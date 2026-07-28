@@ -41,5 +41,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   salvarModoEstacao: (config) => ipcRenderer.invoke('rede-salvar-modo-estacao', config),
   obterHostnameEstacao: () => ipcRenderer.invoke('rede-obter-hostname'),
   estaEmModoClienteRemoto: () => ipcRenderer.invoke('rede-esta-em-modo-cliente'),
-  obterServidorRemoto: () => destinoClienteRemoto
+  obterServidorRemoto: () => destinoClienteRemoto,
+
+  // RC3.16.5 — Diagnóstico Electron
+  obterDiagnosticoElectron: (extra) => ipcRenderer.invoke('electron-diagnostico', extra || {}),
+  abrirDiagnosticoElectron: (extra) => ipcRenderer.invoke('electron-diagnostico-abrir', extra || {}),
+  copiarDiagnosticoElectron: (extra) => ipcRenderer.invoke('electron-diagnostico-copiar', extra || {})
 });

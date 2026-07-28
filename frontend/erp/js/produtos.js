@@ -207,41 +207,6 @@ function inicializarMotorConversaoUnidadesCadastro() {
 
     aplicarModoConversaoUnidadesCadastro();
 }
-// Função global para minimizar modais Bootstrap
-window.minimizarModal = function(modalId) {
-    const $modal = $('#' + modalId);
-    if ($modal.length) {
-        $modal.modal('hide');
-        // Adiciona botão flutuante para restaurar
-        if ($('#btn-restaurar-' + modalId).length === 0) {
-            const $btn = $('<button id="btn-restaurar-' + modalId + '" class="btn btn-primary position-fixed" style="bottom: 24px; right: 24px; z-index: 2000; box-shadow: 0 2px 8px #0002;">Restaurar Produto</button>');
-            $btn.on('click', function() {
-                $modal.modal('show');
-                // Atualiza categorias e subcategorias ao restaurar
-                if (typeof inicializarCategoriasESubcategorias === 'function') {
-                    // Pega os dados já preenchidos
-                    const produto = {
-                        id: $('#produtoId').val(),
-                        codigo: $('#codigo').val(),
-                        nome: $('#nome').val(),
-                        categoria_id: $('#categoria_id').val(),
-                        subcategoria_id: $('#subcategoria_id').val(),
-                        unidade: $('#unidade').val(),
-                        preco_compra: $('#preco_compra').val(),
-                        lucro_percentual: $('#lucro_percentual').val(),
-                        preco_venda: $('#preco_venda').val(),
-                        estoque_atual: $('#estoque_atual').val(),
-                        estoque_minimo: $('#estoque_minimo').val(),
-                        fornecedor: $('#fornecedor').val()
-                    };
-                    inicializarCategoriasESubcategorias(produto, !!produto.id);
-                }
-                $(this).remove();
-            });
-            $('body').append($btn);
-        }
-    }
-};
 // =========================
 // MÓDULO DE PRODUTOS
 // =========================
@@ -1065,22 +1030,62 @@ function montarOptionsFiltroCategorias(produtos) {
 }
 
 function filtrarListaProdutosUI(produtos) {
-    const termo = normalizarTexto($('#buscaProduto').val()).trim();
+    const termoBruto = String($('#buscaProduto').val() || '').trim();
+    const termo = normalizarTexto(termoBruto);
+    const termoDigits = termoBruto.replace(/\D/g, '');
     const categoriaId = String($('#filtroCategoriaProduto').val() || '');
 
     return (produtos || []).filter(p => {
-        const bateBusca =
-            !termo ||
-            (p.nome && normalizarTexto(p.nome).includes(termo)) ||
-            (p.codigo && normalizarTexto(p.codigo).includes(termo)) ||
-            (p.categoria && normalizarTexto(p.categoria).includes(termo)) ||
-            (p.fornecedor && normalizarTexto(p.fornecedor).includes(termo));
+        const bateBusca = !termo || produtoCorrespondeBuscaInteligente(p, termo, termoDigits);
 
         const bateCategoria =
             !categoriaId || String(p.categoria_id || '') === categoriaId;
 
         return bateBusca && bateCategoria;
     });
+}
+
+function produtoCorrespondeBuscaInteligente(produto, termoNormalizado, termoDigits) {
+    if (!termoNormalizado) return true;
+
+    const camposTexto = [
+        produto.nome,
+        produto.descricao,
+        produto.observacoes,
+        produto.codigo,
+        produto.codigo_barras,
+        produto.plu,
+        produto.categoria,
+        produto.categoria_nome,
+        produto.fornecedor
+    ];
+
+    if (camposTexto.some((campo) => campo && normalizarTexto(campo).includes(termoNormalizado))) {
+        return true;
+    }
+
+    if (termoDigits) {
+        const plu = String(produto.plu || '').replace(/\D/g, '');
+        const codigo = String(produto.codigo || '').replace(/\D/g, '');
+        const barras = String(produto.codigo_barras || '').replace(/\D/g, '');
+        if (
+            (plu && plu.includes(termoDigits))
+            || (codigo && codigo.includes(termoDigits))
+            || (barras && barras.includes(termoDigits))
+            || String(produto.id || '') === termoDigits
+        ) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+function formatarNomeProdutoComPlu(produto) {
+    const nome = escapeHtml(produto?.nome || '');
+    const plu = String(produto?.plu || '').trim();
+    if (!plu) return nome;
+    return `<span class="text-muted small me-1">[${escapeHtml(plu)}]</span>${nome}`;
 }
 
 function expandirNosArvoreParaLista(produtos) {
@@ -1124,7 +1129,7 @@ function renderProdutoRow(p) {
 
     return `
         <tr class="${classes.row}">
-            <td class="${classes.text} fw-semibold">${escapeHtml(p.nome || '')}</td>
+            <td class="${classes.text} fw-semibold">${formatarNomeProdutoComPlu(p)}</td>
             <td>${escapeHtml(p.codigo || '')}</td>
             <td>${escapeHtml(p.categoria || p.categoria_nome || '')}</td>
             <td>${escapeHtml(p.unidade || '')}</td>
@@ -1537,37 +1542,39 @@ function renderProdutos(produtos) {
             </div>
         </div>
         <div class="card">
-            <div class="card-header">
-                <div class="row align-items-center">
-                    <div class="col-md-6">
+            <div class="card-header cds-prod-lista-header">
+                <div class="cds-prod-lista-header__top">
+                    <div class="cds-prod-lista-header__title">
                         <i class="fas fa-box"></i> Lista de Produtos
                     </div>
-                    <div class="col-md-8 d-flex justify-content-end align-items-center gap-2 flex-wrap">
-                        <button class="btn btn-secondary btn-sm" onclick="gerarRelatorioEstoque()">
+                    <div class="cds-prod-lista-header__actions">
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="gerarRelatorioEstoque()">
                             <i class="fas fa-list"></i> Relatório de estoque
                         </button>
-
-                        <button class="btn btn-primary btn-sm" onclick="showProdutoModal()">
+                        <button type="button" class="btn btn-primary btn-sm" onclick="showProdutoModal()">
                             <i class="fas fa-plus"></i> Novo Produto
                         </button>
-
-                        <select
-                            class="form-select form-select-sm"
-                            id="filtroCategoriaProduto"
-                            style="width: 200px;"
-                        >
-                            <option value="">Todas as categorias</option>
-                            ${montarOptionsFiltroCategorias(produtos)}
-                        </select>
-
+                    </div>
+                </div>
+                <div class="cds-prod-lista-header__filters">
+                    <div class="cds-prod-lista-header__busca">
+                        <i class="fas fa-search cds-prod-lista-header__busca-icon" aria-hidden="true"></i>
                         <input
                             type="text"
                             class="form-control form-control-sm"
                             id="buscaProduto"
-                            placeholder="Buscar produto..."
-                            style="width: 200px;"
+                            placeholder="Buscar por nome, PLU, código ou código de barras..."
+                            aria-label="Buscar produtos"
                         >
                     </div>
+                    <select
+                        class="form-select form-select-sm cds-prod-lista-header__categoria"
+                        id="filtroCategoriaProduto"
+                        aria-label="Filtrar por categoria"
+                    >
+                        <option value="">Todas as categorias</option>
+                        ${montarOptionsFiltroCategorias(produtos)}
+                    </select>
                 </div>
             </div>
 
@@ -1708,7 +1715,8 @@ function showProdutoModal(produto = null) {
                                         <div class="row g-3">
                                             <div class="col-md-3">
                                                 <label for="codigo" class="form-label">Código Interno</label>
-                                                <input type="text" class="form-control" id="codigo" value="${isEdit ? escapeHtml(produto.codigo || '') : ''}">
+                                                <input type="text" class="form-control" id="codigo" value="${isEdit ? escapeHtml(produto.codigo || '') : ''}" placeholder="Automático se vazio" autocomplete="off">
+                                                <div class="form-text">Se não informar, o sistema gera automaticamente. Você pode alterar.</div>
                                             </div>
                                             <div class="col-md-2">
                                                 <label for="plu" class="form-label">PLU</label>
@@ -2036,6 +2044,23 @@ function showProdutoModal(produto = null) {
                                                     <input
                                                         class="form-check-input"
                                                         type="checkbox"
+                                                        id="controla_estoque"
+                                                        ${!isEdit || Number(produto.controla_estoque ?? 1) !== 0 ? 'checked' : ''}
+                                                    >
+                                                    <label class="form-check-label" for="controla_estoque">
+                                                        Controla Estoque
+                                                    </label>
+                                                </div>
+                                                <div class="form-text">
+                                                    Quando desligado, a venda não valida nem movimenta saldo (útil para açougue, hortifrúti e padaria).
+                                                </div>
+                                            </div>
+
+                                            <div class="col-12">
+                                                <div class="form-check form-switch">
+                                                    <input
+                                                        class="form-check-input"
+                                                        type="checkbox"
                                                         id="controlar_validade"
                                                         ${isEdit && Number(produto.controlar_validade || 0) === 1 ? 'checked' : ''}
                                                     >
@@ -2156,9 +2181,13 @@ function showProdutoModal(produto = null) {
 
     if (isEdit && produto) {
         $('#controlar_validade').prop('checked', produto.controlar_validade == 1);
+        $('#controla_estoque').prop('checked', Number(produto.controla_estoque ?? 1) !== 0);
     } else {
         $('#controlar_validade').prop('checked', false);
+        $('#controla_estoque').prop('checked', true);
     }
+
+    inicializarConfirmacaoControlaEstoque();
 
     // Inicializar controle de visibilidade do lote inicial
     inicializarControleLoteInicial();
@@ -2167,10 +2196,38 @@ function showProdutoModal(produto = null) {
 
     if (!isEdit) {
         aplicarPadraoFiscalNovoProduto();
+        sugerirCodigoInternoNovoProduto();
     }
 
     // ...
 }
+
+async function sugerirCodigoInternoNovoProduto() {
+    if ($('#produtoId').val()) return;
+    const $codigo = $('#codigo');
+    if (!$codigo.length) return;
+    if (String($codigo.val() || '').trim()) return;
+
+    try {
+        const token = localStorage.getItem('token') || '';
+        const response = await fetch(`${API_URL}/produtos/proximo-codigo`, {
+            headers: { Authorization: `Bearer ${token}` }
+        });
+        if (!response.ok) return;
+        const data = await response.json().catch(() => ({}));
+        const sugerido = String(data.codigo || '').trim();
+        if (!sugerido) return;
+        // Só preenche se o usuário ainda não digitou
+        if (String($codigo.val() || '').trim()) return;
+        $codigo.val(sugerido);
+        $('#produtoModal').data('codigoAutoSugerido', sugerido);
+        // Espelha barras se ainda vazias / sincronizadas
+        $codigo.trigger('input.espelhoCodigo');
+    } catch (err) {
+        console.warn('Não foi possível sugerir código interno:', err);
+    }
+}
+window.sugerirCodigoInternoNovoProduto = sugerirCodigoInternoNovoProduto;
 
 async function aplicarPadraoFiscalNovoProduto() {
     if ($('#produtoId').val()) {
@@ -3124,6 +3181,67 @@ function inicializarCalculoPreco(produto, isEdit) {
     setTimeout(() => sincronizarFormacaoPrecoProduto('init'), 0);
 }
 
+function garantirModalConfirmacaoControlaEstoque() {
+    if (document.getElementById('modalConfirmacaoControlaEstoque')) {
+        return;
+    }
+
+    const html = `
+        <div class="modal fade" id="modalConfirmacaoControlaEstoque" tabindex="-1" aria-labelledby="modalConfirmacaoControlaEstoqueLabel" aria-hidden="true">
+            <div class="modal-dialog modal-dialog-centered">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="modalConfirmacaoControlaEstoqueLabel">Desativar Controle de Estoque</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
+                    </div>
+                    <div class="modal-body">
+                        <p class="mb-2">⚠ Este produto não terá movimentação de estoque.</p>
+                        <p class="mb-2">As vendas continuarão sendo registradas normalmente.</p>
+                        <p class="mb-0 fw-semibold">Deseja continuar?</p>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" id="btnCancelarControlaEstoque">Cancelar</button>
+                        <button type="button" class="btn btn-primary" id="btnConfirmarControlaEstoque">Confirmar</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    $('body').append(html);
+}
+
+function inicializarConfirmacaoControlaEstoque() {
+    garantirModalConfirmacaoControlaEstoque();
+
+    const $switch = $('#controla_estoque');
+    $switch.off('change.rc80zControlaEstoque').on('change.rc80zControlaEstoque', function onToggleControlaEstoque() {
+        if ($switch.is(':checked')) {
+            return;
+        }
+
+        // Mantém ON até o usuário confirmar
+        $switch.prop('checked', true);
+
+        const modalEl = document.getElementById('modalConfirmacaoControlaEstoque');
+        const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+        let confirmado = false;
+
+        $('#btnConfirmarControlaEstoque').off('click.rc80z').one('click.rc80z', () => {
+            confirmado = true;
+            $switch.prop('checked', false);
+            modal.hide();
+        });
+
+        $(modalEl).off('hidden.bs.modal.rc80z').one('hidden.bs.modal.rc80z', () => {
+            if (!confirmado) {
+                $switch.prop('checked', true);
+            }
+        });
+
+        modal.show();
+    });
+}
+
 
 // Salva produto
 async function saveProduto() {
@@ -3162,8 +3280,9 @@ async function saveProduto() {
     }
 
     if ($('#produto_fracionado').is(':checked')) {
+        const controlaEstoque = $('#controla_estoque').is(':checked');
         const ref = obterReferenciaConversaoCadastro();
-        if (ref.qtd <= 0 || ref.precoCompra <= 0) {
+        if (controlaEstoque && (ref.qtd <= 0 || ref.precoCompra <= 0)) {
             showNotification(
                 'Para produto pesável, informe a Quantidade Total no Estoque Inicial e o Custo por Unidade de Venda.',
                 'warning'
@@ -3215,6 +3334,7 @@ async function saveProduto() {
         lote: ($('#lote').val() || '').trim(),
         dias_alerta_validade: parseInt($('#dias_alerta_validade').val(), 10) || 30,
         controlar_validade: $('#controlar_validade').is(':checked') ? 1 : 0,
+        controla_estoque: $('#controla_estoque').is(':checked') ? 1 : 0,
         ncm: ($('#ncm').val() || '').trim(),
         cfop: ($('#cfop').val() || '').trim(),
         csosn: ($('#csosn').val() || '').trim(),

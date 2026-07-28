@@ -372,6 +372,7 @@
     if (estado?.modal) estado.modal.hide();
     $('#miipCentralRevisaoRoot').remove();
     $(document).off('.miipCentral');
+    $(document).off('.miipCentralCadastro');
   }
 
   function confirmarAtual() {
@@ -422,7 +423,9 @@
   function abrirBuscaProduto() {
     const produtos = estado.opcoes.produtos || [];
     const modalEl = document.getElementById('miipCentralBuscaModal');
+    if (!modalEl) return;
     const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+    elevarModalSobreMiip(modalEl);
     const renderBusca = (termo) => {
       const lower = String(termo || '').toLowerCase().trim();
       const filtrados = produtos.filter((p) => {
@@ -459,20 +462,131 @@
     setTimeout(() => $('#miipCentralBuscaInput').trigger('focus'), 200);
   }
 
-  function cadastrarNovo() {
-    const pendencia = estado.sessao.pendencias[estado.sessao.indiceAtual];
-    const item = estado.sessao.itens[pendencia?.indice] || pendencia?.produtoXML;
-    if (!item) return;
+  function elevarModalSobreMiip(modalEl) {
+    if (!modalEl) return;
+    modalEl.style.zIndex = '21000';
+    requestAnimationFrame(() => {
+      const backdrops = document.querySelectorAll('.modal-backdrop');
+      const last = backdrops[backdrops.length - 1];
+      if (last) last.style.zIndex = '20990';
+    });
+  }
 
-    if (typeof estado.opcoes.abrirCadastroProduto === 'function') {
-      estado.opcoes.abrirCadastroProduto(item, (produto) => {
-        if (produto?.id) aplicarConfirmacao(pendencia, produto.id, produto, false);
+  function preencherCamposCadastroProduto(item) {
+    const xml = item || {};
+    const nome = xml.produto_nome || xml.descricao || xml.nome || '';
+    if ($('#nome').length) $('#nome').val(nome);
+    if ($('#codigo_barras').length) $('#codigo_barras').val(xml.codigo_barras || xml.gtin || '');
+    if ($('#ncm').length) $('#ncm').val(xml.ncm || '');
+    if ($('#unidade').length) $('#unidade').val(xml.unidade || 'UN');
+    if ($('#preco_compra').length && (xml.preco_unitario != null || xml.valor_unitario != null)) {
+      $('#preco_compra').val(Number(xml.preco_unitario ?? xml.valor_unitario ?? 0));
+    }
+    if ($('#codigo').length && xml.codigo_fornecedor) {
+      $('#codigo').val(String(xml.codigo_fornecedor));
+    }
+  }
+
+  async function resolverProdutoRecemCadastrado(nomeHint) {
+    try {
+      const token = localStorage.getItem('token') || '';
+      const resp = await fetch(`${estado.opcoes.apiUrl}/produtos`, {
+        headers: { Authorization: `Bearer ${token}` }
       });
+      if (!resp.ok) return null;
+      const lista = await resp.json().catch(() => []);
+      if (!Array.isArray(lista) || !lista.length) return null;
+
+      const hint = String(nomeHint || '').trim().toLowerCase();
+      if (hint) {
+        const porNome = [...lista].reverse().find((p) =>
+          String(p.nome || '').trim().toLowerCase() === hint
+        );
+        if (porNome) return porNome;
+      }
+
+      return lista.reduce((a, b) => (Number(a?.id || 0) > Number(b?.id || 0) ? a : b));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /**
+   * Abre o cadastro de produto acima da Central MIIP (fullscreen).
+   * Sem isso o modal de produto fica invisível atrás da revisão.
+   */
+  function abrirCadastroProdutoPadrao(item, callback) {
+    if (typeof showProdutoModal !== 'function') {
+      notificar('Cadastre o produto em Produtos e selecione-o com F2.', 'info');
+      abrirBuscaProduto();
+      if (typeof callback === 'function') callback(null);
       return;
     }
 
-    abrirBuscaProduto();
-    notificar('Cadastre o produto em Produtos e selecione-o na busca (F2).', 'info');
+    showProdutoModal(null);
+
+    const el = document.getElementById('produtoModal');
+    if (!el) {
+      notificar('Não foi possível abrir o cadastro de produto.', 'danger');
+      if (typeof callback === 'function') callback(null);
+      return;
+    }
+
+    // Garante exibição no Bootstrap 5 (jQuery .modal pode não existir).
+    try {
+      bootstrap.Modal.getOrCreateInstance(el).show();
+    } catch (_) { /* ignore */ }
+
+    elevarModalSobreMiip(el);
+
+    const onShown = () => {
+      elevarModalSobreMiip(el);
+      preencherCamposCadastroProduto(item);
+      setTimeout(() => {
+        const campo = document.getElementById('nome');
+        if (campo) campo.focus();
+      }, 50);
+    };
+
+    el.addEventListener('shown.bs.modal', onShown, { once: true });
+    if (el.classList.contains('show')) onShown();
+
+    el.addEventListener('hidden.bs.modal', async () => {
+      const nomeHint = item?.produto_nome || item?.descricao || item?.nome || '';
+      const produto = await resolverProdutoRecemCadastrado(nomeHint);
+      if (typeof callback === 'function') callback(produto || null);
+      if (!produto) {
+        notificar('Se o produto foi salvo, use F2 para selecioná-lo.', 'info');
+      }
+    }, { once: true });
+  }
+
+  function cadastrarNovo() {
+    const pendencia = estado.sessao.pendencias[estado.sessao.indiceAtual];
+    if (!pendencia || !pendenciaAberta(estado.sessao, pendencia)) {
+      notificar('Selecione um item pendente para cadastrar.', 'warning');
+      return;
+    }
+
+    const item = estado.sessao.itens[pendencia.indice] || pendencia.produtoXML || {};
+    const aoCadastrar = (produto) => {
+      if (produto?.id) {
+        aplicarConfirmacao(pendencia, produto.id, produto, false);
+      }
+    };
+
+    if (typeof estado.opcoes.abrirCadastroProduto === 'function') {
+      try {
+        estado.opcoes.abrirCadastroProduto(item, aoCadastrar);
+        // Se o callback externo abriu o modal, ainda elevamos o z-index.
+        setTimeout(() => elevarModalSobreMiip(document.getElementById('produtoModal')), 80);
+        return;
+      } catch (err) {
+        console.warn('[MIIP] abrirCadastroProduto falhou, usando fallback:', err);
+      }
+    }
+
+    abrirCadastroProdutoPadrao(item, aoCadastrar);
   }
 
   function concluirRevisao() {
@@ -537,11 +651,15 @@
 
   function bindEventos() {
     $(document).off('.miipCentral');
+    $(document).off('.miipCentralCadastro');
     $(document).on('keydown.miipCentral', onKeydown);
 
     $('#miipCentralBtnConfirmar').on('click', confirmarAtual);
     $('#miipCentralBtnEscolher').on('click', abrirBuscaProduto);
-    $('#miipCentralBtnCadastrar').on('click', cadastrarNovo);
+    $(document).off('click.miipCentralCadastro').on('click.miipCentralCadastro', '#miipCentralBtnCadastrar', function (e) {
+      e.preventDefault();
+      cadastrarNovo();
+    });
     $('#miipCentralBtnIgnorar').on('click', ignorarAtual);
     $('#miipCentralBtnCancelar').on('click', cancelarRevisao);
 

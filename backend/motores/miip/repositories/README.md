@@ -52,4 +52,4 @@ const { IRepository, MiipDecisoesRepository } = require('./motores/miip/reposito
 IRepository.validarHeranca(MiipDecisoesRepository.MiipDecisoesRepository);
 ```
 
-Documentação do banco: [`docs/MIIP_BANCO_DADOS.md`](../../../docs/MIIP_BANCO_DADOS.md)
+Documentação do banco: [`docs/motores/miip/MIIP_BANCO_DADOS.md`](../../../docs/motores/miip/MIIP_BANCO_DADOS.md)

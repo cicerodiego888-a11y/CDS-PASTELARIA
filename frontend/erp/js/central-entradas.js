@@ -1218,8 +1218,17 @@ function mostrarViewCentral(view) {
 
     if (view === 'config') carregarConfigCentral();
     if (view === 'log') carregarLogCentral();
-    if (view === 'ciclo-dfe' && typeof carregarHomologacaoCentral === 'function') {
-        carregarHomologacaoCentral();
+    if (view === 'ciclo-dfe') {
+        if (typeof carregarHomologacaoCentral === 'function') {
+            carregarHomologacaoCentral();
+        } else if (window.CdsErpLazyLoader) {
+            window.CdsErpLazyLoader.loadFeature('central-homologacao')
+                .then(() => carregarHomologacaoCentral())
+                .catch((error) => {
+                    console.error('[ERP LAZY] Falha ao carregar homologação da Central:', error);
+                    mostrarToastCentral('Não foi possível carregar a homologação.', 'error');
+                });
+        }
     }
 }
 
@@ -3266,18 +3275,61 @@ async function abrirCentralRevisaoMiip(documentoId, dadosImportacao) {
                 if (typeof callback === 'function') callback(null);
                 return;
             }
+
             showProdutoModal(null);
-            $('#produtoModal').one('shown.bs.modal', function () {
-                $('#nome').val(item.produto_nome || '');
-                if ($('#codigo_barras').length) $('#codigo_barras').val(item.codigo_barras || '');
+
+            const el = document.getElementById('produtoModal');
+            if (!el) {
+                showNotification('Não foi possível abrir o cadastro de produto.', 'danger');
+                if (typeof callback === 'function') callback(null);
+                return;
+            }
+
+            try {
+                bootstrap.Modal.getOrCreateInstance(el).show();
+            } catch (_) { /* ignore */ }
+
+            const elevar = () => {
+                el.style.zIndex = '21000';
+                const backdrops = document.querySelectorAll('.modal-backdrop');
+                const last = backdrops[backdrops.length - 1];
+                if (last) last.style.zIndex = '20990';
+            };
+            elevar();
+
+            const preencher = () => {
+                elevar();
+                $('#nome').val(item.produto_nome || item.descricao || '');
+                if ($('#codigo_barras').length) $('#codigo_barras').val(item.codigo_barras || item.gtin || '');
                 if ($('#ncm').length) $('#ncm').val(item.ncm || '');
                 if ($('#unidade').length) $('#unidade').val(item.unidade || 'UN');
-            });
-            $('#produtoModal').one('hidden.bs.modal', async function () {
+                if ($('#preco_compra').length && item.preco_unitario != null) {
+                    $('#preco_compra').val(item.preco_unitario);
+                }
+                if ($('#codigo').length && item.codigo_fornecedor) {
+                    $('#codigo').val(String(item.codigo_fornecedor));
+                }
+            };
+
+            el.addEventListener('shown.bs.modal', preencher, { once: true });
+            if (el.classList.contains('show')) preencher();
+
+            el.addEventListener('hidden.bs.modal', async function () {
                 const lista = await carregarProdutosParaRevisaoCentral();
-                const ultimo = lista[lista.length - 1];
-                if (typeof callback === 'function') callback(ultimo || null);
-            });
+                const hint = String(item.produto_nome || item.descricao || '').trim().toLowerCase();
+                let escolhido = null;
+                if (hint && Array.isArray(lista)) {
+                    escolhido = [...lista].reverse().find((p) =>
+                        String(p.nome || '').trim().toLowerCase() === hint
+                    ) || null;
+                }
+                if (!escolhido && Array.isArray(lista) && lista.length) {
+                    escolhido = lista.reduce((a, b) =>
+                        (Number(a?.id || 0) > Number(b?.id || 0) ? a : b)
+                    );
+                }
+                if (typeof callback === 'function') callback(escolhido || null);
+            }, { once: true });
         },
         onConcluir: async function (resultado) {
             try {

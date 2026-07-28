@@ -64,9 +64,9 @@
   }
 
   function fiscalPermitido() {
-    return typeof implantacaoPermiteFiscal === 'function'
-      ? implantacaoPermiteFiscal()
-      : true;
+    if (typeof fiscalHabilitado === 'function') return fiscalHabilitado();
+    if (typeof implantacaoPermiteFiscal === 'function') return implantacaoPermiteFiscal();
+    return !!(global.CONFIG_IMPLANTACAO && global.CONFIG_IMPLANTACAO.recursos && global.CONFIG_IMPLANTACAO.recursos.fiscal);
   }
 
   function horaCompletaPt(date) {
@@ -321,23 +321,23 @@
     const syncOk = Number(sync.erros || 0) === 0;
 
     return [
-      {
+      fiscalOk && {
         label: 'MIIP',
         icon: 'fa-brain',
-        tone: fiscalOk ? 'ok' : 'muted',
-        status: fiscalOk ? 'OK' : 'N/A'
+        tone: 'ok',
+        status: 'OK'
       },
-      {
+      fiscalOk && {
         label: 'Central',
         icon: 'fa-inbox',
-        tone: fiscalOk ? 'ok' : 'muted',
-        status: fiscalOk ? 'OK' : 'N/A'
+        tone: 'ok',
+        status: 'OK'
       },
-      {
+      fiscalOk && {
         label: 'Fiscal',
         icon: 'fa-file-invoice',
-        tone: fiscalOk ? 'ok' : 'muted',
-        status: fiscalOk ? 'OK' : 'N/A'
+        tone: 'ok',
+        status: 'OK'
       },
       {
         label: 'Equipamentos',
@@ -351,7 +351,7 @@
         tone: backupOk ? 'ok' : 'danger',
         status: backupOk ? 'OK' : 'Atrasado'
       }
-    ];
+    ].filter(Boolean);
   }
 
   function DashboardTimeline(itens) {
@@ -476,17 +476,19 @@
       'ok'
     );
 
-    DashboardOperationCard(
-      'ccOpFiscal',
-      fiscalOk ? 'Documentos e emissão fiscal' : 'Módulo não habilitado',
-      fiscalOk ? 'ok' : 'muted'
-    );
+    if (fiscalOk) {
+      DashboardOperationCard(
+        'ccOpFiscal',
+        'Documentos e emissão fiscal',
+        'ok'
+      );
 
-    DashboardOperationCard(
-      'ccOpCentral',
-      fiscalOk ? 'Documentos e XML de entrada' : 'Módulo não habilitado',
-      fiscalOk ? (temAlertaCritico || temAlertaWarn ? 'warn' : 'ok') : 'muted'
-    );
+      DashboardOperationCard(
+        'ccOpCentral',
+        'Documentos e XML de entrada',
+        temAlertaCritico || temAlertaWarn ? 'warn' : 'ok'
+      );
+    }
 
     return { temAlertaCritico, temAlertaWarn };
   }
@@ -549,7 +551,20 @@
 
   function abrirModuloDashboard(page) {
     if (page === 'pdv') {
+      const recursos = (typeof obterRecursosImplantacao === 'function') ? obterRecursosImplantacao() : {};
+      if (recursos.pdv === false) {
+        if (typeof showNotification === 'function') {
+          showNotification('Módulo PDV não está licenciado.', 'warning');
+        }
+        return;
+      }
       window.location.href = '/pdv';
+      return;
+    }
+    if (typeof paginaPermitidaPorImplantacao === 'function' && !paginaPermitidaPorImplantacao(page)) {
+      if (typeof showNotification === 'function') {
+        showNotification('Módulo não disponível nesta implantação.', 'warning');
+      }
       return;
     }
     if (typeof loadPage === 'function') {

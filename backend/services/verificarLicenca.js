@@ -37,11 +37,12 @@ async function verificarLicenca() {
     );
 
     const vencida = diasRestantes <= 0;
-
-    console.log('DEBUG LICENCA');
-    console.log('Expiração:', licenca.data_expiracao);
-    console.log('Dias restantes:', diasRestantes);
-    console.log('Vencida:', vencida);
+    const diasAposVencimento = vencida
+      ? licencaService.calcularDiasAposVencimento(licenca.data_expiracao)
+      : 0;
+    const emToleranciaPdv = vencida
+      ? licencaService.estaEmToleranciaPdv(licenca.data_expiracao)
+      : false;
 
     if (dataAlterada) {
       licenca.status = 'data_alterada';
@@ -53,7 +54,9 @@ async function verificarLicenca() {
         codigo_instalacao: licenca.codigo_instalacao,
         data_ativacao: licenca.data_ativacao,
         data_expiracao: licenca.data_expiracao,
-        diasRestantes: licenca.diasRestantes,
+        diasRestantes: 0,
+        diasAposVencimento,
+        emToleranciaPdv: false,
         ultima_execucao: licenca.ultima_execucao,
         ultima_verificacao: agora.toISOString()
       };
@@ -69,7 +72,10 @@ async function verificarLicenca() {
         codigo_instalacao: licenca.codigo_instalacao,
         data_ativacao: licenca.data_ativacao,
         data_expiracao: licenca.data_expiracao,
-        diasRestantes: licenca.diasRestantes,
+        diasRestantes: 0,
+        diasAposVencimento,
+        emToleranciaPdv,
+        diasToleranciaRestantes: licencaService.diasToleranciaPdvRestantes(licenca.data_expiracao),
         ultima_execucao: licenca.ultima_execucao,
         ultima_verificacao: agora.toISOString()
       };
@@ -77,11 +83,13 @@ async function verificarLicenca() {
 
     return {
       valido: true,
-      diasRestantes: licenca.diasRestantes,
+      diasRestantes,
       status: licenca.status || 'ativa',
       codigo_instalacao: licenca.codigo_instalacao,
       data_ativacao: licenca.data_ativacao,
       data_expiracao: licenca.data_expiracao,
+      diasAposVencimento: 0,
+      emToleranciaPdv: false,
       ultima_execucao: licenca.ultima_execucao,
       ultima_verificacao: agora.toISOString()
     };

@@ -6,7 +6,7 @@ const fs = require('fs');
 const multer = require('multer');
 const { getFiscalConfig, setConfiguracao } = require('../services/fiscal/configService');
 const { carregarCertificadoPfx } = require('../services/fiscal/certificateService');
-const { emitirPorVendaId } = require('../services/fiscal/emissor');
+const { emitirPorVendaId, obterDanfeHtmlAtualizado } = require('../services/fiscal/emissor');
 const cancelarNfce = require('../services/fiscal/cancelarNfce');
 const { gravarAuditoria } = require('../services/auditoria');
 const { validarMotivoTexto } = require('../services/validacao/validarMotivoTexto');
@@ -233,32 +233,23 @@ router.post('/emitir/venda/:vendaId', async (req, res) => {
   }
 });
 
-router.get('/danfe/venda/:vendaId', (req, res) => {
+router.get('/danfe/venda/:vendaId', async (req, res) => {
   const vendaId = Number(req.params.vendaId);
 
-  db.get(`
-    SELECT n.danfe_html, n.chave_acesso, n.protocolo, n.status, n.numero, n.serie
-    FROM nfce_notas n
-    WHERE n.venda_id = ?
-    ORDER BY n.id DESC
-    LIMIT 1
-  `, [vendaId], (err, nota) => {
-    if (err) {
-      console.error('Erro ao buscar DANFE:', err);
-      return res.status(500).send('Erro interno ao buscar DANFE.');
-    }
-
-    if (!nota) {
-      return res.status(404).send('NFC-e não encontrada para esta venda.');
-    }
-
-    if (!nota.danfe_html) {
+  try {
+    const { html } = await obterDanfeHtmlAtualizado(vendaId);
+    if (!html) {
       return res.status(404).send('DANFE não gerado para esta NFC-e.');
     }
-
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.send(nota.danfe_html);
-  });
+    res.setHeader('Cache-Control', 'no-store');
+    return res.send(html);
+  } catch (error) {
+    console.error('Erro ao gerar DANFE atualizado:', error);
+    const msg = error?.message || 'Erro interno ao buscar DANFE.';
+    const status = /não encontrada/i.test(msg) ? 404 : 500;
+    return res.status(status).send(msg);
+  }
 });
 
 function extrairTagXml(xml, tag) {
@@ -466,8 +457,17 @@ router.post('/exportar-contabilidade', async (req, res) => {
   let resultado = null;
 
   try {
-    const { dataInicial, dataFinal } = req.body || {};
-    resultado = await exportarContabilidade({ dataInicial, dataFinal });
+    const body = req.body || {};
+    const { dataInicial, dataFinal } = body;
+    resultado = await exportarContabilidade({
+      dataInicial,
+      dataFinal,
+      incluirNfce: body.incluirNfce,
+      incluirNfe: body.incluirNfe,
+      incluirEntradas: body.incluirEntradas,
+      incluirRelatorios: body.incluirRelatorios,
+      incluirManifesto: body.incluirManifesto
+    });
 
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="${resultado.nomeZip}"`);

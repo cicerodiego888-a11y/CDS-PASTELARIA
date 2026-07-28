@@ -1,6 +1,6 @@
 function loadLicenca() {
     if (typeof carregarPaginaHtml !== 'function') {
-        $('#page-content').html('<div class="alert alert-danger">Erro ao carregar a página de licença.</div>');
+        $('#page-content').html('<div class="alert alert-danger">Erro ao carregar a página de assinatura.</div>');
         return;
     }
     return carregarPaginaHtml('licenca.html', function () {
@@ -24,7 +24,7 @@ function loadLicencaData() {
             renderLicenseAlert(data);
         },
         error: function(xhr) {
-            const message = xhr.responseJSON?.error || 'Erro ao carregar informações de licença.';
+            const message = xhr.responseJSON?.error || 'Erro ao carregar informações da assinatura.';
             $('#licenca-alert-container').html(`<div class="alert alert-danger">${message}</div>`);
             $('#licencaCodigoInstalacao').val('');
             $('#licencaStatus').val('');
@@ -34,20 +34,25 @@ function loadLicencaData() {
 
 function renderLicenseAlert(data) {
     const status = String(data.status || '').toLowerCase();
-    let message = 'Licença carregada com sucesso.';
+    let message = 'Assinatura carregada com sucesso.';
     let type = 'info';
 
     if (status === 'pendente') {
-        message = 'Sistema não ativado. Insira o código de licença para ativar.';
+        message = 'Sistema não ativado. Insira o código de ativação para liberar a assinatura.';
         type = 'warning';
     } else if (status === 'vencida') {
-        message = 'Licença expirada. Atualize o código para renovar o acesso.';
+        const tolerancia = Number(data.dias_tolerancia_restantes || 0);
+        if (data.em_tolerancia_pdv && tolerancia > 0) {
+            message = `Assinatura expirada. O PDV permanece liberado por mais ${tolerancia} dia(s). Atualize o código para renovar.`;
+        } else {
+            message = 'Assinatura expirada. Atualize o código para renovar o acesso.';
+        }
         type = 'danger';
     } else if (status === 'data_alterada') {
         message = 'Data do sistema alterada. Contate o suporte.';
         type = 'danger';
     } else if (status === 'aviso' || status === 'atencao') {
-        message = `Licença próxima do vencimento. Restam ${data.dias_restantes || 0} dias.`;
+        message = `Assinatura próxima do vencimento. Restam ${data.dias_restantes || 0} dias.`;
         type = 'warning';
     }
 
@@ -71,11 +76,11 @@ function abrirModalAtivarLicenca() {
 function validarLicenca() {
     const codigoLicenca = String($('#modalCodigoLicenca').val() || '').trim();
     if (!codigoLicenca) {
-        $('#modalLicencaAlert').html('<div class="alert alert-warning">Informe o código de licença.</div>');
+        $('#modalLicencaAlert').html('<div class="alert alert-warning">Informe o código de ativação.</div>');
         return;
     }
 
-    $('#modalLicencaAlert').html('<div class="alert alert-info">Validando licença...</div>');
+    $('#modalLicencaAlert').html('<div class="alert alert-info">Validando assinatura...</div>');
 
     $.ajax({
         url: `${API_URL}/licenca/ativar`,
@@ -83,8 +88,8 @@ function validarLicenca() {
         contentType: 'application/json',
         data: JSON.stringify({ codigoLicenca }),
         success: function(response) {
-            $('#modalLicencaAlert').html('<div class="alert alert-success">Licença ativada com sucesso.</div>');
-            showNotification('Licença ativada com sucesso', 'success');
+            $('#modalLicencaAlert').html('<div class="alert alert-success">Assinatura ativada com sucesso.</div>');
+            showNotification('Assinatura ativada com sucesso.', 'success');
             const modalEl = document.getElementById('modalAtivarLicenca');
             const modal = bootstrap.Modal.getInstance(modalEl);
             if (modal) {
@@ -93,7 +98,7 @@ function validarLicenca() {
             loadLicencaData();
         },
         error: function(xhr) {
-            const message = xhr.responseJSON?.error || 'Erro ao ativar a licença.';
+            const message = xhr.responseJSON?.error || 'Erro ao ativar a assinatura.';
             $('#modalLicencaAlert').html(`<div class="alert alert-danger">${message}</div>`);
             showNotification(message, 'danger');
         }

@@ -439,8 +439,9 @@ body.sidebar-collapsed #sidebar-brand {
     width: 100%;
 }
 
-#sidebar-brand img {
-    max-height: 110px;
+#sidebar-brand img,
+#sidebar-brand .brand-sidebar-logo {
+    max-height: 88px;
     max-width: 100%;
     object-fit: contain;
     filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3));
@@ -1104,5 +1105,21 @@ a,
   background: white;
   border-radius: 0 0 8px 8px;
   box-shadow: 0 1px 6px rgba(0, 0, 0, 0.05);
+}
+
+/* Pedidos — sugestão de cliente: contraste no item ativo (fundo azul) */
+.ped-sugestao-meta {
+  color: #6c757d;
+}
+
+#pedClienteSugestoes .list-group-item-action.active .ped-sugestao-meta,
+#pedClienteSugestoes .list-group-item-action.active:hover .ped-sugestao-meta,
+#pedClienteSugestoes .list-group-item-action.active:focus .ped-sugestao-meta {
+  color: rgba(255, 255, 255, 0.92) !important;
+}
+
+#pedClienteSugestoes .list-group-item-action:hover:not(.active) .ped-sugestao-meta,
+#pedClienteSugestoes .list-group-item-action:focus:not(.active) .ped-sugestao-meta {
+  color: #495057;
 }
 

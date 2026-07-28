@@ -30,7 +30,7 @@ dados/
 *.key
 *.crt
 certificado*
-!docs/CERTIFICADO_V1.md
+!docs/oficial/CERTIFICADO_V1.md
 certificado_teste.pfx
 backend/certificados/*.pfx
 backend/certificados/*.p12
@@ -53,6 +53,7 @@ dist-*/
 release/
 out/
 *.zip
+electron-manifest.json
 
 # Cache e temporarios
 .cache/

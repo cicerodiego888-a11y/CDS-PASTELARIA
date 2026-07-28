@@ -1,3 +1,11 @@
+/**
+ * Histórico de Vendas — visão comercial (Hotfix pós NF-e).
+ *
+ * Regra: a Venda = operação comercial completa.
+ * A NF-e / NFC-e = documentos fiscais vinculados — nunca substituem a Venda.
+ * F12 (modo fiscal) NÃO altera itens/totais do histórico.
+ */
+
 function escapeHtmlHistoricoVenda(text) {
     if (text === undefined || text === null) return '';
     return String(text)
@@ -8,47 +16,51 @@ function escapeHtmlHistoricoVenda(text) {
         .replace(/'/g, '&#039;');
 }
 
+/** @deprecated Histórico é sempre comercial; mantido para compatibilidade. */
 function historicoVendaModoFiscalAtivo() {
-    return typeof isModoFiscalVisualizacaoAtivo === 'function' && isModoFiscalVisualizacaoAtivo();
+    return false;
 }
 
 function itemPossuiParteFiscalHistorico(item) {
     return Number(item?.quantidade_fiscal ?? 0) > 0 || Number(item?.valor_fiscal ?? 0) > 0;
 }
 
+/** Sempre todos os itens comerciais da venda. */
 function filtrarItensHistoricoVenda(venda) {
-    const itens = Array.isArray(venda?.itens) ? venda.itens : [];
-    if (!historicoVendaModoFiscalAtivo()) {
-        return itens;
-    }
-    return itens.filter(itemPossuiParteFiscalHistorico);
+    return Array.isArray(venda?.itens) ? venda.itens : [];
 }
 
-function obterTotalExibicaoHistoricoVenda(venda, itensFiltrados = []) {
-    if (historicoVendaModoFiscalAtivo()) {
-        const valorFiscal = Number(venda?.valor_fiscal ?? 0);
-        if (valorFiscal > 0) {
-            return valorFiscal;
-        }
-        return itensFiltrados.reduce((total, item) => total + Number(item.valor_fiscal || 0), 0);
-    }
+/** Sempre o total comercial da negociação. */
+function obterTotalExibicaoHistoricoVenda(venda) {
     return Number(venda?.total || 0);
 }
 
 function exibirCupomNaoFiscalHistorico(venda) {
-    if (historicoVendaModoFiscalAtivo()) {
-        return false;
-    }
     return typeof vendaPossuiCupomNaoFiscal === 'function' && vendaPossuiCupomNaoFiscal(venda);
 }
 
+function moduloFiscalDisponivelHistorico() {
+    if (typeof fiscalHabilitado === 'function') return fiscalHabilitado();
+    if (typeof implantacaoPermiteFiscal === 'function') return implantacaoPermiteFiscal();
+    return false;
+}
+
 function vendaHistoricoTemCupomFiscal(venda) {
+    if (!moduloFiscalDisponivelHistorico()) return false;
     if (!venda) return false;
     if (venda.nfce_id || venda.nfce_numero) return true;
     if (typeof vendaPossuiNfceAutorizada === 'function' && vendaPossuiNfceAutorizada(venda)) {
         return true;
     }
     return Number(venda.valor_fiscal || 0) > 0 && Boolean(venda.nfce_status);
+}
+
+function vendaHistoricoTemNfe(venda) {
+    if (!moduloFiscalDisponivelHistorico()) return false;
+    if (!venda) return false;
+    if (venda.nfe_id || venda.nfe_numero || venda.nfe_chave) return true;
+    const st = String(venda.nfe_status || '').toLowerCase();
+    return st === 'autorizada' || st === 'autorizado';
 }
 
 function vendaHistoricoTemCupomNaoFiscal(venda) {
@@ -63,6 +75,43 @@ function vendaHistoricoTemCupomNaoFiscal(venda) {
     return Number(venda.valor_fiscal || 0) === 0 && Number(venda.total || 0) > 0;
 }
 
+function montarHtmlNfeVinculadaHistorico(venda) {
+    if (!vendaHistoricoTemNfe(venda)) return '';
+    const num = venda.nfe_numero ? ` nº <strong>${escapeHtmlHistoricoVenda(String(venda.nfe_numero))}</strong>` : '';
+    const chave = venda.nfe_chave
+        ? `<div class="small text-muted mt-1">Chave: ${escapeHtmlHistoricoVenda(venda.nfe_chave)}</div>`
+        : '';
+    const proto = venda.nfe_protocolo
+        ? `<div class="small text-muted">Protocolo: ${escapeHtmlHistoricoVenda(venda.nfe_protocolo)}</div>`
+        : '';
+    const id = Number(venda.id);
+    return `
+        <div class="alert alert-info py-2 mb-3">
+            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+                <div>
+                    <i class="fas fa-file-invoice"></i>
+                    <strong>NF-e vinculada</strong> (parcela fiscal)${num}
+                    ${chave}${proto}
+                    <div class="small mt-1">A venda abaixo permanece com a operação comercial completa.</div>
+                </div>
+                <button type="button" class="btn btn-sm btn-outline-primary" onclick="abrirDanfeNfeHistorico(${id})">
+                    <i class="fas fa-external-link-alt"></i> Abrir DANFE NF-e
+                </button>
+            </div>
+        </div>`;
+}
+
+function abrirDanfeNfeHistorico(vendaId) {
+    if (!moduloFiscalDisponivelHistorico()) {
+        if (typeof showNotification === 'function') {
+            showNotification('Módulo não contratado.', 'warning');
+        }
+        return;
+    }
+    const base = (typeof API_URL !== 'undefined' ? API_URL : '/api');
+    window.open(`${base}/faturamento/vendas/${vendaId}/danfe`, '_blank', 'noopener');
+}
+
 function montarHtmlAcoesHistoricoVenda(venda, opcoes = {}) {
     const incluirDevolucao = opcoes.incluirDevolucao !== false;
     const id = Number(venda.id);
@@ -72,6 +121,7 @@ function montarHtmlAcoesHistoricoVenda(venda, opcoes = {}) {
 
     const temFiscal = vendaHistoricoTemCupomFiscal(venda);
     const temNaoFiscal = vendaHistoricoTemCupomNaoFiscal(venda);
+    const temNfe = vendaHistoricoTemNfe(venda);
     const nfceNumero = venda.nfce_numero ? ` #${venda.nfce_numero}` : '';
     const tipoCupom = temFiscal ? 'fiscal' : (temNaoFiscal ? 'nao_fiscal' : null);
 
@@ -87,6 +137,15 @@ function montarHtmlAcoesHistoricoVenda(venda, opcoes = {}) {
                 ${tipoCupom === 'fiscal'
                     ? `Reimprimir cupom fiscal${escapeHtmlHistoricoVenda(nfceNumero)}`
                     : 'Reimprimir cupom não fiscal'}
+            </button>
+        </li>
+    ` : '';
+
+    const blocoNfe = temNfe ? `
+        <li><hr class="dropdown-divider my-1"></li>
+        <li>
+            <button type="button" class="dropdown-item py-2" onclick="abrirDanfeNfeHistorico(${id})">
+                <i class="fas fa-file-invoice fa-fw me-2 text-muted"></i>Abrir DANFE NF-e
             </button>
         </li>
     ` : '';
@@ -140,6 +199,7 @@ function montarHtmlAcoesHistoricoVenda(venda, opcoes = {}) {
                         </button>
                     </li>
                     ${blocoImpressao}
+                    ${blocoNfe}
                     ${blocoOperacional}
                 </ul>
             </div>
@@ -152,3 +212,7 @@ window.historicoVendaModoFiscalAtivo = historicoVendaModoFiscalAtivo;
 window.filtrarItensHistoricoVenda = filtrarItensHistoricoVenda;
 window.obterTotalExibicaoHistoricoVenda = obterTotalExibicaoHistoricoVenda;
 window.exibirCupomNaoFiscalHistorico = exibirCupomNaoFiscalHistorico;
+window.moduloFiscalDisponivelHistorico = moduloFiscalDisponivelHistorico;
+window.vendaHistoricoTemNfe = vendaHistoricoTemNfe;
+window.montarHtmlNfeVinculadaHistorico = montarHtmlNfeVinculadaHistorico;
+window.abrirDanfeNfeHistorico = abrirDanfeNfeHistorico;

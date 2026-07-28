@@ -1,14 +1,13 @@
 /**
- * Sprint 2.0 — VendaApplicationService (fachada pura).
- * Garante delegação integral sem transformação.
+ * Sprint 2.0 / 2.2 — VendaApplicationService.
+ * Garante delegação integral no caminho PDV sem transformação.
  */
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('path');
-const Module = require('module');
 
-describe('VendaApplicationService — Sprint 2.0', () => {
-  it('criarVenda delega integralmente para VendaPagamentoService.criarVenda', () => {
+describe('VendaApplicationService — Sprint 2.0 / 2.2', () => {
+  it('criarVenda (PDV) delega integralmente para VendaPagamentoService.criarVenda', () => {
     const pagamentoPath = require.resolve('../../backend/services/vendas/VendaPagamentoService');
     const appPath = path.resolve(__dirname, '../../backend/services/vendas/VendaApplicationService.js');
 
@@ -38,7 +37,9 @@ describe('VendaApplicationService — Sprint 2.0', () => {
       assert.equal(result, 'DELEGATED_OK');
       assert.equal(calledWith.req, req);
       assert.equal(calledWith.res, res);
-      assert.equal(Object.keys(VendaApplicationService).join(','), 'criarVenda');
+      assert.ok(typeof VendaApplicationService.criarVenda === 'function');
+      assert.ok(typeof VendaApplicationService.criarVendaComContexto === 'function');
+      assert.equal(req.vendaContext.origem, 'PDV');
     } finally {
       if (originalCache) require.cache[pagamentoPath] = originalCache;
       else delete require.cache[pagamentoPath];

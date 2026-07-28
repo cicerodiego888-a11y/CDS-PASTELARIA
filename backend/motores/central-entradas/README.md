@@ -135,4 +135,4 @@ npm run test:central-integridade
 npm run test:central-entradas-rc4
 ```
 
-Documentação: [`docs/CENTRAL_ENTRADAS_ARQUITETURA.md`](../../../docs/CENTRAL_ENTRADAS_ARQUITETURA.md) · [`docs/ARQUITETURA_OFICIAL_CDS_V1.md`](../../../docs/ARQUITETURA_OFICIAL_CDS_V1.md)
+Documentação: [`docs/fiscal/CENTRAL_ENTRADAS_ARQUITETURA.md`](../../../docs/fiscal/CENTRAL_ENTRADAS_ARQUITETURA.md) · [`docs/arquitetura/ARQUITETURA_OFICIAL_CDS_V1.md`](../../../docs/arquitetura/ARQUITETURA_OFICIAL_CDS_V1.md)

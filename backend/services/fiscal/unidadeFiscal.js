@@ -37,11 +37,13 @@ function produtoUsaConversaoUnidadesFiscal(item = {}) {
 const produtoEhFracionadoFiscal = produtoUsaConversaoUnidadesFiscal;
 
 function obterQuantidadeComercialFiscal(item = {}) {
-  return Number(item.quantidade_fiscal ?? item.quantidade ?? 0);
+  // Hotfix: somente quantidade fiscal do Motor (sem fallback comercial).
+  return Number(item.quantidade_fiscal || 0);
 }
 
 function obterValorComercialFiscal(item = {}) {
-  return Number(item.valor_fiscal ?? item.subtotal ?? 0);
+  // Hotfix: somente valor fiscal do Motor (sem fallback subtotal).
+  return Number(item.valor_fiscal || 0);
 }
 
 function obterPrecoUnitarioComercialFiscal(item = {}) {

@@ -144,6 +144,19 @@ class EquipamentosRepository {
     return normalizarEquipamento(row);
   }
 
+  async buscarPorPortaCom(portaCom) {
+    await whenReady();
+    if (!portaCom) return null;
+    const row = await get(`
+      SELECT e.*, d.nome_exibicao AS driver_nome
+      FROM equipamentos e
+      LEFT JOIN equipamentos_drivers d ON d.id = e.driver_id
+      WHERE e.porta_com = ? AND e.ativo = 1
+      LIMIT 1
+    `, [String(portaCom).trim()]);
+    return normalizarEquipamento(row);
+  }
+
   async buscarPorDriver(driverRef) {
     await whenReady();
     if (!driverRef) return [];

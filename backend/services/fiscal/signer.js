@@ -45,6 +45,15 @@ function removerInfNFeSupl(xml) {
 
 function assinarNFe(xml, chavePrivadaPem, certPem) {
   try {
+    // RC3.16.11 — TRACE
+    try {
+      const { traceNfe } = require('./nfeTrace');
+      traceNfe('assinarNFe', {
+        bytesXml: Buffer.byteLength(String(xml || ''), 'utf8'),
+        arquivo: __filename
+      });
+    } catch (_) { /* ignore */ }
+
     salvarDebug('01-xml-original.xml', xml);
 
     const xmlSemSupl = removerInfNFeSupl(xml);

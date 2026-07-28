@@ -13,9 +13,7 @@ function loadVendas() {
         params.push('todas=1');
     }
 
-    if (typeof modoFiscalAtivoSistema === 'function' && modoFiscalAtivoSistema()) {
-        params.push('modo=fiscal');
-    }
+    // Histórico sempre comercial — não filtra por F12/modo fiscal.
     if (params.length) {
         url += '?' + params.join('&');
     }
@@ -47,8 +45,6 @@ function toggleVerTodasVendas() {
 }
 
 function renderVendas(vendas) {
-    const modoFiscal = historicoVendaModoFiscalAtivo();
-
     const html = `
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
@@ -63,7 +59,7 @@ function renderVendas(vendas) {
             </div>
             <div class="card-body">
                 <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
-                    <small class="text-muted">${vendas.length} venda(s) encontrada(s)</small>
+                    <small class="text-muted">${vendas.length} venda(s) encontrada(s) — totais comerciais</small>
                     ${!verTodasVendas ? '<small class="text-warning"><i class="fas fa-filter"></i> Exibindo apenas vendas de hoje</small>' : ''}
                 </div>
                 <div class="row mb-3">
@@ -95,7 +91,7 @@ function renderVendas(vendas) {
                                 <th>Código</th>
                                 <th>Data</th>
                                 <th>Cliente</th>
-                                <th>${modoFiscal ? 'Total fiscal' : 'Total'}</th>
+                                <th>Total</th>
                                 <th>Forma</th>
                                 <th>Status</th>
                                 <th class="historico-venda-acoes-col">Ações</th>
@@ -105,10 +101,10 @@ function renderVendas(vendas) {
                             ${vendas.map(v => `
                                 <tr>
                                     <td>${v.id || '-'}</td>
-                                    <td>${escapeHtml(v.codigo || '-')}</td>
+                                    <td>${escapeHtml(v.codigo || '-')}${v.nfe_numero ? ` <span class="badge bg-info" title="NF-e vinculada">NF-e</span>` : ''}${v.nfce_numero ? ` <span class="badge bg-success" title="NFC-e">NFC-e</span>` : ''}</td>
                                     <td>${formatDate(v.data_venda || v.created_at)}</td>
                                     <td>${escapeHtml(v.cliente_nome || 'Não informado')}</td>
-                                    <td>${formatCurrency(modoFiscal ? (v.valor_fiscal ?? v.total) : v.total)}</td>
+                                    <td>${formatCurrency(v.total)}</td>
                                     <td>${rotuloFormaPagamento(v.forma_pagamento)}</td>
                                     <td>${rotuloStatusVenda(v.status)}</td>
                                     <td class="historico-venda-acoes-col">${montarHtmlAcoesHistoricoVenda(v, { incluirDevolucao: false })}</td>
@@ -135,18 +131,21 @@ function viewVenda(id) {
 }
 
 function showVendaModal(venda) {
-    const modoFiscal = historicoVendaModoFiscalAtivo();
+    // Visão comercial completa — NF-e não substitui itens/totais.
     const itens = filtrarItensHistoricoVenda(venda);
     const totalExibido = obterTotalExibicaoHistoricoVenda(venda, itens);
     const mostrarNaoFiscal = exibirCupomNaoFiscalHistorico(venda);
+    const blocoNfe = typeof montarHtmlNfeVinculadaHistorico === 'function'
+        ? montarHtmlNfeVinculadaHistorico(venda)
+        : '';
 
     const itensHtml = itens.map(item => `
         <tr>
             <td>${item.produto_id || '-'}</td>
             <td>${escapeHtml(item.produto_nome || '-')}</td>
             <td>${formatCurrency(item.preco_unitario)}</td>
-            <td>${modoFiscal ? Number(item.quantidade_fiscal ?? 0).toFixed(3).replace('.', ',') : Number(item.quantidade || 0)}</td>
-            <td>${formatCurrency(modoFiscal ? (item.valor_fiscal ?? 0) : item.subtotal)}</td>
+            <td>${Number(item.quantidade || 0)}</td>
+            <td>${formatCurrency(item.subtotal)}</td>
         </tr>
     `).join('') || `<tr><td colspan="5" class="text-center">Nenhum item encontrado.</td></tr>`;
 
@@ -155,7 +154,7 @@ function showVendaModal(venda) {
             <div class="modal-dialog modal-xl modal-dialog-scrollable">
                 <div class="modal-content">
                     <div class="modal-header">
-                        <h5 class="modal-title" id="vendaModalLabel">Venda ${escapeHtml(venda.codigo || String(venda.id))}${modoFiscal ? ' <small class="text-muted">(somente fiscal)</small>' : ''}</h5>
+                        <h5 class="modal-title" id="vendaModalLabel">Venda ${escapeHtml(venda.codigo || String(venda.id))}</h5>
                         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
                     </div>
                     <div class="modal-body">
@@ -165,7 +164,7 @@ function showVendaModal(venda) {
                             <div class="col-sm-4"><strong>Cliente:</strong> ${escapeHtml(venda.cliente_nome || 'Não informado')}</div>
                         </div>
                         <div class="row mb-3">
-                            <div class="col-sm-4"><strong>${modoFiscal ? 'Total fiscal:' : 'Total:'}</strong> ${formatCurrency(totalExibido)}</div>
+                            <div class="col-sm-4"><strong>Total:</strong> ${formatCurrency(totalExibido)}</div>
                             <div class="col-sm-4"><strong>Desconto:</strong> ${formatCurrency(venda.desconto)}</div>
                             <div class="col-sm-4"><strong>Pagamento:</strong> ${rotuloFormaPagamento(venda.forma_pagamento)}</div>
                         </div>
@@ -174,7 +173,13 @@ function showVendaModal(venda) {
                             <div class="col-sm-4"><strong>Documento:</strong> ${escapeHtml(venda.documento || '-')}</div>
                             <div class="col-sm-4"><strong>Número de itens:</strong> ${itens.length}</div>
                         </div>
-                        ${vendaPossuiNfceAutorizada(venda) ? `
+                        ${venda.pedido_id ? `
+                        <div class="alert alert-secondary py-2 mb-3">
+                            <i class="fas fa-clipboard-list"></i>
+                            Pedido vinculado: <strong>#${escapeHtml(String(venda.pedido_id))}</strong>
+                        </div>` : ''}
+                        ${blocoNfe}
+                        ${(typeof moduloFiscalDisponivelHistorico === 'function' ? moduloFiscalDisponivelHistorico() : false) && vendaPossuiNfceAutorizada(venda) ? `
                         <div class="alert alert-success py-2 mb-3">
                             <i class="fas fa-receipt"></i>
                             NFC-e autorizada${venda.nfce_numero ? ` — nota <strong>#${escapeHtml(String(venda.nfce_numero))}</strong>` : ''}
@@ -191,8 +196,8 @@ function showVendaModal(venda) {
                                         <th>ID Produto</th>
                                         <th>Produto</th>
                                         <th>Preço</th>
-                                        <th>${modoFiscal ? 'Qtd Fiscal' : 'Quantidade'}</th>
-                                        <th>${modoFiscal ? 'Valor Fiscal' : 'Subtotal'}</th>
+                                        <th>Quantidade</th>
+                                        <th>Subtotal</th>
                                     </tr>
                                 </thead>
                                 <tbody>
@@ -206,9 +211,13 @@ function showVendaModal(venda) {
                         <button type="button" class="btn btn-warning" onclick="reimprimirCupomNaoFiscalHistorico(${venda.id})">
                             <i class="fas fa-receipt"></i> Reimprimir cupom não fiscal
                         </button>` : ''}
-                        ${vendaPossuiNfceAutorizada(venda) ? `
+                        ${(typeof moduloFiscalDisponivelHistorico === 'function' ? moduloFiscalDisponivelHistorico() : false) && vendaPossuiNfceAutorizada(venda) ? `
                         <button type="button" class="btn btn-success" onclick="reimprimirCupomFiscalHistorico(${venda.id})">
                             <i class="fas fa-print"></i> Reimprimir cupom fiscal
+                        </button>` : ''}
+                        ${typeof vendaHistoricoTemNfe === 'function' && vendaHistoricoTemNfe(venda) ? `
+                        <button type="button" class="btn btn-info" onclick="abrirDanfeNfeHistorico(${venda.id})">
+                            <i class="fas fa-file-invoice"></i> DANFE NF-e
                         </button>` : ''}
                         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fechar</button>
                     </div>

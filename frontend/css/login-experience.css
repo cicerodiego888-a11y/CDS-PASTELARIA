@@ -602,3 +602,18 @@ body.lx-ready .lx-footer {
     font-size: 1.85rem;
   }
 }
+
+/* Hotfix RC2.2 — painel primeiro acesso */
+.lx-primeiro-acesso .lx-pa-title {
+  margin: 0 0 0.35rem;
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.lx-primeiro-acesso .lx-pa-text {
+  margin: 0 0 1.1rem;
+  color: var(--lx-muted);
+  font-size: 0.95rem;
+  line-height: 1.45;
+}

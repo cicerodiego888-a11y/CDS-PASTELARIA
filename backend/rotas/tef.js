@@ -249,6 +249,18 @@ router.get('/pinpads-catalogo', async (req, res) => {
   }
 });
 
+/** RC5 — Discovery de PinPads via Motor (IntegrationService), sem duplicar enumeração. */
+router.post('/equipamentos/descobrir', verificarToken, async (req, res) => {
+  try {
+    const { modulos } = require('../services/equipamentos-integracao');
+    const data = await modulos.tef.descobrirPinpads(req.user || { perfil: 'SUPER_ADMIN' }, req.body || {});
+    res.json({ sucesso: true, ...data });
+  } catch (error) {
+    console.error('Erro Discovery TEF via integração:', error);
+    res.status(error.statusCode || 500).json({ sucesso: false, erro: error.message || 'Erro na descoberta.' });
+  }
+});
+
 router.get('/diagnostico-sdk', async (req, res) => {
   try {
     const sdks = sdkDetector.localizarSDKs();

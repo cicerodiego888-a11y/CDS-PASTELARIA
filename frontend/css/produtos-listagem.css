@@ -1,5 +1,80 @@
 /* Sprint UX 03 — Polimento visual da árvore Categoria → Subcategoria → Produtos */
 
+.cds-prod-lista-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.cds-prod-lista-header__top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.cds-prod-lista-header__title {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.cds-prod-lista-header__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.cds-prod-lista-header__filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.cds-prod-lista-header__busca {
+  position: relative;
+  flex: 1 1 280px;
+  min-width: min(100%, 240px);
+}
+
+.cds-prod-lista-header__busca-icon {
+  position: absolute;
+  left: 0.7rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #6c757d;
+  font-size: 0.8rem;
+  pointer-events: none;
+}
+
+.cds-prod-lista-header__busca .form-control {
+  padding-left: 2rem;
+  width: 100%;
+}
+
+.cds-prod-lista-header__categoria {
+  flex: 0 1 220px;
+  min-width: 160px;
+  max-width: 100%;
+}
+
+@media (max-width: 767.98px) {
+  .cds-prod-lista-header__actions {
+    width: 100%;
+  }
+
+  .cds-prod-lista-header__actions .btn {
+    flex: 1 1 auto;
+  }
+
+  .cds-prod-lista-header__categoria {
+    flex: 1 1 100%;
+  }
+}
+
 .cds-prod-tree {
   display: flex;
   flex-direction: column;

@@ -118,6 +118,31 @@ class UsbTransport extends BaseTransport {
       endpoint: this._endpoint
     });
   }
+
+  /**
+   * Probe rápido RC2: confirma dispositivo na enumeração USB (VID/PID).
+   * Nunca mantém handle aberto.
+   * @returns {Promise<{ ok: boolean, modo: string }>}
+   */
+  async probeRapido() {
+    const { listarDispositivosUsb } = require('../discovery/deviceEnumeration');
+    const vid = this._vendorId != null
+      ? String(this._vendorId).replace(/^0x/i, '').toUpperCase().padStart(4, '0')
+      : null;
+    const pid = this._productId != null
+      ? String(this._productId).replace(/^0x/i, '').toUpperCase().padStart(4, '0')
+      : null;
+
+    const lista = listarDispositivosUsb();
+    const ok = lista.some((d) => {
+      const dv = d.vid ? String(d.vid).toUpperCase() : null;
+      const dp = d.pid ? String(d.pid).toUpperCase() : null;
+      if (vid && pid) return dv === vid && dp === pid;
+      if (vid) return dv === vid;
+      return false;
+    });
+    return { ok, modo: 'enumeracao_usb' };
+  }
 }
 
 module.exports = UsbTransport;

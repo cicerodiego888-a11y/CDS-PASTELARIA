@@ -13,10 +13,7 @@
 
 const equipamentosManager = require('./core/EquipamentosManager');
 const contracts = require('./contracts');
-
-// Contratos oficiais exportados via contracts/ (Sprint 7)
-// TODO: Exportar métodos de alto nível: conectar, sincronizarProdutos, obterPeso, diagnosticar
-// TODO: Integrar com rotas REST /api/equipamentos (sprint futura)
+const discoveryService = require('./discovery/DiscoveryService');
 
 /**
  * Inicializa o motor de equipamentos.
@@ -24,7 +21,6 @@ const contracts = require('./contracts');
  * @returns {Promise<void>}
  */
 async function inicializar(opcoes = {}) {
-  // TODO: Delegar ao EquipamentosManager.inicializar(opcoes)
   return equipamentosManager.inicializar(opcoes);
 }
 
@@ -33,7 +29,6 @@ async function inicializar(opcoes = {}) {
  * @returns {Promise<void>}
  */
 async function encerrar() {
-  // TODO: Delegar ao EquipamentosManager.encerrar()
   return equipamentosManager.encerrar();
 }
 
@@ -41,5 +36,10 @@ module.exports = {
   inicializar,
   encerrar,
   equipamentosManager,
-  contracts
+  contracts,
+  discoveryService,
+  identidadeService: require('./identidade/IdentidadeService'),
+  centralEquipamentosService: require('./central/CentralEquipamentosService'),
+  monitorService: require('./monitor/MonitorService'),
+  heartbeatEngine: require('./monitor/HeartbeatEngine')
 };

@@ -190,6 +190,9 @@ async function main() {
     assert.ok(rotas.includes("router.get('/entregas/pendentes'"));
     assert.ok(rotas.includes("router.post('/:id/prestacao'"));
     assert.ok(rotas.includes('exigirModuloVendasEntrega'));
+    // Gate NÃO pode ser router.use no root — bloqueia POST /api/vendas do PDV
+    assert.ok(rotas.includes("router.use('/entregas', exigirModuloVendasEntrega)"));
+    assert.ok(!/router\.use\(\s*exigirModuloVendasEntrega\s*\)/.test(rotas));
   });
 
   await test('infra widget rodapé preparada sem botão operacional', async () => {

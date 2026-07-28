@@ -17,6 +17,14 @@ const PERMISSOES_PAGINAS = {
     fornecedores: 'fornecedores',
     vendas: 'vendas',
     entregas: 'vendas',
+    faturamento: 'vendas',
+    pedidos: 'vendas',
+    'nfe-central': 'fiscal',
+    'nfe-avulsa': 'fiscal',
+    'nfe-monitor': 'fiscal',
+    'nfe-fila': 'fiscal',
+    'nfe-diagnostico': 'fiscal',
+    'central-contabil': 'fiscal',
     consulta: 'pdv',
     reimpressao: 'vendas',
     financeiro: 'financeiro',
@@ -24,6 +32,7 @@ const PERMISSOES_PAGINAS = {
     fiscal: 'fiscal',
     configuracoes: 'configuracoes',
     equipamentos: 'configuracoes',
+    'central-equipamentos': 'configuracoes',
     'laboratorio-equipamentos': 'configuracoes',
     licenca: 'configuracoes',
     dashboard: 'relatorios',
@@ -212,6 +221,11 @@ function usuarioPodeAcessarDiagnosticoCentral(user) {
 function usuarioTemPermissao(page) {
     const { role, permissoes } = obterPermissoesUsuario();
 
+    // Assinatura sempre liberada para qualquer usuário autenticado poder renovar a licença.
+    if (page === 'licenca') {
+        return !!localStorage.getItem('token');
+    }
+
     if (page === 'central-diagnostico') {
         return usuarioPodeAcessarDiagnosticoCentral();
     }
@@ -220,7 +234,7 @@ function usuarioTemPermissao(page) {
         return podeGerenciarUsuariosSistema();
     }
 
-    if (page === 'configuracoes-avancadas' || page === 'configuracao-rede' || page === 'nome-terminal-pdv') {
+    if (page === 'configuracoes-avancadas' || page === 'configuracao-rede' || page === 'nome-terminal-pdv' || page === 'observabilidade') {
         return isSuperAdminUser();
     }
 
@@ -234,6 +248,14 @@ function usuarioTemPermissao(page) {
 
 function redirecionarSeModuloNegado(moduloAtual) {
     if (podeAcessarModulo(moduloAtual)) return false;
+
+    // Qualquer autenticado pode abrir o ERP apenas para renovar a Assinatura.
+    if (moduloAtual === 'erp' && localStorage.getItem('token')) {
+        try {
+            const params = new URLSearchParams(window.location.search);
+            if (params.get('page') === 'licenca') return false;
+        } catch (e) { /* ignore */ }
+    }
 
     if (moduloAtual === 'erp' && podeAbrirPDV()) {
         window.location.replace('/pdv');

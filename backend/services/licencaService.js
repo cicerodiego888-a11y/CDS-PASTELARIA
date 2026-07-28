@@ -13,6 +13,9 @@ function parseDate(value) {
   return Number.isNaN(data.getTime()) ? null : data;
 }
 
+/** Dias em que o PDV continua operando após o vencimento da assinatura. */
+const DIAS_TOLERANCIA_PDV = 5;
+
 function calcularDiasRestantes(dataExpiracao) {
   const expiracao = parseDate(dataExpiracao);
   if (!expiracao) return 0;
@@ -21,6 +24,40 @@ function calcularDiasRestantes(dataExpiracao) {
   const diffMs = expiracao.getTime() - agora.getTime();
   const dias = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
   return dias > 0 ? dias : 0;
+}
+
+/**
+ * Dias corridos após o vencimento (0 se ainda válida ou acabou de vencer no mesmo instante).
+ */
+function calcularDiasAposVencimento(dataExpiracao) {
+  const expiracao = parseDate(dataExpiracao);
+  if (!expiracao) return Number.POSITIVE_INFINITY;
+
+  const agora = new Date();
+  const diffMs = agora.getTime() - expiracao.getTime();
+  if (diffMs <= 0) return 0;
+  return Math.floor(diffMs / (1000 * 60 * 60 * 24));
+}
+
+/**
+ * PDV permanece liberado até data_expiracao + diasTolerancia (inclusive).
+ */
+function estaEmToleranciaPdv(dataExpiracao, diasTolerancia = DIAS_TOLERANCIA_PDV) {
+  const expiracao = parseDate(dataExpiracao);
+  if (!expiracao) return false;
+  const limite = new Date(expiracao.getTime());
+  limite.setDate(limite.getDate() + Number(diasTolerancia || 0));
+  return new Date() <= limite;
+}
+
+function diasToleranciaPdvRestantes(dataExpiracao, diasTolerancia = DIAS_TOLERANCIA_PDV) {
+  if (!estaEmToleranciaPdv(dataExpiracao, diasTolerancia)) return 0;
+  const expiracao = parseDate(dataExpiracao);
+  if (!expiracao) return 0;
+  const limite = new Date(expiracao.getTime());
+  limite.setDate(limite.getDate() + Number(diasTolerancia || 0));
+  const diffMs = limite.getTime() - Date.now();
+  return Math.max(0, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
 }
 
 function verificarVencimento(dataExpiracao) {
@@ -422,6 +459,10 @@ module.exports = {
   renovarLicenca,
   registrarHistorico,
   diasRestantes: calcularDiasRestantes,
+  calcularDiasAposVencimento,
+  estaEmToleranciaPdv,
+  diasToleranciaPdvRestantes,
+  DIAS_TOLERANCIA_PDV,
   verificarFraudeData,
   verificarDataAlterada,
   verificarVencimento,

@@ -3,14 +3,34 @@ const router = express.Router();
 const db = require('../database');
 const licencaService = require('../services/licencaService');
 const verificarLicenca = require('../services/verificarLicenca');
-const { verificarPermissaoEspecifica } = require('../middleware/auth');
+const licenciamentoCds = require('../services/licenciamentoCdsService');
+const configService = require('../services/configuracaoService');
+const { verificarToken, verificarPermissaoEspecifica, exigirSuperAdmin } = require('../middleware/auth');
 
-router.get('/', verificarPermissaoEspecifica('configuracoes'), async (req, res) => {
+/** Público (gate libera /api/licenca) — aviso no LOGIN apenas informa, não bloqueia. */
+router.get('/aviso-renovacao', async (req, res) => {
+  try {
+    const aviso = await licenciamentoCds.obterAvisoRenovacaoLogin();
+    res.json(aviso);
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Erro ao obter aviso de renovação.' });
+  }
+});
+
+router.get('/cds-config', exigirSuperAdmin, (req, res) => {
+  try {
+    res.json(configService.getLicenciamentoCds());
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/** Status da assinatura — qualquer usuário autenticado (renovação não pode depender de ACL). */
+router.get('/', verificarToken, async (req, res) => {
   try {
     const resultado = await verificarLicenca();
     const licenca = await licencaService.obterLicenca();
 
-    // Se resultado indica pendente, forçar datas nulas e dias = 0 no retorno
     if (resultado && resultado.status === 'pendente') {
       return res.json({
         codigo_instalacao: resultado.codigo_instalacao || (licenca && licenca.codigo_instalacao),
@@ -19,7 +39,10 @@ router.get('/', verificarPermissaoEspecifica('configuracoes'), async (req, res) 
         motivo: resultado.motivo || 'PENDENTE',
         data_ativacao: null,
         data_expiracao: null,
-        dias_restantes: 0
+        dias_restantes: 0,
+        em_tolerancia_pdv: false,
+        dias_tolerancia_pdv: licencaService.DIAS_TOLERANCIA_PDV,
+        dias_tolerancia_restantes: 0
       });
     }
 
@@ -30,7 +53,12 @@ router.get('/', verificarPermissaoEspecifica('configuracoes'), async (req, res) 
       motivo: resultado.motivo,
       data_ativacao: licenca.data_ativacao,
       data_expiracao: licenca.data_expiracao,
-      dias_restantes: licenca.diasRestantes || 0
+      dias_restantes: resultado.diasRestantes != null ? resultado.diasRestantes : (licenca.diasRestantes || 0),
+      em_tolerancia_pdv: !!resultado.emToleranciaPdv,
+      dias_tolerancia_pdv: licencaService.DIAS_TOLERANCIA_PDV,
+      dias_tolerancia_restantes: resultado.diasToleranciaRestantes || 0,
+      ultima_verificacao: resultado.ultima_verificacao || licenca.ultima_verificacao || null,
+      ultima_execucao: resultado.ultima_execucao || licenca.ultima_execucao || null
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -50,7 +78,8 @@ router.get('/historico', verificarPermissaoEspecifica('configuracoes'), async (r
   }
 });
 
-router.post('/ativar', verificarPermissaoEspecifica('configuracoes'), async (req, res) => {
+/** Ativar/renovar — qualquer usuário autenticado (necessário quando menus/ACL estão restritos). */
+router.post('/ativar', verificarToken, async (req, res) => {
   try {
     const { codigoLicenca } = req.body;
 

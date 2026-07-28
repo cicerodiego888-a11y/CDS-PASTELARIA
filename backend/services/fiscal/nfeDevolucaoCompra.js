@@ -316,6 +316,10 @@ function buildXmlNFeDevolucao({ config, compra, itens, numero }) {
 }
 
 async function emitirNFeDevolucaoCompra(compraId) {
+  // RC3.16.11 — TRACE (fluxo paralelo; NÃO usa nfeEmissorVenda / nfeXmlAuditoria)
+  const { traceNfe } = require('./nfeTrace');
+  traceNfe('emitirNFeDevolucaoCompra', { compraId, arquivo: __filename });
+
   await garantirTabelas();
 
   const existente = await new Promise((resolve, reject) => {
@@ -335,9 +339,11 @@ async function emitirNFeDevolucaoCompra(compraId) {
   const numero = await proximoNumeroNFeDevolucao();
 
   const xmlBase = buildXmlNFeDevolucao({ config, compra, itens, numero });
+  traceNfe('emitirNFeDevolucaoCompra→buildXml', { compraId, numero, chave: xmlBase.chave });
   salvarDebug('01-nfe-devolucao-original.xml', xmlBase.xmlSemAssinatura);
 
   const certificado = carregarCertificadoPfx(config.certificadoPath, config.certificadoSenha);
+  traceNfe('emitirNFeDevolucaoCompra→assinarNFe', { compraId, numero });
   const assinatura = assinarNFe(xmlBase.xmlSemAssinatura, certificado.privateKeyPem, certificado.certPem);
   const xmlAssinado = compactarXml(assinatura.xmlAssinado);
   salvarDebug('02-nfe-devolucao-assinada.xml', xmlAssinado);
@@ -361,6 +367,7 @@ async function emitirNFeDevolucaoCompra(compraId) {
   const loteXml = montarLote(xmlAssinado, String(numero));
   const url = getUrlNFe55(config);
 
+  traceNfe('emitirNFeDevolucaoCompra→enviarLote', { compraId, numero, url });
   const soapResponse = await enviarLote({
     url,
     loteXml,
@@ -372,6 +379,7 @@ async function emitirNFeDevolucaoCompra(compraId) {
 
   const raw = String(soapResponse.raw || soapResponse.message || '');
   salvarDebug('03-retorno-nfe-devolucao.xml', raw);
+  traceNfe('emitirNFeDevolucaoCompra→parserRetorno', { compraId, bytesRetorno: Buffer.byteLength(raw, 'utf8') });
 
   let status = 'pendente';
   let protocolo = null;

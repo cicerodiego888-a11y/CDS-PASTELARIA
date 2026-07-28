@@ -5,17 +5,15 @@
  * O frontend (PDV) NÃO deve tomar nenhuma decisão de fluxo de pagamento.
  * 
  * FLUXO OBRIGATÓRIO:
- * Venda → Motor Fiscal → Distribuição (valor_fiscal, valor_nao_fiscal) → 
- * Motor Financeiro → 1º Recebimento Fiscal → Confirmação (TEF/Manual) → 
- * status = aguardando_nao_fiscal → 2º Recebimento Não Fiscal → 
- * status = quitada → NFC-e
+ * Venda → Motor Fiscal → totais F/NF → MIDP (distribuição de meios) →
+ * Orquestrador (TEF/confirmação) → status → NFC-e / Financeiro
  */
 
 const tefManager = require('./tef/TefManager');
 const tefContrato = require('./tef/tefContrato');
 const tefConfigService = require('./tef/tefConfigService');
 const tefFluxoPagamento = require('./tef/tefFluxoPagamento');
-const { distribuirPagamentos } = require('./DistribuidorPagamento');
+const midp = require('./midp');
 const configService = require('./configuracaoService');
 
 /**
@@ -28,17 +26,42 @@ async function processarFluxoPagamentoVenda({
   formaPagamento,
   pagamentos,
   tefHabilitado,
-  modoConfirmacaoFiscal
+  modoConfirmacaoFiscal,
+  valorFiscalMaximo,
+  preservacaoAplicada
 }) {
   // Validações básicas
   totalFiscal = Number(totalFiscal || 0);
   totalNaoFiscal = Number(totalNaoFiscal || 0);
+  const fiscalMaximo = Number(
+    valorFiscalMaximo != null ? valorFiscalMaximo : totalFiscal
+  );
   
   // Normalizar pagamentos de entrada
   const pagamentosEntrada = normalizarPagamentosEntrada(pagamentos, formaPagamento);
   
-  // Distribuir pagamentos entre fiscal e não fiscal
-  const distribuicao = distribuirPagamentos(pagamentosEntrada, totalFiscal, totalNaoFiscal);
+  // MIDP V1 (3.8C) — política única PRESERVAR DINHEIRO; consome só efetivo do Motor
+  const midpAtivo = Boolean(configService.isMidpAtivado && configService.isMidpAtivado());
+  const resultadoMidp = midp.executar({
+    pagamentosComerciais: pagamentosEntrada,
+    valorFiscalLiquido: totalFiscal,
+    valorFiscalEfetivo: totalFiscal,
+    valorNaoFiscal: totalNaoFiscal,
+    valorFiscalMaximo: fiscalMaximo,
+    preservacaoAplicada: Boolean(preservacaoAplicada),
+    midpAtivo
+  });
+  const distribuicao = {
+    recebimentosFiscal: resultadoMidp.recebimentosFiscal,
+    recebimentosNaoFiscal: resultadoMidp.recebimentosNaoFiscal,
+    saldoFiscal: resultadoMidp.saldoFiscal,
+    saldoNaoFiscal: resultadoMidp.saldoNaoFiscal,
+    midp: {
+      versao: resultadoMidp.versao,
+      politica: resultadoMidp.politica,
+      auditoria: resultadoMidp.auditoria
+    }
+  };
   
   // Validar se o pagamento fiscal é suficiente
   if (distribuicao.saldoFiscal > 0) {

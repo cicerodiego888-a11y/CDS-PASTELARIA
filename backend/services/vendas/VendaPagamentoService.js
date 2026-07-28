@@ -11,7 +11,25 @@ const lotesService = require('../lotesService');
 const { normalizarTipoVendaItem } = require('../vendaUnidadeHelpers');
 const { separarItensDistribuidos } = require('../fiscalNaoFiscalService');
 const OrquestradorPagamento = require('../OrquestradorPagamento');
-const { distribuirItemVenda, parseVendaFiscalFlag } = require('../distribuidorEstoqueVenda');
+const { parseVendaFiscalFlag, distribuirItensVendaComValorFiscalEfetivo } = require('../distribuidorEstoqueVenda');
+const {
+  obterCreditoReservaPedidoCb,
+  creditarDisponibilidadeComReservaPedido,
+  consumirReservasPedidoNaVendaCb
+} = require('../estoque/pedidoReservaPonteNucleo');
+
+/**
+ * RC3.15.11 — prioridade fiscal do estoque ≠ emissão de NFC-e.
+ * - venda_fiscal: informa o Motor F×NF (priorizar saldo fiscal)
+ * - emitir_fiscal: informa se o núcleo deve emitir NFC-e
+ * Retrocompatível: se venda_fiscal ausente, usa emitir_fiscal (PDV).
+ */
+function resolverVendaFiscalParaMotor(body = {}) {
+  if (body.venda_fiscal !== undefined && body.venda_fiscal !== null && body.venda_fiscal !== '') {
+    return parseVendaFiscalFlag(body.venda_fiscal);
+  }
+  return parseVendaFiscalFlag(body.emitir_fiscal);
+}
 const VendaFinanceiroService = require('./VendaFinanceiroService');
 const VendaFiscalService = require('./VendaFiscalService');
 
@@ -82,43 +100,54 @@ function reduzirEstoqueDistribuido(
   quantidadeNaoFiscal,
   callback
 ) {
+  const { produtoControlaEstoque } = require('../estoque/produtoControlaEstoque');
 
-  const executarNaoFiscal = () => {
-
-    if (Number(quantidadeNaoFiscal || 0) <= 0) {
-      return callback(null);
-    }
-
-    reduzirEstoqueComFEFO(
-      vendaItemId,
-      produtoId,
-      quantidadeNaoFiscal,
-      0,
-      callback
-    );
-
-  };
-
-  if (Number(quantidadeFiscal || 0) <= 0) {
-    return executarNaoFiscal();
-  }
-
-  reduzirEstoqueComFEFO(
-    vendaItemId,
-    produtoId,
-    quantidadeFiscal,
-    1,
-    (err) => {
-
-      if (err) {
-        return callback(err);
+  db.get(
+    `SELECT COALESCE(controla_estoque, 1) AS controla_estoque FROM produtos WHERE id = ?`,
+    [produtoId],
+    (errFlag, rowFlag) => {
+      if (errFlag) return callback(errFlag);
+      if (!produtoControlaEstoque(rowFlag || {})) {
+        return callback(null);
       }
 
-      executarNaoFiscal();
+      const executarNaoFiscal = () => {
 
+        if (Number(quantidadeNaoFiscal || 0) <= 0) {
+          return callback(null);
+        }
+
+        reduzirEstoqueComFEFO(
+          vendaItemId,
+          produtoId,
+          quantidadeNaoFiscal,
+          0,
+          callback
+        );
+
+      };
+
+      if (Number(quantidadeFiscal || 0) <= 0) {
+        return executarNaoFiscal();
+      }
+
+      reduzirEstoqueComFEFO(
+        vendaItemId,
+        produtoId,
+        quantidadeFiscal,
+        1,
+        (err) => {
+
+          if (err) {
+            return callback(err);
+          }
+
+          executarNaoFiscal();
+
+        }
+      );
     }
   );
-
 }
 
 function atualizarStatusPagamentoVenda(vendaId, status, tefTransacaoId) {
@@ -415,8 +444,8 @@ function obterTerminalId(req) {
 }
 
 function preCalcularDistribuicao(req, res) {
-const { itens, emitir_fiscal } = req.body;
-const vendaFiscal = parseVendaFiscalFlag(emitir_fiscal);
+const { itens, emitir_fiscal, desconto, acrescimo } = req.body;
+const vendaFiscal = resolverVendaFiscalParaMotor(req.body);
 
 if (!itens || !Array.isArray(itens) || itens.length === 0) {
   return res.status(400).json({
@@ -441,7 +470,8 @@ db.all(`
     id,
     nome,
     saldo_fiscal,
-    saldo_nao_fiscal
+    saldo_nao_fiscal,
+    COALESCE(controla_estoque, 1) AS controla_estoque
   FROM produtos
   WHERE id IN (${produtoIds.map(() => '?').join(',')})
 `, produtoIds, (err, produtos) => {
@@ -449,12 +479,15 @@ db.all(`
     return res.status(500).json({ sucesso: false, error: err.message });
   }
 
+  const { saldosParaDistribuicaoVenda } = require('../estoque/produtoControlaEstoque');
+
   const produtoMap = produtos.reduce((map, produto) => {
     map[produto.id] = produto;
     return map;
   }, {});
 
   const itensDistribuidos = [];
+  const entradasMotor = [];
 
   for (const item of itens) {
     const produto = produtoMap[item.produto_id];
@@ -466,46 +499,75 @@ db.all(`
       });
     }
 
-    const resultado = distribuirItemVenda(
-      item,
-      Number(produto.saldo_fiscal || 0),
-      Number(produto.saldo_nao_fiscal || 0),
-      vendaFiscal
+    const qtdEstoque = item.quantidade_estoque != null && item.quantidade_estoque !== ''
+      ? Number(item.quantidade_estoque)
+      : Number(item.quantidade || 0);
+    const saldos = saldosParaDistribuicaoVenda(
+      produto,
+      qtdEstoque,
+      produto.saldo_fiscal,
+      produto.saldo_nao_fiscal
     );
 
-    if (!resultado.sucesso) {
-      return res.status(400).json({
-        sucesso: false,
-        error:
-          `Saldo insuficiente para ${produto.nome}. ` +
-          `Disponível: ${resultado.estoqueTotal}`
-      });
-    }
-
-    itensDistribuidos.push({
-      produto_id: item.produto_id,
-      quantidade_fiscal: resultado.quantidadeFiscal,
-      quantidade_nao_fiscal: resultado.quantidadeNaoFiscal,
-      valor_fiscal: resultado.valorFiscal,
-      valor_nao_fiscal: resultado.valorNaoFiscal
+    entradasMotor.push({
+      item,
+      saldoFiscal: saldos.saldoFiscal,
+      saldoNaoFiscal: saldos.saldoNaoFiscal
     });
   }
 
-  const { totalFiscal, totalNaoFiscal } = separarItensDistribuidos(itensDistribuidos);
+  const midpAtivo = Boolean(configService.isMidpAtivado && configService.isMidpAtivado());
+  const pagamentosPre = Array.isArray(req.body?.pagamentos) ? req.body.pagamentos : [];
+  const resultadoMotor = distribuirItensVendaComValorFiscalEfetivo(
+    entradasMotor,
+    vendaFiscal,
+    {
+      pagamentos: pagamentosPre,
+      midpAtivo,
+      desconto: Number(desconto || 0),
+      acrescimo: Number(acrescimo || 0)
+    }
+  );
+
+  if (!resultadoMotor.sucesso) {
+    const nome = resultadoMotor.item?.produto_id
+      ? (produtoMap[resultadoMotor.item.produto_id]?.nome || resultadoMotor.item.produto_id)
+      : 'produto';
+    return res.status(400).json({
+      sucesso: false,
+      error:
+        `Saldo insuficiente para ${nome}. ` +
+        `Disponível: ${resultadoMotor.erro?.estoqueTotal}`
+    });
+  }
+
+  for (const row of resultadoMotor.itens) {
+    itensDistribuidos.push({
+      produto_id: row.produto_id,
+      quantidade_fiscal: row.quantidade_fiscal,
+      quantidade_nao_fiscal: row.quantidade_nao_fiscal,
+      valor_fiscal: row.valor_fiscal,
+      valor_nao_fiscal: row.valor_nao_fiscal
+    });
+  }
 
   res.json({
     sucesso: true,
-    valor_fiscal: totalFiscal,
-    valor_nao_fiscal: totalNaoFiscal,
+    valor_fiscal: resultadoMotor.valorFiscalEfetivo,
+    valor_nao_fiscal: resultadoMotor.valorNaoFiscal,
+    valor_fiscal_maximo: resultadoMotor.valorFiscalMaximo,
+    valor_fiscal_efetivo: resultadoMotor.valorFiscalEfetivo,
+    valor_fiscal_liquido: resultadoMotor.valorFiscalLiquido,
+    valor_nao_fiscal_liquido: resultadoMotor.valorNaoFiscalLiquido,
+    valor_fiscal_bruto: resultadoMotor.valorFiscalBruto,
+    midp_preservacao: resultadoMotor.preservacaoAplicada,
+    liquido_comercial: resultadoMotor.liquidoComercial || null,
     itens: itensDistribuidos
   });
 });
 }
 
 function criarVenda(req, res) {
-console.log('ENTROU NA ROTA DE EMISSAO NFC-E');
-console.log('DADOS RECEBIDOS PARA EMISSAO:', req.body);
-
 const tipoVendaCanal = String(req.body?.tipo_venda || 'BALCAO').toUpperCase();
 if (tipoVendaCanal === 'ENTREGA') {
   const { criarVendaEntrega } = require('../entrega/CriarVendaEntregaService');
@@ -516,6 +578,7 @@ const {
   cliente_id,
   total,
   desconto,
+  acrescimo,
   forma_pagamento,
   itens,
   parcelas,
@@ -526,11 +589,15 @@ const {
   cpf_cnpj_nota,
   pagamentos,
   tef,
-  valor_fiscal,
-  valor_nao_fiscal
+  pedido_id: pedidoIdBody,
+  valor_fiscal: _valorFiscalBody,
+  valor_nao_fiscal: _valorNaoFiscalBody
 } = req.body;
 
-const vendaFiscal = parseVendaFiscalFlag(emitir_fiscal);
+/** RC4.1.2 — ponte reserva do pedido (Expedição → Núcleo). Já vem em FaturamentoService. */
+const pedidoIdVenda = Number(pedidoIdBody || req.body?.pedidoId || 0) || null;
+
+const vendaFiscal = resolverVendaFiscalParaMotor(req.body);
 
 const cpfCnpjNotaLimpo = String(cpf_cnpj_nota || '').replace(/\D/g, '');
 
@@ -548,19 +615,30 @@ if (pagamentosVenda.length > 1) {
   formaPagamentoFinal = "misto";
 }
 
-const erroSomaPagamentos = validarSomaPagamentosVenda(pagamentosVenda, total, {
-  valor_fiscal,
-  valor_nao_fiscal
-});
-
-if (erroSomaPagamentos) {
-  return res.status(400).json({ error: erroSomaPagamentos });
-}
+// Hotfix: body.valor_fiscal / valor_nao_fiscal são ignorados — fonte de verdade = Motor.
+void _valorFiscalBody;
+void _valorNaoFiscalBody;
 
 const totalNum = Number(total);
-const formasPendentes = ['prazo'];
+const formasPendentes = ['prazo', 'parcelado', 'crediario', 'boleto', 'boleto_bancario'];
 const formaPagamentoNormalizada = String(forma_pagamento || '').toLowerCase().trim();
 const vendaFicaPendente = formasPendentes.includes(formaPagamentoNormalizada);
+
+/** RC3.17 — mesmas formas que geram Contas a Receber pelo caminho a prazo existente */
+function formaGeraParcelasFinanceiras(forma) {
+  return formasPendentes.includes(String(forma || '').toLowerCase().trim());
+}
+
+function avancarVencimentoParcela(baseMoment, intervalo) {
+  const m = baseMoment.clone ? baseMoment.clone() : moment(baseMoment);
+  const i = String(intervalo || 'mensal').toLowerCase().trim();
+  if (i === 'semanal') return m.add(1, 'weeks');
+  if (i === 'quinzenal') return m.add(15, 'days');
+  return m.add(1, 'months');
+}
+
+const intervaloParcelasBody = req.body?.intervalo_parcelas || req.body?.intervalo || 'mensal';
+
 
 const buscarNomeCliente = (callback) => {
   if (!cliente_id) {
@@ -591,9 +669,9 @@ if (Number.isNaN(totalNum) || totalNum <= 0) {
   return;
 }
 
-if (forma_pagamento === 'prazo' && !cliente_id) {
+if (formaGeraParcelasFinanceiras(forma_pagamento) && !cliente_id) {
   return res.status(400).json({
-    error: 'Cliente é obrigatório para venda a prazo.'
+    error: 'Cliente é obrigatório para venda a prazo / parcelada / boleto.'
   });
 }
 
@@ -612,7 +690,8 @@ db.all(`
     saldo_nao_fiscal,
     estoque_atual,
     COALESCE(reservado_fiscal, 0) AS reservado_fiscal,
-    COALESCE(reservado_nao_fiscal, 0) AS reservado_nao_fiscal
+    COALESCE(reservado_nao_fiscal, 0) AS reservado_nao_fiscal,
+    COALESCE(controla_estoque, 1) AS controla_estoque
   FROM produtos
   WHERE id IN (${produtoIds.map(() => '?').join(',')})
 `, produtoIds, (err, produtos) => {
@@ -622,6 +701,7 @@ db.all(`
   }
 
   const { calcularEstoqueProduto } = require('../estoque/EstoqueDisponivelService');
+  const { saldosParaDistribuicaoVenda } = require('../estoque/produtoControlaEstoque');
 
   const produtoMap = produtos.reduce((map, produto) => {
     map[produto.id] = produto;
@@ -641,54 +721,90 @@ db.all(`
     return;
   }
 
+  // RC4.1.2 — carrega crédito da reserva do pedido antes da distribuição
+  obterCreditoReservaPedidoCb(pedidoIdVenda, db, (_credErr, creditoReserva) => {
+    const creditoPorProduto = (creditoReserva && creditoReserva.por_produto) || {};
+
   const distribuicaoItens = [];
+  const entradasMotor = [];
 
   for (const item of itens) {
+    const produto = produtoMap[item.produto_id];
+    const calcBase = calcularEstoqueProduto(produto);
+    const creditoAplicado = creditoPorProduto[item.produto_id] || 0;
+    const calc = creditarDisponibilidadeComReservaPedido(
+      calcBase,
+      creditoAplicado
+    );
 
-    const produto =
-      produtoMap[item.produto_id];
+    const qtdEstoque = item.quantidade_estoque != null && item.quantidade_estoque !== ''
+      ? Number(item.quantidade_estoque)
+      : Number(item.quantidade || 0);
+    const saldos = saldosParaDistribuicaoVenda(
+      produto,
+      qtdEstoque,
+      calc.disponivel_fiscal,
+      calc.disponivel_nao_fiscal
+    );
 
-    const calc = calcularEstoqueProduto(produto);
-
-    const resultado =
-      distribuirItemVenda(
-        item,
-        calc.disponivel_fiscal,
-        calc.disponivel_nao_fiscal,
-        vendaFiscal
-      );
-
-    if (!resultado.sucesso) {
-
-      return res.status(400).json({
-        error:
-          `Saldo insuficiente para ${produto.nome}. ` +
-          `Disponível: ${resultado.estoqueTotal}`
-      });
-
-    }
-
-    distribuicaoItens.push({
-      ...item,
-
-      quantidade_fiscal:
-        resultado.quantidadeFiscal,
-
-      quantidade_nao_fiscal:
-        resultado.quantidadeNaoFiscal,
-
-      valor_fiscal:
-        resultado.valorFiscal,
-
-      valor_nao_fiscal:
-        resultado.valorNaoFiscal
+    entradasMotor.push({
+      item,
+      saldoFiscal: saldos.saldoFiscal,
+      saldoNaoFiscal: saldos.saldoNaoFiscal
     });
   }
 
-  // Venda a prazo exige cliente
-  if (forma_pagamento === 'prazo') {
+  const midpAtivo = Boolean(configService.isMidpAtivado && configService.isMidpAtivado());
+  const pagamentosParaMotor = Array.isArray(pagamentosVenda) && pagamentosVenda.length
+    ? pagamentosVenda
+    : (forma_pagamento
+      ? [{ forma_pagamento, valor: Number(total || 0) }]
+      : []);
+
+  const resultadoMotor = distribuirItensVendaComValorFiscalEfetivo(
+    entradasMotor,
+    vendaFiscal,
+    {
+      pagamentos: pagamentosParaMotor,
+      midpAtivo,
+      desconto: Number(desconto || 0),
+      acrescimo: Number(acrescimo || 0)
+    }
+  );
+
+  if (!resultadoMotor.sucesso) {
+    const produtoErro = resultadoMotor.item
+      ? produtoMap[resultadoMotor.item.produto_id]
+      : null;
+    return res.status(400).json({
+      error:
+        `Saldo insuficiente para ${produtoErro?.nome || 'produto'}. ` +
+        `Disponível: ${resultadoMotor.erro?.estoqueTotal}`
+    });
+  }
+
+  for (const row of resultadoMotor.itens) {
+    distribuicaoItens.push({
+      ...row,
+      quantidade_fiscal: row.quantidade_fiscal,
+      quantidade_nao_fiscal: row.quantidade_nao_fiscal,
+      valor_fiscal: row.valor_fiscal,
+      valor_nao_fiscal: row.valor_nao_fiscal
+    });
+  }
+
+  /** RC4.1.2 — após baixa de estoque, consome reserva do pedido (idempotente). */
+  function consumirReservaPedidoAposBaixa(vendaId, next) {
+    if (!pedidoIdVenda) return next();
+    consumirReservasPedidoNaVendaCb(pedidoIdVenda, vendaId, db, () => {
+      next();
+    });
+  }
+
+  // Venda a prazo / parcelado / boleto / crediário exige cliente
+  if (formaGeraParcelasFinanceiras(forma_pagamento)) {
   if (!cliente_id) {
-    res.status(400).json({ error: 'Cliente obrigatório para venda a prazo.' });
+    res.status(400).json({ error: 'Cliente obrigatório para venda a prazo / parcelada / boleto.' });
     return;
   }
   // Validar débitos e parcelas vencidas, a menos que forçar esteja ativo
@@ -727,8 +843,16 @@ db.all(`
     const codigo = `VND-${agoraLocalBrasil().replace(/[- :]/g, '').slice(0, 14)}`;
     const data_venda = agoraLocalBrasil().slice(0, 10);
 
-    // Calcular valores fiscal e não fiscal
+    // Calcular valores fiscal e não fiscal (Motor — única fonte de verdade)
     const { totalFiscal, totalNaoFiscal } = separarItensDistribuidos(distribuicaoItens);
+
+    const erroSomaPagamentosMotor = validarSomaPagamentosVenda(pagamentosVenda, total, {
+      valor_fiscal: totalFiscal,
+      valor_nao_fiscal: totalNaoFiscal
+    });
+    if (erroSomaPagamentosMotor) {
+      return res.status(400).json({ error: erroSomaPagamentosMotor });
+    }
 
     // Obter configurações TEF e confirmação fiscal
     let tefHabilitado = false;
@@ -743,14 +867,16 @@ db.all(`
     
     modoConfirmacaoFiscal = configService.getModoConfirmacaoFiscal() || 'TEF';
 
-    // Processar fluxo de pagamento usando o Orquestrador
+    // Processar fluxo de pagamento usando o Orquestrador → MIDP (única via)
     const resultadoPagamento = await OrquestradorPagamento.processarFluxoPagamentoVenda({
       totalFiscal,
       totalNaoFiscal,
       formaPagamento: formaPagamentoFinal,
       pagamentos: req.body.pagamentos || [],
       tefHabilitado,
-      modoConfirmacaoFiscal
+      modoConfirmacaoFiscal,
+      valorFiscalMaximo: resultadoMotor.valorFiscalMaximo,
+      preservacaoAplicada: resultadoMotor.preservacaoAplicada
     });
 
     if (!resultadoPagamento.sucesso) {
@@ -875,6 +1001,7 @@ db.all(`
               }
               itensProcessados++;
               if (itensProcessados === itens.length) {
+                consumirReservaPedidoAposBaixa(vendaId, () => {
                 if (pagamentosVenda.length > 0) {
                   const stmtPagamentos = db.prepare(`
                     INSERT INTO venda_pagamentos (
@@ -926,16 +1053,19 @@ db.all(`
                   );
                 }
 
-                // Gerar parcelas
+                // Gerar parcelas (caminho financeiro existente)
                 const qtdParcelas = Number(parcelas) || 1;
                 const valorParcela = Math.round((totalNum / qtdParcelas) * 100) / 100;
-                let vencimento = moment(primeiro_vencimento, 'YYYY-MM-DD');
+                let vencimento = moment(primeiro_vencimento || undefined, 'YYYY-MM-DD');
+                if (!vencimento.isValid()) {
+                  vencimento = moment().add(30, 'days');
+                }
                 for (let i = 1; i <= qtdParcelas; i++) {
                   db.run(`
                     INSERT INTO contas_receber (venda_id, cliente_id, numero_parcela, total_parcelas, valor_parcela, valor_restante, data_vencimento, status)
                     VALUES (?, ?, ?, ?, ?, ?, ?, 'aberto')
                   `, [vendaId, cliente_id, i, qtdParcelas, valorParcela, valorParcela, vencimento.format('YYYY-MM-DD')]);
-                  vencimento = vencimento.add(1, 'months');
+                  vencimento = avancarVencimentoParcela(vencimento, intervaloParcelasBody);
                 }
                 buscarNomeCliente((clienteErr, clienteNome, clienteCpf) => {
                   if (clienteErr) {
@@ -944,7 +1074,9 @@ db.all(`
                     return;
                   }
 
-                  const inserirFinanceiroPrazo = (indice = 1, venc = moment(primeiro_vencimento, 'YYYY-MM-DD')) => {
+                  let vencFinBase = moment(primeiro_vencimento || undefined, 'YYYY-MM-DD');
+                  if (!vencFinBase.isValid()) vencFinBase = moment().add(30, 'days');
+                  const inserirFinanceiroPrazo = (indice = 1, venc = vencFinBase.clone()) => {
                     if (indice > qtdParcelas) {
                       db.run('COMMIT');
 
@@ -986,12 +1118,13 @@ db.all(`
                         return;
                       }
 
-                      inserirFinanceiroPrazo(indice + 1, moment(venc).add(1, 'months'));
+                      inserirFinanceiroPrazo(indice + 1, avancarVencimentoParcela(venc, intervaloParcelasBody));
                     });
                   };
 
                   inserirFinanceiroPrazo();
                 });
+              });
               }
             });
           });
@@ -1007,8 +1140,16 @@ const executarVenda = async () => {
   const codigo = `VND-${agoraLocalBrasil().replace(/[- :]/g, '').slice(0, 14)}`;
   const data_venda = agoraLocalBrasil().slice(0, 10);
 
-  // Calcular valores fiscal e não fiscal
+  // Calcular valores fiscal e não fiscal (Motor — única fonte de verdade)
   const { totalFiscal, totalNaoFiscal } = separarItensDistribuidos(distribuicaoItens);
+
+  const erroSomaPagamentosMotor = validarSomaPagamentosVenda(pagamentosVenda, total, {
+    valor_fiscal: totalFiscal,
+    valor_nao_fiscal: totalNaoFiscal
+  });
+  if (erroSomaPagamentosMotor) {
+    return res.status(400).json({ error: erroSomaPagamentosMotor });
+  }
 
   // Obter configurações TEF e confirmação fiscal
   let tefHabilitado = false;
@@ -1023,14 +1164,16 @@ const executarVenda = async () => {
   
   modoConfirmacaoFiscal = configService.getModoConfirmacaoFiscal() || 'TEF';
 
-  // Processar fluxo de pagamento usando o Orquestrador
+  // Processar fluxo de pagamento usando o Orquestrador → MIDP (única via)
   const resultadoPagamento = await OrquestradorPagamento.processarFluxoPagamentoVenda({
     totalFiscal,
     totalNaoFiscal,
     formaPagamento: formaPagamentoFinal,
     pagamentos: req.body.pagamentos || [],
     tefHabilitado,
-    modoConfirmacaoFiscal
+    modoConfirmacaoFiscal,
+    valorFiscalMaximo: resultadoMotor.valorFiscalMaximo,
+    preservacaoAplicada: resultadoMotor.preservacaoAplicada
   });
 
   if (!resultadoPagamento.sucesso) {
@@ -1190,6 +1333,7 @@ const executarVenda = async () => {
             }
             itensProcessados++;
             if (itensProcessados === itens.length) {
+              consumirReservaPedidoAposBaixa(vendaId, () => {
               if (pagamentosVenda.length > 0) {
                 const stmtPagamentos = db.prepare(`
                   INSERT INTO venda_pagamentos (
@@ -1259,7 +1403,7 @@ const executarVenda = async () => {
               };
 
               const inserirContasReceberSeNecessario = (callback) => {
-                if (forma_pagamento === 'prazo' && cliente_id) {
+                if (formaGeraParcelasFinanceiras(forma_pagamento) && cliente_id) {
                   const valorParcela = totalNum;
                   db.run(`
                     INSERT INTO contas_receber (
@@ -1312,7 +1456,7 @@ const executarVenda = async () => {
                   }
 
                   const aposFinanceiro = () => {
-                    if (forma_pagamento === 'prazo' && cliente_id) {
+                    if (formaGeraParcelasFinanceiras(forma_pagamento) && cliente_id) {
                       db.run(`
                         UPDATE clientes
                         SET credito_atual = COALESCE(credito_atual, 0) + ?
@@ -1333,6 +1477,7 @@ const executarVenda = async () => {
 
                   inserirContasReceberSeNecessario(aposFinanceiro);
                 });
+              });
               });
             }
           });
@@ -1374,6 +1519,7 @@ if (forma_pagamento === 'credito') {
 } else {
   executarVenda();
 }
+  });
   });
 }
 
@@ -1675,5 +1821,7 @@ module.exports = {
   preCalcularDistribuicao,
   criarVenda,
   consultarPagamentoNaoFiscal,
-  registrarPagamentoNaoFiscal
+  registrarPagamentoNaoFiscal,
+  // RC3.15.11
+  resolverVendaFiscalParaMotor
 };

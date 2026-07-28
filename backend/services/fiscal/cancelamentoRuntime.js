@@ -72,9 +72,11 @@ function createCancelamentoRuntime(options = {}) {
     });
     const tempoXmlMs = Number(process.hrtime.bigint() - xmlStarted) / 1e6;
 
+    const modelo = input.modelo === ModelType.NFE ? ModelType.NFE : ModelType.NFCE;
+
     const resolverStarted = process.hrtime.bigint();
     const resolution = platform.resolve({
-      modelo: ModelType.NFCE,
+      modelo,
       operacao: OperationType.CANCELAMENTO,
       ambiente,
       uf,
@@ -86,7 +88,7 @@ function createCancelamentoRuntime(options = {}) {
     logFiscalRuntime(OP, {
       Ambiente: ambiente,
       UF: uf,
-      Modelo: ModelType.NFCE,
+      Modelo: modelo,
       Operacao: OperationType.CANCELAMENTO,
       tpEvento: TP_EVENTO_CANCELAMENTO,
       Registry: resolution.success,
@@ -112,7 +114,7 @@ function createCancelamentoRuntime(options = {}) {
         certificado: input.certificadoPath || null,
         senha: input.certificadoSenha || null,
         operacao: OperationType.CANCELAMENTO,
-        modelo: ModelType.NFCE
+        modelo,
       });
 
       const transportStarted = process.hrtime.bigint();
@@ -136,7 +138,7 @@ function createCancelamentoRuntime(options = {}) {
           source: 'PLATFORM',
           resolutionSource: resolution.source || ResolutionSource.REGISTRY,
           operacao: OperationType.CANCELAMENTO,
-          modelo: ModelType.NFCE,
+          modelo,
           endpoint: def.endpoint,
           namespace: def.namespace || NS_EVENTO,
           soapAction: def.soapAction || ACTION_EVENTO,
@@ -180,7 +182,7 @@ function createCancelamentoRuntime(options = {}) {
       });
     }
 
-    const legadoUrl = def?.endpoint || getCancelamentoUrl(ambienteCode);
+    const legadoUrl = input.url || def?.endpoint || getCancelamentoUrl(ambienteCode);
     const legadoStarted = process.hrtime.bigint();
     const legado = await legadoSender({
       url: legadoUrl,
@@ -210,7 +212,7 @@ function createCancelamentoRuntime(options = {}) {
       source: ResolutionSource.FALLBACK,
       resolutionSource: resolution.source || null,
       operacao: OperationType.CANCELAMENTO,
-      modelo: ModelType.NFCE,
+      modelo,
       endpoint: legado.endpoint || legadoUrl,
       namespace: legado.namespace || NS_EVENTO,
       soapAction: legado.soapAction || ACTION_EVENTO,

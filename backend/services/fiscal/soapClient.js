@@ -127,6 +127,16 @@ async function enviarLote({
   cUF = '23',
   versaoDados = '4.00'
 }) {
+  // RC3.16.11 — TRACE
+  try {
+    const { traceNfe } = require('./nfeTrace');
+    traceNfe('enviarLote', {
+      url,
+      bytesLote: Buffer.byteLength(String(loteXml || ''), 'utf8'),
+      arquivo: __filename
+    });
+  } catch (_) { /* ignore */ }
+
   if (!url) {
     return {
       success: false,

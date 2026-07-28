@@ -1,15 +1,19 @@
+/**
+ * Validação de recurso de implantação — Hotfix RC1
+ * Resposta padronizada: MODULO_NAO_LICENCIADO
+ */
+
+'use strict';
+
 const configService = require('../services/configuracaoService');
+const { responderModuloNaoLicenciado } = require('./errosLicenciamento');
 
 function exigirRecurso(nomeRecurso) {
   return (req, res, next) => {
     if (configService.recursoHabilitado(nomeRecurso)) {
       return next();
     }
-
-    return res.status(403).json({
-      error: 'Recurso não habilitado para o tipo de implantação configurado.',
-      recurso: nomeRecurso
-    });
+    return responderModuloNaoLicenciado(res, nomeRecurso);
   };
 }
 

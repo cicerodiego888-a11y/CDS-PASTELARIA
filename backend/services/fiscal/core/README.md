@@ -67,4 +67,4 @@ One-shot. O legado **nunca** reentra o runtime (sem loop).
 npm run test:fiscal
 ```
 
-Documentação completa: [`docs/FISCAL_PLATFORM.md`](../../../../docs/FISCAL_PLATFORM.md)
+Documentação completa: [`docs/fiscal/FISCAL_PLATFORM.md`](../../../../docs/fiscal/FISCAL_PLATFORM.md)

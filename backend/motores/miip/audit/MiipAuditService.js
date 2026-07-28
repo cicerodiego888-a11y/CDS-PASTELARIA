@@ -14,7 +14,7 @@ const MiipPerformanceReport = require('./MiipPerformanceReport');
 const MiipArchitectureValidator = require('./MiipArchitectureValidator');
 const MiipDecisionValidator = require('./MiipDecisionValidator');
 
-const DOCS_PATH = path.join(__dirname, '../../../../docs/MIIP_READINESS_REPORT.md');
+const DOCS_PATH = path.join(__dirname, '../../../../docs/historico/relatorios/MIIP_READINESS_REPORT.md');
 
 class MiipAuditService {
   /**

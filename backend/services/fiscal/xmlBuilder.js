@@ -12,6 +12,12 @@ const {
 
 const { extrairNomeEmpresaDoCertificado } = require('./certificateService');
 const { normalizarUnidadeComercialFiscal } = require('./unidadeFiscal');
+const {
+  MODELO_BRUTO,
+  MODELO_LIQUIDO,
+  determinarModeloDeTotais,
+  validarIdentidadeICMSTot
+} = require('./modeloTotais');
 
 function normalizarCsosn(valor, padrao = '102') {
   const digits = String(valor ?? '').replace(/\D/g, '');
@@ -146,6 +152,10 @@ function resolverTefPagamento(pagamento, dadosVenda = {}) {
   return dadosVenda.tef || null;
 }
 
+/**
+ * RC7.10.4 — resolve pagamentos fiscais e troco.
+ * Σ vPag = vNF + vTroco (nunca clipar overpay de dinheiro).
+ */
 function resolverPagamentosNfce(venda, totalFiscal) {
   const pagamentosBrutos = Array.isArray(venda?.pagamentos) ? venda.pagamentos : [];
   let pagamentosFiscais = pagamentosBrutos.filter((p) => (
@@ -166,22 +176,33 @@ function resolverPagamentosNfce(venda, totalFiscal) {
     }];
   }
 
-  const somaPagamentos = pagamentosFiscais.reduce(
-    (total, pagamento) => total + Number(pagamento.valor || 0),
-    0
-  );
+  pagamentosFiscais = pagamentosFiscais.map((p) => ({
+    ...p,
+    valor: round2(Number(p.valor || 0))
+  }));
 
-  if (Math.abs(somaPagamentos - totalFiscal) > 0.01 && pagamentosFiscais.length === 1) {
+  const somaPagamentos = round2(
+    pagamentosFiscais.reduce((total, pagamento) => total + Number(pagamento.valor || 0), 0)
+  );
+  const vNF = round2(totalFiscal);
+  let vTroco = 0;
+
+  if (somaPagamentos > vNF + 0.009) {
+    vTroco = round2(somaPagamentos - vNF);
+  } else if (Math.abs(somaPagamentos - vNF) > 0.01 && pagamentosFiscais.length === 1) {
+    // Pagamento único aquém / ruído: normaliza para vNF (sem troco).
     pagamentosFiscais = [{
       ...pagamentosFiscais[0],
-      valor: totalFiscal
+      valor: vNF
     }];
   }
 
-  return pagamentosFiscais;
+  return { pagamentos: pagamentosFiscais, vTroco, somaPagamentos: round2(
+    pagamentosFiscais.reduce((t, p) => t + Number(p.valor || 0), 0)
+  ) };
 }
 
-function montarPagamentos(pagamentos, dadosVenda = {}) {
+function montarPagamentos(pagamentos, dadosVenda = {}, vTroco = 0) {
   let xml = '<pag>';
 
   pagamentos.forEach(p => {
@@ -253,6 +274,11 @@ function montarPagamentos(pagamentos, dadosVenda = {}) {
 
     xml += `</detPag>`;
   });
+
+  const troco = round2(vTroco || 0);
+  if (troco > 0.009) {
+    xml += `<vTroco>${formatNumber(troco, 2)}</vTroco>`;
+  }
 
   xml += '</pag>';
 
@@ -483,10 +509,13 @@ function buildNfceXml({ config, venda, itens, numero }) {
   const aamm = dhEmi.slice(2, 4) + dhEmi.slice(5, 7);
   const cNF = gerarCodigoNumerico();
 
-  const totalFiscal = itens.reduce(
+  const totalFiscalBrutoItens = itens.reduce(
     (total, item) => total + obterValorFiscalItem(item),
     0
   );
+
+  const modeloTotais = determinarModeloDeTotais({ itens, venda });
+  const totalFiscal = modeloTotais.vNF;
 
   const chave = gerarChaveAcesso({
     uf: config.codigoUf,
@@ -583,8 +612,11 @@ function buildNfceXml({ config, venda, itens, numero }) {
     : '';
 
   let vProd = 0;
-  const descontoVenda = round2(venda.desconto || venda.desconto_total || 0);
-  const itensVenda = ratearDescontoNosItens(itens || [], descontoVenda);
+  const usarModeloBruto = modeloTotais.modelo === MODELO_BRUTO;
+  const descontoVenda = usarModeloBruto ? round2(modeloTotais.vDesc || 0) : 0;
+  const itensVenda = usarModeloBruto
+    ? ratearDescontoNosItens(itens || [], descontoVenda)
+    : (itens || []).map((item) => ({ ...item, desconto_rateado: 0 }));
   let vDesc = 0;
   let vNF = totalFiscal;
 
@@ -594,7 +626,7 @@ function buildNfceXml({ config, venda, itens, numero }) {
     const quantidade = obterQuantidadeFiscalItem(item);
     const subtotal = round2(obterValorFiscalItem(item));
     const valorUnitario = obterPrecoUnitarioFiscalItem(item);
-    const descontoItem = round2(item.desconto_rateado || 0);
+    const descontoItem = usarModeloBruto ? round2(item.desconto_rateado || 0) : 0;
     vProd += subtotal;
     vDesc += descontoItem;
 
@@ -654,14 +686,45 @@ function buildNfceXml({ config, venda, itens, numero }) {
     `;
   }).join('');
 
-  vDesc = round2(vDesc);
-  vNF = round2(vProd - vDesc);
+  vProd = round2(vProd);
+  vDesc = round2(usarModeloBruto ? vDesc : 0);
+  vNF = round2(
+    vProd - vDesc
+    + Number(modeloTotais.vFrete || 0)
+    + Number(modeloTotais.vSeg || 0)
+    + Number(modeloTotais.vOutro || 0)
+    + Number(modeloTotais.vIPI || 0)
+    + Number(modeloTotais.vST || 0)
+  );
 
-  const pagamentosVenda = resolverPagamentosNfce(venda, totalFiscal);
+  const totaisICMS = {
+    modelo: modeloTotais.modelo,
+    vProd,
+    vDesc,
+    vFrete: modeloTotais.vFrete,
+    vSeg: modeloTotais.vSeg,
+    vOutro: modeloTotais.vOutro,
+    vIPI: modeloTotais.vIPI,
+    vST: modeloTotais.vST,
+    vII: 0,
+    vPIS: 0,
+    vCOFINS: 0,
+    vIPIDevol: 0,
+    vNF
+  };
 
-  const pag = montarPagamentos(pagamentosVenda, venda);
+  // RC7.10.2.1 / RC7.10.4 — nunca assinar/enviar XML com ICMSTot inconsistente
+  validarIdentidadeICMSTot(totaisICMS);
+
+  const { pagamentos: pagamentosVenda, vTroco } = resolverPagamentosNfce(venda, vNF);
+
+  const pag = montarPagamentos(pagamentosVenda, venda, vTroco);
 
   console.log('PAGAMENTO NFCe:', pag);
+  console.log('ICMSTOT MODELO:', modeloTotais.modelo, { vProd, vDesc, vNF, vTroco, somaItens: totalFiscalBrutoItens });
+
+  const cMunFG = String(config.municipioCodigo || config.codigo_municipio || '2307304').replace(/\D/g, '');
+  const tpImp = config.tpImp != null && config.tpImp !== '' ? config.tpImp : 4;
 
   const xmlSemAssinatura = `<?xml version="1.0" encoding="UTF-8"?>
 <NFe xmlns="http://www.portalfiscal.inf.br/nfe">
@@ -676,8 +739,8 @@ function buildNfceXml({ config, venda, itens, numero }) {
       <dhEmi>${dhEmi}</dhEmi>
       <tpNF>1</tpNF>
       <idDest>1</idDest>
-      <cMunFG>${config.municipioCodigo}</cMunFG>
-      <tpImp>${config.tpImp}</tpImp>
+      <cMunFG>${cMunFG}</cMunFG>
+      <tpImp>${tpImp}</tpImp>
       <tpEmis>1</tpEmis>
       <cDV>${chave.slice(-1)}</cDV>
       <tpAmb>${config.ambiente}</tpAmb>
@@ -722,17 +785,17 @@ function buildNfceXml({ config, venda, itens, numero }) {
         <vST>0.00</vST>
         <vFCPST>0.00</vFCPST>
         <vFCPSTRet>0.00</vFCPSTRet>
-        <vProd>${formatNumber(totalFiscal, 2)}</vProd>
-        <vFrete>0.00</vFrete>
-        <vSeg>0.00</vSeg>
+        <vProd>${formatNumber(vProd, 2)}</vProd>
+        <vFrete>${formatNumber(totaisICMS.vFrete, 2)}</vFrete>
+        <vSeg>${formatNumber(totaisICMS.vSeg, 2)}</vSeg>
         <vDesc>${formatNumber(vDesc, 2)}</vDesc>
         <vII>0.00</vII>
-        <vIPI>0.00</vIPI>
+        <vIPI>${formatNumber(totaisICMS.vIPI, 2)}</vIPI>
         <vIPIDevol>0.00</vIPIDevol>
         <vPIS>0.00</vPIS>
         <vCOFINS>0.00</vCOFINS>
-        <vOutro>0.00</vOutro>
-        <vNF>${formatNumber(totalFiscal, 2)}</vNF>
+        <vOutro>${formatNumber(totaisICMS.vOutro, 2)}</vOutro>
+        <vNF>${formatNumber(vNF, 2)}</vNF>
       </ICMSTot>
     </total>
     <transp>
@@ -749,13 +812,20 @@ function buildNfceXml({ config, venda, itens, numero }) {
     cNF,
     dhEmi,
     xmlSemAssinatura,
-    valores: { vProd, vDesc, vNF }
+    valores: { vProd, vDesc, vNF, vTroco, modelo: modeloTotais.modelo },
+    modeloTotais: totaisICMS,
+    pagamentos: pagamentosVenda,
+    vTroco
   };
 }
 
 module.exports = {
   buildNfceXml,
   ratearDescontoNosItens,
+  determinarModeloDeTotais,
+  validarIdentidadeICMSTot,
+  MODELO_BRUTO,
+  MODELO_LIQUIDO,
   gerarQrCodeUrl,
   montarInfNFeSupl,
   anexarInfNFeSupl,

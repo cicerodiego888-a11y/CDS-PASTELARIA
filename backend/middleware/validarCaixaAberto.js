@@ -1,6 +1,7 @@
 const db = require('../database');
 const { isMultiCaixaAtivo, obterTerminalIdDaRequisicao, parsePositiveInteger } = require('../utils/multiCaixa');
 const { obterCaixaTurnoId } = require('../utils/caixaSessaoHelpers');
+const { origemExigeCaixa } = require('../services/vendas/VendaOrigin');
 
 function obterTerminalId(req) {
   return obterTerminalIdDaRequisicao(req);
@@ -9,6 +10,19 @@ function obterTerminalId(req) {
 function obterSessaoId(req) {
   const rawId = req.body?.caixa_sessao_id || req.query?.caixa_sessao_id || req.headers['x-caixa-sessao-id'] || req.user?.caixa_sessao_id;
   return parsePositiveInteger(rawId);
+}
+
+/**
+ * Sprint 2.2 — política de porta por origem.
+ * PDV: exige caixa aberto (comportamento atual).
+ * Demais origens: não executa validarCaixaAberto.
+ */
+function validarCaixaSeOrigemPdv(req, res, next) {
+  const origemRaw = req.body?.origem ?? req.query?.origem ?? req.headers?.['x-venda-origem'];
+  if (origemExigeCaixa(origemRaw)) {
+    return validarCaixaAberto(req, res, next);
+  }
+  return next();
 }
 
 function validarCaixaAberto(req, res, next) {
@@ -192,4 +206,9 @@ function validarCaixaAbertoDevolucaoVenda(req, res, next) {
   );
 }
 
-module.exports = { validarCaixaAberto, validarCaixaAbertoCancelamentoVenda, validarCaixaAbertoDevolucaoVenda };
+module.exports = {
+  validarCaixaAberto,
+  validarCaixaSeOrigemPdv,
+  validarCaixaAbertoCancelamentoVenda,
+  validarCaixaAbertoDevolucaoVenda
+};

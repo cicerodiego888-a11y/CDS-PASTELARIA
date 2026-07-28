@@ -1,7 +1,6 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs');
-const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 
 // BANCO OFICIAL DEFINITIVO
@@ -195,6 +194,8 @@ function aplicarAlteracoesPosCriacao() {
   aplicarAlteracaoSegura('usuarios', `ALTER TABLE usuarios ADD COLUMN nome TEXT`);
   aplicarAlteracaoSegura('usuarios', `ALTER TABLE usuarios ADD COLUMN perfil TEXT DEFAULT 'USUARIO'`);
   aplicarAlteracaoSegura('usuarios', `ALTER TABLE usuarios ADD COLUMN pode_alterar_senhas INTEGER DEFAULT 0`);
+  // Hotfix RC2.2 — primeiro acesso: troca obrigatória (legado = 0)
+  aplicarAlteracaoSegura('usuarios', `ALTER TABLE usuarios ADD COLUMN troca_senha_obrigatoria INTEGER DEFAULT 0`);
   // Garantir coluna criado_em na tabela auditoria (compatibilidade com migrações anteriores)
   aplicarAlteracaoSegura('auditoria', `ALTER TABLE auditoria ADD COLUMN criado_em DATETIME DEFAULT CURRENT_TIMESTAMP`);
 
@@ -226,7 +227,9 @@ function aplicarAlteracoesPosCriacao() {
     // Sprint INFRA 01 — extensões opcionais (zero breaking change)
     `ALTER TABLE produtos ADD COLUMN marca_id INTEGER`,
     `ALTER TABLE produtos ADD COLUMN observacoes TEXT`,
-    `ALTER TABLE produtos ADD COLUMN imagem_principal TEXT`
+    `ALTER TABLE produtos ADD COLUMN imagem_principal TEXT`,
+    // RC8.0.Y — controle opcional de estoque por produto (1 = controla, 0 = não controla)
+    `ALTER TABLE produtos ADD COLUMN controla_estoque INTEGER DEFAULT 1`
   ];
 
   const alteracoesCompras = [
@@ -372,6 +375,9 @@ function aplicarAlteracoesPosCriacao() {
   aplicarAlteracaoSegura('equipamentos', `ALTER TABLE equipamentos ADD COLUMN reconnect_auto INTEGER DEFAULT 1`);
   aplicarAlteracaoSegura('equipamentos', `ALTER TABLE equipamentos ADD COLUMN ultima_comunicacao DATETIME`);
 
+  // RC8.0.Y — garantia explícita (bancos já migrados pelo lote alteracoesProdutos)
+  aplicarAlteracaoSegura('produtos', `ALTER TABLE produtos ADD COLUMN controla_estoque INTEGER DEFAULT 1`);
+
   // Sprint 2 — Vendas para Entrega: reserva de estoque (sem baixa definitiva)
   aplicarAlteracaoSegura('produtos', `ALTER TABLE produtos ADD COLUMN reservado_fiscal REAL DEFAULT 0`);
   aplicarAlteracaoSegura('produtos', `ALTER TABLE produtos ADD COLUMN reservado_nao_fiscal REAL DEFAULT 0`);
@@ -380,6 +386,29 @@ function aplicarAlteracoesPosCriacao() {
 
   // Sprint 2.1 — status da venda independente do status da entrega
   aplicarAlteracaoSegura('vendas', `ALTER TABLE vendas ADD COLUMN status_venda TEXT DEFAULT 'ABERTA'`);
+
+  // Sprint 3.1 — Faturamento / Pedido → Venda
+  aplicarAlteracaoSegura('vendas', `ALTER TABLE vendas ADD COLUMN origem TEXT DEFAULT 'PDV'`);
+  aplicarAlteracaoSegura('vendas', `ALTER TABLE vendas ADD COLUMN pedido_id INTEGER`);
+  aplicarAlteracaoSegura(
+    'vendas',
+    `CREATE INDEX IF NOT EXISTS idx_vendas_pedido_id ON vendas(pedido_id)`
+  );
+  aplicarAlteracaoSegura(
+    'vendas',
+    `CREATE INDEX IF NOT EXISTS idx_vendas_origem ON vendas(origem)`
+  );
+
+  // Sprint 3.2 — campos fiscais do Pedido / NF-e
+  aplicarAlteracaoSegura('pedidos', `ALTER TABLE pedidos ADD COLUMN natureza_operacao TEXT`);
+  aplicarAlteracaoSegura('pedidos', `ALTER TABLE pedidos ADD COLUMN cfop TEXT`);
+  aplicarAlteracaoSegura('pedidos', `ALTER TABLE pedidos ADD COLUMN frete REAL DEFAULT 0`);
+  aplicarAlteracaoSegura('pedidos', `ALTER TABLE pedidos ADD COLUMN acrescimo REAL DEFAULT 0`);
+  aplicarAlteracaoSegura('pedidos', `ALTER TABLE pedidos ADD COLUMN transportadora TEXT`);
+  aplicarAlteracaoSegura('pedidos', `ALTER TABLE pedidos ADD COLUMN volumes REAL DEFAULT 0`);
+  aplicarAlteracaoSegura('pedidos', `ALTER TABLE pedidos ADD COLUMN peso REAL DEFAULT 0`);
+  aplicarAlteracaoSegura('pedidos', `ALTER TABLE pedidos ADD COLUMN dados_adicionais TEXT`);
+  aplicarAlteracaoSegura('pedidos', `ALTER TABLE pedidos ADD COLUMN mod_frete TEXT`);
 
   // Sprint 3.1 — índices de performance (entregas / reservas / auditoria)
   aplicarAlteracaoSegura(
@@ -1222,6 +1251,66 @@ function criarTabelas() {
       else console.log('Tabela produtos_ajustes_estoque criada/verificada');
     });
 
+    // MTS V1.0 — auditoria de transferência Fiscal ↔ Não Fiscal
+    db.run(`
+      CREATE TABLE IF NOT EXISTS movimentos_transferencia_saldos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        produto_id INTEGER NOT NULL,
+        origem TEXT NOT NULL,
+        destino TEXT NOT NULL,
+        quantidade REAL NOT NULL,
+        saldo_origem_antes REAL NOT NULL,
+        saldo_origem_depois REAL NOT NULL,
+        saldo_destino_antes REAL NOT NULL,
+        saldo_destino_depois REAL NOT NULL,
+        motivo TEXT,
+        usuario_id INTEGER,
+        data_hora DATETIME DEFAULT CURRENT_TIMESTAMP,
+        resultado TEXT NOT NULL
+      )
+    `, (err) => {
+      if (err) console.error('Erro ao criar tabela movimentos_transferencia_saldos:', err);
+      else console.log('Tabela movimentos_transferencia_saldos criada/verificada');
+    });
+
+    // RC3.16.1 — reservas fiscais de Pedido (dono: Motor F×NF)
+    db.run(`
+      CREATE TABLE IF NOT EXISTS pedido_estoque_reservas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pedido_id INTEGER NOT NULL,
+        pedido_item_id INTEGER,
+        produto_id INTEGER NOT NULL,
+        quantidade_fiscal REAL NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'ATIVA',
+        criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
+        atualizado_em DATETIME
+      )
+    `, (err) => {
+      if (err) console.error('Erro ao criar tabela pedido_estoque_reservas:', err);
+      else console.log('Tabela pedido_estoque_reservas criada/verificada');
+    });
+
+    db.run(`
+      CREATE TABLE IF NOT EXISTS auditoria_pedido_estoque_fiscal (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pedido_id INTEGER,
+        produto_id INTEGER,
+        evento TEXT NOT NULL,
+        quantidade REAL,
+        saldo_fiscal REAL,
+        saldo_nao_fiscal REAL,
+        disponivel_fiscal REAL,
+        disponivel_nao_fiscal REAL,
+        detalhes TEXT,
+        usuario_id INTEGER,
+        supervisor_id INTEGER,
+        data_hora DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `, (err) => {
+      if (err) console.error('Erro ao criar tabela auditoria_pedido_estoque_fiscal:', err);
+      else console.log('Tabela auditoria_pedido_estoque_fiscal criada/verificada');
+    });
+
     // Tabela de configurações de validade
     db.run(`
       CREATE TABLE IF NOT EXISTS configuracoes_validade (
@@ -1376,6 +1465,7 @@ function criarTabelas() {
         lote TEXT,
         dias_alerta_validade INTEGER DEFAULT 30,
         controlar_validade INTEGER DEFAULT 0,
+        controla_estoque INTEGER DEFAULT 1,
         permite_venda_unidade INTEGER DEFAULT 0,
         peso_medio_unidade REAL DEFAULT 0,
         preco_unidade REAL DEFAULT 0,
@@ -2622,45 +2712,58 @@ function seedPinpadCatalogoTEF() {
   });
 }
 
+/**
+ * Hotfix RC2.2 — primeiro acesso previsível.
+ * Cria admin / 1234 / SUPER_ADMIN somente se NÃO existir SUPER_ADMIN.
+ * Não altera instalações que já possuem administrador.
+ * Nunca gera senha aleatória.
+ */
 function seedUsuarioAdmin() {
-  db.get('SELECT COUNT(*) AS total FROM usuarios', [], (countErr, countRow) => {
-    if (countErr) {
-      console.error('Erro ao verificar usuários existentes:', countErr);
-      return;
-    }
-
-    if ((countRow?.total || 0) > 0) {
-      db.run(`
-        UPDATE usuarios
-        SET perfil = 'SUPER_ADMIN',
-            pode_alterar_senhas = 1,
-            nome = 'Diego'
-        WHERE username = 'Diego'
-      `, (err) => {
-        if (err) console.error('Erro ao atualizar perfil do administrador:', err);
-      });
-      return;
-    }
-
-    const senhaInicial = process.env.ADMIN_SEED_PASSWORD || crypto.randomBytes(12).toString('base64url');
-    const hash = bcrypt.hashSync(senhaInicial, 10);
-
-    db.run(`
-      INSERT INTO usuarios (username, password_hash, role, nome, perfil, pode_alterar_senhas)
-      VALUES ('Diego', ?, 'admin', 'Diego', 'SUPER_ADMIN', 1)
-    `, [hash], (err) => {
-      if (err) {
-        console.error('Erro ao criar usuário administrador padrão:', err);
+  db.get(
+    `
+      SELECT id FROM usuarios
+      WHERE UPPER(TRIM(COALESCE(perfil, ''))) = 'SUPER_ADMIN'
+      LIMIT 1
+    `,
+    [],
+    (countErr, superAdmin) => {
+      if (countErr) {
+        console.error('Erro ao verificar SUPER_ADMIN existente:', countErr);
         return;
       }
 
-      console.log('Usuário administrador inicial criado (Diego).');
-      if (!process.env.ADMIN_SEED_PASSWORD) {
-        console.warn('[SEGURANÇA] Senha temporária do admin:', senhaInicial);
-        console.warn('[SEGURANÇA] Defina ADMIN_SEED_PASSWORD ou altere a senha no primeiro acesso.');
+      if (superAdmin) {
+        return;
       }
-    });
-  });
+
+      const senhaInicial = '1234';
+      const hash = bcrypt.hashSync(senhaInicial, 10);
+
+      db.run(
+        `
+        INSERT INTO usuarios (
+          username, password_hash, role, nome, perfil,
+          pode_alterar_senhas, ativo, troca_senha_obrigatoria
+        )
+        VALUES ('admin', ?, 'admin', 'Administrador', 'SUPER_ADMIN', 1, 1, 1)
+      `,
+        [hash],
+        (err) => {
+          if (err) {
+            // Username admin pode existir sem SUPER_ADMIN — não sobrescrever.
+            if (String(err.message || '').includes('UNIQUE')) {
+              console.warn('[RC2.2] Usuário admin já existe sem SUPER_ADMIN — seed não sobrescreveu.');
+              return;
+            }
+            console.error('Erro ao criar usuário administrador padrão:', err);
+            return;
+          }
+
+          console.log('Usuário administrador inicial criado (admin). Troca de senha obrigatória no primeiro acesso.');
+        }
+      );
+    }
+  );
 }
 
 
@@ -3013,6 +3116,131 @@ db.serialize(() => {
         FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
       )
     `);
+
+    // Sprint 3.1 — Módulo Pedido / Faturamento
+    db.run(`
+      CREATE TABLE IF NOT EXISTS pedidos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        codigo VARCHAR(50) UNIQUE,
+        data_pedido DATE NOT NULL,
+        cliente_id INTEGER,
+        total DECIMAL(10,2) NOT NULL DEFAULT 0,
+        desconto DECIMAL(10,2) DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'AGUARDANDO_FATURAMENTO',
+        representante_id INTEGER,
+        representante_nome TEXT,
+        observacao TEXT,
+        operador_id INTEGER,
+        venda_id INTEGER,
+        faturado_em DATETIME,
+        faturado_por INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME,
+        FOREIGN KEY (cliente_id) REFERENCES clientes(id),
+        FOREIGN KEY (venda_id) REFERENCES vendas(id)
+      )
+    `, (err) => {
+      if (err) console.error('Erro ao criar tabela pedidos:', err);
+      else console.log('Tabela pedidos criada/verificada');
+    });
+
+    db.run(`
+      CREATE TABLE IF NOT EXISTS pedidos_itens (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pedido_id INTEGER NOT NULL,
+        produto_id INTEGER NOT NULL,
+        quantidade REAL NOT NULL,
+        preco_unitario DECIMAL(10,2) NOT NULL,
+        desconto_percentual REAL DEFAULT 0,
+        subtotal DECIMAL(10,2) NOT NULL,
+        tipo_venda TEXT DEFAULT 'PESO',
+        FOREIGN KEY (pedido_id) REFERENCES pedidos(id) ON DELETE CASCADE,
+        FOREIGN KEY (produto_id) REFERENCES produtos(id)
+      )
+    `, (err) => {
+      if (err) console.error('Erro ao criar tabela pedidos_itens:', err);
+      else console.log('Tabela pedidos_itens criada/verificada');
+    });
+
+    db.run(`CREATE INDEX IF NOT EXISTS idx_pedidos_status ON pedidos(status)`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_pedidos_itens_pedido ON pedidos_itens(pedido_id)`);
+
+    // Sprint 3.2 — NF-e modelo 55 (venda) / Sprint 3.3 — central operacional
+    db.run(`
+      CREATE TABLE IF NOT EXISTS nfe_notas (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        venda_id INTEGER NOT NULL,
+        pedido_id INTEGER,
+        numero INTEGER NOT NULL,
+        serie INTEGER NOT NULL,
+        chave_acesso TEXT,
+        ambiente INTEGER DEFAULT 2,
+        status TEXT DEFAULT 'pendente',
+        xml_enviado TEXT,
+        xml_retorno TEXT,
+        protocolo TEXT,
+        recibo TEXT,
+        danfe_html TEXT,
+        natureza_operacao TEXT,
+        cfop TEXT,
+        protocolo_cancelamento TEXT,
+        xml_cancelamento TEXT,
+        motivo_cancelamento TEXT,
+        consultado_em DATETIME,
+        cstat_consulta TEXT,
+        xmotivo_consulta TEXT,
+        usuario_id INTEGER,
+        usuario_nome TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (venda_id) REFERENCES vendas(id)
+      )
+    `, (err) => {
+      if (err) console.error('Erro ao criar tabela nfe_notas:', err);
+      else console.log('Tabela nfe_notas criada/verificada');
+    });
+    aplicarAlteracaoSegura('nfe_notas', `ALTER TABLE nfe_notas ADD COLUMN protocolo_cancelamento TEXT`);
+    aplicarAlteracaoSegura('nfe_notas', `ALTER TABLE nfe_notas ADD COLUMN xml_cancelamento TEXT`);
+    aplicarAlteracaoSegura('nfe_notas', `ALTER TABLE nfe_notas ADD COLUMN motivo_cancelamento TEXT`);
+    aplicarAlteracaoSegura('nfe_notas', `ALTER TABLE nfe_notas ADD COLUMN consultado_em DATETIME`);
+    aplicarAlteracaoSegura('nfe_notas', `ALTER TABLE nfe_notas ADD COLUMN cstat_consulta TEXT`);
+    aplicarAlteracaoSegura('nfe_notas', `ALTER TABLE nfe_notas ADD COLUMN xmotivo_consulta TEXT`);
+    aplicarAlteracaoSegura('nfe_notas', `ALTER TABLE nfe_notas ADD COLUMN usuario_id INTEGER`);
+    aplicarAlteracaoSegura('nfe_notas', `ALTER TABLE nfe_notas ADD COLUMN usuario_nome TEXT`);
+    aplicarAlteracaoSegura('nfe_notas', `ALTER TABLE nfe_notas ADD COLUMN fila_estado TEXT`);
+    aplicarAlteracaoSegura('nfe_notas', `ALTER TABLE nfe_notas ADD COLUMN tentativas INTEGER DEFAULT 0`);
+    aplicarAlteracaoSegura('nfe_notas', `ALTER TABLE nfe_notas ADD COLUMN ultima_tentativa_em DATETIME`);
+    aplicarAlteracaoSegura('nfe_notas', `ALTER TABLE nfe_notas ADD COLUMN erro_codigo TEXT`);
+    aplicarAlteracaoSegura('nfe_notas', `ALTER TABLE nfe_notas ADD COLUMN erro_mensagem TEXT`);
+    aplicarAlteracaoSegura('nfe_notas', `ALTER TABLE nfe_notas ADD COLUMN erro_sugestao TEXT`);
+    aplicarAlteracaoSegura('nfe_notas', `ALTER TABLE nfe_notas ADD COLUMN tempo_resposta_ms INTEGER`);
+    aplicarAlteracaoSegura('nfe_notas', `ALTER TABLE nfe_notas ADD COLUMN consulta_auto_tentativas INTEGER DEFAULT 0`);
+    aplicarAlteracaoSegura('nfe_notas', `ALTER TABLE nfe_notas ADD COLUMN proxima_consulta_em DATETIME`);
+
+    db.run(`
+      CREATE TABLE IF NOT EXISTS nfe_operacional_logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nota_id INTEGER,
+        venda_id INTEGER,
+        usuario_id INTEGER,
+        usuario_nome TEXT,
+        empresa TEXT,
+        filial TEXT,
+        documento TEXT,
+        acao TEXT NOT NULL,
+        retorno_sefaz TEXT,
+        cstat TEXT,
+        tempo_resposta_ms INTEGER,
+        tentativas INTEGER DEFAULT 0,
+        sucesso INTEGER DEFAULT 0,
+        detalhes TEXT,
+        criado_em DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `, (err) => {
+      if (err) console.error('Erro ao criar tabela nfe_operacional_logs:', err);
+      else console.log('Tabela nfe_operacional_logs criada/verificada');
+    });
+
     db.run('SELECT 1', (readyErr) => sinalizarInicializacaoParcial(readyErr));
 });
 

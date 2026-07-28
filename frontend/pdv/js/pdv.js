@@ -725,40 +725,120 @@ async function processarPagamentoTEF(tipo, valor, parcelas = 1, opcoes = {}) {
     }
 }
 
-function abrirModalPagamentoNaoFiscal(valor, onConfirm, onCancel) {
+function rotuloFormaRecebimentoNaoFiscal(forma) {
+    const f = String(forma || '').toLowerCase().trim();
+    if (f === 'pix') return 'PIX';
+    if (f === 'dinheiro' || f === 'cash' || f === 'especie' || f === 'espécie') return 'Dinheiro';
+    if (f.includes('credito') || f === 'credito') return 'Cartão de Crédito';
+    if (f.includes('debito') || f === 'debito') return 'Cartão de Débito';
+    if (f === 'cartao' || f.includes('cartao')) return 'Cartão';
+    if (f === 'prazo') return 'A Prazo';
+    return forma ? String(forma) : '—';
+}
+
+function isFormaDinheiroNaoFiscal(forma) {
+    const f = String(forma || '').toLowerCase().trim();
+    return f === 'dinheiro' || f === 'cash' || f === 'especie' || f === 'espécie';
+}
+
+/**
+ * Resolve a única forma já escolhida para a parcela não fiscal.
+ * Retorna null apenas se não for possível inferir (mantém seletor legado).
+ */
+function resolverFormaPagamentoNaoFiscalConhecida(opcoes = {}) {
+    const mistos = Array.isArray(opcoes.pagamentosMistos) ? opcoes.pagamentosMistos : [];
+    if (mistos.length > 0) {
+        const formas = mistos
+            .map((p) => String(p.forma_pagamento || p.forma || '').toLowerCase().trim())
+            .filter(Boolean);
+        const unicas = [...new Set(formas)];
+        if (unicas.length === 1) return unicas[0];
+        const dinheiro = mistos.find((p) => isFormaDinheiroNaoFiscal(p.forma_pagamento || p.forma));
+        if (dinheiro) return String(dinheiro.forma_pagamento || dinheiro.forma).toLowerCase().trim();
+    }
+
+    const candidata = String(
+        opcoes.formaPagamento
+        || opcoes.forma_pagamento
+        || formaPagamentoSelecionadaPDV
+        || ''
+    ).toLowerCase().trim();
+
+    if (candidata && candidata !== 'misto') return candidata;
+    return null;
+}
+
+/**
+ * Sprint 3.11UX — confirmação inteligente do pagamento não fiscal.
+ * Se a forma já foi escolhida, apenas confirma (não pergunta de novo).
+ */
+function abrirModalPagamentoNaoFiscal(valor, onConfirm, onCancel, formaPredefinida) {
     const valorNum = Number(valor || 0);
+    const formaConhecida = formaPredefinida
+        ? String(formaPredefinida).toLowerCase().trim()
+        : resolverFormaPagamentoNaoFiscalConhecida({
+            pagamentosMistos,
+            formaPagamento: formaPagamentoSelecionadaPDV
+        });
+    const modoConfirmacao = Boolean(formaConhecida);
 
     if (valorNum <= 0) {
         if (typeof onConfirm === 'function') {
-            onConfirm({ forma_pagamento: 'dinheiro', valor: 0 });
+            onConfirm({
+                forma_pagamento: formaConhecida || 'dinheiro',
+                valor: 0
+            });
         }
         return;
     }
+
+    const rotuloForma = rotuloFormaRecebimentoNaoFiscal(formaConhecida || 'pix');
+    const corpoConfirmacao = modoConfirmacao
+        ? `
+            <p class="text-muted mb-2">Confirme o recebimento da parcela não fiscal.</p>
+            <h4 class="text-center mb-3">Valor: ${formatCurrency(valorNum)}</h4>
+            <div class="p-3 bg-light rounded text-center mb-2">
+                <small class="text-muted d-block mb-1">Forma de recebimento</small>
+                <strong class="fs-5">${rotuloForma}</strong>
+            </div>
+            ${isFormaDinheiroNaoFiscal(formaConhecida) ? `
+            <div id="nao-fiscal-dinheiro-area" class="mt-3 p-3 bg-light rounded">
+                <label for="nao-fiscal-valor-recebido" class="form-label fw-bold">Valor Recebido:</label>
+                <input type="number" step="0.01" class="form-control form-control-lg text-end" id="nao-fiscal-valor-recebido" placeholder="0,00">
+                <div class="mt-2">
+                    <span class="fw-bold text-success">Troco: </span>
+                    <span id="nao-fiscal-troco">${formatCurrency(0)}</span>
+                </div>
+            </div>` : ''}
+        `
+        : `
+            <p class="text-muted mb-2">Itens não fiscais — conta pessoa física, sem TEF.</p>
+            <h4 class="text-center mb-3">Valor: ${formatCurrency(valorNum)}</h4>
+            <div class="payment-methods mb-3 d-flex flex-wrap gap-2">
+                <button type="button" class="nao-fiscal-method-btn btn btn-outline-primary active" data-pagamento="pix">PIX PF</button>
+                <button type="button" class="nao-fiscal-method-btn btn btn-outline-primary" data-pagamento="dinheiro">Dinheiro</button>
+                <button type="button" class="nao-fiscal-method-btn btn btn-outline-primary" data-pagamento="cartao">Cartão PF</button>
+            </div>
+            <div id="nao-fiscal-dinheiro-area" style="display:none;" class="mt-3 p-3 bg-light rounded">
+                <label for="nao-fiscal-valor-recebido" class="form-label fw-bold">Valor Recebido:</label>
+                <input type="number" step="0.01" class="form-control form-control-lg text-end" id="nao-fiscal-valor-recebido" placeholder="0,00">
+                <div class="mt-2">
+                    <span class="fw-bold text-success">Troco: </span>
+                    <span id="nao-fiscal-troco">${formatCurrency(0)}</span>
+                </div>
+            </div>
+        `;
 
     const modalHtml = `
         <div class="modal fade" id="pagamentoNaoFiscalModal" tabindex="-1" aria-hidden="true">
             <div class="modal-dialog">
                 <div class="modal-content">
                     <div class="modal-header">
-                        <h5 class="modal-title">Pagamento Não Fiscal (PF)</h5>
+                        <h5 class="modal-title">${modoConfirmacao ? 'Pagamento Não Fiscal' : 'Pagamento Não Fiscal (PF)'}</h5>
                         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                     </div>
                     <div class="modal-body">
-                        <p class="text-muted mb-2">Itens não fiscais — conta pessoa física, sem TEF.</p>
-                        <h4 class="text-center mb-3">Valor: ${formatCurrency(valorNum)}</h4>
-                        <div class="payment-methods mb-3 d-flex flex-wrap gap-2">
-                            <button type="button" class="nao-fiscal-method-btn btn btn-outline-primary active" data-pagamento="pix">PIX PF</button>
-                            <button type="button" class="nao-fiscal-method-btn btn btn-outline-primary" data-pagamento="dinheiro">Dinheiro</button>
-                            <button type="button" class="nao-fiscal-method-btn btn btn-outline-primary" data-pagamento="cartao">Cartão PF</button>
-                        </div>
-                        <div id="nao-fiscal-dinheiro-area" style="display:none;" class="mt-3 p-3 bg-light rounded">
-                            <label for="nao-fiscal-valor-recebido" class="form-label fw-bold">Valor Recebido:</label>
-                            <input type="number" step="0.01" class="form-control form-control-lg text-end" id="nao-fiscal-valor-recebido" placeholder="0,00">
-                            <div class="mt-2">
-                                <span class="fw-bold text-success">Troco: </span>
-                                <span id="nao-fiscal-troco">${formatCurrency(0)}</span>
-                            </div>
-                        </div>
+                        ${corpoConfirmacao}
                     </div>
                     <div class="modal-footer">
                         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
@@ -773,7 +853,7 @@ function abrirModalPagamentoNaoFiscal(valor, onConfirm, onCancel) {
 
     const modalEl = document.getElementById('pagamentoNaoFiscalModal');
     const modal = new bootstrap.Modal(modalEl);
-    let formaSelecionada = 'pix';
+    let formaSelecionada = formaConhecida || 'pix';
     let confirmado = false;
 
     function atualizarTrocoNaoFiscal() {
@@ -787,7 +867,7 @@ function abrirModalPagamentoNaoFiscal(valor, onConfirm, onCancel) {
         $('.nao-fiscal-method-btn').removeClass('active btn-primary').addClass('btn-outline-primary');
         $(`.nao-fiscal-method-btn[data-pagamento="${tipo}"]`).removeClass('btn-outline-primary').addClass('active btn-primary');
 
-        if (tipo === 'dinheiro') {
+        if (isFormaDinheiroNaoFiscal(tipo)) {
             $('#nao-fiscal-dinheiro-area').show();
             $('#nao-fiscal-valor-recebido').val(valorNum.toFixed(2));
             atualizarTrocoNaoFiscal();
@@ -803,18 +883,23 @@ function abrirModalPagamentoNaoFiscal(valor, onConfirm, onCancel) {
         }
     }, { once: true });
 
-    $('.nao-fiscal-method-btn').off('click').on('click', function() {
-        selecionarFormaNaoFiscal($(this).data('pagamento'));
-    });
+    if (!modoConfirmacao) {
+        $('.nao-fiscal-method-btn').off('click').on('click', function () {
+            selecionarFormaNaoFiscal($(this).data('pagamento'));
+        });
+    }
 
     $('#nao-fiscal-valor-recebido').off('input').on('input', atualizarTrocoNaoFiscal);
 
-    $('#confirmar-pagamento-nao-fiscal').off('click').on('click', function() {
-        if (formaSelecionada === 'dinheiro') {
-            const recebido = parseFloat($('#nao-fiscal-valor-recebido').val()) || 0;
-            if (recebido + 0.009 < valorNum) {
-                showNotification('Valor recebido insuficiente para o pagamento não fiscal.', 'warning');
-                return;
+    $('#confirmar-pagamento-nao-fiscal').off('click').on('click', function () {
+        if (isFormaDinheiroNaoFiscal(formaSelecionada)) {
+            const $recebido = $('#nao-fiscal-valor-recebido');
+            if ($recebido.length) {
+                const recebido = parseFloat($recebido.val()) || 0;
+                if (recebido + 0.009 < valorNum) {
+                    showNotification('Valor recebido insuficiente para o pagamento não fiscal.', 'warning');
+                    return;
+                }
             }
         }
 
@@ -829,7 +914,17 @@ function abrirModalPagamentoNaoFiscal(valor, onConfirm, onCancel) {
     });
 
     modal.show();
-    selecionarFormaNaoFiscal('pix');
+    if (modoConfirmacao) {
+        if (isFormaDinheiroNaoFiscal(formaSelecionada) && $('#nao-fiscal-valor-recebido').length) {
+            $('#nao-fiscal-valor-recebido').val(valorNum.toFixed(2));
+            atualizarTrocoNaoFiscal();
+            setTimeout(() => $('#nao-fiscal-valor-recebido').trigger('focus'), 50);
+        } else {
+            setTimeout(() => $('#confirmar-pagamento-nao-fiscal').trigger('focus'), 50);
+        }
+    } else {
+        selecionarFormaNaoFiscal('pix');
+    }
 }
 
 function abrirModalConfirmacaoFiscalManual(valor, onConfirm, onCancel) {
@@ -989,10 +1084,13 @@ function calcularDistribuicaoFiscalLocal(itens, vendaFiscal = false) {
         const qtdEstoque = item.quantidade_estoque != null && item.quantidade_estoque !== ''
             ? Number(item.quantidade_estoque)
             : qtdVenda;
+        const controlaEstoque = produtoControlaEstoquePdv(produto);
+        const saldoFiscalMotor = controlaEstoque ? saldos.saldo_fiscal : qtdEstoque;
+        const saldoNaoFiscalMotor = controlaEstoque ? saldos.saldo_nao_fiscal : qtdEstoque;
         const resultado = distribuirQuantidadeVendaLocal(
             qtdEstoque,
-            saldos.saldo_fiscal,
-            saldos.saldo_nao_fiscal,
+            saldoFiscalMotor,
+            saldoNaoFiscalMotor,
             vendaFiscal
         );
 
@@ -1037,7 +1135,19 @@ function calcularDistribuicaoFiscalLocal(itens, vendaFiscal = false) {
     };
 }
 
-async function precalcularDistribuicaoFiscalVenda(itens, vendaFiscal = false) {
+/**
+ * Pré-cálculo fiscal (Hotfix 3.11A + RC7.10.1): envia pagamentos e
+ * desconto/acréscimo para o backend aplicar Valor Fiscal Líquido oficial.
+ * Não converte / não resume o vetor — payload original do operador.
+ */
+async function precalcularDistribuicaoFiscalVenda(
+    itens,
+    vendaFiscal = false,
+    pagamentos = [],
+    desconto = 0,
+    acrescimo = 0
+) {
+    const pagamentosPayload = Array.isArray(pagamentos) ? pagamentos : [];
     try {
         const response = await fetch(`${API_URL}/vendas/pre-calcular-distribuicao`, {
             method: 'POST',
@@ -1047,14 +1157,17 @@ async function precalcularDistribuicaoFiscalVenda(itens, vendaFiscal = false) {
             },
             body: JSON.stringify(getTerminalRequestData({
                 itens,
-                emitir_fiscal: vendaFiscal
+                emitir_fiscal: vendaFiscal,
+                pagamentos: pagamentosPayload,
+                desconto: Number(desconto || 0),
+                acrescimo: Number(acrescimo || 0)
             }))
         });
 
         const data = await response.json().catch(() => ({}));
 
         if (response.ok && data.sucesso) {
-            return data;
+            return { ...data, liquido_aplicado_backend: true };
         }
 
         if (!response.ok && data.error) {
@@ -1067,14 +1180,21 @@ async function precalcularDistribuicaoFiscalVenda(itens, vendaFiscal = false) {
     return calcularDistribuicaoFiscalLocal(itens, vendaFiscal);
 }
 
-function aplicarDescontoProporcionalDistribuicao(distribuicao, subtotal, desconto) {
+/**
+ * Fallback local — espelho do cálculo oficial backend/services/vendas/valorFiscalLiquido.js
+ * (RC7.10.1). Usado só se o pré-cálculo remoto falhar.
+ */
+function aplicarDescontoProporcionalDistribuicao(distribuicao, subtotal, desconto, acrescimo = 0) {
     const brutoFiscal = Number(distribuicao?.valor_fiscal || 0);
     const brutoNaoFiscal = Number(distribuicao?.valor_nao_fiscal || 0);
-    const subtotalNum = Number(subtotal || 0);
-    const descontoNum = Number(desconto || 0);
-    const totalLiquido = Math.max(0, subtotalNum - descontoNum);
+    const subtotalNum = Number(subtotal || 0) > 0
+        ? Number(subtotal || 0)
+        : Math.round((brutoFiscal + brutoNaoFiscal) * 100) / 100;
+    const descontoNum = Math.max(0, Number(desconto || 0));
+    const acrescimoNum = Math.max(0, Number(acrescimo || 0));
+    const totalLiquido = Math.max(0, Math.round((subtotalNum - descontoNum + acrescimoNum) * 100) / 100);
 
-    if (subtotalNum <= 0 || descontoNum <= 0 || totalLiquido === subtotalNum) {
+    if (subtotalNum <= 0 || (descontoNum <= 0 && acrescimoNum <= 0) || totalLiquido === subtotalNum) {
         return {
             valor_fiscal: brutoFiscal,
             valor_nao_fiscal: brutoNaoFiscal
@@ -1297,7 +1417,11 @@ function iniciarFluxoPosVendaComNaoFiscal(vendaId, opcoes = {}) {
                         `Venda #${vendaId} aguardando pagamento não fiscal.`,
                         'warning'
                     );
-                }
+                },
+                resolverFormaPagamentoNaoFiscalConhecida({
+                    pagamentosMistos,
+                    formaPagamento: formaPagamentoSelecionadaPDV
+                })
             );
         })
         .catch(function(error) {
@@ -1575,7 +1699,23 @@ function pdvResolverSaldosProduto(produto) {
     };
 }
 
+function produtoControlaEstoquePdv(produto) {
+    if (produto == null) return true;
+    if (
+        produto.controla_estoque === undefined
+        || produto.controla_estoque === null
+        || produto.controla_estoque === ''
+    ) {
+        return true;
+    }
+    return Number(produto.controla_estoque) !== 0;
+}
+
 function validarEstoqueVenda(produto, quantidade, modoFiscal) {
+    if (!produtoControlaEstoquePdv(produto)) {
+        return { sucesso: true };
+    }
+
     const saldos = pdvResolverSaldosProduto(produto);
     const saldoFiscal = saldos.saldo_fiscal;
     const saldoNaoFiscal = saldos.saldo_nao_fiscal;
@@ -1784,8 +1924,11 @@ function bindEventosPDV() {
         if (e.key === 'F9') {
             e.preventDefault();
             e.stopPropagation();
+            const entregaAtiva = window.PdvVendaEntrega
+                && typeof PdvVendaEntrega.moduloEntregaAtivo === 'function'
+                && PdvVendaEntrega.moduloEntregaAtivo();
             const btnEntrega = document.getElementById('btnVendaEntregaPdv');
-            if (btnEntrega && !btnEntrega.disabled) {
+            if (entregaAtiva && btnEntrega && !btnEntrega.disabled) {
                 btnEntrega.click();
             }
         }
@@ -3691,31 +3834,16 @@ function abrirPagamentoMisto() {
         $('.pagamento-misto-input').on('input', atualizarTotais);
 
         const $inputs = $('.pagamento-misto-input');
-        if (tipo === 'dinheiro_pix' && $inputs.length >= 2) {
-            const $dinheiro = $inputs.filter('[data-forma="dinheiro"]');
-            const $pix = $inputs.filter('[data-forma="pix"]');
-
-            function preencherRestantePixMisto() {
-                const valDinheiro = Number($dinheiro.val() || 0);
-                const restante = Math.round((totalVenda - valDinheiro) * 100) / 100;
-
-                if (valDinheiro > 0 && restante > 0) {
-                    $pix.val(restante.toFixed(2));
-                } else if (restante <= 0) {
-                    $pix.val('0.00');
-                }
-                atualizarTotais();
-            }
-
-            $dinheiro.on('input blur', preencherRestantePixMisto);
-        } else if ($inputs.length >= 2) {
-            $inputs.first().on('blur', function() {
+        // Completa o 2º campo só no blur e só se estiver vazio —
+        // nunca sobrescreve enquanto o operador digita (Hotfix pagamento misto).
+        if ($inputs.length >= 2) {
+            $inputs.first().on('blur', function () {
                 const valPrimeiro = Number($(this).val() || 0);
                 const $segundo = $inputs.eq(1);
                 const valSegundo = Number($segundo.val() || 0);
 
                 if (valPrimeiro > 0 && valSegundo === 0) {
-                    const restante = totalVenda - valPrimeiro;
+                    const restante = Math.round((totalVenda - valPrimeiro) * 100) / 100;
                     if (restante > 0) {
                         $segundo.val(restante.toFixed(2));
                         atualizarTotais();
@@ -4028,8 +4156,9 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
     }
 
     const desconto = parseFloat($('#descontoPdv').val()) || 0;
+    const acrescimo = parseFloat($('#acrescimoPdv').val()) || 0;
     const subtotal = calcularSubtotal();
-    const total = Math.round((Math.max(0, subtotal - desconto)) * 100) / 100;
+    const total = Math.round((Math.max(0, subtotal - desconto + acrescimo)) * 100) / 100;
 
     if (total <= 0) {
         showNotification('O total final da venda é inválido.', 'warning');
@@ -4041,6 +4170,7 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
         cliente_nome: clienteSelecionado?.nome || vendaPrazoInfo?.cliente_nome || null,
         forma_pagamento: pagamentosMistos.length > 1 ? "misto" : formaPagamento,
         desconto,
+        acrescimo,
         total,
         emitir_fiscal: false,
         cpf_cnpj_nota: null,
@@ -4087,16 +4217,35 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
         dados.primeiro_vencimento = dataRecebimento;
     }
 
-    const distribuicao = await precalcularDistribuicaoFiscalVenda(dados.itens, emitirFiscal);
+    const distribuicao = await precalcularDistribuicaoFiscalVenda(
+        dados.itens,
+        emitirFiscal,
+        dados.pagamentos,
+        desconto,
+        acrescimo
+    );
 
     if (!distribuicao.sucesso) {
         showNotification(distribuicao.error || 'Erro ao calcular distribuição fiscal.', 'danger');
         return;
     }
 
-    const valoresDistribuidos = aplicarDescontoProporcionalDistribuicao(distribuicao, subtotal, desconto);
-    let totalFiscal = Number(valoresDistribuidos.valor_fiscal || 0);
-    let totalNaoFiscal = Number(valoresDistribuidos.valor_nao_fiscal || 0);
+    // RC7.10.1: backend já devolve valor fiscal líquido; rateio local só no fallback.
+    let totalFiscal;
+    let totalNaoFiscal;
+    if (distribuicao.liquido_aplicado_backend) {
+        totalFiscal = Number(distribuicao.valor_fiscal || 0);
+        totalNaoFiscal = Number(distribuicao.valor_nao_fiscal || 0);
+    } else {
+        const valoresDistribuidos = aplicarDescontoProporcionalDistribuicao(
+            distribuicao,
+            subtotal,
+            desconto,
+            acrescimo
+        );
+        totalFiscal = Number(valoresDistribuidos.valor_fiscal || 0);
+        totalNaoFiscal = Number(valoresDistribuidos.valor_nao_fiscal || 0);
+    }
 
     vendaEmProcessamento = true;
 
@@ -4198,11 +4347,17 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
             dados.pagamentos = pagamentosComTEF;
         } else if (deveUsarTefAutomatico) {
             if (totalNaoFiscal > 0) {
+                const formaNaoFiscal = resolverFormaPagamentoNaoFiscalConhecida({
+                    pagamentosMistos,
+                    formaPagamento: formaPagamentoNormalizada || formaPagamento,
+                    ehPagamentoMisto
+                });
                 const pagamentoNaoFiscal = await new Promise((resolve, reject) => {
                     abrirModalPagamentoNaoFiscal(
                         totalNaoFiscal,
                         resolve,
-                        () => reject(new Error('Pagamento não fiscal cancelado.'))
+                        () => reject(new Error('Pagamento não fiscal cancelado.')),
+                        formaNaoFiscal
                     );
                 });
 

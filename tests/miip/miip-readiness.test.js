@@ -153,9 +153,9 @@ async function main() {
     assert.ok(nomes.includes('test:miip-telemetry'));
   });
 
-  await test('relatório salvo em docs/MIIP_READINESS_REPORT.md', () => {
+  await test('relatório salvo em docs/historico/relatorios/MIIP_READINESS_REPORT.md', () => {
     new MiipAuditService().auditar({ executarSuites: false, salvarArquivo: true });
-    const reportPath = path.join(__dirname, '../../docs/MIIP_READINESS_REPORT.md');
+    const reportPath = path.join(__dirname, '../../docs/historico/relatorios/MIIP_READINESS_REPORT.md');
     assert.ok(fs.existsSync(reportPath));
     const conteudo = fs.readFileSync(reportPath, 'utf8');
     assert.ok(conteudo.includes('MIIP'));
@@ -197,13 +197,13 @@ async function main() {
 
   // --- Documentação ---
   const docs = [
-    'MIIP_CANONICAL_ENGINE.md',
-    'MIIP_ATTRIBUTE_ENGINE.md',
-    'MIIP_SYNONYM_ENGINE.md',
-    'MIIP_SIMILARITY_ENGINE.md',
-    'MIIP_DECISION_ENGINE.md',
-    'MIIP_EXPLAIN.md',
-    'ARQUITETURA_MIIP.md'
+    'motores/miip/MIIP_CANONICAL_ENGINE.md',
+    'motores/miip/MIIP_ATTRIBUTE_ENGINE.md',
+    'motores/miip/MIIP_SYNONYM_ENGINE.md',
+    'motores/miip/MIIP_SIMILARITY_ENGINE.md',
+    'motores/miip/MIIP_DECISION_ENGINE.md',
+    'motores/miip/MIIP_EXPLAIN.md',
+    'arquitetura/ARQUITETURA_MIIP.md'
   ];
 
   for (let i = 0; i < docs.length; i += 1) {

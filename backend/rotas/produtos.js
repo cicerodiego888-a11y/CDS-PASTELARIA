@@ -39,6 +39,61 @@ function obterPdvIdentificacaoService() {
   return _pdvIdentificacaoService;
 }
 
+/**
+ * Próximo código interno numérico (maior código só-dígitos + 1).
+ * Fallback: MAX(id)+1.
+ */
+function obterProximoCodigoInternoProduto(callback) {
+  db.get(
+    `
+      SELECT MAX(CAST(codigo AS INTEGER)) AS max_num
+      FROM produtos
+      WHERE codigo IS NOT NULL
+        AND TRIM(codigo) != ''
+        AND codigo GLOB '[0-9]*'
+    `,
+    (err, row) => {
+      if (!err && row && row.max_num != null) {
+        return callback(null, String(Number(row.max_num) + 1));
+      }
+      db.get('SELECT COALESCE(MAX(id), 0) + 1 AS proximo FROM produtos', (err2, row2) => {
+        if (err2) return callback(err2);
+        callback(null, String(row2?.proximo || 1));
+      });
+    }
+  );
+}
+
+/**
+ * Se o usuário informou código, usa o informado.
+ * Se vazio, gera o próximo disponível (único).
+ */
+function resolverCodigoInternoCriacao(codigoInformado, callback) {
+  const informado = String(codigoInformado == null ? '' : codigoInformado).trim();
+  if (informado) {
+    return callback(null, { codigo: informado, gerado: false });
+  }
+
+  const tentar = (candidato, tentativas) => {
+    if (tentativas > 50) {
+      return callback(new Error('Não foi possível gerar um código interno único.'));
+    }
+    db.get('SELECT id FROM produtos WHERE codigo = ? LIMIT 1', [candidato], (err, row) => {
+      if (err) return callback(err);
+      if (!row) return callback(null, { codigo: candidato, gerado: true });
+      const n = Number(candidato);
+      const proximo = Number.isFinite(n) ? String(n + 1) : `${candidato}-${tentativas + 1}`;
+      tentar(proximo, tentativas + 1);
+    });
+  };
+
+  obterProximoCodigoInternoProduto((err, base) => {
+    if (err) return callback(err);
+    tentar(base, 0);
+  });
+}
+
+
 /** @internal testes */
 function _setPdvIdentificacaoServiceForTests(svc) {
   _pdvIdentificacaoService = svc;
@@ -73,6 +128,7 @@ function exprEstoqueAlerta(modoFiscal, alias = '') {
 }
 
 const { resolverCustoUnitarioProdutoCadastro } = require('../lib/motorConversaoUnidades');
+const { normalizarFlagControlaEstoque } = require('../services/estoque/produtoControlaEstoque');
 
 function normalizarProdutoResposta(produto, modoFiscal) {
   const saldoFiscal = Number(produto.saldo_fiscal ?? 0);
@@ -95,6 +151,7 @@ function normalizarProdutoResposta(produto, modoFiscal) {
     /** Alias oficial Sprint 06 — mesmo valor de produto_fracionado */
     produto_pesavel: flagFracionado,
     plu: pluValor,
+    controla_estoque: normalizarFlagControlaEstoque(produto.controla_estoque),
     preco_compra: precoCompra,
     saldo_fiscal: saldoFiscal,
     saldo_nao_fiscal: saldoNaoFiscal,
@@ -508,6 +565,16 @@ router.get('/', (req, res) => {
   });
 });
 
+// Próximo código interno sugerido (cadastro de produto)
+router.get('/proximo-codigo', (req, res) => {
+  obterProximoCodigoInternoProduto((err, codigo) => {
+    if (err) {
+      return res.status(500).json({ error: err.message || 'Falha ao gerar código.' });
+    }
+    res.json({ success: true, codigo, gerado: true });
+  });
+});
+
 // Buscar produto por código
 router.get('/codigo/:codigo', (req, res) => {
   const { codigo } = req.params;
@@ -689,12 +756,14 @@ router.get('/consulta-pdv/buscar', (req, res) => {
       p.unidade,
       p.preco_compra,
       p.preco_venda,
+      ${SQL_PLU_SUBQUERY},
       (SELECT preco_atacado FROM produto_atacado WHERE produto_id = p.id ORDER BY quantidade_minima ASC LIMIT 1) AS preco_atacado,
       (SELECT quantidade_minima FROM produto_atacado WHERE produto_id = p.id ORDER BY quantidade_minima ASC LIMIT 1) AS quantidade_minima_atacado,
       p.estoque_atual,
       COALESCE(p.saldo_fiscal, 0) AS saldo_fiscal,
       COALESCE(p.saldo_nao_fiscal, 0) AS saldo_nao_fiscal,
       COALESCE(p.item_fiscal, 1) AS item_fiscal,
+      COALESCE(p.controla_estoque, 1) AS controla_estoque,
       p.estoque_minimo,
       p.vendido_por_peso,
       COALESCE(p.produto_fracionado, p.vendido_por_peso, 0) AS produto_fracionado,
@@ -719,6 +788,13 @@ router.get('/consulta-pdv/buscar', (req, res) => {
           OR CAST(p.id AS TEXT) = ?
           OR TRIM(COALESCE(p.codigo_barras, '')) = ?
           OR TRIM(COALESCE(p.codigo, '')) = ?
+          OR EXISTS (
+            SELECT 1 FROM produto_identificadores pi
+            WHERE pi.produto_id = p.id
+              AND pi.tipo = 'PLU'
+              AND COALESCE(pi.ativo, 1) = 1
+              AND TRIM(pi.codigo) = ?
+          )
         THEN 1
         ELSE 0
       END AS match_exato
@@ -733,6 +809,16 @@ router.get('/consulta-pdv/buscar', (req, res) => {
         OR LOWER(COALESCE(p.codigo, '')) LIKE LOWER(?)
         OR LOWER(COALESCE(p.codigo_barras, '')) LIKE LOWER(?)
         OR (${replaceChain}) LIKE ?
+        OR EXISTS (
+          SELECT 1 FROM produto_identificadores pi
+          WHERE pi.produto_id = p.id
+            AND pi.tipo = 'PLU'
+            AND COALESCE(pi.ativo, 1) = 1
+            AND (
+              TRIM(pi.codigo) = ?
+              OR LOWER(pi.codigo) LIKE LOWER(?)
+            )
+          )
       )
       ${filtroFiscal}
     ORDER BY match_exato DESC, p.nome ASC
@@ -743,12 +829,15 @@ router.get('/consulta-pdv/buscar', (req, res) => {
     buscaNumero,
     termo,
     termo,
+    buscaNumero,
     hoje,
     hoje,
     buscaNumero,
     buscaLike,
     buscaLike,
-    buscaLikeNormalized
+    buscaLikeNormalized,
+    buscaNumero,
+    buscaLike
   ], (err, rows) => {
     if (err) {
       console.error('Erro na consulta de produtos PDV:', err.message);
@@ -1871,6 +1960,7 @@ router.post('/', (req, res) => {
     ncm, cfop, csosn, origem, cest, codigo_barras,
     aliquota_icms, aliquota_pis, aliquota_cofins,
     controlar_validade,
+    controla_estoque,
     produto_fracionado, vendido_por_peso, produto_pesavel,
     peso_total_compra, valor_total_compra, custo_por_kg,
     venda_atacado,
@@ -1908,6 +1998,7 @@ router.post('/', (req, res) => {
     : null;
 
   const controlarValidade = controlar_validade ? 1 : 0;
+  const controlaEstoque = normalizarFlagControlaEstoque(controla_estoque);
   const flagFracionado = resolverFlagProdutoFracionado({
     produto_fracionado,
     vendido_por_peso,
@@ -1945,6 +2036,12 @@ router.post('/', (req, res) => {
   console.log('[AUDIT PRODUTO POST] req.body.item_fiscal:', req.body.item_fiscal);
   console.log('[AUDIT PRODUTO POST] item_fiscal gravar INSERT:', itemFiscalGravar);
 
+  resolverCodigoInternoCriacao(codigo, (codigoErr, resolvido) => {
+    if (codigoErr) {
+      return res.status(500).json({ error: codigoErr.message || 'Falha ao gerar código interno.' });
+    }
+    const codigoFinal = resolvido.codigo;
+
   db.run(`
     INSERT INTO produtos (
       codigo, nome, categoria_id, subcategoria_id, unidade,
@@ -1952,21 +2049,22 @@ router.post('/', (req, res) => {
       estoque_atual, estoque_minimo, fornecedor,
       ncm, cfop, csosn, origem, cest, codigo_barras,
       aliquota_icms, aliquota_pis, aliquota_cofins,
-      controlar_validade,
+      controlar_validade, controla_estoque,
       vendido_por_peso, produto_fracionado, peso_total_compra, valor_total_compra, custo_por_kg,
       venda_atacado,
       saldo_fiscal, saldo_nao_fiscal, item_fiscal,
       permite_venda_unidade, peso_medio_unidade, preco_unidade,
       marca_id, observacoes, imagem_principal
     )
-    VALUES (${Array(36).fill('?').join(', ')})
+    VALUES (${Array(37).fill('?').join(', ')})
   `, [
-    codigo, nome, categoria_id, subcategoria_id, unidade,
+    codigoFinal, nome, categoria_id, subcategoria_id, unidade,
     preco_compra, lucro_percentual, preco_venda,
     estoqueInicial, estoque_minimo || 0, fornecedor,
     ncm, cfop, csosn, origem, cest, codigo_barras,
     aliquota_icms, aliquota_pis, aliquota_cofins,
     controlarValidade,
+    controlaEstoque,
     flagFracionado,
     flagFracionado,
     peso_total_compra || 0,
@@ -1986,13 +2084,17 @@ router.post('/', (req, res) => {
     function(err) {
       if (err) {
         console.error('Erro ao criar produto:', err.message);
+        const msg = String(err.message || '');
+        if (/UNIQUE|unique/i.test(msg) && /codigo/i.test(msg)) {
+          return res.status(400).json({ error: 'Já existe um produto com este código interno.' });
+        }
         res.status(500).json({ error: err.message });
         return;
       }
 
       const produtoId = this.lastID;
       // MIP — dual-write codigo/barras/PLU (aguardar antes da resposta para o GET/editar ver o PLU)
-      const camposEspelho = { codigo, codigo_barras };
+      const camposEspelho = { codigo: codigoFinal, codigo_barras };
       if (pluValidacao.informado) {
         camposEspelho.plu = pluValidacao.valor;
       }
@@ -2068,13 +2170,23 @@ router.post('/', (req, res) => {
               acao: 'criar_produto',
               referencia_tipo: 'produto',
               referencia_id: produtoId,
-              detalhes: { nome, codigo, categoria_id, estoque_atual, preco_venda, controlar_validade, faixas_atacado: (atacado_faixas || []).length },
+              detalhes: {
+                nome,
+                codigo: codigoFinal,
+                codigo_gerado_automaticamente: Boolean(resolvido.gerado),
+                categoria_id,
+                estoque_atual,
+                preco_venda,
+                controlar_validade,
+                faixas_atacado: (atacado_faixas || []).length
+              },
               ip_requisicao: req.ip || null
             }).catch((auditErr) => console.error('Erro ao gravar auditoria de criação de produto:', auditErr));
           });
         });
       }
     });
+  });
 });
 
 // Obter estatísticas de vencimentos para o dashboard
@@ -2146,6 +2258,10 @@ router.put('/:id', (req, res) => {
 
   if (controlar_validade !== undefined) {
     bodyUpdates.controlar_validade = controlar_validade ? 1 : 0;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(req.body, 'controla_estoque')) {
+    bodyUpdates.controla_estoque = normalizarFlagControlaEstoque(req.body.controla_estoque);
   }
 
   console.log('[AUDIT PRODUTO PUT] id:', id, 'req.body.item_fiscal:', req.body.item_fiscal);

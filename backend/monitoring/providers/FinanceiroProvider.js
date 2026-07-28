@@ -25,51 +25,55 @@ function zeroPeriodo() {
 
 async function agregarReceberAberto(modo) {
   // modo: 'fiscal' | 'nao_fiscal'
-  const expr = modo === 'fiscal'
-    ? `CASE
-         WHEN v.id IS NULL THEN COALESCE(cr.valor_restante, 0)
-         WHEN COALESCE(v.total, 0) > 0 THEN COALESCE(cr.valor_restante, 0) * (COALESCE(v.valor_fiscal, 0) / v.total)
-         ELSE COALESCE(cr.valor_restante, 0)
-       END`
-    : `CASE
-         WHEN v.id IS NULL THEN 0
-         WHEN COALESCE(v.total, 0) > 0 THEN COALESCE(cr.valor_restante, 0) * (COALESCE(v.valor_nao_fiscal, 0) / v.total)
-         ELSE 0
-       END`;
+  // Hotfix: consome v.valor_fiscal / v.valor_nao_fiscal do Motor (sem rateio).
+  // Contas da mesma venda contam o Motor uma única vez (MAX por venda).
+  const colMotor = modo === 'fiscal' ? 'v.valor_fiscal' : 'v.valor_nao_fiscal';
+  const exprSemVenda = modo === 'fiscal'
+    ? 'COALESCE(cr.valor_restante, 0)'
+    : '0';
 
   const row = await dbGet(
     `SELECT
-       COALESCE(SUM(${expr}), 0) AS valor,
-       COUNT(CASE WHEN (${expr}) > 0.009 THEN 1 END) AS quantidade
-     FROM contas_receber cr
-     LEFT JOIN vendas v ON v.id = cr.venda_id
-     WHERE cr.status IN ('aberto', 'parcial')
-       AND ${sqlExcluirContaVendaCancelada('cr')}`
+       COALESCE(SUM(parcela_motor), 0) AS valor,
+       COUNT(CASE WHEN parcela_motor > 0.009 THEN 1 END) AS quantidade
+     FROM (
+       SELECT
+         CASE
+           WHEN v.id IS NULL THEN ${exprSemVenda}
+           ELSE COALESCE(MAX(${colMotor}), 0)
+         END AS parcela_motor
+       FROM contas_receber cr
+       LEFT JOIN vendas v ON v.id = cr.venda_id
+       WHERE cr.status IN ('aberto', 'parcial')
+         AND ${sqlExcluirContaVendaCancelada('cr')}
+       GROUP BY COALESCE(cr.venda_id, -cr.id)
+     )`
   );
   return { valor: num(row.valor), quantidade: num(row.quantidade) };
 }
 
 async function agregarReceberPeriodo(modo, inicio, fim) {
-  const expr = modo === 'fiscal'
-    ? `CASE
-         WHEN v.id IS NULL THEN COALESCE(cr.valor_parcela, cr.valor_restante, 0)
-         WHEN COALESCE(v.total, 0) > 0 THEN COALESCE(cr.valor_parcela, cr.valor_restante, 0) * (COALESCE(v.valor_fiscal, 0) / v.total)
-         ELSE COALESCE(cr.valor_parcela, cr.valor_restante, 0)
-       END`
-    : `CASE
-         WHEN v.id IS NULL THEN 0
-         WHEN COALESCE(v.total, 0) > 0 THEN COALESCE(cr.valor_parcela, cr.valor_restante, 0) * (COALESCE(v.valor_nao_fiscal, 0) / v.total)
-         ELSE 0
-       END`;
+  const colMotor = modo === 'fiscal' ? 'v.valor_fiscal' : 'v.valor_nao_fiscal';
+  const exprSemVenda = modo === 'fiscal'
+    ? 'COALESCE(cr.valor_parcela, cr.valor_restante, 0)'
+    : '0';
 
   const row = await dbGet(
     `SELECT
-       COALESCE(SUM(${expr}), 0) AS valor,
-       COUNT(CASE WHEN (${expr}) > 0.009 THEN 1 END) AS quantidade
-     FROM contas_receber cr
-     LEFT JOIN vendas v ON v.id = cr.venda_id
-     WHERE date(COALESCE(cr.created_at, cr.data_vencimento)) BETWEEN date(?) AND date(?)
-       AND ${sqlExcluirContaVendaCancelada('cr')}`,
+       COALESCE(SUM(parcela_motor), 0) AS valor,
+       COUNT(CASE WHEN parcela_motor > 0.009 THEN 1 END) AS quantidade
+     FROM (
+       SELECT
+         CASE
+           WHEN v.id IS NULL THEN ${exprSemVenda}
+           ELSE COALESCE(MAX(${colMotor}), 0)
+         END AS parcela_motor
+       FROM contas_receber cr
+       LEFT JOIN vendas v ON v.id = cr.venda_id
+       WHERE date(COALESCE(cr.created_at, cr.data_vencimento)) BETWEEN date(?) AND date(?)
+         AND ${sqlExcluirContaVendaCancelada('cr')}
+       GROUP BY COALESCE(cr.venda_id, -cr.id)
+     )`,
     [inicio, fim]
   );
   return { valor: num(row.valor), quantidade: num(row.quantidade) };

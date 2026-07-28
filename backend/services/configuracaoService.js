@@ -7,6 +7,9 @@ const LEGACY_ELECTRON_PATHS = [
   path.join(__dirname, '..', 'storage', 'config-servidor.json')
 ];
 
+const MENSAGEM_RENOVACAO_PADRAO =
+  'Sua assinatura do CDS Sistemas expira em {dias} dias.';
+
 const DEFAULT = {
   tipoImplantacao: 'ERP_SEM_FISCAL',
   modoOperacao: 'LOCAL',
@@ -15,6 +18,19 @@ const DEFAULT = {
   modo_confirmacao_fiscal: 'TEF',
   // Sprint 1 — módulo opcional (default OFF; zero impacto no PDV)
   habilitar_vendas_entrega: false,
+  // Comercial — Expedição (Pedido → Venda via Núcleo). Independente de fiscal/NF-e/NFC-e.
+  // habilitar_faturamento: chave legada (mesmo valor); NÃO significa módulo fiscal.
+  habilitar_expedicao: false,
+  habilitar_faturamento: false,
+  // Sprint 3.9 — Módulos Licenciados (null = herda do tipo de implantação)
+  modulo_pdv: true,
+  modulo_pedidos: null,
+  modulo_nfe: null,
+  modulo_nfce: null,
+  modulo_historico_vendas: null,
+  modulo_compra_facil: false,
+  modulo_marketplace: false,
+  modulo_crm: false,
   // Sprint 3.1 — impressão inteligente
   imprimir_comprovante_entrega: true,
   imprimir_comprovante_prestacao: true,
@@ -23,7 +39,16 @@ const DEFAULT = {
   // Sprint 3.1 — alertas (horas)
   entrega_alerta_horas_aguardando: 2,
   entrega_alerta_horas_reserva: 4,
-  entrega_alerta_horas_parado: 3
+  entrega_alerta_horas_parado: 3,
+  // Sprint 3.8A/B/C — MIDP V1 (política única PRESERVAR DINHEIRO quando ativar_midp=true)
+  ativar_midp: false,
+  // Sprint 3.9 — Licenciamento CDS (aviso no login; sem bloqueio novo)
+  licenca_dias_aviso: 3,
+  licenca_chave_pix: '',
+  licenca_whatsapp_url: '',
+  licenca_mensagem_renovacao: MENSAGEM_RENOVACAO_PADRAO,
+  // Hotfix RC1.3 — plano exibido na Barra de Status (opcional; senão deriva do tipo)
+  licenca_plano: ''
 };
 
 const TIPOS = ['ERP_SEM_FISCAL', 'ERP_FISCAL', 'ERP_MULTICAIXA'];
@@ -178,7 +203,40 @@ function normalizeBoolFlag(valor, padrao = false) {
   return padrao === true;
 }
 
+/** Tri-state: null = herdar; true/false = explícito (Sprint 3.9). */
+function normalizeTriStateFlag(valor) {
+  if (valor === null || valor === undefined || valor === '') return null;
+  return normalizeBoolFlag(valor, false);
+}
+
+function resolveModuloFlag(valor, herdado) {
+  const tri = normalizeTriStateFlag(valor);
+  if (tri === null) return herdado === true;
+  return tri === true;
+}
+
+/**
+ * RC8.0.3 — Expedição é módulo COMERCIAL.
+ * Fonte: habilitar_expedicao (canônico) ou habilitar_faturamento (legado).
+ * Nunca depende de tipoImplantacao, fiscal, nfe ou nfce.
+ */
+function resolverExpedicaoComercial(obj, padrao = DEFAULT.habilitar_expedicao) {
+  if (obj && Object.prototype.hasOwnProperty.call(obj, 'habilitar_expedicao')) {
+    return normalizeBoolFlag(obj.habilitar_expedicao, padrao);
+  }
+  if (obj && Object.prototype.hasOwnProperty.call(obj, 'habilitar_faturamento')) {
+    return normalizeBoolFlag(obj.habilitar_faturamento, padrao);
+  }
+  return padrao === true;
+}
+
+function normalizeLicencaMensagem(valor) {
+  const texto = String(valor ?? '').trim();
+  return texto || MENSAGEM_RENOVACAO_PADRAO;
+}
+
 function normalizeConfig(obj) {
+  const expedicaoComercial = resolverExpedicaoComercial(obj, DEFAULT.habilitar_expedicao);
   return {
     tipoImplantacao: String(obj?.tipoImplantacao || DEFAULT.tipoImplantacao).toUpperCase(),
     modoOperacao: String(obj?.modoOperacao || DEFAULT.modoOperacao).toUpperCase(),
@@ -189,6 +247,17 @@ function normalizeConfig(obj) {
       obj?.habilitar_vendas_entrega,
       DEFAULT.habilitar_vendas_entrega
     ),
+    habilitar_expedicao: expedicaoComercial,
+    // Legado: mesma flag comercial (API / checkbox antigos). Não é “faturamento fiscal”.
+    habilitar_faturamento: expedicaoComercial,
+    modulo_pdv: resolveModuloFlag(obj?.modulo_pdv, DEFAULT.modulo_pdv === true),
+    modulo_pedidos: normalizeTriStateFlag(obj?.modulo_pedidos),
+    modulo_nfe: normalizeTriStateFlag(obj?.modulo_nfe),
+    modulo_nfce: normalizeTriStateFlag(obj?.modulo_nfce),
+    modulo_historico_vendas: normalizeTriStateFlag(obj?.modulo_historico_vendas),
+    modulo_compra_facil: normalizeBoolFlag(obj?.modulo_compra_facil, DEFAULT.modulo_compra_facil),
+    modulo_marketplace: normalizeBoolFlag(obj?.modulo_marketplace, DEFAULT.modulo_marketplace),
+    modulo_crm: normalizeBoolFlag(obj?.modulo_crm, DEFAULT.modulo_crm),
     imprimir_comprovante_entrega: normalizeBoolFlag(
       obj?.imprimir_comprovante_entrega,
       DEFAULT.imprimir_comprovante_entrega
@@ -217,12 +286,23 @@ function normalizeConfig(obj) {
       1,
       Number(obj?.entrega_alerta_horas_parado ?? DEFAULT.entrega_alerta_horas_parado) || 3
     ),
+    ativar_midp: normalizeBoolFlag(obj?.ativar_midp, DEFAULT.ativar_midp),
+    licenca_dias_aviso: Math.min(30, Math.max(1, Number(obj?.licenca_dias_aviso ?? DEFAULT.licenca_dias_aviso) || 3)),
+    licenca_chave_pix: String(obj?.licenca_chave_pix || '').trim(),
+    licenca_whatsapp_url: String(obj?.licenca_whatsapp_url || '').trim(),
+    licenca_mensagem_renovacao: normalizeLicencaMensagem(obj?.licenca_mensagem_renovacao),
+    licenca_plano: String(obj?.licenca_plano || '').trim(),
     ...normalizePadraoFiscal(obj)
   };
 }
 
 function getModoConfirmacaoFiscal(cfg) {
   return normalizeModoConfirmacaoFiscal((cfg || readConfig()).modo_confirmacao_fiscal);
+}
+
+/** Sprint 3.8C — MIDP V1: quando true, Motor aplica Valor Fiscal Efetivo (política PRESERVAR DINHEIRO). */
+function isMidpAtivado(cfg) {
+  return normalizeBoolFlag((cfg || readConfig()).ativar_midp, DEFAULT.ativar_midp);
 }
 
 function getPadraoFiscal(cfg) {
@@ -245,25 +325,42 @@ function getRecursos(cfg) {
   const config = normalizeConfig(cfg || readConfig());
   const tipo = config.tipoImplantacao;
   const modo = config.modoOperacao;
+  const fiscalBase = tipo === 'ERP_FISCAL' || tipo === 'ERP_MULTICAIXA';
+
+  // Documento fiscal — depende SOMENTE do tipo de implantação + módulos nfe/nfce
+  const nfe = fiscalBase && resolveModuloFlag(config.modulo_nfe, true);
+  const nfce = fiscalBase && resolveModuloFlag(config.modulo_nfce, true);
+
+  // Fluxo comercial: Pedido → Expedição → (opcional) Documento Fiscal
+  // expedicao NÃO herda de fiscal/nfe/nfce/tipoImplantacao.
+  const expedicao = resolverExpedicaoComercial(config) === true;
+  const pedidos = resolveModuloFlag(config.modulo_pedidos, expedicao);
+  const pdv = resolveModuloFlag(config.modulo_pdv, true);
+  // Histórico de Vendas: se não definido, acompanha o PDV (invisibilidade operacional).
+  const historicoVendas = resolveModuloFlag(config.modulo_historico_vendas, pdv);
 
   const recursos = {
-    fiscal: false,
-    nfce: false,
-    nfe: false,
-    nfse: false,
+    // Sprint 3.9 — existência dos módulos (princípio da invisibilidade)
+    pdv,
+    pedidos,
+    // RC8.0.3 — recurso canônico comercial
+    expedicao,
+    // Alias de API legado: /api/faturamento e exigirRecurso('faturamento') = Expedição comercial
+    // (não confundir com “Faturamento” fiscal da nomenclatura RC8.0.1)
+    faturamento: expedicao,
+    vendasEntrega: config.habilitar_vendas_entrega === true,
+    nfe,
+    nfce,
+    historicoVendas,
+    compraFacil: config.modulo_compra_facil === true,
+    marketplace: config.modulo_marketplace === true,
+    crm: config.modulo_crm === true,
+    fiscal: fiscalBase && (nfe || nfce),
+    nfse: fiscalBase,
     multiCaixa: false,
     clienteServidor: false,
-    terminaisPdv: false,
-    // Módulo opcional — independente do tipo de implantação
-    vendasEntrega: config.habilitar_vendas_entrega === true
+    terminaisPdv: false
   };
-
-  if (tipo === 'ERP_FISCAL' || tipo === 'ERP_MULTICAIXA') {
-    recursos.fiscal = true;
-    recursos.nfce = true;
-    recursos.nfe = true;
-    recursos.nfse = true;
-  }
 
   if (tipo === 'ERP_MULTICAIXA') {
     recursos.multiCaixa = true;
@@ -281,7 +378,37 @@ function getRecursos(cfg) {
     ipServidor: config.ipServidor,
     porta: config.porta,
     habilitar_vendas_entrega: config.habilitar_vendas_entrega === true,
+    habilitar_expedicao: expedicao,
+    habilitar_faturamento: expedicao,
+    modulo_pdv: recursos.pdv,
+    modulo_pedidos: pedidos,
+    modulo_nfe: nfe,
+    modulo_nfce: nfce,
+    modulo_historico_vendas: historicoVendas,
+    modulo_compra_facil: recursos.compraFacil,
+    modulo_marketplace: recursos.marketplace,
+    modulo_crm: recursos.crm,
+    licenca_dias_aviso: config.licenca_dias_aviso,
+    licenca_chave_pix: config.licenca_chave_pix,
+    licenca_whatsapp_url: config.licenca_whatsapp_url,
+    licenca_mensagem_renovacao: config.licenca_mensagem_renovacao,
     recursos
+  };
+}
+
+function getLicenciamentoCds(cfg) {
+  const config = normalizeConfig(cfg || readConfig());
+  return {
+    dias_aviso: config.licenca_dias_aviso,
+    // Hotfix RC1.1 — PIX Renovação (chave ou copia e cola)
+    chave_pix: config.licenca_chave_pix,
+    pix_renovacao: config.licenca_chave_pix,
+    plano: config.licenca_plano,
+    whatsapp_url: config.licenca_whatsapp_url,
+    mensagem_renovacao: config.licenca_mensagem_renovacao,
+    // Sprint 3.10 prep — renovação automática via PIX/webhook (não implementada)
+    renovacao_automatica_preparada: true,
+    renovacao_automatica_ativa: false
   };
 }
 
@@ -439,6 +566,52 @@ function saveConfig(obj) {
     habilitar_vendas_entrega: Object.prototype.hasOwnProperty.call(obj || {}, 'habilitar_vendas_entrega')
       ? validation.config.habilitar_vendas_entrega === true
       : current.habilitar_vendas_entrega === true,
+    habilitar_expedicao: (
+      Object.prototype.hasOwnProperty.call(obj || {}, 'habilitar_expedicao')
+      || Object.prototype.hasOwnProperty.call(obj || {}, 'habilitar_faturamento')
+    )
+      ? validation.config.habilitar_expedicao === true
+      : resolverExpedicaoComercial(current) === true,
+    habilitar_faturamento: (
+      Object.prototype.hasOwnProperty.call(obj || {}, 'habilitar_expedicao')
+      || Object.prototype.hasOwnProperty.call(obj || {}, 'habilitar_faturamento')
+    )
+      ? validation.config.habilitar_expedicao === true
+      : resolverExpedicaoComercial(current) === true,
+    ativar_midp: pickBool(obj, 'ativar_midp', validation.config, current),
+    modulo_pdv: Object.prototype.hasOwnProperty.call(obj || {}, 'modulo_pdv')
+      ? validation.config.modulo_pdv === true
+      : current.modulo_pdv !== false,
+    modulo_pedidos: Object.prototype.hasOwnProperty.call(obj || {}, 'modulo_pedidos')
+      ? validation.config.modulo_pedidos
+      : current.modulo_pedidos,
+    modulo_nfe: Object.prototype.hasOwnProperty.call(obj || {}, 'modulo_nfe')
+      ? validation.config.modulo_nfe
+      : current.modulo_nfe,
+    modulo_nfce: Object.prototype.hasOwnProperty.call(obj || {}, 'modulo_nfce')
+      ? validation.config.modulo_nfce
+      : current.modulo_nfce,
+    modulo_historico_vendas: Object.prototype.hasOwnProperty.call(obj || {}, 'modulo_historico_vendas')
+      ? validation.config.modulo_historico_vendas
+      : current.modulo_historico_vendas,
+    modulo_compra_facil: pickBool(obj, 'modulo_compra_facil', validation.config, current),
+    modulo_marketplace: pickBool(obj, 'modulo_marketplace', validation.config, current),
+    modulo_crm: pickBool(obj, 'modulo_crm', validation.config, current),
+    licenca_dias_aviso: Object.prototype.hasOwnProperty.call(obj || {}, 'licenca_dias_aviso')
+      ? validation.config.licenca_dias_aviso
+      : (current.licenca_dias_aviso || DEFAULT.licenca_dias_aviso),
+    licenca_chave_pix: Object.prototype.hasOwnProperty.call(obj || {}, 'licenca_chave_pix')
+      ? validation.config.licenca_chave_pix
+      : (current.licenca_chave_pix || ''),
+    licenca_whatsapp_url: Object.prototype.hasOwnProperty.call(obj || {}, 'licenca_whatsapp_url')
+      ? validation.config.licenca_whatsapp_url
+      : (current.licenca_whatsapp_url || ''),
+    licenca_mensagem_renovacao: Object.prototype.hasOwnProperty.call(obj || {}, 'licenca_mensagem_renovacao')
+      ? validation.config.licenca_mensagem_renovacao
+      : normalizeLicencaMensagem(current.licenca_mensagem_renovacao),
+    licenca_plano: Object.prototype.hasOwnProperty.call(obj || {}, 'licenca_plano')
+      ? validation.config.licenca_plano
+      : (current.licenca_plano || ''),
     imprimir_comprovante_entrega: pickBool(obj, 'imprimir_comprovante_entrega', validation.config, current),
     imprimir_comprovante_prestacao: pickBool(obj, 'imprimir_comprovante_prestacao', validation.config, current),
     imprimir_danfe_nfce_entrega: pickBool(obj, 'imprimir_danfe_nfce_entrega', validation.config, current),
@@ -468,7 +641,27 @@ function savePadraoFiscal(obj) {
 
 function recursoHabilitado(nomeRecurso) {
   const recursos = getRecursos().recursos;
+  // RC8.0.3 — canônico = expedicao; faturamento = alias de API do módulo comercial
+  if (nomeRecurso === 'expedicao' || nomeRecurso === 'faturamento') {
+    return recursos.expedicao === true;
+  }
   return recursos[nomeRecurso] === true;
+}
+
+/** RC8.0.0 — ponto único: módulo fiscal contratado (NF-e e/ou NFC-e). */
+function fiscalHabilitado(cfg) {
+  if (cfg) {
+    return getRecursos(cfg).recursos.fiscal === true;
+  }
+  return recursoHabilitado('fiscal');
+}
+
+/** RC8.0.3 — Expedição (módulo comercial) contratada. Independente de fiscal. */
+function expedicaoHabilitada(cfg) {
+  if (cfg) {
+    return getRecursos(cfg).recursos.expedicao === true;
+  }
+  return recursoHabilitado('expedicao');
 }
 
 function obterModoEstacaoLocal() {
@@ -510,10 +703,12 @@ module.exports = {
   get CONFIG_PATH() { return getConfigPath(); },
   get ELECTRON_CONFIG_PATH() { return getElectronConfigPath(); },
   DEFAULT,
+  MENSAGEM_RENOVACAO_PADRAO,
   TIPOS,
   MODOS,
   MODOS_CONFIRMACAO_FISCAL,
   getModoConfirmacaoFiscal,
+  isMidpAtivado,
   normalizeModoConfirmacaoFiscal,
   getDbDir,
   getConfigPath,
@@ -526,6 +721,8 @@ module.exports = {
   validateConfig,
   ensureConfigFile,
   getRecursos,
+  getLicenciamentoCds,
+  resolveModuloFlag,
   getModoRedeElectron,
   getModoRedeEstacaoElectron,
   readElectronStationConfig,
@@ -533,6 +730,9 @@ module.exports = {
   syncElectronConfig,
   reloadGlobalConfig,
   recursoHabilitado,
+  fiscalHabilitado,
+  expedicaoHabilitada,
+  resolverExpedicaoComercial,
   obterModoEstacaoLocal,
   voltarModoLocalEstacao,
   salvarModoEstacaoLocal,

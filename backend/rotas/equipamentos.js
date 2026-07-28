@@ -4,6 +4,11 @@ const equipamentosController = require('../controllers/equipamentosController');
 
 router.get('/resumo', equipamentosController.resumo);
 router.get('/drivers', equipamentosController.listarDrivers);
+router.post('/discovery', equipamentosController.discovery);
+router.post('/discovery/cancel', equipamentosController.discoveryCancelar);
+router.get('/discovery/sessoes', equipamentosController.discoverySessoes);
+router.get('/identidades', equipamentosController.listarIdentidades);
+router.get('/identidades/:id', equipamentosController.buscarIdentidade);
 router.post('/testar', equipamentosController.testar);
 router.post('/diagnostico', equipamentosController.diagnostico);
 

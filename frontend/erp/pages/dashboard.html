@@ -38,7 +38,7 @@
       <article class="cc-kpi" data-component="DashboardKPI">
         <div class="cc-kpi__head">
           <span class="cc-kpi__icon"><i class="fas fa-coins"></i></span>
-          <p class="cc-label">Faturamento</p>
+          <p class="cc-label">Receita</p>
         </div>
         <div class="cc-value" id="dashboardFaturamento">R$ 0,00</div>
         <p class="cc-legend">Período selecionado</p>
@@ -87,7 +87,7 @@
     <section class="cc-panel" data-component="DashboardSection" aria-label="Operação">
       <div class="cc-section-title"><i class="fas fa-th-large"></i> Operação</div>
       <div class="cc-ops-grid">
-        <article class="cc-op" data-component="DashboardOperationCard">
+        <article class="cc-op" data-component="DashboardOperationCard" data-recurso="pdv">
           <div class="cc-op__top">
             <h3 class="cc-op__name"><i class="fas fa-cash-register"></i> PDV</h3>
             <span class="cc-op__dot" id="ccOpPdvDot" data-tone="ok"></span>
@@ -114,7 +114,7 @@
           <button type="button" class="btn btn-sm btn-outline-primary cc-op__btn" onclick="abrirModuloDashboard('compras')">Abrir</button>
         </article>
 
-        <article class="cc-op" data-component="DashboardOperationCard">
+        <article class="cc-op" data-component="DashboardOperationCard" data-recurso="fiscal">
           <div class="cc-op__top">
             <h3 class="cc-op__name"><i class="fas fa-file-invoice-dollar"></i> Fiscal</h3>
             <span class="cc-op__dot" id="ccOpFiscalDot" data-tone="ok"></span>
@@ -123,7 +123,7 @@
           <button type="button" class="btn btn-sm btn-outline-primary cc-op__btn" onclick="abrirModuloDashboard('fiscal')">Abrir</button>
         </article>
 
-        <article class="cc-op" data-component="DashboardOperationCard">
+        <article class="cc-op" data-component="DashboardOperationCard" data-recurso="fiscal">
           <div class="cc-op__top">
             <h3 class="cc-op__name"><i class="fas fa-inbox"></i> Central Inteligente</h3>
             <span class="cc-op__dot" id="ccOpCentralDot" data-tone="ok"></span>

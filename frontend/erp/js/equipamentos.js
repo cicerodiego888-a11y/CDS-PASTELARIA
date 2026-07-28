@@ -7,6 +7,13 @@ let driversCache = [];
 let presetsLayoutCache = [];
 let layoutAtivoCache = null;
 let filtrosEquipamentos = { tipo: 'balanca', busca: '', status: '', ativo: '' };
+/** @type {Object[]} Cache dos candidatos do Discovery Ethernet (RC1) */
+let discoveryCandidatosCache = [];
+/** @type {number|null} */
+let discoveryProgressTimer = null;
+let discoveryEmAndamento = false;
+/** @type {string} todos|ethernet|serial|usb */
+let discoveryFiltroTransporte = 'todos';
 
 function escapeHtmlEquipamentos(texto) {
     if (texto === null || texto === undefined) return '';
@@ -145,8 +152,51 @@ function renderPaginaEquipamentos(dados) {
                 <small class="text-muted">Cadastro, layout de etiqueta e conexão TCP — fonte oficial do PDV/MIP</small>
             </div>
             <div>
+                <button class="btn btn-outline-success me-2" onclick="descobrirEquipamentosEthernet()"><i class="fas fa-search-location"></i> Descobrir Equipamentos</button>
                 <button class="btn btn-outline-secondary me-2" onclick="diagnosticarEquipamento()"><i class="fas fa-stethoscope"></i> Diagnóstico geral</button>
                 <button class="btn btn-primary" onclick="abrirModalEquipamento()"><i class="fas fa-plus"></i> Nova balança</button>
+            </div>
+        </div>
+
+        <div class="card mb-3 border-success" id="painel-discovery-eq" style="display:none;">
+            <div class="card-header bg-success text-white d-flex justify-content-between align-items-center flex-wrap gap-2">
+                <span><i class="fas fa-network-wired"></i> Discovery — candidatos</span>
+                <div class="d-flex gap-2 align-items-center flex-wrap">
+                    <select class="form-select form-select-sm" id="discovery-filtro-transporte" style="width:auto;min-width:120px;" onchange="discoveryFiltroTransporte=this.value">
+                        <option value="todos" ${discoveryFiltroTransporte === 'todos' ? 'selected' : ''}>Todos</option>
+                        <option value="ethernet" ${discoveryFiltroTransporte === 'ethernet' ? 'selected' : ''}>Ethernet</option>
+                        <option value="serial" ${discoveryFiltroTransporte === 'serial' ? 'selected' : ''}>Serial</option>
+                        <option value="usb" ${discoveryFiltroTransporte === 'usb' ? 'selected' : ''}>USB</option>
+                    </select>
+                    <button type="button" class="btn btn-sm btn-warning" id="btn-cancelar-discovery" style="display:none;" onclick="cancelarDiscoveryEthernet()">
+                        <i class="fas fa-stop"></i> Cancelar
+                    </button>
+                    <button type="button" class="btn btn-sm btn-light" onclick="fecharPainelDiscovery()">Fechar</button>
+                </div>
+            </div>
+            <div class="card-body p-0">
+                <div id="discovery-eq-status" class="px-3 py-2 small text-muted border-bottom"></div>
+                <div class="progress rounded-0" style="height:4px;display:none;" id="discovery-eq-progress-wrap">
+                    <div class="progress-bar progress-bar-striped progress-bar-animated bg-success" id="discovery-eq-progress" style="width:100%"></div>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-sm table-hover mb-0">
+                        <thead>
+                            <tr>
+                                <th>Transporte</th>
+                                <th>Endpoint</th>
+                                <th>Driver</th>
+                                <th>Fabricante/Modelo</th>
+                                <th>Confiança</th>
+                                <th>Identidade</th>
+                                <th>Assinatura</th>
+                                <th>Status</th>
+                                <th>Ações</th>
+                            </tr>
+                        </thead>
+                        <tbody id="discovery-eq-tbody"></tbody>
+                    </table>
+                </div>
             </div>
         </div>
 
@@ -259,6 +309,256 @@ function aplicarFiltrosEquipamentos() {
 function limparFiltrosEquipamentos() {
     filtrosEquipamentos = { tipo: 'balanca', busca: '', status: '', ativo: '' };
     loadEquipamentos();
+}
+
+function fecharPainelDiscovery() {
+    if (discoveryEmAndamento) {
+        cancelarDiscoveryEthernet();
+    }
+    const painel = document.getElementById('painel-discovery-eq');
+    if (painel) painel.style.display = 'none';
+}
+
+function _pararProgressoDiscovery() {
+    discoveryEmAndamento = false;
+    if (discoveryProgressTimer) {
+        clearInterval(discoveryProgressTimer);
+        discoveryProgressTimer = null;
+    }
+    const btnCancel = document.getElementById('btn-cancelar-discovery');
+    const wrap = document.getElementById('discovery-eq-progress-wrap');
+    if (btnCancel) btnCancel.style.display = 'none';
+    if (wrap) wrap.style.display = 'none';
+}
+
+function _iniciarProgressoDiscovery() {
+    discoveryEmAndamento = true;
+    const inicio = Date.now();
+    const btnCancel = document.getElementById('btn-cancelar-discovery');
+    const wrap = document.getElementById('discovery-eq-progress-wrap');
+    const statusEl = document.getElementById('discovery-eq-status');
+    if (btnCancel) btnCancel.style.display = '';
+    if (wrap) wrap.style.display = '';
+    if (discoveryProgressTimer) clearInterval(discoveryProgressTimer);
+    discoveryProgressTimer = setInterval(() => {
+        const seg = ((Date.now() - inicio) / 1000).toFixed(1);
+        if (statusEl) {
+            statusEl.innerHTML = `<span class="spinner-border spinner-border-sm me-2"></span>Varrendo rede Ethernet… <strong>${seg}s</strong>`;
+        }
+    }, 250);
+}
+
+async function cancelarDiscoveryEthernet() {
+    try {
+        await fetch(`${apiUrlEquipamentos()}/equipamentos/discovery/cancel`, {
+            method: 'POST',
+            headers: headersEquipamentos(),
+            body: '{}'
+        });
+        showNotification('Cancelamento solicitado', 'warning');
+    } catch (err) {
+        showNotification(err.message || 'Falha ao cancelar', 'danger');
+    }
+}
+
+function confiancaBadge(confianca) {
+    const n = Number(confianca || 0);
+    const pct = Math.round(n * 100);
+    const cls = n >= 0.8 ? 'success' : (n >= 0.5 ? 'warning' : 'secondary');
+    return `<span class="badge bg-${cls}">${pct}%</span>`;
+}
+
+function renderTabelaDiscovery(candidatos) {
+    const tbody = document.getElementById('discovery-eq-tbody');
+    if (!tbody) return;
+    if (!candidatos.length) {
+        tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-3">Nenhum equipamento encontrado nesta varredura.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = candidatos.map((c, idx) => {
+        let endpoint = '—';
+        if (c.transporte === 'ethernet') {
+            endpoint = `${escapeHtmlEquipamentos(c.ip || '-')}:${escapeHtmlEquipamentos(c.porta || '-')}`;
+        } else if (c.transporte === 'serial') {
+            endpoint = escapeHtmlEquipamentos(c.porta_com || '-');
+        } else if (c.transporte === 'usb') {
+            endpoint = c.vid && c.pid
+                ? `VID ${escapeHtmlEquipamentos(c.vid)} / PID ${escapeHtmlEquipamentos(c.pid)}`
+                : escapeHtmlEquipamentos(c.caminho_dispositivo || '-');
+        }
+        const status = c.ja_cadastrado
+            ? '<span class="badge bg-secondary">Já cadastrado</span>'
+            : '<span class="badge bg-info text-dark">Novo cadastro</span>';
+        const idn = c.identidade || {};
+        const idBadge = badgeIdentidadeDiscovery(idn);
+        const btn = c.ja_cadastrado
+            ? '<button class="btn btn-sm btn-outline-secondary" disabled>Cadastrado</button>'
+            : `<button class="btn btn-sm btn-primary" onclick="cadastrarCandidatoDiscovery(${idx})"><i class="fas fa-plus"></i> Cadastrar</button>`;
+        return `<tr>
+            <td><span class="badge bg-dark">${escapeHtmlEquipamentos(c.transporte || '-')}</span></td>
+            <td><code>${endpoint}</code></td>
+            <td><small>${escapeHtmlEquipamentos(c.driver_codigo || '-')}</small></td>
+            <td>${escapeHtmlEquipamentos(c.fabricante || '-')}<br><small class="text-muted">${escapeHtmlEquipamentos(c.modelo || '-')}</small></td>
+            <td>${confiancaBadge(c.confianca)}</td>
+            <td>${idBadge}</td>
+            <td><small class="text-muted">${escapeHtmlEquipamentos(c.assinatura || '—')}</small></td>
+            <td>${status}</td>
+            <td>${btn}</td>
+        </tr>`;
+    }).join('');
+}
+
+function badgeIdentidadeDiscovery(idn) {
+    if (!idn || !idn.status) {
+        return '<span class="badge bg-light text-muted">—</span>';
+    }
+    const mapa = {
+        novo: { cls: 'success', icon: 'fa-star' },
+        conhecido: { cls: 'primary', icon: 'fa-check' },
+        ip_alterado: { cls: 'warning text-dark', icon: 'fa-exchange-alt' },
+        firmware_alterado: { cls: 'info text-dark', icon: 'fa-microchip' },
+        porta_alterada: { cls: 'warning text-dark', icon: 'fa-plug' },
+        semelhante: { cls: 'secondary', icon: 'fa-question' }
+    };
+    const m = mapa[idn.status] || { cls: 'secondary', icon: 'fa-fingerprint' };
+    const pct = idn.score_pct != null ? `${idn.score_pct}%` : '';
+    const extra = idn.status === 'ip_alterado' && idn.ip_anterior
+        ? `<br><small class="text-muted">${escapeHtmlEquipamentos(idn.ip_anterior)} → ${escapeHtmlEquipamentos(idn.ip_atual || '')}</small>`
+        : '';
+    return `<span class="badge bg-${m.cls}"><i class="fas ${m.icon}"></i> ${escapeHtmlEquipamentos(idn.rotulo || idn.status)}${pct ? ' · ' + pct : ''}</span>${extra}`;
+}
+
+async function descobrirEquipamentosEthernet() {
+    if (discoveryEmAndamento) {
+        showNotification('Já existe uma varredura em andamento', 'info');
+        return;
+    }
+
+    const sel = document.getElementById('discovery-filtro-transporte');
+    if (sel) discoveryFiltroTransporte = sel.value || 'todos';
+
+    const transportes = discoveryFiltroTransporte === 'todos'
+        ? ['ethernet', 'serial', 'usb']
+        : [discoveryFiltroTransporte];
+
+    const painel = document.getElementById('painel-discovery-eq');
+    const statusEl = document.getElementById('discovery-eq-status');
+    if (painel) painel.style.display = '';
+    const tbody = document.getElementById('discovery-eq-tbody');
+    if (tbody) tbody.innerHTML = '<tr><td colspan="9" class="text-center text-muted py-3">Aguarde…</td></tr>';
+    _iniciarProgressoDiscovery();
+
+    try {
+        const resp = await fetch(`${apiUrlEquipamentos()}/equipamentos/discovery`, {
+            method: 'POST',
+            headers: headersEquipamentos(),
+            body: JSON.stringify({
+                transportes,
+                timeoutMs: 800,
+                concorrencia: 32,
+                timeoutMsSerial: 500,
+                concorrenciaSerial: 4,
+                timeoutMsUsb: 500,
+                concorrenciaUsb: 8,
+                persistir_sessao: true
+            })
+        });
+        const body = await resp.json();
+        if (!resp.ok) throw new Error(body.error || 'Falha no discovery');
+
+        discoveryCandidatosCache = body.candidatos || [];
+        renderTabelaDiscovery(discoveryCandidatosCache);
+
+        const meta = body.meta || {};
+        const erros = Array.isArray(body.erros) ? body.erros.length : 0;
+        if (statusEl) {
+            statusEl.innerHTML = [
+                `Transportes: <strong>${escapeHtmlEquipamentos((meta.transportes_executados || transportes).join(', '))}</strong>`,
+                meta.subnet ? `Subnet: <strong>${escapeHtmlEquipamentos(meta.subnet)}</strong>` : '',
+                `Duração: <strong>${Number(meta.duracao_ms || 0)} ms</strong>`,
+                `Probes: <strong>${Number(meta.probes_ok || 0)}/${Number(meta.probes_total || 0)}</strong>`,
+                `Candidatos: <strong>${discoveryCandidatosCache.length}</strong>`,
+                meta.sessao_id ? `Sessão: <strong>#${meta.sessao_id}</strong>` : '',
+                meta.cancelado ? '<span class="text-warning">Cancelado</span>' : '',
+                erros ? `Avisos: <strong>${erros}</strong>` : ''
+            ].filter(Boolean).join(' · ');
+        }
+
+        if (!discoveryCandidatosCache.length) {
+            showNotification(meta.cancelado ? 'Varredura cancelada' : 'Nenhum equipamento encontrado', 'info');
+        } else {
+            showNotification(`${discoveryCandidatosCache.length} candidato(s) encontrado(s)`, 'success');
+        }
+    } catch (err) {
+        if (statusEl) statusEl.textContent = err.message;
+        if (tbody) tbody.innerHTML = `<tr><td colspan="9" class="text-danger text-center py-3">${escapeHtmlEquipamentos(err.message)}</td></tr>`;
+        showNotification(err.message, 'danger');
+    } finally {
+        _pararProgressoDiscovery();
+    }
+}
+
+async function cadastrarCandidatoDiscovery(indice) {
+    const c = discoveryCandidatosCache[indice];
+    if (!c) return showNotification('Candidato inválido', 'warning');
+    if (c.ja_cadastrado) return showNotification('Equipamento já cadastrado', 'info');
+
+    const nomeSug = [
+        c.fabricante || 'Equipamento',
+        c.modelo || '',
+        c.ip || c.porta_com || (c.vid ? `${c.vid}:${c.pid}` : '')
+    ].filter(Boolean).join(' ').trim();
+
+    const nome = window.prompt('Nome para cadastrar o equipamento:', nomeSug);
+    if (!nome) return;
+
+    const payload = {
+        nome: String(nome).trim(),
+        tipo: 'balanca',
+        driver_codigo: c.driver_codigo || null,
+        fabricante: c.fabricante || null,
+        modelo: c.modelo || null,
+        transporte: c.transporte || 'ethernet',
+        ip: c.ip || null,
+        porta_tcp: c.porta != null ? Number(c.porta) : (c.transporte === 'ethernet' ? 9100 : null),
+        porta_com: c.porta_com || null,
+        timeout_ms: 5000,
+        reconnect_auto: false,
+        ativo: true,
+        observacao: [
+            `Discovery RC2`,
+            c.observacoes || '',
+            c.assinatura ? `assinatura=${c.assinatura}` : '',
+            c.caminho_dispositivo ? `path=${c.caminho_dispositivo}` : '',
+            c.vid && c.pid ? `usb=${c.vid}:${c.pid}` : ''
+        ].filter(Boolean).join(' · ')
+    };
+
+    try {
+        const resp = await fetch(`${apiUrlEquipamentos()}/equipamentos`, {
+            method: 'POST',
+            headers: headersEquipamentos(),
+            body: JSON.stringify(payload)
+        });
+        const body = await resp.json();
+        if (!resp.ok) throw new Error(body.error || 'Erro ao cadastrar');
+
+        showNotification(body.message || 'Equipamento cadastrado', 'success');
+        discoveryCandidatosCache[indice] = { ...c, ja_cadastrado: true };
+        const dados = await carregarEquipamentosDados();
+        renderPaginaEquipamentos(dados);
+        const painel = document.getElementById('painel-discovery-eq');
+        if (painel) painel.style.display = '';
+        const statusEl = document.getElementById('discovery-eq-status');
+        if (statusEl) {
+            statusEl.innerHTML = `Cadastrado: <strong>${escapeHtmlEquipamentos(payload.nome)}</strong> · candidatos restantes atualizados`;
+        }
+        const sel = document.getElementById('discovery-filtro-transporte');
+        if (sel) sel.value = discoveryFiltroTransporte;
+        renderTabelaDiscovery(discoveryCandidatosCache);
+    } catch (err) {
+        showNotification(err.message, 'danger');
+    }
 }
 
 function loadEquipamentos() {

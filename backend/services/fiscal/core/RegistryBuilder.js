@@ -208,6 +208,19 @@ function listOfficialDefinitions() {
 
     defs.push(def({
       modelo: ModelType.NFE,
+      operacao: OperationType.CANCELAMENTO,
+      ambiente,
+      uf: UF_SVRS,
+      endpoint: ENDPOINTS.NFE_EVENTO[ambiente],
+      soapAction: ACTION.EVENTO,
+      namespace: NS.EVENTO,
+      versao: '1.00',
+      descricao: `NF-e Cancelamento (${ambiente}) — SVRS`,
+      observacoes: 'Evento 110111 modelo 55. Runtime via cancelamentoRuntime + cancelarNfe.'
+    }));
+
+    defs.push(def({
+      modelo: ModelType.NFE,
       operacao: OperationType.DISTRIBUICAO_DFE,
       ambiente,
       uf: UF_AN,

@@ -12,6 +12,7 @@ const { montarLote } = require('./soapClient');
 const { enviarAutorizacao } = require('./autorizacaoRuntime');
 const { compactarXml, extrairChaveEProtocoloAutorizados } = require('./utils');
 const { validarItensFiscal } = require('./validadorFiscal');
+const { validarXmlFiscal } = require('./validarXmlFiscal');
 const { gerarDanfeHtml } = require('./danfe');
 const { getFiscalSubDir } = require('./paths');
 
@@ -74,6 +75,25 @@ function carregarVenda(vendaId) {
           );
         };
 
+        const carregarPagamentosComerciaisEVoltar = () => {
+          // Valores pagos pelo cliente (visão comercial do DANFE)
+          db.all(
+            'SELECT forma_pagamento, valor FROM venda_pagamentos WHERE venda_id = ? ORDER BY id',
+            [vendaId],
+            (pgErr, pagamentosComerciais) => {
+              if (pgErr) return reject(pgErr);
+              venda.pagamentos_comerciais = pagamentosComerciais || [];
+              if (
+                (!Array.isArray(venda.pagamentos) || venda.pagamentos.length === 0)
+                && venda.pagamentos_comerciais.length > 0
+              ) {
+                venda.pagamentos = venda.pagamentos_comerciais;
+              }
+              carregarTefEVoltar();
+            }
+          );
+        };
+
         db.all(`
           SELECT
             forma_pagamento,
@@ -91,19 +111,8 @@ function carregarVenda(vendaId) {
 
           if (Array.isArray(recebimentos) && recebimentos.length > 0) {
             venda.pagamentos = recebimentos;
-            carregarTefEVoltar();
-            return;
           }
-
-          db.all(
-            "SELECT forma_pagamento, valor FROM venda_pagamentos WHERE venda_id = ?",
-            [vendaId],
-            (pgErr, pagamentos) => {
-              if (pgErr) return reject(pgErr);
-              venda.pagamentos = pagamentos || [];
-              carregarTefEVoltar();
-            }
-          );
+          carregarPagamentosComerciaisEVoltar();
         });
       });
     });
@@ -318,7 +327,64 @@ async function emitirPorVendaId(vendaId) {
     console.warn('Avisos fiscais (homologação):', errosFiscais.join('; '));
   }
 
+  // RC5 — validação de equipamentos via IntegrationService (consulta Heartbeat pela fachada).
+  try {
+    const { modulos } = require('../equipamentos-integracao');
+    const ids = String(process.env.FISCAL_EQUIPAMENTOS_OBRIGATORIOS || '')
+      .split(',')
+      .map((s) => Number(String(s).trim()))
+      .filter(Boolean);
+    if (ids.length) {
+      const check = await modulos.fiscal.antesDaEmissao(
+        { perfil: 'SUPER_ADMIN' },
+        { equipamento_ids: ids }
+      );
+      if (!check.ok) {
+        console.warn('[RC5] Equipamentos indisponíveis na emissão:', JSON.stringify(check.indisponiveis));
+        if (process.env.FISCAL_BLOQUEAR_SEM_EQUIPAMENTO === '1') {
+          return {
+            success: false,
+            status: 'equipamento_indisponivel',
+            message: 'Equipamentos obrigatórios indisponíveis para emissão.',
+            indisponiveis: check.indisponiveis
+          };
+        }
+      }
+    }
+  } catch (eqErr) {
+    console.warn('[RC5] validação equipamentos fiscal:', eqErr.message);
+  }
+
   const xmlBase = buildNfceXml({ config, venda, itens: itensFiscal, numero });
+
+  // RC7.10.4 — aborta emissão se XML inconsistente (antes da assinatura)
+  try {
+    validarXmlFiscal({
+      xml: xmlBase.xmlSemAssinatura,
+      fase: 'pre_assinatura',
+      modeloDoc: '65',
+      validarXsd: false
+    });
+  } catch (validErr) {
+    const notaId = await salvarNota({
+      venda_id: vendaId,
+      numero,
+      serie: config.serie,
+      chave_acesso: xmlBase.chave || '',
+      ambiente: config.ambiente,
+      status: 'erro_validacao',
+      xml_enviado: xmlBase.xmlSemAssinatura,
+      xml_retorno: String(validErr.message || validErr)
+    });
+    return {
+      success: false,
+      notaId,
+      status: 'erro_validacao',
+      message: validErr.message || 'XML fiscal inconsistente.',
+      code: validErr.code || 'XML_INVALIDO',
+      detalhes: validErr.detalhes || null
+    };
+  }
 
   let xmlAssinadoFinal = null;
   let qrCodeUrl = '';
@@ -560,4 +626,72 @@ async function emitirPorVendaId(vendaId) {
   };
 }
 
-module.exports = { emitirPorVendaId };
+/**
+ * Regenera o DANFE com pagamentos atuais (F+NF),
+ * para a impressão não ficar presa ao HTML gerado só com a fatia fiscal.
+ */
+async function obterDanfeHtmlAtualizado(vendaId) {
+  const id = Number(vendaId);
+  if (!id) {
+    throw new Error('Venda inválida para DANFE.');
+  }
+
+  const nota = await new Promise((resolve, reject) => {
+    db.get(
+      `SELECT *
+       FROM nfce_notas
+       WHERE venda_id = ?
+       ORDER BY id DESC
+       LIMIT 1`,
+      [id],
+      (err, row) => (err ? reject(err) : resolve(row || null))
+    );
+  });
+
+  if (!nota) {
+    throw new Error('NFC-e não encontrada para esta venda.');
+  }
+
+  const { venda, itens } = await carregarVenda(id);
+  const config = await getFiscalConfig();
+  const ambiente = Number(nota.ambiente || config.ambiente || 1);
+
+  const danfeHtml = await gerarDanfeHtml({
+    venda: {
+      ...venda,
+      tpAmb: ambiente
+    },
+    itens,
+    itensFiscal: (itens || []).filter(itemEntraNaNfce),
+    empresa: {
+      nome: config.nomeEmpresa,
+      cnpj: config.cnpj,
+      endereco: config.endereco
+    },
+    chave: nota.chave_acesso,
+    numero: nota.numero,
+    serie: nota.serie || config.serie,
+    qrCodeUrl: nota.qr_code_url || '',
+    tributos: null,
+    nota: { tpAmb: ambiente }
+  });
+
+  if (nota.id && danfeHtml) {
+    db.run(
+      `UPDATE nfce_notas
+       SET danfe_html = ?, updated_at = datetime('now', 'localtime')
+       WHERE id = ?`,
+      [danfeHtml, nota.id],
+      (err) => {
+        if (err) console.error('Erro ao atualizar danfe_html:', err.message);
+      }
+    );
+  }
+
+  return {
+    html: danfeHtml,
+    nota
+  };
+}
+
+module.exports = { emitirPorVendaId, obterDanfeHtmlAtualizado };

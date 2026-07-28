@@ -25,4 +25,4 @@ Registrado em `MiipBootstrap` → `MotorRegistry` → executado pelo `MiipPipeli
 
 **Sprint 3.1:** consulta produtos exclusivamente via `ProdutoRepository` → `ProdutoSnapshot`. Sem SQL no engine.
 
-Documentação completa: [`docs/MIIP_MOTOR_GTIN.md`](../../../../docs/MIIP_MOTOR_GTIN.md).
+Documentação completa: [`docs/motores/miip/MIIP_MOTOR_GTIN.md`](../../../../docs/motores/miip/MIIP_MOTOR_GTIN.md).

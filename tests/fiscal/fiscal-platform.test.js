@@ -358,8 +358,8 @@ async function main() {
       assert.ok(fs.existsSync(path.join(base, arquivo)), `faltou ${arquivo}`);
     }
     assert.ok(
-      fs.existsSync(path.join(__dirname, '../../docs/FISCAL_PLATFORM.md')),
-      'faltou docs/FISCAL_PLATFORM.md'
+      fs.existsSync(path.join(__dirname, '../../docs/fiscal/FISCAL_PLATFORM.md')),
+      'faltou docs/fiscal/FISCAL_PLATFORM.md'
     );
   });
 

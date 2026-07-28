@@ -7,10 +7,14 @@
  */
 
 const express = require('express');
-const MiipService = require('../motores/miip/MiipService');
+const { getMiipService } = require('../motores/miip/getMiipService');
 const { mapearItemCompraParaIdentificavel } = require('../motores/miip/utils/mapearItemCompra');
 
 const router = express.Router();
+
+function miip() {
+  return getMiipService();
+}
 
 const MOTOR_LABELS = Object.freeze({
   motor_gtin: 'GTIN / Código de Barras',
@@ -104,7 +108,7 @@ router.post('/identificar-lote', async (req, res) => {
 
     if (itens.length === 0) {
       return res.json({
-        usarMiip: MiipService.estaHabilitado(),
+        usarMiip: miip().estaHabilitado(),
         itens: []
       });
     }
@@ -124,12 +128,12 @@ router.post('/identificar-lote', async (req, res) => {
         fornecedor_nome: bruto.fornecedor_nome || bruto.fornecedorNome || fornecedorNome
       });
 
-      const miipResp = await MiipService.identificar(item, contexto);
+      const miipResp = await miip().identificar(item, contexto);
       resultados.push(formatarSugestaoMiip(indice, miipResp));
     }
 
     return res.json({
-      usarMiip: MiipService.estaHabilitado(),
+      usarMiip: miip().estaHabilitado(),
       total: resultados.length,
       totalSugestoes: resultados.filter((r) => r.encontrado).length,
       itens: resultados
@@ -150,7 +154,7 @@ router.post('/feedback', async (req, res) => {
     const feedback = req.body || {};
     const usuarioId = req.user?.id ?? feedback.usuarioId ?? feedback.usuario_id ?? null;
 
-    const resultado = await MiipService.registrarFeedback({
+    const resultado = await miip().registrarFeedback({
       ...feedback,
       confirmado: feedback.confirmado === true,
       usuarioId
@@ -170,7 +174,7 @@ router.post('/feedback', async (req, res) => {
  */
 router.get('/health', async (req, res) => {
   try {
-    const health = await MiipService.healthCheck();
+    const health = await miip().healthCheck();
     const status = health.pronto ? 200 : 503;
     return res.status(status).json(health);
   } catch (error) {

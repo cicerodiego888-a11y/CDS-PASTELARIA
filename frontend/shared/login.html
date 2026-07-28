@@ -94,6 +94,32 @@
             </form>
         </section>
 
+        <!-- Hotfix RC2.2 — troca obrigatória no primeiro acesso -->
+        <section id="primeiroAcessoPanel" class="lx-card lx-primeiro-acesso" hidden aria-label="Primeiro acesso">
+            <h2 class="lx-pa-title">Primeiro acesso</h2>
+            <p class="lx-pa-text">Por segurança, é necessário alterar a senha do administrador.</p>
+            <form id="primeiroAcessoForm" autocomplete="off" novalidate>
+                <div class="lx-field">
+                    <label for="novaSenha">Nova senha</label>
+                    <div class="lx-input-wrap">
+                        <i class="fas fa-key" aria-hidden="true"></i>
+                        <input type="password" class="lx-input" id="novaSenha" name="novaSenha" required minlength="4" autocomplete="new-password">
+                    </div>
+                </div>
+                <div class="lx-field">
+                    <label for="confirmarSenha">Confirmar senha</label>
+                    <div class="lx-input-wrap">
+                        <i class="fas fa-lock" aria-hidden="true"></i>
+                        <input type="password" class="lx-input" id="confirmarSenha" name="confirmarSenha" required minlength="4" autocomplete="new-password">
+                    </div>
+                </div>
+                <div id="primeiro-acesso-error" class="lx-error" role="alert" aria-live="polite"></div>
+                <button type="submit" class="lx-btn" id="btn-salvar-senha">
+                    <span class="lx-btn__label"><i class="fas fa-save" aria-hidden="true"></i> Salvar</span>
+                </button>
+            </form>
+        </section>
+
         <footer class="lx-footer">
             <p class="lx-footer__name" id="loginFooterName"></p>
             <p class="lx-footer__meta">
@@ -119,6 +145,8 @@
     <script src="/shared/js/estacaoHostname.js"></script>
     <script src="/shared/js/access-control.js"></script>
     <script src="/shared/js/login-experience.js"></script>
+    <script src="/shared/js/licenca-aviso-login.js"></script>
+    <script src="/shared/js/cds-obs-rum.js"></script>
     <script src="/shared/js/login.js"></script>
 </body>
 </html>

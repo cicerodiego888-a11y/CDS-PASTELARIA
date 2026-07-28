@@ -9,7 +9,8 @@ const {
   obterQuantidadeImpressao,
   obterValorImpressao,
   obterQuantidadeFiscalDanfe,
-  obterValorFiscalItemDanfe
+  obterValorFiscalItemDanfe,
+  obterPagamentosComerciaisDanfe
 } = require('../../backend/services/fiscal/danfe');
 
 let passou = 0;
@@ -109,6 +110,94 @@ async function main() {
 
     assert.ok(html.includes('Arroz'));
     assert.ok(!html.includes('Refrigerante'));
+  });
+
+  await test('DANFE pagamentos: valor pago pelo cliente (fiscal + não fiscal)', async () => {
+    const html = await gerarDanfeHtml({
+      venda: {
+        total: 10,
+        desconto: 0,
+        valor_fiscal: 2,
+        valor_nao_fiscal: 8,
+        pagamentos: [
+          { forma_pagamento: 'dinheiro', valor: 2, tipo_recebimento: 'fiscal' },
+          { forma_pagamento: 'dinheiro', valor: 8, tipo_recebimento: 'nao_fiscal' }
+        ]
+      },
+      itens: [itemArroz],
+      itensFiscal: [itemArroz],
+      empresa: { nome: 'Loja', cnpj: '65957340000150', endereco: '' },
+      chave: 'CHAVE123',
+      numero: 3,
+      serie: 1,
+      qrCodeUrl: '',
+      tributos: null,
+      nota: { tpAmb: 1 }
+    });
+
+    assert.ok(html.includes('Dinheiro: R$ 10,00'), 'deve somar o valor comercial pago');
+    assert.ok(!html.includes('Dinheiro: R$ 2,00'), 'não deve mostrar só a fatia fiscal');
+  });
+
+  await test('DANFE prioriza recebimentos F+NF mesmo com venda_pagamentos incompleto', async () => {
+    const html = await gerarDanfeHtml({
+      venda: {
+        total: 4,
+        desconto: 0,
+        valor_fiscal: 2,
+        valor_nao_fiscal: 2,
+        forma_pagamento: 'cartao_credito',
+        pagamentos: [
+          { forma_pagamento: 'cartao_credito', valor: 2, tipo_recebimento: 'fiscal' },
+          { forma_pagamento: 'pix', valor: 2, tipo_recebimento: 'nao_fiscal' }
+        ],
+        pagamentos_comerciais: [
+          { forma_pagamento: 'cartao_credito', valor: 2 }
+        ]
+      },
+      itens: [itemArroz],
+      itensFiscal: [itemArroz],
+      empresa: { nome: 'Loja', cnpj: '65957340000150', endereco: '' },
+      chave: 'CHAVE123',
+      numero: 4,
+      serie: 1,
+      qrCodeUrl: '',
+      tributos: null,
+      nota: { tpAmb: 1 }
+    });
+
+    assert.ok(html.includes('Cartão Crédito: R$ 2,00'), 'mostra cartão fiscal');
+    assert.ok(html.includes('Pix: R$ 2,00'), 'mostra pix não fiscal');
+    assert.ok(html.includes('Total: R$ 4.00'), 'total comercial');
+  });
+
+  await test('DANFE prioriza pagamentos_comerciais quando recebimentos ainda incompletos', async () => {
+    const html = await gerarDanfeHtml({
+      venda: {
+        total: 10,
+        desconto: 0,
+        valor_fiscal: 2,
+        valor_nao_fiscal: 8,
+        pagamentos: [
+          { forma_pagamento: 'dinheiro', valor: 2, tipo_recebimento: 'fiscal' }
+        ],
+        pagamentos_comerciais: [
+          { forma_pagamento: 'dinheiro', valor: 10 }
+        ]
+      },
+      itens: [itemArroz],
+      itensFiscal: [itemArroz],
+      empresa: { nome: 'Loja', cnpj: '65957340000150', endereco: '' },
+      chave: 'CHAVE123',
+      numero: 5,
+      serie: 1,
+      qrCodeUrl: '',
+      tributos: null,
+      nota: { tpAmb: 1 }
+    });
+
+    assert.ok(html.includes('Dinheiro: R$ 10,00'), 'usa valor comercial pago pelo cliente');
+    assert.ok(!html.includes('Dinheiro: R$ 2,00'), 'ignora fatia fiscal isolada');
   });
 
   console.log(`\nResultado: ${passou} passou, ${falhou} falhou\n`);

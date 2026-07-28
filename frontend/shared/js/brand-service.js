@@ -9,7 +9,7 @@
   const NOME = 'CDS Sistemas';
   const NOME_CURTO = 'CDS';
   const NOME_DISPLAY = 'CDS SISTEMAS';
-  const SLOGAN = 'Inteligência para gerir, tecnologia para crescer.';
+  const SLOGAN = 'Inteligência para gerir, Tecnologia para crescer';
   const SUBTITULO = 'Plataforma Inteligente de Gestão';
   const VERSAO = '1.0.0';
   const COPYRIGHT = '© ' + new Date().getFullYear() + ' CDS Sistemas';
@@ -67,12 +67,12 @@
 
   /** HTML padrão da marca na sidebar (quando não há logo da empresa). */
   function htmlSidebarPadrao(modulo) {
-    const mod = modulo || (global.CDS_MODULE === 'pdv' ? 'PDV' : 'ERP');
     return (
-      '<img src="' + url('logoAuxiliar') + '" alt="' + NOME + '" class="img-fluid brand-sidebar-logo" ' +
-      'style="max-height:72px;object-fit:contain;margin:0 auto 0.35rem;display:block;">' +
-      '<h5 class="text-white mb-0" style="font-size:0.95rem;">' + NOME_CURTO + '</h5>' +
-      '<small class="text-muted">' + mod + '</small>'
+      '<img src="' + url('logoOficial') + '" alt="' + NOME + '" class="img-fluid brand-sidebar-logo" ' +
+      'style="max-height:88px;object-fit:contain;margin:0 auto 0.35rem;display:block;">' +
+      '<small class="text-muted brand-sidebar-slogan" style="display:block;line-height:1.25;max-width:11.5rem;margin:0.15rem auto 0;">' +
+        SLOGAN +
+      '</small>'
     );
   }
 

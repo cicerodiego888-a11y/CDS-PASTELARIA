@@ -420,6 +420,21 @@ function executarAberturaCaixa(req, res, { valorInicial, terminalId, caixaConfig
                   ip_requisicao: req.ip || null
                 }).catch((auditErr) => console.error('Erro ao gravar auditoria de abertura de caixa:', auditErr));
 
+                // RC5 — verificação de equipamentos via IntegrationService (não acessa Drivers).
+                try {
+                  const { modulos } = require('../services/equipamentos-integracao');
+                  const ids = String(process.env.PDV_EQUIPAMENTOS_OBRIGATORIOS || '')
+                    .split(',')
+                    .map((s) => Number(String(s).trim()))
+                    .filter(Boolean);
+                  modulos.pdv.naAberturaCaixa(req.user || {}, {
+                    equipamento_ids: ids,
+                    tipos: ['balanca']
+                  }).catch((e) => console.warn('[RC5] verificação equipamentos PDV:', e.message));
+                } catch (e) {
+                  console.warn('[RC5] integração equipamentos indisponível na abertura:', e.message);
+                }
+
                 res.json({
                   message: 'Caixa aberto com sucesso.',
                   caixa_id: caixaTurnoId,

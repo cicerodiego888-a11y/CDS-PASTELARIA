@@ -23,7 +23,7 @@ const {
   resolverQuantidadesCompraItem
 } = require('../lib/motorConversaoUnidades');
 const { emitirNFeDevolucaoCompra } = require('../services/fiscal/nfeDevolucaoCompra');
-const MiipService = require('../motores/miip/MiipService');
+const { getMiipService } = require('../motores/miip/getMiipService');
 const centralOrchestrator = require('../motores/central-entradas/CentralEntradasOrchestrator');
 const { logCentralErro } = require('../motores/central-entradas/utils/centralLog');
 const EntradasProdutoIdentificacaoService = require('../motores/produto-identidade/services/EntradasProdutoIdentificacaoService');
@@ -360,6 +360,7 @@ function ensureProductForItem(item, callback) {
   }
 
   const seguirComMiipOuLegado = (mipJaTentou) => {
+    const MiipService = getMiipService();
     if (!MiipService.estaHabilitado()) {
       MiipService.registrarIntegracao({
         evento: 'legado_feature_flag',

@@ -31,7 +31,7 @@ const DRIVER_CATALOG = [
     transportes: ['serial', 'ethernet'],
     status: 'estrutura',
     versao_minima: '1.0.0',
-    modulo: null,
+    modulo: './filizola/FilizolaPlatinaDriver',
     nome_exibicao: 'Filizola Platina'
   },
   {
@@ -43,7 +43,7 @@ const DRIVER_CATALOG = [
     transportes: ['serial'],
     status: 'estrutura',
     versao_minima: '1.0.0',
-    modulo: null,
+    modulo: './urano/UranoPopDriver',
     nome_exibicao: 'Urano POP'
   },
   {
@@ -55,7 +55,7 @@ const DRIVER_CATALOG = [
     transportes: ['serial', 'usb'],
     status: 'estrutura',
     versao_minima: '1.0.0',
-    modulo: null,
+    modulo: './aclas/AclasLs2Driver',
     nome_exibicao: 'Aclas LS2'
   },
   {
@@ -67,7 +67,7 @@ const DRIVER_CATALOG = [
     transportes: ['serial'],
     status: 'estrutura',
     versao_minima: '1.0.0',
-    modulo: null,
+    modulo: './elgin/ElginDp30Driver',
     nome_exibicao: 'Elgin DP30'
   },
   {
@@ -79,8 +79,32 @@ const DRIVER_CATALOG = [
     transportes: ['serial'],
     status: 'estrutura',
     versao_minima: '1.0.0',
-    modulo: null,
+    modulo: './bematech/BematechBp5Driver',
     nome_exibicao: 'Bematech BP5'
+  },
+  {
+    codigo: 'GENERIC_SERIAL',
+    fabricante: 'Genérico',
+    modelo: 'Serial',
+    tipo: 'balanca',
+    protocolos: ['serial-generico'],
+    transportes: ['serial'],
+    status: 'estrutura',
+    versao_minima: '1.0.0',
+    modulo: './comum/GenericSerialDriver',
+    nome_exibicao: 'Genérico Serial (Discovery)'
+  },
+  {
+    codigo: 'GENERIC_USB',
+    fabricante: 'Genérico',
+    modelo: 'USB',
+    tipo: 'balanca',
+    protocolos: ['usb-generico'],
+    transportes: ['usb'],
+    status: 'estrutura',
+    versao_minima: '1.0.0',
+    modulo: './comum/GenericUsbDriver',
+    nome_exibicao: 'Genérico USB (Discovery)'
   }
 ];
 

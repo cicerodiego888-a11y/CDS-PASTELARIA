@@ -1,4 +1,4 @@
-const QRCode = require('qrcode');
+const QRCodeService = require('../qrcode/QRCodeService');
 
 function montarPagamentosDanfe(pagamentos) {
   if (!Array.isArray(pagamentos) || pagamentos.length === 0) {
@@ -8,6 +8,92 @@ function montarPagamentosDanfe(pagamentos) {
   return pagamentos.map(p => {
     return `${formatarFormaPagamento(p.forma_pagamento)}: ${formatarMoeda(p.valor)}`;
   }).join('\n');
+}
+
+/**
+ * Visão comercial do DANFE: o que o cliente pagou,
+ * independente da alocação fiscal × não fiscal (MIDP).
+ * Agrega por forma_pagamento somando todas as parcelas.
+ */
+function obterPagamentosComerciaisDanfe(pagamentos = []) {
+  const lista = Array.isArray(pagamentos) ? pagamentos : [];
+  if (lista.length === 0) return [];
+
+  const mapa = new Map();
+  for (const p of lista) {
+    const forma = String(p.forma_pagamento || p.forma || '').toLowerCase().trim() || 'outro';
+    const valor = Number(p.valor || 0);
+    if (!Number.isFinite(valor) || valor <= 0) continue;
+    mapa.set(forma, Math.round(((mapa.get(forma) || 0) + valor) * 100) / 100);
+  }
+
+  return Array.from(mapa.entries()).map(([forma_pagamento, valor]) => ({
+    forma_pagamento,
+    valor
+  }));
+}
+
+function somarPagamentosDanfe(pagamentos = []) {
+  return Math.round(
+    (Array.isArray(pagamentos) ? pagamentos : []).reduce(
+      (s, p) => s + Number(p.valor || 0),
+      0
+    ) * 100
+  ) / 100;
+}
+
+/**
+ * Cupom do cliente: pagamentos devem fechar com o total da venda.
+ * Prioriza recebimentos F+NF; não usa fatia fiscal isolada.
+ */
+function resolverPagamentosExibicaoDanfe(venda = {}) {
+  const total = Math.round(Number(venda.total || 0) * 100) / 100;
+  const recebimentos = Array.isArray(venda.pagamentos) ? venda.pagamentos : [];
+  const comerciais = Array.isArray(venda.pagamentos_comerciais)
+    ? venda.pagamentos_comerciais
+    : [];
+
+  const fromRec = obterPagamentosComerciaisDanfe(recebimentos);
+  const somaRec = somarPagamentosDanfe(fromRec);
+  if (fromRec.length > 0 && (total <= 0 || Math.abs(somaRec - total) <= 0.01)) {
+    return fromRec;
+  }
+
+  const fromCom = obterPagamentosComerciaisDanfe(comerciais);
+  const somaCom = somarPagamentosDanfe(fromCom);
+  if (fromCom.length > 0 && (total <= 0 || Math.abs(somaCom - total) <= 0.01)) {
+    return fromCom;
+  }
+
+  // Junta F+NF quando a soma parcial ainda não fecha o total
+  const mesclado = obterPagamentosComerciaisDanfe([...recebimentos, ...comerciais]);
+  const somaMesclado = somarPagamentosDanfe(mesclado);
+  if (mesclado.length > 0 && (total <= 0 || Math.abs(somaMesclado - total) <= 0.01)) {
+    return mesclado;
+  }
+
+  if (fromRec.length > 0 && total > 0 && somaRec < total - 0.01) {
+    const falta = Math.round((total - somaRec) * 100) / 100;
+    const formasRec = new Set(fromRec.map((p) => p.forma_pagamento));
+    const extra = fromCom.find((p) => !formasRec.has(p.forma_pagamento));
+    const formaFalta = extra?.forma_pagamento
+      || String(venda.forma_pagamento || fromRec[0].forma_pagamento || 'outro').toLowerCase();
+    return obterPagamentosComerciaisDanfe([
+      ...fromRec,
+      { forma_pagamento: formaFalta, valor: falta }
+    ]);
+  }
+
+  if (fromCom.length === 1 && total > 0) {
+    return [{ forma_pagamento: fromCom[0].forma_pagamento, valor: total }];
+  }
+
+  const formaVenda = String(venda.forma_pagamento || '').toLowerCase().trim();
+  if (formaVenda && formaVenda !== 'misto' && total > 0) {
+    return [{ forma_pagamento: formaVenda, valor: total }];
+  }
+
+  return fromRec.length ? fromRec : fromCom;
 }
 
 function formatarFormaPagamento(forma) {
@@ -97,15 +183,15 @@ async function gerarDanfeHtml({
     `
     : '';
 
-  const qrCodeDataUrl = qrCodeUrl ? await QRCode.toDataURL(qrCodeUrl) : '';
+  const qrCodeDataUrl = qrCodeUrl
+    ? (await QRCodeService.gerarLink(qrCodeUrl, { formato: 'dataurl', largura: 220, uso: 'danfe' })).imagem || ''
+    : '';
 
   const itensImpressao = Array.isArray(itensDanfe) ? itensDanfe : [];
 
-  const pagamentosLista = Array.isArray(venda.pagamentos) ? venda.pagamentos : [];
-  const possuiTipoRecebimento = pagamentosLista.some((p) => p.tipo_recebimento);
-  const pagamentosFiscal = possuiTipoRecebimento
-    ? pagamentosLista.filter((p) => p.tipo_recebimento === 'fiscal')
-    : pagamentosLista;
+  // Cupom: todos os pagamentos do cliente (F+NF), fechando com o total.
+  const pagamentosComerciais = resolverPagamentosExibicaoDanfe(venda);
+  const textoPagamentos = montarPagamentosDanfe(pagamentosComerciais);
 
   const valorTotalVenda = Number(venda.total ?? 0) > 0
     ? Number(venda.total)
@@ -176,7 +262,7 @@ async function gerarDanfeHtml({
   <div class="sep"></div>
   <p>Total: R$ ${valorTotalVenda.toFixed(2)}</p>
   <p>Desconto: R$ ${Number(venda.desconto || 0).toFixed(2)}</p>
-  ${montarPagamentosDanfe(pagamentosFiscal) ? `<p>${montarPagamentosDanfe(pagamentosFiscal).replace(/\n/g, '<br>')}</p>` : ''}
+  ${textoPagamentos ? `<p>${textoPagamentos.replace(/\n/g, '<br>')}</p>` : ''}
   <div class="sep"></div>
   ${tributosHtml}
   <div class="sep"></div>
@@ -191,6 +277,8 @@ async function gerarDanfeHtml({
 
 module.exports = {
   gerarDanfeHtml,
+  obterPagamentosComerciaisDanfe,
+  resolverPagamentosExibicaoDanfe,
   obterQuantidadeImpressao,
   obterValorImpressao,
   obterQuantidadeFiscalDanfe,

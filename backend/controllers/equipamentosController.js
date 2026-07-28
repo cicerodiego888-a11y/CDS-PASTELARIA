@@ -24,6 +24,94 @@ async function listar(req, res) {
   }
 }
 
+async function discovery(req, res) {
+  try {
+    const discoveryService = require('../motores/equipamentos/discovery/DiscoveryService');
+    const identidadeService = require('../motores/equipamentos/identidade/IdentidadeService');
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const transportes = Array.isArray(body.transportes) && body.transportes.length
+      ? body.transportes
+      : ['ethernet'];
+    const resultado = await discoveryService.descobrirTodos({
+      ...body,
+      transportes,
+      persistir_sessao: body.persistir_sessao !== false
+    });
+
+    // MIE RC2.1 — enriquece após Discovery (não altera o motor de discovery)
+    let candidatos = resultado.candidatos || [];
+    if (body.enriquecer_identidade !== false) {
+      candidatos = await identidadeService.enriquecerCandidatos(candidatos, {
+        sessao_id: resultado.meta?.sessao_id || null
+      });
+    }
+
+    res.json({
+      success: resultado.sucesso !== false,
+      sucesso: resultado.sucesso,
+      candidatos,
+      erros: resultado.erros,
+      meta: {
+        ...resultado.meta,
+        identidade_enriquecida: body.enriquecer_identidade !== false
+      }
+    });
+  } catch (error) {
+    await loggerService.error('Erro no discovery de equipamentos', {
+      operacao: 'discovery',
+      contexto: { erro: error.message }
+    });
+    responderErro(res, error, 'Erro ao descobrir equipamentos.', 500);
+  }
+}
+
+async function discoverySessoes(req, res) {
+  try {
+    const sessions = require('../motores/equipamentos/repositories/DiscoverySessionsRepository');
+    const lista = await sessions.listarSessoes(req.query?.limite || 20);
+    res.json({ success: true, sessoes: lista });
+  } catch (error) {
+    responderErro(res, error, 'Erro ao listar sessões de discovery.', 500);
+  }
+}
+
+async function listarIdentidades(req, res) {
+  try {
+    const identidadeService = require('../motores/equipamentos/identidade/IdentidadeService');
+    const identidades = await identidadeService.listar(req.query?.limite || 50);
+    res.json({ success: true, identidades });
+  } catch (error) {
+    responderErro(res, error, 'Erro ao listar identidades.', 500);
+  }
+}
+
+async function buscarIdentidade(req, res) {
+  try {
+    const identidadeService = require('../motores/equipamentos/identidade/IdentidadeService');
+    const identidade = await identidadeService.buscarPorId(req.params.id);
+    if (!identidade) {
+      return res.status(404).json({ success: false, error: 'Identidade não encontrada' });
+    }
+    res.json({ success: true, identidade });
+  } catch (error) {
+    responderErro(res, error, 'Erro ao buscar identidade.', 500);
+  }
+}
+
+async function discoveryCancelar(req, res) {
+  try {
+    const discoveryService = require('../motores/equipamentos/discovery/DiscoveryService');
+    discoveryService.cancelar();
+    res.json({
+      success: true,
+      cancelado: true,
+      em_execucao: discoveryService.estaEmExecucao()
+    });
+  } catch (error) {
+    responderErro(res, error, 'Erro ao cancelar discovery.', 500);
+  }
+}
+
 async function buscarPorId(req, res) {
   try {
     const equipamento = await equipamentosService.buscarPorId(req.params.id);
@@ -277,6 +365,11 @@ module.exports = {
   listarDrivers,
   testar,
   diagnostico,
+  discovery,
+  discoveryCancelar,
+  discoverySessoes,
+  listarIdentidades,
+  buscarIdentidade,
   resumo,
   conexao,
   logs,

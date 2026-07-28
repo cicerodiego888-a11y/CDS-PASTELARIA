@@ -262,6 +262,60 @@ class SDKDetector {
       observacao: 'Detecção indicativa — operação via CliSiTef ou PayGo'
     };
   }
+
+  /**
+   * API pública — reutilizada pelo Discovery Engine (RC2).
+   * @returns {Array<{ porta: string|null, nome: string, descricao: string }>}
+   */
+  listarPortasCOM() {
+    return this._listarPortasCOM();
+  }
+
+  /**
+   * Enumera dispositivos USB/PnP com VID/PID quando disponíveis (Windows).
+   * Reutiliza a mesma abordagem PowerShell do detector TEF.
+   * @returns {Array<Object>}
+   */
+  listarDispositivosUsb() {
+    if (process.platform !== 'win32') {
+      return [];
+    }
+
+    try {
+      const script = [
+        "Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |",
+        "Where-Object { $_.InstanceId -match 'USB\\\\VID_' -or $_.Class -match 'USB|Ports' } |",
+        "Select-Object FriendlyName, InstanceId, Manufacturer, Status, Class |",
+        "ConvertTo-Json -Compress"
+      ].join(' ');
+      const pnp = execSync(
+        `powershell -NoProfile -Command "${script}"`,
+        { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 15000 }
+      );
+      const dispositivos = JSON.parse(pnp || '[]');
+      const lista = Array.isArray(dispositivos) ? dispositivos : (dispositivos ? [dispositivos] : []);
+
+      return lista.filter(Boolean).map((d) => {
+        const instanceId = String(d.InstanceId || '');
+        const vidMatch = /VID_([0-9A-Fa-f]{4})/i.exec(instanceId);
+        const pidMatch = /PID_([0-9A-Fa-f]{4})/i.exec(instanceId);
+        const serialMatch = /\\([0-9A-Fa-f\-]+)$/i.exec(instanceId);
+        return {
+          nome: d.FriendlyName || '',
+          caminho_dispositivo: instanceId || null,
+          manufacturer: d.Manufacturer || '',
+          product: d.FriendlyName || '',
+          status: d.Status || '',
+          classe: d.Class || '',
+          vid: vidMatch ? vidMatch[1].toUpperCase() : null,
+          pid: pidMatch ? pidMatch[1].toUpperCase() : null,
+          serial_number: serialMatch && !/^VID_/i.test(serialMatch[1]) ? serialMatch[1] : null
+        };
+      });
+    } catch {
+      return [];
+    }
+  }
 }
 
 module.exports = new SDKDetector();

@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../database');
-const { validarCaixaAberto, validarCaixaAbertoCancelamentoVenda, validarCaixaAbertoDevolucaoVenda } = require('../middleware/validarCaixaAberto');
+const { validarCaixaAberto, validarCaixaSeOrigemPdv, validarCaixaAbertoCancelamentoVenda, validarCaixaAbertoDevolucaoVenda } = require('../middleware/validarCaixaAberto');
 const { exigirSenhaAdmin } = require('../middleware/exigirSenhaAdmin');
 const {
   FILTRO_VENDA_VALIDA,
@@ -64,7 +64,8 @@ router.get('/', (req, res) => {
 
   if (somenteFiscal) {
     where += (where ? ' AND ' : ' WHERE ');
-    where += ` n.id IS NOT NULL `;
+    // Lista "modo fiscal" = vendas com documento fiscal (NFC-e ou NF-e).
+    where += ` (n.id IS NOT NULL OR nfe.id IS NOT NULL) `;
   }
 
   db.all(`
@@ -80,10 +81,17 @@ router.get('/', (req, res) => {
       v.desconto,
       v.forma_pagamento,
       v.status,
+      v.pedido_id,
       n.id AS nfce_id,
       n.numero AS nfce_numero,
       n.status AS nfce_status,
       n.chave_acesso AS nfce_chave,
+      nfe.id AS nfe_id,
+      nfe.numero AS nfe_numero,
+      nfe.serie AS nfe_serie,
+      nfe.status AS nfe_status,
+      nfe.chave_acesso AS nfe_chave,
+      nfe.protocolo AS nfe_protocolo,
       c.nome AS cliente_nome,
       (
         SELECT COUNT(*)
@@ -97,6 +105,14 @@ router.get('/', (req, res) => {
       FROM nfce_notas n2
       WHERE n2.venda_id = v.id
       ORDER BY n2.id DESC
+      LIMIT 1
+    )
+    LEFT JOIN nfe_notas nfe ON nfe.id = (
+      SELECT nfe2.id
+      FROM nfe_notas nfe2
+      WHERE nfe2.venda_id = v.id
+        AND LOWER(COALESCE(nfe2.status, '')) = 'autorizada'
+      ORDER BY nfe2.id DESC
       LIMIT 1
     )
     ${where}
@@ -124,7 +140,13 @@ router.get('/:id', (req, res) => {
       n.id AS nfce_id,
       n.numero AS nfce_numero,
       n.status AS nfce_status,
-      n.chave_acesso AS nfce_chave
+      n.chave_acesso AS nfce_chave,
+      nfe.id AS nfe_id,
+      nfe.numero AS nfe_numero,
+      nfe.serie AS nfe_serie,
+      nfe.status AS nfe_status,
+      nfe.chave_acesso AS nfe_chave,
+      nfe.protocolo AS nfe_protocolo
     FROM vendas v
     LEFT JOIN clientes c ON v.cliente_id = c.id
     LEFT JOIN nfce_notas n ON n.id = (
@@ -132,6 +154,14 @@ router.get('/:id', (req, res) => {
       FROM nfce_notas n2
       WHERE n2.venda_id = v.id
       ORDER BY n2.id DESC
+      LIMIT 1
+    )
+    LEFT JOIN nfe_notas nfe ON nfe.id = (
+      SELECT nfe2.id
+      FROM nfe_notas nfe2
+      WHERE nfe2.venda_id = v.id
+        AND LOWER(COALESCE(nfe2.status, '')) = 'autorizada'
+      ORDER BY nfe2.id DESC
       LIMIT 1
     )
     WHERE v.id = ?
@@ -151,6 +181,7 @@ router.get('/:id', (req, res) => {
         res.status(500).json({ error: err.message });
         return;
       }
+      // Visão comercial: todos os itens originais (não filtrar pela NF-e).
       res.json({ ...venda, itens });
     });
   });
@@ -190,7 +221,8 @@ router.get('/:id/detalhes', (req, res) => {
 
 router.post('/pre-calcular-distribuicao', validarCaixaAberto, preCalcularDistribuicao);
 
-router.post('/', validarCaixaAberto, criarVenda);
+// Sprint 2.2: PDV exige caixa; demais origens reconhecidas sem validarCaixaAberto
+router.post('/', validarCaixaSeOrigemPdv, criarVenda);
 
 router.get('/:id/pagamento-nao-fiscal', consultarPagamentoNaoFiscal);
 

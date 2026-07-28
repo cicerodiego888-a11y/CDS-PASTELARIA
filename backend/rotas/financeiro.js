@@ -65,20 +65,47 @@ async function consultarRecebimentosVendaSplit(dataInicio, dataFim, modoFiscal) 
   };
 }
 
-function calcularValorFiscalConta(valor, vendaTotal, valorFiscal) {
-  const totalVenda = parseNumber(vendaTotal);
-  if (totalVenda <= 0) {
-    return parseNumber(valor);
+/**
+ * Hotfix: valores F/NF vêm exclusivamente do Motor persistido na venda.
+ * Não rateia parcela × (valor_fiscal / total).
+ */
+function valoresMotorDaVenda(row) {
+  if (!row.venda_id) {
+    return {
+      valorFiscal: parseNumber(row.valor),
+      valorNaoFiscal: 0
+    };
   }
-  return arredondarCentavos(parseNumber(valor) * (parseNumber(valorFiscal) / totalVenda));
+  return {
+    valorFiscal: parseNumber(row.venda_valor_fiscal),
+    valorNaoFiscal: parseNumber(row.venda_valor_nao_fiscal)
+  };
 }
 
-function calcularValorNaoFiscalConta(valor, vendaTotal, valorNaoFiscal) {
-  const totalVenda = parseNumber(vendaTotal);
-  if (totalVenda <= 0) {
-    return 0;
+function totaisMotorSemDuplicarVenda(contas, modoFiscalAtivo) {
+  const vendasVistas = new Set();
+  let fiscal = 0;
+  let naoFiscal = 0;
+  let totalParcelas = 0;
+
+  for (const c of contas) {
+    totalParcelas += parseNumber(modoFiscalAtivo ? c.valor : c.valor_total);
+    if (c.venda_id) {
+      if (vendasVistas.has(c.venda_id)) continue;
+      vendasVistas.add(c.venda_id);
+      fiscal += parseNumber(c.valor_fiscal);
+      naoFiscal += parseNumber(c.valor_nao_fiscal);
+    } else {
+      fiscal += parseNumber(c.valor_fiscal);
+      naoFiscal += parseNumber(c.valor_nao_fiscal);
+    }
   }
-  return arredondarCentavos(parseNumber(valor) * (parseNumber(valorNaoFiscal) / totalVenda));
+
+  return {
+    fiscal,
+    nao_fiscal: modoFiscalAtivo ? 0 : naoFiscal,
+    total: modoFiscalAtivo ? fiscal : totalParcelas
+  };
 }
 
 function dbGetAsync(sql, params = []) {
@@ -1885,9 +1912,12 @@ router.get('/relatorios/receber', (req, res) => {
         statusFinal = 'vencido';
       }
 
-      const valorFiscal = calcularValorFiscalConta(row.valor, row.venda_total, row.venda_valor_fiscal);
-      const valorNaoFiscal = calcularValorNaoFiscalConta(row.valor, row.venda_total, row.venda_valor_nao_fiscal);
-      const valorExibido = modoFiscalAtivo ? valorFiscal : parseNumber(row.valor);
+      const { valorFiscal, valorNaoFiscal } = valoresMotorDaVenda(row);
+      const valorExibido = modoFiscalAtivo
+        ? (parseNumber(row.venda_valor_nao_fiscal) <= 0
+          ? parseNumber(row.valor)
+          : valorFiscal)
+        : parseNumber(row.valor);
 
       return {
         id: row.id,
@@ -1913,13 +1943,7 @@ router.get('/relatorios/receber', (req, res) => {
       success: true,
       modo_fiscal_ativo: modoFiscalAtivo,
       contas,
-      totais: {
-        fiscal: contas.reduce((sum, c) => sum + parseNumber(c.valor_fiscal), 0),
-        nao_fiscal: modoFiscalAtivo
-          ? 0
-          : contas.reduce((sum, c) => sum + parseNumber(c.valor_nao_fiscal), 0),
-        total: contas.reduce((sum, c) => sum + parseNumber(modoFiscalAtivo ? c.valor_fiscal : c.valor_total), 0)
-      },
+      totais: totaisMotorSemDuplicarVenda(contas, modoFiscalAtivo),
       periodo: { dataInicio, dataFim }
     });
   });

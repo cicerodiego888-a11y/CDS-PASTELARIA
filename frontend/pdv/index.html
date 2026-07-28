@@ -18,8 +18,8 @@
                 <div class="position-sticky pt-3">
                     <div class="text-center mb-2" id="sidebar-brand">
                         <div id="sidebar-brand-content">
-                            <h5 class="text-white">CDS</h5>
-                            <small class="text-muted">PDV</small>
+                            <img src="/branding/logo-oficial.png" alt="CDS Sistemas" class="img-fluid brand-sidebar-logo" style="max-height:88px;object-fit:contain;margin:0 auto 0.35rem;display:block;">
+                            <small class="text-muted brand-sidebar-slogan" style="display:block;line-height:1.25;max-width:11.5rem;margin:0.15rem auto 0;">Inteligência para gerir, Tecnologia para crescer</small>
                         </div>
                         <div id="sidebar-modo-fiscal-bar" class="sidebar-modo-fiscal-bar sidebar-modo-fiscal-bar--off" title="Modo completo"></div>
                     </div>
@@ -31,7 +31,7 @@
                         </li>
                         <li class="nav-item" data-recurso="vendasEntrega">
                             <a class="nav-link text-white" href="#" data-page="entregas">
-                                <i class="fas fa-motorcycle"></i> Vendas para Entrega
+                                <i class="fas fa-motorcycle"></i> Entregas
                             </a>
                         </li>
                         <li class="nav-item">
@@ -45,23 +45,8 @@
                             </a>
                         </li>
                         <li class="nav-item">
-                            <a class="nav-link text-white" href="#" data-page="caixa">
-                                <i class="fas fa-hand-holding-usd"></i> Sangria / Suprimento
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link text-white" href="#" data-page="caixa">
-                                <i class="fas fa-cash-register"></i> Fechamento de Caixa
-                            </a>
-                        </li>
-                        <li class="nav-item" data-recurso="fiscal">
-                            <a class="nav-link text-white" href="#" data-page="pdv">
-                                <i class="fas fa-file-invoice"></i> NFC-e
-                            </a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link text-white" href="#" data-page="tef">
-                                <i class="fas fa-credit-card"></i> TEF
+                            <a class="nav-link text-white" href="#" data-page="caixa" title="Sangria, suprimento e fechamento">
+                                <i class="fas fa-cash-register"></i> Caixa
                             </a>
                         </li>
                         <li class="nav-item">
@@ -82,6 +67,11 @@
                         <li class="nav-item" id="nav-abrir-erp" style="display:none">
                             <a class="nav-link text-info" href="/erp">
                                 <i class="fas fa-building"></i> Abrir ERP
+                            </a>
+                        </li>
+                        <li class="nav-item" id="nav-assinatura">
+                            <a class="nav-link text-warning" href="/erp?page=licenca" title="Renovar assinatura CDS">
+                                <i class="fas fa-id-card"></i> Assinatura
                             </a>
                         </li>
                     </ul>
@@ -126,6 +116,7 @@
     <script src="/shared/js/access-control.js"></script>
     <script src="/shared/js/caixaPermissoes.js"></script>
     <script src="/shared/js/core.js"></script>
+    <script src="/shared/js/cds-nomenclatura.js"></script>
     <script src="/shared/js/configuracaoRede.js"></script>
     <script src="/shared/js/modoFiscalHelpers.js"></script>
     <script src="/shared/js/fiscalImpressao.js"></script>

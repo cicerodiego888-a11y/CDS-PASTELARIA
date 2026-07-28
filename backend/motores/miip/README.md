@@ -1,8 +1,8 @@
 # MIIP — Motor Inteligente de Identificação de Produtos
 
 **Versão:** `1.0.0-rc1` (Release Candidate)  
-**Documentação:** [`docs/ARQUITETURA_MIIP.md`](../../../docs/ARQUITETURA_MIIP.md)  
-**Release Notes:** [`docs/MIIP_RC1_RELEASE_NOTES.md`](../../../docs/MIIP_RC1_RELEASE_NOTES.md)
+**Documentação:** [`docs/arquitetura/ARQUITETURA_MIIP.md`](../../../docs/arquitetura/ARQUITETURA_MIIP.md)  
+**Release Notes:** [`docs/historico/relatorios/MIIP_RC1_RELEASE_NOTES.md`](../../../docs/historico/relatorios/MIIP_RC1_RELEASE_NOTES.md)
 
 ## Responsabilidade
 

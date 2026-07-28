@@ -120,6 +120,64 @@ class SerialTransport extends BaseTransport {
     await this._log('configurar', { status: 'configurado' });
     return this._stub('configurar', { porta: this._porta, baudRate: this._baudRate });
   }
+
+  /**
+   * Probe rápido RC2: tenta open/close se serialport estiver disponível;
+   * caso contrário valida existência da porta na enumeração OS.
+   * Nunca mantém a porta aberta.
+   * @param {Object} [opcoes]
+   * @returns {Promise<{ ok: boolean, modo: string }>}
+   */
+  async probeRapido(opcoes = {}) {
+    const timeout = opcoes.timeout ?? this._timeout;
+    let SerialPortCtor = null;
+    try {
+      // eslint-disable-next-line global-require, import/no-extraneous-dependencies
+      SerialPortCtor = require('serialport').SerialPort;
+    } catch (_) {
+      SerialPortCtor = null;
+    }
+
+    if (SerialPortCtor) {
+      return new Promise((resolve) => {
+        let finalizado = false;
+        const concluir = (ok, modo) => {
+          if (finalizado) return;
+          finalizado = true;
+          resolve({ ok, modo });
+        };
+        let porta;
+        try {
+          porta = new SerialPortCtor({
+            path: this._porta,
+            baudRate: this._baudRate,
+            autoOpen: false
+          });
+        } catch (err) {
+          concluir(false, 'serialport_erro');
+          return;
+        }
+        const timer = setTimeout(() => {
+          try { if (porta.isOpen) porta.close(() => {}); } catch (_) { /* */ }
+          concluir(false, 'serialport_timeout');
+        }, Math.max(50, timeout));
+
+        porta.open((err) => {
+          clearTimeout(timer);
+          if (err) {
+            concluir(false, 'serialport_open_fail');
+            return;
+          }
+          porta.close(() => concluir(true, 'serialport_open'));
+        });
+      });
+    }
+
+    // Sem serialport: existência via enumeração
+    const { listarPortasSerial } = require('../discovery/deviceEnumeration');
+    const existe = listarPortasSerial().some((p) => String(p.porta) === String(this._porta));
+    return { ok: existe, modo: 'enumeracao' };
+  }
 }
 
 module.exports = SerialTransport;

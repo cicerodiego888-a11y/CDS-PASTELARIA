@@ -87,10 +87,6 @@ app.get('/login', (req, res) => {
     res.sendFile(path.join(frontendRoot, 'shared/login.html'));
 });
 
-app.get(['/pdv', '/pdv/'], verificarToken, (req, res) => {
-    res.sendFile(path.join(frontendRoot, 'pdv/index.html'));
-});
-
 app.get(['/erp', '/erp/'], verificarToken, (req, res) => {
     res.sendFile(path.join(frontendRoot, 'erp/index.html'));
 });
@@ -100,42 +96,66 @@ app.get(['/erp', '/erp/'], verificarToken, (req, res) => {
 const produtosRoutes = require('./rotas/produtos');
 const clientesRoutes = require('./rotas/clientes');
 const comprasRoutes = require('./rotas/compras');
-const miipRoutes = require('./rotas/miip');
 const categoriasRoutes = require('./rotas/categorias');
 const subcategoriasRoutes = require('./rotas/subcategorias');
 const marcasRoutes = require('./rotas/marcas');
 const vendasRoutes = require('./rotas/vendas');
 const entregasRoutes = require('./rotas/entregas');
+const faturamentoRoutes = require('./rotas/faturamento');
+const centralFaturamentoRoutes = require('./rotas/centralFaturamento');
+const pedidosRoutes = require('./rotas/pedidos');
 const financeiroRoutes = require('./rotas/financeiro');
 const configuracoesRoutes = require('./rotas/configuracoes');
 const configuracaoRedeRoutes = require('./rotas/configuracao_rede');
 const fiscalRoutes = require('./rotas/fiscal');
+const nfeRoutes = require('./rotas/nfe');
 const fornecedoresRoutes = require('./rotas/fornecedores');
 const impressaoRoutes = require('./rotas/impressao');
 const caixaRoutes = require('./rotas/caixa');
 const caixasRoutes = require('./rotas/caixas');
 const terminaisRoutes = require('./rotas/terminais');
-const backupRoutes = require('./rotas/backup');
 const tefRoutes = require('./rotas/tef');
 const pixRoutes = require('./rotas/pix');
 const dashboardRoutes = require('./rotas/dashboard');
 const contasReceberRoutes = require('./rotas/contas_receber');
 const alertasRoutes = require('./rotas/alertas');
-const auditoriaRoutes = require('./rotas/auditoria');
 const licencaRoutes = require('./rotas/licenca');
 const dfeRoutes = require('./rotas/dfe');
 const centralEntradasRoutes = require('./rotas/central-entradas');
 const monitoringRoutes = require('./monitoring/MonitoringRouter');
 const equipamentosRoutes = require('./rotas/equipamentos');
-const laboratorioEquipamentosRoutes = require('./rotas/laboratorioEquipamentos');
-const engenhariaReversaRoutes = require('./rotas/engenhariaReversa');
-const licencaMiddleware = require('./middleware/licencaMiddleware');
+const centralEquipamentosRoutes = require('./rotas/central-equipamentos');
 const configuracoesAvancadasRoutes = require('./rotas/configuracoes_avancadas');
+const plataformaRoutes = require('./rotas/plataforma');
+const observabilidadeRoutes = require('./rotas/observabilidade');
 const { exigirRecurso } = require('./middleware/validarRecursoImplantacao');
 const configService = require('./services/configuracaoService');
 
 configService.ensureConfigFile();
 configService.reloadGlobalConfig();
+
+const { createLazyRouter } = require('./boot/lazyService');
+
+// RC11.3 — Grupo D (lazy): MIIP, laboratorio, engenharia reversa, auditoria, backup
+const miipRoutes = createLazyRouter('miip', () => require('./rotas/miip'));
+const auditoriaRoutes = createLazyRouter('auditoria', () => require('./rotas/auditoria'));
+const laboratorioEquipamentosRoutes = createLazyRouter(
+  'laboratorio-equipamentos',
+  () => require('./rotas/laboratorioEquipamentos')
+);
+const engenhariaReversaRoutes = createLazyRouter(
+  'engenharia-reversa',
+  () => require('./rotas/engenhariaReversa')
+);
+const backupRoutes = createLazyRouter('backup', () => require('./rotas/backup'));
+
+
+// Hotfix RC1 — ordem obrigatória sob /api: Auth → Licença → rotas (recurso)
+const { apiAuthLicencaGate } = require('./middleware/apiAuthLicencaGate');
+app.use('/api', apiAuthLicencaGate);
+
+// Rotas de licença (públicas — gate libera /api/licenca)
+app.use('/api/licenca', licencaRoutes);
 
 app.use('/api/produtos', verificarToken, produtosRoutes);
 app.use('/api/clientes', verificarToken, clientesRoutes);
@@ -147,13 +167,29 @@ app.use('/api/marcas', verificarToken, marcasRoutes);
 // Sprint 1 — rotas de entrega montadas antes das rotas genéricas de vendas
 app.use('/api/vendas', verificarToken, entregasRoutes);
 app.use('/api/vendas', verificarToken, vendasRoutes);
+app.use('/api/faturamento', verificarToken, exigirRecurso('faturamento'), faturamentoRoutes);
+app.use('/api/central-faturamento', verificarToken, exigirRecurso('nfe'), centralFaturamentoRoutes);
+app.use('/api/pedidos', verificarToken, exigirRecurso('pedidos'), pedidosRoutes);
+
+// Sprint 3.9 — PDV só existe se módulo licenciado (princípio da invisibilidade)
+const { responderModuloNaoLicenciado } = require('./middleware/errosLicenciamento');
+app.get(['/pdv', '/pdv/'], verificarToken, (req, res) => {
+  if (!configService.recursoHabilitado('pdv')) {
+    return responderModuloNaoLicenciado(res, 'pdv');
+  }
+  res.sendFile(path.join(frontendRoot, 'pdv/index.html'));
+});
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/financeiro', verificarToken, financeiroRoutes);
 app.use('/api/contas-receber', verificarToken, contasReceberRoutes);
 app.use('/api/configuracoes', verificarToken, configuracoesRoutes);
 app.use('/api/configuracao-rede', verificarToken, configuracaoRedeRoutes);
 app.use('/api/configuracoes-avancadas', verificarToken, configuracoesAvancadasRoutes);
-app.use('/api/fiscal', verificarToken, fiscalRoutes);
+app.use('/api/plataforma', verificarToken, plataformaRoutes);
+// RC12.2 — summary autenticado via gate; POST /rum público (observe-only)
+app.use('/api/observabilidade', observabilidadeRoutes);
+app.use('/api/fiscal', verificarToken, exigirRecurso('fiscal'), fiscalRoutes);
+app.use('/api/nfe', verificarToken, exigirRecurso('nfe'), nfeRoutes);
 app.use('/api/fornecedores', verificarToken, fornecedoresRoutes);
 app.use('/api/impressao', verificarToken, impressaoRoutes);
 app.use('/api/caixa', verificarToken, caixaRoutes);
@@ -182,14 +218,11 @@ app.use('/api/dfe', verificarToken, exigirRecurso('fiscal'), dfeRoutes);
 app.use('/api/central-entradas', verificarToken, exigirRecurso('fiscal'), centralEntradasRoutes);
 app.use('/api/monitoring', verificarToken, monitoringRoutes);
 app.use('/api/equipamentos', verificarToken, equipamentosRoutes);
+app.use('/api/central-equipamentos', verificarToken, centralEquipamentosRoutes);
+app.use('/api/monitoramento-equipamentos', verificarToken, require('./rotas/monitoramento-equipamentos'));
+app.use('/api/integracao-equipamentos', verificarToken, require('./rotas/integracao-equipamentos'));
 app.use('/api/laboratorio-equipamentos', verificarToken, laboratorioEquipamentosRoutes);
 app.use('/api/engenharia-reversa', verificarToken, engenhariaReversaRoutes);
-
-// Rotas de licença (públicas)
-app.use('/api/licenca', licencaRoutes);
-
-// Middleware de licença para todas as APIs exceto auth e licença
-app.use('/api', licencaMiddleware);
 
 // Rota principal — redireciona para o ERP modular
 app.get('/', verificarToken, (req, res) => {
@@ -226,25 +259,48 @@ app.use((err, req, res, next) => {
     }
     res.status(500).json({ error: 'Erro interno do servidor' });
 });
-
 // Iniciar servidor somente após o banco estar pronto (evita SQLITE_BUSY no login do PDV)
+// RC11.2 — Boot não bloqueante: listen() antes dos serviços Grupo B (background).
 const server = http.createServer(app);
 module.exports = server;
 
-const motorEquipamentos = require('./motores/equipamentos');
-const monitorService = require('./motores/equipamentos/monitor/MonitorService');
-const driverManager = require('./motores/equipamentos/core/DriverManager');
+const bootT0 = Date.now();
+function bootLog(evento, extra = {}) {
+    const payload = {
+        tag: 'BOOT',
+        evento,
+        ms: Date.now() - bootT0,
+        ...extra
+    };
+    console.log(JSON.stringify(payload));
+    // RC12.1 — observe-only (nunca bloqueia / nunca propaga erro)
+    try {
+        require('./observabilidade/adapters/bootAdapter').publishBootEvent(evento, payload);
+    } catch (_) { /* ignore */ }
+}
+
+bootLog('BOOT');
 
 async function inicializarMotorEquipamentos() {
+    const motorEquipamentos = require('./motores/equipamentos');
+    const monitorService = require('./motores/equipamentos/monitor/MonitorService');
+    const driverManager = require('./motores/equipamentos/core/DriverManager');
     await motorEquipamentos.inicializar();
     driverManager.obterRelatorioCarregamento();
     monitorService.iniciar();
+    try {
+        const integracaoEquipamentos = require('./services/equipamentos-integracao');
+        integracaoEquipamentos.iniciar();
+        console.log('Integração corporativa de Equipamentos RC5 iniciada.');
+    } catch (err) {
+        console.error('Falha ao iniciar integração de equipamentos:', err.message);
+        throw err;
+    }
     console.log('Motor de Equipamentos inicializado (fila, drivers, monitor).');
 }
 
-const { sincronizarFinanceiroVendasCanceladas } = require('./services/vendas/VendaFinanceiroService');
-
 async function inicializarFinanceiroVendas() {
+    const { sincronizarFinanceiroVendasCanceladas } = require('./services/vendas/VendaFinanceiroService');
     const resultado = await sincronizarFinanceiroVendasCanceladas();
     if (resultado.registros_corrigidos > 0) {
         console.log(
@@ -253,40 +309,50 @@ async function inicializarFinanceiroVendas() {
     }
 }
 
-db.whenReady(async (readyErr) => {
-    if (readyErr) {
-        console.error('Servidor não iniciado: banco indisponível.', readyErr.message);
-        process.exit(1);
-        return;
-    }
+async function inicializarCentralSync() {
+    const centralSyncBackground = require('./motores/central-entradas/services/CentralSyncBackgroundService');
+    await centralSyncBackground.iniciar();
+}
 
+async function inicializarNfeRetoma() {
+    const nfeOperacional = require('./services/fiscal/nfeOperacionalService');
+    await nfeOperacional.garantirSchemaOperacional();
+    await nfeOperacional.retomarConsultasPendentes();
+    console.log('[NFe] Consultas automáticas pendentes retomadas.');
+}
+
+async function executarPassoBackground(nome, fn) {
+    const t0 = Date.now();
     try {
-        const { hidratarFlagDoBanco, MIP_VERSION } = require('./motores/produto-identidade');
-        const mipOn = await hidratarFlagDoBanco(db);
-        console.log(`[MIP] v${MIP_VERSION} produto_identidade_enabled = ${mipOn ? 'ON' : 'OFF'}`);
+        await fn();
+        bootLog('BACKGROUND STEP OK', { step: nome, stepMs: Date.now() - t0 });
+        return true;
     } catch (err) {
-        console.error('Falha ao hidratar flag MIP:', err.message);
+        bootLog('BACKGROUND ERROR', {
+            step: nome,
+            stepMs: Date.now() - t0,
+            erro: err && err.message ? err.message : String(err)
+        });
+        console.error(`Falha no background [${nome}]:`, err && err.message ? err.message : err);
+        return false;
     }
+}
 
-    try {
-        await inicializarFinanceiroVendas();
-    } catch (err) {
-        console.error('Falha ao sincronizar financeiro de vendas canceladas:', err.message);
-    }
+/**
+ * Grupo B (RC11.1) — pós-listen, não bloqueia HTTP/login.
+ * Falha individual não derruba o servidor.
+ */
+async function iniciarServicosBackgroundGrupoB() {
+    bootLog('BACKGROUND START');
+    const tBg = Date.now();
+    await executarPassoBackground('financeiro-sync', inicializarFinanceiroVendas);
+    await executarPassoBackground('equipamentos-monitor', inicializarMotorEquipamentos);
+    await executarPassoBackground('central-sync', inicializarCentralSync);
+    await executarPassoBackground('nfe-retoma', inicializarNfeRetoma);
+    bootLog('BACKGROUND READY', { backgroundMs: Date.now() - tBg });
+}
 
-    try {
-        await inicializarMotorEquipamentos();
-    } catch (err) {
-        console.error('Falha ao inicializar Motor de Equipamentos:', err.message);
-    }
-
-    try {
-        const centralSyncBackground = require('./motores/central-entradas/services/CentralSyncBackgroundService');
-        await centralSyncBackground.iniciar();
-    } catch (err) {
-        console.error('Falha ao inicializar sync automática Central Entradas:', err.message);
-    }
-
+function registrarEncerramentoBackground() {
     const encerrarSyncCentral = () => {
         try {
             const centralSyncBackground = require('./motores/central-entradas/services/CentralSyncBackgroundService');
@@ -295,11 +361,45 @@ db.whenReady(async (readyErr) => {
     };
     process.on('SIGTERM', encerrarSyncCentral);
     process.on('SIGINT', encerrarSyncCentral);
+}
+
+db.whenReady(async (readyErr) => {
+    if (readyErr) {
+        bootLog('DATABASE ERROR', { erro: readyErr.message });
+        console.error('Servidor não iniciado: banco indisponível.', readyErr.message);
+        process.exit(1);
+        return;
+    }
+
+    bootLog('DATABASE READY');
+
+    // Leve / gate de produto — mantido antes do listen (não bloqueia de forma relevante)
+    try {
+        const { hidratarFlagDoBanco, MIP_VERSION } = require('./motores/produto-identidade');
+        const mipOn = await hidratarFlagDoBanco(db);
+        console.log(`[MIP] v${MIP_VERSION} produto_identidade_enabled = ${mipOn ? 'ON' : 'OFF'}`);
+        bootLog('MIP FLAG READY', { enabled: !!mipOn });
+    } catch (err) {
+        console.error('Falha ao hidratar flag MIP:', err.message);
+        bootLog('BACKGROUND ERROR', { step: 'mip-flag', erro: err.message });
+    }
+
+    registrarEncerramentoBackground();
 
     server.listen(PORT, () => {
+        bootLog('HTTP LISTENING', { port: Number(PORT) });
         console.log(`Servidor rodando na porta ${PORT}`);
         console.log(`Acesse: http://localhost:${PORT}/login`);
         console.log('Configuração avançada:', configService.getRecursos());
+
+        // Desacoplado do boot: não impede o listen nem a aceitação de conexões
+        setImmediate(() => {
+            // RC12.1 — Observability Bus adapters (observe-only)
+            try {
+                require('./observabilidade').iniciar();
+            } catch (_) { /* ignore */ }
+            void iniciarServicosBackgroundGrupoB();
+        });
     });
 
     server.on('error', (err) => {

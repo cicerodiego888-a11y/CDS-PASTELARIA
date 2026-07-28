@@ -4,11 +4,252 @@
 window.CDS_MODULE = 'erp';
 window.CDS_DEFAULT_PAGE = 'dashboard';
 
-function loadPage(page) {
+const CDS_ERP_PAGE_SCRIPTS = Object.freeze({
+    dashboard: [
+        '/vendor/chart.js/chart.min.js',
+        '/erp/js/dashboard-command.js',
+        '/erp/js/dashboard.js'
+    ],
+    monitoring: ['/erp/js/cds-monitoring-engine.js'],
+    produtos: ['/erp/js/produtos.js', '/erp/js/subcategorias.js'],
+    clientes: ['/erp/js/clientes.js'],
+    compras: ['/erp/js/miip-central-revisao.js', '/erp/js/compras.js'],
+    'central-entradas': [
+        '/erp/js/central-entradas-ux.js',
+        '/erp/js/miip-central-revisao.js',
+        '/erp/js/central-entradas.js'
+    ],
+    'central-diagnostico': ['/erp/js/central-diagnostico.js'],
+    fornecedores: ['/erp/js/fornecedores.js'],
+    vendas: [
+        '/shared/js/fiscalImpressao.js',
+        '/shared/js/vendasHistoricoUi.js',
+        '/erp/js/vendas.js'
+    ],
+    entregas: ['/pdv/js/entregas.js'],
+    faturamento: ['/erp/js/faturamento.js'],
+    'central-faturamento': ['/erp/js/central-faturamento.js'],
+    pedidos: ['/erp/js/pedidos.js'],
+    financeiro: [
+        '/erp/js/financeiro-dashboard.js',
+        '/erp/js/financeiro-receber.js',
+        '/erp/js/financeiro-pagar.js',
+        '/erp/js/financeiro-historico.js',
+        '/erp/js/financeiro-relatorios.js',
+        '/erp/js/financeiro.js'
+    ],
+    licenca: ['/erp/js/licenca.js'],
+    caixa: ['/erp/js/caixa.js'],
+    configuracoes: [
+        '/shared/js/fiscalImpressao.js',
+        '/shared/js/configuracaoRede.js',
+        '/erp/js/configuracoes.js'
+    ],
+    usuarios: ['/erp/js/usuarios.js'],
+    equipamentos: ['/erp/js/equipamentos.js'],
+    'central-equipamentos': ['/erp/js/central-equipamentos.js'],
+    'laboratorio-equipamentos': ['/erp/js/laboratorio-equipamentos.js'],
+    'configuracoes-avancadas': [
+        '/shared/js/fiscalImpressao.js',
+        '/shared/js/configuracaoRede.js',
+        '/erp/js/configuracoes.js',
+        '/erp/js/cds-centro-configuracoes.js'
+    ],
+    fiscal: ['/shared/js/fiscalImpressao.js', '/erp/js/fiscal.js'],
+    'nfe-central': ['/shared/js/fiscalImpressao.js', '/erp/js/nfe-central.js'],
+    'nfe-avulsa': ['/erp/js/nfe-avulsa.js'],
+    'nfe-monitor': ['/erp/js/nfe-operacional.js'],
+    'nfe-fila': ['/erp/js/nfe-operacional.js'],
+    'nfe-diagnostico': ['/erp/js/nfe-operacional.js'],
+    'central-contabil': ['/erp/js/central-contabil.js'],
+    categorias: ['/erp/js/subcategorias.js', '/erp/js/categorias.js'],
+    auditoria: ['/erp/js/auditoria.js'],
+    observabilidade: ['/erp/js/observabilidade.js'],
+    caixas: ['/erp/js/caixas.js'],
+    'feature:central-homologacao': ['/erp/js/central-homologacao.js'],
+    'feature:configuracao-tef': ['/erp/js/configuracao_tef.js']
+});
+
+const cdsErpLazyScripts = new Map();
+const cdsErpLazyStats = new Map();
+
+function cdsErpAgora() {
+    return typeof performance !== 'undefined' && typeof performance.now === 'function'
+        ? performance.now()
+        : Date.now();
+}
+
+function carregarScriptErpLazy(src) {
+    const existente = cdsErpLazyScripts.get(src);
+    if (existente) {
+        existente.reuses += 1;
+        return existente.promise;
+    }
+
+    const inicio = cdsErpAgora();
+    const entry = { promise: null, reuses: 0, loadMs: null };
+    entry.promise = new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = src;
+        script.async = false;
+        script.dataset.cdsLazyLoaded = 'true';
+        script.onload = function () {
+            entry.loadMs = Number((cdsErpAgora() - inicio).toFixed(2));
+            console.info('[ERP LAZY] SCRIPT LOADED', {
+                src,
+                loadMs: entry.loadMs
+            });
+            resolve(src);
+        };
+        script.onerror = function () {
+            cdsErpLazyScripts.delete(src);
+            script.remove();
+            reject(new Error(`Falha ao carregar script ERP: ${src}`));
+        };
+        document.head.appendChild(script);
+    });
+    cdsErpLazyScripts.set(src, entry);
+    return entry.promise;
+}
+
+function cdsErpPublicarRum(eventName, page, totalMs, extras) {
+    try {
+        if (!window.CdsObsRum || typeof window.CdsObsRum.publish !== 'function') return;
+        window.CdsObsRum.publish(eventName, {
+            origem: 'frontend.erp.lazy',
+            duracao_ms: totalMs,
+            resultado: extras && extras.ok === false ? 'erro' : 'ok',
+            ok: !(extras && extras.ok === false),
+            payload: Object.assign({
+                page: String(page || '').slice(0, 80),
+                module: String(page || '').slice(0, 80),
+                source: 'erp.lazy'
+            }, extras || {})
+        });
+    } catch (_) { /* RUM never blocks navigation */ }
+}
+
+async function carregarScriptsPaginaErp(page) {
+    const scripts = CDS_ERP_PAGE_SCRIPTS[page] || [];
+    const inicio = cdsErpAgora();
+    let novos = 0;
+
+    for (const src of scripts) {
+        if (!cdsErpLazyScripts.has(src)) novos += 1;
+        await carregarScriptErpLazy(src);
+    }
+
+    const stats = cdsErpLazyStats.get(page) || { loads: 0, reuses: 0, firstLoadMs: null };
+    const totalMs = Number((cdsErpAgora() - inicio).toFixed(2));
+    const isFirst = stats.loads === 0;
+    if (isFirst) {
+        stats.firstLoadMs = totalMs;
+    } else {
+        stats.reuses += 1;
+        stats.lastReuseMs = totalMs;
+    }
+    stats.loads += 1;
+    stats.scripts = scripts.length;
+    stats.newScripts = novos;
+    cdsErpLazyStats.set(page, stats);
+
+    console.info(novos > 0 ? '[ERP LAZY] MODULE CREATED' : '[ERP LAZY] MODULE REUSED', {
+        page,
+        scripts: scripts.length,
+        newScripts: novos,
+        totalMs
+    });
+
+    const rumEvent = (novos > 0 || isFirst)
+        ? (window.CdsObsRum && window.CdsObsRum.EVENT.MODULE_LAZY_CREATED)
+        : (window.CdsObsRum && window.CdsObsRum.EVENT.MODULE_LAZY_REUSED);
+    if (rumEvent) {
+        cdsErpPublicarRum(rumEvent, page, totalMs, {
+            scripts: scripts.length,
+            new_scripts: novos,
+            first_open: isFirst,
+            reuse: !isFirst,
+            loads: stats.loads,
+            total_ms: totalMs
+        });
+    }
+}
+
+window.CdsErpLazyLoader = Object.freeze({
+    loadPageScripts: carregarScriptsPaginaErp,
+    loadFeatureScript: carregarScriptErpLazy,
+    loadFeature: (feature) => carregarScriptsPaginaErp(`feature:${feature}`),
+    isScriptLoaded: (src) => cdsErpLazyScripts.has(src),
+    getLoadedScripts: () => Array.from(cdsErpLazyScripts.keys()),
+    getPageStats: (page) => {
+        const stats = cdsErpLazyStats.get(page);
+        return stats ? { ...stats } : null;
+    },
+    getAllStats: () => Object.fromEntries(
+        Array.from(cdsErpLazyStats.entries()).map(([page, stats]) => [page, { ...stats }])
+    ),
+    manifest: CDS_ERP_PAGE_SCRIPTS
+});
+
+window.minimizarModal = function minimizarModal(modalId, rotuloRestaurar) {
+    const $modal = $('#' + modalId);
+    if (!$modal.length) return;
+
+    $modal.modal('hide');
+
+    const btnId = 'btn-restaurar-' + modalId;
+    if ($('#' + btnId).length) return;
+
+    const titulo = String(
+        rotuloRestaurar
+        || $modal.find('.modal-title').first().text()
+        || 'formulário'
+    ).trim();
+    const tituloSeguro = typeof escapeHtml === 'function' ? escapeHtml(titulo) : titulo;
+
+    const $btn = $(`
+      <button type="button" id="${btnId}" class="btn btn-primary position-fixed shadow"
+        style="bottom: 48px; right: 24px; z-index: 2000;"
+        title="Restaurar ${tituloSeguro}">
+        <i class="fas fa-window-maximize me-1"></i> Restaurar: ${tituloSeguro}
+      </button>
+    `);
+
+    $btn.on('click', function () {
+        $modal.modal('show');
+        if (modalId === 'produtoModal' || modalId === 'viewProdutoModal') {
+            if (typeof inicializarCategoriasESubcategorias === 'function') {
+                const produto = {
+                    id: $('#produtoId').val(),
+                    codigo: $('#codigo').val(),
+                    nome: $('#nome').val(),
+                    categoria_id: $('#categoria_id').val(),
+                    subcategoria_id: $('#subcategoria_id').val(),
+                    unidade: $('#unidade').val(),
+                    preco_compra: $('#preco_compra').val(),
+                    lucro_percentual: $('#lucro_percentual').val(),
+                    preco_venda: $('#preco_venda').val(),
+                    estoque_atual: $('#estoque_atual').val(),
+                    estoque_minimo: $('#estoque_minimo').val(),
+                    fornecedor: $('#fornecedor').val()
+                };
+                inicializarCategoriasESubcategorias(produto, !!produto.id);
+            }
+        }
+        $(this).remove();
+    });
+
+    $('body').append($btn);
+};
+
+async function loadPage(page) {
     currentPage = page;
 
     if (!paginaPermitidaPorImplantacao(page)) {
-        showNotification('Este módulo não está habilitado para o tipo de implantação configurado.', 'warning');
+        const msg = typeof mensagemModuloNaoContratado === 'function'
+            ? mensagemModuloNaoContratado(page)
+            : 'Módulo não contratado.';
+        showNotification(msg, 'warning');
         if (page !== 'dashboard') loadPage('dashboard');
         return;
     }
@@ -23,6 +264,47 @@ function loadPage(page) {
         desativarPdvFullscreen();
     }
     document.body.classList.remove('menu-open', 'pdv-mode');
+
+    const moduleOpenStarted = cdsErpAgora();
+    cdsErpPublicarRum(
+        window.CdsObsRum && window.CdsObsRum.EVENT.MODULE_OPEN,
+        page,
+        0,
+        { phase: 'module_open', ok: true }
+    );
+
+    const scriptsPagina = CDS_ERP_PAGE_SCRIPTS[page] || [];
+    const precisaCarregar = scriptsPagina.some((src) => !cdsErpLazyScripts.has(src));
+    if (precisaCarregar) {
+        $('#page-content').html(`
+            <div class="text-center p-5" data-erp-lazy-loading="${page}">
+                <div class="spinner-border text-primary" role="status"></div>
+                <p class="mt-2">Carregando módulo...</p>
+            </div>
+        `);
+    }
+
+    try {
+        await carregarScriptsPaginaErp(page);
+    } catch (error) {
+        console.error('[ERP LAZY] MODULE ERROR', { page, error });
+        cdsErpPublicarRum(
+            window.CdsObsRum && window.CdsObsRum.EVENT.MODULE_LAZY_ERROR,
+            page,
+            Number((cdsErpAgora() - moduleOpenStarted).toFixed(2)),
+            {
+                ok: false,
+                error_kind: 'script_load',
+                error_code: 'MODULE_LAZY_ERROR'
+            }
+        );
+        $('#page-content').html(
+            '<div class="alert alert-danger">Erro ao carregar o módulo. Tente novamente.</div>'
+        );
+        return;
+    }
+
+    if (currentPage !== page) return;
 
     switch (page) {
         case 'dashboard':
@@ -65,6 +347,18 @@ function loadPage(page) {
             return typeof loadEntregas === 'function'
                 ? loadEntregas()
                 : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar vendas para entrega.</div>');
+        case 'faturamento':
+            return typeof loadFaturamento === 'function'
+                ? loadFaturamento()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar Expedição.</div>');
+        case 'central-faturamento':
+            return typeof loadCentralFaturamento === 'function'
+                ? loadCentralFaturamento()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar Central de Faturamento.</div>');
+        case 'pedidos':
+            return typeof loadPedidos === 'function'
+                ? loadPedidos()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar pedidos.</div>');
         case 'financeiro':
             return carregarPaginaHtml('financeiro.html', function () {
                 if (typeof initFinanceiro === 'function') initFinanceiro();
@@ -72,7 +366,7 @@ function loadPage(page) {
         case 'licenca':
             return typeof loadLicenca === 'function'
                 ? loadLicenca()
-                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar licença.</div>');
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar assinatura.</div>');
         case 'caixa':
             return typeof loadCaixa === 'function'
                 ? loadCaixa()
@@ -89,6 +383,10 @@ function loadPage(page) {
             return typeof loadEquipamentos === 'function'
                 ? loadEquipamentos()
                 : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar equipamentos.</div>');
+        case 'central-equipamentos':
+            return typeof loadCentralEquipamentos === 'function'
+                ? loadCentralEquipamentos()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar Central de Equipamentos.</div>');
         case 'laboratorio-equipamentos':
             return typeof loadLaboratorioEquipamentos === 'function'
                 ? loadLaboratorioEquipamentos()
@@ -101,6 +399,30 @@ function loadPage(page) {
             return typeof loadFiscal === 'function'
                 ? loadFiscal()
                 : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar o módulo fiscal.</div>');
+        case 'nfe-central':
+            return typeof loadNfeCentral === 'function'
+                ? loadNfeCentral()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar a Central de NF-e.</div>');
+        case 'nfe-avulsa':
+            return typeof loadNfeAvulsa === 'function'
+                ? loadNfeAvulsa()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar Nova NF-e.</div>');
+        case 'nfe-monitor':
+            return typeof loadNfeMonitor === 'function'
+                ? loadNfeMonitor()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar o Monitor NF-e.</div>');
+        case 'nfe-fila':
+            return typeof loadNfeFila === 'function'
+                ? loadNfeFila()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar a Fila NF-e.</div>');
+        case 'nfe-diagnostico':
+            return typeof loadNfeDiagnostico === 'function'
+                ? loadNfeDiagnostico()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar o Diagnóstico Fiscal.</div>');
+        case 'central-contabil':
+            return typeof loadCentralContabil === 'function'
+                ? loadCentralContabil()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar a Central Contábil.</div>');
         case 'categorias':
             return carregarPaginaHtml('categorias.html', function () {
                 if (typeof loadCategoriasAndSubcategorias === 'function') {
@@ -117,6 +439,10 @@ function loadPage(page) {
                     carregarAuditoria(1);
                 }
             });
+        case 'observabilidade':
+            return typeof loadObservabilidade === 'function'
+                ? loadObservabilidade()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar Observabilidade.</div>');
         case 'caixas':
             return carregarPaginaHtml('caixas.html', function () {
                 if (typeof loadCaixas === 'function') {
@@ -127,6 +453,8 @@ function loadPage(page) {
             $('#page-content').html('<div class="alert alert-warning">Página não encontrada.</div>');
     }
 }
+
+window.loadPage = loadPage;
 
 $(document).ready(function () {
     inicializarShellModulo({ defaultPage: 'dashboard' });

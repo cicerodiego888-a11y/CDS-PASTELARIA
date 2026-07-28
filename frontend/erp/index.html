@@ -35,8 +35,8 @@
                     </div>
                     <div class="text-center mb-2" id="sidebar-brand">
                         <div id="sidebar-brand-content">
-                            <h5 class="text-white">CDS</h5>
-                            <small class="text-muted">ERP</small>
+                            <img src="/branding/logo-oficial.png" alt="CDS Sistemas" class="img-fluid brand-sidebar-logo" style="max-height:88px;object-fit:contain;margin:0 auto 0.35rem;display:block;">
+                            <small class="text-muted brand-sidebar-slogan" style="display:block;line-height:1.25;max-width:11.5rem;margin:0.15rem auto 0;">Inteligência para gerir, Tecnologia para crescer</small>
                         </div>
                         <div id="sidebar-modo-fiscal-bar" class="sidebar-modo-fiscal-bar sidebar-modo-fiscal-bar--off" title="Modo completo"></div>
                     </div>
@@ -51,7 +51,7 @@
                                         <i class="fas fa-chart-line" aria-hidden="true"></i><span>Dashboard</span>
                                     </a>
                                 </li>
-                                <li class="nav-item">
+                                <li class="nav-item" data-recurso="fiscal">
                                     <a class="nav-link text-white" href="#" data-page="monitoring" title="Central de Monitoramento">
                                         <i class="fas fa-chart-pie" aria-hidden="true"></i><span>Central de Monitoramento</span>
                                     </a>
@@ -63,19 +63,34 @@
                         <li class="nav-group" data-nav-group="comercial">
                             <div class="nav-group-label"><i class="fas fa-store" aria-hidden="true"></i><span>Comercial</span></div>
                             <ul class="nav flex-column nav-group-items">
-                                <li class="nav-item" id="nav-abrir-pdv">
+                                <li class="nav-item" id="nav-abrir-pdv" data-recurso="pdv">
                                     <a class="nav-link text-success" href="/pdv" title="Abrir PDV">
                                         <i class="fas fa-store" aria-hidden="true"></i><span>Abrir PDV</span>
                                     </a>
                                 </li>
-                                <li class="nav-item">
+                                <li class="nav-item" data-recurso="historicoVendas">
                                     <a class="nav-link text-white" href="#" data-page="vendas" title="Histórico de Vendas">
                                         <i class="fas fa-history" aria-hidden="true"></i><span>Histórico de Vendas</span>
                                     </a>
                                 </li>
                                 <li class="nav-item" data-recurso="vendasEntrega">
-                                    <a class="nav-link text-white" href="#" data-page="entregas" title="Vendas para Entrega">
-                                        <i class="fas fa-motorcycle" aria-hidden="true"></i><span>Vendas para Entrega</span>
+                                    <a class="nav-link text-white" href="#" data-page="entregas" title="Entregas">
+                                        <i class="fas fa-motorcycle" aria-hidden="true"></i><span>Entregas</span>
+                                    </a>
+                                </li>
+                                <li class="nav-item" data-recurso="pedidos">
+                                    <a class="nav-link text-white" href="#" data-page="pedidos" title="Pedidos">
+                                        <i class="fas fa-clipboard-list" aria-hidden="true"></i><span>Pedidos</span>
+                                    </a>
+                                </li>
+                                <li class="nav-item" data-recurso="expedicao">
+                                    <a class="nav-link text-white" href="#" data-page="faturamento" title="Expedição">
+                                        <i class="fas fa-dolly" aria-hidden="true"></i><span>Expedição</span>
+                                    </a>
+                                </li>
+                                <li class="nav-item" data-recurso="nfe">
+                                    <a class="nav-link text-white" href="#" data-page="central-faturamento" title="Painel Operacional Fiscal — emissão e monitoramento NF-e">
+                                        <i class="fas fa-file-invoice-dollar" aria-hidden="true"></i><span>Central de Faturamento</span>
                                     </a>
                                 </li>
                                 <li class="nav-item">
@@ -151,16 +166,46 @@
                         <li class="nav-group" data-nav-group="fiscal" data-recurso="fiscal">
                             <div class="nav-group-label"><i class="fas fa-file-invoice" aria-hidden="true"></i><span>Fiscal</span></div>
                             <ul class="nav flex-column nav-group-items">
-                                <li class="nav-item" data-recurso="fiscal">
+                                <li class="nav-item" data-recurso="nfce">
                                     <a class="nav-link text-white" href="#" data-page="fiscal" title="NFC-e Emitidas">
                                         <i class="fas fa-file-invoice" aria-hidden="true"></i><span>NFC-e Emitidas</span>
+                                    </a>
+                                </li>
+                                <li class="nav-item" data-recurso="nfe">
+                                    <a class="nav-link text-white" href="#" data-page="nfe-avulsa" title="Nova NF-e">
+                                        <i class="fas fa-file-medical" aria-hidden="true"></i><span>Nova NF-e</span>
+                                    </a>
+                                </li>
+                                <li class="nav-item" data-recurso="nfe">
+                                    <a class="nav-link text-white" href="#" data-page="nfe-central" title="NF-e Emitidas — consulta e eventos pós-emissão">
+                                        <i class="fas fa-list-alt" aria-hidden="true"></i><span>NF-e Emitidas</span>
+                                    </a>
+                                </li>
+                                <li class="nav-item" data-recurso="nfe">
+                                    <a class="nav-link text-white" href="#" data-page="nfe-monitor" title="Monitor NF-e">
+                                        <i class="fas fa-heartbeat" aria-hidden="true"></i><span>Monitor NF-e</span>
+                                    </a>
+                                </li>
+                                <li class="nav-item" data-recurso="nfe">
+                                    <a class="nav-link text-white" href="#" data-page="nfe-fila" title="Fila NF-e">
+                                        <i class="fas fa-stream" aria-hidden="true"></i><span>Fila NF-e</span>
+                                    </a>
+                                </li>
+                                <li class="nav-item" data-recurso="nfe">
+                                    <a class="nav-link text-white" href="#" data-page="nfe-diagnostico" title="Diagnóstico NF-e">
+                                        <i class="fas fa-stethoscope" aria-hidden="true"></i><span>Diagnóstico NF-e</span>
+                                    </a>
+                                </li>
+                                <li class="nav-item" data-recurso="fiscal">
+                                    <a class="nav-link text-white" href="#" data-page="central-contabil" title="Central Contábil">
+                                        <i class="fas fa-file-export" aria-hidden="true"></i><span>Central Contábil</span>
                                     </a>
                                 </li>
                             </ul>
                         </li>
 
-                        <!-- RELATÓRIOS (placeholder visual) -->
-                        <li class="nav-group" data-nav-group="relatorios" data-placeholder="true">
+                        <!-- RELATÓRIOS — oculto até existir módulo (RC1) -->
+                        <li class="nav-group" data-nav-group="relatorios" data-placeholder="true" hidden aria-hidden="true">
                             <div class="nav-group-label"><i class="fas fa-chart-pie" aria-hidden="true"></i><span>Relatórios</span></div>
                             <ul class="nav flex-column nav-group-items">
                                 <li class="nav-item nav-item--placeholder">
@@ -176,7 +221,7 @@
                             <div class="nav-group-label"><i class="fas fa-cogs" aria-hidden="true"></i><span>Administração</span></div>
                             <ul class="nav flex-column nav-group-items">
                                 <li class="nav-item">
-                                    <a class="nav-link text-white" href="#" data-page="configuracoes" title="Configurações">
+                                    <a class="nav-link text-white" href="#" data-page="configuracoes" title="Configurações da Empresa">
                                         <i class="fas fa-cog" aria-hidden="true"></i><span>Configurações</span>
                                     </a>
                                 </li>
@@ -186,13 +231,23 @@
                                     </a>
                                 </li>
                                 <li class="nav-item">
-                                    <a class="nav-link text-white" href="#" data-page="licenca" title="Licença">
-                                        <i class="fas fa-key" aria-hidden="true"></i><span>Licença</span>
+                                    <a class="nav-link text-white" href="#" data-page="licenca" title="Assinatura CDS">
+                                        <i class="fas fa-id-card" aria-hidden="true"></i><span>Assinatura</span>
                                     </a>
                                 </li>
                                 <li class="nav-item">
                                     <a class="nav-link text-white" href="#" data-page="auditoria" title="Auditoria">
                                         <i class="fas fa-shield-alt" aria-hidden="true"></i><span>Auditoria</span>
+                                    </a>
+                                </li>
+                                <li class="nav-item" id="nav-observabilidade">
+                                    <a class="nav-link text-white" href="#" data-page="observabilidade" title="Observabilidade">
+                                        <i class="fas fa-chart-line" aria-hidden="true"></i><span>Observabilidade</span>
+                                    </a>
+                                </li>
+                                <li class="nav-item">
+                                    <a class="nav-link text-white" href="#" data-page="central-equipamentos" title="Central de Equipamentos">
+                                        <i class="fas fa-network-wired" aria-hidden="true"></i><span>Central Equipamentos</span>
                                     </a>
                                 </li>
                                 <li class="nav-item">
@@ -205,9 +260,9 @@
                                         <i class="fas fa-heartbeat" aria-hidden="true"></i><span>Saúde da Central</span>
                                     </a>
                                 </li>
-                                <li class="nav-item" id="nav-config-avancadas" data-recurso="configAvancadas">
+                                <li class="nav-item" id="nav-config-avancadas">
                                     <a class="nav-link text-white" href="#" data-page="configuracoes-avancadas" title="Centro de Configurações">
-                                        <i class="fas fa-cogs" aria-hidden="true"></i><span>Centro de Configurações</span>
+                                        <i class="fas fa-sliders-h" aria-hidden="true"></i><span>Centro de Configurações</span>
                                     </a>
                                 </li>
                             </ul>
@@ -242,7 +297,7 @@
 
     <script src="/vendor/jquery/jquery.min.js"></script>
     <script src="/vendor/bootstrap/js/bootstrap.bundle.min.js"></script>
-    <script src="/vendor/chart.js/chart.min.js"></script>
+    <script type="application/cds-lazy" src="/vendor/chart.js/chart.min.js"></script>
     <script>
         window.CDS_MODULE = 'erp';
         window.CDS_DEFAULT_PAGE = 'dashboard';
@@ -255,54 +310,65 @@
     <script src="/shared/js/cds-page-shell.js"></script>
     <script src="/shared/js/cds-smart-select.js"></script>
     <script src="/shared/js/core.js"></script>
+    <script src="/shared/js/cds-nomenclatura.js"></script>
     <script src="/shared/js/modoFiscalHelpers.js"></script>
+    <script src="/shared/js/cds-formas-pagamento.js"></script>
     <script src="/shared/services/AdaptiveLabelRegistry.js"></script>
     <script src="/shared/services/AdaptiveLabelContext.js"></script>
     <script src="/shared/services/AdaptiveLabelService.js"></script>
     <script src="/shared/services/AdaptiveLabelProvider.js"></script>
     <script src="/shared/design-system/cds-ui-foundation.bundle.js"></script>
-    <script src="/shared/js/fiscalImpressao.js"></script>
-    <script src="/shared/js/vendasHistoricoUi.js"></script>
-    <script src="/erp/js/dashboard-command.js"></script>
-    <script src="/erp/js/dashboard.js"></script>
-    <script src="/erp/js/produtos.js"></script>
-    <script src="/erp/js/subcategorias.js"></script>
-    <script src="/erp/js/clientes.js"></script>
-    <script src="/erp/js/fornecedores.js"></script>
-    <script src="/erp/js/miip-central-revisao.js"></script>
-    <script src="/erp/js/compras.js"></script>
-    <script src="/erp/js/central-entradas-ux.js"></script>
-    <script src="/erp/js/central-entradas.js"></script>
-    <script src="/erp/js/central-homologacao.js"></script>
-    <script src="/erp/js/central-diagnostico.js"></script>
-    <script src="/erp/js/vendas.js"></script>
-    <script src="/pdv/js/entregas.js"></script>
-    <script src="/erp/js/financeiro-dashboard.js"></script>
-    <script src="/erp/js/financeiro-receber.js"></script>
-    <script src="/erp/js/financeiro-pagar.js"></script>
-    <script src="/erp/js/financeiro-historico.js"></script>
-    <script src="/erp/js/financeiro-relatorios.js"></script>
-    <script src="/erp/js/financeiro.js"></script>
-    <script src="/shared/js/configuracaoRede.js"></script>
-    <script src="/erp/js/configuracoes.js"></script>
-    <script src="/erp/js/cds-centro-configuracoes.js"></script>
-    <script src="/erp/js/cds-monitoring-engine.js"></script>
-    <script src="/erp/js/usuarios.js"></script>
-    <script src="/erp/js/equipamentos.js"></script>
-    <script src="/erp/js/laboratorio-equipamentos.js"></script>
-    <script src="/erp/js/configuracao_tef.js"></script>
-    <script src="/erp/js/categorias.js"></script>
-    <script src="/erp/js/fiscal.js"></script>
-    <script src="/erp/js/caixa.js"></script>
-    <script src="/erp/js/licenca.js"></script>
-    <script src="/erp/js/auditoria.js"></script>
-    <script src="/erp/js/caixas.js"></script>
+    <script type="application/cds-lazy" src="/shared/js/fiscalImpressao.js"></script>
+    <script type="application/cds-lazy" src="/shared/js/vendasHistoricoUi.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/dashboard-command.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/dashboard.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/produtos.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/subcategorias.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/clientes.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/fornecedores.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/miip-central-revisao.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/compras.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/central-entradas-ux.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/central-entradas.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/central-homologacao.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/central-diagnostico.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/vendas.js"></script>
+    <script type="application/cds-lazy" src="/pdv/js/entregas.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/faturamento.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/central-faturamento.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/pedidos.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/financeiro-dashboard.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/financeiro-receber.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/financeiro-pagar.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/financeiro-historico.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/financeiro-relatorios.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/financeiro.js"></script>
+    <script type="application/cds-lazy" src="/shared/js/configuracaoRede.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/configuracoes.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/cds-centro-configuracoes.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/cds-monitoring-engine.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/usuarios.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/equipamentos.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/central-equipamentos.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/laboratorio-equipamentos.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/configuracao_tef.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/categorias.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/fiscal.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/nfe-central.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/central-contabil.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/nfe-avulsa.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/nfe-operacional.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/caixa.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/licenca.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/auditoria.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/observabilidade.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/caixas.js"></script>
+    <script src="/shared/js/cds-obs-rum.js"></script>
     <script src="/erp/js/app.js"></script>
 
     <div id="notification-container" style="position: fixed; top: 20px; right: 20px; z-index: 9999; pointer-events: none;"></div>
 
-    <footer style="position: fixed; bottom: 0; width: 100%; background: #111827; color: #9ca3af; text-align: center; padding: 6px; font-size: 12px; z-index: 1000;">
-        &copy; <span data-brand="copyright">CDS Sistemas</span> — ERP (Retaguarda)
-    </footer>
+    <footer id="cds-plataforma-status" class="cds-plataforma-status-host" aria-live="polite"></footer>
+    <script src="/shared/js/cds-plataforma-status.js"></script>
 </body>
 </html>

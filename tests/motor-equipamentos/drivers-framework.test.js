@@ -97,10 +97,10 @@ async function main() {
   driverRegistry.limpar();
   driverLoader.reiniciar();
 
-  await test('DriverLoader carrega Toledo Prix 4 automaticamente', () => {
+  await test('DriverLoader carrega drivers do catálogo com módulo', () => {
     const rel = driverLoader.carregarTodos({ forcar: true });
-    assert.strictEqual(rel.carregados.length, 1);
-    assert.strictEqual(rel.carregados[0].codigo, 'TOLEDO_PRIX4_UNO');
+    assert.ok(rel.carregados.length >= 1);
+    assert.ok(rel.carregados.some((d) => d.codigo === 'TOLEDO_PRIX4_UNO'));
     assert.strictEqual(rel.erros.length, 0);
   });
 
@@ -118,7 +118,7 @@ async function main() {
     assert.strictEqual(toledo.registrado, true);
   });
 
-  await test('ToledoPrix4UnoDriver métodos não implementados retornam stub simulado', async () => {
+  await test('ToledoPrix4UnoDriver zerar/reiniciar e discovery oficiais', async () => {
     const d = new ToledoPrix4UnoDriver();
     const zerar = await d.zerar();
     assert.strictEqual(zerar.simulado, true);
@@ -128,9 +128,8 @@ async function main() {
     assert.strictEqual(reiniciar.simulado, true);
     assert.strictEqual(reiniciar.comunicacao_real, false);
 
-    const descobrir = await d.descobrir();
-    assert.strictEqual(descobrir.simulado, true);
-    assert.strictEqual(descobrir.comunicacao_real, false);
+    assert.strictEqual(typeof d.descobrir, 'function');
+    assert.strictEqual(d.informacoes().oficial, true);
   });
 
   console.log(`\n=== Resultado: ${passou} passou, ${falhou} falhou ===\n`);

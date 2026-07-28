@@ -35,7 +35,17 @@ const PERMISSOES_DISPONIVEIS = [
   'entrega_prestacao',
   'entrega_cancelar',
   'entrega_reabrir',
-  'entrega_alterar_pagamento'
+  'entrega_alterar_pagamento',
+  // RC4.1.0 — Arquitetura Comercial/Fiscal V4 (catálogo preparado para perfis)
+  'expedicao_expedir',
+  'nfe_emitir',
+  'nfe_cancelar',
+  'nfe_reenviar',
+  'nfe_consultar',
+  'nfe_exportar_xml',
+  'nfe_reimprimir_danfe',
+  'nfe_alterar_dados',
+  'nfe_acoes_lote'
 ];
 
 function extrairToken(req) {

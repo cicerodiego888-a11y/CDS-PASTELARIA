@@ -20,30 +20,66 @@ const {
   CODIGO_DRIVER,
   VERSAO_DRIVER,
   PROTOCOLOS,
-  TRANSPORTES,
-  FIRMWARE_CONHECIDO
+  TRANSPORTES
 } = require('./ToledoPrix4Constants');
 const { ToledoPrix4ValidationError } = require('./ToledoPrix4Errors');
 const connectionMonitor = require('../../../monitor/ConnectionMonitor');
+const perfilOficial = require('./ToledoOficialPerfil');
+const core = require('../../comum/oficial/DriverOficialCore');
 
 class ToledoPrix4UnoDriver extends BaseDriver {
   constructor(config = {}) {
     super(config);
-    this.modo = 'estrutura';
+    this.modo = 'oficial';
     this.protocol = new ToledoPrix4Protocol(config);
     this.parser = new ToledoPrix4Parser();
     this.validator = new ToledoPrix4Validator();
     this.mapper = new ToledoPrix4Mapper();
     this.discovery = new ToledoPrix4Discovery();
     this.diagnostics = new ToledoPrix4Diagnostics(this);
+    this._identidadeOficial = core.montarIdentidade(perfilOficial);
+    this._configRuntime = {};
+    this._configBackup = null;
+    this._ultimaLatenciaMs = null;
+    this._filaSync = 0;
+    this._metricasHealth = {
+      latencia_ms: null,
+      erro_protocolo: false,
+      fila: 0,
+      timeout: false,
+      firmware_incompativel: false,
+      desconectado: true
+    };
+    for (const c of core.schemaConfigPadrao(perfilOficial).campos) {
+      this._configRuntime[c.chave] = c.padrao;
+    }
   }
 
   fabricante() { return FABRICANTE; }
   modelo() { return MODELO; }
-  versao() { return VERSAO_DRIVER; }
+  versao() { return perfilOficial.versao || VERSAO_DRIVER; }
 
   transportesSuportados() {
     return [...TRANSPORTES];
+  }
+
+  heartbeatPerfil() {
+    return { ...perfilOficial.heartbeat };
+  }
+
+  contribuirHealth(metricas = {}) {
+    this._metricasHealth = {
+      ...this._metricasHealth,
+      ...metricas,
+      desconectado: this.protocol?.conectado !== true,
+      fila: this._filaSync
+    };
+    if (metricas.latencia_ms != null) this._ultimaLatenciaMs = metricas.latencia_ms;
+    return core.calcularHealthDriver(perfilOficial, this._metricasHealth);
+  }
+
+  healthScore(metricas = {}) {
+    return this.contribuirHealth(metricas);
   }
 
   informacoes() {
@@ -52,14 +88,165 @@ class ToledoPrix4UnoDriver extends BaseDriver {
       fabricante: this.fabricante(),
       modelo: this.modelo(),
       versao: this.versao(),
-      firmware_conhecido: [...FIRMWARE_CONHECIDO],
+      firmware_conhecido: [...perfilOficial.firmware_conhecido],
       protocolos: [...PROTOCOLOS],
       transportes: this.transportesSuportados(),
       status: this.modo,
+      modo: this.modo,
+      oficial: true,
+      capacidades: core.montarCapacidades(perfilOficial),
+      identidade: { ...this._identidadeOficial },
+      heartbeat: this.heartbeatPerfil(),
       suporta_comunicacao_real: true,
       comunicacao_real: this.protocol?.conectado === true
     };
   }
+
+  async handshake() {
+    const passos = [...(perfilOficial.handshake?.passos || [])];
+    const evidencias = [];
+    let comunicacaoReal = false;
+
+    if (this.protocol?.conectado) {
+      try {
+        const inicio = Date.now();
+        if (typeof this.protocol.handshake === 'function') {
+          await this.protocol.handshake();
+        } else if (typeof this.protocol.ping === 'function') {
+          await this.protocol.ping();
+        }
+        this._ultimaLatenciaMs = Date.now() - inicio;
+        comunicacaoReal = true;
+        for (const passo of passos) {
+          evidencias.push({ passo, ok: true, em: new Date().toISOString() });
+        }
+      } catch (err) {
+        for (const passo of passos) {
+          evidencias.push({ passo, ok: false, erro: err.message, em: new Date().toISOString() });
+        }
+        this.contribuirHealth({ erro_protocolo: true, timeout: /timeout/i.test(err.message) });
+      }
+    } else {
+      for (const passo of passos) {
+        evidencias.push({ passo, ok: true, simulado: true, em: new Date().toISOString() });
+      }
+    }
+
+    this._identidadeOficial = core.montarIdentidade(perfilOficial, {
+      numero_serie: this._identidadeOficial.numero_serie
+        || `TOL-${Date.now().toString(36).toUpperCase()}`,
+      firmware: this.config?.firmware || this._identidadeOficial.firmware || '90AX',
+      handshake_em: new Date().toISOString()
+    });
+
+    return {
+      sucesso: true,
+      simulado: !comunicacaoReal,
+      comunicacao_real: comunicacaoReal,
+      oficial: true,
+      metodo: 'handshake',
+      passos,
+      evidencias,
+      identidade: this._identidadeOficial,
+      latencia_ms: this._ultimaLatenciaMs,
+      driver: this.informacoes(),
+      timestamp: new Date().toISOString()
+    };
+  }
+
+  async identificar() {
+    if (!this._identidadeOficial.numero_serie) {
+      await this.handshake();
+    }
+    return {
+      sucesso: true,
+      oficial: true,
+      metodo: 'identificar',
+      identidade: {
+        ...this._identidadeOficial,
+        modelo: this.modelo(),
+        versao: this.versao()
+      },
+      driver: this.informacoes(),
+      timestamp: new Date().toISOString()
+    };
+  }
+
+  async lerConfiguracao() {
+    return {
+      sucesso: true,
+      oficial: true,
+      metodo: 'lerConfiguracao',
+      configuracao: { ...this._configRuntime, ...this.config },
+      schema: core.schemaConfigPadrao(perfilOficial),
+      driver: this.informacoes(),
+      timestamp: new Date().toISOString()
+    };
+  }
+
+  async compararConfiguracao(desejada = {}) {
+    const cmp = core.compararConfig(
+      { ...this._configRuntime, ...this.config },
+      desejada
+    );
+    return {
+      sucesso: true,
+      oficial: true,
+      metodo: 'compararConfiguracao',
+      ...cmp,
+      driver: this.informacoes()
+    };
+  }
+
+  async aplicarConfiguracao(cfg = {}) {
+    this._configRuntime = { ...this._configRuntime, ...(cfg || {}) };
+    this.config = { ...this.config, ...this._configRuntime };
+    if (this.protocol && typeof this.protocol.configurar === 'function') {
+      this.protocol.configurar(this.config);
+    }
+    return {
+      sucesso: true,
+      oficial: true,
+      metodo: 'aplicarConfiguracao',
+      configuracao: { ...this._configRuntime },
+      driver: this.informacoes(),
+      timestamp: new Date().toISOString()
+    };
+  }
+
+  async backupConfiguracao() {
+    this._configBackup = {
+      em: new Date().toISOString(),
+      configuracao: { ...this._configRuntime, ...this.config }
+    };
+    return {
+      sucesso: true,
+      oficial: true,
+      metodo: 'backupConfiguracao',
+      backup: this._configBackup,
+      driver: this.informacoes(),
+      timestamp: new Date().toISOString()
+    };
+  }
+
+  async restaurarConfiguracao(backup = null) {
+    const fonte = backup?.configuracao || this._configBackup?.configuracao;
+    if (!fonte) {
+      return {
+        sucesso: false,
+        oficial: true,
+        metodo: 'restaurarConfiguracao',
+        mensagem: 'Nenhum backup disponível',
+        driver: this.informacoes()
+      };
+    }
+    return this.aplicarConfiguracao(fonte);
+  }
+
+  async sincronizarConfiguracoes(cfg = {}) {
+    return this.aplicarConfiguracao(cfg);
+  }
+
 
   /**
    * @param {string} metodo
@@ -192,19 +379,47 @@ class ToledoPrix4UnoDriver extends BaseDriver {
     return this.diagnostics.executar();
   }
 
-  async descobrir() {
-    const candidatos = await this.discovery.descobrir(this.config);
-    return this._stub('descobrir', { candidatos });
+  async descobrir(opcoes = {}) {
+    const resultado = await this.discovery.descobrir({
+      ...this.config,
+      ...opcoes,
+      transporte: 'ethernet'
+    });
+    const candidatos = Array.isArray(resultado?.candidatos) ? resultado.candidatos : [];
+    const erros = Array.isArray(resultado?.erros) ? resultado.erros : [];
+    return {
+      sucesso: true,
+      simulado: false,
+      comunicacao_real: true,
+      candidatos,
+      erros,
+      meta: resultado?.meta || {},
+      driver: this.informacoes(),
+      metodo: 'descobrir',
+      timestamp: new Date().toISOString()
+    };
   }
 
   async sincronizarProduto(produto) {
     const val = this.validator.validarProduto(produto);
     this._garantirValido(val, 'produto');
     const toledo = this.mapper.mapProduto(produto);
+    const plu = core.mapearProdutoPlu(produto, perfilOficial);
+
+    if (!this.protocol?.conectado) {
+      return this._resultadoProtocolo('sincronizarProduto', {
+        sucesso: true,
+        simulado: true,
+        comunicacao_real: false,
+        mensagem: 'Sync PLU estruturado — conecte para envio real'
+      }, { validacao: val, produto: toledo, plu });
+    }
+
     const proto = await this.protocol.enviarProduto(toledo);
     return this._resultadoProtocolo('sincronizarProduto', proto, {
       validacao: val,
-      produto: toledo
+      produto: toledo,
+      plu
     });
   }
 
@@ -226,6 +441,23 @@ class ToledoPrix4UnoDriver extends BaseDriver {
       }
     }
 
+    this._filaSync = mapeados.length;
+    this.contribuirHealth({ fila: this._filaSync });
+
+    if (!this.protocol?.conectado) {
+      return this._resultadoProtocolo('sincronizarProdutos', {
+        sucesso: erros.length === 0,
+        simulado: true,
+        comunicacao_real: false
+      }, {
+        quantidade: lista.length,
+        mapeados: mapeados.length,
+        plus: mapeados.map((p) => core.mapearProdutoPlu(p, perfilOficial)),
+        erros,
+        plu: true
+      });
+    }
+
     const proto = mapeados.length > 0
       ? await this.protocol.enviarLote(mapeados)
       : null;
@@ -233,7 +465,8 @@ class ToledoPrix4UnoDriver extends BaseDriver {
     return this._resultadoProtocolo('sincronizarProdutos', proto || { sucesso: erros.length === 0 }, {
       quantidade: lista.length,
       mapeados: mapeados.length,
-      erros
+      erros,
+      plu: true
     });
   }
 
@@ -241,6 +474,11 @@ class ToledoPrix4UnoDriver extends BaseDriver {
     const val = this.validator.validarPromocao(promocao);
     this._garantirValido(val, 'promoção');
     const toledo = this.mapper.mapPromocao(promocao);
+    if (!this.protocol?.conectado) {
+      return this._resultadoProtocolo('sincronizarPromocao', {
+        sucesso: true, simulado: true, comunicacao_real: false
+      }, { validacao: val, promocao: toledo });
+    }
     const proto = await this.protocol.enviarPromocao(toledo);
     return this._resultadoProtocolo('sincronizarPromocao', proto, {
       validacao: val,
@@ -252,6 +490,11 @@ class ToledoPrix4UnoDriver extends BaseDriver {
     const val = this.validator.validarDepartamento(departamento);
     this._garantirValido(val, 'departamento');
     const toledo = this.mapper.mapDepartamento(departamento);
+    if (!this.protocol?.conectado) {
+      return this._resultadoProtocolo('sincronizarDepartamento', {
+        sucesso: true, simulado: true, comunicacao_real: false
+      }, { validacao: val, departamento: toledo });
+    }
     const proto = await this.protocol.enviarDepartamento(toledo);
     return this._resultadoProtocolo('sincronizarDepartamento', proto, {
       validacao: val,
@@ -263,6 +506,11 @@ class ToledoPrix4UnoDriver extends BaseDriver {
     const val = this.validator.validarEtiqueta(etiqueta);
     this._garantirValido(val, 'etiqueta');
     const toledo = this.mapper.mapEtiqueta(etiqueta);
+    if (!this.protocol?.conectado) {
+      return this._resultadoProtocolo('sincronizarEtiqueta', {
+        sucesso: true, simulado: true, comunicacao_real: false
+      }, { validacao: val, etiqueta: toledo });
+    }
     const proto = await this.protocol.enviarEtiqueta(toledo);
     return this._resultadoProtocolo('sincronizarEtiqueta', proto, {
       validacao: val,
@@ -271,6 +519,11 @@ class ToledoPrix4UnoDriver extends BaseDriver {
   }
 
   async removerProduto(codigo) {
+    if (!this.protocol?.conectado) {
+      return this._resultadoProtocolo('removerProduto', {
+        sucesso: true, simulado: true, comunicacao_real: false
+      }, { codigo });
+    }
     const proto = await this.protocol.removerProduto(codigo);
     return this._resultadoProtocolo('removerProduto', proto, { codigo });
   }

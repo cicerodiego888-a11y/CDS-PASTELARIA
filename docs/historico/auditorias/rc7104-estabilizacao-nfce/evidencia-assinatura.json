@@ -1,0 +1,14 @@
+{
+  "digestValue": "pHfMWPKsYHcwkA63q4ZPrVT+Yos=",
+  "temSignatureValue": true,
+  "temC14N": true,
+  "temReference": true,
+  "temTransform": true,
+  "xsd": {
+    "ok": true,
+    "status": "XSD_OK",
+    "erros": []
+  },
+  "vTroco": 22,
+  "modelo": "MODELO_LIQUIDO"
+}

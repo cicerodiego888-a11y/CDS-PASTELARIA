@@ -140,7 +140,7 @@ async function main() {
   });
 
   await test('docs de arquitetura RC3/RC4 existem', async () => {
-    const doc = path.join(__dirname, '../../docs/CENTRAL_ENTRADAS_ARQUITETURA.md');
+    const doc = path.join(__dirname, '../../docs/fiscal/CENTRAL_ENTRADAS_ARQUITETURA.md');
     const txt = fs.readFileSync(doc, 'utf8');
     assert.ok(/RC[34]/.test(txt));
     assert.ok(txt.includes('CentralEntradasOrchestrator'));

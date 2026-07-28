@@ -171,7 +171,8 @@
         </span>
       </button>
 
-      <button id="btnVendaEntregaPdv" class="btn-venda-entrega" type="button" disabled title="Enviar para Entrega (F9)">
+      <button id="btnVendaEntregaPdv" class="btn-venda-entrega" type="button" disabled
+        data-recurso="vendasEntrega" style="display:none;" title="Enviar para Entrega (F9)">
         <span class="btn-venda-entrega-icone pdv-btn-icone" aria-hidden="true">🚚</span>
         <span class="btn-finalizar-textos">
           <span class="btn-venda-entrega-titulo">ENVIAR PARA ENTREGA</span>
@@ -224,7 +225,7 @@
     <span class="pdv-atalho-chip">F4 Quantidade</span>
     <span class="pdv-atalho-chip">F7 Fechar Caixa</span>
     <span class="pdv-atalho-chip">F8 Desconto</span>
-    <span class="pdv-atalho-chip" data-atalho="entrega">F9 Entrega</span>
+    <span class="pdv-atalho-chip" data-atalho="entrega" data-recurso="vendasEntrega" style="display:none;">F9 Entrega</span>
     <span class="pdv-atalho-chip">F10 Finalizar</span>
     <span class="pdv-atalho-chip" data-atalho="aparencia">F11 Aparência</span>
     <span class="pdv-atalho-chip">ESC Cancelar</span>

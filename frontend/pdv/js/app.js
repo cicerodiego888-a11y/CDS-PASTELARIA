@@ -8,7 +8,10 @@ function loadPage(page) {
     currentPage = page;
 
     if (!paginaPermitidaPorImplantacao(page)) {
-        showNotification('Este módulo não está habilitado para o tipo de implantação configurado.', 'warning');
+        const msg = typeof mensagemModuloNaoContratado === 'function'
+            ? mensagemModuloNaoContratado(page)
+            : 'Módulo não contratado.';
+        showNotification(msg, 'warning');
         if (page !== 'pdv') loadPage('pdv');
         return;
     }
@@ -61,9 +64,6 @@ function loadPage(page) {
             return typeof loadEntregas === 'function'
                 ? loadEntregas()
                 : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar entregas.</div>');
-        case 'tef':
-            showNotification('TEF integrado ao fluxo de venda. Para reimprimir comprovantes, use Reimpressão de Cupom.', 'info');
-            return loadPage('reimpressao');
         case 'configuracao-rede':
             if (typeof abrirModalConfiguracaoRede === 'function') {
                 abrirModalConfiguracaoRede({ somenteSuperAdmin: true });
@@ -80,6 +80,9 @@ function loadPage(page) {
             $('.nav-link').removeClass('active');
             $('.nav-link[data-page="pdv"]').first().addClass('active');
             return;
+        case 'tef':
+            // Atalho legado removido do menu — redireciona para reimpressão
+            return loadPage('reimpressao');
         default:
             $('#page-content').html('<div class="alert alert-warning">Página não encontrada.</div>');
     }

@@ -97,8 +97,10 @@ function finalizarLoginComUsuario(req, res, usuario) {
           nome: usuario.nome || usuario.username,
           permissoes,
           terminal_id: terminalId,
-          caixa_sessao_id: caixaSessaoId
-        }
+          caixa_sessao_id: caixaSessaoId,
+          troca_senha_obrigatoria: Number(usuario.troca_senha_obrigatoria) === 1
+        },
+        troca_senha_obrigatoria: Number(usuario.troca_senha_obrigatoria) === 1
       });
 
       gravarAuditoria({
@@ -158,8 +160,7 @@ router.post('/supervisor/authorize', (req, res) => {
       if (err) {
         console.error('ERRO SQL LOGIN:', err);
         return res.status(500).json({
-          error: err.message,
-          stack: err.stack
+          error: 'Erro interno ao autenticar.'
         });
       }
 
@@ -257,6 +258,99 @@ router.post('/login', (req, res) => {
       }
 
       finalizarLoginComUsuario(req, res, usuario);
+    }
+  );
+});
+
+/**
+ * Hotfix RC2.2 — detecta instalação em primeiro acesso (admin com troca obrigatória).
+ * Público: usado pela tela de login para pré-preencher admin/1234.
+ */
+router.get('/primeiro-acesso', (req, res) => {
+  db.get(
+    `
+      SELECT id, username
+      FROM usuarios
+      WHERE COALESCE(ativo, 1) = 1
+        AND COALESCE(troca_senha_obrigatoria, 0) = 1
+        AND LOWER(TRIM(username)) = 'admin'
+      LIMIT 1
+    `,
+    [],
+    (err, row) => {
+      if (err) {
+        return res.status(500).json({ error: 'Erro ao verificar primeiro acesso.' });
+      }
+      res.json({
+        primeiro_acesso: Boolean(row),
+        username: row ? 'admin' : null
+      });
+    }
+  );
+});
+
+/**
+ * Hotfix RC2.2 — troca de senha obrigatória no primeiro acesso.
+ */
+router.post('/primeiro-acesso/trocar-senha', verificarToken, (req, res) => {
+  const usuarioId = req.user?.id || req.user?.usuario_id;
+  const novaSenha = String(req.body?.nova_senha || req.body?.password || '').trim();
+  const confirmar = String(req.body?.confirmar_senha || req.body?.confirmacao || '').trim();
+
+  if (!usuarioId) {
+    return res.status(401).json({ error: 'Não autenticado.' });
+  }
+  if (!novaSenha || novaSenha.length < 4) {
+    return res.status(400).json({ error: 'Nova senha deve ter pelo menos 4 caracteres.' });
+  }
+  if (novaSenha !== confirmar) {
+    return res.status(400).json({ error: 'Confirmação de senha não confere.' });
+  }
+  if (novaSenha === '1234') {
+    return res.status(400).json({ error: 'Escolha uma senha diferente da senha inicial.' });
+  }
+
+  db.get(
+    `SELECT id, username, troca_senha_obrigatoria FROM usuarios WHERE id = ? AND COALESCE(ativo, 1) = 1`,
+    [usuarioId],
+    (err, usuario) => {
+      if (err) {
+        return res.status(500).json({ error: 'Erro ao carregar usuário.' });
+      }
+      if (!usuario) {
+        return res.status(404).json({ error: 'Usuário não encontrado.' });
+      }
+      if (Number(usuario.troca_senha_obrigatoria) !== 1) {
+        return res.status(400).json({ error: 'Troca de senha no primeiro acesso não é necessária.' });
+      }
+
+      const hash = bcrypt.hashSync(novaSenha, 10);
+      db.run(
+        `UPDATE usuarios SET password_hash = ?, troca_senha_obrigatoria = 0 WHERE id = ?`,
+        [hash, usuarioId],
+        function updateErr(updateErr) {
+          if (updateErr) {
+            return res.status(500).json({ error: 'Falha ao atualizar senha.' });
+          }
+
+          gravarAuditoria({
+            usuario_id: usuarioId,
+            usuario_nome: usuario.username,
+            modulo: 'auth',
+            acao: 'primeiro_acesso_trocar_senha',
+            referencia_tipo: 'usuario',
+            referencia_id: usuarioId,
+            detalhes: { username: usuario.username },
+            ip_requisicao: req.ip || null
+          }).catch(() => {});
+
+          res.json({
+            success: true,
+            troca_senha_obrigatoria: false,
+            message: 'Senha alterada com sucesso.'
+          });
+        }
+      );
     }
   );
 });
@@ -686,10 +780,14 @@ router.post('/usuarios/alterar-senha', verificarToken, async (req, res) => {
 
     // Atualizar senha
     await new Promise((resolve, reject) => {
-      db.run('UPDATE usuarios SET password_hash = ? WHERE id = ?', [senhaHash, usuarioAlvoId], function(err) {
-        if (err) return reject(err);
-        resolve(this.changes);
-      });
+      db.run(
+        'UPDATE usuarios SET password_hash = ?, troca_senha_obrigatoria = 0 WHERE id = ?',
+        [senhaHash, usuarioAlvoId],
+        function(err) {
+          if (err) return reject(err);
+          resolve(this.changes);
+        }
+      );
     });
 
     auditarAcaoUsuario(req, 'alterar_senha', usuarioAlvoId, {

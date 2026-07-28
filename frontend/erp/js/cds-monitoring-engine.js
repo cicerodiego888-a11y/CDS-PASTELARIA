@@ -72,6 +72,12 @@
     return true;
   }
 
+  function moduloFiscalContratado() {
+    if (typeof global.fiscalHabilitado === 'function') return global.fiscalHabilitado();
+    if (typeof global.implantacaoPermiteFiscal === 'function') return global.implantacaoPermiteFiscal();
+    return true;
+  }
+
   function getShortLabel(domain, opts) {
     const svc = ALS();
     if (svc && typeof svc.getShortLabel === 'function') return svc.getShortLabel(domain, opts);
@@ -85,11 +91,14 @@
   }
 
   function obterAbas() {
-    return ABAS_BASE.map((a) => ({
-      id: a.id,
-      icon: a.icon,
-      label: sanitizeText(getLabel(a.labelKey))
-    }));
+    const fiscalOn = moduloFiscalContratado();
+    return ABAS_BASE
+      .filter((a) => fiscalOn || a.id !== 'fiscal')
+      .map((a) => ({
+        id: a.id,
+        icon: a.icon,
+        label: sanitizeText(getLabel(a.labelKey))
+      }));
   }
 
   function formatMoney(v) {
@@ -129,8 +138,10 @@
 
   function filtrarWidgets(widgets, domain) {
     const list = Array.isArray(widgets) ? widgets : [];
+    const fiscalOn = moduloFiscalContratado();
     return list.filter((w) => {
       if (!w || w.domain !== domain) return false;
+      if (!fiscalOn && (w.scope === 'fiscal' || domain === 'fiscal')) return false;
       if (w.scope === 'nao_fiscal' && !shouldShowNaoFiscal()) return false;
       return true;
     });
@@ -597,27 +608,39 @@
     const nav = document.querySelector('#cdsMonitoringEngine .cds-cfg-nav');
     if (nav) {
       nav.innerHTML = renderNav(estado.abaAtiva);
-      nav.querySelectorAll('[data-mon-nav]').forEach((btn) => {
-        btn.addEventListener('click', () => ativarAba(btn.getAttribute('data-mon-nav')));
-      });
     }
   }
 
   function bindUi() {
-    document.querySelectorAll('[data-mon-nav]').forEach((btn) => {
-      btn.addEventListener('click', () => ativarAba(btn.getAttribute('data-mon-nav')));
-    });
-    const btnRefresh = document.getElementById('cdsMonRefresh');
-    if (btnRefresh) {
-      btnRefresh.addEventListener('click', () => carregarSummary(true));
-    }
-    document.querySelectorAll('.cds-mon-action').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const action = parseActionAttr(btn);
-        if (action) executarAction(action);
-        else notify('Não foi possível executar a navegação sugerida.', 'warning');
+    const host = document.getElementById('page-content');
+    if (host && host.dataset.cdsMonDelegate !== '1') {
+      host.dataset.cdsMonDelegate = '1';
+      host.addEventListener('click', (ev) => {
+        if (!host.querySelector('#cdsMonitoringEngine')) return;
+
+        const navBtn = ev.target.closest('[data-mon-nav]');
+        if (navBtn && host.contains(navBtn)) {
+          ev.preventDefault();
+          ativarAba(navBtn.getAttribute('data-mon-nav'));
+          return;
+        }
+
+        const refreshBtn = ev.target.closest('#cdsMonRefresh');
+        if (refreshBtn && host.contains(refreshBtn)) {
+          ev.preventDefault();
+          carregarSummary(true);
+          return;
+        }
+
+        const actionBtn = ev.target.closest('.cds-mon-action');
+        if (actionBtn && host.contains(actionBtn)) {
+          ev.preventDefault();
+          const action = parseActionAttr(actionBtn);
+          if (action) executarAction(action);
+          else notify('Não foi possível executar a navegação sugerida.', 'warning');
+        }
       });
-    });
+    }
   }
 
   function renderShell(summary) {

@@ -7,19 +7,35 @@
   'use strict';
 
   const CATEGORIAS = Object.freeze([
-    { id: 'geral', icon: 'fa-sliders-h', label: 'Geral', keywords: 'implantação tipo erp sem fiscal multi-caixa' },
-    { id: 'empresa', icon: 'fa-building', label: 'Empresa', keywords: 'cfop csosn origem cest padrão fiscal empresa' },
-    { id: 'fiscal', icon: 'fa-file-invoice', label: 'Fiscal', keywords: 'ambiente produção homologação certificado csc uf sefaz urls qrcode nfc-e manifestação destinatário ciência 210210' },
-    { id: 'plataforma', icon: 'fa-university', label: 'Plataforma Fiscal', keywords: 'registry resolver soap transport runtime fallback confidence enablement' },
-    { id: 'central', icon: 'fa-inbox', label: 'Central Inteligente', keywords: 'central sync nsu scheduler timeout retries logs debug sefaz' },
+    { id: 'empresa', icon: 'fa-building', label: 'Empresa', keywords: 'implantação tipo erp cfop csosn origem cest padrão fiscal empresa' },
+    { id: 'plataformaFiscal', icon: 'fa-university', label: 'Plataforma Fiscal', keywords: 'ambiente produção homologação certificado csc uf sefaz urls qrcode nfc-e nf-e contingência webservices diagnóstico fiscal', fiscal: true },
+    { id: 'modulosLicenciados', icon: 'fa-puzzle-piece', label: 'Módulos Licenciados', keywords: 'pdv pedidos expedição faturamento entregas nfe nfce compra fácil marketplace crm invisibilidade' },
+    { id: 'motores', icon: 'fa-brain', label: 'Motores Inteligentes', keywords: 'midp miip motor distribuição pagamentos ativar' },
     { id: 'equipamentos', icon: 'fa-cash-register', label: 'Equipamentos', keywords: 'tef pinpad equipamento' },
     { id: 'integracoes', icon: 'fa-plug', label: 'Integrações', keywords: 'pix tef pinpad automação bancária' },
-    { id: 'seguranca', icon: 'fa-shield-alt', label: 'Segurança', keywords: 'confirmação fiscal tef manual certificado senha' },
+    { id: 'licenciamentoCds', icon: 'fa-id-card', label: 'Licenciamento CDS', keywords: 'assinatura pix whatsapp renovação aviso dias mensagem qr code' },
+    { id: 'seguranca', icon: 'fa-shield-alt', label: 'Segurança', keywords: 'confirmação fiscal tef manual certificado senha', fiscal: true },
+    { id: 'bancoDados', icon: 'fa-database', label: 'Banco de Dados', keywords: 'rede ip porta cliente servidor local modo operação' },
     { id: 'performance', icon: 'fa-tachometer-alt', label: 'Performance', keywords: 'timeout retry sync performance' },
-    { id: 'backup', icon: 'fa-database', label: 'Backup', keywords: 'backup restauração' },
-    { id: 'aparencia', icon: 'fa-palette', label: 'Aparência', keywords: 'tema aparência pdv visual' },
-    { id: 'avancado', icon: 'fa-cog', label: 'Avançado', keywords: 'rede ip porta cliente servidor local módulos vendas entrega' }
+    { id: 'backup', icon: 'fa-hdd', label: 'Backup', keywords: 'backup restauração' },
+    { id: 'diagnostico', icon: 'fa-stethoscope', label: 'Diagnóstico', keywords: 'central sync nsu scheduler logs debug sefaz saúde', fiscal: true }
   ]);
+
+  function configPermiteFiscalUi() {
+    if (typeof global.fiscalHabilitado === 'function' && global.fiscalHabilitado()) return true;
+    try {
+      const sel = document.querySelector('input[name="tipoImplantacao"]:checked');
+      const tipo = String(sel && sel.value || (global.configuracaoAvancadaServidor && global.configuracaoAvancadaServidor.tipoImplantacao) || '').toUpperCase();
+      return tipo === 'ERP_FISCAL' || tipo === 'ERP_MULTICAIXA';
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function categoriasVisiveis() {
+    const fiscalOn = configPermiteFiscalUi();
+    return CATEGORIAS.filter((c) => !c.fiscal || fiscalOn);
+  }
 
   let estadoExecutivo = {
     empresa: '—',
@@ -84,23 +100,28 @@
     const certLabel = cert.status === 'OK' ? 'Válido' : (cert.status || (cert.presente ? 'Atenção' : 'Ausente'));
     const sefazOnline = cen.diagnostico?.ultimoErro ? 'warn' : 'ok';
     const syncLabel = cen.sincronizacao?.syncAutomaticaHabilitada ? 'Scheduler ativo' : 'Scheduler off';
+    const fiscalUi = configPermiteFiscalUi();
 
     return `
       <div class="cds-cfg-exec" id="cdsCfgExecPanel" aria-label="Painel executivo da plataforma">
         ${renderKpi('empresa', 'Empresa', escapeHtml(e.empresa || '—'), `CNPJ ${escapeHtml(e.cnpj || '—')}`, e.cnpj && e.cnpj !== '—' ? 'ok' : 'warn')}
+        ${fiscalUi ? `
         ${renderKpi('ambiente', 'Ambiente Fiscal', ambCode != null ? escapeHtml(labelAmbiente(ambCode)) : '—', 'Origem: Centro de Configurações', toneAmbiente(ambCode))}
         ${renderKpi('sefaz', 'SEFAZ', badge(cen.ambiente?.label || '—', sefazOnline === 'ok' ? 'ok' : 'warn'), 'Visão via Central / DF-e', sefazOnline)}
         ${renderKpi('cert', 'Certificado Digital', badge(certLabel, certTone), cert.validade ? `Validade: ${escapeHtml(String(cert.validade).slice(0, 10))} · ${cert.diasRestantes != null ? cert.diasRestantes + ' dias' : ''}` : (cert.mensagem || 'Configure na aba Fiscal'), certTone)}
         ${renderKpi('miip', 'MIIP', badge(cen.diagnostico?.versaoMiip || 'RC1', 'info'), 'Health via pipeline Central', 'ok')}
         ${renderKpi('plataforma', 'Plataforma Fiscal', badge('RC1.1', 'prep'), 'Registry · Resolver · SoapTransport', 'ok')}
         ${renderKpi('central', 'Central Inteligente', badge(syncLabel, cen.sincronizacao?.syncAutomaticaHabilitada ? 'ok' : 'neutral'), cen.diagnostico?.ultimaSincronizacao ? `Última sync: ${escapeHtml(String(cen.diagnostico.ultimaSincronizacao).slice(0, 19).replace('T', ' '))}` : 'Consome config fiscal oficial', 'ok')}
-        ${renderKpi('servicos', 'Serviços', badge('Operacional', 'ok'), 'Parser · Motor Fiscal · Financeiro · Equipamentos', 'ok')}
+        ` : ''}
+        ${renderKpi('servicos', 'Serviços', badge('Operacional', 'ok'), fiscalUi ? 'Parser · Motor Fiscal · Financeiro · Equipamentos' : 'Financeiro · Equipamentos · Comercial', 'ok')}
       </div>`;
   }
 
   function renderNav(ativa) {
-    return CATEGORIAS.map((c) => `
-      <button type="button" class="cds-cfg-nav__item${c.id === ativa ? ' is-active' : ''}"
+    const cats = categoriasVisiveis();
+    const ativaOk = cats.some((c) => c.id === ativa) ? ativa : (cats[0] && cats[0].id);
+    return cats.map((c) => `
+      <button type="button" class="cds-cfg-nav__item${c.id === ativaOk ? ' is-active' : ''}"
         data-cfg-nav="${c.id}" data-cfg-keywords="${escapeHtml(c.keywords)} ${escapeHtml(c.label)}">
         <i class="fas ${c.icon}"></i><span>${escapeHtml(c.label)}</span>
       </button>`).join('');
@@ -123,11 +144,34 @@
     const clienteServidorDisponivel = tipo === 'ERP_MULTICAIXA';
     const vendasEntregaOn = config.habilitar_vendas_entrega === true
       || (config.recursos && config.recursos.vendasEntrega === true);
+    const faturamentoOn = (config.recursos && (config.recursos.expedicao === true || config.recursos.faturamento === true))
+      || config.habilitar_expedicao === true
+      || config.habilitar_faturamento === true;
+    const midpOn = config.ativar_midp === true;
+    const rec = config.recursos || {};
+    const pdvOn = rec.pdv !== false && config.modulo_pdv !== false;
+    const pedidosOn = rec.pedidos === true || (config.modulo_pedidos === true) || (config.modulo_pedidos == null && faturamentoOn);
+    // Histórico acompanha PDV quando a flag ainda não foi definida.
+    const historicoOn = rec.historicoVendas === true
+      || config.modulo_historico_vendas === true
+      || (rec.historicoVendas == null && config.modulo_historico_vendas == null && pdvOn);
+    const nfeOn = rec.nfe === true || config.modulo_nfe === true;
+    const nfceOn = rec.nfce === true || config.modulo_nfce === true;
+    const compraFacilOn = config.modulo_compra_facil === true || rec.compraFacil === true;
+    const marketplaceOn = config.modulo_marketplace === true || rec.marketplace === true;
+    const crmOn = config.modulo_crm === true || rec.crm === true;
+    const licDias = Number(config.licenca_dias_aviso || 3);
+    const licPix = config.licenca_chave_pix || '';
+    const licWa = config.licenca_whatsapp_url || '';
+    const licMsg = config.licenca_mensagem_renovacao
+      || 'Sua assinatura do CDS Sistemas expira em {dias} dias.';
+    const licPlano = config.licenca_plano || '';
+    const fiscalUi = configPermiteFiscalUi();
 
     return `
-      <div class="cds-cfg-pane is-active" data-cfg-pane="geral">
-        <h2 class="cds-cfg-pane__title">Geral</h2>
-        <p class="cds-cfg-pane__sub">Tipo de implantação da plataforma.</p>
+      <div class="cds-cfg-pane is-active" data-cfg-pane="empresa">
+        <h2 class="cds-cfg-pane__title">Empresa</h2>
+        <p class="cds-cfg-pane__sub">Tipo de implantação e padrões contábeis.${fiscalUi ? ' Cadastro fiscal oficial fica em Plataforma Fiscal.' : ''}</p>
         ${card('<i class="fas fa-layer-group"></i> Tipo de Implantação', `
           <div class="form-check mb-2" data-cfg-search="erp sem fiscal">
             <input class="form-check-input" type="radio" name="tipoImplantacao" id="tipoSemFiscal" value="ERP_SEM_FISCAL" ${tipo === 'ERP_SEM_FISCAL' ? 'checked' : ''}>
@@ -142,12 +186,7 @@
             <label class="form-check-label" for="tipoMulticaixa">ERP Multi-Caixa</label>
           </div>
         `, 'implantação tipo erp')}
-      </div>
-
-      <div class="cds-cfg-pane" data-cfg-pane="empresa">
-        <h2 class="cds-cfg-pane__title">Empresa</h2>
-        <p class="cds-cfg-pane__sub">Padrões contábeis da empresa. Dados cadastrais fiscais ficam na aba Fiscal (fonte oficial).</p>
-        <div class="cds-cfg-note">Razão social, CNPJ, IE e endereço são editados na categoria <strong>Fiscal</strong> (única fonte oficial).</div>
+        ${fiscalUi ? `<div class="cds-cfg-note">Razão social, CNPJ, IE e certificado são editados em <strong>Plataforma Fiscal</strong> (Super Usuário).</div>
         <div id="secaoPadraoFiscalEmpresa">
           ${card('<i class="fas fa-file-invoice"></i> Padrão Fiscal da Empresa', `
             <p class="cds-cfg-hint mb-3">Valores padrão para novos produtos. Não altera produtos já cadastrados.</p>
@@ -175,21 +214,22 @@
               </button>
             </div>
           `, 'cfop csosn origem cest padrão fiscal')}
-        </div>
+        </div>` : ''}
       </div>
 
-      <div class="cds-cfg-pane" data-cfg-pane="fiscal">
-        <h2 class="cds-cfg-pane__title">Fiscal</h2>
-        <p class="cds-cfg-pane__sub">Única fonte oficial de Ambiente, UF, certificado, CSC, URLs SEFAZ e Manifestação do Destinatário.</p>
+      ${fiscalUi ? `
+      <div class="cds-cfg-pane" data-cfg-pane="plataformaFiscal">
+        <h2 class="cds-cfg-pane__title">Plataforma Fiscal</h2>
+        <p class="cds-cfg-pane__sub">Única fonte oficial — Super Usuário. Ambiente, série, CSC, certificado, contingência e WebServices.</p>
         <div class="cds-cfg-note">
-          ${badge('Fonte oficial RC3.1 / RC4.3', 'ok')}
-          <span class="ms-2">Central Inteligente, emissão e DF-e consomem esta configuração.</span>
+          ${badge('Fonte oficial Sprint 3.9', 'ok')}
+          <span class="ms-2">Acesso restrito a SUPER_ADMIN.</span>
         </div>
         <div id="secaoConfigFiscalAvancadas">
           <p class="text-muted small" id="msgConfigFiscalIndisponivel" style="display:none;">
-            Selecione ERP Fiscal ou ERP Multi-Caixa na categoria Geral para configurar os parâmetros fiscais.
+            Selecione ERP Fiscal ou ERP Multi-Caixa em Empresa para configurar os parâmetros fiscais.
           </p>
-          <div id="fiscal-config-form-area-avancadas" class="cds-cfg-fiscal-grid" data-cfg-search="ambiente certificado csc produção homologação">
+          <div id="fiscal-config-form-area-avancadas" class="cds-cfg-fiscal-grid" data-cfg-search="ambiente certificado csc produção homologação série token contingência">
             <div class="text-center py-4 text-muted">
               <i class="fas fa-spinner fa-spin me-2"></i> Carregando configuração fiscal...
             </div>
@@ -230,8 +270,8 @@
         </div>
       </div>
 
-      <div class="cds-cfg-pane" data-cfg-pane="plataforma">
-        <h2 class="cds-cfg-pane__title">Plataforma Fiscal</h2>
+      <div class="cds-cfg-pane" data-cfg-pane="plataformaFiscalRuntime" style="display:none" aria-hidden="true">
+        <h2 class="cds-cfg-pane__title">Runtime Fiscal</h2>
         <p class="cds-cfg-pane__sub">Visão somente leitura da plataforma (Registry, Resolver, Transport).</p>
         <div class="row g-3">
           <div class="col-md-6">${card('Registry', `<div class="cds-cfg-kpi__value">Ativo</div><p class="cds-cfg-hint mb-0">Catálogo de endpoints SEFAZ por modelo/operação/ambiente.</p>`, 'registry')}</div>
@@ -242,12 +282,11 @@
         <div class="cds-cfg-note">Ambiente SEFAZ utilizado pela plataforma: o mesmo de <strong>Fiscal</strong> (getFiscalConfig).</div>
       </div>
 
-      <div class="cds-cfg-pane" data-cfg-pane="central">
-        <h2 class="cds-cfg-pane__title">Central Inteligente</h2>
-        <p class="cds-cfg-pane__sub">Consome a configuração fiscal oficial. Operação (sync/timeouts) permanece na Central.</p>
+      <div class="cds-cfg-pane" data-cfg-pane="diagnostico">
+        <h2 class="cds-cfg-pane__title">Diagnóstico</h2>
+        <p class="cds-cfg-pane__sub">Central Inteligente e saúde da plataforma (somente leitura operacional).</p>
         <div class="cds-cfg-note">
-          Ambiente, UF, certificado, CSC e política de Manifestação são <strong>somente leitura</strong> na Central.
-          Origem: Centro de Configurações → Fiscal (RC4.3).
+          Ambiente, UF, certificado e Manifestação: origem em <strong>Plataforma Fiscal</strong>.
         </div>
         <div class="row g-3" id="cdsCfgCentralReadonly">
           <div class="col-md-6">${card('Ambiente (somente leitura)', `<div id="cdsCfgCentralAmbiente">—</div>`, 'ambiente produção homologação')}</div>
@@ -257,13 +296,14 @@
         </div>
         <div class="cds-cfg-actions">
           <button type="button" class="btn btn-primary btn-sm" id="btnAbrirConfigFiscalOficial">
-            <i class="fas fa-file-invoice"></i> Abrir Configuração Fiscal
+            <i class="fas fa-file-invoice"></i> Abrir Plataforma Fiscal
           </button>
           <button type="button" class="btn btn-outline-secondary btn-sm" onclick="typeof loadPage==='function'&&loadPage('central-entradas')">
             <i class="fas fa-inbox"></i> Abrir Central Inteligente
           </button>
         </div>
       </div>
+      ` : ''}
 
       <div class="cds-cfg-pane" data-cfg-pane="equipamentos">
         <h2 class="cds-cfg-pane__title">Equipamentos</h2>
@@ -298,6 +338,7 @@
         `, 'tef')}
       </div>
 
+      ${fiscalUi ? `
       <div class="cds-cfg-pane" data-cfg-pane="seguranca">
         <h2 class="cds-cfg-pane__title">Segurança</h2>
         <p class="cds-cfg-pane__sub">Confirmação fiscal no PDV. Certificado digital na aba Fiscal.</p>
@@ -314,6 +355,7 @@
         `, 'confirmação fiscal segurança')}
         <div class="cds-cfg-note">Certificado A1 e senha: edite em <strong>Fiscal</strong> (fonte oficial).</div>
       </div>
+      ` : ''}
 
       <div class="cds-cfg-pane" data-cfg-pane="performance">
         <h2 class="cds-cfg-pane__title">Performance</h2>
@@ -330,27 +372,92 @@
 
       <div class="cds-cfg-pane" data-cfg-pane="backup">
         <h2 class="cds-cfg-pane__title">Backup</h2>
-        <p class="cds-cfg-pane__sub">Organização visual — rotinas existentes permanecem nos módulos atuais.</p>
-        <div class="cds-cfg-empty" data-cfg-search="backup">
-          <div><i class="fas fa-database"></i></div>
-          <div>Use o menu <strong>Configurações</strong> do ERP para rotinas de backup já existentes.</div>
-          <button type="button" class="btn btn-outline-primary btn-sm mt-3" onclick="typeof loadPage==='function'&&loadPage('configuracoes')">
-            Abrir Configurações
-          </button>
-        </div>
+        <p class="cds-cfg-pane__sub">Rotinas de backup e manutenção da base (Super Usuário).</p>
+        ${card('<i class="fas fa-database"></i> Backup e Manutenção', `
+          <div class="d-flex flex-wrap gap-2 mb-2">
+            <button type="button" id="btnBackupManual" class="btn btn-success btn-sm">
+              <i class="fas fa-database"></i> Backup Manual DB
+            </button>
+            <button type="button" id="btnEscolherPasta" class="btn btn-info btn-sm" onclick="escolherPastaBackup()">
+              <i class="fas fa-folder-open"></i> Escolher Pasta
+            </button>
+            <button type="button" class="btn btn-warning btn-sm" onclick="limparCache()">
+              <i class="fas fa-trash"></i> Limpar Cache
+            </button>
+          </div>
+          <div id="pastaAtual" class="cds-cfg-hint"></div>
+          <div id="resultadoBackup" class="mt-2"></div>
+        `, 'backup restauração pasta')}
       </div>
 
-      <div class="cds-cfg-pane" data-cfg-pane="aparencia">
-        <h2 class="cds-cfg-pane__title">Aparência</h2>
-        <p class="cds-cfg-pane__sub">Preferências visuais do PDV (quando disponíveis).</p>
-        <div class="cds-cfg-empty" data-cfg-search="aparência tema">
-          <div><i class="fas fa-palette"></i></div>
-          <div>Temas e aparência do PDV são gerenciados na interface do PDV.</div>
-        </div>
+      <div class="cds-cfg-pane" data-cfg-pane="modulosLicenciados">
+        <h2 class="cds-cfg-pane__title">Módulos Licenciados</h2>
+        <p class="cds-cfg-pane__sub">Princípio da invisibilidade: módulo desligado desaparece de menus, APIs e widgets.</p>
+        ${card('<i class="fas fa-puzzle-piece"></i> Checklist de módulos', `
+          <p class="cds-cfg-hint mb-3">Desmarque para ocultar o módulo em todo o sistema (403 MODULO_NAO_LICENCIADO nas APIs).</p>
+          <p class="cds-cfg-hint mb-3"><strong>Expedição</strong> é módulo comercial (Pedido → Venda). Não depende de Fiscal, NF-e ou NFC-e.</p>
+          <div class="row g-2">
+            <div class="col-md-6"><div class="form-check"><input class="form-check-input" type="checkbox" id="cfgModuloPdv" ${pdvOn ? 'checked' : ''}><label class="form-check-label" for="cfgModuloPdv">PDV</label></div></div>
+            <div class="col-md-6"><div class="form-check"><input class="form-check-input" type="checkbox" id="cfgModuloHistoricoVendas" ${historicoOn ? 'checked' : ''}><label class="form-check-label" for="cfgModuloHistoricoVendas">Histórico de Vendas</label></div></div>
+            <div class="col-md-6"><div class="form-check"><input class="form-check-input" type="checkbox" id="cfgModuloPedidos" ${pedidosOn ? 'checked' : ''}><label class="form-check-label" for="cfgModuloPedidos">Pedidos</label></div></div>
+            <div class="col-md-6"><div class="form-check"><input class="form-check-input" type="checkbox" id="cfgHabilitarFaturamento" ${faturamentoOn ? 'checked' : ''}><label class="form-check-label" for="cfgHabilitarFaturamento">Expedição</label></div></div>
+            <div class="col-md-6"><div class="form-check"><input class="form-check-input" type="checkbox" id="cfgHabilitarVendasEntrega" ${vendasEntregaOn ? 'checked' : ''}><label class="form-check-label" for="cfgHabilitarVendasEntrega">Entregas</label></div></div>
+            ${fiscalUi ? `
+            <div class="col-md-6"><div class="form-check"><input class="form-check-input" type="checkbox" id="cfgModuloNfe" ${nfeOn ? 'checked' : ''}><label class="form-check-label" for="cfgModuloNfe">NF-e</label></div></div>
+            <div class="col-md-6"><div class="form-check"><input class="form-check-input" type="checkbox" id="cfgModuloNfce" ${nfceOn ? 'checked' : ''}><label class="form-check-label" for="cfgModuloNfce">NFC-e</label></div></div>
+            ` : ''}
+            <div class="col-md-6"><div class="form-check"><input class="form-check-input" type="checkbox" id="cfgModuloCompraFacil" ${compraFacilOn ? 'checked' : ''}><label class="form-check-label" for="cfgModuloCompraFacil">Compra Fácil</label></div></div>
+            <div class="col-md-6"><div class="form-check"><input class="form-check-input" type="checkbox" id="cfgModuloMarketplace" ${marketplaceOn ? 'checked' : ''}><label class="form-check-label" for="cfgModuloMarketplace">Marketplace</label></div></div>
+            <div class="col-md-6"><div class="form-check"><input class="form-check-input" type="checkbox" id="cfgModuloCrm" ${crmOn ? 'checked' : ''}><label class="form-check-label" for="cfgModuloCrm">CRM</label></div></div>
+          </div>
+          <div class="mt-3 ${vendasEntregaOn ? '' : 'opacity-50'}" id="cfgEntregaImpressaoBox">
+            <div class="fw-semibold mb-2">Opções de Entrega</div>
+            <div class="form-check"><input class="form-check-input" type="checkbox" id="cfgImpComprovanteEntrega" ${config.imprimir_comprovante_entrega !== false ? 'checked' : ''}><label class="form-check-label" for="cfgImpComprovanteEntrega">Comprovante de Entrega</label></div>
+            <div class="form-check"><input class="form-check-input" type="checkbox" id="cfgImpComprovantePrestacao" ${config.imprimir_comprovante_prestacao !== false ? 'checked' : ''}><label class="form-check-label" for="cfgImpComprovantePrestacao">Comprovante de Prestação</label></div>
+            <div class="form-check"><input class="form-check-input" type="checkbox" id="cfgImpDanfeEntrega" ${config.imprimir_danfe_nfce_entrega !== false ? 'checked' : ''}><label class="form-check-label" for="cfgImpDanfeEntrega">DANFE NFC-e</label></div>
+            <div class="form-check"><input class="form-check-input" type="checkbox" id="cfgImpCupomNaoFiscalEntrega" ${config.imprimir_cupom_nao_fiscal_entrega === true ? 'checked' : ''}><label class="form-check-label" for="cfgImpCupomNaoFiscalEntrega">Cupom Não Fiscal</label></div>
+            <div class="row g-2 mt-2">
+              <div class="col-4"><label class="form-label small">Alerta aguardando (h)</label><input type="number" min="1" class="form-control form-control-sm" id="cfgAlertaAguardando" value="${Number(config.entrega_alerta_horas_aguardando || 2)}"></div>
+              <div class="col-4"><label class="form-label small">Alerta reserva (h)</label><input type="number" min="1" class="form-control form-control-sm" id="cfgAlertaReserva" value="${Number(config.entrega_alerta_horas_reserva || 4)}"></div>
+              <div class="col-4"><label class="form-label small">Alerta parado (h)</label><input type="number" min="1" class="form-control form-control-sm" id="cfgAlertaParado" value="${Number(config.entrega_alerta_horas_parado || 3)}"></div>
+            </div>
+          </div>
+        `, 'módulos pdv histórico vendas pedidos expedição entregas nfe nfce')}
       </div>
 
-      <div class="cds-cfg-pane" data-cfg-pane="avancado">
-        <h2 class="cds-cfg-pane__title">Avançado</h2>
+      <div class="cds-cfg-pane" data-cfg-pane="licenciamentoCds">
+        <h2 class="cds-cfg-pane__title">Licenciamento CDS</h2>
+        <p class="cds-cfg-pane__sub">Aviso no login (não bloqueia). Preparado para renovação automática futura via PIX.</p>
+        ${card('<i class="fas fa-id-card"></i> Central de Licenciamento', `
+          <div class="row g-3">
+            <div class="col-md-4" data-cfg-search="dias aviso">
+              <label class="cds-cfg-label" for="cfgLicencaDiasAviso">Dias para aviso</label>
+              <input type="number" min="1" max="30" class="form-control" id="cfgLicencaDiasAviso" value="${licDias}">
+            </div>
+            <div class="col-md-4" data-cfg-search="plano assinatura enterprise">
+              <label class="cds-cfg-label" for="cfgLicencaPlano">Plano</label>
+              <input type="text" class="form-control" id="cfgLicencaPlano" value="${escapeHtml(licPlano)}" placeholder="Ex.: Enterprise (ou deixe vazio para derivar)">
+            </div>
+            <div class="col-md-4" data-cfg-search="chave pix renovação copia cola">
+              <label class="cds-cfg-label" for="cfgLicencaChavePix">PIX Renovação</label>
+              <input type="text" class="form-control" id="cfgLicencaChavePix" value="${escapeHtml(licPix)}" placeholder="Chave PIX ou PIX Copia e Cola">
+            </div>
+            <div class="col-12" data-cfg-search="whatsapp">
+              <label class="cds-cfg-label" for="cfgLicencaWhatsapp">WhatsApp Comercial (URL)</label>
+              <input type="url" class="form-control" id="cfgLicencaWhatsapp" value="${escapeHtml(licWa)}" placeholder="https://wa.me/5588...">
+            </div>
+            <div class="col-12" data-cfg-search="mensagem renovação">
+              <label class="cds-cfg-label" for="cfgLicencaMensagem">Mensagem de renovação</label>
+              <textarea class="form-control" id="cfgLicencaMensagem" rows="2">${escapeHtml(licMsg)}</textarea>
+              <small class="cds-cfg-hint">Use {dias} para o número de dias restantes. PIX: o QR Code é gerado automaticamente (QRCodeService).</small>
+            </div>
+          </div>
+          <div class="cds-cfg-note mt-3">QR Code PIX gerado automaticamente (Hotfix RC1.1) — sem imagens estáticas. Preparado para PIX Dinâmico futuro.</div>
+        `, 'licenciamento pix whatsapp renovação')}
+      </div>
+
+      <div class="cds-cfg-pane" data-cfg-pane="bancoDados">
+        <h2 class="cds-cfg-pane__title">Banco de Dados</h2>
         <p class="cds-cfg-pane__sub">Rede e operação multi-estação.</p>
         <div id="bannerEstacaoClienteRemoto"></div>
         ${card('Modo de Operação', `
@@ -391,26 +498,24 @@
             </button>
           </div>
         `, 'rede ip porta cliente servidor')}
-        ${card('<i class="fas fa-puzzle-piece"></i> Módulos', `
-          <p class="cds-cfg-hint mb-3">Módulos opcionais. Desabilitados por padrão — sem impacto no PDV até ativação.</p>
-          <div class="form-check" data-cfg-search="vendas para entrega módulo opcional">
-            <input class="form-check-input" type="checkbox" id="cfgHabilitarVendasEntrega" ${vendasEntregaOn ? 'checked' : ''}>
-            <label class="form-check-label" for="cfgHabilitarVendasEntrega">Habilitar Vendas para Entrega</label>
+      </div>
+
+      <div class="cds-cfg-pane" data-cfg-pane="motores">
+        <h2 class="cds-cfg-pane__title">Motores Inteligentes</h2>
+        <p class="cds-cfg-pane__sub">Infraestrutura oficial dos motores do Núcleo Transacional.</p>
+        ${card('<i class="fas fa-money-check-alt"></i> MIDP — Distribuição de Pagamentos', `
+          <p class="cds-cfg-hint mb-3">
+            MIDP V1 — política oficial <strong>Preservar Dinheiro</strong> (Sprint 3.8C).
+            Quando <strong>ativado</strong>, o Motor F×NF pode reduzir o Valor Fiscal Efetivo
+            (dentro da faixa válida) para preservar dinheiro físico na parcela Não Fiscal.
+            O MIDP apenas distribui os meios sobre esse resultado — não decide valores fiscais.
+          </p>
+          <div class="form-check" data-cfg-search="ativar midp motor pagamentos">
+            <input class="form-check-input" type="checkbox" id="cfgAtivarMidp" ${midpOn ? 'checked' : ''}>
+            <label class="form-check-label" for="cfgAtivarMidp">Ativar MIDP</label>
           </div>
-          <div class="mt-3 ${vendasEntregaOn ? '' : 'opacity-50'}" id="cfgEntregaImpressaoBox">
-            <div class="fw-semibold mb-2">Impressão automática (Entrega)</div>
-            <div class="form-check"><input class="form-check-input" type="checkbox" id="cfgImpComprovanteEntrega" ${config.imprimir_comprovante_entrega !== false ? 'checked' : ''}><label class="form-check-label" for="cfgImpComprovanteEntrega">Comprovante de Entrega</label></div>
-            <div class="form-check"><input class="form-check-input" type="checkbox" id="cfgImpComprovantePrestacao" ${config.imprimir_comprovante_prestacao !== false ? 'checked' : ''}><label class="form-check-label" for="cfgImpComprovantePrestacao">Comprovante de Prestação</label></div>
-            <div class="form-check"><input class="form-check-input" type="checkbox" id="cfgImpDanfeEntrega" ${config.imprimir_danfe_nfce_entrega !== false ? 'checked' : ''}><label class="form-check-label" for="cfgImpDanfeEntrega">DANFE NFC-e</label></div>
-            <div class="form-check"><input class="form-check-input" type="checkbox" id="cfgImpCupomNaoFiscalEntrega" ${config.imprimir_cupom_nao_fiscal_entrega === true ? 'checked' : ''}><label class="form-check-label" for="cfgImpCupomNaoFiscalEntrega">Cupom Não Fiscal</label></div>
-            <div class="row g-2 mt-2">
-              <div class="col-4"><label class="form-label small">Alerta aguardando (h)</label><input type="number" min="1" class="form-control form-control-sm" id="cfgAlertaAguardando" value="${Number(config.entrega_alerta_horas_aguardando || 2)}"></div>
-              <div class="col-4"><label class="form-label small">Alerta reserva (h)</label><input type="number" min="1" class="form-control form-control-sm" id="cfgAlertaReserva" value="${Number(config.entrega_alerta_horas_reserva || 4)}"></div>
-              <div class="col-4"><label class="form-label small">Alerta parado (h)</label><input type="number" min="1" class="form-control form-control-sm" id="cfgAlertaParado" value="${Number(config.entrega_alerta_horas_parado || 3)}"></div>
-            </div>
-          </div>
-          <small class="cds-cfg-hint d-block mt-2">Quando desabilitado, rotinas e widgets do módulo não são carregados.</small>
-        `, 'módulos vendas entrega impressão alertas')}
+          <small class="cds-cfg-hint d-block mt-2">Desativado = algoritmo 100% legado (Valor Fiscal Máximo).</small>
+        `, 'midp motor distribuição pagamentos ativar')}
       </div>
     `;
   }
@@ -457,7 +562,7 @@
   }
 
   function focarCardManifestacao() {
-    ativarCategoria('fiscal');
+    ativarCategoria('plataformaFiscal');
     const tentar = (tentativa) => {
       const el = document.getElementById('cdsCfgCardManifestacao');
       if (el) {
@@ -472,7 +577,8 @@
   }
 
   function ativarCategoria(id) {
-    const cat = CATEGORIAS.find((c) => c.id === id) || CATEGORIAS[0];
+    const cats = categoriasVisiveis();
+    const cat = cats.find((c) => c.id === id) || cats[0] || CATEGORIAS[0];
     document.querySelectorAll('[data-cfg-nav]').forEach((el) => {
       el.classList.toggle('is-active', el.getAttribute('data-cfg-nav') === cat.id);
     });
@@ -493,8 +599,9 @@
 
     if (!q) return;
 
+    const cats = categoriasVisiveis();
     let destino = null;
-    for (const cat of CATEGORIAS) {
+    for (const cat of cats) {
       const blob = `${cat.label} ${cat.keywords}`.toLowerCase();
       if (blob.includes(q)) {
         destino = cat.id;
@@ -503,13 +610,14 @@
     }
 
     if (!destino) {
-      const hit = document.querySelector(`[data-cfg-search*="${CSS.escape ? '' : ''}"]`);
-      void hit;
       document.querySelectorAll('[data-cfg-search]').forEach((el) => {
         const keys = (el.getAttribute('data-cfg-search') || '').toLowerCase();
         if (!destino && keys.includes(q)) {
           const pane = el.closest('[data-cfg-pane]');
-          if (pane) destino = pane.getAttribute('data-cfg-pane');
+          if (pane) {
+            const paneId = pane.getAttribute('data-cfg-pane');
+            if (cats.some((c) => c.id === paneId)) destino = paneId;
+          }
         }
       });
     }
@@ -521,6 +629,9 @@
     }
 
     document.querySelectorAll('[data-cfg-search]').forEach((el) => {
+      const pane = el.closest('[data-cfg-pane]');
+      const paneId = pane && pane.getAttribute('data-cfg-pane');
+      if (paneId && !cats.some((c) => c.id === paneId)) return;
       const keys = (el.getAttribute('data-cfg-search') || '').toLowerCase();
       if (keys.includes(q)) {
         el.classList.add('is-highlight', 'cds-cfg-field-hit');
@@ -535,64 +646,67 @@
     const token = localStorage.getItem('token');
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
     estadoExecutivo.usuario = obterUsuarioNome();
+    const fiscalOn = configPermiteFiscalUi();
 
-    try {
-      const fiscalRes = await fetch(`${global.API_URL}/fiscal/config`, { headers });
-      if (fiscalRes.ok) {
-        const cfg = await fiscalRes.json();
-        estadoExecutivo.empresa = cfg.nomeEmpresa || '—';
-        estadoExecutivo.cnpj = cfg.cnpj || '—';
-        estadoExecutivo.ambiente = cfg.ambiente;
-      }
-    } catch { /* ignore */ }
+    if (fiscalOn) {
+      try {
+        const fiscalRes = await fetch(`${global.API_URL}/fiscal/config`, { headers });
+        if (fiscalRes.ok) {
+          const cfg = await fiscalRes.json();
+          estadoExecutivo.empresa = cfg.nomeEmpresa || '—';
+          estadoExecutivo.cnpj = cfg.cnpj || '—';
+          estadoExecutivo.ambiente = cfg.ambiente;
+        }
+      } catch { /* ignore */ }
 
-    try {
-      const cenRes = await fetch(`${global.API_URL}/central-entradas/configuracao`, { headers });
-      if (cenRes.ok) {
-        const painel = await cenRes.json();
-        estadoExecutivo.central = painel;
-        estadoExecutivo.certificado = painel.certificado || null;
-        if (painel.ambiente?.codigo != null) {
-          estadoExecutivo.ambiente = painel.ambiente.codigo;
-        }
-        estadoExecutivo.ultimaAlteracao = painel.ambiente?.atualizadoEm
-          || painel.diagnostico?.ultimaSincronizacao
-          || estadoExecutivo.ultimaAlteracao;
+      try {
+        const cenRes = await fetch(`${global.API_URL}/central-entradas/configuracao`, { headers });
+        if (cenRes.ok) {
+          const painel = await cenRes.json();
+          estadoExecutivo.central = painel;
+          estadoExecutivo.certificado = painel.certificado || null;
+          if (painel.ambiente?.codigo != null) {
+            estadoExecutivo.ambiente = painel.ambiente.codigo;
+          }
+          estadoExecutivo.ultimaAlteracao = painel.ambiente?.atualizadoEm
+            || painel.diagnostico?.ultimaSincronizacao
+            || estadoExecutivo.ultimaAlteracao;
 
-        const ambEl = document.getElementById('cdsCfgCentralAmbiente');
-        const ufEl = document.getElementById('cdsCfgCentralUf');
-        const certEl = document.getElementById('cdsCfgCentralCert');
-        const syncEl = document.getElementById('cdsCfgCentralSync');
-        const perfEl = document.getElementById('cdsCfgPerfTimeouts');
+          const ambEl = document.getElementById('cdsCfgCentralAmbiente');
+          const ufEl = document.getElementById('cdsCfgCentralUf');
+          const certEl = document.getElementById('cdsCfgCentralCert');
+          const syncEl = document.getElementById('cdsCfgCentralSync');
+          const perfEl = document.getElementById('cdsCfgPerfTimeouts');
 
-        if (ambEl) {
-          ambEl.innerHTML = `${badge(painel.ambiente?.label || '—', toneAmbiente(painel.ambiente?.codigo))}
-            <div class="cds-cfg-hint mt-1">${escapeHtml(painel.ambiente?.origemLabel || 'Centro de Configurações')}</div>`;
-        }
-        if (ufEl) {
-          ufEl.innerHTML = `<strong>${escapeHtml(painel.ambiente?.uf || '—')}</strong>
-            <span class="cds-cfg-hint">Código ${escapeHtml(painel.ambiente?.codigoUf || '—')}</span>`;
-        }
-        if (certEl) {
-          const c = painel.certificado || {};
-          certEl.innerHTML = `${badge(c.status || 'AUSENTE', c.status === 'OK' ? 'ok' : 'warn')}
-            <div class="cds-cfg-hint mt-1">${escapeHtml(c.mensagem || '')}</div>`;
-        }
-        if (syncEl) {
-          const s = painel.sincronizacao || {};
-          syncEl.innerHTML = `${badge(s.syncAutomaticaHabilitada ? 'Automática' : 'Manual', s.syncAutomaticaHabilitada ? 'ok' : 'neutral')}
-            <div class="cds-cfg-hint mt-1">Intervalo: ${escapeHtml(String(s.syncIntervaloMinutos ?? '—'))} min · Max docs: ${escapeHtml(String(s.syncMaxDocumentos ?? '—'))}</div>`;
-        }
-        if (perfEl) {
-          const sf = painel.sefaz || {};
-          perfEl.innerHTML = `<div><strong>Timeout</strong>: ${escapeHtml(String(sf.timeoutMs ?? '—'))} ms</div>
-            <div><strong>Max tentativas</strong>: ${escapeHtml(String(sf.maxTentativas ?? '—'))}</div>
-            <div class="cds-cfg-hint">Edição em Central Inteligente → Configuração Enterprise</div>`;
-        }
+          if (ambEl) {
+            ambEl.innerHTML = `${badge(painel.ambiente?.label || '—', toneAmbiente(painel.ambiente?.codigo))}
+              <div class="cds-cfg-hint mt-1">${escapeHtml(painel.ambiente?.origemLabel || 'Centro de Configurações')}</div>`;
+          }
+          if (ufEl) {
+            ufEl.innerHTML = `<strong>${escapeHtml(painel.ambiente?.uf || '—')}</strong>
+              <span class="cds-cfg-hint">Código ${escapeHtml(painel.ambiente?.codigoUf || '—')}</span>`;
+          }
+          if (certEl) {
+            const c = painel.certificado || {};
+            certEl.innerHTML = `${badge(c.status || 'AUSENTE', c.status === 'OK' ? 'ok' : 'warn')}
+              <div class="cds-cfg-hint mt-1">${escapeHtml(c.mensagem || '')}</div>`;
+          }
+          if (syncEl) {
+            const s = painel.sincronizacao || {};
+            syncEl.innerHTML = `${badge(s.syncAutomaticaHabilitada ? 'Automática' : 'Manual', s.syncAutomaticaHabilitada ? 'ok' : 'neutral')}
+              <div class="cds-cfg-hint mt-1">Intervalo: ${escapeHtml(String(s.syncIntervaloMinutos ?? '—'))} min · Max docs: ${escapeHtml(String(s.syncMaxDocumentos ?? '—'))}</div>`;
+          }
+          if (perfEl) {
+            const sf = painel.sefaz || {};
+            perfEl.innerHTML = `<div><strong>Timeout</strong>: ${escapeHtml(String(sf.timeoutMs ?? '—'))} ms</div>
+              <div><strong>Max tentativas</strong>: ${escapeHtml(String(sf.maxTentativas ?? '—'))}</div>
+              <div class="cds-cfg-hint">Edição em Central Inteligente → Configuração Enterprise</div>`;
+          }
 
-        hidratarPoliticaManifestacaoUi(painel.sefaz?.politicaManifestacao || 'MANUAL');
-      }
-    } catch { /* ignore */ }
+          hidratarPoliticaManifestacaoUi(painel.sefaz?.politicaManifestacao || 'MANUAL');
+        }
+      } catch { /* ignore */ }
+    }
 
     const panel = document.getElementById('cdsCfgExecPanel');
     const wrap = document.getElementById('cdsCfgExecWrap');
@@ -628,7 +742,7 @@
     }
 
     document.getElementById('btnAbrirConfigFiscalOficial')?.addEventListener('click', () => {
-      ativarCategoria('fiscal');
+      ativarCategoria('plataformaFiscal');
       const area = document.getElementById('fiscal-config-form-area-avancadas');
       try { area?.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch { /* ignore */ }
     });
@@ -641,6 +755,13 @@
       if (typeof global.salvarConfiguracoesAvancadas === 'function') {
         global.salvarConfiguracoesAvancadas().then?.(() => atualizarPainelExecutivo());
       }
+    });
+
+    // Ao desligar PDV, sugere desligar Histórico de Vendas (ainda editável).
+    document.getElementById('cfgModuloPdv')?.addEventListener('change', (ev) => {
+      const hist = document.getElementById('cfgModuloHistoricoVendas');
+      if (!hist) return;
+      if (!ev.target.checked) hist.checked = false;
     });
 
     document.getElementById('btnCdsCfgCancelar')?.addEventListener('click', () => {
@@ -657,20 +778,39 @@
       }
     });
 
-    document.getElementById('btnConfiguracaoTEF')?.addEventListener('click', () => {
-      if (typeof global.abrirConfiguracaoTEF === 'function') global.abrirConfiguracaoTEF();
-    });
-    document.getElementById('btnConfiguracaoTEFIntegracoes')?.addEventListener('click', () => {
-      if (typeof global.abrirConfiguracaoTEF === 'function') global.abrirConfiguracaoTEF();
-    });
+    const abrirTefLazy = async () => {
+      try {
+        if (typeof global.abrirConfiguracaoTEF !== 'function' && global.CdsErpLazyLoader) {
+          await global.CdsErpLazyLoader.loadFeature('configuracao-tef');
+        }
+        if (typeof global.abrirConfiguracaoTEF === 'function') global.abrirConfiguracaoTEF();
+      } catch (error) {
+        console.error('[ERP LAZY] Falha ao carregar configuração TEF:', error);
+        if (typeof global.showNotification === 'function') {
+          global.showNotification('Não foi possível carregar a configuração TEF.', 'danger');
+        }
+      }
+    };
+    document.getElementById('btnConfiguracaoTEF')?.addEventListener('click', abrirTefLazy);
+    document.getElementById('btnConfiguracaoTEFIntegracoes')?.addEventListener('click', abrirTefLazy);
     document.getElementById('btnConfiguracaoRede')?.addEventListener('click', () => {
       if (typeof global.abrirModalConfiguracaoRede === 'function') global.abrirModalConfiguracaoRede();
     });
 
-    let tab = 'geral';
+    let tab = 'empresa';
     try {
-      tab = sessionStorage.getItem('cds_cfg_tab') || 'geral';
+      tab = sessionStorage.getItem('cds_cfg_tab') || 'empresa';
     } catch { /* ignore */ }
+    const legacyTabs = {
+      geral: 'empresa',
+      fiscal: 'plataformaFiscal',
+      avancado: 'modulosLicenciados',
+      aparencia: 'empresa',
+      central: 'diagnostico',
+      plataforma: 'plataformaFiscal'
+    };
+    if (legacyTabs[tab]) tab = legacyTabs[tab];
+    if (!CATEGORIAS.some((c) => c.id === tab)) tab = 'empresa';
     if (global.__CDS_CFG_FORCE_TAB) {
       tab = global.__CDS_CFG_FORCE_TAB;
       global.__CDS_CFG_FORCE_TAB = null;
@@ -714,7 +854,7 @@
 
         <form id="formConfigAvancadas" onsubmit="return false;">
           <div class="cds-cfg-shell">
-            <nav class="cds-cfg-nav" aria-label="Categorias de configuração">${renderNav('geral')}</nav>
+            <nav class="cds-cfg-nav" aria-label="Categorias de configuração">${renderNav('empresa')}</nav>
             <div class="cds-cfg-main">${renderPanes(config || {})}</div>
           </div>
         </form>
@@ -735,6 +875,12 @@
 
     wireShell();
     atualizarPainelExecutivo();
+    if (typeof global.setupBackupManualListener === 'function') {
+      global.setupBackupManualListener();
+    }
+    if (typeof global.carregarPastaBackup === 'function') {
+      global.carregarPastaBackup();
+    }
   }
 
   global.CATEGORIAS_CDS_CFG = CATEGORIAS;

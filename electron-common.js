@@ -11,6 +11,18 @@ const {
   obterSessaoClienteRemoto,
   estaEmSessaoClienteRemoto
 } = require('./electron-sessao-rede');
+const {
+  registrarAuditoriaStartup,
+  invalidarCachesSessao,
+  anexarAuditoriaNaJanela,
+  mensagemPacoteDesatualizado,
+  metadadosPacote
+} = require('./electron-auditoria-rc3164');
+const {
+  garantirIntegridadeOuAbortar,
+  registrarHandlersDiagnostico,
+  coletarDiagnostico
+} = require('./electron-diagnostico');
 
 process.env.DB_DIR = process.env.DB_DIR || path.join(
   process.env.PROGRAMDATA || 'C:\\ProgramData',
@@ -482,6 +494,7 @@ function criarMainWindow(tituloJanela, opcoes = {}) {
 
   global.mainWindow = mainWindow;
   registrarHandlersIpc();
+  registrarHandlersDiagnostico();
 
   mainWindow.webContents.on('preload-error', (_event, preloadPath, error) => {
     console.error('[ELECTRON] Erro no preload:', preloadPath, error?.message || error);
@@ -521,6 +534,11 @@ function montarUrlLogin(baseUrl) {
 
 function abrirJanelaApp(url, tituloErro, mensagemErro, tituloJanela, opcoes = {}) {
   criarMainWindow(tituloJanela, opcoes);
+
+  // RC3.16.4 — evidência de loadURL + snapshot de origin/CONFIG no renderer
+  console.log('[RC3.16.4] loadURL (não loadFile):', url);
+  anexarAuditoriaNaJanela(mainWindow, url, metadadosPacote());
+
   return carregarJanelaComRobustez(mainWindow, url)
     .then(() => {
       mainWindow.maximize();
@@ -608,8 +626,10 @@ function iniciarAplicacaoElectron(options = {}) {
   app.commandLine.appendSwitch('disable-gpu');
   app.commandLine.appendSwitch('disable-software-rasterizer');
   app.commandLine.appendSwitch('disable-features', 'UseSkiaRenderer');
+  // RC3.16.4 — evita Chromium reutilizar JS/CSS antigos de http://127.0.0.1 após rebuilds
+  app.commandLine.appendSwitch('disable-http-cache');
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     try {
       if (!fs.existsSync(process.env.DB_DIR)) {
         fs.mkdirSync(process.env.DB_DIR, { recursive: true });
@@ -623,6 +643,28 @@ function iniciarAplicacaoElectron(options = {}) {
       });
 
       process.env.FISCAL_DIR = fiscalDir;
+
+      const auditoria = registrarAuditoriaStartup({ modulo: appModuloAtual });
+      await invalidarCachesSessao();
+
+      // RC3.16.5 — manifesto/hashes: pacote inconsistente não inicia o ERP (asar)
+      const integridade = garantirIntegridadeOuAbortar();
+      if (!integridade.ok) {
+        app.quit();
+        return;
+      }
+
+      const avisoPacote = mensagemPacoteDesatualizado(auditoria.ausentes);
+      if (avisoPacote && auditoria.meta.rodandoDeAsar) {
+        dialog.showErrorBox('Pacote Electron desatualizado (RC3.16.4)', avisoPacote);
+        app.quit();
+        return;
+      } else if (avisoPacote) {
+        console.error(avisoPacote);
+      }
+
+      console.log('[RC3.16.5] diagnostico-resumo', coletarDiagnostico());
+
       const configServidor = carregarConfiguracaoServidor(appModuloAtual);
 
       if (configServidor.modo === 'cliente') {

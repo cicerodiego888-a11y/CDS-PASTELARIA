@@ -2189,7 +2189,27 @@ function abrirCadastroProdutoCentralMiip(item, callback) {
     }
 
     showProdutoModal(null);
-    $('#produtoModal').one('shown.bs.modal', function preencherNovoProdutoCentralMiip() {
+
+    const el = document.getElementById('produtoModal');
+    if (!el) {
+        if (typeof callback === 'function') callback(null);
+        return;
+    }
+
+    try {
+        bootstrap.Modal.getOrCreateInstance(el).show();
+    } catch (_) { /* ignore */ }
+
+    const elevar = () => {
+        el.style.zIndex = '21000';
+        const backdrops = document.querySelectorAll('.modal-backdrop');
+        const last = backdrops[backdrops.length - 1];
+        if (last) last.style.zIndex = '20990';
+    };
+    elevar();
+
+    el.addEventListener('shown.bs.modal', function preencherNovoProdutoCentralMiip() {
+        elevar();
         $('#nome').val(item.produto_nome || '');
         if ($('#codigo_barras').length) $('#codigo_barras').val(item.codigo_barras || '');
         if ($('#ncm').length) $('#ncm').val(item.ncm || '');
@@ -2197,12 +2217,12 @@ function abrirCadastroProdutoCentralMiip(item, callback) {
         if ($('#preco_compra').length) $('#preco_compra').val(formatNumberInput(item.preco_unitario || 0));
         if ($('#preco_venda').length) $('#preco_venda').val(formatNumberInput(item.preco_venda_sugerido || 0));
         if ($('#lucro_percentual').length) $('#lucro_percentual').val(formatNumberInput(item.margem_lucro || 30));
-    });
+    }, { once: true });
 
-    $('#produtoModal').one('hidden.bs.modal', function aposCadastroCentralMiip() {
+    el.addEventListener('hidden.bs.modal', function aposCadastroCentralMiip() {
         const ultimo = produtosCompraList[produtosCompraList.length - 1];
         if (typeof callback === 'function') callback(ultimo || null);
-    });
+    }, { once: true });
 }
 
 function finalizarImportacaoXmlCompra(data) {

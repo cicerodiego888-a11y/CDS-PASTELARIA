@@ -7,6 +7,7 @@
 'use strict';
 
 const db = require('../../database');
+const { produtoControlaEstoque } = require('./produtoControlaEstoque');
 
 function run(sql, params = []) {
   return new Promise((resolve, reject) => {
@@ -44,28 +45,39 @@ function reservarItem({
     return callback(null);
   }
 
-  db.run(
-    `
-      UPDATE produtos
-      SET
-        reservado_fiscal = COALESCE(reservado_fiscal, 0) + ?,
-        reservado_nao_fiscal = COALESCE(reservado_nao_fiscal, 0) + ?
-      WHERE id = ?
-    `,
-    [qF, qNf, produtoId],
-    (errUpdate) => {
-      if (errUpdate) return callback(errUpdate);
+  db.get(
+    `SELECT COALESCE(controla_estoque, 1) AS controla_estoque FROM produtos WHERE id = ?`,
+    [produtoId],
+    (errFlag, rowFlag) => {
+      if (errFlag) return callback(errFlag);
+      if (!produtoControlaEstoque(rowFlag || {})) {
+        return callback(null);
+      }
 
       db.run(
         `
-          INSERT INTO venda_estoque_reservas (
-            venda_id, venda_item_id, produto_id,
-            quantidade_fiscal, quantidade_nao_fiscal,
-            status, criado_em
-          ) VALUES (?, ?, ?, ?, ?, 'ATIVA', CURRENT_TIMESTAMP)
+          UPDATE produtos
+          SET
+            reservado_fiscal = COALESCE(reservado_fiscal, 0) + ?,
+            reservado_nao_fiscal = COALESCE(reservado_nao_fiscal, 0) + ?
+          WHERE id = ?
         `,
-        [vendaId, vendaItemId || null, produtoId, qF, qNf],
-        callback
+        [qF, qNf, produtoId],
+        (errUpdate) => {
+          if (errUpdate) return callback(errUpdate);
+
+          db.run(
+            `
+              INSERT INTO venda_estoque_reservas (
+                venda_id, venda_item_id, produto_id,
+                quantidade_fiscal, quantidade_nao_fiscal,
+                status, criado_em
+              ) VALUES (?, ?, ?, ?, ?, 'ATIVA', CURRENT_TIMESTAMP)
+            `,
+            [vendaId, vendaItemId || null, produtoId, qF, qNf],
+            callback
+          );
+        }
       );
     }
   );

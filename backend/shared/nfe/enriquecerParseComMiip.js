@@ -10,8 +10,7 @@
  * @module shared/nfe/enriquecerParseComMiip
  */
 
-const MiipService = require('../../motores/miip/MiipService');
-const MiipImportacaoXmlService = require('../../motores/miip/services/MiipImportacaoXmlService');
+const { getMiipService } = require('../../motores/miip/getMiipService');
 const { extrairPendencias } = require('../../motores/miip/utils/miipCentralRevisaoUtils');
 const EntradasProdutoIdentificacaoService = require('../../motores/produto-identidade/services/EntradasProdutoIdentificacaoService');
 const { isProdutoIdentidadeEnabled } = require('../../motores/produto-identidade/config/produtoIdentidadeFlags');
@@ -82,6 +81,9 @@ async function enriquecerParseComMiip(parsed, deps = {}) {
   };
 
   try {
+    const MiipService = deps.miipService || getMiipService();
+    const MiipImportacaoXmlService = deps.miipImportacaoXmlService
+      || require('../../motores/miip/services/MiipImportacaoXmlService');
     const miipImportacao = await MiipService.processarImportacaoXml(parsed);
     if (miipImportacao) {
       parsed.miip_importacao = miipImportacao;

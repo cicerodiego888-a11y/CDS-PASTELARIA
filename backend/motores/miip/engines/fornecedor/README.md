@@ -23,4 +23,4 @@ SQL direto, GTIN, nome, similaridade. Não cria nem altera associações.
 
 Registrado em `MiipBootstrap` com prioridade `20` (após GTIN `10`).
 
-Documentação completa: [`docs/MIIP_MOTOR_FORNECEDOR.md`](../../../../docs/MIIP_MOTOR_FORNECEDOR.md).
+Documentação completa: [`docs/motores/miip/MIIP_MOTOR_FORNECEDOR.md`](../../../../docs/motores/miip/MIIP_MOTOR_FORNECEDOR.md).

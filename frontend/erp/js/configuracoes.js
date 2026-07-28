@@ -111,15 +111,23 @@ function renderConfiguracoes(configuracoes) {
         return ia - ib;
     });
 
+    const loginBg = configuracoes.find(c => c.chave === 'login_background');
+    const camposComerciais = configuracoes.filter(c => c.chave !== 'login_background');
+
     const html = `
-        <div class="card">
-            <div class="card-header">
-                <i class="fas fa-cog"></i> Configurações do Sistema
+        <div class="card mb-3 border-0 shadow-sm">
+            <div class="card-body py-3">
+                <h4 class="mb-1"><i class="fas fa-building text-primary"></i> Configurações da Empresa</h4>
+                <p class="text-muted small mb-0">Parâmetros operacionais. Fiscal, módulos e licenciamento ficam em <strong>Centro de Configurações</strong> (Super Usuário).</p>
             </div>
+        </div>
+
+        <div class="card mb-3">
+            <div class="card-header"><i class="fas fa-store"></i> Comercial</div>
             <div class="card-body">
                 <form id="configForm">
                     <div class="row">
-                        ${configuracoes.filter(config => config.chave !== 'login_background').map(config => `
+                        ${camposComerciais.map(config => `
                             <div class="col-md-6 mb-3">
                                 <label for="${config.chave}" class="form-label fw-bold">
                                     ${config.descricao || config.chave}
@@ -128,7 +136,6 @@ function renderConfiguracoes(configuracoes) {
                             </div>
                         `).join('')}
                     </div>
-
                     <button type="button" class="btn btn-primary" onclick="saveConfiguracoes()">
                         <i class="fas fa-save"></i> Salvar Configurações
                     </button>
@@ -136,63 +143,12 @@ function renderConfiguracoes(configuracoes) {
             </div>
         </div>
 
-        <!-- Campo de imagem de fundo do login (após configurações fiscais) -->
-
-        <div class="card mt-3">
-            <div class="card-header">
-                <i class="fas fa-image"></i> Personalização da Tela de Login
-            </div>
+        <div class="card mb-3">
+            <div class="card-header"><i class="fas fa-print"></i> Impressões</div>
             <div class="card-body">
                 <div class="row align-items-center">
                     <div class="col-md-8">
-                        <label class="form-label fw-bold">Imagem de fundo da tela de login</label>
-                        <input type="file" class="form-control form-control-sm" id="loginBackgroundUpload" accept="image/*">
-                        <small class="text-muted">Recomendado: imagem 1920x1080px ou maior</small>
-                        <input type="hidden" id="login_background_path" value="${escapeHtml(configuracoes.find(c => c.chave === 'login_background')?.valor || '')}">
-                    </div>
-                    <div class="col-md-4">
-                        <div id="loginBackgroundPreview">
-                            ${(() => {
-                                const value = configuracoes.find(c => c.chave === 'login_background')?.valor || '';
-                                const previewUrl = value && value.startsWith('/')
-                                    ? `${API_URL.replace('/api', '')}${value}`
-                                    : value;
-                                const previewImg = previewUrl
-                                    ? `<img src="${escapeHtml(previewUrl)}" alt="Fundo login atual" style="max-height: 60px; max-width: 120px; border: 1px solid #ddd; border-radius: 4px;" />`
-                                    : '<span class="text-muted small">Nenhuma imagem definida</span>';
-                                return previewImg;
-                            })()}
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <div class="card mt-3">
-            <div class="card-header">
-                <i class="fas fa-weight"></i> Equipamentos
-            </div>
-            <div class="card-body">
-                <p class="text-muted small mb-3">
-                    Motor de Equipamentos: cadastre balanças, configure o layout oficial da etiqueta (PLU/peso/valor) e teste conexão TCP.
-                </p>
-                <button type="button" class="btn btn-primary" onclick="loadPage('equipamentos')">
-                    <i class="fas fa-weight"></i> Motor de Equipamentos — Balanças
-                </button>
-                <button type="button" class="btn btn-outline-primary ms-2" onclick="loadPage('laboratorio-equipamentos')">
-                    <i class="fas fa-flask"></i> Laboratório de Engenharia
-                </button>
-            </div>
-        </div>
-
-        <div class="card mt-3">
-            <div class="card-header">
-                <i class="fas fa-print"></i> Impressão
-            </div>
-            <div class="card-body">
-                <div class="row align-items-center">
-                    <div class="col-md-8">
-                        <label class="form-label fw-bold">Impressora de Cupom Fiscal</label>
+                        <label class="form-label fw-bold">Impressora de Cupom</label>
                         <div id="impressoraAtual" class="text-muted small mb-2">
                             <i class="fas fa-spinner fa-spin"></i> Carregando...
                         </div>
@@ -206,42 +162,56 @@ function renderConfiguracoes(configuracoes) {
             </div>
         </div>
 
-        <div class="card mt-3">
-            <div class="card-header">
-                <i class="fas fa-database"></i> Backup e Manutenção
-            </div>
+        <div class="card mb-3">
+            <div class="card-header"><i class="fas fa-bell"></i> Alertas</div>
             <div class="card-body">
-                <button type="button" id="btnBackupManual" class="btn btn-success">
-                    <i class="fas fa-database"></i> Backup Manual DB
-                </button>
-                <button type="button" id="btnEscolherPasta" class="btn btn-info ms-2" onclick="escolherPastaBackup()">
-                    <i class="fas fa-folder-open"></i> Escolher Pasta
-                </button>
-                <button class="btn btn-warning ms-2" onclick="limparCache()">
-                    <i class="fas fa-trash"></i> Limpar Cache
-                </button>
-                <div id="pastaAtual" class="mt-2 text-muted small"></div>
-                <div id="resultadoBackup" class="mt-2"></div>
+                <p class="text-muted small mb-0">
+                    Alertas operacionais de entrega e prazos são definidos em
+                    <strong>Centro de Configurações → Módulos Licenciados</strong> (quando Entregas estiver ativo).
+                </p>
             </div>
         </div>
-        
-        <div class="card mt-3">
-            <div class="card-header">
-                <i class="fas fa-info-circle"></i> Informações do Sistema
-            </div>
+
+        <div class="card mb-3">
+            <div class="card-header"><i class="fas fa-palette"></i> Aparência</div>
             <div class="card-body">
-                <p><strong>Versão:</strong> 1.0.0</p>
-                <p><strong>Data de Instalação:</strong> ${new Date().toLocaleDateString()}</p>
-                <p><strong>Desenvolvido por:</strong> Cicero Diego</p>
+                <div class="row align-items-center">
+                    <div class="col-md-8">
+                        <label class="form-label fw-bold">Imagem de fundo da tela de login</label>
+                        <input type="file" class="form-control form-control-sm" id="loginBackgroundUpload" accept="image/*">
+                        <small class="text-muted">Recomendado: imagem 1920x1080px ou maior</small>
+                        <input type="hidden" id="login_background_path" value="${escapeHtml(loginBg?.valor || '')}">
+                    </div>
+                    <div class="col-md-4">
+                        <div id="loginBackgroundPreview">
+                            ${(() => {
+                                const value = loginBg?.valor || '';
+                                const previewUrl = value && value.startsWith('/')
+                                    ? `${API_URL.replace('/api', '')}${value}`
+                                    : value;
+                                return previewUrl
+                                    ? `<img src="${escapeHtml(previewUrl)}" alt="Fundo login atual" style="max-height: 60px; max-width: 120px; border: 1px solid #ddd; border-radius: 4px;" />`
+                                    : '<span class="text-muted small">Nenhuma imagem definida</span>';
+                            })()}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card mb-3">
+            <div class="card-header"><i class="fas fa-sliders-h"></i> Preferências Operacionais</div>
+            <div class="card-body">
+                <p class="mb-2"><strong>Versão:</strong> 1.0.0</p>
+                <p class="mb-2 text-muted small">Cache do navegador e limpeza local (não altera banco).</p>
+                <button class="btn btn-outline-warning btn-sm" onclick="limparCache()">
+                    <i class="fas fa-trash"></i> Limpar Cache Local
+                </button>
             </div>
         </div>
     `;
-    
-    $('#page-content').html(html);
 
-    // Configurar event listeners
-    setupBackupManualListener();
-    carregarPastaBackup();
+    $('#page-content').html(html);
     carregarImpressoraCupom();
 }
 
@@ -1381,6 +1351,44 @@ async function salvarConfiguracoesAvancadas() {
             habilitar_vendas_entrega: $('#cfgHabilitarVendasEntrega').length
                 ? $('#cfgHabilitarVendasEntrega').is(':checked')
                 : !!(servidorAtual.habilitar_vendas_entrega || (servidorAtual.recursos && servidorAtual.recursos.vendasEntrega)),
+            habilitar_expedicao: $('#cfgHabilitarFaturamento').length
+                ? $('#cfgHabilitarFaturamento').is(':checked')
+                : !!(servidorAtual.habilitar_expedicao
+                    || servidorAtual.habilitar_faturamento
+                    || (servidorAtual.recursos && (servidorAtual.recursos.expedicao || servidorAtual.recursos.faturamento))),
+            habilitar_faturamento: $('#cfgHabilitarFaturamento').length
+                ? $('#cfgHabilitarFaturamento').is(':checked')
+                : !!(servidorAtual.habilitar_expedicao
+                    || servidorAtual.habilitar_faturamento
+                    || (servidorAtual.recursos && (servidorAtual.recursos.expedicao || servidorAtual.recursos.faturamento))),
+            modulo_pdv: $('#cfgModuloPdv').length ? $('#cfgModuloPdv').is(':checked') : (servidorAtual.modulo_pdv !== false),
+            modulo_historico_vendas: $('#cfgModuloHistoricoVendas').length
+                ? $('#cfgModuloHistoricoVendas').is(':checked')
+                : (servidorAtual.modulo_historico_vendas != null
+                    ? !!servidorAtual.modulo_historico_vendas
+                    : (servidorAtual.recursos && servidorAtual.recursos.historicoVendas) !== false),
+            modulo_pedidos: $('#cfgModuloPedidos').length ? $('#cfgModuloPedidos').is(':checked') : !!servidorAtual.modulo_pedidos,
+            modulo_nfe: $('#cfgModuloNfe').length ? $('#cfgModuloNfe').is(':checked') : (servidorAtual.modulo_nfe !== false),
+            modulo_nfce: $('#cfgModuloNfce').length ? $('#cfgModuloNfce').is(':checked') : (servidorAtual.modulo_nfce !== false),
+            modulo_compra_facil: $('#cfgModuloCompraFacil').length ? $('#cfgModuloCompraFacil').is(':checked') : !!servidorAtual.modulo_compra_facil,
+            modulo_marketplace: $('#cfgModuloMarketplace').length ? $('#cfgModuloMarketplace').is(':checked') : !!servidorAtual.modulo_marketplace,
+            modulo_crm: $('#cfgModuloCrm').length ? $('#cfgModuloCrm').is(':checked') : !!servidorAtual.modulo_crm,
+            licenca_dias_aviso: Number($('#cfgLicencaDiasAviso').val() || servidorAtual.licenca_dias_aviso || 3),
+            licenca_chave_pix: $('#cfgLicencaChavePix').length
+                ? String($('#cfgLicencaChavePix').val() || '').trim()
+                : String(servidorAtual.licenca_chave_pix || ''),
+            licenca_whatsapp_url: $('#cfgLicencaWhatsapp').length
+                ? String($('#cfgLicencaWhatsapp').val() || '').trim()
+                : String(servidorAtual.licenca_whatsapp_url || ''),
+            licenca_mensagem_renovacao: $('#cfgLicencaMensagem').length
+                ? String($('#cfgLicencaMensagem').val() || '').trim()
+                : String(servidorAtual.licenca_mensagem_renovacao || ''),
+            licenca_plano: $('#cfgLicencaPlano').length
+                ? String($('#cfgLicencaPlano').val() || '').trim()
+                : String(servidorAtual.licenca_plano || ''),
+            ativar_midp: $('#cfgAtivarMidp').length
+                ? $('#cfgAtivarMidp').is(':checked')
+                : !!servidorAtual.ativar_midp,
             imprimir_comprovante_entrega: $('#cfgImpComprovanteEntrega').length
                 ? $('#cfgImpComprovanteEntrega').is(':checked')
                 : servidorAtual.imprimir_comprovante_entrega !== false,
@@ -1482,3 +1490,26 @@ async function salvarPadraoFiscalEmpresa() {
     }
 }
 window.salvarPadraoFiscalEmpresa = salvarPadraoFiscalEmpresa;
+window.setupBackupManualListener = setupBackupManualListener;
+window.carregarPastaBackup = carregarPastaBackup;
+
+function limparCache() {
+    try {
+        const token = localStorage.getItem('token');
+        const user = localStorage.getItem('user');
+        const keysKeep = new Set(['token', 'user']);
+        const backup = {};
+        for (let i = 0; i < localStorage.length; i += 1) {
+            const k = localStorage.key(i);
+            if (keysKeep.has(k)) backup[k] = localStorage.getItem(k);
+        }
+        localStorage.clear();
+        Object.keys(backup).forEach((k) => localStorage.setItem(k, backup[k]));
+        if (token) localStorage.setItem('token', token);
+        if (user) localStorage.setItem('user', user);
+        showNotification('Cache local limpo (sessão preservada).', 'success');
+    } catch (err) {
+        showNotification(err.message || 'Não foi possível limpar o cache.', 'danger');
+    }
+}
+window.limparCache = limparCache;

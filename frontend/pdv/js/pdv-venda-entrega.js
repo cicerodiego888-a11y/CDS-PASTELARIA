@@ -163,9 +163,8 @@
   }
 
   /**
-   * Botão sempre visível na lateral.
-   * Habilitado somente com módulo ON + itens no carrinho.
-   * Sem show/hide/display/visibility/opacity.
+   * Módulo OFF: botão e atalho F9 ocultos.
+   * Módulo ON: botão visível; habilitado só com itens no carrinho.
    */
   function atualizarBotaoEntrega() {
     const $btn = $('#btnVendaEntregaPdv');
@@ -176,33 +175,27 @@
     const configurada = estaConfigurada();
     const habilitado = ativo && temItens;
 
-    const $titulo = $btn.find('.btn-venda-entrega-titulo');
-    const $icone = $btn.find('.btn-venda-entrega-icone');
-    if (configurada) {
-      $titulo.text(TITULO_OK);
-      if ($icone.length) $icone.text(ICONE_OK);
-      $btn.addClass('btn-venda-entrega--ok');
-      $btn.attr('title', 'Entrega configurada');
-    } else {
-      $titulo.text(TITULO_PADRAO);
-      if ($icone.length) $icone.text(ICONE_PADRAO);
-      $btn.removeClass('btn-venda-entrega--ok');
-      if (!ativo) {
-        $btn.attr('title', 'Módulo Vendas para Entrega desabilitado');
-      } else if (!temItens) {
-        $btn.attr('title', 'Adicione itens ao carrinho');
-      } else {
-        $btn.attr('title', 'Enviar para Entrega (F9)');
-      }
-    }
+    $btn.toggle(ativo);
+    $btn.attr('aria-hidden', ativo ? 'false' : 'true');
 
-    $btn.prop('disabled', !habilitado);
-    $btn.removeAttr('aria-hidden');
-    // Garante que nunca fique oculto por estilo legado
-    if ($btn[0] && $btn[0].style) {
-      $btn[0].style.removeProperty('display');
-      $btn[0].style.removeProperty('visibility');
-      $btn[0].style.removeProperty('opacity');
+    if (!ativo) {
+      $btn.prop('disabled', true);
+      limparEstadoVisualBotao($btn);
+    } else {
+      const $titulo = $btn.find('.btn-venda-entrega-titulo');
+      const $icone = $btn.find('.btn-venda-entrega-icone');
+      if (configurada) {
+        $titulo.text(TITULO_OK);
+        if ($icone.length) $icone.text(ICONE_OK);
+        $btn.addClass('btn-venda-entrega--ok');
+        $btn.attr('title', 'Entrega configurada');
+      } else {
+        $titulo.text(TITULO_PADRAO);
+        if ($icone.length) $icone.text(ICONE_PADRAO);
+        $btn.removeClass('btn-venda-entrega--ok');
+        $btn.attr('title', temItens ? 'Enviar para Entrega (F9)' : 'Adicione itens ao carrinho');
+      }
+      $btn.prop('disabled', !habilitado);
     }
 
     const $tipoBox = $('#pdvTipoVendaResumoBox');
@@ -215,6 +208,14 @@
     if ($chipF9.length) {
       $chipF9.toggle(ativo);
     }
+  }
+
+  function limparEstadoVisualBotao($btn) {
+    $btn.find('.btn-venda-entrega-titulo').text(TITULO_PADRAO);
+    const $icone = $btn.find('.btn-venda-entrega-icone');
+    if ($icone.length) $icone.text(ICONE_PADRAO);
+    $btn.removeClass('btn-venda-entrega--ok');
+    $btn.attr('title', '');
   }
 
   function marcarEntregaConfigurada() {

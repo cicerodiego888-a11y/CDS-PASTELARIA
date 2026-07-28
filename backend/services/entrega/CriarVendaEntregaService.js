@@ -10,8 +10,9 @@
 
 const db = require('../../database');
 const configService = require('../configuracaoService');
-const { distribuirItemVenda, parseVendaFiscalFlag } = require('../distribuidorEstoqueVenda');
+const { parseVendaFiscalFlag, distribuirItensVendaComValorFiscalEfetivo } = require('../distribuidorEstoqueVenda');
 const { calcularEstoqueProduto } = require('../estoque/EstoqueDisponivelService');
+const { saldosParaDistribuicaoVenda } = require('../estoque/produtoControlaEstoque');
 const { reservarItem } = require('../estoque/EstoqueReservaService');
 const { TipoVenda, StatusEntrega, StatusVenda, PagamentoPrevisto } = require('./enums');
 const {
@@ -133,7 +134,8 @@ function criarVendaEntrega(req, res) {
         COALESCE(saldo_fiscal, 0) AS saldo_fiscal,
         COALESCE(saldo_nao_fiscal, 0) AS saldo_nao_fiscal,
         COALESCE(reservado_fiscal, 0) AS reservado_fiscal,
-        COALESCE(reservado_nao_fiscal, 0) AS reservado_nao_fiscal
+        COALESCE(reservado_nao_fiscal, 0) AS reservado_nao_fiscal,
+        COALESCE(controla_estoque, 1) AS controla_estoque
       FROM produtos
       WHERE id IN (${produtoIds.map(() => '?').join(',')})
     `,
@@ -148,7 +150,7 @@ function criarVendaEntrega(req, res) {
         return map;
       }, {});
 
-      const distribuicaoItens = [];
+      const entradasMotor = [];
 
       for (const item of itens) {
         const produto = produtoMap[item.produto_id];
@@ -157,34 +159,58 @@ function criarVendaEntrega(req, res) {
         }
 
         const calc = calcularEstoqueProduto(produto);
-        const resultado = distribuirItemVenda(
-          item,
+        const qtdEstoque = item.quantidade_estoque != null && item.quantidade_estoque !== ''
+          ? Number(item.quantidade_estoque)
+          : Number(item.quantidade || 0);
+        const saldos = saldosParaDistribuicaoVenda(
+          produto,
+          qtdEstoque,
           calc.disponivel_fiscal,
-          calc.disponivel_nao_fiscal,
-          vendaFiscal
+          calc.disponivel_nao_fiscal
         );
-
-        if (!resultado.sucesso) {
-          return res.status(400).json({
-            error:
-              `Estoque disponível insuficiente para ${produto.nome}. ` +
-              `Disponível: ${resultado.estoqueTotal}`
-          });
-        }
-
-        distribuicaoItens.push({
-          ...item,
-          nome: produto.nome,
-          quantidade_fiscal: resultado.quantidadeFiscal,
-          quantidade_nao_fiscal: resultado.quantidadeNaoFiscal,
-          valor_fiscal: resultado.valorFiscal,
-          valor_nao_fiscal: resultado.valorNaoFiscal
+        entradasMotor.push({
+          item,
+          saldoFiscal: saldos.saldoFiscal,
+          saldoNaoFiscal: saldos.saldoNaoFiscal
         });
       }
 
+      const midpAtivo = Boolean(configService.isMidpAtivado && configService.isMidpAtivado());
+      const pagamentosEntrega = Array.isArray(body.pagamentos) ? body.pagamentos : [];
+      const resultadoMotor = distribuirItensVendaComValorFiscalEfetivo(
+        entradasMotor,
+        vendaFiscal,
+        {
+          pagamentos: pagamentosEntrega,
+          midpAtivo,
+          desconto: Number(body.desconto || 0),
+          acrescimo: Number(body.acrescimo || 0)
+        }
+      );
+
+      if (!resultadoMotor.sucesso) {
+        const produtoErro = resultadoMotor.item
+          ? produtoMap[resultadoMotor.item.produto_id]
+          : null;
+        return res.status(400).json({
+          error:
+            `Estoque disponível insuficiente para ${produtoErro?.nome || 'produto'}. ` +
+            `Disponível: ${resultadoMotor.erro?.estoqueTotal}`
+        });
+      }
+
+      const distribuicaoItens = resultadoMotor.itens.map((row) => ({
+        ...row,
+        nome: produtoMap[row.produto_id]?.nome || row.nome,
+        quantidade_fiscal: row.quantidade_fiscal,
+        quantidade_nao_fiscal: row.quantidade_nao_fiscal,
+        valor_fiscal: row.valor_fiscal,
+        valor_nao_fiscal: row.valor_nao_fiscal
+      }));
+
       const dataVenda = agoraLocalBrasil().slice(0, 10);
-      const valorFiscal = distribuicaoItens.reduce((s, i) => s + Number(i.valor_fiscal || 0), 0);
-      const valorNaoFiscal = distribuicaoItens.reduce((s, i) => s + Number(i.valor_nao_fiscal || 0), 0);
+      const valorFiscal = resultadoMotor.valorFiscalEfetivo;
+      const valorNaoFiscal = resultadoMotor.valorNaoFiscal;
       const desconto = Number(body.desconto || 0) || 0;
       const codigo = `ENT-${Date.now()}`;
 
