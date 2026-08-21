@@ -83,11 +83,12 @@ Mesmo `db`. Sem BEGIN próprio. Rollback testado.
 
 | Suite | Resultado |
 |---|---|
-| `reserva-repair-porta-publica.test.js` | (executar) |
-| `consumo-reserva-pedido-porta-publica.test.js` | (executar) |
-| `reservas-pdv-porta-publica.test.js` | (executar) |
-| `mts-v1.test.js` | (executar) |
-| `muc-public-contract.test.js` | (executar) |
+| `reserva-repair-porta-publica.test.js` | **10/10 OK** |
+| `consumo-reserva-pedido-porta-publica.test.js` | **10/10 OK** |
+| `reservas-pdv-porta-publica.test.js` | **11/11 OK** |
+| `mts-v1.test.js` | **9/9 OK** (homologado) |
+| `muc-public-contract.test.js` | **20/20 OK** |
+| `rc531-reserva-repair.test.js` (contrato existente) | **29/29 OK** |
 
 ---
 
