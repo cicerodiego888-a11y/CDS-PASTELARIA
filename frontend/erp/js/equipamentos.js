@@ -520,7 +520,7 @@ async function cadastrarCandidatoDiscovery(indice) {
         modelo: c.modelo || null,
         transporte: c.transporte || 'ethernet',
         ip: c.ip || null,
-        porta_tcp: c.porta != null ? Number(c.porta) : (c.transporte === 'ethernet' ? 9100 : null),
+        porta_tcp: c.porta != null ? Number(c.porta) : (c.transporte === 'ethernet' ? 9000 : null),
         porta_com: c.porta_com || null,
         timeout_ms: 5000,
         reconnect_auto: false,
@@ -803,7 +803,7 @@ async function abrirModalEquipamento(equipamento = null) {
                             </div>
                             <div class="col-md-4 mb-3">
                                 <label class="form-label">Porta TCP</label>
-                                <input type="number" class="form-control" id="eqPortaTcp" value="${eq.porta_tcp || 9100}" placeholder="9100">
+                                <input type="number" class="form-control" id="eqPortaTcp" value="${eq.porta_tcp || 9000}" placeholder="9000">
                             </div>
                             <div class="col-md-4 mb-3">
                                 <label class="form-label">Timeout (ms)</label>
@@ -825,6 +825,7 @@ async function abrirModalEquipamento(equipamento = null) {
                             </div>
                         </div>
                         ${htmlCamposLayoutEtiqueta(layout, 'eq')}
+                        ${htmlSecaoMgv6(eq)}
                     </div>
                     <div class="modal-footer">
                         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
@@ -836,6 +837,9 @@ async function abrirModalEquipamento(equipamento = null) {
     `);
 
     new bootstrap.Modal(document.getElementById('modalEquipamento')).show();
+    if (isEdicao && eq.id) {
+        carregarConfigMgv6NoFormulario(eq.id);
+    }
 }
 
 function abrirModalLayoutAtivo() {
@@ -906,7 +910,7 @@ function coletarDadosFormEquipamento() {
         transporte: document.getElementById('eqTransporte').value,
         porta_com: document.getElementById('eqPortaCom').value.trim() || null,
         ip: document.getElementById('eqIp').value.trim() || null,
-        porta_tcp: document.getElementById('eqPortaTcp').value ? Number(document.getElementById('eqPortaTcp').value) : 9100,
+        porta_tcp: document.getElementById('eqPortaTcp').value ? Number(document.getElementById('eqPortaTcp').value) : 9000,
         timeout_ms: document.getElementById('eqTimeout').value ? Number(document.getElementById('eqTimeout').value) : 5000,
         reconnect_auto: document.getElementById('eqReconnectAuto').checked,
         ativo: document.getElementById('eqAtivo').checked,
@@ -1080,3 +1084,288 @@ async function diagnosticarEquipamento(id) {
         showNotification(err.message, 'danger');
     }
 }
+
+/* ─── Sprint 14.15.1 / RC14.15.3 — Método de Envio + Bridge MGV6 ─── */
+
+function htmlSecaoMgv6(eq) {
+    const idEq = eq && eq.id ? Number(eq.id) : '';
+    return `
+                        <hr class="my-4">
+                        <div class="border rounded p-3 bg-light" id="secaoMgv6">
+                            <h6 class="fw-bold mb-1"><i class="fas fa-exchange-alt me-1"></i> Método de Envio</h6>
+                            <p class="small text-muted mb-3">
+                                Escolha <strong>um</strong> método por equipamento. Os pipelines são mutuamente exclusivos.
+                                O Driver cadastrado (ex.: Toledo Prix IV Uno) permanece o mesmo; muda apenas o transporte do envio de produtos.
+                            </p>
+                            <div class="mb-3" id="modoEnvioRadios">
+                                <div class="form-check mb-2">
+                                    <input class="form-check-input" type="radio" name="modoEnvio" id="modoEnvioTcp" value="TCP" checked onchange="atualizarVisibilidadeMgv6()">
+                                    <label class="form-check-label" for="modoEnvioTcp">
+                                        <strong>TCP Oficial</strong>
+                                        <span class="d-block small text-muted">Comunicação direta com a balança via Driver Toledo.</span>
+                                    </label>
+                                </div>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="radio" name="modoEnvio" id="modoEnvioMgv6" value="MGV6" onchange="atualizarVisibilidadeMgv6()">
+                                    <label class="form-check-label" for="modoEnvioMgv6">
+                                        <strong>MGV6 / Compatibilidade Toledo</strong>
+                                        <span class="d-block small text-muted">Exportação para MGV6.exe através de arquivo TXT.</span>
+                                    </label>
+                                </div>
+                            </div>
+                            <div id="painelConfigMgv6" class="d-none">
+                                <div class="mb-2">
+                                    <span class="badge bg-secondary me-1">Transporte: Arquivo / MGV6</span>
+                                    <span class="badge bg-light text-dark border">Não requer TCP conectado para enviar</span>
+                                </div>
+                                <div class="row">
+                                    <div class="col-md-8 mb-3">
+                                        <label class="form-label">Pasta de exportação</label>
+                                        <input type="text" class="form-control" id="mgv6ExportFolder"
+                                            placeholder="C:\\Program Files (x86)\\Toledo do Brasil\\MGV6\\TXT\\">
+                                    </div>
+                                    <div class="col-md-4 mb-3">
+                                        <label class="form-label">Nome do arquivo</label>
+                                        <input type="text" class="form-control" id="mgv6FileName" value="TXITENS.TXT">
+                                    </div>
+                                    <div class="col-md-8 mb-3">
+                                        <label class="form-label">Caminho do MGV6.exe</label>
+                                        <input type="text" class="form-control" id="mgv6Executable"
+                                            placeholder="C:\\Program Files (x86)\\Toledo do Brasil\\MGV6\\MGV6.exe">
+                                    </div>
+                                    <div class="col-md-4 mb-3">
+                                        <label class="form-label">Encoding</label>
+                                        <select class="form-select" id="mgv6Encoding">
+                                            <option value="WINDOWS-1252" selected>Windows-1252</option>
+                                            <option value="UTF-8">UTF-8</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-4 mb-3">
+                                        <label class="form-label">Terminador</label>
+                                        <select class="form-select" id="mgv6LineEnding">
+                                            <option value="CRLF" selected>CRLF</option>
+                                            <option value="LF">LF</option>
+                                            <option value="CR">CR</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-4 mb-3">
+                                        <label class="form-label">Modo da informação variável</label>
+                                        <select class="form-select" id="mgv6ModoVariavel">
+                                            <option value="VALOR" selected>Valor</option>
+                                            <option value="PESO">Peso</option>
+                                        </select>
+                                    </div>
+                                    <div class="col-md-4 mb-3">
+                                        <label class="form-label">Dígitos PLU</label>
+                                        <input type="number" min="1" max="10" class="form-control" id="mgv6DigitosPlu" value="6">
+                                    </div>
+                                    <div class="col-md-4 mb-3">
+                                        <label class="form-label">Prefixo</label>
+                                        <input type="text" class="form-control" id="mgv6Prefixo" value="2">
+                                    </div>
+                                    <div class="col-md-6 mb-2">
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" id="mgv6DiffPesoUnidade">
+                                            <label class="form-check-label" for="mgv6DiffPesoUnidade">Diferenciar Peso/Unidade</label>
+                                        </div>
+                                    </div>
+                                    <div class="col-md-6 mb-2">
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" id="mgv6AutoLaunch">
+                                            <label class="form-check-label" for="mgv6AutoLaunch">Auto Launch (abrir MGV6.exe)</label>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="d-flex flex-wrap gap-2 mt-2">
+                                    <button type="button" class="btn btn-outline-primary btn-sm" onclick="salvarConfigMgv6DoFormulario()" ${idEq ? '' : 'disabled title="Salve a balança antes"'}>
+                                        Salvar configuração MGV6
+                                    </button>
+                                    <button type="button" class="btn btn-outline-secondary btn-sm" onclick="testarPastaMgv6()" ${idEq ? '' : 'disabled'}>
+                                        Testar pasta
+                                    </button>
+                                    <button type="button" class="btn btn-outline-success btn-sm" onclick="exportarProdutosMgv6()" ${idEq ? '' : 'disabled'}>
+                                        Exportar produtos
+                                    </button>
+                                    <button type="button" class="btn btn-outline-dark btn-sm" onclick="verHistoricoMgv6()" ${idEq ? '' : 'disabled'}>
+                                        Ver histórico
+                                    </button>
+                                </div>
+                                <small class="text-muted d-block mt-2">autoLaunch permanece desligado por padrão. MGV6 não é Driver — não altera DriverRegistry / TCP.</small>
+                            </div>
+                            <input type="hidden" id="mgv6EquipamentoId" value="${idEq}">
+                        </div>`;
+}
+
+function atualizarVisibilidadeMgv6() {
+    const modo = document.querySelector('input[name="modoEnvio"]:checked')?.value || 'TCP';
+    const painel = document.getElementById('painelConfigMgv6');
+    if (painel) painel.classList.toggle('d-none', modo !== 'MGV6');
+}
+
+function coletarConfigMgv6DoFormulario() {
+    const modo = document.querySelector('input[name="modoEnvio"]:checked')?.value || 'TCP';
+    return {
+        modo_envio: modo,
+        enabled: modo === 'MGV6',
+        exportFolder: document.getElementById('mgv6ExportFolder')?.value?.trim() || '',
+        mgv6Executable: document.getElementById('mgv6Executable')?.value?.trim() || '',
+        fileName: document.getElementById('mgv6FileName')?.value?.trim() || 'TXITENS.TXT',
+        encoding: document.getElementById('mgv6Encoding')?.value || 'WINDOWS-1252',
+        lineEnding: document.getElementById('mgv6LineEnding')?.value || 'CRLF',
+        autoLaunch: document.getElementById('mgv6AutoLaunch')?.checked === true,
+        modoVariavel: document.getElementById('mgv6ModoVariavel')?.value || 'VALOR',
+        digitosPlu: Number(document.getElementById('mgv6DigitosPlu')?.value || 6),
+        prefixoEtiqueta: document.getElementById('mgv6Prefixo')?.value?.trim() || '2',
+        diferenciarPesoUnidade: document.getElementById('mgv6DiffPesoUnidade')?.checked === true
+    };
+}
+
+function aplicarConfigMgv6NoFormulario(cfg) {
+    if (!cfg) return;
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+    const chk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = Boolean(v); };
+    const modo = String(cfg.modo_envio || (cfg.enabled ? 'MGV6' : 'TCP')).toUpperCase() === 'MGV6'
+        ? 'MGV6'
+        : 'TCP';
+    const tcp = document.getElementById('modoEnvioTcp');
+    const mgv = document.getElementById('modoEnvioMgv6');
+    if (tcp) tcp.checked = modo === 'TCP';
+    if (mgv) mgv.checked = modo === 'MGV6';
+    set('mgv6ExportFolder', cfg.exportFolder || '');
+    set('mgv6Executable', cfg.mgv6Executable || '');
+    set('mgv6FileName', cfg.fileName || 'TXITENS.TXT');
+    set('mgv6Encoding', cfg.encoding || 'WINDOWS-1252');
+    set('mgv6LineEnding', cfg.lineEnding || 'CRLF');
+    set('mgv6ModoVariavel', cfg.modoVariavel || 'VALOR');
+    set('mgv6DigitosPlu', cfg.digitosPlu != null ? cfg.digitosPlu : 6);
+    set('mgv6Prefixo', cfg.prefixoEtiqueta || '2');
+    chk('mgv6DiffPesoUnidade', cfg.diferenciarPesoUnidade);
+    chk('mgv6AutoLaunch', cfg.autoLaunch);
+    atualizarVisibilidadeMgv6();
+}
+
+async function carregarConfigMgv6NoFormulario(equipamentoId) {
+    try {
+        const resp = await fetch(`${apiUrlEquipamentos()}/equipamentos/mgv6/config/${equipamentoId}`, {
+            headers: headersEquipamentos()
+        });
+        const body = await resp.json();
+        if (!resp.ok) throw new Error(body.error || 'Falha ao carregar MGV6');
+        aplicarConfigMgv6NoFormulario({
+            ...(body.config || {}),
+            modo_envio: body.modo_envio || body.config?.modo_envio || 'TCP'
+        });
+    } catch (err) {
+        console.warn('[MGV6]', err.message);
+        atualizarVisibilidadeMgv6();
+    }
+}
+
+async function salvarConfigMgv6DoFormulario() {
+    const id = Number(document.getElementById('mgv6EquipamentoId')?.value || document.getElementById('eqId')?.value);
+    if (!id) {
+        showNotification('Salve a balança antes de gravar a configuração MGV6', 'warning');
+        return;
+    }
+    try {
+        const resp = await fetch(`${apiUrlEquipamentos()}/equipamentos/mgv6/config/${id}`, {
+            method: 'PUT',
+            headers: headersEquipamentos(),
+            body: JSON.stringify(coletarConfigMgv6DoFormulario())
+        });
+        const body = await resp.json();
+        if (!resp.ok) throw new Error(body.error || body.mensagem || 'Erro ao salvar');
+        showNotification(body.message || `Método de envio: ${body.modo_envio || 'TCP'}`, 'success');
+    } catch (err) {
+        showNotification(err.message, 'danger');
+    }
+}
+
+async function testarPastaMgv6() {
+    const id = Number(document.getElementById('mgv6EquipamentoId')?.value || document.getElementById('eqId')?.value);
+    const cfg = coletarConfigMgv6DoFormulario();
+    try {
+        const resp = await fetch(`${apiUrlEquipamentos()}/equipamentos/mgv6/test-folder`, {
+            method: 'POST',
+            headers: headersEquipamentos(),
+            body: JSON.stringify({
+                equipamentoId: id,
+                exportFolder: cfg.exportFolder,
+                fileName: cfg.fileName
+            })
+        });
+        const body = await resp.json();
+        if (!resp.ok) throw new Error(body.error || 'Pasta inválida');
+        showNotification(`Pasta OK: ${body.pasta}`, 'success');
+    } catch (err) {
+        showNotification(err.message, 'danger');
+    }
+}
+
+async function exportarProdutosMgv6() {
+    const id = Number(document.getElementById('mgv6EquipamentoId')?.value || document.getElementById('eqId')?.value);
+    if (!id) return showNotification('Equipamento inválido', 'warning');
+    if (!confirm('Exportar todos os produtos elegíveis para o arquivo MGV6 desta balança?')) return;
+    try {
+        await salvarConfigMgv6DoFormulario();
+        const resp = await fetch(`${apiUrlEquipamentos()}/equipamentos/mgv6/export-all`, {
+            method: 'POST',
+            headers: headersEquipamentos(),
+            body: JSON.stringify({ equipamentoId: id })
+        });
+        const body = await resp.json();
+        if (!resp.ok) throw new Error(body.error || 'Falha na exportação');
+        showNotification(`Exportado: ${body.arquivo} (${body.quantidade} produtos)`, 'success');
+    } catch (err) {
+        showNotification(err.message, 'danger');
+    }
+}
+
+async function verHistoricoMgv6() {
+    const id = Number(document.getElementById('mgv6EquipamentoId')?.value || document.getElementById('eqId')?.value);
+    try {
+        const resp = await fetch(`${apiUrlEquipamentos()}/equipamentos/mgv6/history?equipamentoId=${id}&limite=30`, {
+            headers: headersEquipamentos()
+        });
+        const body = await resp.json();
+        if (!resp.ok) throw new Error(body.error || 'Falha ao carregar histórico');
+        const rows = (body.historico || []).map((h) => `
+            <tr>
+                <td>${h.id}</td>
+                <td>${escapeHtmlEquipamentos(h.arquivo || '')}</td>
+                <td>${h.quantidade_produtos ?? ''}</td>
+                <td>${escapeHtmlEquipamentos(h.status || '')}</td>
+                <td>${escapeHtmlEquipamentos(h.criado_em || '')}</td>
+                <td>${h.mgv6_iniciado ? 'sim' : 'não'}</td>
+            </tr>`).join('') || '<tr><td colspan="6" class="text-muted">Sem exportações</td></tr>';
+        $('#modal-container').append(`
+            <div class="modal fade" id="modalHistMgv6" tabindex="-1">
+                <div class="modal-dialog modal-lg modal-dialog-scrollable">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title">Histórico MGV6</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                        </div>
+                        <div class="modal-body">
+                            <table class="table table-sm">
+                                <thead><tr><th>ID</th><th>Arquivo</th><th>Qtd</th><th>Status</th><th>Quando</th><th>MGV6</th></tr></thead>
+                                <tbody>${rows}</tbody>
+                            </table>
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fechar</button>
+                        </div>
+                    </div>
+                </div>
+            </div>`);
+        new bootstrap.Modal(document.getElementById('modalHistMgv6')).show();
+    } catch (err) {
+        showNotification(err.message, 'danger');
+    }
+}
+
+window.salvarConfigMgv6DoFormulario = salvarConfigMgv6DoFormulario;
+window.testarPastaMgv6 = testarPastaMgv6;
+window.exportarProdutosMgv6 = exportarProdutosMgv6;
+window.verHistoricoMgv6 = verHistoricoMgv6;
+window.atualizarVisibilidadeMgv6 = atualizarVisibilidadeMgv6;

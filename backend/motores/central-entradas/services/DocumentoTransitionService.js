@@ -7,6 +7,7 @@
  */
 
 const { validarTransicao } = require('../core/MaquinaEstadosDocumento');
+const { normalizarStatus } = require('../core/DocumentoFiscalStatus');
 const CentralDocumentosRepository = require('../repositories/CentralDocumentosRepository');
 const CentralHistoricoService = require('./CentralHistoricoService');
 
@@ -33,7 +34,9 @@ class DocumentoTransitionService {
    * @returns {Promise<void>}
    */
   async transicionar(id, statusAtual, statusNovo, opcoes = {}) {
-    const validacao = validarTransicao(statusAtual, statusNovo);
+    const atual = normalizarStatus(statusAtual);
+    const novo = normalizarStatus(statusNovo);
+    const validacao = validarTransicao(atual, novo);
     if (!validacao.valido) {
       const erro = new Error(validacao.erro);
       erro.statusCode = 400;
@@ -41,18 +44,18 @@ class DocumentoTransitionService {
     }
 
     await this._documentosRepository.atualizar(id, {
-      status: statusNovo,
+      status: novo,
       statusDetalhe: opcoes.detalhe ?? null,
       usuarioId: opcoes.usuarioId ?? null
     });
 
-    if (statusAtual !== statusNovo) {
+    if (atual !== novo) {
       await this._historicoService.registrar({
         documentoId: id,
-        statusAnterior: statusAtual,
-        statusNovo,
+        statusAnterior: atual,
+        statusNovo: novo,
         usuarioId: opcoes.usuarioId ?? null,
-        detalhe: opcoes.detalhe ?? `Transição: ${statusAtual} → ${statusNovo}`,
+        detalhe: opcoes.detalhe ?? `Transição: ${atual} → ${novo}`,
         origem: opcoes.origem || null
       });
     }

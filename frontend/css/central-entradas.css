@@ -1080,6 +1080,15 @@
     color: #dc3545;
 }
 
+.central-ux-servico--cooldown {
+    border-color: #fcd34d;
+    background: linear-gradient(135deg, #fffbeb 0%, #fff 100%);
+}
+.central-ux-servico--cooldown .central-ux-servico-icone {
+    background: rgba(245, 158, 11, 0.14);
+    color: #b45309;
+}
+
 .central-ux-servico--offline {
     border-color: #cbd5e1;
     background: linear-gradient(135deg, #f1f5f9 0%, #fff 100%);

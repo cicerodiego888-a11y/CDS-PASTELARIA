@@ -7,7 +7,7 @@
 
 const loggerService = require('../services/LoggerService');
 const driverRegistry = require('../drivers/DriverRegistry');
-const driverLoader = require('../drivers/DriverLoader');
+const officialLoader = require('../sdk/OfficialDriverLoader');
 const equipamentosRepository = require('../repositories/EquipamentosRepository');
 const {
   criarDiscoveryResult,
@@ -64,16 +64,15 @@ class DiscoveryService {
   }
 
   _garantirDrivers() {
-    if (!driverLoader.estaCarregado()) {
-      driverLoader.carregarTodos();
+    if (!officialLoader.estaCarregado()) {
+      officialLoader.carregarTodos();
       return;
     }
     // Hot-reload se catálogo RC2 ainda não registrou serial/usb
     const serial = driverRegistry.buscarPorTransporte('serial');
     const usb = driverRegistry.buscarPorTransporte('usb');
     if (!serial.length || !usb.length) {
-      driverLoader.reiniciar();
-      driverLoader.carregarTodos({ forcar: true });
+      officialLoader.reload();
     }
   }
 

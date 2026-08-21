@@ -151,11 +151,26 @@ async function main() {
     assert.ok(errosFe.some((e) => /hashFrontend/i.test(e)));
   });
 
+  await test('package.json efetivo (extraMetadata ERP) difere do repositório', () => {
+    const repoHash = integrity.sha256File(path.join(root, 'package.json'));
+    const efetivoHash = integrity.hashPackageJsonEfetivo(root, 'erp');
+    assert.notStrictEqual(repoHash, efetivoHash);
+
+    const m = integrity.gerarManifesto(root, { modulo: 'erp', commit: 'pkg', branch: 'main' });
+    assert.strictEqual(m.arquivos['package.json'], efetivoHash);
+  });
+
   await test('asar idêntico (fixture): comparação OK com backend', async () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'rc3166-ok-'));
     const pack = path.join(tmp, 'pack');
     try {
       montarFixtureIntegral(pack);
+      if (integrity.moduloUsaPackageJsonEfetivo('erp')) {
+        write(
+          path.join(pack, 'package.json'),
+          integrity.serializarPackageJsonEfetivo(pack, 'erp')
+        );
+      }
       const manifesto = integrity.gerarManifesto(pack, { modulo: 'erp', commit: 'ok', branch: 'main' });
       integrity.escreverManifesto(pack, manifesto);
       assert.ok(manifesto.hashBackend);
@@ -163,7 +178,7 @@ async function main() {
 
       const asarPath = path.join(tmp, 'app.asar');
       await asar.createPackage(pack, asarPath);
-      const cmp = integrity.compararRepoComAsar(pack, asarPath, { manifesto });
+      const cmp = integrity.compararRepoComAsar(pack, asarPath, { manifesto, modulo: 'erp' });
       assert.strictEqual(cmp.ok, true, cmp.erros.join('\n'));
       assert.ok(cmp.porCamada.backend.ok >= 2);
       assert.ok(cmp.porCamada.frontend.ok >= 5);
@@ -187,7 +202,7 @@ async function main() {
       const manifestoNovo = integrity.gerarManifesto(pack, { modulo: 'erp', commit: 't2', branch: 'b' });
       integrity.escreverManifesto(pack, manifestoNovo);
 
-      const cmp = integrity.compararRepoComAsar(pack, asarPath, { manifesto: manifestoNovo });
+      const cmp = integrity.compararRepoComAsar(pack, asarPath, { manifesto: manifestoNovo, modulo: 'erp' });
       assert.strictEqual(cmp.ok, false);
       assert.ok(cmp.divergencias.some((d) => d.camada === 'backend'));
     } finally {

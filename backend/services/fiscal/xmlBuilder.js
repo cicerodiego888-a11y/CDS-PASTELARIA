@@ -613,6 +613,8 @@ function buildNfceXml({ config, venda, itens, numero }) {
 
   let vProd = 0;
   const usarModeloBruto = modeloTotais.modelo === MODELO_BRUTO;
+  // Desconto da venda (R$) → vDesc rateado. Desconto de item já vem no valor líquido
+  // (preço unitário/subtotal) e NÃO entra de novo em vDesc — evita rejeição SEFAZ (cStat 610).
   const descontoVenda = usarModeloBruto ? round2(modeloTotais.vDesc || 0) : 0;
   const itensVenda = usarModeloBruto
     ? ratearDescontoNosItens(itens || [], descontoVenda)
@@ -626,7 +628,10 @@ function buildNfceXml({ config, venda, itens, numero }) {
     const quantidade = obterQuantidadeFiscalItem(item);
     const subtotal = round2(obterValorFiscalItem(item));
     const valorUnitario = obterPrecoUnitarioFiscalItem(item);
-    const descontoItem = usarModeloBruto ? round2(item.desconto_rateado || 0) : 0;
+    // Só rateio do desconto da venda; nunca somar desconto_valor do item (já líquido).
+    let descontoItem = usarModeloBruto ? round2(item.desconto_rateado || 0) : 0;
+    if (descontoItem > subtotal) descontoItem = subtotal;
+    if (descontoItem < 0) descontoItem = 0;
     vProd += subtotal;
     vDesc += descontoItem;
 

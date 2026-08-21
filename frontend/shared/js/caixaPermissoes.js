@@ -6,7 +6,8 @@
 const PERMISSOES_CAIXA = {
   ABRIR: 'abrir_caixa',
   SANGRIA: 'sangria_caixa',
-  SUPRIMENTO: 'suprimento_caixa'
+  SUPRIMENTO: 'suprimento_caixa',
+  FECHAR: 'fechar_caixa'
 };
 
 function temPermissaoOperacaoCaixa(permissao, user) {
@@ -121,7 +122,7 @@ async function enviarOperacaoCaixa(permissao, url, body, opcoes = {}) {
   const mensagemErro = opcoes.mensagemErro || 'Erro ao executar operação de caixa.';
 
   try {
-    await executarAcaoCaixaComPermissao(permissao, (senhaAdmin) => {
+    const resposta = await executarAcaoCaixaComPermissao(permissao, (senhaAdmin) => {
       const payload = { ...body };
       if (senhaAdmin) {
         payload.senha_admin = senhaAdmin;
@@ -141,7 +142,7 @@ async function enviarOperacaoCaixa(permissao, url, body, opcoes = {}) {
     }, opcoes.senha || {});
 
     if (typeof opcoes.onSuccess === 'function') {
-      opcoes.onSuccess();
+      opcoes.onSuccess(resposta);
     }
   } catch (erro) {
     if (erro && erro.message === 'Operação cancelada.') {

@@ -285,6 +285,40 @@ function contarPendenciasAbertas(sessao) {
   }).length;
 }
 
+/**
+ * RC7.5 — Validação do botão Confirmar Produto (sem navegação).
+ * @param {Object} pendencia
+ * @returns {{ ok: boolean, mensagem?: string, produtoId?: number }}
+ */
+function validarConfirmacaoProduto(pendencia) {
+  const produtoId = pendencia?.produtoEncontrado?.id
+    ?? pendencia?.produtoId
+    ?? null;
+  if (!produtoId) {
+    return { ok: false, mensagem: 'Selecione um produto para continuar.' };
+  }
+  return { ok: true, produtoId: Number(produtoId) };
+}
+
+/**
+ * RC7.5 — resultado de conclusão nunca solicita abrir Compra/Pedido.
+ * @param {Object} sessao
+ * @param {Object} [meta]
+ * @returns {Object}
+ */
+function montarResultadoConclusaoRevisao(sessao, meta = {}) {
+  return {
+    itens: sessao?.itens || [],
+    estatisticas: montarEstatisticasFinais(sessao),
+    navegacao: {
+      abrirCompra: false,
+      abrirPedido: false,
+      permanecerNaCentral: true,
+      motivo: meta.motivoEncerramento || 'manual'
+    }
+  };
+}
+
 module.exports = {
   MOTOR_LABELS,
   formatarTempoProcessamento,
@@ -300,5 +334,7 @@ module.exports = {
   registrarResolucaoPendencia,
   montarEstatisticasFinais,
   proximaPendenciaNaoResolvida,
-  contarPendenciasAbertas
+  contarPendenciasAbertas,
+  validarConfirmacaoProduto,
+  montarResultadoConclusaoRevisao
 };

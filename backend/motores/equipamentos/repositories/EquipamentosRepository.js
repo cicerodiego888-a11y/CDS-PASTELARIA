@@ -208,7 +208,7 @@ class EquipamentosRepository {
       dados.transporte || 'ethernet',
       dados.porta_com || null,
       dados.ip || null,
-      dados.porta_tcp ?? 9100,
+      dados.porta_tcp ?? require('../drivers/toledo/ToledoProtocol').PORTA_PADRAO,
       dados.status || 'desconhecido',
       dados.ativo === false || dados.ativo === 0 ? 0 : 1,
       dados.terminal_id || null,
@@ -296,7 +296,19 @@ class EquipamentosRepository {
 
   async buscarDriverCatalogoPorCodigo(codigo) {
     await whenReady();
-    return get('SELECT * FROM equipamentos_drivers WHERE codigo = ?', [codigo]);
+    const raw = String(codigo || '').trim();
+    if (!raw) return null;
+    let codigoLookup = raw;
+    try {
+      const identity = require('../sdk/DriverIdentityResolver');
+      codigoLookup = identity.canonical(raw) || raw;
+    } catch (_) { /* ignore */ }
+    let row = await get('SELECT * FROM equipamentos_drivers WHERE codigo = ?', [codigoLookup]);
+    if (row) return row;
+    if (codigoLookup !== raw) {
+      row = await get('SELECT * FROM equipamentos_drivers WHERE codigo = ?', [raw]);
+    }
+    return row;
   }
 
   async buscarDriverCatalogoPorId(id) {

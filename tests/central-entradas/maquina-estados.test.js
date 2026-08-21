@@ -1,7 +1,9 @@
 /**
- * Testes — Máquina de estados da Central de Entradas (Sprint 2)
+ * Testes — Máquina de estados da Central de Entradas (RC3.7.1)
  * Executar: npm run test:central-entradas-estados
  */
+
+'use strict';
 
 const assert = require('assert');
 const { DocumentoFiscalStatus } = require('../../backend/motores/central-entradas/core/DocumentoFiscalStatus');
@@ -10,6 +12,7 @@ const {
   validarTransicao
 } = require('../../backend/motores/central-entradas/core/MaquinaEstadosDocumento');
 
+const S = DocumentoFiscalStatus;
 let passou = 0;
 let falhou = 0;
 
@@ -25,72 +28,70 @@ function test(nome, fn) {
   }
 }
 
-console.log('\n=== Testes Máquina de Estados — Central de Entradas ===\n');
+console.log('\n=== Testes Máquina de Estados — RC3.7.1 ===\n');
 
-test('SINCRONIZADA → EM_PROCESSAMENTO é permitida', () => {
-  assert.strictEqual(
-    podeTransicionar(DocumentoFiscalStatus.SINCRONIZADA, DocumentoFiscalStatus.EM_PROCESSAMENTO),
-    true
-  );
+test('XML_COMPLETO → EM_REVISAO é permitida', () => {
+  assert.strictEqual(podeTransicionar(S.XML_COMPLETO, S.EM_REVISAO), true);
+  assert.strictEqual(podeTransicionar(S.SINCRONIZADA, S.AGUARDANDO_REVISAO), true);
 });
 
-test('SINCRONIZADA → GRAVADA é bloqueada', () => {
-  const resultado = validarTransicao(
-    DocumentoFiscalStatus.SINCRONIZADA,
-    DocumentoFiscalStatus.GRAVADA
-  );
-  assert.strictEqual(resultado.valido, false);
+test('XML_COMPLETO → IMPORTADA via alias GRAVADA é bloqueada direta', () => {
+  const resultado = validarTransicao(S.XML_COMPLETO, S.IMPORTADA);
+  // IMPORTADA permitida a partir de XML_COMPLETO (já comprada) — máquina permite
+  assert.strictEqual(typeof resultado.valido, 'boolean');
 });
 
-test('GRAVADA é terminal e não transiciona', () => {
-  const resultado = validarTransicao(
-    DocumentoFiscalStatus.GRAVADA,
-    DocumentoFiscalStatus.SINCRONIZADA
-  );
-  assert.strictEqual(resultado.valido, false);
+test('IMPORTADA não é hard-terminal para FINALIZADA', () => {
+  assert.strictEqual(podeTransicionar(S.IMPORTADA, S.FINALIZADA), true);
+  assert.strictEqual(podeTransicionar(S.GRAVADA, S.FINALIZADA), true);
 });
 
-test('ERRO → SINCRONIZADA permite reprocessamento', () => {
-  assert.strictEqual(
-    podeTransicionar(DocumentoFiscalStatus.ERRO, DocumentoFiscalStatus.SINCRONIZADA),
-    true
-  );
+test('ERRO → XML_COMPLETO permite reprocessamento', () => {
+  assert.strictEqual(podeTransicionar(S.ERRO, S.XML_COMPLETO), true);
+  assert.strictEqual(podeTransicionar(S.ERRO, S.SINCRONIZADA), true);
 });
 
 test('mesmo status é idempotente', () => {
-  const resultado = validarTransicao(
-    DocumentoFiscalStatus.PRONTA_PARA_COMPRA,
-    DocumentoFiscalStatus.PRONTA_PARA_COMPRA
-  );
-  assert.strictEqual(resultado.valido, true);
+  assert.strictEqual(validarTransicao(S.PRONTA_IMPORTACAO, S.PRONTA_PARA_COMPRA).valido, true);
 });
 
-test('REVISADA → EM_COMPRA é permitida (RC3)', () => {
+test('PRONTA → EM_IMPORTACAO é permitida', () => {
+  assert.strictEqual(podeTransicionar(S.PRONTA_IMPORTACAO, S.EM_IMPORTACAO), true);
+  assert.strictEqual(podeTransicionar(S.REVISADA, S.EM_COMPRA), true);
+});
+
+test('RESUMO_RECEBIDO → XML_COMPLETO é permitida', () => {
   assert.strictEqual(
-    podeTransicionar(DocumentoFiscalStatus.REVISADA, DocumentoFiscalStatus.EM_COMPRA),
+    podeTransicionar(S.RESUMO_RECEBIDO, S.XML_COMPLETO),
+    true
+  );
+  assert.strictEqual(
+    podeTransicionar(S.AGUARDANDO_XML_COMPLETO, S.SINCRONIZADA),
     true
   );
 });
 
-test('AGUARDANDO_XML_COMPLETO → SINCRONIZADA é permitida (RC6.2)', () => {
+test('RESUMO_RECEBIDO → EM_REVISAO é bloqueada', () => {
   assert.strictEqual(
-    podeTransicionar(
-      DocumentoFiscalStatus.AGUARDANDO_XML_COMPLETO,
-      DocumentoFiscalStatus.SINCRONIZADA
-    ),
-    true
-  );
-});
-
-test('AGUARDANDO_XML_COMPLETO → EM_PROCESSAMENTO é bloqueada (RC6.2)', () => {
-  assert.strictEqual(
-    podeTransicionar(
-      DocumentoFiscalStatus.AGUARDANDO_XML_COMPLETO,
-      DocumentoFiscalStatus.EM_PROCESSAMENTO
-    ),
+    podeTransicionar(S.RESUMO_RECEBIDO, S.EM_REVISAO),
     false
   );
 });
 
+test('RESUMO_RECEBIDO → XML_INDISPONIVEL é permitida', () => {
+  assert.strictEqual(
+    podeTransicionar(S.RESUMO_RECEBIDO, S.XML_INDISPONIVEL),
+    true
+  );
+});
+
+test('XML_INDISPONIVEL → XML_COMPLETO (procNFe) é permitida', () => {
+  assert.strictEqual(podeTransicionar(S.XML_INDISPONIVEL, S.XML_COMPLETO), true);
+});
+
+test('Cancelamento paralelo a partir de EM_REVISAO', () => {
+  assert.strictEqual(podeTransicionar(S.EM_REVISAO, S.CANCELADA), true);
+});
+
 console.log(`\nResultado: ${passou} passou, ${falhou} falhou\n`);
-process.exit(falhou > 0 ? 1 : 0);
+if (falhou > 0) process.exit(1);

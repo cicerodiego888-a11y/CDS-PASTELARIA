@@ -66,6 +66,7 @@ function espelharIdentificadoresSafe(produtoId, campos, deps = {}, callback) {
         resultado?.interno?.acao === 'conflito'
         || resultado?.barras?.acao === 'conflito'
         || resultado?.plu?.acao === 'conflito'
+        || resultado?.mgv6?.acao === 'conflito'
       ) {
         mipLogger.warn('dual-write conflito', { produtoId, resultado });
       } else {
@@ -73,7 +74,8 @@ function espelharIdentificadoresSafe(produtoId, campos, deps = {}, callback) {
           produtoId,
           interno: resultado?.interno?.acao,
           barras: resultado?.barras?.acao,
-          plu: resultado?.plu?.acao
+          plu: resultado?.plu?.acao,
+          mgv6: resultado?.mgv6?.acao
         });
       }
       if (cb) cb(null, resultado);
@@ -142,6 +144,8 @@ module.exports = {
   interpretarResultadoPdv,
   calcularPesoEtiquetaPdv,
   normalizarPlu,
+  variantesPlu: require('./utils/normalizarPlu').variantesPlu,
+  pluInformado: require('./utils/normalizarPlu').pluInformado,
   // Sprint 08 — observabilidade
   mipLogger,
   mipMetrics,

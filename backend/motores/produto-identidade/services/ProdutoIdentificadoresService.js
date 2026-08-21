@@ -120,10 +120,12 @@ class ProdutoIdentificadoresService {
    *   codigo?: string|null,
    *   codigo_barras?: string|null,
    *   codigoBarras?: string|null,
-   *   plu?: string|null
+   *   plu?: string|null,
+   *   codigo_mgv6?: string|null,
+   *   codigoMgv6?: string|null
    * }} campos
    * @param {{ origem?: string }} [opcoes]
-   * @returns {Promise<{ interno: Object, barras: Object|null, plu: Object|null }>}
+   * @returns {Promise<{ interno: Object, barras: Object|null, plu: Object|null, mgv6: Object|null }>}
    */
   async espelharCodigoEBarras(produtoId, campos = {}, opcoes = {}) {
     const origem = opcoes.origem || 'dual_write';
@@ -169,7 +171,31 @@ class ProdutoIdentificadoresService {
       );
     }
 
-    return { interno, barras: barrasResult, plu: pluResult };
+    let mgv6Result = { acao: 'noop', registro: null };
+    const codigoMgv6 = campos.codigo_mgv6 !== undefined
+      ? campos.codigo_mgv6
+      : campos.codigoMgv6;
+    if (codigoMgv6 !== undefined) {
+      mgv6Result = await this.upsertPrincipal(
+        produtoId,
+        TIPOS_IDENTIFICADOR.MGV6,
+        codigoMgv6,
+        { origem }
+      );
+    }
+
+    return { interno, barras: barrasResult, plu: pluResult, mgv6: mgv6Result };
+  }
+
+  /**
+   * Lê Código MGV6 principal do produto (ou null).
+   * @param {number} produtoId
+   * @returns {Promise<string|null>}
+   */
+  async obterCodigoMgv6Principal(produtoId) {
+    const reg = await this._repo.buscarPrincipal(produtoId, TIPOS_IDENTIFICADOR.MGV6);
+    if (!reg || !reg.ativo) return null;
+    return reg.codigo != null ? String(reg.codigo) : null;
   }
 
   /**

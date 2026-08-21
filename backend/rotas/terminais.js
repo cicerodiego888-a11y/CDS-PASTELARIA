@@ -62,19 +62,35 @@ function registrarTerminalAuto(req, res) {
 
     const agora = new Date().toISOString();
     if (terminal) {
-      db.run(
-        `UPDATE terminais SET ultima_conexao = ?, usuario_id = ?, usuario_nome = ?, updated_at = ? WHERE id = ?`,
-        [agora, usuarioId, usuarioNome, agora, terminal.id],
-        (updateErr) => {
-          if (updateErr) {
-            console.error('Erro ao atualizar terminal:', updateErr);
+      const aplicarHeartbeat = (usuarioIdSeguro) => {
+        db.run(
+          `UPDATE terminais SET ultima_conexao = ?, usuario_id = ?, usuario_nome = ?, updated_at = ? WHERE id = ?`,
+          [agora, usuarioIdSeguro, usuarioNome, agora, terminal.id],
+          (updateErr) => {
+            if (updateErr) {
+              console.error('Erro ao atualizar terminal:', updateErr);
+            }
+            db.get(`SELECT * FROM terminais WHERE id = ?`, [terminal.id], (getErr, updated) => {
+              if (getErr) return res.status(500).json({ error: getErr.message });
+              res.json({ ...updated, online: true });
+            });
           }
-          db.get(`SELECT * FROM terminais WHERE id = ?`, [terminal.id], (getErr, updated) => {
-            if (getErr) return res.status(500).json({ error: getErr.message });
-            res.json({ ...updated, online: true });
-          });
-        }
-      );
+        );
+      };
+
+      // Evita FK em terminais.usuario_id quando o JWT aponta usuário inexistente
+      if (usuarioId) {
+        db.get('SELECT id FROM usuarios WHERE id = ?', [usuarioId], (userErr, userRow) => {
+          if (userErr) {
+            console.error('Erro ao validar usuário do heartbeat:', userErr);
+            return aplicarHeartbeat(null);
+          }
+          aplicarHeartbeat(userRow ? usuarioId : null);
+        });
+        return;
+      }
+
+      aplicarHeartbeat(null);
       return;
     }
 

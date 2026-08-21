@@ -26,6 +26,7 @@ const STATUS_NUNCA = Object.freeze([
   DocumentoFiscalStatus.GRAVADA,
   DocumentoFiscalStatus.EM_COMPRA,
   DocumentoFiscalStatus.DESCARTADA,
+  DocumentoFiscalStatus.XML_INDISPONIVEL,
   DocumentoFiscalStatus.AGUARDANDO_XML_COMPLETO,
   DocumentoFiscalStatus.EM_PROCESSAMENTO,
   DocumentoFiscalStatus.AGUARDANDO_REVISAO,

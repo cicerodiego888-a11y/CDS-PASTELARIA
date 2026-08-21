@@ -2,36 +2,38 @@ const express = require('express');
 const router = express.Router();
 const db = require('../database');
 const { gravarAuditoria } = require('../services/auditoria');
+const { obterSearchService } = require('../motores/mib');
 
-// LISTAR TODOS
-router.get('/', (req, res) => {
+// LISTAR TODOS (com busca via SearchService quando há termo)
+router.get('/', async (req, res) => {
   const { busca } = req.query;
-  let sql = 'SELECT * FROM fornecedores';
-  const params = [];
 
   if (busca && String(busca).trim() !== '') {
-    const buscaTexto = String(busca).trim();
-    const buscaNumerica = buscaTexto.replace(/\D/g, '');
-    const termo = `%${buscaTexto}%`;
-
-    sql += ' WHERE nome LIKE ? OR cpf_cnpj LIKE ? OR telefone LIKE ? OR razao_social LIKE ?';
-    params.push(termo, termo, termo, termo);
-
-    // Permite busca por CNPJ digitado só com números (sem máscara).
-    if (buscaNumerica) {
-      sql += " OR REPLACE(REPLACE(REPLACE(REPLACE(cpf_cnpj, '.', ''), '/', ''), '-', ''), ' ', '') LIKE ?";
-      params.push(`%${buscaNumerica}%`);
+    try {
+      const user = req.user || {};
+      const resultado = await obterSearchService(db).search({
+        entity: 'fornecedor',
+        query: String(busca).trim(),
+        limite: 200,
+        operador_id: user.id,
+        permissoes: user.permissoes || ['fornecedores'],
+        perfil: user.perfil,
+        role: user.role || 'admin',
+        origem: 'api.fornecedores',
+        user
+      });
+      return res.json(resultado.itens || []);
+    } catch (err) {
+      console.error('Erro ao buscar fornecedores (SearchService):', err.message);
+      return res.status(500).json({ error: 'Erro ao listar fornecedores.' });
     }
   }
 
-  sql += ' ORDER BY nome ASC';
-
-  db.all(sql, params, (err, rows) => {
+  db.all('SELECT * FROM fornecedores ORDER BY nome ASC', [], (err, rows) => {
     if (err) {
       console.error('Erro ao listar fornecedores:', err.message);
       return res.status(500).json({ error: 'Erro ao listar fornecedores.' });
     }
-
     res.json(rows || []);
   });
 });

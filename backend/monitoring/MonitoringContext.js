@@ -1,11 +1,19 @@
 /**
  * Contexto de consulta do Monitoring Engine.
- * Carrega escopo, usuário e flags de visualização — sem SQL.
+ * Carrega escopo, usuário, flags de visualização e competência fiscal — sem SQL.
  */
+
+const { resolverCompetencia } = require('./monitoringDateHelpers');
 
 function criarMonitoringContext(req = {}, extras = {}) {
   const query = req.query || {};
   const usuario = req.usuario || req.user || {};
+  const competencia = resolverCompetencia({
+    ano: query.ano,
+    mes: query.mes,
+    competencia: query.competencia
+  });
+
   return {
     requestId: extras.requestId || `mon-${Date.now()}`,
     usuarioId: usuario.id || null,
@@ -13,6 +21,9 @@ function criarMonitoringContext(req = {}, extras = {}) {
     role: usuario.role || null,
     permissoes: usuario.permissoes || [],
     modoFiscalUi: query.modo_fiscal === '1' || query.modo_fiscal === 'true',
+    competencia,
+    ano: competencia.ano,
+    mes: competencia.mes,
     agora: new Date(),
     extras: { ...extras }
   };

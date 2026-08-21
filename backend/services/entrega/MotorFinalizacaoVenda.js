@@ -28,7 +28,7 @@ const VendaFinanceiroService = require('../vendas/VendaFinanceiroService');
 const VendaFiscalService = require('../vendas/VendaFiscalService');
 const VendaPagamentoService = require('../vendas/VendaPagamentoService');
 const { consumirReservasDaVenda } = require('../estoque/EstoqueConsumoReserva');
-const { liberarReservasDaVenda } = require('../estoque/EstoqueReservaService');
+const { liberarReservasDaVenda, montarOptsPortaReservaPdv } = require('../estoque/EstoqueReservaService');
 const { StatusVenda, StatusEntrega, TipoVenda } = require('./enums');
 const {
   EntregaAuditoriaEventos,
@@ -298,6 +298,25 @@ async function _finalizarPrestacaoInterno({ vendaId, body = {}, req = {}, contex
   });
   const { statusPagamento, recebimentos } = resultadoStatus;
 
+  const valorRecebidoPrevisto = pagamentosNormalizados.reduce(
+    (s, p) => s + Number(p.valor || 0),
+    0
+  );
+  // Defesa: pagamento integral confirmado NÃO pode permanecer aguardando_nao_fiscal
+  if (
+    totalFiscal > 0
+    && totalNaoFiscal > 0
+    && Math.abs(valorRecebidoPrevisto - totalNum) <= 0.01
+    && statusPagamento === 'aguardando_nao_fiscal'
+  ) {
+    const err = new Error(
+      'Inconsistência de pagamento: valor integral confirmado, mas status aguardando_nao_fiscal.'
+    );
+    err.status = 500;
+    err.codigo = 'PAGAMENTO_INTEGRAL_INCONSISTENTE';
+    throw err;
+  }
+
   await audit(EntregaAuditoriaEventos.PAGAMENTO_CONFIRMADO, vendaId, {
     forma_pagamento: formaPagamentoFinal,
     status_pagamento: statusPagamento,
@@ -382,7 +401,8 @@ async function _finalizarPrestacaoInterno({ vendaId, body = {}, req = {}, contex
     }
 
     // 1–4: converter reserva → baixa
-    const consumo = await consumirReservasDaVenda(vendaId);
+    const optsReserva = montarOptsPortaReservaPdv({ req, ...req, body, contexto: contextoAuditoria }, db);
+    const consumo = await consumirReservasDaVenda(vendaId, optsReserva);
     await audit(EntregaAuditoriaEventos.RESERVA_CONVERTIDA, vendaId, consumo, contextoAuditoria);
     await audit(EntregaAuditoriaEventos.ESTOQUE_BAIXADO, vendaId, consumo, contextoAuditoria);
 
@@ -627,7 +647,7 @@ async function cancelarEntregaMotor({ vendaId, motivo = null, contextoAuditoria 
       throw err;
     }
 
-    await liberarReservasDaVenda(vendaId);
+    await liberarReservasDaVenda(vendaId, montarOptsPortaReservaPdv(contextoAuditoria, db));
     const cancelResult = await run(
       `
         UPDATE vendas SET

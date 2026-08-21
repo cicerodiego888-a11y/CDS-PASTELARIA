@@ -30,7 +30,7 @@ class ConnectionManager {
   _chave(config) {
     if (config.equipamento_id != null) return `eq:${config.equipamento_id}`;
     const host = config.host || config.ip || '127.0.0.1';
-    const porta = config.porta || config.port || 9100;
+    const porta = config.porta || config.port || require('../drivers/toledo/ToledoProtocol').PORTA_PADRAO;
     return `${host}:${porta}`;
   }
 

@@ -21,6 +21,7 @@ function normalizarCodigoIdentificador(valor, tipo = TIPOS_IDENTIFICADOR.INTERNO
     || t === TIPOS_IDENTIFICADOR.EAN13
     || t === TIPOS_IDENTIFICADOR.GTIN
     || t === TIPOS_IDENTIFICADOR.PLU
+    || t === TIPOS_IDENTIFICADOR.MGV6
   ) {
     return bruto.replace(/\D/g, '');
   }

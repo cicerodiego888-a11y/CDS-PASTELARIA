@@ -1,24 +1,25 @@
 /**
  * MiipPipelineEngineRunner — Executa engines via MotorRegistry no Pipeline.
  *
- * Sprint RC1: pipeline oficial com encadeamento semântico completo.
- *
- * Fluxo: Canonical → Attribute → Synonym → GTIN → Fornecedor → Similarity
+ * Sprint RC1 + RC9.3: Canonical → Attribute → Synonym → GTIN → Fornecedor → MUBC → Similarity
  *
  * @module motores/miip/core/MiipPipelineEngineRunner
  */
 
 const MotorRegistry = require('./MotorRegistry');
+const MiipEvidence = require('./MiipEvidence');
 
 const ENGINES_IDENTIFICACAO = Object.freeze([
   'motor_gtin',
-  'motor_associacao_fornecedor'
+  'motor_associacao_fornecedor',
+  'motor_mubc'
 ]);
 
 const CODIGO_CANONICAL = 'motor_canonical';
 const CODIGO_ATTRIBUTE = 'motor_attribute_extractor';
 const CODIGO_SYNONYMS = 'motor_synonyms';
 const CODIGO_SIMILARITY = 'motor_similarity';
+const CODIGO_MUBC = 'motor_mubc';
 
 /**
  * @param {import('./MotorRegistry')} [motorRegistry]
@@ -44,6 +45,14 @@ function obterMelhorCandidato(candidatos) {
     const scoreAtual = Number(atual?.scoreTotal ?? atual?.scorePonderado ?? 0);
     return scoreAtual > scoreMelhor ? atual : melhor;
   }, candidatos[0]);
+}
+
+/**
+ * @private
+ */
+function veioDoMubc(candidato) {
+  const motores = candidato?.motoresQueVotaram || [];
+  return motores.includes(CODIGO_MUBC);
 }
 
 /**
@@ -78,6 +87,72 @@ async function construirSemanticDeNome(instancias, nome, contexto) {
 }
 
 /**
+ * Pontua candidatos MUBC via Motor Similarity (comparação + score).
+ * Não altera candidatos de GTIN/Associação (score de identidade preservado).
+ *
+ * @private
+ */
+async function pontuarCandidatosComSimilarity(instancia, instancias, candidatos, meta, context) {
+  if (!meta.semanticProduct || !candidatos.length || typeof instancia.comparar !== 'function') {
+    return;
+  }
+
+  let melhorSim = null;
+  const alvo = candidatos.filter(veioDoMubc);
+  const lista = alvo.length > 0 ? alvo : [obterMelhorCandidato(candidatos)].filter(Boolean);
+
+  for (const cand of lista) {
+    const nomeCandidato = cand?.produto?.nome
+      ?? cand?.produtoNome
+      ?? cand?.nome
+      ?? cand?.snapshot?.nome
+      ?? '';
+    const semanticCandidato = await construirSemanticDeNome(instancias, nomeCandidato, context);
+    if (!semanticCandidato) continue;
+
+    const sim = instancia.comparar(meta.semanticProduct, semanticCandidato);
+    const scoreSim = Number(sim?.score ?? 0);
+
+    if (veioDoMubc(cand) && scoreSim > 0) {
+      const relevancia = Number(cand.scoreTotal ?? 0);
+      // Similarity pontua; relevância MUBC serve de piso suave (máx 94)
+      cand.scoreTotal = Math.min(94, Math.max(relevancia, Math.round(scoreSim)));
+      cand.evidencias = [
+        ...(cand.evidencias || []),
+        MiipEvidence.agora({
+          motor: CODIGO_SIMILARITY,
+          tipo: 'similarity',
+          descricao: 'Similaridade semântica',
+          peso: scoreSim,
+          valor: scoreSim,
+          score: scoreSim
+        })
+      ];
+      if (!cand.motoresQueVotaram.includes(CODIGO_SIMILARITY)) {
+        cand.motoresQueVotaram.push(CODIGO_SIMILARITY);
+      }
+    }
+
+    if (!melhorSim || scoreSim > Number(melhorSim.score ?? 0)) {
+      melhorSim = sim;
+    }
+  }
+
+  if (melhorSim) {
+    meta.similarityResult = melhorSim;
+  } else {
+    const melhor = obterMelhorCandidato(candidatos);
+    if (melhor && meta.semanticProduct) {
+      const nomeCandidato = melhor?.produto?.nome ?? melhor?.snapshot?.nome ?? '';
+      const semanticCandidato = await construirSemanticDeNome(instancias, nomeCandidato, context);
+      if (semanticCandidato) {
+        meta.similarityResult = instancia.comparar(meta.semanticProduct, semanticCandidato);
+      }
+    }
+  }
+}
+
+/**
  * Executa engines registrados na ordem oficial do pipeline.
  *
  * @param {import('./MotorRegistry')} [motorRegistry]
@@ -92,6 +167,7 @@ function criarEngineExecutor(motorRegistry = MotorRegistry) {
       canonicalProduct: null,
       semanticProduct: null,
       similarityResult: null,
+      mubcDiagnostico: null,
       tempoPorEngine: {}
     };
 
@@ -115,6 +191,26 @@ function criarEngineExecutor(motorRegistry = MotorRegistry) {
           const entrada = meta.semanticProduct ?? item;
           await instancia.identificar(entrada, context);
           meta.semanticProduct = instancia.obterUltimoSemantic?.() ?? meta.semanticProduct;
+        } else if (codigo === CODIGO_MUBC) {
+          // Só busca quando GTIN e Associação não geraram candidatos
+          if (candidatos.length === 0) {
+            const resultado = await instancia.identificar(item, context);
+            const lista = Array.isArray(resultado) ? resultado : [];
+            produtosPorMotor.push(
+              lista.length > 0
+                ? Number(lista[0].produtoId ?? lista[0].produto_id) || null
+                : null
+            );
+            candidatos.push(...lista);
+            meta.mubcDiagnostico = instancia.obterUltimoDiagnostico?.() ?? null;
+          } else {
+            produtosPorMotor.push(null);
+            meta.mubcDiagnostico = {
+              mubcExecutado: false,
+              motivo: 'candidatos_ja_encontrados_gtin_ou_associacao',
+              quantidadeCandidatos: 0
+            };
+          }
         } else if (ENGINES_IDENTIFICACAO.includes(codigo)) {
           const resultado = await instancia.identificar(item, context);
           const lista = Array.isArray(resultado) ? resultado : [];
@@ -126,18 +222,7 @@ function criarEngineExecutor(motorRegistry = MotorRegistry) {
           );
           candidatos.push(...lista);
         } else if (codigo === CODIGO_SIMILARITY) {
-          const melhor = obterMelhorCandidato(candidatos);
-          if (meta.semanticProduct && melhor && typeof instancia.comparar === 'function') {
-            const nomeCandidato = melhor?.produto?.nome
-              ?? melhor?.produtoNome
-              ?? melhor?.nome
-              ?? melhor?.snapshot?.nome
-              ?? '';
-            const semanticCandidato = await construirSemanticDeNome(instancias, nomeCandidato, context);
-            if (semanticCandidato) {
-              meta.similarityResult = instancia.comparar(meta.semanticProduct, semanticCandidato);
-            }
-          }
+          await pontuarCandidatosComSimilarity(instancia, instancias, candidatos, meta, context);
         } else {
           const resultado = await instancia.identificar(item, context);
           const lista = Array.isArray(resultado) ? resultado : [];
@@ -157,6 +242,7 @@ function criarEngineExecutor(motorRegistry = MotorRegistry) {
       canonicalProduct: meta.canonicalProduct,
       semanticProduct: meta.semanticProduct,
       similarityResult: meta.similarityResult,
+      mubcDiagnostico: meta.mubcDiagnostico,
       tempoPorEngine: meta.tempoPorEngine
     };
 

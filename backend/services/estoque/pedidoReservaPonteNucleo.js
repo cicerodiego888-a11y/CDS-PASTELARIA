@@ -4,13 +4,60 @@
  * Reconhece reservas ATIVAS de pedido_estoque_reservas no cálculo de
  * disponibilidade do Núcleo, e consome essas reservas ao faturar.
  *
+ * Fase 2 / Implementação 03.6:
+ *   consumo de reserva de pedido → reservasPublico.liberarQuantidadeReservada
+ * Somente reservado_fiscal (comportamento encontrado). Não altera saldo físico.
+ * Tracking permanece em pedido_estoque_reservas. PDV (02.7) não é este fluxo.
+ *
  * NÃO altera Motor Comercial, MTS nem a API pública de criação de reserva.
  */
 
 'use strict';
 
+const reservasPublico = require('../fiscalNaoFiscal/reservasPublico');
+const { TipoSaldo } = require('../fiscalNaoFiscal/constants');
+const { resolverEmpresaId, resolverEmpresaIdDaRequisicao } = require('../fiscalNaoFiscal/empresaContexto');
+
+/** Compat explícita: consumo Pedido→venda ainda sem empresa no JWT. */
+const MOTIVO_COMPAT_CONSUMO_RESERVA_PEDIDO = 'COMPAT_CONSUMO_RESERVA_PEDIDO_PRE_MULTIEMPRESA';
+
 function round3(n) {
   return Math.round(Number(n || 0) * 1000) / 1000;
+}
+
+function montarOptsPortaConsumoReservaPedido(opcoes = {}) {
+  const empresaId = resolverEmpresaId(opcoes)
+    ?? resolverEmpresaId(opcoes.contexto)
+    ?? resolverEmpresaId(opcoes.ctx)
+    ?? resolverEmpresaId(opcoes.req)
+    ?? resolverEmpresaIdDaRequisicao(opcoes.req)
+    ?? resolverEmpresaIdDaRequisicao(opcoes.contexto)
+    ?? resolverEmpresaIdDaRequisicao(opcoes.ctx);
+
+  const base = {
+    db: getDb(opcoes.db),
+    usuarioId: opcoes.usuarioId,
+    validarEmpresa: opcoes.validarEmpresa
+  };
+
+  if (empresaId != null) {
+    return { ...base, empresaId, legado: false, motivoCompat: null };
+  }
+
+  if (opcoes.exigirEmpresa === true) {
+    const err = new Error(
+      'empresaId é obrigatório para operações de saldo/reserva. Informe empresa_id/empresaId no contexto.'
+    );
+    err.code = 'EMPRESA_OBRIGATORIA';
+    throw err;
+  }
+
+  return {
+    ...base,
+    modoLegadoSemEmpresa: true,
+    motivoCompat: opcoes.motivoCompat || MOTIVO_COMPAT_CONSUMO_RESERVA_PEDIDO,
+    legado: true
+  };
 }
 
 function getDb(dbInjected) {
@@ -95,9 +142,12 @@ function creditarDisponibilidadeComReservaPedido(calc, creditoProduto) {
 
 /**
  * Consome reservas ATIVAS do pedido após a venda (baixa já feita pelo Núcleo).
- * - Decrementa produtos.reservado_fiscal
+ * - Libera reservado_fiscal pela porta pública (quantidade_fiscal persistida)
  * - Marca pedido_estoque_reservas como CONSUMIDA
+ * Não altera saldo_fiscal / saldo_nao_fiscal / estoque_atual.
+ * Não toca reservado_nao_fiscal (o tracking do pedido só tem quantidade_fiscal).
  * Idempotente: linhas já CONSUMIDA/CANCELADA são ignoradas.
+ * Não abre transação própria — usa o mesmo db do caller.
  */
 async function consumirReservasPedidoNaVenda(pedidoId, vendaId = null, opts = {}) {
   const id = Number(pedidoId);
@@ -105,7 +155,8 @@ async function consumirReservasPedidoNaVenda(pedidoId, vendaId = null, opts = {}
     return { consumidas: 0, pedido_id: null };
   }
 
-  const db = getDb(opts.db);
+  const optsPorta = montarOptsPortaConsumoReservaPedido(opts);
+  const db = optsPorta.db;
   const rows = await dbAll(
     db,
     `SELECT * FROM pedido_estoque_reservas WHERE pedido_id = ? AND status = 'ATIVA'`,
@@ -115,17 +166,14 @@ async function consumirReservasPedidoNaVenda(pedidoId, vendaId = null, opts = {}
   let consumidas = 0;
   for (const row of rows) {
     const q = round3(row.quantidade_fiscal);
-    await dbRun(
-      db,
-      `UPDATE produtos
-       SET reservado_fiscal = CASE
-         WHEN COALESCE(reservado_fiscal, 0) - ? < 0 THEN 0
-         ELSE COALESCE(reservado_fiscal, 0) - ?
-       END,
-       updated_at = CURRENT_TIMESTAMP
-       WHERE id = ?`,
-      [q, q, row.produto_id]
-    );
+    if (q > 0) {
+      await reservasPublico.liberarQuantidadeReservada(
+        row.produto_id,
+        TipoSaldo.FISCAL,
+        q,
+        optsPorta
+      );
+    }
 
     await dbRun(
       db,
@@ -141,7 +189,12 @@ async function consumirReservasPedidoNaVenda(pedidoId, vendaId = null, opts = {}
   return {
     consumidas,
     pedido_id: id,
-    venda_id: vendaId != null ? Number(vendaId) : null
+    venda_id: vendaId != null ? Number(vendaId) : null,
+    empresa_id: optsPorta.empresaId != null ? optsPorta.empresaId : null,
+    legado: optsPorta.legado === true,
+    motivo_compat: optsPorta.legado
+      ? (optsPorta.motivoCompat || MOTIVO_COMPAT_CONSUMO_RESERVA_PEDIDO)
+      : null
   };
 }
 
@@ -152,13 +205,15 @@ function obterCreditoReservaPedidoCb(pedidoId, db, callback) {
     .catch((err) => callback(err));
 }
 
-function consumirReservasPedidoNaVendaCb(pedidoId, vendaId, db, callback) {
-  consumirReservasPedidoNaVenda(pedidoId, vendaId, { db })
+function consumirReservasPedidoNaVendaCb(pedidoId, vendaId, db, callback, extra = {}) {
+  consumirReservasPedidoNaVenda(pedidoId, vendaId, { db, ...extra })
     .then((r) => callback(null, r))
     .catch((err) => callback(err));
 }
 
 module.exports = {
+  MOTIVO_COMPAT_CONSUMO_RESERVA_PEDIDO,
+  montarOptsPortaConsumoReservaPedido,
   obterCreditoReservaPedido,
   creditarDisponibilidadeComReservaPedido,
   consumirReservasPedidoNaVenda,

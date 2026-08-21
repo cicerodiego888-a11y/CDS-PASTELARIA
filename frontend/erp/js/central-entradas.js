@@ -16,11 +16,12 @@ const centralEntradasState = {
     documentos: [],
     documentoSelecionadoId: null,
     metadados: null,
-    ordenarPor: 'created_at',
+    ordenarPor: 'data_emissao',
     ordenarDirecao: 'desc',
     carregando: false,
     carregandoDashboard: false,
     carregandoInteligencia: false,
+    indicadoresFiscais: null,
     sincronizando: false,
     ultimaSincronizacao: null,
     sincronizacaoNsu: null,
@@ -35,10 +36,14 @@ const centralEntradasState = {
     ultimoDashboardContadores: null,
     operacional: null,
     sefazOperacional: null,
+    saudeCentral: null,
+    saudeFiltroNivel: null,
     alertas: null,
     pendencias: null,
     atencao: null,
     filtroRapidoAtivo: '',
+    filaFiltroAtivo: 'todos',
+    avancadoAberto: false,
     fornecedorStats: null,
     servicoStatus: null,
     configuracoes: null,
@@ -52,6 +57,9 @@ const centralEntradasState = {
     tickerSync: null,
     uploadArquivos: [],
     uploadEmAndamento: false,
+    importacaoLegadoArquivos: [],
+    importacaoLegadoEmAndamento: false,
+    importacaoLegadoRelatorio: null,
     eventosRodape: [],
     notificacoesNaoLidas: 0,
     buscaDebounceTimer: null,
@@ -59,26 +67,96 @@ const centralEntradasState = {
     tickerSoftDoc: null,
     softRefreshEmAndamento: false,
     statusServico: null,
-    loadingFase: 'preparando'
+    loadingFase: 'preparando',
+    featureFlags: {
+        recuperacaoPortalNacional: false
+    }
 };
 
 const CENTRAL_STATUS_META = {
-    RECEBIDA: { cor: '#94a3b8', bg: 'rgba(148,163,184,.12)', icone: 'fa-envelope', badge: 'central-badge-light', descricao: 'Documento recebido' },
-    SINCRONIZADA: { cor: '#0d6efd', bg: 'rgba(13,110,253,.10)', icone: 'fa-inbox', badge: 'bg-primary', descricao: 'Nova nota encontrada' },
-    EM_PROCESSAMENTO: { cor: '#f59e0b', bg: 'rgba(245,158,11,.12)', icone: 'fa-cog', badge: 'bg-warning text-dark', descricao: 'Pipeline em execução' },
-    AGUARDANDO_REVISAO: { cor: '#fd7e14', bg: 'rgba(253,126,20,.12)', icone: 'fa-user-check', badge: 'central-badge-orange', descricao: 'Produtos aguardando revisão' },
-    AGUARDANDO_XML_COMPLETO: { cor: '#64748b', bg: 'rgba(100,116,139,.12)', icone: 'fa-file-import', badge: 'bg-secondary', descricao: 'Aguardando a disponibilização do XML completo pela SEFAZ.' },
-    REVISADA: { cor: '#0dcaf0', bg: 'rgba(13,202,240,.12)', icone: 'fa-clipboard-check', badge: 'bg-info', descricao: 'Revisão concluída' },
-    PRONTA_PARA_COMPRA: { cor: '#198754', bg: 'rgba(25,135,84,.12)', icone: 'fa-check-circle', badge: 'bg-success', descricao: 'Pronta para lançamento' },
-    EM_COMPRA: { cor: '#6610f2', bg: 'rgba(102,16,242,.12)', icone: 'fa-shopping-cart', badge: 'bg-info', descricao: 'Aberta na tela de Compras' },
-    GRAVADA: { cor: '#6c757d', bg: 'rgba(108,117,125,.12)', icone: 'fa-archive', badge: 'bg-secondary', descricao: 'Compra concluída' },
-    DESCARTADA: { cor: '#212529', bg: 'rgba(33,37,41,.10)', icone: 'fa-trash-alt', badge: 'bg-dark', descricao: 'Documento descartado' },
-    ERRO: { cor: '#dc3545', bg: 'rgba(220,53,69,.12)', icone: 'fa-exclamation-triangle', badge: 'bg-danger', descricao: 'Consulta temporariamente indisponível.' },
-    DUPLICADA: { cor: '#dc3545', bg: 'rgba(220,53,69,.12)', icone: 'fa-copy', badge: 'bg-danger', descricao: 'Nota já lançada no sistema' }
+    NOVA: { cor: '#94a3b8', bg: 'rgba(148,163,184,.12)', icone: 'fa-envelope', badge: 'central-badge-light', descricao: 'Documento novo' },
+    RESUMO_RECEBIDO: { cor: '#64748b', bg: 'rgba(100,116,139,.12)', icone: 'fa-file-alt', badge: 'bg-secondary', descricao: 'Resumo DF-e recebido' },
+    XML_INDISPONIVEL: { cor: '#dc3545', bg: 'rgba(220,53,69,.12)', icone: 'fa-file-excel', badge: 'bg-danger', descricao: 'XML indisponível' },
+    XML_COMPLETO: { cor: '#0d6efd', bg: 'rgba(13,110,253,.10)', icone: 'fa-file-code', badge: 'bg-primary', descricao: 'XML completo' },
+    EM_REVISAO: { cor: '#fd7e14', bg: 'rgba(253,126,20,.12)', icone: 'fa-user-check', badge: 'central-badge-orange', descricao: 'Em revisão MIIP' },
+    PRONTA_IMPORTACAO: { cor: '#198754', bg: 'rgba(25,135,84,.12)', icone: 'fa-check-circle', badge: 'bg-success', descricao: 'Pronta para importar' },
+    EM_IMPORTACAO: { cor: '#6610f2', bg: 'rgba(102,16,242,.12)', icone: 'fa-shopping-cart', badge: 'bg-info', descricao: 'Importando compra' },
+    IMPORTADA: { cor: '#6c757d', bg: 'rgba(108,117,125,.12)', icone: 'fa-archive', badge: 'bg-secondary', descricao: 'Importada' },
+    FINALIZADA: { cor: '#212529', bg: 'rgba(33,37,41,.10)', icone: 'fa-flag-checkered', badge: 'bg-dark', descricao: 'Finalizada' },
+    CANCELADA: { cor: '#dc3545', bg: 'rgba(220,53,69,.12)', icone: 'fa-ban', badge: 'bg-danger', descricao: 'Cancelada' },
+    DENEGADA: { cor: '#dc3545', bg: 'rgba(220,53,69,.12)', icone: 'fa-times-circle', badge: 'bg-danger', descricao: 'Denegada' },
+    INUTILIZADA: { cor: '#6c757d', bg: 'rgba(108,117,125,.12)', icone: 'fa-minus-circle', badge: 'bg-secondary', descricao: 'Inutilizada' },
+    ERRO: { cor: '#dc3545', bg: 'rgba(220,53,69,.12)', icone: 'fa-exclamation-triangle', badge: 'bg-danger', descricao: 'Erro' },
+    // Aliases legados (pré-migração / histórico)
+    RECEBIDA: { cor: '#94a3b8', bg: 'rgba(148,163,184,.12)', icone: 'fa-envelope', badge: 'central-badge-light', descricao: 'Recebendo documento' },
+    SINCRONIZADA: { cor: '#0d6efd', bg: 'rgba(13,110,253,.10)', icone: 'fa-inbox', badge: 'bg-primary', descricao: 'Documento sincronizado' },
+    EM_PROCESSAMENTO: { cor: '#f59e0b', bg: 'rgba(245,158,11,.12)', icone: 'fa-cog', badge: 'bg-warning text-dark', descricao: 'Processando XML' },
+    AGUARDANDO_REVISAO: { cor: '#fd7e14', bg: 'rgba(253,126,20,.12)', icone: 'fa-user-check', badge: 'central-badge-orange', descricao: 'Em revisão' },
+    AGUARDANDO_XML_COMPLETO: { cor: '#64748b', bg: 'rgba(100,116,139,.12)', icone: 'fa-file-import', badge: 'bg-secondary', descricao: 'Resumo recebido' },
+    REVISADA: { cor: '#0dcaf0', bg: 'rgba(13,202,240,.12)', icone: 'fa-clipboard-check', badge: 'bg-info', descricao: 'Pronta' },
+    PRONTA_PARA_COMPRA: { cor: '#198754', bg: 'rgba(25,135,84,.12)', icone: 'fa-check-circle', badge: 'bg-success', descricao: 'Pronta para importar' },
+    EM_COMPRA: { cor: '#6610f2', bg: 'rgba(102,16,242,.12)', icone: 'fa-shopping-cart', badge: 'bg-info', descricao: 'Em importação' },
+    GRAVADA: { cor: '#6c757d', bg: 'rgba(108,117,125,.12)', icone: 'fa-archive', badge: 'bg-secondary', descricao: 'Importada' },
+    DESCARTADA: { cor: '#212529', bg: 'rgba(33,37,41,.10)', icone: 'fa-trash-alt', badge: 'bg-dark', descricao: 'Finalizada' },
+    DUPLICADA: { cor: '#6c757d', bg: 'rgba(108,117,125,.12)', icone: 'fa-copy', badge: 'bg-secondary', descricao: 'Importada' },
+    XML_IMPORTADO_MANUALMENTE: { cor: '#0d6efd', bg: 'rgba(13,110,253,.12)', icone: 'fa-file-import', badge: 'bg-primary', descricao: 'XML completo' }
 };
 
 function metaStatusCentral(status) {
-    return CENTRAL_STATUS_META[status] || CENTRAL_STATUS_META.RECEBIDA;
+    return CENTRAL_STATUS_META[status] || CENTRAL_STATUS_META.NOVA || CENTRAL_STATUS_META.RECEBIDA;
+}
+
+/** RC3.6.H — recuperação pelo Portal exposta apenas com feature flag ativa. */
+function recuperacaoPortalNacionalHabilitadaCentral() {
+    return centralEntradasState.featureFlags?.recuperacaoPortalNacional === true;
+}
+
+function documentoTemChaveAcessoValidaCentral(doc) {
+    return String(doc?.chave || '').replace(/\D/g, '').length === 44;
+}
+
+function extrairChaveAcessoDigitosCentral(chave) {
+    const digitos = String(chave || '').replace(/\D/g, '');
+    return digitos.length === 44 ? digitos : null;
+}
+
+async function copiarChaveAcessoCentral(documentoId, chave) {
+    const digitos = extrairChaveAcessoDigitosCentral(chave);
+    if (!digitos) {
+        showNotification('Chave de acesso inválida.', 'warning');
+        return;
+    }
+    try {
+        if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(digitos);
+        } else {
+            const ta = document.createElement('textarea');
+            ta.value = digitos;
+            ta.setAttribute('readonly', '');
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+        }
+        showNotification('Chave copiada para a área de transferência.', 'success');
+        centralEntradasFetch(`/${documentoId}/chave-copiada`, {
+            method: 'POST',
+            body: JSON.stringify({ usuario_id: obterUsuarioLogadoCentral()?.id })
+        }).catch(() => {});
+    } catch {
+        showNotification('Não foi possível copiar a chave.', 'error');
+    }
+}
+
+function renderBotaoCopiarChaveCentral(doc) {
+    if (!documentoTemChaveAcessoValidaCentral(doc)) return '';
+    return `<button type="button" class="btn btn-outline-secondary btn-sm w-100 mb-2" id="centralBtnCopiarChave"
+        data-doc-id="${doc.id}" data-chave="${escapeHtmlCentralEntradas(doc.chave || '')}"
+        title="Copiar os 44 dígitos da chave de acesso">
+        <i class="fas fa-copy me-1"></i> 📋 Copiar Chave de Acesso
+    </button>`;
 }
 
 function escapeHtmlCentralEntradas(texto) {
@@ -105,6 +183,19 @@ function formatarDataCentral(data) {
         return `${dia}/${mes}/${ano}`;
     }
     return texto;
+}
+
+/** RC3.4.9A — emissão em dd/MM/aa (sem horário). */
+function formatarDataEmissaoCurtaListaCentral(data) {
+    const UX = centralUx();
+    if (typeof UX.formatarDataEmissaoCurtaCentral === 'function') {
+        return UX.formatarDataEmissaoCurtaCentral(data);
+    }
+    if (!data) return '—';
+    const texto = String(data).trim();
+    const m = texto.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) return `${m[3]}/${m[2]}/${m[1].slice(-2)}`;
+    return formatarDataCentral(data);
 }
 
 function formatarDataHoraCentral(data) {
@@ -175,6 +266,36 @@ function iconeOrigemCentral(origem) {
 function obterLabelStatusCentral(status) {
     const meta = (centralEntradasState.metadados?.estados || []).find((e) => e.codigo === status);
     return meta?.label || status || '—';
+}
+
+function renderBadgeUsoConsumoCentral(doc) {
+    if (!doc?.badgeUsoConsumo && doc?.compraTipoEntrada !== 'USO_CONSUMO') return '';
+    return `<span class="badge bg-dark ms-1" title="Compra registrada como Uso e Consumo">USO E CONSUMO</span>`;
+}
+
+function rotuloTipoEntradaCentral(tipo) {
+    const map = {
+        REVENDA: 'Compra para Revenda',
+        INDUSTRIALIZACAO: 'Compra para Industrialização',
+        USO_CONSUMO: 'Uso e Consumo',
+        BONIFICACAO: 'Compra por Bonificação'
+    };
+    return map[tipo] || tipo || '—';
+}
+
+function renderClassificacaoEntradaCentral(doc) {
+    if (!doc?.compraTipoEntrada && !doc?.compraTipoEntradaSugerido) return '';
+    const alterado = doc.compraTipoEntradaAlterado
+        ? ' <span class="badge bg-warning text-dark">Alterado pelo operador</span>'
+        : '';
+    return `
+        <div class="mb-3">
+            <label class="central-entradas-label">Classificação da Entrada</label>
+            <div class="small"><strong>Tipo sugerido</strong> ${escapeHtmlCentralEntradas(rotuloTipoEntradaCentral(doc.compraTipoEntradaSugerido))}</div>
+            <div class="small"><strong>Tipo escolhido</strong> ${escapeHtmlCentralEntradas(rotuloTipoEntradaCentral(doc.compraTipoEntrada))}${alterado}</div>
+            <div class="small"><strong>Confiança</strong> ${doc.compraTipoEntradaConfianca != null ? (doc.compraTipoEntradaConfianca + '%') : '—'}</div>
+            <div class="small text-muted">${escapeHtmlCentralEntradas(doc.compraTipoEntradaMotivo || '')}</div>
+        </div>`;
 }
 
 function renderBadgeStatusCentral(status, label) {
@@ -447,38 +568,362 @@ async function enviarUploadCentralEntradas() {
 }
 
 /* ============================================================
+ * RC3.4.9 — Importação de XML Legado (Ferramentas Administrativas)
+ * ============================================================ */
+
+function _extrairTagXmlLegado(xml, tag) {
+    return String(xml || '').match(new RegExp(`<${tag}(?:\\s[^>]*)?>([^<]*)</${tag}>`, 'i'))?.[1] || '';
+}
+
+function _extrairBlocoXmlLegado(xml, tag) {
+    return String(xml || '').match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)</${tag}>`, 'i'))?.[1] || '';
+}
+
+function _extrairMetaXmlLegadoCliente(xml, nome) {
+    const emit = _extrairBlocoXmlLegado(xml, 'emit');
+    const dest = _extrairBlocoXmlLegado(xml, 'dest');
+    const chave = (_extrairTagXmlLegado(xml, 'chNFe') || (String(xml).match(/Id="NFe(\d{44})"/i) || [])[1] || '')
+        .replace(/\D/g, '');
+    const raiz = /<(\w+:)?nfeProc[\s>]/i.test(xml)
+        ? 'nfeProc'
+        : (/<(\w+:)?resNFe[\s>]/i.test(xml)
+            ? 'resNFe'
+            : (/<(\w+:)?procEvento/i.test(xml) ? 'procEvento' : 'outro'));
+    return {
+        nome,
+        chave: chave || '—',
+        emitente: _extrairTagXmlLegado(emit, 'xNome') || '—',
+        destinatario: _extrairTagXmlLegado(dest, 'xNome') || '—',
+        situacao: raiz === 'nfeProc' ? 'Pendente' : `Recusado (${raiz})`,
+        raiz
+    };
+}
+
+async function lerArquivosImportacaoLegado(fileList) {
+    const files = Array.from(fileList || []);
+    const lidos = [];
+    for (const file of files) {
+        // eslint-disable-next-line no-await-in-loop
+        const texto = await file.text();
+        const meta = _extrairMetaXmlLegadoCliente(texto, file.name);
+        lidos.push({ file, ...meta });
+    }
+    return lidos;
+}
+
+function adicionarArquivosImportacaoLegado(fileList) {
+    const existentes = new Set(
+        (centralEntradasState.importacaoLegadoArquivos || []).map((a) => `${a.file.name}|${a.file.size}`)
+    );
+    return lerArquivosImportacaoLegado(fileList).then((novos) => {
+        const merged = [...(centralEntradasState.importacaoLegadoArquivos || [])];
+        for (const item of novos) {
+            const key = `${item.file.name}|${item.file.size}`;
+            if (existentes.has(key)) continue;
+            merged.push(item);
+            existentes.add(key);
+        }
+        centralEntradasState.importacaoLegadoArquivos = merged;
+        centralEntradasState.importacaoLegadoRelatorio = null;
+        renderImportacaoXmlLegadoCentral();
+    });
+}
+
+async function centralEntradasImportarXmlLegado(arquivos, opcoes = {}) {
+    const token = localStorage.getItem('token');
+    const formData = new FormData();
+    arquivos.forEach((arquivo) => {
+        formData.append('xml', arquivo.file || arquivo);
+    });
+    const usuario = obterUsuarioLogadoCentral();
+    if (usuario?.id != null) formData.append('usuario_id', String(usuario.id));
+    if (opcoes.dryRun) formData.append('dryRun', 'true');
+    if (opcoes.recusarCancelados === false) formData.append('recusarCancelados', 'false');
+
+    const response = await fetch(`${API_URL}/central-entradas/admin/importar-xml-legado`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        throw new Error(data.error || `Erro HTTP ${response.status}`);
+    }
+    return data;
+}
+
+async function processarImportacaoXmlLegadoCentral() {
+    const itens = centralEntradasState.importacaoLegadoArquivos || [];
+    if (!itens.length || centralEntradasState.importacaoLegadoEmAndamento) return;
+
+    const btn = document.getElementById('centralBtnProcessarXmlLegado');
+    centralEntradasState.importacaoLegadoEmAndamento = true;
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Processando…';
+    }
+
+    try {
+        const relatorio = await centralEntradasImportarXmlLegado(itens);
+        centralEntradasState.importacaoLegadoRelatorio = relatorio;
+        const ok = Number(relatorio.documentosAlterados || 0);
+        showNotification(
+            ok > 0
+                ? `Importação concluída — ${ok} documento(s) atualizado(s) pelo pipeline oficial.`
+                : (relatorio.xmlsRejeitados > 0
+                    ? 'Nenhum documento importado. Verifique o relatório.'
+                    : 'Importação finalizada sem alterações.'),
+            ok > 0 ? 'success' : 'warning'
+        );
+        if (ok > 0 && typeof carregarDashboardCentral === 'function') {
+            carregarDashboardCentral().catch(() => {});
+        }
+    } catch (error) {
+        showNotification('Erro na importação: ' + error.message, 'danger');
+    } finally {
+        centralEntradasState.importacaoLegadoEmAndamento = false;
+        renderImportacaoXmlLegadoCentral();
+    }
+}
+
+function renderImportacaoXmlLegadoCentral() {
+    const root = document.getElementById('centralImportacaoLegadoBody');
+    if (!root) return;
+
+    const itens = centralEntradasState.importacaoLegadoArquivos || [];
+    const rel = centralEntradasState.importacaoLegadoRelatorio;
+    const emAndamento = centralEntradasState.importacaoLegadoEmAndamento;
+
+    const mapaSituacao = {};
+    if (rel?.detalhes) {
+        for (const d of rel.detalhes) {
+            mapaSituacao[d.nomeArquivo] = d;
+        }
+    }
+
+    const linhas = itens.length
+        ? itens.map((item, idx) => {
+            const srv = mapaSituacao[item.nome] || mapaSituacao[item.file?.name];
+            const situacao = srv?.situacao || item.situacao || 'Pendente';
+            const chave = srv?.chave || item.chave || '—';
+            const emitente = srv?.emitente || item.emitente || '—';
+            const destinatario = srv?.destinatario || item.destinatario || '—';
+            const classe = srv
+                ? (srv.codigo === 'IMPORTADO' || srv.documentoAlterado
+                    ? 'text-success'
+                    : (srv.valido === false ? 'text-danger' : 'text-muted'))
+                : (item.raiz === 'nfeProc' ? 'text-muted' : 'text-danger');
+            return `
+                <tr>
+                    <td class="small text-break" title="${escapeHtmlCentralEntradas(item.nome)}">${escapeHtmlCentralEntradas(item.nome)}</td>
+                    <td class="small font-monospace">${escapeHtmlCentralEntradas(chave)}</td>
+                    <td class="small">${escapeHtmlCentralEntradas(emitente)}</td>
+                    <td class="small">${escapeHtmlCentralEntradas(destinatario)}</td>
+                    <td class="small ${classe}">${escapeHtmlCentralEntradas(situacao)}</td>
+                    <td class="text-end">
+                        <button type="button" class="btn btn-sm btn-link text-danger p-0 central-import-legado-remover" data-idx="${idx}" title="Remover" ${emAndamento ? 'disabled' : ''}>
+                            <i class="fas fa-times"></i>
+                        </button>
+                    </td>
+                </tr>`;
+        }).join('')
+        : `<tr><td colspan="6" class="text-center text-muted py-4">Nenhum XML selecionado</td></tr>`;
+
+    const relatorioHtml = rel ? `
+        <div class="central-import-legado-relatorio mt-3">
+            <div class="fw-semibold mb-2"><i class="fas fa-chart-bar me-1"></i> Relatório</div>
+            <div class="row g-2 small">
+                <div class="col-6 col-md-3"><div class="central-import-legado-kpi">Enviados <strong>${rel.xmlsEnviados || 0}</strong></div></div>
+                <div class="col-6 col-md-3"><div class="central-import-legado-kpi">Válidos <strong>${rel.xmlsValidos || 0}</strong></div></div>
+                <div class="col-6 col-md-3"><div class="central-import-legado-kpi">Rejeitados <strong>${rel.xmlsRejeitados || 0}</strong></div></div>
+                <div class="col-6 col-md-3"><div class="central-import-legado-kpi">Encontrados <strong>${rel.documentosEncontrados || 0}</strong></div></div>
+                <div class="col-6 col-md-3"><div class="central-import-legado-kpi">Não encontrados <strong>${rel.documentosNaoEncontrados || 0}</strong></div></div>
+                <div class="col-6 col-md-3"><div class="central-import-legado-kpi">Parser <strong>${rel.parserExecutado || 0}</strong></div></div>
+                <div class="col-6 col-md-3"><div class="central-import-legado-kpi">MIIP <strong>${rel.miipExecutado || 0}</strong></div></div>
+                <div class="col-6 col-md-3"><div class="central-import-legado-kpi">Compras <strong>${rel.comprasCriadas || 0}</strong></div></div>
+            </div>
+            <div class="small text-muted mt-2">Tempo total: ${Number(rel.tempoTotalMs || 0)} ms · correlation: ${escapeHtmlCentralEntradas(rel.correlationId || '—')}</div>
+        </div>` : '';
+
+    root.innerHTML = `
+        <p class="text-muted small mb-3">
+            Complementa a Central quando o XML não pode mais ser obtido pela SEFAZ (ex.: rejeição 596).
+            Aceita somente <strong>nfeProc autorizado</strong> do Portal Nacional. Não cria documento novo e não substitui o MIRX.
+        </p>
+        <div class="central-import-legado-dropzone" id="centralImportLegadoDropzone">
+            <div class="central-import-legado-dropzone-icone"><i class="fas fa-cloud-upload-alt fa-2x"></i></div>
+            <div class="fw-semibold">Arraste XMLs aqui</div>
+            <div class="small text-muted mb-2">ou</div>
+            <button type="button" class="btn btn-outline-primary btn-sm" id="centralBtnSelecionarXmlLegado" ${emAndamento ? 'disabled' : ''}>
+                <i class="fas fa-folder-open me-1"></i> Selecionar Arquivos
+            </button>
+            <input type="file" id="centralImportLegadoInput" accept=".xml,text/xml,application/xml" multiple class="d-none" title="Selecionar XMLs">
+        </div>
+        <div class="table-responsive mt-3">
+            <table class="table table-sm table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>Nome</th><th>Chave</th><th>Emitente</th><th>Destinatário</th><th>Situação</th><th></th>
+                    </tr>
+                </thead>
+                <tbody>${linhas}</tbody>
+            </table>
+        </div>
+        <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center mt-3">
+            <span class="small text-muted">${itens.length} arquivo(s)</span>
+            <button type="button" class="btn btn-primary" id="centralBtnProcessarXmlLegado"
+                ${!itens.length || emAndamento ? 'disabled' : ''}>
+                <i class="fas fa-play me-1"></i> PROCESSAR XMLs
+            </button>
+        </div>
+        ${relatorioHtml}
+    `;
+}
+
+/* ============================================================
  * Dashboard — Sprint UX1
  * ============================================================ */
 
 const CENTRAL_UX1_FILTROS = [
-    { codigo: 'hoje', label: 'Hoje' },
-    { codigo: 'ontem', label: 'Ontem' },
-    { codigo: 'ultimos_7_dias', label: 'Semana' },
-    { codigo: 'este_mes', label: 'Mês' },
-    { codigo: 'pendentes', label: 'Pendentes' },
-    { codigo: '_status_gravada', label: 'Importadas', status: 'GRAVADA' },
-    { codigo: '_status_descartada', label: 'Canceladas', status: 'DESCARTADA' },
-    { codigo: '_status_erro', label: 'Erro', status: 'ERRO' },
-    { codigo: '', label: 'Todos' }
+    { codigo: 'todos', label: 'Todos' },
+    { codigo: 'pendentes', label: 'Pendentes', filtroRapido: 'pendentes' },
+    { codigo: 'em_revisao', label: 'Em Revisão', filtroRapido: 'em_revisao' },
+    { codigo: 'prontas', label: 'Prontas', filtroRapido: 'prontas' },
+    { codigo: 'importadas', label: 'Importadas', filtroRapido: 'importadas' },
+    { codigo: 'canceladas', label: 'Canceladas', filtroRapido: 'canceladas' },
+    { codigo: 'erro', label: 'Erro', filtroRapido: 'erro' }
 ];
+
+function contadoresFilaTrabalhoCentral() {
+    const c = centralEntradasState.ultimoDashboardContadores || {};
+    const filas = c.filas || {};
+    const ind = centralEntradasState.indicadores || {};
+    return {
+        todos: Number(ind.totalDocumentos ?? c.total ?? centralEntradasState.total ?? 0),
+        pendentes: Number(filas.pendentes ?? c.pendentes ?? 0),
+        em_revisao: Number(filas.em_revisao ?? c.aguardandoRevisao ?? 0),
+        revisar: Number(filas.em_revisao ?? c.aguardandoRevisao ?? 0),
+        prontas: Number(filas.prontas ?? c.prontasParaCompra ?? 0),
+        importadas: Number(filas.importadas ?? c.gravadas ?? 0),
+        canceladas: Number(filas.canceladas ?? 0),
+        erro: Number(filas.erro ?? c.erros ?? 0),
+        atencao: Number(filas.erro ?? c.erros ?? 0),
+        xml: Number(filas.pendentes ?? 0),
+        hoje: Number(ind.documentosHoje || 0)
+    };
+}
+
+function aplicarFiltroFilaCentral(codigo, opcoes = {}) {
+    const select = document.getElementById('centralFiltroStatus');
+    const cod = String(codigo || 'todos');
+    const mapa = {
+        revisar: 'em_revisao',
+        atencao: 'erro',
+        xml: 'pendentes'
+    };
+    const fila = mapa[cod] || cod;
+    centralEntradasState.filaFiltroAtivo = fila;
+    centralEntradasState.filtroRapidoAtivo = '';
+    if (select) select.value = '';
+
+    if (fila === 'hoje') centralEntradasState.filtroRapidoAtivo = 'hoje';
+    else if (fila !== 'todos') centralEntradasState.filtroRapidoAtivo = fila;
+
+    if (!opcoes.semReload) {
+        centralEntradasState.pagina = 1;
+        renderFiltrosRapidosCentral();
+        renderCardsUx1CentralRefresh();
+        carregarDocumentosCentral();
+    }
+}
+
+function renderCardsUx1CentralRefresh() {
+    const cardsContainer = document.getElementById('centralEntradasCards');
+    if (!cardsContainer) return;
+    cardsContainer.className = 'central-rc40-kpis';
+    cardsContainer.innerHTML = renderCardsUx1Central(
+        centralEntradasState.ultimoDashboardContadores || {},
+        centralEntradasState.indicadores || {},
+        centralEntradasState.operacional || {}
+    );
+    renderIndicadoresFiscaisCentral();
+}
+
+function renderIndicadoresFiscaisCentral() {
+    const container = document.getElementById('centralIndicadoresFiscais');
+    if (!container) return;
+
+    const ind = centralEntradasState.indicadoresFiscais
+        || centralEntradasState.operacional
+        || {};
+    const cards = [
+        {
+            titulo: 'Valor do Mês',
+            valor: formatarMoedaCentral(ind.valorMensal ?? ind.valorTotalMes),
+            icone: 'fa-calendar-alt',
+            cor: '#198754'
+        },
+        {
+            titulo: 'Valor do Ano',
+            valor: formatarMoedaCentral(ind.valorAnual),
+            icone: 'fa-chart-line',
+            cor: '#0d6efd'
+        },
+        {
+            titulo: 'NF-e do Mês',
+            valor: ind.quantidadeMensal != null ? String(ind.quantidadeMensal) : '—',
+            icone: 'fa-file-invoice',
+            cor: '#fd7e14'
+        },
+        {
+            titulo: 'NF-e do Ano',
+            valor: ind.quantidadeAnual != null ? String(ind.quantidadeAnual) : '—',
+            icone: 'fa-layer-group',
+            cor: '#6610f2'
+        }
+    ];
+
+    const ambiente = ind.ambienteLabel
+        ? `<span class="small text-muted ms-1">· ${escapeHtmlCentralEntradas(ind.ambienteLabel)}</span>`
+        : '';
+    const comp = ind.competenciaLabel
+        ? `<span class="small text-muted">Competência ${escapeHtmlCentralEntradas(ind.competenciaLabel)}</span>`
+        : '';
+
+    container.innerHTML = `
+        <div class="d-flex justify-content-between align-items-center mb-1 flex-wrap gap-1">
+            <span class="small text-muted fw-semibold">Indicadores fiscais (data de emissão)</span>
+            <span>${comp}${ambiente}</span>
+        </div>
+        <div class="central-rc40-kpis central-rc40-kpis--fiscais">
+            ${cards.map((card) => `
+                <div class="central-rc40-kpi central-rc40-kpi--fiscal" style="--kpi-cor:${card.cor}" title="${escapeHtmlCentralEntradas(card.titulo)}">
+                    <span aria-hidden="true"><i class="fas ${card.icone}" style="color:${card.cor}"></i></span>
+                    <span>
+                        <span class="central-rc40-kpi-valor d-block">${escapeHtmlCentralEntradas(card.valor)}</span>
+                        <span class="central-rc40-kpi-titulo d-block">${escapeHtmlCentralEntradas(card.titulo)}</span>
+                    </span>
+                </div>
+            `).join('')}
+        </div>`;
+}
 
 function renderSefazOperacionalChipCentral(painel) {
     if (!painel || !painel.estadoOperacional) return '';
+    const UX = centralUx();
+    const cooldown = UX.resolverCooldownSefaz656Ux?.(centralEntradasState);
+    if (cooldown?.ativo) {
+        return `<span class="central-ux1-sync-info central-ux1-sync-info--cooldown" title="${escapeHtmlCentralEntradas(cooldown.tooltipSync)}">
+            <span aria-hidden="true">${escapeHtmlCentralEntradas(cooldown.indicador)}</span>
+            SEFAZ: ${escapeHtmlCentralEntradas(cooldown.label)}
+            <small class="central-ux1-sync-cooldown-meta">· ${escapeHtmlCentralEntradas(cooldown.proximaLabel)} · ${escapeHtmlCentralEntradas(cooldown.restanteLabel)}</small>
+        </span>`;
+    }
     const est = painel.estadoOperacional;
-    const titulo = [
-        `Estado: ${est.label || est.codigo || '—'}`,
-        painel.ultimoCStat ? `Último cStat: ${painel.ultimoCStat}` : null,
-        painel.ultimaConsulta ? `Última consulta: ${formatarDataHoraCentral(painel.ultimaConsulta)}` : null,
-        painel.proximaConsulta ? `Próxima: ${formatarDataHoraCentral(painel.proximaConsulta)}` : null,
-        painel.tempoRestante ? `Restante: ${painel.tempoRestante}` : null,
-        painel.economiaSOAP != null ? `Economia SOAP: ${painel.economiaSOAP}` : null
-    ].filter(Boolean).join(' · ');
-    return `<span class="central-ux1-sync-info" title="${escapeHtmlCentralEntradas(titulo)}" style="margin-left:.35rem">
+    const label = (!est.codigo || est.codigo === 'NORMAL') ? 'Normal' : (est.label || 'Atenção');
+    return `<span class="central-ux1-sync-info" title="Status da SEFAZ">
         <span aria-hidden="true">${escapeHtmlCentralEntradas(est.indicador || '🟢')}</span>
-        SEFAZ: ${escapeHtmlCentralEntradas(est.label || 'Normal')}
-        ${painel.tempoRestante && (est.codigo === 'BLOQUEIO_656' || est.codigo === 'BLOCKED')
-            ? ` · ${escapeHtmlCentralEntradas(painel.tempoRestante)}`
-            : ''}
+        SEFAZ: ${escapeHtmlCentralEntradas(label)}
     </span>`;
 }
 
@@ -489,106 +934,96 @@ function renderCabecalhoUx1Central() {
     const UX = centralUx();
     const estado = UX.resolverEstadoServicoCentral?.(centralEntradasState) || { label: 'Online', codigo: 'monitorando' };
     const online = estado.codigo !== 'offline' && navigator.onLine;
-    const ultima = centralEntradasState.ultimaSincronizacao;
-    const tempoSync = tempoDesdeCentral(ultima);
-    const usuario = obterUsuarioLogadoCentral();
-    const iniciais = (usuario?.nome || 'U').split(/\s+/).slice(0, 2).map((p) => p[0]).join('').toUpperCase();
     const podeDiagnostico = typeof usuarioPodeAcessarDiagnosticoCentral === 'function'
         && usuarioPodeAcessarDiagnosticoCentral();
     const notifQtd = centralEntradasState.notificacoesNaoLidas || 0;
+    const cooldown = UX.resolverCooldownSefaz656Ux?.(centralEntradasState) || { ativo: false };
+    const syncDesabilitado = Boolean(centralEntradasState.sincronizando || cooldown.ativo);
+    const syncTitle = cooldown.ativo
+        ? cooldown.tooltipSync
+        : 'Sincronizar agora com a SEFAZ';
 
     container.innerHTML = `
-        <div class="central-ux1-header central-entradas-anim-in">
+        <div class="central-rc40-header">
             <div>
-                <h1 class="central-ux1-header-titulo">Central Inteligente de Entradas</h1>
-                <p class="central-ux1-header-sub">Monitoramento automático de documentos fiscais recebidos</p>
-                <div class="central-ux1-header-meta">
-                    <span class="central-ux1-online ${online ? '' : 'central-ux1-online--off'}" title="${online ? 'Sistema conectado e operacional' : 'Sem conexão'}">
+                <h1 class="central-rc40-header-titulo">Central Inteligente de Entradas</h1>
+                <div class="central-rc40-header-meta">
+                    <span class="central-ux1-online ${online ? '' : 'central-ux1-online--off'}" title="${online ? 'Sistema conectado' : 'Sem conexão'}">
                         <span class="central-ux1-online-pulse" aria-hidden="true"></span>
-                        ${online ? 'ONLINE' : 'OFFLINE'}
-                    </span>
-                    <span class="central-ux1-sync-info" title="Última sincronização com a SEFAZ">
-                        <i class="fas fa-clock me-1" aria-hidden="true"></i>
-                        Última sync: ${ultima ? escapeHtmlCentralEntradas(formatarDataHoraCentral(ultima)) : '—'}
-                        ${tempoSync && !centralEntradasState.sincronizando ? ` · ${escapeHtmlCentralEntradas(tempoSync)}` : ''}
+                        ${online ? '🟢 ONLINE' : 'OFFLINE'}
                     </span>
                     ${renderSefazOperacionalChipCentral(centralEntradasState.sefazOperacional)}
                 </div>
+                ${cooldown.ativo ? `
+                <div class="central-ux1-cooldown-banner" role="status" aria-live="polite">
+                    <span aria-hidden="true">🟡</span>
+                    <span>Aguardando liberação da SEFAZ</span>
+                    <span class="central-ux1-cooldown-banner__meta">Próxima tentativa: <strong>${escapeHtmlCentralEntradas(cooldown.proximaLabel)}</strong></span>
+                    <span class="central-ux1-cooldown-banner__meta">Tempo restante: <strong>${escapeHtmlCentralEntradas(cooldown.restanteLabel)}</strong></span>
+                </div>` : ''}
             </div>
-            <div class="central-ux1-header-acoes">
-                <button type="button" class="btn btn-light btn-sm" id="centralBtnSincronizar" title="Sincronizar agora com a SEFAZ">
-                    <i class="fas fa-sync-alt ${centralEntradasState.sincronizando ? 'fa-spin' : ''} me-1"></i> Sincronizar Agora
+            <div class="central-rc40-header-acoes">
+                <button type="button" class="btn btn-light btn-sm" id="centralBtnSincronizar"
+                    ${syncDesabilitado ? 'disabled' : ''}
+                    title="${escapeHtmlCentralEntradas(syncTitle)}"
+                    aria-disabled="${syncDesabilitado ? 'true' : 'false'}">
+                    <i class="fas fa-sync-alt ${centralEntradasState.sincronizando ? 'fa-spin' : ''} me-1"></i> Sincronizar
                 </button>
-                ${podeDiagnostico
-                    ? `<button type="button" class="btn btn-outline-light btn-sm" id="centralBtnDiagnostico" title="Painel de diagnóstico (admin)">
-                        <i class="fas fa-stethoscope me-1"></i> Diagnóstico
-                       </button>`
-                    : ''}
-                <button type="button" class="btn btn-outline-light btn-sm position-relative" id="centralBtnNotificacoes" title="Notificações da Central">
-                    <i class="fas fa-bell"></i>
-                    ${notifQtd > 0 ? `<span class="central-ux1-notif-badge">${notifQtd > 9 ? '9+' : notifQtd}</span>` : ''}
-                </button>
-                <button type="button" class="btn btn-outline-light btn-sm" id="centralBtnAdicionarDocumento" title="Adicionar documento via XML">
-                    <i class="fas fa-plus"></i>
-                </button>
-                <button type="button" class="btn btn-outline-light btn-sm central-nav-view" data-view="ciclo-dfe" title="Monitor de Ciclo DF-e (homologação)">
-                    <i class="fas fa-project-diagram"></i>
-                </button>
-                <button type="button" class="btn btn-outline-light btn-sm central-nav-view" data-view="config" title="Configurações">
-                    <i class="fas fa-cog"></i>
-                </button>
-                <button type="button" class="btn btn-outline-light btn-sm central-nav-view" data-view="log" title="Log operacional">
-                    <i class="fas fa-list-alt"></i>
-                </button>
-                <div class="central-ux1-usuario" title="Usuário logado">
-                    <span class="central-ux1-usuario-avatar" aria-hidden="true">${escapeHtmlCentralEntradas(iniciais)}</span>
-                    <span>${escapeHtmlCentralEntradas(usuario?.nome || 'Usuário')}</span>
+                <div class="dropdown central-rc40-mais">
+                    <button type="button" class="btn btn-outline-light btn-sm dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false" title="Mais opções">
+                        <i class="fas fa-ellipsis-h"></i>
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-end">
+                        <li><button type="button" class="dropdown-item" id="centralBtnAdicionarDocumento"><i class="fas fa-plus me-2"></i>Adicionar XML</button></li>
+                        <li><button type="button" class="dropdown-item" id="centralBtnNotificacoes"><i class="fas fa-bell me-2"></i>Notificações${notifQtd > 0 ? ` (${notifQtd})` : ''}</button></li>
+                        ${podeDiagnostico ? '<li><button type="button" class="dropdown-item" id="centralBtnDiagnostico"><i class="fas fa-stethoscope me-2"></i>Diagnóstico</button></li>' : ''}
+                        <li><hr class="dropdown-divider"></li>
+                        <li><h6 class="dropdown-header">Ferramentas Administrativas</h6></li>
+                        ${podeDiagnostico ? '<li><button type="button" class="dropdown-item central-nav-view" data-view="importacao-xml-legado"><i class="fas fa-file-import me-2"></i>Importação de XML Legado</button></li>' : ''}
+                        <li><hr class="dropdown-divider"></li>
+                        <li><button type="button" class="dropdown-item central-nav-view" data-view="config"><i class="fas fa-cog me-2"></i>Configurações</button></li>
+                        <li><button type="button" class="dropdown-item central-nav-view" data-view="log"><i class="fas fa-list-alt me-2"></i>Log operacional</button></li>
+                        <li><button type="button" class="dropdown-item central-nav-view" data-view="ciclo-dfe"><i class="fas fa-project-diagram me-2"></i>Ciclo DF-e</button></li>
+                    </ul>
                 </div>
             </div>
         </div>`;
 }
 
-function renderCardsUx1Central(contadores = {}, indicadores = {}, operacional = {}) {
-    const UX = centralUx();
-    const snapshot = UX.obterSnapshotKpisCentral?.();
-    const prev = snapshot?.contadores || {};
-    const prevOp = snapshot?.operacional || {};
-    const porStatus = contadores.porStatus || {};
+function renderCardsUx1Central(contadores = {}, indicadores = {}) {
+    const counts = contadoresFilaTrabalhoCentral();
+    const filas = contadores.filas || {};
+    const hoje = indicadores.documentosHoje != null ? indicadores.documentosHoje : counts.hoje;
+    const revisar = filas.em_revisao != null ? filas.em_revisao
+        : (contadores.aguardandoRevisao != null ? contadores.aguardandoRevisao : counts.em_revisao);
+    const prontas = filas.prontas != null ? filas.prontas
+        : (contadores.prontasParaCompra != null ? contadores.prontasParaCompra : counts.prontas);
+    const erro = filas.erro != null ? filas.erro
+        : (contadores.erros != null ? contadores.erros : counts.erro);
+    const pendentes = filas.pendentes != null ? filas.pendentes : counts.pendentes;
+    const ativo = centralEntradasState.filaFiltroAtivo || 'todos';
 
     const cards = [
-        { titulo: 'Recebidas Hoje', valor: indicadores.documentosHoje ?? 0, icone: 'fa-inbox', cor: '#0d6efd', trendKey: 'documentosHoje', trendPrev: prevOp.documentosHoje, statusFiltro: null, filtroRapido: 'hoje' },
-        { titulo: 'Importadas', valor: contadores.gravadas ?? 0, icone: 'fa-check-double', cor: '#198754', trendKey: 'gravadas', statusFiltro: 'GRAVADA' },
-        { titulo: 'Pendentes', valor: (contadores.novas ?? 0) + (contadores.emProcessamento ?? 0) + (contadores.aguardandoRevisao ?? 0), icone: 'fa-hourglass-half', cor: '#fd7e14', trendKey: 'pendentes', trendPrev: (prev.novas || 0) + (prev.emProcessamento || 0) + (prev.aguardandoRevisao || 0), invertTrend: true, filtroRapido: 'pendentes' },
-        { titulo: 'Em Processamento', valor: contadores.emProcessamento ?? 0, icone: 'fa-cog', cor: '#0dcaf0', trendKey: 'emProcessamento', statusFiltro: 'EM_PROCESSAMENTO' },
-        { titulo: 'Canceladas', valor: porStatus.DESCARTADA ?? 0, icone: 'fa-ban', cor: '#6c757d', trendKey: 'canceladas', trendPrev: prev.porStatus?.DESCARTADA, statusFiltro: 'DESCARTADA' },
-        { titulo: 'Precisão MIIP', valor: operacional.taxaIdentificacaoAutomatica != null ? `${operacional.taxaIdentificacaoAutomatica}%` : '—', icone: 'fa-brain', cor: '#6610f2', trendVal: operacional.taxaIdentificacaoAutomatica, trendPrev: prevOp.taxaIdentificacaoAutomatica, raw: true },
-        { titulo: 'Tempo Médio', valor: operacional.tempoMedioProcessamentoMinutos != null ? `${operacional.tempoMedioProcessamentoMinutos} min` : '—', icone: 'fa-stopwatch', cor: '#20c997', trendVal: operacional.tempoMedioProcessamentoMinutos, trendPrev: prevOp.tempoMedioProcessamentoMinutos, invertTrend: true, raw: true },
-        { titulo: 'Valor Total', valor: formatarMoedaCentral(indicadores.valorTotalDia), icone: 'fa-coins', cor: '#198754', trendVal: indicadores.valorTotalDia, trendPrev: prevOp.valorTotalDia, raw: true }
+        { codigo: 'hoje', titulo: 'Recebidos Hoje', valor: hoje, cor: '#0d6efd', emoji: '📥' },
+        { codigo: 'pendentes', titulo: 'Pendentes', valor: pendentes, cor: '#64748b', emoji: '📋' },
+        { codigo: 'em_revisao', titulo: 'Em Revisão', valor: revisar, cor: '#f59e0b', emoji: '🟡' },
+        { codigo: 'prontas', titulo: 'Prontas', valor: prontas, cor: '#198754', emoji: '🟢' },
+        { codigo: 'erro', titulo: 'Erro / XML Indisp.', valor: erro, cor: '#dc3545', emoji: '🔴' }
     ];
 
-    return cards.map((card) => {
-        const trend = card.raw
-            ? (UX.renderTendenciaKpiCentral?.(card.trendVal, card.trendPrev, card.invertTrend) || '')
-            : (UX.renderTendenciaKpiCentral?.(card.valor, card.trendPrev ?? prev[card.trendKey], card.invertTrend) || '');
-        const clickAttrs = card.statusFiltro
-            ? `data-status-filtro="${card.statusFiltro}"`
-            : (card.filtroRapido ? `data-filtro-kpi="${card.filtroRapido}"` : '');
-        const clickClass = clickAttrs ? 'central-ux1-kpi--click central-entradas-card-click' : '';
-
-        return `
-            <div class="central-ux1-kpi central-entradas-anim-in ${clickClass}" ${clickAttrs}
-                 style="--kpi-cor:${card.cor}; --kpi-bg:${card.cor}18"
-                 title="${escapeHtmlCentralEntradas(card.titulo)}"
-                 tabindex="${clickAttrs ? '0' : '-1'}"
-                 role="${clickAttrs ? 'button' : 'group'}">
-                <div class="central-ux1-kpi-icone"><i class="fas ${card.icone}"></i></div>
-                <div>
-                    <div class="central-ux1-kpi-valor">${escapeHtmlCentralEntradas(card.valor)}</div>
-                    <div class="central-ux1-kpi-titulo">${escapeHtmlCentralEntradas(card.titulo)}</div>
-                    ${trend}
-                </div>
-            </div>`;
-    }).join('');
+    return cards.map((card) => `
+        <button type="button" class="central-rc40-kpi ${ativo === card.codigo ? 'ativa' : ''}"
+            data-fila-filtro="${card.codigo}"
+            style="--kpi-cor:${card.cor}"
+            title="${escapeHtmlCentralEntradas(card.titulo)}"
+            aria-pressed="${ativo === card.codigo ? 'true' : 'false'}">
+            <span aria-hidden="true" style="font-size:1.25rem">${card.emoji}</span>
+            <span>
+                <span class="central-rc40-kpi-valor d-block">${escapeHtmlCentralEntradas(card.valor)}</span>
+                <span class="central-rc40-kpi-titulo d-block">${escapeHtmlCentralEntradas(card.titulo)}</span>
+            </span>
+        </button>
+    `).join('');
 }
 
 function renderAtencaoBannerUx1() {
@@ -624,25 +1059,32 @@ function renderRodapeUx1Central() {
     const ranking = montarRankingFornecedoresUx1();
 
     container.innerHTML = `
-        <div class="central-ux1-rodape central-entradas-anim-in">
-            <div class="central-ux1-rodape-card">
-                <div class="central-ux1-rodape-titulo"><i class="fas fa-piggy-bank"></i> Economia Gerada Hoje</div>
-                <div class="central-ux1-economia-item"><span>Tempo economizado</span><strong>${escapeHtmlCentralEntradas(tempoEconomizado)}</strong></div>
-                <div class="central-ux1-economia-item"><span>Produtos reconhecidos</span><strong>${escapeHtmlCentralEntradas(op.taxaIdentificacaoAutomatica != null ? `${op.taxaIdentificacaoAutomatica}%` : '—')}</strong></div>
-                <div class="central-ux1-economia-item"><span>Importações automáticas</span><strong>${escapeHtmlCentralEntradas(op.comprasConcluidasHoje ?? 0)}</strong></div>
-            </div>
-            <div class="central-ux1-rodape-card">
-                <div class="central-ux1-rodape-titulo"><i class="fas fa-chart-line"></i> Precisão por Fornecedor</div>
-                ${ranking || '<p class="text-muted small mb-0">Carregue documentos para ver o ranking.</p>'}
-            </div>
-            <div class="central-ux1-rodape-card">
-                <div class="central-ux1-rodape-titulo"><i class="fas fa-bolt"></i> Atividade em Tempo Real</div>
-                <div id="centralUx1Atividade">${renderAtividadeRodapeUx1()}</div>
-            </div>
-            <div class="central-ux1-rodape-card">
-                <div class="central-ux1-rodape-titulo"><i class="fas fa-server"></i> Status dos Serviços</div>
-                <div id="centralUx1Servicos">${renderStatusServicosRodapeUx1()}</div>
-            </div>
+        <div class="central-rc40-indicadores">
+            <details>
+                <summary>Indicadores Avançados</summary>
+                <div class="central-ux1-rodape mt-2">
+                    <div class="central-ux1-rodape-card">
+                        <div class="central-ux1-rodape-titulo"><i class="fas fa-piggy-bank"></i> Economia Gerada Hoje</div>
+                        <div class="central-ux1-economia-item"><span>Tempo economizado</span><strong>${escapeHtmlCentralEntradas(tempoEconomizado)}</strong></div>
+                        <div class="central-ux1-economia-item"><span>Produtos reconhecidos</span><strong>${escapeHtmlCentralEntradas(op.taxaIdentificacaoAutomatica != null ? `${op.taxaIdentificacaoAutomatica}%` : '—')}</strong></div>
+                        <div class="central-ux1-economia-item"><span>Importações automáticas</span><strong>${escapeHtmlCentralEntradas(op.comprasConcluidasHoje ?? 0)}</strong></div>
+                        <div class="central-ux1-economia-item"><span>Valor do dia</span><strong>${escapeHtmlCentralEntradas(formatarMoedaCentral(ind.valorTotalDia))}</strong></div>
+                        <div class="central-ux1-economia-item"><span>Tempo médio</span><strong>${escapeHtmlCentralEntradas(op.tempoMedioProcessamentoMinutos != null ? `${op.tempoMedioProcessamentoMinutos} min` : '—')}</strong></div>
+                    </div>
+                    <div class="central-ux1-rodape-card">
+                        <div class="central-ux1-rodape-titulo"><i class="fas fa-chart-line"></i> Precisão por Fornecedor</div>
+                        ${ranking || '<p class="text-muted small mb-0">Carregue documentos para ver o ranking.</p>'}
+                    </div>
+                    <div class="central-ux1-rodape-card">
+                        <div class="central-ux1-rodape-titulo"><i class="fas fa-bolt"></i> Atividade em Tempo Real</div>
+                        <div id="centralUx1Atividade">${renderAtividadeRodapeUx1()}</div>
+                    </div>
+                    <div class="central-ux1-rodape-card">
+                        <div class="central-ux1-rodape-titulo"><i class="fas fa-server"></i> Status dos Serviços</div>
+                        <div id="centralUx1Servicos">${renderStatusServicosRodapeUx1()}</div>
+                    </div>
+                </div>
+            </details>
         </div>`;
 }
 
@@ -900,11 +1342,11 @@ function renderCardsOperacionaisCentral() {
     const prev = UX.obterSnapshotKpisCentral?.()?.operacional || {};
 
     const cards = [
-        { titulo: 'Valor do mês', valor: formatarMoedaCentral(op.valorTotalMes), icone: 'fa-calendar-alt', cor: '#198754', trendVal: op.valorTotalMes, trendPrev: prev.valorTotalMes },
+        { titulo: 'Valor do mês', valor: formatarMoedaCentral(op.valorMensal ?? op.valorTotalMes), icone: 'fa-calendar-alt', cor: '#198754', trendVal: op.valorMensal ?? op.valorTotalMes, trendPrev: prev.valorMensal ?? prev.valorTotalMes },
+        { titulo: 'Valor do ano', valor: formatarMoedaCentral(op.valorAnual), icone: 'fa-chart-line', cor: '#0d6efd', trendVal: op.valorAnual, trendPrev: prev.valorAnual },
+        { titulo: 'NF-e do mês', valor: op.quantidadeMensal ?? '—', icone: 'fa-file-invoice', cor: '#fd7e14', trendVal: op.quantidadeMensal, trendPrev: prev.quantidadeMensal },
+        { titulo: 'NF-e do ano', valor: op.quantidadeAnual ?? '—', icone: 'fa-layer-group', cor: '#6610f2', trendVal: op.quantidadeAnual, trendPrev: prev.quantidadeAnual },
         { titulo: 'Tempo médio processamento', valor: op.tempoMedioProcessamentoMinutos != null ? `${op.tempoMedioProcessamentoMinutos} min` : '—', icone: 'fa-stopwatch', cor: '#0d6efd', trendVal: op.tempoMedioProcessamentoMinutos, trendPrev: prev.tempoMedioProcessamentoMinutos, invertTrend: true },
-        { titulo: 'Identificação automática', valor: op.taxaIdentificacaoAutomatica != null ? `${op.taxaIdentificacaoAutomatica}%` : '—', icone: 'fa-brain', cor: '#6610f2', trendVal: op.taxaIdentificacaoAutomatica, trendPrev: prev.taxaIdentificacaoAutomatica },
-        { titulo: 'Revisão manual', valor: op.taxaRevisaoManual != null ? `${op.taxaRevisaoManual}%` : '—', icone: 'fa-user-check', cor: '#fd7e14', trendVal: op.taxaRevisaoManual, trendPrev: prev.taxaRevisaoManual, invertTrend: true },
-        { titulo: 'Compras concluídas hoje', valor: op.comprasConcluidasHoje ?? 0, icone: 'fa-check-double', cor: '#20c997', trendVal: op.comprasConcluidasHoje, trendPrev: prev.comprasConcluidasHoje },
         { titulo: 'Pendências críticas', valor: op.pendenciasCriticas ?? 0, icone: 'fa-exclamation-circle', cor: '#dc3545', trendVal: op.pendenciasCriticas, trendPrev: prev.pendenciasCriticas, invertTrend: true }
     ];
 
@@ -1033,19 +1475,21 @@ function renderFiltrosRapidosCentral() {
     const container = document.getElementById('centralEntradasFiltrosRapidos');
     if (!container) return;
 
-    const ativo = centralEntradasState.filtroRapidoAtivo;
-    const statusAtivo = document.getElementById('centralFiltroStatus')?.value || '';
+    const counts = contadoresFilaTrabalhoCentral();
+    const ativo = centralEntradasState.filaFiltroAtivo || 'todos';
 
-    container.innerHTML = CENTRAL_UX1_FILTROS.map((preset) => {
-        const isStatus = preset.codigo.startsWith('_status_');
-        const ativa = isStatus
-            ? (statusAtivo === preset.status && !ativo)
-            : (ativo === preset.codigo || (!ativo && !statusAtivo && preset.codigo === ''));
-        return `<button type="button" class="central-ux1-filtro ${ativa ? 'ativa' : ''}"
-            data-filtro-rapido="${escapeHtmlCentralEntradas(preset.codigo)}"
-            data-filtro-status="${escapeHtmlCentralEntradas(preset.status || '')}"
-            title="${escapeHtmlCentralEntradas(preset.label)}">${escapeHtmlCentralEntradas(preset.label)}</button>`;
-    }).join('');
+    container.innerHTML = `
+        <div class="central-rc40-fila w-100">
+            <div class="central-rc40-fila-titulo">Fila de Trabalho</div>
+            <div class="central-rc40-fila-chips" role="toolbar" aria-label="Fila de trabalho">
+                ${CENTRAL_UX1_FILTROS.map((preset) => {
+                    const qtd = counts[preset.codigo] != null ? counts[preset.codigo] : '—';
+                    return `<button type="button" class="central-rc40-chip ${ativo === preset.codigo ? 'ativa' : ''}"
+                        data-fila-filtro="${escapeHtmlCentralEntradas(preset.codigo)}"
+                        title="${escapeHtmlCentralEntradas(preset.label)}">${escapeHtmlCentralEntradas(preset.label)}<strong>${escapeHtmlCentralEntradas(qtd)}</strong></button>`;
+                }).join('')}
+            </div>
+        </div>`;
 }
 
 function renderScoreBadgeCentral(score, cor) {
@@ -1063,15 +1507,32 @@ async function carregarInteligenciaCentral() {
     centralEntradasState.carregandoInteligencia = true;
 
     try {
-        // RC3: um único endpoint — alertas calculados uma vez
-        const inteligencia = await centralEntradasFetch('/inteligencia?limite=20');
+        const filtros = obterFiltrosCentralDaTela();
+        const params = new URLSearchParams({ limite: '20' });
+        if (filtros.dataEmissaoInicio) params.set('data_emissao_inicio', filtros.dataEmissaoInicio);
+        if (filtros.dataEmissaoFim) params.set('data_emissao_fim', filtros.dataEmissaoFim);
+
+        const inteligencia = await centralEntradasFetch(`/inteligencia?${params.toString()}`);
 
         centralEntradasState.operacional = inteligencia.operacional;
         centralEntradasState.alertas = inteligencia.alertas;
         centralEntradasState.pendencias = inteligencia.pendencias;
         centralEntradasState.atencao = inteligencia.atencao;
+        centralEntradasState.indicadoresFiscais = inteligencia.indicadoresFiscais
+            || {
+                valorMensal: inteligencia.operacional?.valorMensal,
+                valorAnual: inteligencia.operacional?.valorAnual,
+                quantidadeMensal: inteligencia.operacional?.quantidadeMensal,
+                quantidadeAnual: inteligencia.operacional?.quantidadeAnual,
+                competencia: inteligencia.operacional?.competencia,
+                competenciaLabel: inteligencia.operacional?.competenciaLabel,
+                ambiente: inteligencia.operacional?.ambiente,
+                ambienteLabel: inteligencia.operacional?.ambienteLabel
+            };
 
         renderAtencaoBannerUx1();
+        renderIndicadoresFiscaisCentral();
+        renderCardsOperacionaisCentral();
 
         centralUx().salvarSnapshotKpisCentral?.(
             { contadores: centralEntradasState.ultimoDashboardContadores || {} },
@@ -1083,6 +1544,37 @@ async function carregarInteligenciaCentral() {
         console.warn('[Central Entradas][UX] Inteligência operacional:', error.message);
     } finally {
         centralEntradasState.carregandoInteligencia = false;
+    }
+}
+
+async function carregarIndicadoresFiscaisCentral() {
+    try {
+        const filtros = obterFiltrosCentralDaTela();
+        const params = new URLSearchParams();
+        if (filtros.dataEmissaoInicio) params.set('data_emissao_inicio', filtros.dataEmissaoInicio);
+        if (filtros.dataEmissaoFim) params.set('data_emissao_fim', filtros.dataEmissaoFim);
+
+        const qs = params.toString();
+        const indicadores = await centralEntradasFetch(`/indicadores-fiscais${qs ? `?${qs}` : ''}`);
+        centralEntradasState.indicadoresFiscais = indicadores;
+        if (centralEntradasState.operacional) {
+            centralEntradasState.operacional = {
+                ...centralEntradasState.operacional,
+                valorMensal: indicadores.valorMensal,
+                valorAnual: indicadores.valorAnual,
+                quantidadeMensal: indicadores.quantidadeMensal,
+                quantidadeAnual: indicadores.quantidadeAnual,
+                valorTotalMes: indicadores.valorMensal,
+                competencia: indicadores.competencia,
+                competenciaLabel: indicadores.competenciaLabel,
+                ambiente: indicadores.ambiente,
+                ambienteLabel: indicadores.ambienteLabel
+            };
+        }
+        renderIndicadoresFiscaisCentral();
+        renderCardsOperacionaisCentral();
+    } catch (error) {
+        console.warn('[Central Entradas] Indicadores fiscais:', error.message);
     }
 }
 
@@ -1169,6 +1661,7 @@ function renderPainelServicoCentral() {
     const duracao = ultimo.duracaoMs != null ? `${Math.round(ultimo.duracaoMs / 1000)}s` : '—';
     const qtd = ultimo.notasNovas != null ? ultimo.notasNovas : '—';
     const executando = estado.codigo === 'sincronizando';
+    const cooldown = estado.cooldown || UX.resolverCooldownSefaz656Ux?.(centralEntradasState);
 
     container.innerHTML = `
         <div class="central-entradas-servico central-ux-servico ${estado.classe} central-entradas-anim-in ${executando ? 'central-entradas-servico--ativo' : ''}"
@@ -1182,12 +1675,22 @@ function renderPainelServicoCentral() {
                     <div class="central-ux-servico-descricao small text-muted">${escapeHtmlCentralEntradas(estado.descricao)}</div>
                 </div>
                 ${executando ? '<span class="badge bg-primary ms-2 central-ux-badge-pulse">Em execução</span>' : ''}
+                ${cooldown?.ativo && !executando
+                    ? '<span class="badge bg-warning text-dark ms-2">Cooldownoldown SEFAZ</span>'
+                    : ''}
             </div>
             <div class="central-entradas-servico-metricas">
                 <div title="Data e hora da última sincronização"><span class="label">Última execução</span><span>${escapeHtmlCentralEntradas(ultima ? formatarDataHoraCentral(ultima) : '—')}</span></div>
-                <div title="Próxima execução agendada"><span class="label">Próxima execução</span><span>${escapeHtmlCentralEntradas(proxima ? formatarDataHoraCentral(proxima) : '—')}</span></div>
+                <div title="Próxima execução agendada"><span class="label">Próxima execução</span><span>${escapeHtmlCentralEntradas(
+                    cooldown?.ativo
+                        ? `Liberação SEFAZ ${cooldown.proximaLabel}`
+                        : (proxima ? formatarDataHoraCentral(proxima) : '—')
+                )}</span></div>
                 <div title="Duração da última sincronização"><span class="label">Duração última sync</span><span>${escapeHtmlCentralEntradas(duracao)}</span></div>
                 <div title="Notas recebidas na última sincronização"><span class="label">Notas na última sync</span><span>${escapeHtmlCentralEntradas(qtd)}</span></div>
+                ${cooldown?.ativo ? `
+                <div title="Tempo restante do cooldown SEFAZ"><span class="label">Tempo restante</span><span>${escapeHtmlCentralEntradas(cooldown.restanteLabel)}</span></div>
+                ` : ''}
             </div>
         </div>`;
 }
@@ -1207,10 +1710,12 @@ function mostrarViewCentral(view) {
     const config = document.getElementById('centralEntradasViewConfig');
     const log = document.getElementById('centralEntradasViewLog');
     const ciclo = document.getElementById('centralEntradasViewCicloDfe');
+    const importacao = document.getElementById('centralEntradasViewImportacaoLegado');
     if (inbox) inbox.classList.toggle('d-none', view !== 'inbox');
     if (config) config.classList.toggle('d-none', view !== 'config');
     if (log) log.classList.toggle('d-none', view !== 'log');
     if (ciclo) ciclo.classList.toggle('d-none', view !== 'ciclo-dfe');
+    if (importacao) importacao.classList.toggle('d-none', view !== 'importacao-xml-legado');
 
     document.querySelectorAll('.central-nav-view').forEach((btn) => {
         btn.classList.toggle('active', btn.dataset.view === view);
@@ -1218,6 +1723,7 @@ function mostrarViewCentral(view) {
 
     if (view === 'config') carregarConfigCentral();
     if (view === 'log') carregarLogCentral();
+    if (view === 'importacao-xml-legado') renderImportacaoXmlLegadoCentral();
     if (view === 'ciclo-dfe') {
         if (typeof carregarHomologacaoCentral === 'function') {
             carregarHomologacaoCentral();
@@ -1645,6 +2151,51 @@ function wireBotoesConfigFiscalCentral() {
         void copiarUrlManifestacaoCentralCfg();
     });
     void carregarStatusManifestacaoCentralCfg();
+    void carregarStatusRecuperacaoXmlCentralCfg();
+    document.getElementById('centralCfgRecupXmlRefresh')?.addEventListener('click', () => {
+        void carregarStatusRecuperacaoXmlCentralCfg();
+    });
+    document.getElementById('centralCfgRecupXmlExecutar')?.addEventListener('click', () => {
+        void executarCicloRecuperacaoXmlCentralCfg();
+    });
+}
+
+async function carregarStatusRecuperacaoXmlCentralCfg() {
+    const el = document.getElementById('centralCfgRecupXmlStats');
+    if (!el) return;
+    try {
+        const st = await centralEntradasFetch('/recuperacao-xml/status');
+        const m = st.metricas || {};
+        el.innerHTML = `
+            <div class="col-md-3"><div class="central-cfg-stat"><div class="central-cfg-stat__label">Motor</div><div class="central-cfg-stat__value">${st.ativo ? 'Ativo' : 'Parado'}</div></div></div>
+            <div class="col-md-3"><div class="central-cfg-stat"><div class="central-cfg-stat__label">Monitorados</div><div class="central-cfg-stat__value">${escapeHtmlCentralEntradas(String(st.documentosMonitorados ?? 0))}</div></div></div>
+            <div class="col-md-3"><div class="central-cfg-stat"><div class="central-cfg-stat__label">Última execução</div><div class="central-cfg-stat__value">${escapeHtmlCentralEntradas(formatarDataHoraCentral(st.ultimaExecucao) || '—')}</div></div></div>
+            <div class="col-md-3"><div class="central-cfg-stat"><div class="central-cfg-stat__label">Próxima execução</div><div class="central-cfg-stat__value">${escapeHtmlCentralEntradas(formatarDataHoraCentral(st.proximaExecucao) || '—')}</div></div></div>
+            <div class="col-md-3"><div class="central-cfg-stat"><div class="central-cfg-stat__label">XML recuperados</div><div class="central-cfg-stat__value">${escapeHtmlCentralEntradas(String(m.recuperados ?? 0))}</div></div></div>
+            <div class="col-md-3"><div class="central-cfg-stat"><div class="central-cfg-stat__label">Consultas</div><div class="central-cfg-stat__value">${escapeHtmlCentralEntradas(String(m.consultas ?? 0))}</div></div></div>
+            <div class="col-md-3"><div class="central-cfg-stat"><div class="central-cfg-stat__label">Falhas</div><div class="central-cfg-stat__value">${escapeHtmlCentralEntradas(String(m.falhas ?? 0))}</div></div></div>
+            <div class="col-md-3"><div class="central-cfg-stat"><div class="central-cfg-stat__label">Timeouts</div><div class="central-cfg-stat__value">${escapeHtmlCentralEntradas(String(m.timeouts ?? 0))}</div></div></div>`;
+    } catch (error) {
+        el.innerHTML = `<div class="col-12 text-danger small">${escapeHtmlCentralEntradas(error.message || 'Falha ao carregar')}</div>`;
+    }
+}
+
+async function executarCicloRecuperacaoXmlCentralCfg() {
+    const resultEl = document.getElementById('centralCfgRecupXmlResult');
+    try {
+        const data = await postConfigAcaoCentral('/recuperacao-xml/executar');
+        exibirResultadoCfg('centralCfgRecupXmlResult', {
+            sucesso: data.sucesso !== false,
+            mensagemAmigavel: data.recuperados != null
+                ? `Ciclo: ${data.consultados || 0} consultados, ${data.recuperados || 0} recuperados, ${data.falhas || 0} falhas`
+                : (data.error || data.mensagem || 'Ciclo executado')
+        });
+        await carregarStatusRecuperacaoXmlCentralCfg();
+    } catch (error) {
+        if (resultEl) {
+            exibirResultadoCfg('centralCfgRecupXmlResult', { sucesso: false, mensagemAmigavel: error.message });
+        }
+    }
 }
 
 function badgePoliticaManifestacaoCfg(politica) {
@@ -1812,6 +2363,45 @@ function renderAbaSincronizacaoCfg(painel) {
                     </div>
                 </div>
             </div>
+            <div class="col-12">
+                <div class="central-cfg-card">
+                    <div class="central-cfg-card__title"><i class="fas fa-file-medical me-1"></i> Recuperação Automática de XML (RC3.7.5)</div>
+                    <p class="small text-muted">Monitora XML_INDISPONIVEL e RESUMO_RECEBIDO e reconsulta a SEFAZ (consChNFe) até o procNFe.</p>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="cfgRecupXmlAtiva" ${(painel.recuperacaoXml?.ativa !== false) ? 'checked' : ''}>
+                                <label class="form-check-label" for="cfgRecupXmlAtiva">Ativar recuperação automática</label>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="central-cfg-label" for="cfgRecupXmlIntervalo">Intervalo</label>
+                            <select class="form-select" id="cfgRecupXmlIntervalo">
+                                ${[30, 60, 120, 360, 1440].map((m) => {
+                                    const sel = Number(painel.recuperacaoXml?.intervaloMinutos) === m ? 'selected' : '';
+                                    const label = m < 60 ? `${m} min` : (m === 60 ? '1 h' : (m < 1440 ? `${m / 60} h` : '24 h'));
+                                    return `<option value="${m}" ${sel}>${label}</option>`;
+                                }).join('')}
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="central-cfg-label" for="cfgRecupXmlLote">Lote por ciclo</label>
+                            <input type="number" class="form-control" id="cfgRecupXmlLote" min="1" max="20"
+                                value="${Number(painel.recuperacaoXml?.lotePorCiclo) || 5}">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="central-cfg-label" for="cfgRecupXmlMaxTent">Máx. tentativas</label>
+                            <input type="number" class="form-control" id="cfgRecupXmlMaxTent" min="1" max="500"
+                                value="${Number(painel.recuperacaoXml?.maxTentativas) || 48}">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="central-cfg-label" for="cfgRecupXmlMaxDias">Máx. dias monitoramento</label>
+                            <input type="number" class="form-control" id="cfgRecupXmlMaxDias" min="1" max="365"
+                                value="${Number(painel.recuperacaoXml?.maxDiasMonitoramento) || 30}">
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>`;
 }
 
@@ -1823,6 +2413,23 @@ function renderAbaDiagnosticoCfg(painel) {
     const errInt = op.errosInternosCds || {};
     return `
         <div class="row g-3">
+            <div class="col-12">
+                <div class="central-cfg-card" id="centralCfgRecupXmlPainel">
+                    <div class="central-cfg-card__title"><i class="fas fa-sync me-1"></i> Recuperação Automática</div>
+                    <div class="row g-2" id="centralCfgRecupXmlStats">
+                        <div class="col-12 text-muted small">Carregando status do motor…</div>
+                    </div>
+                    <div class="d-flex flex-wrap gap-2 mt-2">
+                        <button type="button" class="btn btn-sm btn-outline-primary" id="centralCfgRecupXmlRefresh">
+                            <i class="fas fa-redo me-1"></i> Atualizar
+                        </button>
+                        <button type="button" class="btn btn-sm btn-outline-warning" id="centralCfgRecupXmlExecutar">
+                            <i class="fas fa-play me-1"></i> Executar ciclo agora
+                        </button>
+                    </div>
+                    <div id="centralCfgRecupXmlResult" class="central-cfg-result mt-2"></div>
+                </div>
+            </div>
             <div class="col-12">
                 <div class="central-cfg-card">
                     <div class="central-cfg-card__title"><i class="fas fa-satellite-dish me-1"></i> SEFAZ OPERACIONAL</div>
@@ -2030,6 +2637,13 @@ function coletarPayloadConfigCentral() {
             horarioPermitidoFim: document.getElementById('cfgPermFim')?.value || '23:59',
             horarioBloqueadoInicio: document.getElementById('cfgBloqInicio')?.value || '',
             horarioBloqueadoFim: document.getElementById('cfgBloqFim')?.value || ''
+        },
+        recuperacaoXml: {
+            ativa: document.getElementById('cfgRecupXmlAtiva')?.checked ?? true,
+            intervaloMinutos: Number(document.getElementById('cfgRecupXmlIntervalo')?.value) || 60,
+            maxTentativas: Number(document.getElementById('cfgRecupXmlMaxTent')?.value) || 48,
+            maxDiasMonitoramento: Number(document.getElementById('cfgRecupXmlMaxDias')?.value) || 30,
+            lotePorCiclo: Number(document.getElementById('cfgRecupXmlLote')?.value) || 5
         },
         avancado: {
             httpTimeoutMs: Number(document.getElementById('cfgHttpTimeout')?.value) || 90000,
@@ -2338,12 +2952,87 @@ function obterFiltrosCentralDaTela() {
     };
 }
 
+/** RC3.6.C — chips dos filtros restritivos (sem a busca textual). */
+function listarFiltrosAtivosRestritivosCentral() {
+    const f = obterFiltrosCentralDaTela();
+    const chips = [];
+    const labelsRapidos = {
+        hoje: 'Hoje',
+        ontem: 'Ontem',
+        ultimos_7_dias: 'Últimos 7 dias',
+        ultimos_30_dias: 'Últimos 30 dias',
+        este_mes: 'Este mês',
+        pendentes: 'Pendentes',
+        em_revisao: 'Em Revisão',
+        revisar: 'Em Revisão',
+        prontas: 'Prontas',
+        importadas: 'Importadas',
+        canceladas: 'Canceladas',
+        denegadas: 'Denegadas',
+        inutilizadas: 'Inutilizadas',
+        erro: 'Erro',
+        atencao: 'Erro',
+        em_importacao: 'Em Importação',
+        finalizadas: 'Finalizadas'
+    };
+    if (f.filtroRapido) {
+        chips.push({
+            codigo: 'filtroRapido',
+            label: labelsRapidos[f.filtroRapido] || f.filtroRapido
+        });
+    }
+    if (f.status) chips.push({ codigo: 'status', label: f.status });
+    if (f.origem) chips.push({ codigo: 'origem', label: `Origem: ${f.origem}` });
+    if (f.dataEmissaoInicio) chips.push({ codigo: 'dataInicio', label: `De ${f.dataEmissaoInicio}` });
+    if (f.dataEmissaoFim) chips.push({ codigo: 'dataFim', label: `Até ${f.dataEmissaoFim}` });
+    return chips;
+}
+
+function renderIndicadorFiltrosAtivosCentral() {
+    const wrap = document.getElementById('centralFiltrosAtivosWrap');
+    if (!wrap) return;
+
+    const busca = obterFiltrosCentralDaTela().busca;
+    const chips = listarFiltrosAtivosRestritivosCentral();
+    if (!chips.length && !busca) {
+        wrap.innerHTML = '';
+        wrap.classList.add('d-none');
+        return;
+    }
+
+    wrap.classList.remove('d-none');
+    const chipsHtml = chips.map((c) => (
+        `<span class="badge rounded-pill text-bg-light border me-1 mb-1">${escapeHtmlCentralEntradas(c.label)}</span>`
+    )).join('');
+
+    const avisoBusca = busca && chips.length
+        ? `<div class="small text-muted mb-1">A pesquisa está considerando os filtros ativos.</div>`
+        : '';
+
+    wrap.innerHTML = `
+        <div class="central-rc36c-filtros-ativos border rounded px-2 py-2 mb-2 bg-body-tertiary">
+            <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+                <div>
+                    <div class="small fw-semibold mb-1">Filtros ativos</div>
+                    ${avisoBusca}
+                    <div>${chipsHtml || '<span class="text-muted small">Somente pesquisa textual</span>'}</div>
+                </div>
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="centralBtnLimparTodosFiltros">
+                    Limpar Todos
+                </button>
+            </div>
+        </div>
+    `;
+}
+
 function renderGridCentralEntradas() {
     const lista = document.getElementById('centralEntradasListaDocs');
     const tbody = document.getElementById('centralEntradasGridBody');
     const container = lista || tbody;
     const contador = document.getElementById('centralEntradasContador');
     if (!container) return;
+
+    renderIndicadorFiltrosAtivosCentral();
 
     if (centralEntradasState.carregando) {
         if (lista) {
@@ -2356,49 +3045,61 @@ function renderGridCentralEntradas() {
     }
 
     const filtros = obterFiltrosCentralDaTela();
+    const chipsRestritivos = listarFiltrosAtivosRestritivosCentral();
     const temFiltro = !!(filtros.busca || filtros.status || filtros.origem
         || filtros.dataEmissaoInicio || filtros.dataEmissaoFim || filtros.filtroRapido);
+    const temBuscaComFiltros = !!(filtros.busca && chipsRestritivos.length);
 
     if (!centralEntradasState.documentos.length) {
-        const emptyTipo = temFiltro ? 'pesquisa' : 'documentos';
+        const emptyTipo = temBuscaComFiltros
+            ? 'pesquisa_filtros'
+            : (temFiltro ? 'pesquisa' : 'documentos');
         container.innerHTML = centralUx().renderEmptyStateCentral?.(emptyTipo) || '';
     } else if (lista) {
         const UX = centralUx();
-        container.innerHTML = centralEntradasState.documentos.map((doc) => {
+        const cabecalho = `
+            <div class="central-rc40-doc-cols-header" role="row" aria-label="Cabeçalho da listagem">
+                <span class="central-rc40-doc-cols-spacer" aria-hidden="true"></span>
+                <span>Fornecedor</span>
+                <span>NF</span>
+                <span>Emissão</span>
+                <span>Valor</span>
+                <span>Status</span>
+                <span>Ação</span>
+            </div>`;
+        const linhas = centralEntradasState.documentos.map((doc) => {
             const selecionado = centralEntradasState.documentoSelecionadoId === doc.id ? 'central-ux1-doc-card--selected' : '';
             const numero = doc.numero ? `${doc.numero}${doc.serie ? '/' + doc.serie : ''}` : '—';
             const avatar = UX.avatarFornecedorCentral?.(doc.fornecedor) || { iniciais: '?', cor: '#94a3b8' };
             const badge = UX.badgeStatusUx1?.(doc.status, doc.statusLabel) || renderBadgeStatusCentral(doc.status, doc.statusLabel);
-            const miipBadge = doc.miipDisponivel
-                ? '<span class="central-ux1-badge-miip" title="Processado pelo MIIP"><i class="fas fa-brain"></i> MIIP</span>'
-                : '';
-            const dt = obterDataExibicaoDocumentoCentral(doc);
+            const emissao = formatarDataEmissaoCurtaListaCentral(doc.dataEmissao || doc.data_emissao);
+            const acao = documentoElegivelPortalNfeCentral(doc)
+                ? { emoji: '☁️', label: 'Portal Nacional', tom: 'atencao', acao: 'portal-nfe' }
+                : (UX.resolverProximaAcaoOperacional?.(doc) || { emoji: '🔵', label: 'Acompanhar', tom: 'processando' });
 
             return `
-                <div class="central-ux1-doc-card ${selecionado} central-entradas-row"
+                <div class="central-rc40-doc-row central-ux1-doc-card ${selecionado} central-entradas-row"
                      data-documento-id="${doc.id}"
                      tabindex="0"
                      role="button"
-                     aria-label="Documento ${escapeHtmlCentralEntradas(doc.fornecedor || 'sem fornecedor')}, NF ${escapeHtmlCentralEntradas(numero)}">
-                    <span class="central-ux1-doc-avatar" style="background:${escapeHtmlCentralEntradas(avatar.cor)}" aria-hidden="true">${escapeHtmlCentralEntradas(avatar.iniciais)}</span>
-                    <div class="central-ux1-doc-info">
-                        <div class="central-ux1-doc-fornecedor">${escapeHtmlCentralEntradas(doc.fornecedor || '—')}</div>
-                        <div class="central-ux1-doc-meta">
-                            <span title="Número da NF"><i class="fas fa-file-invoice me-1"></i>${escapeHtmlCentralEntradas(numero)}</span>
-                            <span title="Data"><i class="far fa-calendar me-1"></i>${escapeHtmlCentralEntradas(dt.data)} ${escapeHtmlCentralEntradas(dt.hora)}</span>
-                            <span title="Origem"><i class="fas ${iconeOrigemCentral(doc.origem)} me-1"></i>${escapeHtmlCentralEntradas(labelOrigemCentral(doc.origem))}</span>
-                        </div>
+                     aria-label="Documento ${escapeHtmlCentralEntradas(doc.fornecedor || 'sem fornecedor')}, ${escapeHtmlCentralEntradas(acao.label)}">
+                    <span class="central-rc40-doc-avatar" style="background:${escapeHtmlCentralEntradas(avatar.cor)}" aria-hidden="true">${escapeHtmlCentralEntradas(avatar.iniciais)}</span>
+                    <div>
+                        <div class="central-rc40-doc-fornecedor">${escapeHtmlCentralEntradas(doc.fornecedor || '—')}</div>
+                        <div class="central-rc40-doc-meta d-md-none">${escapeHtmlCentralEntradas(numero)} · ${escapeHtmlCentralEntradas(emissao)} · ${escapeHtmlCentralEntradas(formatarMoedaCentral(doc.valorTotal))}</div>
                     </div>
-                    <div class="central-ux1-doc-acoes">
-                        <div class="central-ux1-doc-valor">${escapeHtmlCentralEntradas(formatarMoedaCentral(doc.valorTotal))}</div>
-                        ${badge}
-                        ${miipBadge}
-                        <button type="button" class="btn btn-sm btn-outline-primary central-doc-detalhe-btn" data-doc-id="${doc.id}" title="Ver detalhes">
-                            <i class="fas fa-chevron-right"></i>
-                        </button>
+                    <div class="central-rc40-doc-meta" title="NF">${escapeHtmlCentralEntradas(numero)}</div>
+                    <div class="central-rc40-doc-meta" title="Emissão">${escapeHtmlCentralEntradas(emissao)}</div>
+                    <div class="fw-semibold" title="Valor">${escapeHtmlCentralEntradas(formatarMoedaCentral(doc.valorTotal))}</div>
+                    <div>${badge}</div>
+                    <div class="central-rc40-acao central-rc40-acao--${escapeHtmlCentralEntradas(acao.tom)}"
+                        ${acao.acao === 'portal-nfe' ? `data-portal-nfe-id="${doc.id}" data-portal-nfe-chave="${escapeHtmlCentralEntradas(doc.chave || '')}"` : ''}
+                        ${acao.acao === 'copiar-chave' ? `data-copiar-chave-id="${doc.id}" data-copiar-chave="${escapeHtmlCentralEntradas(doc.chave || '')}"` : ''}>
+                        ${escapeHtmlCentralEntradas(acao.emoji)} ${escapeHtmlCentralEntradas(acao.label)}
                     </div>
                 </div>`;
         }).join('');
+        container.innerHTML = cabecalho + linhas;
     } else {
         container.innerHTML = centralEntradasState.documentos.map((doc) => {
             const meta = metaStatusCentral(doc.status);
@@ -2588,15 +3289,26 @@ function renderAcoesPipelineCentral(doc) {
            </div>`
         : '';
 
-    const podeProcessar = doc.status === 'SINCRONIZADA' && !processando;
-    const aguardandoRevisao = doc.status === 'AGUARDANDO_REVISAO';
+    const podeProcessar = (doc.status === 'XML_COMPLETO' || doc.status === 'SINCRONIZADA') && !processando;
+    const aguardandoRevisao = doc.status === 'EM_REVISAO' || doc.status === 'AGUARDANDO_REVISAO';
+    const podePortalNfe = typeof documentoElegivelPortalNfeCentral === 'function'
+      ? documentoElegivelPortalNfeCentral(doc)
+      : (doc.status === 'XML_INDISPONIVEL' || doc.status === 'ERRO');
 
     let acoesHtml = '';
     if (doc.status === 'AGUARDANDO_XML_COMPLETO') {
-        acoesHtml += `<button type="button" class="btn btn-outline-primary btn-sm w-100 mb-2" id="centralBtnSolicitarXmlCompleto" data-doc-id="${doc.id}" title="Enviar Ciência da Emissão e consultar o XML completo">
-            <i class="fas fa-file-import me-1"></i> Solicitar XML completo
+        acoesHtml += `<button type="button" class="btn btn-outline-secondary btn-sm w-100 mb-2" id="centralBtnSolicitarXmlCompleto" data-doc-id="${doc.id}" title="Exceção manual — na rotina o MIRX recupera o XML automaticamente">
+            <i class="fas fa-file-import me-1"></i> Solicitar XML completo <small class="opacity-75">(manual)</small>
         </button>`;
     }
+    if (podePortalNfe) {
+        acoesHtml += `<button type="button" class="btn btn-outline-primary btn-sm w-100 mb-2" id="centralBtnPortalNfe"
+            data-doc-id="${doc.id}" data-chave="${escapeHtmlCentralEntradas(doc.chave || '')}"
+            title="Abre a Central de Recuperação CDS para obter o XML oficial no Portal Nacional.">
+            <i class="fas fa-cloud-download-alt me-1"></i> Recuperar pelo Portal Nacional
+        </button>`;
+    }
+    acoesHtml += renderBotaoCopiarChaveCentral(doc);
     if (podeProcessar) {
         acoesHtml += `<button type="button" class="btn btn-primary btn-sm w-100 mb-2" id="centralBtnProcessar" data-doc-id="${doc.id}" title="Executar pipeline Parser → MIIP">
             <i class="fas fa-cogs me-1"></i> Processar documento
@@ -2613,182 +3325,82 @@ function renderAcoesPipelineCentral(doc) {
 
 function renderAbaResumoCentral(doc) {
     const UX = centralUx();
-    const meta = metaStatusCentral(doc.status);
     const detalhe = centralEntradasState.detalheAtual;
-    const wait = doc.xmlWait || detalhe?.documento?.xmlWait || null;
+    const wait = doc.xmlWait || detalhe?.documento?.xmlWait || {};
     const sefaz = detalhe?.sefazOperacional || centralEntradasState.sefazOperacional || {};
-    const exec = UX.extrairDadosExecutivoCentral?.(
-        doc,
-        centralEntradasState.parseAtual,
-        centralEntradasState.parseAtual,
-        detalhe?.historico
-    ) || {};
+    const acao = UX.resolverProximaAcaoOperacional?.(doc) || { label: 'Acompanhar', tom: 'processando' };
+    const statusOp = UX.labelStatusOperacionalCentral?.(doc.status) || obterLabelStatusCentral(doc.status);
+    const explicacao = UX.explicarStatusCentral?.(doc, wait) || '';
+    const modelo = UX.montarEtapasOperacionaisCentral?.(doc, detalhe?.historico, wait, detalhe?.eventosMirx) || null;
+    const etapa = modelo?.statusReal || statusOp;
+    const automatico = doc.status === 'AGUARDANDO_XML_COMPLETO'
+        ? 'Sim. O sistema tentará recuperar o XML automaticamente no horário programado.'
+        : (doc.status === 'EM_PROCESSAMENTO' || doc.status === 'EM_COMPRA'
+            ? 'Sim. O processamento continua em segundo plano.'
+            : 'Não neste momento.');
+    const precisaAcao = acao.acao
+        ? ('Sim — ' + acao.label + '.')
+        : (doc.status === 'GRAVADA' || doc.status === 'DESCARTADA'
+            ? 'Não. Documento encerrado.'
+            : 'Não. Aguarde o andamento automático.');
 
-    const gaugeHtml = UX.renderGaugeScoreCentral
-        ? `<div class="text-center mb-3">${UX.renderGaugeScoreCentral(doc.scoreGeral, doc.scoreCor, { tamanho: 108 })}</div>`
-        : '';
-
-    const modelo = UX.montarEtapasOperacionaisCentral?.(doc, detalhe?.historico, wait) || null;
-    const barraHtml = modelo && UX.renderBarraProgressoOperacionalCentral
-        ? UX.renderBarraProgressoOperacionalCentral(modelo)
-        : '';
-    const timelineOpHtml = modelo && UX.renderTimelineOperacionalCentral
-        ? `<div class="mb-3"><label class="central-entradas-label">Linha do tempo operacional</label>${UX.renderTimelineOperacionalCentral(modelo)}</div>`
-        : '';
     const cardXmlHtml = UX.renderCardXmlWaitOperacionalCentral?.(doc, wait, {
         ultimoCStat: sefaz.ultimoCStat,
         backoffLabel: sefaz.backoffAtual || sefaz.backoffAtualLabel
     }) || '';
-    const chipHtml = UX.renderChipEtapaCentral?.(UX.resolverChipEtapaCentral?.(doc, wait)) || '';
     const techHtml = UX.renderInfoTecnicasRecolhivelCentral?.({
-        doc,
-        wait,
-        sefaz,
-        statusBg: centralEntradasState.statusServico || {}
+        doc, wait, sefaz, statusBg: centralEntradasState.statusServico || {}
     }) || '';
-
-    const descricaoResumo = doc.status === 'AGUARDANDO_XML_COMPLETO'
-        ? (UX.mensagemAmigavelCentral?.('AGUARDANDO_XML_COMPLETO')
-            || 'Aguardando a disponibilização do XML completo pela SEFAZ.')
-        : (doc.status === 'ERRO'
-            ? (UX.mensagemAmigavelCentral?.('ERRO') || meta.descricao)
-            : meta.descricao);
+    const mirxHtml = UX.renderEventosMirxCentral?.(detalhe?.eventosMirx || []) || '';
+    const auditHtml = UX.renderAuditoriaDocumentalCentral?.(detalhe?.auditoriaDocumental || {
+        quantidadeTentativas: wait?.tentativas,
+        ultimoMetodo: wait?.ultimoMetodo,
+        ultimoRetornoSefaz: wait?.ultimoCStat ? ('cStat ' + wait.ultimoCStat) : null,
+        tempoAteXmlLabel: wait?.tempoAguardandoLabel,
+        dormindo: wait?.dormindo
+    }) || '';
+    const saudeHtml = UX.renderCardSaudeDocumentoCentral?.(doc.saude || detalhe?.saude, doc) || '';
+    const timelineOpHtml = modelo && UX.renderTimelineOperacionalCentral
+        ? UX.renderTimelineOperacionalCentral(modelo)
+        : '';
+    const gaugeHtml = UX.renderGaugeScoreCentral && doc.scoreGeral != null
+        ? UX.renderGaugeScoreCentral(doc.scoreGeral, doc.scoreCor, { tamanho: 72 })
+        : '';
 
     return `
-        ${gaugeHtml}
-
-        <div class="mb-2 d-flex flex-wrap gap-2 align-items-center">${chipHtml}</div>
-
-        ${cardXmlHtml}
-
-        ${barraHtml ? `<div class="mb-3">${barraHtml}</div>` : ''}
-
-        ${timelineOpHtml}
-
-        <div class="central-entradas-resumo-executivo mb-3 central-entradas-anim-in"
-             style="border-left-color:${meta.cor}; background:${meta.bg}">
-            <div class="d-flex align-items-center gap-2 mb-1">
-                <i class="fas ${meta.icone}" style="color:${meta.cor}" aria-hidden="true"></i>
-                <strong>${escapeHtmlCentralEntradas(obterLabelStatusCentral(doc.status))}</strong>
-            </div>
-            <div class="small text-muted">${escapeHtmlCentralEntradas(descricaoResumo)}</div>
-        </div>
-
-        ${techHtml}
-
-        <div class="central-entradas-painel-executivo mb-3">
-            <label class="central-entradas-label">Painel executivo</label>
-            <div class="row g-2 central-entradas-exec-grid">
-                <div class="col-6">
-                    <div class="central-entradas-exec-item" title="Fornecedor emissor da NF-e">
-                        <i class="fas fa-building" aria-hidden="true"></i>
-                        <div>
-                            <span class="central-entradas-exec-label">Fornecedor</span>
-                            <span class="central-entradas-exec-valor">${escapeHtmlCentralEntradas(exec.fornecedor)}</span>
-                            <small class="text-muted">${escapeHtmlCentralEntradas(exec.cnpjFornecedor)}</small>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-6">
-                    <div class="central-entradas-exec-item" title="Transporte / frete na nota">
-                        <i class="fas fa-truck" aria-hidden="true"></i>
-                        <div>
-                            <span class="central-entradas-exec-label">Transportadora</span>
-                            <span class="central-entradas-exec-valor">${escapeHtmlCentralEntradas(exec.transportadora)}</span>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-6">
-                    <div class="central-entradas-exec-item" title="Volumes e unidades">
-                        <i class="fas fa-boxes" aria-hidden="true"></i>
-                        <div>
-                            <span class="central-entradas-exec-label">Volumes</span>
-                            <span class="central-entradas-exec-valor">${escapeHtmlCentralEntradas(exec.volumes)}</span>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-6">
-                    <div class="central-entradas-exec-item" title="Peso bruto (quando disponível no XML)">
-                        <i class="fas fa-weight-hanging" aria-hidden="true"></i>
-                        <div>
-                            <span class="central-entradas-exec-label">Peso</span>
-                            <span class="central-entradas-exec-valor">${escapeHtmlCentralEntradas(exec.peso)}</span>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-6">
-                    <div class="central-entradas-exec-item" title="Condição de pagamento">
-                        <i class="fas fa-credit-card" aria-hidden="true"></i>
-                        <div>
-                            <span class="central-entradas-exec-label">Pagamento</span>
-                            <span class="central-entradas-exec-valor text-truncate d-block">${escapeHtmlCentralEntradas(exec.pagamento)}</span>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-6">
-                    <div class="central-entradas-exec-item" title="Valor total da nota">
-                        <i class="fas fa-coins" aria-hidden="true"></i>
-                        <div>
-                            <span class="central-entradas-exec-label">Valor total</span>
-                            <span class="central-entradas-exec-valor text-success fw-semibold">${escapeHtmlCentralEntradas(formatarMoedaCentral(exec.valorTotal ?? doc.valorTotal))}</span>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-6">
-                    <div class="central-entradas-exec-item" title="Quantidade de itens">
-                        <i class="fas fa-list-ol" aria-hidden="true"></i>
-                        <div>
-                            <span class="central-entradas-exec-label">Itens</span>
-                            <span class="central-entradas-exec-valor">${escapeHtmlCentralEntradas(exec.qtdItens)}</span>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-6">
-                    <div class="central-entradas-exec-item" title="Precisão da identificação MIIP">
-                        <i class="fas fa-brain" aria-hidden="true"></i>
-                        <div>
-                            <span class="central-entradas-exec-label">Precisão MIIP</span>
-                            <span class="central-entradas-exec-valor">${escapeHtmlCentralEntradas(exec.precisaoMiip)}</span>
-                        </div>
-                    </div>
-                </div>
-                <div class="col-12">
-                    <div class="central-entradas-exec-item" title="Tempo entre início e conclusão do processamento">
-                        <i class="fas fa-stopwatch" aria-hidden="true"></i>
-                        <div>
-                            <span class="central-entradas-exec-label">Tempo de processamento</span>
-                            <span class="central-entradas-exec-valor">${escapeHtmlCentralEntradas(exec.tempoProcessamento)}</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <div class="row g-2 mb-3">
-            <div class="col-6">
-                <label class="central-entradas-label">Número / Série</label>
-                <div>${escapeHtmlCentralEntradas(doc.numero || '—')}${doc.serie ? '/' + escapeHtmlCentralEntradas(doc.serie) : ''}</div>
-            </div>
-            <div class="col-6">
-                <label class="central-entradas-label">Emissão</label>
-                <div>${escapeHtmlCentralEntradas(obterDataExibicaoDocumentoCentral(doc).data)}</div>
-            </div>
+        <div class="central-rc40-resumo-qa">
+            <div class="central-rc40-qa-item"><strong>O que aconteceu?</strong><span>${escapeHtmlCentralEntradas(explicacao || statusOp)}</span></div>
+            <div class="central-rc40-qa-item"><strong>Em que etapa está?</strong><span>${escapeHtmlCentralEntradas(etapa)}${modelo?.percentual != null ? (' · ' + modelo.percentual + '%') : ''}</span></div>
+            <div class="central-rc40-qa-item"><strong>O sistema fará algo sozinho?</strong><span>${escapeHtmlCentralEntradas(automatico)}</span></div>
+            <div class="central-rc40-qa-item"><strong>Preciso fazer alguma ação?</strong><span>${escapeHtmlCentralEntradas(precisaAcao)}</span></div>
         </div>
 
         <div class="mb-3">
-            <label class="central-entradas-label">Origem</label>
-            <div><i class="fas ${iconeOrigemCentral(doc.origem)} me-1 text-muted" aria-hidden="true"></i>${escapeHtmlCentralEntradas(labelOrigemCentral(doc.origem))}</div>
+            <label class="central-entradas-label">Dados da nota</label>
+            <div class="small"><strong>NF</strong> ${escapeHtmlCentralEntradas(doc.numero || '—')}${doc.serie ? '/' + escapeHtmlCentralEntradas(doc.serie) : ''}</div>
+            <div class="small"><strong>Emissão</strong> ${escapeHtmlCentralEntradas(obterDataExibicaoDocumentoCentral(doc).data)}</div>
+            <div class="small text-break"><strong>Chave</strong> ${escapeHtmlCentralEntradas(doc.chave || '—')}</div>
         </div>
 
-        <div class="mb-3">
-            <label class="central-entradas-label">Chave de acesso</label>
-            <div class="central-entradas-chave">${escapeHtmlCentralEntradas(doc.chave || '—')}</div>
-        </div>
+        ${renderClassificacaoEntradaCentral(doc)}
 
         <div class="central-entradas-divider"></div>
-        <label class="central-entradas-label">Ações do pipeline</label>
+        <label class="central-entradas-label">Ações</label>
         ${renderAcoesPipelineCentral(doc) || '<div class="text-muted small">Nenhuma ação disponível para este status.</div>'}
-        ${renderStatsFornecedorCentral()}
+
+        <details class="central-rc40-modo-tecnico mt-3">
+            <summary>Modo Técnico</summary>
+            <div class="pt-2">
+                ${gaugeHtml ? ('<div class="text-center mb-2">' + gaugeHtml + '</div>') : ''}
+                ${cardXmlHtml}
+                ${saudeHtml}
+                ${auditHtml}
+                ${mirxHtml}
+                ${timelineOpHtml ? ('<div class="mb-2">' + timelineOpHtml + '</div>') : ''}
+                ${techHtml}
+                ${renderStatsFornecedorCentral()}
+            </div>
+        </details>
     `;
 }
 
@@ -2831,10 +3443,21 @@ function renderAbaItensCentral() {
 function renderAbaTimelineCentral(detalhe) {
     const UX = centralUx();
     const doc = detalhe.documento;
-    const wait = doc?.xmlWait || null;
-    const modelo = UX.montarEtapasOperacionaisCentral?.(doc, detalhe.historico, wait);
-    const op = modelo && UX.renderTimelineOperacionalCentral
-        ? `<div class="mb-3">${UX.renderBarraProgressoOperacionalCentral?.(modelo) || ''}${UX.renderTimelineOperacionalCentral(modelo)}</div>`
+    const wait = doc?.xmlWait || {};
+    const modelo = UX.montarEtapasOperacionaisCentral?.(doc, detalhe.historico, wait, detalhe.eventosMirx);
+    const op = modelo
+        ? `<div class="mb-3">
+            ${UX.renderBarraProgressoOperacionalCentral?.(modelo) || ''}
+            ${UX.renderExplicacaoStatusCentral?.(doc, wait) || ''}
+            <details class="central-rc40-modo-tecnico mt-2">
+                <summary>Detalhes técnicos da timeline</summary>
+                <div class="pt-2">
+                    ${UX.renderAuditoriaDocumentalCentral?.(detalhe.auditoriaDocumental) || ''}
+                    ${UX.renderEventosMirxCentral?.(detalhe.eventosMirx) || ''}
+                    ${UX.renderTimelineOperacionalCentral?.(modelo) || ''}
+                </div>
+            </details>
+           </div>`
         : '';
     const legado = UX.renderPipelineTimelineUx1?.(doc, detalhe.historico)
         || renderTimelineCentral(detalhe.historico);
@@ -2849,10 +3472,47 @@ function renderPainelSaudeSefazUxCentral() {
         wrap.innerHTML = '';
         return;
     }
-    wrap.innerHTML = UX.renderPainelSaudeSefazCentral(
+    const inner = UX.renderPainelSaudeSefazCentral(
         centralEntradasState.sefazOperacional || {},
-        centralEntradasState.servicoStatus || centralEntradasState.statusServico || {}
+        {
+            ...(centralEntradasState.servicoStatus || centralEntradasState.statusServico || {}),
+            sincronizacaoNsu: centralEntradasState.sincronizacaoNsu || null
+        }
     );
+    wrap.innerHTML = `<div class="central-rc40-monitor"><details><summary>Monitoramento — SEFAZ</summary><div class="pt-2">${inner}</div></details></div>`;
+}
+
+/** RC3.4.6 — Saúde da Central (documentos). RC4.0 — recolhido por padrão. */
+function renderPainelSaudeCentralUx() {
+    const wrap = document.getElementById('centralSaudeWrap');
+    if (!wrap) return;
+    const UX = centralUx();
+    if (!UX.renderPainelSaudeDocumentalCentral) {
+        wrap.innerHTML = '';
+        return;
+    }
+    const inner = UX.renderPainelSaudeDocumentalCentral(
+        centralEntradasState.saudeCentral || {},
+        { filtroNivel: centralEntradasState.saudeFiltroNivel }
+    );
+    wrap.innerHTML = `<div class="central-rc40-monitor"><details><summary>Monitoramento — Saúde</summary><div class="pt-2">${inner}</div></details></div>`;
+}
+
+async function filtrarAlertasSaudeCentral(nivel) {
+    centralEntradasState.saudeFiltroNivel = nivel || null;
+    renderPainelSaudeCentralUx();
+    if (!nivel) return;
+    try {
+        const lista = await centralEntradasFetch(`/saude/alertas?nivel=${encodeURIComponent(nivel)}`);
+        const ids = (lista.alertas || []).map((a) => a.documentoId).filter(Boolean);
+        if (ids.length === 1) {
+            await selecionarDocumentoCentral(ids[0]);
+        } else if (ids.length > 1) {
+            showNotification(`${ids.length} documento(s) em ${nivel}. Selecione na lista de alertas.`, 'info');
+        }
+    } catch (e) {
+        console.warn('[Central] Saúde alertas:', e.message);
+    }
 }
 
 /** RC7.5 — atualiza countdown/tempo sem redesenhar tabela. */
@@ -2861,8 +3521,12 @@ function tickLiveUxCentral() {
     if (!UX.atualizarLiveRegionsCentral) return;
     const painel = document.getElementById('centralEntradasPainelLateral');
     const saude = document.getElementById('centralRc75SaudeWrap');
-    if (painel) UX.atualizarLiveRegionsCentral(painel);
-    if (saude) UX.atualizarLiveRegionsCentral(saude);
+    // RC4.0 — só atualiza countdown quando Modo Técnico / card XML / monitoramento aberto
+    const precisa =
+        painel?.querySelector('#centralRc75XmlCard, .central-rc40-modo-tecnico[open], [data-central-live]')
+        || saude?.querySelector('details[open] [data-central-live], details[open] #centralRc75Saude');
+    if (painel && precisa) UX.atualizarLiveRegionsCentral(painel);
+    if (saude?.querySelector('details[open]')) UX.atualizarLiveRegionsCentral(saude);
 }
 
 /** Soft refresh só do documento selecionado (AGUARDANDO_XML). */
@@ -2873,9 +3537,23 @@ async function softRefreshDocumentoSelecionadoCentral() {
     if (!doc || doc.status !== 'AGUARDANDO_XML_COMPLETO') return;
     if (centralEntradasState.softRefreshEmAndamento) return;
     centralEntradasState.softRefreshEmAndamento = true;
+    const statusAnterior = doc.status;
     try {
         const detalhe = await centralEntradasFetch(`/${id}`);
         if (centralEntradasState.documentoSelecionadoId !== id) return;
+
+        const novoStatus = detalhe.documento?.status;
+        // RC3.4.2 — XML recuperado automaticamente: atualiza Central completa.
+        if (novoStatus && novoStatus !== statusAnterior) {
+            showNotification('🟢 XML recuperado automaticamente pelo MIRX.', 'success');
+            await Promise.all([
+                carregarDashboardCentral(),
+                carregarDocumentosCentral()
+            ]);
+            await selecionarDocumentoCentral(id);
+            return;
+        }
+
         centralEntradasState.detalheAtual = {
             ...centralEntradasState.detalheAtual,
             ...detalhe,
@@ -2888,16 +3566,14 @@ async function softRefreshDocumentoSelecionadoCentral() {
             centralEntradasState.sefazOperacional = detalhe.sefazOperacional;
             renderPainelSaudeSefazUxCentral();
         }
-        // Atualização parcial: só aba resumo / timeline se ativas
-        if (['resumo', 'timeline'].includes(centralEntradasState.abaAtiva)) {
+        // Atualização parcial: resumo / timeline / produtos
+        if (['resumo', 'timeline', 'produtos', 'itens'].includes(centralEntradasState.abaAtiva)) {
             const corpo = document.getElementById('centralEntradasAbaConteudo')
                 || document.querySelector('.central-ux1-painel-body');
             if (corpo && centralEntradasState.detalheAtual) {
-                // Re-render apenas o painel lateral (documento único), sem grid.
                 renderPainelLateralCentral(centralEntradasState.detalheAtual);
             }
         } else {
-            // Atualiza só o card XML live se existir no DOM
             const card = document.getElementById('centralRc75XmlCard');
             if (card && centralEntradasState.detalheAtual) {
                 renderPainelLateralCentral(centralEntradasState.detalheAtual);
@@ -3012,7 +3688,7 @@ function renderAbaCompraCentral(doc) {
         `;
     }
 
-    const podeAbrir = ['PRONTA_PARA_COMPRA', 'EM_COMPRA', 'REVISADA'].includes(doc.status) && doc.parseDisponivel;
+    const podeAbrir = ['PRONTA_IMPORTACAO', 'EM_IMPORTACAO', 'PRONTA_PARA_COMPRA', 'EM_COMPRA', 'REVISADA'].includes(doc.status) && doc.parseDisponivel;
 
     return `
         <div class="text-muted small mb-3">
@@ -3042,14 +3718,23 @@ function renderConteudoAbaCentral(detalhe) {
 }
 
 function renderCtaImportarCompraCentral(doc) {
-    const podeAbrir = ['PRONTA_PARA_COMPRA', 'EM_COMPRA', 'REVISADA'].includes(doc.status) && doc.parseDisponivel;
+    const UX = centralUx();
+    const acao = UX.resolverProximaAcaoOperacional?.(doc) || {};
+
+    if (acao.acao === 'revisar' && typeof MiipCentralRevisao !== 'undefined') {
+        return `<button type="button" class="btn btn-warning central-ux1-btn-importar" id="centralBtnRevisarMiip" data-doc-id="${doc.id}" title="Abrir revisão de produtos">
+            <i class="fas fa-user-check me-1"></i> Abrir Revisão
+        </button>`;
+    }
+
+    const podeAbrir = ['PRONTA_IMPORTACAO', 'EM_IMPORTACAO', 'PRONTA_PARA_COMPRA', 'EM_COMPRA', 'REVISADA'].includes(doc.status) && doc.parseDisponivel;
     if (!podeAbrir) {
-        return `<button type="button" class="btn btn-secondary central-ux1-btn-importar" disabled title="Disponível quando a máquina de estados permitir importação">
-            <i class="fas fa-lock me-1"></i> IMPORTAR COMPRA
+        return `<button type="button" class="btn btn-secondary central-ux1-btn-importar" disabled title="${escapeHtmlCentralEntradas(acao.label || 'Aguardando')}">
+            <i class="fas fa-lock me-1"></i> ${escapeHtmlCentralEntradas(acao.label || 'Aguardando')}
         </button>`;
     }
     return `<button type="button" class="btn btn-success central-ux1-btn-importar" id="centralBtnAbrirCompra" data-doc-id="${doc.id}" title="Importar compra a partir desta NF-e">
-        <i class="fas fa-shopping-cart me-1"></i> IMPORTAR COMPRA
+        <i class="fas fa-shopping-cart me-1"></i> Importar Compra
     </button>`;
 }
 
@@ -3059,43 +3744,36 @@ function renderPainelLateralCentral(detalhe) {
 
     const doc = detalhe.documento;
     const UX = centralUx();
-    const exec = UX.extrairDadosExecutivoCentral?.(
-        doc,
-        centralEntradasState.parseAtual,
-        centralEntradasState.parseAtual,
-        detalhe.historico
-    ) || {};
     const badge = UX.badgeStatusUx1?.(doc.status, doc.statusLabel) || renderBadgeStatusCentral(doc.status, doc.statusLabel);
     const numero = doc.numero ? `${doc.numero}${doc.serie ? '/' + doc.serie : ''}` : '—';
+    const acao = UX.resolverProximaAcaoOperacional?.(doc) || { emoji: '🔵', label: 'Acompanhar', tom: 'processando' };
 
     const abas = [
         { id: 'resumo', label: 'Resumo', icone: 'fa-file-invoice' },
         { id: 'produtos', label: 'Produtos', icone: 'fa-boxes' },
         { id: 'timeline', label: 'Timeline', icone: 'fa-project-diagram' },
-        { id: 'miip', label: 'MIIP', icone: 'fa-brain' },
         { id: 'xml', label: 'XML', icone: 'fa-code' },
         { id: 'historico', label: 'Histórico', icone: 'fa-history' }
     ];
 
-    const abaAtiva = centralEntradasState.abaAtiva === 'itens' ? 'produtos' : centralEntradasState.abaAtiva;
+    let abaAtiva = centralEntradasState.abaAtiva === 'itens' ? 'produtos' : centralEntradasState.abaAtiva;
+    if (abaAtiva === 'miip') abaAtiva = 'produtos';
 
     painel.innerHTML = `
-        <div class="central-ux1-painel central-entradas-painel-card central-entradas-anim-in">
+        <div class="central-ux1-painel central-entradas-painel-card">
             <div class="central-ux1-painel-header">
                 <div class="d-flex justify-content-between align-items-start gap-2">
                     <div class="text-truncate">
                         <strong>${escapeHtmlCentralEntradas(doc.fornecedor || '—')}</strong>
                         <div class="small text-muted">NF ${escapeHtmlCentralEntradas(numero)}</div>
                     </div>
-                    ${badge}
-                </div>
-                <div class="central-ux1-painel-resumo-chips">
+                    ${badge}${renderBadgeUsoConsumoCentral(doc)}
                     <span class="central-ux1-chip" title="Valor total"><i class="fas fa-coins me-1"></i>${escapeHtmlCentralEntradas(formatarMoedaCentral(doc.valorTotal))}</span>
-                    <span class="central-ux1-chip" title="Data emissão"><i class="far fa-calendar me-1"></i>${escapeHtmlCentralEntradas(obterDataExibicaoDocumentoCentral(doc).data)}</span>
-                    <span class="central-ux1-chip" title="Itens"><i class="fas fa-list me-1"></i>${escapeHtmlCentralEntradas(exec.qtdItens || '—')} itens</span>
-                    <span class="central-ux1-chip" title="Peso"><i class="fas fa-weight-hanging me-1"></i>${escapeHtmlCentralEntradas(exec.peso || '—')}</span>
-                    <span class="central-ux1-chip" title="Volumes"><i class="fas fa-cubes me-1"></i>${escapeHtmlCentralEntradas(exec.volumes || '—')}</span>
+                    <span class="central-ux1-chip central-rc40-acao--${escapeHtmlCentralEntradas(acao.tom)}" title="Próxima ação">${escapeHtmlCentralEntradas(acao.emoji)} ${escapeHtmlCentralEntradas(acao.label)}</span>
                 </div>
+            </div>
+            <div class="central-ux1-painel-cta px-3 pt-2">
+                ${renderCtaImportarCompraCentral(doc)}
             </div>
             <div class="central-entradas-abas" role="tablist" aria-label="Detalhes do documento">
                 ${abas.map((aba) => `
@@ -3113,9 +3791,6 @@ function renderPainelLateralCentral(detalhe) {
             <div class="card-body central-entradas-painel-body flex-grow-1 overflow-auto" role="tabpanel">
                 ${renderConteudoAbaCentral(detalhe)}
             </div>
-            <div class="central-ux1-painel-cta">
-                ${renderCtaImportarCompraCentral(doc)}
-            </div>
         </div>
     `;
 }
@@ -3129,8 +3804,8 @@ async function carregarDashboardCentral() {
 
     centralEntradasState.carregandoDashboard = true;
     if (cardsContainer) {
-        cardsContainer.className = 'central-ux1-kpis';
-        cardsContainer.innerHTML = Array.from({ length: 8 }, () => `
+        cardsContainer.className = 'central-rc40-kpis';
+        cardsContainer.innerHTML = Array.from({ length: 4 }, () => `
             <div class="central-ux1-kpi central-ux-skeleton-kpi" aria-hidden="true">
                 <div class="central-ux-skeleton central-ux-skeleton-circle"></div>
                 <div class="flex-grow-1">
@@ -3151,12 +3826,19 @@ async function carregarDashboardCentral() {
         centralEntradasState.sefazOperacional = dashboard.sefazOperacional
             || dashboard.xmlWait?.painelOperacional
             || null;
+        centralEntradasState.saudeCentral = dashboard.saude || null;
+        centralEntradasState.featureFlags = {
+            ...centralEntradasState.featureFlags,
+            ...(dashboard.featureFlags || {})
+        };
+        centralUx().setFeatureFlagsCentral?.(centralEntradasState.featureFlags);
 
         renderCabecalhoUx1Central();
         renderPainelSaudeSefazUxCentral();
+        renderPainelSaudeCentralUx();
 
         if (cardsContainer) {
-            cardsContainer.className = 'central-ux1-kpis';
+            cardsContainer.className = 'central-rc40-kpis';
             cardsContainer.innerHTML = renderCardsUx1Central(
                 dashboard.contadores || {},
                 dashboard.indicadores || {},
@@ -3165,9 +3847,10 @@ async function carregarDashboardCentral() {
         }
 
         await carregarInteligenciaCentral();
+        renderFiltrosRapidosCentral();
 
         if (cardsContainer && centralEntradasState.operacional) {
-            cardsContainer.className = 'central-ux1-kpis';
+            cardsContainer.className = 'central-rc40-kpis';
             cardsContainer.innerHTML = renderCardsUx1Central(
                 dashboard.contadores || {},
                 dashboard.indicadores || {},
@@ -3192,17 +3875,44 @@ function atualizarIndicadorSyncBotao() {
     const btn = document.getElementById('centralBtnSincronizar');
     if (!btn) return;
 
+    const UX = centralUx();
+    const cooldown = UX.resolverCooldownSefaz656Ux?.(centralEntradasState) || { ativo: false };
+
     if (centralEntradasState.sincronizando) {
         btn.disabled = true;
+        btn.setAttribute('aria-disabled', 'true');
+        btn.title = 'Sincronizando…';
         btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status"></span> Sincronizando...';
-    } else {
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-sync-alt me-1"></i> Sincronizar Agora';
+        return;
     }
+
+    if (cooldown.ativo) {
+        btn.disabled = true;
+        btn.setAttribute('aria-disabled', 'true');
+        btn.title = cooldown.tooltipSync
+            || 'A SEFAZ bloqueia novas consultas durante o período de espera.';
+        btn.innerHTML = '<i class="fas fa-hourglass-half me-1"></i> Sincronizar';
+        return;
+    }
+
+    btn.disabled = false;
+    btn.setAttribute('aria-disabled', 'false');
+    btn.title = 'Sincronizar agora com a SEFAZ';
+    btn.innerHTML = '<i class="fas fa-sync-alt me-1"></i> Sincronizar';
 }
 
 async function sincronizarCentralEntradas() {
     if (centralEntradasState.sincronizando) return;
+
+    const UX = centralUx();
+    const cooldown = UX.resolverCooldownSefaz656Ux?.(centralEntradasState);
+    if (cooldown?.ativo) {
+        showNotification(
+            `🟡 Aguardando liberação da SEFAZ. Próxima tentativa: ${cooldown.proximaLabel} · Tempo restante: ${cooldown.restanteLabel}`,
+            'warning'
+        );
+        return;
+    }
 
     centralEntradasState.sincronizando = true;
     atualizarIndicadorSyncBotao();
@@ -3214,13 +3924,28 @@ async function sincronizarCentralEntradas() {
         centralEntradasState.notasNovasUltimaSync = resultado.notasNovas || 0;
         centralEntradasState.ultimaSincronizacao = resultado.ultimaSincronizacao || new Date().toISOString();
 
+        const cStat = String(resultado.cStat || resultado.codigoErro || '');
+        const msgBruta = String(
+            (resultado.erros || []).join('; ')
+            || resultado.mensagemAmigavel
+            || resultado.mensagem
+            || ''
+        );
+        const is656 = cStat === '656' || /656|Consumo Indevido|CONSUMO_INDEVIDO/i.test(msgBruta);
+
         if (resultado.sucesso) {
             const msg = resultado.notasNovas > 0
                 ? `${resultado.notasNovas} nova${resultado.notasNovas === 1 ? '' : 's'} nota${resultado.notasNovas === 1 ? '' : 's'} encontrada${resultado.notasNovas === 1 ? '' : 's'}.`
                 : 'Sincronização concluída. Nenhuma nota nova.';
             showNotification(msg, 'success');
+        } else if (is656) {
+            // RC3.7.5.3 — não tratar cooldown como "erro" na notificação
+            showNotification(
+                '🟡 Aguardando liberação da SEFAZ (cStat 656). O NSU foi sincronizado; novas consultas serão liberadas após o período de espera.',
+                'warning'
+            );
         } else {
-            const erros = (resultado.erros || []).join('; ') || resultado.mensagem || 'Falha na sincronização';
+            const erros = msgBruta || 'Falha na sincronização';
             showNotification('Sincronização: ' + erros, 'warning');
         }
 
@@ -3263,74 +3988,42 @@ async function abrirCentralRevisaoMiip(documentoId, dadosImportacao) {
     }
 
     const produtos = await carregarProdutosParaRevisaoCentral();
+    const docAtual = centralEntradasState.documentos?.find((d) => Number(d.id) === Number(documentoId))
+        || centralEntradasState.detalheAtual?.documento
+        || centralEntradasState.detalheAtual
+        || {};
+    const statusDoc = docAtual.status || docAtual.statusDocumento || '';
+    const permiteImportarXml = ['XML_INDISPONIVEL', 'RESUMO_RECEBIDO', 'AGUARDANDO_XML_COMPLETO'].includes(statusDoc);
 
     MiipCentralRevisao.iniciar({
         dadosImportacao,
         apiUrl: API_URL,
         produtos,
         obterUsuario: obterUsuarioLogadoCentral,
-        abrirCadastroProduto: function (item, callback) {
-            if (typeof showProdutoModal !== 'function') {
-                showNotification('Cadastre o produto em Produtos e retorne à revisão.', 'info');
-                if (typeof callback === 'function') callback(null);
-                return;
-            }
-
-            showProdutoModal(null);
-
-            const el = document.getElementById('produtoModal');
-            if (!el) {
-                showNotification('Não foi possível abrir o cadastro de produto.', 'danger');
-                if (typeof callback === 'function') callback(null);
-                return;
-            }
-
-            try {
-                bootstrap.Modal.getOrCreateInstance(el).show();
-            } catch (_) { /* ignore */ }
-
-            const elevar = () => {
-                el.style.zIndex = '21000';
-                const backdrops = document.querySelectorAll('.modal-backdrop');
-                const last = backdrops[backdrops.length - 1];
-                if (last) last.style.zIndex = '20990';
-            };
-            elevar();
-
-            const preencher = () => {
-                elevar();
-                $('#nome').val(item.produto_nome || item.descricao || '');
-                if ($('#codigo_barras').length) $('#codigo_barras').val(item.codigo_barras || item.gtin || '');
-                if ($('#ncm').length) $('#ncm').val(item.ncm || '');
-                if ($('#unidade').length) $('#unidade').val(item.unidade || 'UN');
-                if ($('#preco_compra').length && item.preco_unitario != null) {
-                    $('#preco_compra').val(item.preco_unitario);
-                }
-                if ($('#codigo').length && item.codigo_fornecedor) {
-                    $('#codigo').val(String(item.codigo_fornecedor));
-                }
-            };
-
-            el.addEventListener('shown.bs.modal', preencher, { once: true });
-            if (el.classList.contains('show')) preencher();
-
-            el.addEventListener('hidden.bs.modal', async function () {
-                const lista = await carregarProdutosParaRevisaoCentral();
-                const hint = String(item.produto_nome || item.descricao || '').trim().toLowerCase();
-                let escolhido = null;
-                if (hint && Array.isArray(lista)) {
-                    escolhido = [...lista].reverse().find((p) =>
-                        String(p.nome || '').trim().toLowerCase() === hint
-                    ) || null;
-                }
-                if (!escolhido && Array.isArray(lista) && lista.length) {
-                    escolhido = lista.reduce((a, b) =>
-                        (Number(a?.id || 0) > Number(b?.id || 0) ? a : b)
-                    );
-                }
-                if (typeof callback === 'function') callback(escolhido || null);
-            }, { once: true });
+        documento: {
+            id: documentoId,
+            chave: docAtual.chave || dadosImportacao?.chave_acesso || '',
+            status: statusDoc,
+            permiteImportarXml
         },
+        acoesDocumento: {
+            copiarChave: (id, chave) => copiarChaveAcessoCentral(id, chave),
+            visualizarXml: (id) => carregarXmlDocumentoCentral(id),
+            reprocessar: (id) => processarDocumentoCentral(id),
+            historico: async (id) => {
+                await selecionarDocumentoCentral(id);
+                centralEntradasState.abaAtiva = 'historico';
+                if (centralEntradasState.detalheAtual) {
+                    renderPainelLateralCentral(centralEntradasState.detalheAtual);
+                }
+            },
+            importarXml: () => {
+                showNotification('Use o upload de XML na Central para importar o arquivo oficial.', 'info');
+                const input = document.getElementById('centralUploadXmlInput');
+                if (input) input.click();
+            }
+        },
+        // Cadastro: modal empilhado + prefill do XML (miip-central-revisao.js).
         onConcluir: async function (resultado) {
             try {
                 const itens = resultado?.itens || dadosImportacao.itens;
@@ -3343,7 +4036,14 @@ async function abrirCentralRevisaoMiip(documentoId, dadosImportacao) {
                     carregarDashboardCentral(),
                     carregarDocumentosCentral()
                 ]);
+                const docAtualizado = centralEntradasState.documentos?.find((d) => Number(d.id) === Number(documentoId))
+                    || { status: 'PRONTA_IMPORTACAO', parseDisponivel: true };
                 await selecionarDocumentoCentral(documentoId);
+                aplicarRetornoCentralDepoisDaRevisao(documentoId, {
+                    ...docAtualizado,
+                    status: docAtualizado.status || 'PRONTA_IMPORTACAO',
+                    parseDisponivel: docAtualizado.parseDisponivel !== false
+                });
             } catch (error) {
                 showNotification('Erro ao concluir revisão: ' + error.message, 'danger');
             }
@@ -3401,25 +4101,380 @@ async function processarDocumentoCentral(documentoId) {
     }
 }
 
+/** RC3.5.0 — elegibilidade local do CTA Portal Nacional. */
+function documentoElegivelPortalNfeCentral(doc) {
+    if (!recuperacaoPortalNacionalHabilitadaCentral()) return false;
+    if (!doc?.id) return false;
+    const status = doc.status;
+    const chave = String(doc.chave || '').replace(/\D/g, '');
+    if (chave.length !== 44) return false;
+    if (status === 'XML_INDISPONIVEL' || status === 'ERRO') return true;
+    // AGUARDANDO_XML configurável (default: não — MIRX prioritário)
+    if (status === 'AGUARDANDO_XML_COMPLETO' && centralEntradasState.portalNfeIncluirAguardando === true) {
+        return true;
+    }
+    return false;
+}
+
+function obterApiPortalNfeElectron() {
+    return window.electronAPI?.portalNfe || null;
+}
+
+let _portalNfeUnsub = null;
+let _portalNfeDocAtivo = null;
+
+function obterUiCentralRecuperacao() {
+    return window.CentralRecuperacaoXml || null;
+}
+
+async function importarXmlPortalNfeCentral(documentoId, xml, nomeArquivo) {
+    const token = localStorage.getItem('token');
+    const response = await fetch(`${API_URL}/central-entradas/${documentoId}/recuperar-portal-nacional/importar`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+            xml,
+            nomeArquivo: nomeArquivo || 'portal-nfe.xml',
+            usuario_id: obterUsuarioLogadoCentral()?.id || null
+        })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        throw new Error(data.error || data.mensagem || `Erro HTTP ${response.status}`);
+    }
+    return data;
+}
+
+async function atualizarUiAposRecuperacaoPortalCentral(documentoId) {
+    await Promise.all([
+        carregarDashboardCentral().catch(() => {}),
+        carregarDocumentosCentral().catch(() => {})
+    ]);
+    if (documentoId) {
+        await selecionarDocumentoCentral(documentoId).catch(() => {});
+    }
+}
+
+async function onEventoPortalNfeCentral(ev) {
+    if (!ev || !_portalNfeDocAtivo) return;
+    const documentoId = _portalNfeDocAtivo.documentoId;
+    const UI = obterUiCentralRecuperacao();
+
+    if (ev.tipo === 'PORTAL_ABERTO') {
+        UI?.concluirEtapa?.('portal', 'Portal aberto.');
+        UI?.definirEtapa?.('download', 'Aguardando download do XML…');
+        UI?.registrarLog?.('Portal aberto', 'OK');
+        return;
+    }
+    if (ev.tipo === 'PORTAL_FECHADO') {
+        const st = UI?.obterEstado?.();
+        const antesDownload = !st || st.etapasStatus?.xml_detectado !== 'concluido';
+        if (antesDownload && st?.emConsulta) {
+            UI?.definirEtapa?.('download', 'O Portal foi fechado antes do download.', { erro: true });
+            UI?.registrarTentativaFalha?.('Portal fechado antes do download');
+            UI?.registrarLog?.('Portal fechado', 'Antes do download');
+            UI?.setEmConsulta?.(false);
+            showNotification('O Portal foi fechado antes do download.', 'warning');
+        }
+        return;
+    }
+    if (ev.tipo === 'DOWNLOAD_INICIADO') {
+        UI?.concluirEtapa?.('download', 'Download detectado.');
+        UI?.definirEtapa?.('xml_detectado', 'XML detectado.');
+        UI?.registrarLog?.('Download detectado', ev.nomeArquivo || 'XML');
+        if (ev.caminho) UI?.setXmlDownload?.(ev.caminho, ev.nomeArquivo);
+        centralEntradasFetch(`/${documentoId}/recuperar-portal-nacional/download-detectado`, {
+            method: 'POST',
+            body: JSON.stringify({
+                chave: _portalNfeDocAtivo.chave,
+                nomeArquivo: ev.nomeArquivo || null,
+                usuario_id: obterUsuarioLogadoCentral()?.id
+            })
+        }).catch(() => {});
+        return;
+    }
+    if (ev.tipo === 'DOWNLOAD_CANCELADO') {
+        UI?.definirEtapa?.('download', 'Download cancelado. Tente novamente.', { erro: true });
+        UI?.registrarTentativaFalha?.('Download cancelado');
+        UI?.registrarLog?.('Download cancelado', 'Falha');
+        UI?.setEmConsulta?.(false);
+        showNotification('Download cancelado. Tente novamente.', 'warning');
+        return;
+    }
+    if (ev.tipo === 'DOWNLOAD_ERRO') {
+        const msg = ev.mensagem || 'Erro no download do Portal Nacional.';
+        UI?.definirEtapa?.('download', msg, { erro: true });
+        UI?.registrarTentativaFalha?.(msg);
+        UI?.registrarLog?.('Erro no download', msg);
+        UI?.setEmConsulta?.(false);
+        showNotification(msg, 'danger');
+        return;
+    }
+    if (ev.tipo !== 'DOWNLOAD_CONCLUIDO' || !ev.xml) return;
+
+    if (ev.caminho) UI?.setXmlDownload?.(ev.caminho, ev.nomeArquivo);
+
+    try {
+        UI?.concluirEtapa?.('xml_detectado', 'XML recebido.');
+        UI?.definirEtapa?.('validando', 'Validando assinatura…');
+        UI?.registrarLog?.('XML detectado', ev.nomeArquivo || 'nfeProc');
+
+        UI?.concluirEtapa?.('validando', 'XML validado.');
+        UI?.definirEtapa?.('importando', 'Importando XML…');
+        UI?.registrarLog?.('XML validado', 'Assinatura OK');
+
+        const resultado = await importarXmlPortalNfeCentral(documentoId, ev.xml, ev.nomeArquivo);
+
+        if (!resultado.sucesso) {
+            const msg = resultado.mensagem || 'XML inválido. O documento não foi recuperado.';
+            UI?.definirEtapa?.('importando', msg, { erro: true });
+            UI?.registrarTentativaFalha?.(msg);
+            UI?.registrarLog?.('Importação rejeitada', msg);
+            UI?.setEmConsulta?.(false);
+            showNotification(msg, 'warning');
+            return;
+        }
+
+        UI?.concluirEtapa?.('importando', 'XML importado.');
+        UI?.definirEtapa?.('parser', 'Parser em execução…');
+        UI?.registrarLog?.('Importação iniciada', 'Pipeline oficial');
+        UI?.concluirEtapa?.('parser', 'Parser finalizado.');
+        UI?.definirEtapa?.('miip', 'MIIP identificando produtos…');
+        UI?.registrarLog?.('Parser finalizado', 'OK');
+        UI?.concluirEtapa?.('miip', 'MIIP finalizado.');
+        UI?.definirEtapa?.('compra', 'Criando compra…');
+        UI?.registrarLog?.('MIIP finalizado', 'OK');
+        UI?.concluirEtapa?.('compra', 'Compra criada.');
+        UI?.definirEtapa?.('atualizando', 'Atualizando Central…');
+        UI?.registrarLog?.('Compra criada', 'OK');
+
+        await atualizarUiAposRecuperacaoPortalCentral(documentoId);
+
+        UI?.concluirEtapa?.('atualizando', 'Central atualizada.');
+        UI?.concluirEtapa?.('recuperado', 'Documento recuperado com sucesso.');
+        UI?.registrarTentativaSucesso?.();
+        UI?.registrarLog?.('Recuperação finalizada', 'Sucesso');
+        UI?.setEmConsulta?.(false);
+        showNotification(resultado.mensagem || 'Documento recuperado com sucesso.', 'success');
+
+        const api = obterApiPortalNfeElectron();
+        if (api?.sucesso) {
+            await api.sucesso({
+                mensagem: 'Documento recuperado com sucesso.',
+                aguardarMs: 2000,
+                manterAberta: false
+            });
+        }
+    } catch (error) {
+        const msg = 'XML inválido. O documento não foi recuperado. ' + (error.message || '');
+        UI?.definirEtapa?.('validando', msg, { erro: true });
+        UI?.registrarTentativaFalha?.(error.message || 'Parser falhou');
+        UI?.registrarLog?.('Falha na importação', error.message || 'Erro');
+        UI?.setEmConsulta?.(false);
+        showNotification('Falha na importação do Portal: ' + error.message, 'danger');
+    }
+}
+
+/**
+ * RC3.6.0 — Abre a Central de Recuperação CDS (nunca o Portal diretamente).
+ */
+async function abrirCentralRecuperacaoXml(documentoId, chave) {
+    if (!recuperacaoPortalNacionalHabilitadaCentral()) return;
+    const id = Number(documentoId);
+    if (!id) return;
+
+    const api = obterApiPortalNfeElectron();
+    if (!api?.abrir) {
+        showNotification(
+            'Recuperação pelo Portal Nacional disponível apenas no aplicativo CDS (Electron). '
+            + 'No navegador, use Ferramentas Administrativas → Importação de XML Legado.',
+            'warning'
+        );
+        return;
+    }
+
+    const UI = obterUiCentralRecuperacao();
+    if (!UI?.abrir) {
+        showNotification('Módulo Central de Recuperação não carregado.', 'danger');
+        return;
+    }
+
+    try {
+        const elegivel = await centralEntradasFetch(`/${id}/recuperar-portal-nacional`);
+        if (!elegivel?.elegivel) {
+            showNotification(elegivel?.mensagem || 'Documento não elegível para o Portal Nacional.', 'warning');
+            return;
+        }
+
+        const detalhe = centralEntradasState.detalheAtual?.documento;
+        const listaDoc = (centralEntradasState.documentos || []).find((d) => Number(d.id) === id);
+        const doc = {
+            id,
+            chave: chave || elegivel.chave || detalhe?.chave || listaDoc?.chave || '',
+            fornecedor: elegivel.fornecedor || detalhe?.fornecedor || listaDoc?.fornecedor || '—',
+            numero: elegivel.numero || detalhe?.numero || listaDoc?.numero || '—',
+            serie: elegivel.serie || detalhe?.serie || listaDoc?.serie || '—',
+            dataEmissao: elegivel.dataEmissao || detalhe?.dataEmissao || listaDoc?.dataEmissao || null,
+            valor: detalhe?.valor || detalhe?.valorTotal || listaDoc?.valor || listaDoc?.valorTotal || 0,
+            status: elegivel.status || detalhe?.status || listaDoc?.status || 'XML_INDISPONIVEL',
+            origem: detalhe?.origem || listaDoc?.origem || 'Central de Entradas'
+        };
+
+        UI.abrir(doc);
+
+        const reg = await centralEntradasFetch(`/${id}/recuperar-portal-nacional/central-aberta`, {
+            method: 'POST',
+            body: JSON.stringify({
+                chave: doc.chave,
+                usuario_id: obterUsuarioLogadoCentral()?.id
+            })
+        }).catch(() => null);
+
+        if (reg?.correlationId) UI.setCorrelationId?.(reg.correlationId);
+    } catch (error) {
+        showNotification('Não foi possível abrir a Central de Recuperação: ' + error.message, 'danger');
+    }
+}
+
+/**
+ * RC3.6.0 — Usuário confirma → PORTAL_CONSULTA_INICIADA → abre BrowserWindow.
+ */
+async function consultarPortalNacionalViaCentralRecuperacao() {
+    const UI = obterUiCentralRecuperacao();
+    const st = UI?.obterEstado?.();
+    const doc = st?.documento;
+    if (!doc?.id) return;
+
+    const api = obterApiPortalNfeElectron();
+    if (!api?.abrir) {
+        showNotification('Recuperação pelo Portal Nacional disponível apenas no aplicativo CDS (Electron).', 'warning');
+        return;
+    }
+
+    const id = Number(doc.id);
+    const chave = doc.chave;
+
+    try {
+        UI.setErro?.(false);
+        UI.iniciarConsulta?.();
+        UI.definirEtapa?.('portal', 'Preparando Portal…');
+        UI.registrarLog?.('Recuperação iniciada', 'Consulta confirmada');
+
+        await centralEntradasFetch(`/${id}/recuperar-portal-nacional/consulta-iniciada`, {
+            method: 'POST',
+            body: JSON.stringify({
+                chave,
+                usuario_id: obterUsuarioLogadoCentral()?.id,
+                correlationId: st.correlationId
+            })
+        }).catch(() => {});
+
+        if (_portalNfeUnsub) {
+            _portalNfeUnsub();
+            _portalNfeUnsub = null;
+        }
+        _portalNfeDocAtivo = { documentoId: id, chave };
+        _portalNfeUnsub = api.onEvento?.(onEventoPortalNfeCentral) || null;
+
+        UI.definirEtapa?.('portal', 'Abrindo Portal…');
+
+        const aberto = await api.abrir({ documentoId: id, chave });
+
+        if (!aberto || aberto.sucesso === false) {
+            const msg = aberto?.mensagem || aberto?.erro
+                || 'Não foi possível abrir o Portal Nacional no CDS.';
+            UI.definirEtapa?.('portal', msg, { erro: true });
+            UI.registrarTentativaFalha?.(msg);
+            UI.registrarLog?.('Falha ao abrir Portal', msg);
+            UI.setEmConsulta?.(false);
+            showNotification(msg, 'danger');
+            return;
+        }
+
+        await centralEntradasFetch(`/${id}/recuperar-portal-nacional/abrir`, {
+            method: 'POST',
+            body: JSON.stringify({
+                chave,
+                metodoChave: aberto.metodoChave || null,
+                usuario_id: obterUsuarioLogadoCentral()?.id,
+                correlationId: st.correlationId
+            })
+        }).catch(() => {});
+
+        UI.concluirEtapa?.('portal', 'Portal aberto.');
+        UI.definirEtapa?.(
+            'download',
+            aberto.chavePreenchida
+                ? 'Portal aberto. A chave já está preenchida — resolva o captcha e baixe o XML.'
+                : (aberto.chaveCopiada
+                    ? 'Portal aberto. A chave foi copiada — pressione CTRL+V e baixe o XML.'
+                    : 'Aguardando download do XML…')
+        );
+        UI.registrarLog?.('Portal aberto', aberto.chavePreenchida ? 'Chave preenchida' : 'Aguardando download');
+    } catch (error) {
+        const msg = String(error?.message || error);
+        const amigavel = msg.includes('No handler registered')
+            ? 'Integração Electron incompleta. Reinicie o CDS com npm run start:erp ou atualize o aplicativo.'
+            : ('Não foi possível abrir o Portal Nacional: ' + msg);
+        UI?.definirEtapa?.('portal', amigavel, { erro: true });
+        UI?.registrarTentativaFalha?.(amigavel);
+        UI?.registrarLog?.('Erro ao abrir Portal', amigavel);
+        UI?.setEmConsulta?.(false);
+        showNotification(amigavel, 'danger');
+    }
+}
+
+/**
+ * RC3.6.0 — CTA abre a Central de Recuperação CDS (não o Portal direto).
+ */
+async function recuperarPortalNfeCentral(documentoId, chave) {
+    if (!recuperacaoPortalNacionalHabilitadaCentral()) return;
+    return abrirCentralRecuperacaoXml(documentoId, chave);
+}
+
 async function solicitarXmlCompletoCentral(documentoId) {
     const confirmado = window.confirm(
-        'Enviar Ciência da Emissão (210210) à SEFAZ para solicitar o XML completo desta NF-e?'
+        'Solicitar recuperação manual do XML completo?\n\n'
+        + 'Na rotina normal o MIRX já acompanha automaticamente.\n'
+        + 'Use esta opção apenas em casos excepcionais.'
     );
     if (!confirmado) return;
 
     try {
-        const resultado = await centralEntradasFetch(`/${documentoId}/ciclo-dfe`, {
+        const resultado = await centralEntradasFetch(`/${documentoId}/solicitar-xml-completo`, {
             method: 'POST',
             body: JSON.stringify({
-                confirmado: true,
                 usuario_id: obterUsuarioLogadoCentral()?.id
             })
         });
+
+        if (resultado.gateBloqueado || resultado.naoEnfileirado) {
+            const msg = resultado.mensagem
+                || [
+                    'Consulta temporariamente bloqueada pela SEFAZ (cStat 656).',
+                    '',
+                    `Próxima tentativa automática: ${resultado.proximaTentativaLabel || 'em breve'}`,
+                    '',
+                    'Nenhuma ação é necessária. O MIRX fará uma nova tentativa automaticamente.'
+                ].join('\n');
+            showNotification(msg, 'warning');
+            await softRefreshDocumentoSelecionadoCentral();
+            return;
+        }
+
+        const mensagem = resultado.mensagem
+            || (resultado.xmlCompleto
+                ? '🟢 XML recuperado automaticamente.'
+                : 'Solicitação aceita. O MIRX continua o acompanhamento automático.');
+        const tipoNotificacao = resultado.xmlCompleto
+            ? 'success'
+            : (resultado.sucesso === false ? 'warning' : 'info');
         showNotification(
-            resultado.mensagem || (resultado.xmlCompleto
-                ? 'XML completo recebido.'
-                : 'Aguardando disponibilização do XML completo pela SEFAZ.'),
-            resultado.xmlCompleto ? 'success' : 'info'
+            resultado.cStat ? `[cStat ${resultado.cStat}] ${mensagem}` : mensagem,
+            tipoNotificacao
         );
         await Promise.all([
             carregarDashboardCentral(),
@@ -3439,6 +4494,24 @@ async function abrirRevisaoMiipCentral(documentoId) {
         }
     } catch (error) {
         showNotification('Erro ao abrir revisão: ' + error.message, 'danger');
+    }
+}
+
+function aplicarRetornoCentralDepoisDaRevisao(documentoId, doc) {
+    const reviewUx = (typeof window !== 'undefined' && window.CentralEntradasReviewUx)
+        || (typeof globalThis !== 'undefined' && globalThis.CentralEntradasReviewUx)
+        || null;
+    if (!reviewUx) return;
+
+    const retorno = reviewUx.montarRetornoCentralDepoisDaRevisao(documentoId, doc);
+    if (!retorno?.documentoId) return;
+
+    centralEntradasState.abaAtiva = retorno.aba || 'resumo';
+    centralEntradasState.documentoSelecionadoId = retorno.documentoId;
+    if (retorno.focarImportarCompra) {
+        setTimeout(() => {
+            reviewUx.prepararFocoImportarCompraCentral({ documentoId: retorno.documentoId });
+        }, 250);
     }
 }
 
@@ -3574,11 +4647,16 @@ async function carregarDocumentosCentral(opcoes = {}) {
             ordenar_direcao: centralEntradasState.ordenarDirecao
         };
 
+        const paramMap = {
+            dataEmissaoInicio: 'data_emissao_inicio',
+            dataEmissaoFim: 'data_emissao_fim',
+            filtroRapido: 'filtro_rapido'
+        };
+
         const params = new URLSearchParams();
         Object.entries(filtros).forEach(([chave, valor]) => {
             if (valor !== '' && valor != null) {
-                const param = chave === 'filtroRapido' ? 'filtro_rapido' : chave;
-                params.append(param, valor);
+                params.append(paramMap[chave] || chave, valor);
             }
         });
 
@@ -3589,6 +4667,7 @@ async function carregarDocumentosCentral(opcoes = {}) {
         centralEntradasState.totalPaginas = resultado.paginacao?.totalPaginas || 1;
         centralEntradasState.pagina = resultado.paginacao?.pagina || 1;
         centralEntradasState.loadingFase = 'concluido';
+        carregarIndicadoresFiscaisCentral().catch(() => {});
     } catch (error) {
         showNotification('Não foi possível carregar os documentos. Tente novamente.', 'danger');
         if (lista) {
@@ -3655,7 +4734,7 @@ function alternarOrdenacaoCentral(campo) {
  * ============================================================ */
 
 function limparFiltrosCentralEntradas() {
-    const ids = ['centralFiltroBusca', 'centralFiltroDataInicio', 'centralFiltroDataFim'];
+    const ids = ['centralFiltroBusca', 'centralFiltroDataInicio', 'centralFiltroDataFim', 'centralFiltroChave'];
     ids.forEach((id) => {
         const el = document.getElementById(id);
         if (el) el.value = '';
@@ -3665,8 +4744,31 @@ function limparFiltrosCentralEntradas() {
     if (status) status.value = '';
     if (origem) origem.value = '';
     centralEntradasState.filtroRapidoAtivo = '';
+    centralEntradasState.filaFiltroAtivo = 'todos';
     centralEntradasState.pagina = 1;
     renderFiltrosRapidosCentral();
+    renderCardsUx1CentralRefresh();
+    renderIndicadorFiltrosAtivosCentral();
+    carregarDocumentosCentral();
+}
+
+/** RC3.6.C — remove filtros restritivos e mantém o termo da pesquisa. */
+function limparFiltrosRestritivosManterBuscaCentral() {
+    const ids = ['centralFiltroDataInicio', 'centralFiltroDataFim', 'centralFiltroChave'];
+    ids.forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.value = '';
+    });
+    const status = document.getElementById('centralFiltroStatus');
+    const origem = document.getElementById('centralFiltroOrigem');
+    if (status) status.value = '';
+    if (origem) origem.value = '';
+    centralEntradasState.filtroRapidoAtivo = '';
+    centralEntradasState.filaFiltroAtivo = 'todos';
+    centralEntradasState.pagina = 1;
+    renderFiltrosRapidosCentral();
+    renderCardsUx1CentralRefresh();
+    renderIndicadorFiltrosAtivosCentral();
     carregarDocumentosCentral();
 }
 
@@ -3684,6 +4786,15 @@ function bindEventosCentralEntradas() {
 
     $(document).on('click.centralEntradas', '#centralEmptyLimparFiltros', function () {
         limparFiltrosCentralEntradas();
+    });
+
+    $(document).on('click.centralEntradas', '#centralEmptyLimparFiltrosManterBusca, #centralBtnLimparTodosFiltros', function () {
+        const id = this.id;
+        if (id === 'centralEmptyLimparFiltrosManterBusca') {
+            limparFiltrosRestritivosManterBuscaCentral();
+        } else {
+            limparFiltrosCentralEntradas();
+        }
     });
 
     $(document).on('keydown.centralEntradas', '.central-entradas-row, .central-ux1-doc-card', function (event) {
@@ -3717,12 +4828,34 @@ function bindEventosCentralEntradas() {
     });
 
     $(document).on('click.centralEntradas', '[data-filtro-kpi]', function () {
-        centralEntradasState.filtroRapidoAtivo = $(this).data('filtro-kpi');
-        const select = document.getElementById('centralFiltroStatus');
-        if (select) select.value = '';
+        const kpi = String($(this).data('filtro-kpi') || '');
+        aplicarFiltroFilaCentral(kpi === 'pendentes' ? 'pendentes' : (kpi || 'todos'));
+    });
+
+    $(document).on('click.centralEntradas', '[data-fila-filtro]', function () {
+        aplicarFiltroFilaCentral($(this).data('fila-filtro'));
+    });
+
+    $(document).on('click.centralEntradas', '#centralBtnFiltroAvancado', function () {
+        const painel = document.getElementById('centralFiltroAvancadoPainel');
+        if (!painel) return;
+        const aberto = !painel.classList.contains('d-none');
+        painel.classList.toggle('d-none', aberto);
+        centralEntradasState.avancadoAberto = !aberto;
+        this.setAttribute('aria-expanded', String(!aberto));
+    });
+
+    $(document).on('blur.centralEntradas', '#centralFiltroDataInicio, #centralFiltroDataFim', function () {
         centralEntradasState.pagina = 1;
-        renderFiltrosRapidosCentral();
         carregarDocumentosCentral();
+        carregarInteligenciaCentral().catch(() => {});
+    });
+
+    $(document).on('keydown.centralEntradas', '#centralFiltroDataInicio, #centralFiltroDataFim', function (event) {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            this.blur();
+        }
     });
 
     $(document).on('keydown.centralEntradas', '.central-entradas-card-click', function (event) {
@@ -3740,6 +4873,78 @@ function bindEventosCentralEntradas() {
     $(document).on('click.centralEntradas', '#centralBtnSolicitarXmlCompleto', function () {
         const id = Number($(this).data('doc-id'));
         if (id) solicitarXmlCompletoCentral(id);
+    });
+
+    $(document).on('click.centralEntradas', '#centralBtnPortalNfe', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        const id = Number($(this).data('doc-id'));
+        const chave = String($(this).data('chave') || '');
+        if (id) recuperarPortalNfeCentral(id, chave);
+    });
+
+    $(document).on('click.centralEntradas', '#centralBtnCopiarChave', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        const id = Number($(this).data('doc-id'));
+        const chave = String($(this).data('chave') || '');
+        if (id) copiarChaveAcessoCentral(id, chave);
+    });
+
+    $(document).on('click.centralEntradas', '[data-portal-nfe-id]', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        const id = Number($(this).data('portal-nfe-id'));
+        const chave = String($(this).data('portal-nfe-chave') || '');
+        if (id) recuperarPortalNfeCentral(id, chave);
+    });
+
+    $(document).on('click.centralEntradas', '[data-copiar-chave-id]', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        const id = Number($(this).data('copiar-chave-id'));
+        const chave = String($(this).data('copiar-chave') || '');
+        if (id) copiarChaveAcessoCentral(id, chave);
+    });
+
+    /* RC3.6.0 — Central de Recuperação CDS */
+    $(document).on('click.centralEntradas', '#centralRecuperacaoBtnConsultar', function (event) {
+        event.preventDefault();
+        if (typeof consultarPortalNacionalViaCentralRecuperacao === 'function') {
+            consultarPortalNacionalViaCentralRecuperacao();
+        }
+    });
+
+    $(document).on('click.centralEntradas', '#centralRecuperacaoBtnRetry', function (event) {
+        event.preventDefault();
+        const UI = window.CentralRecuperacaoXml;
+        UI?.reiniciarFluxo?.();
+        if (typeof consultarPortalNacionalViaCentralRecuperacao === 'function') {
+            consultarPortalNacionalViaCentralRecuperacao();
+        }
+    });
+
+    $(document).on('click.centralEntradas', '#centralRecuperacaoBtnAbrirPasta', function (event) {
+        event.preventDefault();
+        window.CentralRecuperacaoXml?.abrirPastaXml?.();
+    });
+
+    $(document).on('click.centralEntradas', '#centralRecuperacaoBtnFechar, #centralRecuperacaoBtnConcluir, [data-central-recuperacao-cancelar]', function (event) {
+        event.preventDefault();
+        const UI = window.CentralRecuperacaoXml;
+        const st = UI?.obterEstado?.();
+        const fecharBtn = event.currentTarget.id === 'centralRecuperacaoBtnFechar'
+            || event.currentTarget.id === 'centralRecuperacaoBtnConcluir';
+        if (!fecharBtn && st?.emConsulta && !st.erro
+            && st.etapasStatus?.recuperado !== 'concluido') {
+            return;
+        }
+        if (_portalNfeUnsub) {
+            _portalNfeUnsub();
+            _portalNfeUnsub = null;
+        }
+        _portalNfeDocAtivo = null;
+        UI?.fechar?.();
     });
 
     $(document).on('click.centralEntradas', '#centralBtnRevisarMiip', function () {
@@ -3790,6 +4995,51 @@ function bindEventosCentralEntradas() {
 
     $(document).on('click.centralEntradas', '#centralUploadEnviar', function () {
         enviarUploadCentralEntradas();
+    });
+
+    $(document).on('click.centralEntradas', '#centralBtnSelecionarXmlLegado', function () {
+        document.getElementById('centralImportLegadoInput')?.click();
+    });
+
+    $(document).on('change.centralEntradas', '#centralImportLegadoInput', function () {
+        adicionarArquivosImportacaoLegado(this.files).catch((err) => {
+            showNotification('Falha ao ler XML: ' + err.message, 'danger');
+        });
+        this.value = '';
+    });
+
+    $(document).on('click.centralEntradas', '#centralBtnProcessarXmlLegado', function () {
+        processarImportacaoXmlLegadoCentral();
+    });
+
+    $(document).on('click.centralEntradas', '.central-import-legado-remover', function () {
+        const idx = Number($(this).data('idx'));
+        if (Number.isNaN(idx)) return;
+        centralEntradasState.importacaoLegadoArquivos = (centralEntradasState.importacaoLegadoArquivos || [])
+            .filter((_, i) => i !== idx);
+        centralEntradasState.importacaoLegadoRelatorio = null;
+        renderImportacaoXmlLegadoCentral();
+    });
+
+    $(document).on('dragover.centralEntradas drop.centralEntradas', '#centralImportLegadoDropzone', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        const dropzone = this;
+        if (event.type === 'dragover') {
+            dropzone.classList.add('central-import-legado-dropzone--ativo');
+            return;
+        }
+        dropzone.classList.remove('central-import-legado-dropzone--ativo');
+        const files = event.originalEvent?.dataTransfer?.files;
+        if (files?.length) {
+            adicionarArquivosImportacaoLegado(files).catch((err) => {
+                showNotification('Falha ao ler XML: ' + err.message, 'danger');
+            });
+        }
+    });
+
+    $(document).on('dragleave.centralEntradas', '#centralImportLegadoDropzone', function () {
+        this.classList.remove('central-import-legado-dropzone--ativo');
     });
 
     $(document).on('click.centralEntradas', '#centralUploadLimpar', function () {
@@ -3843,6 +5093,35 @@ function bindEventosCentralEntradas() {
             carregarDashboardCentral(),
             carregarDocumentosCentral()
         ]).then(() => showNotification('Central atualizada.', 'info'));
+    });
+
+    $(document).on('click.centralEntradas', '[data-health-nivel]', function () {
+        const nivel = $(this).attr('data-health-nivel') || '';
+        filtrarAlertasSaudeCentral(nivel || null);
+    });
+
+    $(document).on('click.centralEntradas', '[data-health-doc]', async function () {
+        const id = Number($(this).data('health-doc'));
+        if (id) await selecionarDocumentoCentral(id);
+    });
+
+    $(document).on('click.centralEntradas', '#centralBtnSaudeAnalisar', async function () {
+        const btn = this;
+        btn.disabled = true;
+        try {
+            const painel = await centralEntradasFetch('/saude/analisar', {
+                method: 'POST',
+                body: JSON.stringify({ autoRecuperar: true }),
+                headers: { 'Content-Type': 'application/json' }
+            });
+            centralEntradasState.saudeCentral = painel;
+            renderPainelSaudeCentralUx();
+            showNotification('Análise de saúde concluída (sem consulta à SEFAZ).', 'success');
+        } catch (e) {
+            showNotification(e.message || 'Falha na análise de saúde.', 'error');
+        } finally {
+            btn.disabled = false;
+        }
     });
 
     $(document).on('click.centralEntradas', '#centralBtnAtualizarDashboard', function () {
@@ -3910,28 +5189,27 @@ function bindEventosCentralEntradas() {
         }
     });
 
-    $(document).on('click.centralEntradas', '.central-ux1-filtro', function () {
+    $(document).on('click.centralEntradas', '.central-ux1-filtro, .central-rc40-chip', function (e) {
+        if ($(this).data('fila-filtro') != null) return; // handled by [data-fila-filtro]
         const codigo = String($(this).data('filtro-rapido') ?? '');
         const status = $(this).data('filtro-status') || '';
         const select = document.getElementById('centralFiltroStatus');
 
-        if (codigo === '') {
-            centralEntradasState.filtroRapidoAtivo = '';
-            if (select) select.value = '';
-        } else if (codigo.startsWith('_status_')) {
+        if (codigo === '' || codigo === 'todos') {
+            aplicarFiltroFilaCentral('todos');
+            return;
+        }
+        if (codigo.startsWith('_status_')) {
+            centralEntradasState.filaFiltroAtivo = status === 'GRAVADA' ? 'importadas' : (status === 'ERRO' ? 'atencao' : 'todos');
             centralEntradasState.filtroRapidoAtivo = '';
             if (select) select.value = status;
-        } else if (centralEntradasState.filtroRapidoAtivo === codigo) {
-            centralEntradasState.filtroRapidoAtivo = '';
-            if (select) select.value = '';
-        } else {
-            centralEntradasState.filtroRapidoAtivo = codigo;
-            if (select) select.value = '';
+            centralEntradasState.pagina = 1;
+            renderFiltrosRapidosCentral();
+            renderCardsUx1CentralRefresh();
+            carregarDocumentosCentral();
+            return;
         }
-
-        centralEntradasState.pagina = 1;
-        renderFiltrosRapidosCentral();
-        carregarDocumentosCentral();
+        aplicarFiltroFilaCentral(codigo);
     });
 
     $(document).on('click.centralEntradas', '.central-atencao-acao', function () {
@@ -4019,7 +5297,6 @@ function loadCentralEntradas() {
     const html = `
         <div class="central-ux1-page">
             <div id="centralUx1Header"></div>
-            <div id="centralRc75SaudeWrap" class="mb-3"></div>
 
             <div id="centralEntradasViewConfig" class="d-none mb-4">
                 <div class="card central-cfg-panel">
@@ -4062,6 +5339,11 @@ function loadCentralEntradas() {
                                 <option value="MANIFESTACAO_REJEITADA">Manifestação rejeitada</option>
                                 <option value="CONSULTA_DFE_POS_MANIFESTACAO">Nova consulta DF-e</option>
                                 <option value="PARSER_CONCLUIDO">Parser</option>
+                                <option value="PARSER_INICIADO">Parser iniciado</option>
+                                <option value="PARSER_FINALIZADO">Parser finalizado</option>
+                                <option value="XML_IMPORTADO_MANUALMENTE">XML importado manualmente</option>
+                                <option value="XML_VALIDADO">XML validado</option>
+                                <option value="XML_REJEITADO">XML rejeitado</option>
                                 <option value="MIIP_CONCLUIDO">MIIP</option>
                                 <option value="COMPRA_GRAVADA">Compra gravada</option>
                                 <option value="ERRO">Erro</option>
@@ -4101,44 +5383,93 @@ function loadCentralEntradas() {
                 </div>
             </div>
 
+            <div id="centralEntradasViewImportacaoLegado" class="d-none mb-4">
+                <div class="card central-import-legado-panel">
+                    <div class="card-header d-flex justify-content-between align-items-start flex-wrap gap-2">
+                        <div>
+                            <div class="fw-semibold"><i class="fas fa-file-import me-2"></i> Importação de XML Legado</div>
+                            <div class="small text-muted">Ferramentas Administrativas · RC3.4.9 · pipeline oficial (Parser → MIIP → Compra)</div>
+                        </div>
+                        <button type="button" class="btn btn-sm btn-outline-light central-nav-view" data-view="inbox" title="Voltar à Central">
+                            <i class="fas fa-arrow-left me-1"></i> Voltar
+                        </button>
+                    </div>
+                    <div class="card-body" id="centralImportacaoLegadoBody">
+                        <div class="text-center py-4 text-muted">Carregando…</div>
+                    </div>
+                </div>
+            </div>
+
             <div id="centralEntradasViewInbox">
 
             <div id="centralEntradasAtencao"></div>
 
-            <div id="centralEntradasCards" class="central-ux1-kpis" aria-busy="true">
-                ${Array.from({ length: 8 }, () => `
-                    <div class="central-ux1-kpi central-ux-skeleton-kpi" aria-hidden="true">
+            <div id="centralIndicadoresFiscais" class="mb-2" aria-live="polite"></div>
+
+            <div id="centralEntradasCards" class="central-rc40-kpis" aria-busy="true">
+                ${Array.from({ length: 4 }, () => `
+                    <button type="button" class="central-rc40-kpi central-ux-skeleton-kpi" aria-hidden="true" disabled>
                         <div class="central-ux-skeleton central-ux-skeleton-circle"></div>
                         <div class="flex-grow-1">
                             <div class="central-ux-skeleton central-ux-skeleton-line central-ux-skeleton-line--lg"></div>
                             <div class="central-ux-skeleton central-ux-skeleton-line central-ux-skeleton-line--sm mt-1"></div>
                         </div>
-                    </div>
+                    </button>
                 `).join('')}
             </div>
 
-            <div class="central-ux1-toolbar">
-                <div class="central-ux1-busca">
+            <div id="centralEntradasFiltrosRapidos" class="mb-2"></div>
+
+            <div class="central-rc40-toolbar central-ux1-toolbar">
+                <div class="central-ux1-busca flex-grow-1">
                     <i class="fas fa-search" aria-hidden="true"></i>
                     <input type="search" class="form-control" id="centralFiltroBusca"
-                        placeholder="Pesquisar: fornecedor, número, chave, CNPJ, valor..."
-                        title="Pesquisa instantânea por fornecedor, número, chave, produto, valor ou CNPJ"
+                        placeholder="Pesquisar: fornecedor, NF-e, chave, protocolo, CNPJ..."
+                        title="Pesquisa por fornecedor, NF-e, chave, protocolo ou CNPJ"
                         autocomplete="off">
                 </div>
-                <div class="central-ux1-filtros" id="centralEntradasFiltrosRapidos"></div>
+                <div class="central-rc40-periodo">
+                    <input type="date" class="form-control form-control-sm" id="centralFiltroDataInicio" title="Data de emissão — início">
+                    <span class="text-muted small">até</span>
+                    <input type="date" class="form-control form-control-sm" id="centralFiltroDataFim" title="Data de emissão — fim">
+                </div>
+                <button type="button" class="btn btn-outline-secondary btn-sm" id="centralBtnFiltroAvancado" title="Filtro avançado" aria-expanded="false">
+                    <i class="fas fa-sliders-h"></i> Avançado
+                </button>
                 <button type="button" class="btn btn-outline-secondary btn-sm" id="centralBtnAtualizar" title="Atualizar lista e indicadores">
                     <i class="fas fa-redo-alt"></i>
                 </button>
             </div>
+            <div id="centralFiltroAvancadoPainel" class="central-rc40-avancado d-none">
+                <div class="row g-2 align-items-end">
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1" for="centralFiltroStatus">Status</label>
+                        <select class="form-select form-select-sm" id="centralFiltroStatus"><option value="">Todos</option></select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1" for="centralFiltroOrigem">Origem</label>
+                        <select class="form-select form-select-sm" id="centralFiltroOrigem"><option value="">Todas</option></select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small mb-1" for="centralFiltroChave">Chave / Protocolo</label>
+                        <div class="input-group input-group-sm">
+                            <input type="text" class="form-control" id="centralFiltroChave" maxlength="44" placeholder="44 dígitos">
+                            <button type="button" class="btn btn-outline-primary" id="centralBtnBuscarChave" title="Buscar chave na SEFAZ"><i class="fas fa-key"></i></button>
+                        </div>
+                    </div>
+                    <div class="col-12 d-flex gap-2">
+                        <button type="button" class="btn btn-sm btn-primary" id="centralBtnFiltrar">Aplicar</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" id="centralEmptyLimparFiltros">Limpar</button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="centralFiltrosAtivosWrap" class="d-none" aria-live="polite"></div>
+
+            <div id="centralRc75SaudeWrap" class="mb-2"></div>
+            <div id="centralSaudeWrap" class="mb-2"></div>
 
             <div class="d-none" aria-hidden="true">
-                <input type="text" id="centralFiltroChave" maxlength="44">
-                <select id="centralFiltroStatus"><option value="">Todos</option></select>
-                <select id="centralFiltroOrigem"><option value="">Todas</option></select>
-                <input type="date" id="centralFiltroDataInicio">
-                <input type="date" id="centralFiltroDataFim">
-                <button type="button" id="centralBtnFiltrar"></button>
-                <button type="button" id="centralBtnBuscarChave"></button>
                 <button type="button" id="centralBtnExportarXml"></button>
                 <button type="button" id="centralBtnAtualizarDashboard"></button>
             </div>
@@ -4146,7 +5477,7 @@ function loadCentralEntradas() {
             <div class="central-ux1-corpo">
                 <div class="central-ux1-lista-card">
                     <div class="central-ux1-lista-header">
-                        <span><i class="fas fa-file-invoice me-2"></i> Documentos Fiscais</span>
+                        <span><i class="fas fa-tasks me-2"></i> Documentos</span>
                         <span class="badge bg-secondary" id="centralEntradasContador">0 documentos</span>
                     </div>
                     <div class="central-ux1-lista-body" id="centralEntradasListaDocs">
@@ -4223,6 +5554,16 @@ function loadCentralEntradas() {
     iniciarAutomacaoCentral();
 
     const posGravacao = sessionStorage.getItem('central_pos_gravacao');
+
+    centralEntradasFetch('/feature-flags')
+        .then((flags) => {
+            centralEntradasState.featureFlags = {
+                ...centralEntradasState.featureFlags,
+                ...(flags || {})
+            };
+            centralUx().setFeatureFlagsCentral?.(centralEntradasState.featureFlags);
+        })
+        .catch(() => {});
 
     centralEntradasFetch('/metadados')
         .then((metadados) => {

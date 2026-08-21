@@ -26,9 +26,42 @@ async function listar(req, res) {
 
 async function discovery(req, res) {
   try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const engineV1 = body.engine === 'v1'
+      || body.modo === 'v1'
+      || body.simples === true
+      || req.query.engine === 'v1'
+      || req.query.v === '1';
+
+    // Sprint 14.1 — Discovery Engine V1.0 (TCP porta 9000, sem fabricante)
+    if (engineV1) {
+      const discoveryEngineV1 = require('../motores/equipamentos/discovery/DiscoveryEngineV1');
+      const resultado = await discoveryEngineV1.executar({
+        timeoutMs: body.timeoutMs,
+        concorrencia: body.concorrencia,
+        maxHosts: body.maxHosts,
+        portas: body.portas,
+        persistir: body.persistir !== false
+      });
+      if (body.meta === true || body.meta === 1 || req.query.meta === '1') {
+        return res.json({
+          success: true,
+          equipamentos: resultado.equipamentos,
+          candidatos: (resultado.candidatos || []).map((c) => ({
+            ...c,
+            ip: c.host,
+            transporte: 'ethernet',
+            ja_cadastrado: false
+          })),
+          meta: resultado.meta
+        });
+      }
+      // Aceite oficial: array [{host, porta, status, latencia}]
+      return res.json(resultado.equipamentos || []);
+    }
+
     const discoveryService = require('../motores/equipamentos/discovery/DiscoveryService');
     const identidadeService = require('../motores/equipamentos/identidade/IdentidadeService');
-    const body = req.body && typeof req.body === 'object' ? req.body : {};
     const transportes = Array.isArray(body.transportes) && body.transportes.length
       ? body.transportes
       : ['ethernet'];
@@ -101,11 +134,20 @@ async function buscarIdentidade(req, res) {
 async function discoveryCancelar(req, res) {
   try {
     const discoveryService = require('../motores/equipamentos/discovery/DiscoveryService');
+    const discoveryEngineV1 = require('../motores/equipamentos/discovery/DiscoveryEngineV1');
+    const ethernetDiscovery = require('../motores/equipamentos/discovery/EthernetDiscovery');
+    const discoveryManager = require('../motores/equipamentos/discovery/DiscoveryManager');
     discoveryService.cancelar();
+    discoveryEngineV1.cancelar();
+    ethernetDiscovery.cancelar();
+    discoveryManager.cancelar();
     res.json({
       success: true,
       cancelado: true,
       em_execucao: discoveryService.estaEmExecucao()
+        || discoveryEngineV1.estaEmExecucao()
+        || ethernetDiscovery.estaEmExecucao()
+        || discoveryManager.estaEmExecucao()
     });
   } catch (error) {
     responderErro(res, error, 'Erro ao cancelar discovery.', 500);
@@ -199,8 +241,28 @@ async function desativar(req, res) {
 
 async function listarDrivers(req, res) {
   try {
+    // Sprint 15.7 — Device Profile SDK (fonte canônica de drivers instalados)
+    try {
+      const sdk = require('../motores/equipamentos/sdk');
+      sdk.ensureLoaded();
+      const drivers = sdk.listarDrivers({
+        categoria: req.query.categoria,
+        fabricante: req.query.fabricante,
+        capability: req.query.capability
+      });
+      return res.json({
+        success: true,
+        drivers,
+        total: drivers.length,
+        fonte: 'device-profile-sdk',
+        relatorio: sdk.loader.obterRelatorio()
+      });
+    } catch (sdkErr) {
+      console.warn('[equipamentos] SDK drivers fallback:', sdkErr.message);
+    }
+
     const drivers = await equipamentosService.listarDrivers();
-    res.json({ success: true, drivers });
+    res.json({ success: true, drivers, fonte: 'legado' });
   } catch (error) {
     responderErro(res, error, 'Erro ao listar drivers.');
   }

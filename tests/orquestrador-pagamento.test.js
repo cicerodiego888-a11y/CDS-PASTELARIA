@@ -93,6 +93,28 @@ test('Montagem — venda mista grava somente recebimentos fiscais na 1ª etapa',
   assert.strictEqual(recebimentos[0].valor, 71.2);
 });
 
+test('Montagem — venda mista quitada grava fiscal + não fiscal', () => {
+  const recebimentos = montarRecebimentosParaGravar({
+    distribuicao: {
+      recebimentosFiscal: [
+        { forma_pagamento: 'dinheiro', valor: 4, tipo_recebimento: 'fiscal' }
+      ],
+      recebimentosNaoFiscal: [
+        { forma_pagamento: 'dinheiro', valor: 23.44, tipo_recebimento: 'nao_fiscal' }
+      ]
+    },
+    statusPagamento: 'quitada',
+    totalFiscal: 4,
+    totalNaoFiscal: 23.44
+  });
+
+  assert.strictEqual(recebimentos.length, 2);
+  assert.strictEqual(recebimentos[0].tipo_recebimento, 'fiscal');
+  assert.strictEqual(recebimentos[0].valor, 4);
+  assert.strictEqual(recebimentos[1].tipo_recebimento, 'nao_fiscal');
+  assert.strictEqual(recebimentos[1].valor, 23.44);
+});
+
 test('Montagem — venda somente não fiscal grava recebimento não fiscal', () => {
   const recebimentos = montarRecebimentosParaGravar({
     distribuicao: {

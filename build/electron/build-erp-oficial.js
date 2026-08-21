@@ -11,6 +11,9 @@ const {
   gerarManifesto,
   escreverManifesto,
   compararRepoComAsar,
+  escreverManifestoBuild,
+  gerarManifestoBuild,
+  executarSmokeTestAsar,
   ARQUIVOS_OBRIGATORIOS,
   resumoManifesto
 } = require('../../electron-integrity');
@@ -58,6 +61,10 @@ function main() {
 
   validarFonte();
 
+  run('npm', ['run', 'test:muc-certificacao']);
+
+  run('node', ['tests/e2e/release-certification/run.js']);
+
   const manifesto = gerarManifesto(root, { modulo: 'erp' });
   escreverManifesto(root, manifesto);
   console.log(TAG, 'manifesto', resumoManifesto(manifesto));
@@ -70,14 +77,16 @@ function main() {
 
   limparDistErp();
 
-  run('npx', ['electron-builder', '--config', 'electron-builder-erp.json']);
+  run('npx', ['electron-builder', '--config', 'electron-builder-erp.json'], {
+    env: { ...process.env, CSC_IDENTITY_AUTO_DISCOVERY: 'false' }
+  });
 
   const asarPath = path.join(distErp, 'win-unpacked', 'resources', 'app.asar');
   if (!fs.existsSync(asarPath)) {
     fail(`app.asar não encontrado após build: ${asarPath}`);
   }
 
-  const cmp = compararRepoComAsar(root, asarPath, { manifesto });
+  const cmp = compararRepoComAsar(root, asarPath, { manifesto, modulo: 'erp' });
   if (!cmp.ok) {
     try {
       fs.rmSync(distErp, { recursive: true, force: true });
@@ -86,6 +95,17 @@ function main() {
     }
     fail(`pós-build: asar inválido\n${cmp.erros.join('\n')}\ncamadas=${JSON.stringify(cmp.porCamada)}`);
   }
+
+  run('node', ['tests/muc/rc431-build-certificacao.test.js', '--require-asar']);
+
+  const smoke = executarSmokeTestAsar(asarPath);
+  if (!smoke.ok) {
+    fail(`smoke test asar falhou:\n${smoke.erros.join('\n')}`);
+  }
+
+  const buildManifest = gerarManifestoBuild(root, asarPath, cmp, { manifesto, smoke });
+  escreverManifestoBuild(root, buildManifest);
+  console.log(TAG, 'build manifest', buildManifest.certificacao.resultado, buildManifest.hashAppAsar.slice(0, 16) + '…');
 
   const setups = fs.existsSync(distErp)
     ? fs.readdirSync(distErp).filter((f) => /\.exe$/i.test(f) && /Setup/i.test(f))

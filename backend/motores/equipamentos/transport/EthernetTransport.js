@@ -1,31 +1,39 @@
 /**
- * EthernetTransport — Transporte TCP/Ethernet com comunicação real (Sprint 8).
+ * EthernetTransport (legado) — RC14.14.1
  *
- * Utiliza o módulo nativo `net` do Node.js.
- * Não implementa protocolo de fabricante — apenas conexão TCP reutilizável.
+ * Em produção NÃO abre socket próprio.
+ * Delega para o ConnectionManager oficial (connection/).
  *
- * @class EthernetTransport
+ * Lab/compat: CDS_LEGACY_TRANSPORT_SOCKET=1 reativa net.createConnection.
  */
+
+'use strict';
 
 const net = require('net');
 const BaseTransport = require('./BaseTransport');
 const loggerService = require('../services/LoggerService');
 
-const TIMEOUT_PADRAO = Number(process.env.EQUIPAMENTOS_ETHERNET_TIMEOUT_MS || 5000);
+const { PORTA_PADRAO } = require('../drivers/toledo/ToledoProtocol');
+const ToledoTimeouts = require('../drivers/toledo/ToledoTimeouts');
+
+const TIMEOUT_PADRAO = ToledoTimeouts.CONNECT;
 const MAX_RECONEXOES_PADRAO = Number(process.env.EQUIPAMENTOS_ETHERNET_MAX_RECONNECT || 3);
 const INTERVALO_RECONEXAO_PADRAO = Number(process.env.EQUIPAMENTOS_ETHERNET_RECONNECT_MS || 2000);
+const ALLOW_LEGACY_SOCKET = process.env.CDS_LEGACY_TRANSPORT_SOCKET === '1';
 
 class EthernetTransport extends BaseTransport {
   constructor(config = {}) {
     super(config);
     this._host = config.host || config.ip || '127.0.0.1';
-    this._porta = Number(config.porta || config.port || 9100);
+    this._porta = Number(config.porta || config.port || PORTA_PADRAO);
     this._timeout = config.timeout ?? TIMEOUT_PADRAO;
     this._maxReconexoes = config.tentativas ?? config.maxReconexoes ?? MAX_RECONEXOES_PADRAO;
     this._intervaloReconexao = config.intervaloReconexao ?? INTERVALO_RECONEXAO_PADRAO;
     this._tentativasReconexao = 0;
     /** @type {import('net').Socket|null} */
     this._socket = null;
+    /** @type {boolean} */
+    this._delegado = false;
     /** @type {Buffer[]} */
     this._bufferRecebimento = [];
     /** @type {Array<{resolve: Function, reject: Function, timer: NodeJS.Timeout}>} */
@@ -39,11 +47,19 @@ class EthernetTransport extends BaseTransport {
     return 'ethernet';
   }
 
-  // ─── Aliases em inglês (Sprint 8) ─────────────────────────────
-
   connect() { return this.conectar(); }
   disconnect() { return this.desconectar(); }
-  isConnected() { return this.estaConectado() && !!this._socket && !this._socket.destroyed; }
+  isConnected() {
+    if (this._delegado) {
+      try {
+        const cm = require('../connection/ConnectionManager');
+        return cm.isConnected({ host: this._host, porta: this._porta });
+      } catch (_) {
+        return false;
+      }
+    }
+    return this.estaConectado() && !!this._socket && !this._socket.destroyed;
+  }
   write(dados) { return this.enviar(dados); }
   read(opcoes) { return this.receber(opcoes); }
   reconnect() { return this.reconectar(); }
@@ -52,12 +68,6 @@ class EthernetTransport extends BaseTransport {
     return this._timeout;
   }
 
-  /**
-   * @param {string} mensagem
-   * @param {string} status
-   * @param {Object} [detalhe]
-   * @private
-   */
   async _logConexao(mensagem, status, detalhe = {}) {
     await loggerService.logTransporte({
       transporte: 'ethernet',
@@ -72,362 +82,199 @@ class EthernetTransport extends BaseTransport {
   }
 
   /**
-   * @returns {Promise<import('net').Socket>}
-   * @private
+   * RC14.14.1 — delega ao CM oficial (sem abrir socket legado).
    */
+  async conectar() {
+    if (!ALLOW_LEGACY_SOCKET) {
+      const cm = require('../connection/ConnectionManager');
+      await cm.connect({
+        host: this._host,
+        porta: this._porta,
+        timeoutMs: this._timeout || ToledoTimeouts.CONNECT,
+        persistir: this.config.persistir !== false
+      });
+      this._delegado = true;
+      this._conectadoEm = new Date().toISOString();
+      this._marcadoConectado();
+      await this._logConexao('Conexão delegada ao ConnectionManager oficial', 'ok', {
+        operacao: 'conectar_delegado'
+      });
+      return cm.getTcp({ host: this._host, porta: this._porta });
+    }
+
+    return this._conectarLegadoSocket();
+  }
+
   _abrirSocket() {
     return new Promise((resolve, reject) => {
       const socket = net.createConnection({
         host: this._host,
         port: this._porta
       });
-
       const timer = setTimeout(() => {
         socket.destroy();
-        reject(new Error('Timeout de conexão'));
+        const err = new Error(`Timeout TCP ${this._timeout}ms`);
+        err.code = 'TCP_TIMEOUT';
+        reject(err);
       }, this._timeout);
 
-      const limpar = () => clearTimeout(timer);
-
       socket.once('connect', () => {
-        limpar();
-        socket.setTimeout(this._timeout);
+        clearTimeout(timer);
         resolve(socket);
       });
-
       socket.once('error', (err) => {
-        limpar();
+        clearTimeout(timer);
         reject(err);
       });
     });
   }
 
-  /**
-   * @param {import('net').Socket} socket
-   * @private
-   */
-  _vincularSocket(socket) {
-    this._socket = socket;
-
-    socket.on('data', (chunk) => {
-      this._bufferRecebimento.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-      this._entregarLeituraPendente();
+  async _conectarLegadoSocket() {
+    if (this.isConnected()) return this._socket;
+    this._socket = await this._abrirSocket();
+    this._conectadoEm = new Date().toISOString();
+    this._marcadoConectado();
+    this._socket.on('data', (buf) => {
+      if (this._aguardandoLeitura.length) {
+        const wait = this._aguardandoLeitura.shift();
+        clearTimeout(wait.timer);
+        wait.resolve(buf);
+      } else {
+        this._bufferRecebimento.push(buf);
+      }
     });
-
-    socket.on('timeout', () => {
-      this._ultimoErro = 'Timeout de socket';
-      this._logConexao('Timeout', 'timeout', { operacao: 'timeout' }).catch(() => {});
-    });
-
-    socket.on('error', (err) => {
-      this._ultimoErro = err.message;
-      this._logConexao('Erro', 'erro', { operacao: 'erro', erro: err.message }).catch(() => {});
-    });
-
-    socket.on('close', () => {
-      this._conectado = false;
-      this._rejeitarLeiturasPendentes(new Error('Conexão encerrada'));
-      this._logConexao('Desconectado', 'desconectado', { operacao: 'desconectar' }).catch(() => {});
-    });
-  }
-
-  /**
-   * @private
-   */
-  _entregarLeituraPendente() {
-    if (!this._aguardandoLeitura.length || !this._bufferRecebimento.length) return;
-
-    const dados = Buffer.concat(this._bufferRecebimento);
-    this._bufferRecebimento = [];
-
-    const waiter = this._aguardandoLeitura.shift();
-    clearTimeout(waiter.timer);
-    waiter.resolve(dados);
-  }
-
-  /**
-   * @param {Error} erro
-   * @private
-   */
-  _rejeitarLeiturasPendentes(erro) {
-    while (this._aguardandoLeitura.length) {
-      const waiter = this._aguardandoLeitura.shift();
-      clearTimeout(waiter.timer);
-      waiter.reject(erro);
-    }
-  }
-
-  /**
-   * @param {Object} [extras]
-   * @returns {Object}
-   * @private
-   */
-  _resposta(extras = {}) {
-    return {
-      sucesso: true,
-      simulado: false,
-      comunicacao_real: true,
-      transporte: 'ethernet',
-      host: this._host,
-      porta: this._porta,
-      conectado: this.isConnected(),
-      timestamp: new Date().toISOString(),
-      ...extras
-    };
-  }
-
-  async conectar() {
-    if (this.isConnected()) {
-      return this._resposta({ metodo: 'conectar', mensagem: 'Já conectado' });
-    }
-
-    await this._logConexao('Conectando...', 'conectando', { operacao: 'conectar' });
-
-    try {
-      const socket = await this._abrirSocket();
-      this._vincularSocket(socket);
-      this._conectado = true;
-      this._conectadoEm = Date.now();
-      this._tentativasReconexao = 0;
-      this._ultimoErro = null;
-
-      await this._logConexao('Conectado', 'conectado', { operacao: 'conectar' });
-
-      return this._resposta({
-        metodo: 'conectar',
-        mensagem: 'Conectado',
-        conectado_em: new Date(this._conectadoEm).toISOString()
-      });
-    } catch (err) {
-      this._ultimoErro = err.message;
-      this._conectado = false;
+    this._socket.on('close', () => {
+      this._marcadoDesconectado();
       this._socket = null;
-
-      const isTimeout = /timeout/i.test(err.message);
-      await this._logConexao(
-        isTimeout ? 'Timeout' : 'Erro',
-        isTimeout ? 'timeout' : 'erro',
-        { operacao: 'conectar', erro: err.message }
-      );
-
-      throw err;
-    }
+    });
+    this._socket.on('error', (err) => {
+      this._ultimoErro = err.message;
+    });
+    await this._logConexao('Socket legado aberto (CDS_LEGACY_TRANSPORT_SOCKET=1)', 'ok', {
+      operacao: 'conectar_legado'
+    });
+    return this._socket;
   }
 
   async desconectar() {
-    await this._logConexao('Desconectando...', 'desconectando', { operacao: 'desconectar' });
-
-    this._rejeitarLeiturasPendentes(new Error('Desconectado'));
-
-    if (this._socket && !this._socket.destroyed) {
-      this._socket.destroy();
+    if (this._delegado) {
+      try {
+        const cm = require('../connection/ConnectionManager');
+        const { podeHeartbeatDisconnect } = require('../connection/SessionBusy');
+        const session = typeof cm.getSession === 'function'
+          ? cm.getSession({ host: this._host, porta: this._porta })
+          : null;
+        // RC15.10 — Heartbeat/legado NÃO derruba sessão busy ou persistente
+        if (!podeHeartbeatDisconnect(session)) {
+          await this._logConexao(
+            'desconectar ignorado — sessão busy/persistente (RC15.10)',
+            'ok',
+            { operacao: 'desconectar_bloqueado_rc1510', busy: session?.busy, persistent: session?.persistent }
+          );
+          this._delegado = false;
+          this._marcadoDesconectado();
+          return;
+        }
+        await cm.disconnect({ host: this._host, porta: this._porta });
+      } catch (_) { /* ignore */ }
+      this._delegado = false;
+      this._marcadoDesconectado();
+      return;
     }
+    if (this._socket) {
+      try { this._socket.destroy(); } catch (_) { /* ignore */ }
+      this._socket = null;
+    }
+    this._marcadoDesconectado();
+  }
 
-    this._socket = null;
-    this._conectado = false;
-    this._bufferRecebimento = [];
-
-    await this._logConexao('Desconectado', 'desconectado', { operacao: 'desconectar' });
-
-    return this._resposta({
-      metodo: 'desconectar',
-      mensagem: 'Desconectado',
-      conectado: false
-    });
+  estaConectado() {
+    return this.isConnected();
   }
 
   async enviar(dados) {
-    if (!this.isConnected()) {
-      throw new Error('EthernetTransport: não conectado');
+    const buf = Buffer.isBuffer(dados) ? dados : Buffer.from(dados);
+    if (this._delegado) {
+      const cm = require('../connection/ConnectionManager');
+      return cm.send({ host: this._host, porta: this._porta }, buf);
     }
-
-    const payload = Buffer.isBuffer(dados) ? dados : Buffer.from(String(dados));
-
-    return new Promise((resolve, reject) => {
-      this._socket.write(payload, (err) => {
-        if (err) {
-          this._ultimoErro = err.message;
-          reject(err);
-          return;
-        }
-        loggerService.logTransporte({
-          transporte: 'ethernet',
-          operacao: 'enviar',
-          equipamento_id: this.config.equipamento_id ?? null,
-          status: 'ok',
-          detalhe: { bytes: payload.length }
-        }).catch(() => {});
-        resolve(this._resposta({ metodo: 'enviar', bytes: payload.length }));
-      });
-    });
+    if (!this._socket || this._socket.destroyed) {
+      const err = new Error('EthernetTransport: não conectado');
+      err.code = 'NOT_CONNECTED';
+      throw err;
+    }
+    this._socket.write(buf);
+    return buf.length;
   }
 
-  async receber(opcoes = {}) {
-    if (!this.isConnected()) {
-      throw new Error('EthernetTransport: não conectado');
+  receber(opcoes = {}) {
+    const timeoutMs = opcoes.timeoutMs != null ? Number(opcoes.timeoutMs) : ToledoTimeouts.READ;
+    if (this._delegado) {
+      const cm = require('../connection/ConnectionManager');
+      return cm.receive({ host: this._host, porta: this._porta }, { timeoutMs });
     }
-
-    const timeoutMs = opcoes.timeout ?? this._timeout;
-
-    if (this._bufferRecebimento.length) {
-      const dados = Buffer.concat(this._bufferRecebimento);
-      this._bufferRecebimento = [];
-      return this._resposta({ metodo: 'receber', dados, timeout: timeoutMs });
-    }
-
     return new Promise((resolve, reject) => {
+      if (this._bufferRecebimento.length) {
+        resolve(this._bufferRecebimento.shift());
+        return;
+      }
       const timer = setTimeout(() => {
         const idx = this._aguardandoLeitura.findIndex((w) => w.timer === timer);
         if (idx >= 0) this._aguardandoLeitura.splice(idx, 1);
-        this._ultimoErro = 'Timeout de leitura';
-        this._logConexao('Timeout', 'timeout', { operacao: 'receber' }).catch(() => {});
-        reject(new Error('Timeout de leitura'));
+        const err = new Error('Timeout leitura');
+        err.code = 'READ_TIMEOUT';
+        reject(err);
       }, timeoutMs);
-
-      this._aguardandoLeitura.push({
-        resolve: (dados) => {
-          resolve(this._resposta({ metodo: 'receber', dados, timeout: timeoutMs }));
-        },
-        reject,
-        timer
-      });
-    });
-  }
-
-  async ping() {
-    if (!this.isConnected()) {
-      return {
-        sucesso: false,
-        comunicacao_real: true,
-        host: this._host,
-        porta: this._porta,
-        mensagem: 'Não conectado'
-      };
-    }
-
-    const inicio = Date.now();
-    const ok = this._socket.writable && !this._socket.destroyed;
-
-    await loggerService.logTransporte({
-      transporte: 'ethernet',
-      operacao: 'ping',
-      equipamento_id: this.config.equipamento_id ?? null,
-      status: ok ? 'ok' : 'erro'
-    }).catch(() => {});
-
-    return this._resposta({
-      metodo: 'ping',
-      sucesso: ok,
-      latencia_ms: Date.now() - inicio
-    });
-  }
-
-  async status() {
-    const tempoConexaoMs = this._conectadoEm ? Date.now() - this._conectadoEm : 0;
-
-    return this._resposta({
-      metodo: 'status',
-      conectado: this.isConnected(),
-      timeout: this._timeout,
-      tentativas_reconexao: this._tentativasReconexao,
-      max_reconexoes: this._maxReconexoes,
-      intervalo_reconexao: this._intervaloReconexao,
-      tempo_conexao_ms: tempoConexaoMs,
-      ultimo_erro: this._ultimoErro,
-      buffer_recebimento: this._bufferRecebimento.length
-    });
-  }
-
-  async reiniciar() {
-    await this.desconectar();
-    this._bufferRecebimento = [];
-    this._tentativasReconexao = 0;
-    return this.conectar();
-  }
-
-  async configurar(novaConfig = {}) {
-    if (novaConfig.host || novaConfig.ip) this._host = novaConfig.host || novaConfig.ip;
-    if (novaConfig.porta || novaConfig.port) this._porta = Number(novaConfig.porta || novaConfig.port);
-    if (novaConfig.timeout != null) this._timeout = Number(novaConfig.timeout);
-    if (novaConfig.tentativas != null) this._maxReconexoes = Number(novaConfig.tentativas);
-    if (novaConfig.maxReconexoes != null) this._maxReconexoes = Number(novaConfig.maxReconexoes);
-    if (novaConfig.intervaloReconexao != null) {
-      this._intervaloReconexao = Number(novaConfig.intervaloReconexao);
-    }
-    this.config = { ...this.config, ...novaConfig };
-
-    await loggerService.logTransporte({
-      transporte: 'ethernet',
-      operacao: 'configurar',
-      status: 'configurado',
-      detalhe: { host: this._host, porta: this._porta, timeout: this._timeout }
-    }).catch(() => {});
-
-    return this._resposta({
-      metodo: 'configurar',
-      host: this._host,
-      porta: this._porta,
-      timeout: this._timeout,
-      tentativas: this._maxReconexoes,
-      intervaloReconexao: this._intervaloReconexao
+      this._aguardandoLeitura.push({ resolve, reject, timer });
     });
   }
 
   async reconectar() {
-    if (this._reconectando) {
-      return this._resposta({ metodo: 'reconectar', mensagem: 'Reconexão em andamento' });
-    }
-
-    if (this._tentativasReconexao >= this._maxReconexoes) {
-      await this._logConexao('Limite de reconexões', 'limite_excedido', {
-        operacao: 'reconectar',
-        tentativas: this._tentativasReconexao
-      });
-      return {
-        sucesso: false,
-        comunicacao_real: true,
-        metodo: 'reconectar',
-        tentativas: this._tentativasReconexao,
-        mensagem: 'Limite de tentativas de reconexão excedido'
-      };
-    }
-
-    this._reconectando = true;
-    this._tentativasReconexao += 1;
-
-    await this._logConexao('Reconectando', 'reconectando', {
-      operacao: 'reconectar',
-      tentativa: this._tentativasReconexao
-    });
-
-    try {
-      if (this._socket && !this._socket.destroyed) {
-        this._socket.destroy();
-      }
-      this._socket = null;
-      this._conectado = false;
-
-      if (this._intervaloReconexao > 0) {
-        await new Promise((r) => setTimeout(r, this._intervaloReconexao));
-      }
-
-      const resultado = await this.conectar();
-      this._reconectando = false;
-      return { ...resultado, metodo: 'reconectar', tentativa: this._tentativasReconexao };
-    } catch (err) {
-      this._reconectando = false;
-      this._ultimoErro = err.message;
-      throw err;
-    }
+    await this.desconectar();
+    return this.conectar();
   }
 
-  obterUltimoErro() {
-    return this._ultimoErro;
+  async ping() {
+    if (this._delegado) {
+      const cm = require('../connection/ConnectionManager');
+      return cm.isConnected({ host: this._host, porta: this._porta });
+    }
+    return this.isConnected();
   }
 
-  obterTempoConexaoMs() {
-    return this._conectadoEm ? Date.now() - this._conectadoEm : 0;
+  async status() {
+    return {
+      conectado: this.isConnected(),
+      host: this._host,
+      porta: this._porta,
+      delegado: this._delegado,
+      legadoSocket: ALLOW_LEGACY_SOCKET && !this._delegado
+    };
   }
+
+  async reiniciar() {
+    return this.reconectar();
+  }
+
+  async configurar(cfg = {}) {
+    if (cfg.host || cfg.ip) this._host = cfg.host || cfg.ip;
+    if (cfg.porta != null || cfg.port != null) {
+      this._porta = Number(cfg.porta || cfg.port);
+    }
+    if (cfg.timeout != null) this._timeout = Number(cfg.timeout);
+    return this.status();
+  }
+
+  _marcadoConectado() {
+    this._conectado = true;
+  }
+
+  _marcadoDesconectado() {
+    this._conectado = false;
+  }
+
+  get host() { return this._host; }
+  get porta() { return this._porta; }
 }
 
 module.exports = EthernetTransport;

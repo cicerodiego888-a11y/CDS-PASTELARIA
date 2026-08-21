@@ -10,7 +10,7 @@
     { id: 'empresa', icon: 'fa-building', label: 'Empresa', keywords: 'implantação tipo erp cfop csosn origem cest padrão fiscal empresa' },
     { id: 'plataformaFiscal', icon: 'fa-university', label: 'Plataforma Fiscal', keywords: 'ambiente produção homologação certificado csc uf sefaz urls qrcode nfc-e nf-e contingência webservices diagnóstico fiscal', fiscal: true },
     { id: 'modulosLicenciados', icon: 'fa-puzzle-piece', label: 'Módulos Licenciados', keywords: 'pdv pedidos expedição faturamento entregas nfe nfce compra fácil marketplace crm invisibilidade' },
-    { id: 'motores', icon: 'fa-brain', label: 'Motores Inteligentes', keywords: 'midp miip motor distribuição pagamentos ativar' },
+    { id: 'motores', icon: 'fa-brain', label: 'Motores Inteligentes', keywords: 'midp miip mib motor busca distribuição pagamentos ativar' },
     { id: 'equipamentos', icon: 'fa-cash-register', label: 'Equipamentos', keywords: 'tef pinpad equipamento' },
     { id: 'integracoes', icon: 'fa-plug', label: 'Integrações', keywords: 'pix tef pinpad automação bancária' },
     { id: 'licenciamentoCds', icon: 'fa-id-card', label: 'Licenciamento CDS', keywords: 'assinatura pix whatsapp renovação aviso dias mensagem qr code' },
@@ -18,7 +18,8 @@
     { id: 'bancoDados', icon: 'fa-database', label: 'Banco de Dados', keywords: 'rede ip porta cliente servidor local modo operação' },
     { id: 'performance', icon: 'fa-tachometer-alt', label: 'Performance', keywords: 'timeout retry sync performance' },
     { id: 'backup', icon: 'fa-hdd', label: 'Backup', keywords: 'backup restauração' },
-    { id: 'diagnostico', icon: 'fa-stethoscope', label: 'Diagnóstico', keywords: 'central sync nsu scheduler logs debug sefaz saúde', fiscal: true }
+    { id: 'implantacao', icon: 'fa-file-import', label: 'Implantação', keywords: 'importação inicial produtos xlsx migração implantação cliente base avançadas ferramentas' },
+    { id: 'diagnostico', icon: 'fa-stethoscope', label: 'Diagnóstico', keywords: 'central sync nsu scheduler logs debug sefaz saúde mib busca', fiscal: true }
   ]);
 
   function configPermiteFiscalUi() {
@@ -214,6 +215,46 @@
               </button>
             </div>
           `, 'cfop csosn origem cest padrão fiscal')}
+          ${card('<i class="fas fa-gift"></i> Entrada por Bonificação', `
+            <p class="cds-cfg-hint mb-3">Parâmetros aplicados a itens bonificados (CFOP 5910/5949 ou tipo Bonificação).</p>
+            <div class="row g-3">
+              <div class="col-md-2" data-cfg-search="bonificação cfop">
+                <label for="bonifCfopPadrao" class="cds-cfg-label">CFOP padrão</label>
+                <input type="text" class="form-control" id="bonifCfopPadrao" maxlength="4"
+                  value="${escapeHtml(config.entrada_bonificacao_cfop_padrao || '5910')}" placeholder="5910">
+              </div>
+              <div class="col-md-2" data-cfg-search="bonificação csosn cst">
+                <label for="bonifCsosnPadrao" class="cds-cfg-label">CSOSN/CST padrão</label>
+                <input type="text" class="form-control" id="bonifCsosnPadrao"
+                  value="${escapeHtml(config.entrada_bonificacao_csosn_padrao || '')}" placeholder="Ex.: 400">
+              </div>
+              <div class="col-md-4" data-cfg-search="bonificação natureza operação">
+                <label for="bonifNatureza" class="cds-cfg-label">Natureza da operação</label>
+                <input type="text" class="form-control" id="bonifNatureza"
+                  value="${escapeHtml(config.entrada_bonificacao_natureza || 'Bonificação recebida')}"
+                  placeholder="Bonificação recebida">
+              </div>
+              <div class="col-md-2" data-cfg-search="bonificação estoque">
+                <div class="form-check mt-4">
+                  <input class="form-check-input" type="checkbox" id="bonifGerarEstoque"
+                    ${config.entrada_bonificacao_gerar_estoque !== false ? 'checked' : ''}>
+                  <label class="form-check-label" for="bonifGerarEstoque">Gerar estoque</label>
+                </div>
+              </div>
+              <div class="col-md-2" data-cfg-search="bonificação custo">
+                <div class="form-check mt-4">
+                  <input class="form-check-input" type="checkbox" id="bonifAtualizarCusto"
+                    ${config.entrada_bonificacao_atualizar_custo === true ? 'checked' : ''}>
+                  <label class="form-check-label" for="bonifAtualizarCusto">Atualizar custo</label>
+                </div>
+              </div>
+            </div>
+            <div class="cds-cfg-actions">
+              <button type="button" class="btn btn-success btn-sm" onclick="salvarPadraoFiscalEmpresa()">
+                <i class="fas fa-save"></i> Salvar padrão
+              </button>
+            </div>
+          `, 'bonificação brinde entrada estoque custo cfop')}
         </div>` : ''}
       </div>
 
@@ -302,6 +343,81 @@
             <i class="fas fa-inbox"></i> Abrir Central Inteligente
           </button>
         </div>
+
+        <hr class="my-4">
+        <h3 class="h6 mb-2"><i class="fas fa-search me-1"></i> Motor Cognitivo de Busca (MIB)</h3>
+        <p class="cds-cfg-hint mb-3">MIB-RC2.0 — aprendizado, fuzzy, sinônimos, ranking adaptativo e SearchAI.</p>
+        <ul class="nav nav-tabs mb-3" id="mibDiagTabs" role="tablist">
+          <li class="nav-item"><button class="nav-link active" data-mib-tab="basico" type="button">Geral</button></li>
+          <li class="nav-item"><button class="nav-link" data-mib-tab="avancado" type="button">MIB Avançado</button></li>
+          <li class="nav-item"><button class="nav-link" data-mib-tab="cognitivo" type="button">Cognitivo RC2</button></li>
+        </ul>
+        <div id="mibPaneBasico">
+          <div class="row g-3" id="cdsCfgMibDiag">
+            <div class="col-md-3">${card('Status', `<div class="cds-cfg-kpi__value" id="mibDiagStatus">—</div>`, 'mib health')}</div>
+            <div class="col-md-3">${card('Tempo médio', `<div class="cds-cfg-kpi__value" id="mibDiagTempoMedio">—</div>`, 'mib tempo')}</div>
+            <div class="col-md-3">${card('Cache Hit / Miss', `<div class="cds-cfg-kpi__value" id="mibDiagCache">—</div>`, 'mib cache')}</div>
+            <div class="col-md-3">${card('Produtos em RAM', `<div class="cds-cfg-kpi__value" id="mibDiagProdutos">—</div>`, 'mib catalogo')}</div>
+            <div class="col-md-3">${card('HotCache hits', `<div class="cds-cfg-kpi__value" id="mibDiagHot">—</div>`, 'mib hotcache')}</div>
+            <div class="col-md-3">${card('Consultas / min', `<div class="cds-cfg-kpi__value" id="mibDiagCpm">—</div>`, 'mib consultas')}</div>
+            <div class="col-md-3">${card('RAM (heap)', `<div class="cds-cfg-kpi__value" id="mibDiagRam">—</div>`, 'mib ram')}</div>
+            <div class="col-md-3">${card('Versão catálogo', `<div class="cds-cfg-kpi__value" id="mibDiagVersao">—</div>`, 'mib versao')}</div>
+          </div>
+        </div>
+        <div id="mibPaneAvancado" class="d-none">
+          <div class="row g-3">
+            <div class="col-md-3">${card('Tempo construção', `<div class="cds-cfg-kpi__value" id="mibAdvBuild">—</div>`, 'mib build')}</div>
+            <div class="col-md-3">${card('Tempo médio SQL', `<div class="cds-cfg-kpi__value" id="mibAdvSql">—</div>`, 'mib sql')}</div>
+            <div class="col-md-3">${card('Tempo médio Cache', `<div class="cds-cfg-kpi__value" id="mibAdvCacheMs">—</div>`, 'mib cache ms')}</div>
+            <div class="col-md-3">${card('Swaps', `<div class="cds-cfg-kpi__value" id="mibAdvSwaps">—</div>`, 'mib swap')}</div>
+            <div class="col-md-3">${card('Atualizações', `<div class="cds-cfg-kpi__value" id="mibAdvUpdates">—</div>`, 'mib updates')}</div>
+            <div class="col-md-3">${card('HotCache size', `<div class="cds-cfg-kpi__value" id="mibAdvHotSize">—</div>`, 'mib hot size')}</div>
+            <div class="col-md-3">${card('Estado Engine', `<div class="cds-cfg-kpi__value" id="mibAdvEstado">—</div>`, 'mib estado')}</div>
+            <div class="col-md-3">${card('Last Swap', `<div class="cds-cfg-kpi__value small" id="mibAdvLastSwap">—</div>`, 'mib last swap')}</div>
+          </div>
+          <div class="mt-3" id="mibConfigForm">
+            <h4 class="h6">Configurações</h4>
+            <div class="row g-2">
+              <div class="col-md-3"><label class="form-label small">Refresh (ms)</label><input type="number" class="form-control form-control-sm" id="mibCfgRefresh" min="50"></div>
+              <div class="col-md-3"><label class="form-label small">Limite Cache</label><input type="number" class="form-control form-control-sm" id="mibCfgCache" min="50"></div>
+              <div class="col-md-3"><label class="form-label small">Limite RAM (MB)</label><input type="number" class="form-control form-control-sm" id="mibCfgRam" min="128"></div>
+              <div class="col-md-3"><label class="form-label small">HotCache</label><input type="number" class="form-control form-control-sm" id="mibCfgHot" min="10"></div>
+            </div>
+            <div class="form-check form-check-inline mt-2"><input class="form-check-input" type="checkbox" id="mibCfgAuto"><label class="form-check-label small" for="mibCfgAuto">Atualização automática</label></div>
+            <div class="form-check form-check-inline mt-2"><input class="form-check-input" type="checkbox" id="mibCfgStats"><label class="form-check-label small" for="mibCfgStats">Estatísticas</label></div>
+            <div class="form-check form-check-inline mt-2"><input class="form-check-input" type="checkbox" id="mibCfgBench"><label class="form-check-label small" for="mibCfgBench">Benchmark</label></div>
+            <div class="form-check form-check-inline mt-2"><input class="form-check-input" type="checkbox" id="mibCfgDev"><label class="form-check-label small" for="mibCfgDev">Modo desenvolvimento</label></div>
+            <button type="button" class="btn btn-sm btn-primary ms-2" id="btnMibSalvarConfig">Salvar config</button>
+          </div>
+          <pre class="small bg-light border rounded p-2 mt-2" id="mibHistBench" style="max-height:160px;overflow:auto">Histórico benchmark…</pre>
+        </div>
+        <div id="mibPaneCognitivo" class="d-none">
+          <h4 class="h6">Motor Cognitivo</h4>
+          <div class="form-check form-check-inline mt-1"><input class="form-check-input" type="checkbox" id="mibCfgAprendizado"><label class="form-check-label small" for="mibCfgAprendizado">Ativar Aprendizado</label></div>
+          <div class="form-check form-check-inline mt-1"><input class="form-check-input" type="checkbox" id="mibCfgFuzzy"><label class="form-check-label small" for="mibCfgFuzzy">Ativar Fuzzy</label></div>
+          <div class="form-check form-check-inline mt-1"><input class="form-check-input" type="checkbox" id="mibCfgSinonimos"><label class="form-check-label small" for="mibCfgSinonimos">Ativar Sinônimos</label></div>
+          <div class="form-check form-check-inline mt-1"><input class="form-check-input" type="checkbox" id="mibCfgAutoCorr"><label class="form-check-label small" for="mibCfgAutoCorr">Ativar Auto Correção</label></div>
+          <div class="row g-2 mt-2">
+            <div class="col-md-3"><label class="form-label small">Sensibilidade Levenshtein</label><input type="number" class="form-control form-control-sm" id="mibCfgLevenshtein" min="1" max="5"></div>
+            <div class="col-md-3"><label class="form-label small">Limite Histórico</label><input type="number" class="form-control form-control-sm" id="mibCfgHist" min="100"></div>
+            <div class="col-md-3"><label class="form-label small">Retenção (dias)</label><input type="number" class="form-control form-control-sm" id="mibCfgRetencao" min="7"></div>
+            <div class="col-md-3"><label class="form-label small">Limite Preferência</label><input type="number" class="form-control form-control-sm" id="mibCfgPref" min="2" max="20"></div>
+          </div>
+          <div class="cds-cfg-actions mt-3">
+            <button type="button" class="btn btn-sm btn-primary" id="btnMibSalvarCognitivo">Salvar cognitivo</button>
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="btnMibRetrain">Retrain</button>
+            <button type="button" class="btn btn-sm btn-outline-danger" id="btnMibResetLearn">Reset Aprendizado</button>
+            <button type="button" class="btn btn-sm btn-outline-primary" onclick="typeof loadPage==='function'&&loadPage('mib-analytics')"><i class="fas fa-chart-bar"></i> MIB Analytics</button>
+          </div>
+        </div>
+        <div class="cds-cfg-actions mt-2">
+          <button type="button" class="btn btn-outline-primary btn-sm" id="btnMibAtualizarDiag"><i class="fas fa-sync"></i> Atualizar</button>
+          <button type="button" class="btn btn-outline-secondary btn-sm" id="btnMibBenchmark"><i class="fas fa-tachometer-alt"></i> Benchmark</button>
+          <button type="button" class="btn btn-outline-secondary btn-sm" id="btnMibRefresh"><i class="fas fa-bolt"></i> Refresh</button>
+          <button type="button" class="btn btn-outline-secondary btn-sm" id="btnMibRecarregarCat"><i class="fas fa-database"></i> Rebuild</button>
+          <button type="button" class="btn btn-outline-secondary btn-sm" id="btnMibHotRebuild"><i class="fas fa-fire"></i> HotCache</button>
+        </div>
+        <pre class="small bg-light border rounded p-2 mt-2 d-none" id="mibBenchmarkOut" style="max-height:220px;overflow:auto"></pre>
       </div>
       ` : ''}
 
@@ -388,6 +504,26 @@
           <div id="pastaAtual" class="cds-cfg-hint"></div>
           <div id="resultadoBackup" class="mt-2"></div>
         `, 'backup restauração pasta')}
+      </div>
+
+      <div class="cds-cfg-pane" data-cfg-pane="implantacao">
+        <h2 class="cds-cfg-pane__title">Implantação</h2>
+        <p class="cds-cfg-pane__sub">Ferramentas avançadas de implantação inicial do cliente (Super Usuário).</p>
+        ${card('<i class="fas fa-file-excel text-success"></i> Importação Inicial de Produtos', `
+          <p class="cds-cfg-hint mb-3">Importe produtos e registre o estoque inicial informado no arquivo XLSX.</p>
+          <button type="button" class="btn btn-success btn-sm" id="btnAbrirImportacaoInicialProdutos"
+            onclick="typeof loadPage==='function'&&loadPage('importacao-inicial-produtos')">
+            <i class="fas fa-file-excel"></i> Abrir Importação Inicial de Produtos
+          </button>
+        `, 'importação inicial produtos xlsx implantação')}
+        ${card('<i class="fas fa-database"></i> Próximas ferramentas', `
+          <p class="cds-cfg-hint mb-2 text-muted">Em breve (não disponíveis nesta versão):</p>
+          <ul class="cds-cfg-hint mb-0 text-muted">
+            <li>Migração de Banco Antigo</li>
+            <li>Importação de CSV</li>
+            <li>Importação de XML</li>
+          </ul>
+        `, 'migração banco antigo csv xml futuro')}
       </div>
 
       <div class="cds-cfg-pane" data-cfg-pane="modulosLicenciados">
@@ -516,6 +652,20 @@
           </div>
           <small class="cds-cfg-hint d-block mt-2">Desativado = algoritmo 100% legado (Valor Fiscal Máximo).</small>
         `, 'midp motor distribuição pagamentos ativar')}
+        ${card('<i class="fas fa-search"></i> MIB — Motor Cognitivo de Busca', `
+          <p class="cds-cfg-hint mb-3">
+            MIB-RC2.0 — aprendizado contínuo, fuzzy, sinônimos, ranking adaptativo e SearchAI.
+            Diagnóstico em <strong>Diagnóstico</strong>; métricas em <strong>MIB Analytics</strong>.
+          </p>
+          <div class="cds-cfg-actions">
+            <button type="button" class="btn btn-outline-primary btn-sm" id="btnCfgAbrirDiagMib">
+              <i class="fas fa-stethoscope"></i> Abrir Diagnóstico MIB
+            </button>
+            <button type="button" class="btn btn-outline-secondary btn-sm" onclick="typeof loadPage==='function'&&loadPage('mib-analytics')">
+              <i class="fas fa-brain"></i> MIB Analytics
+            </button>
+          </div>
+        `, 'mib motor busca produtos cache ranking fuzzy aprendizado')}
       </div>
     `;
   }
@@ -727,6 +877,104 @@
     void panel;
   }
 
+  async function carregarDiagnosticoMib() {
+    try {
+      const token = localStorage.getItem('token');
+      const headers = token ? { Authorization: `Bearer ${token}` } : {};
+      const [respH, respD, respS, respC] = await Promise.all([
+        fetch(`${global.API_URL}/produtos/mib/health`, { headers }),
+        fetch(`${global.API_URL}/produtos/mib/diagnostico`, { headers }),
+        fetch(`${global.API_URL}/produtos/mib/statistics`, { headers }),
+        fetch(`${global.API_URL}/produtos/mib/config`, { headers })
+      ]);
+      const h = await respH.json().catch(() => ({}));
+      const d = await respD.json().catch(() => ({}));
+      const s = await respS.json().catch(() => ({}));
+      const cfg = await respC.json().catch(() => ({}));
+      if (!respH.ok && !respD.ok) throw new Error(d.error || h.error || 'Falha MIB');
+
+      const set = (id, v) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = v;
+      };
+      const adv = d.avancado || {};
+      set('mibDiagStatus', h.status || '—');
+      set('mibDiagTempoMedio', `${h.avgSearch ?? d.tempoMedioMs ?? 0} ms`);
+      set('mibDiagCache', `${h.cacheHits ?? d.cacheHit ?? 0} / ${h.cacheMiss ?? d.cacheMiss ?? 0}`);
+      set('mibDiagProdutos', String(h.catalogSize ?? d.produtosCarregados ?? 0));
+      set('mibDiagHot', String(h.hotCacheHits ?? 0));
+      set('mibDiagCpm', String(d.consultasPorMinuto ?? 0));
+      set('mibDiagRam', `${h.memoryUsage?.heapUsed ?? d.usoRamMb?.heapUsed ?? '—'} MB`);
+      set('mibDiagVersao', String(h.catalogVersion ?? adv.catalogVersion ?? 0));
+      set('mibAdvBuild', `${adv.tempoConstrucaoMs ?? 0} ms`);
+      set('mibAdvSql', `${adv.tempoMedioSql ?? s.tempoMedioSqlMs ?? 0} ms`);
+      set('mibAdvCacheMs', `${adv.tempoMedioCache ?? s.tempoMedioCacheMs ?? 0} ms`);
+      set('mibAdvSwaps', String(adv.swaps ?? s.swaps ?? 0));
+      set('mibAdvUpdates', String(adv.atualizacoes ?? s.atualizacoesCatalogo ?? 0));
+      set('mibAdvHotSize', String(adv.hotCache ?? 0));
+      set('mibAdvEstado', String(adv.estadoEngine || h.status || '—'));
+      set('mibAdvLastSwap', String(h.lastSwap || '—').slice(0, 19).replace('T', ' '));
+
+      const hist = document.getElementById('mibHistBench');
+      if (hist && Array.isArray(s.historicoBenchmark)) {
+        hist.textContent = s.historicoBenchmark.length
+          ? s.historicoBenchmark.slice(0, 8).map((b) => `${b.criado_em || ''} · ${(b.resultados || []).length} amostras`).join('\n')
+          : 'Sem histórico de benchmark ainda.';
+      }
+
+      const bindNum = (id, val) => {
+        const el = document.getElementById(id);
+        if (el && val != null) el.value = val;
+      };
+      bindNum('mibCfgRefresh', cfg.tempoRefreshMs);
+      bindNum('mibCfgCache', cfg.limiteCache);
+      bindNum('mibCfgRam', cfg.limiteRamMb);
+      bindNum('mibCfgHot', cfg.hotCacheSize);
+      const chk = (id, v) => { const el = document.getElementById(id); if (el) el.checked = !!v; };
+      chk('mibCfgAuto', cfg.ativarAtualizacaoAutomatica);
+      chk('mibCfgStats', cfg.ativarEstatisticas);
+      chk('mibCfgBench', cfg.ativarBenchmark);
+      chk('mibCfgDev', cfg.modoDesenvolvimento);
+      chk('mibCfgAprendizado', cfg.ativarAprendizado);
+      chk('mibCfgFuzzy', cfg.ativarFuzzy);
+      chk('mibCfgSinonimos', cfg.ativarSinonimos);
+      chk('mibCfgAutoCorr', cfg.ativarAutoCorrecao);
+      bindNum('mibCfgLevenshtein', cfg.sensibilidadeLevenshtein);
+      bindNum('mibCfgHist', cfg.limiteHistorico);
+      bindNum('mibCfgRetencao', cfg.tempoRetencaoDias);
+      bindNum('mibCfgPref', cfg.limitePreferencia);
+    } catch (err) {
+      if (typeof global.showNotification === 'function') {
+        global.showNotification(err.message || 'Falha ao carregar diagnóstico MIB', 'warning');
+      }
+    }
+  }
+
+  async function executarBenchmarkMib() {
+    const out = document.getElementById('mibBenchmarkOut');
+    if (out) {
+      out.classList.remove('d-none');
+      out.textContent = 'Executando benchmark…';
+    }
+    try {
+      const token = localStorage.getItem('token');
+      const resp = await fetch(`${global.API_URL}/produtos/mib/benchmark`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify({ termo: 'arroz', tamanhos: [10, 100, 1000, 10000] })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      if (out) out.textContent = JSON.stringify(data, null, 2);
+      await carregarDiagnosticoMib();
+    } catch (err) {
+      if (out) out.textContent = err.message || 'Falha no benchmark';
+    }
+  }
+
   function wireShell() {
     document.querySelectorAll('[data-cfg-nav]').forEach((btn) => {
       btn.addEventListener('click', () => ativarCategoria(btn.getAttribute('data-cfg-nav')));
@@ -740,6 +988,113 @@
         timer = setTimeout(() => pesquisarConfiguracao(search.value), 180);
       });
     }
+
+    document.querySelectorAll('[data-mib-tab]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const tab = btn.getAttribute('data-mib-tab');
+        document.querySelectorAll('[data-mib-tab]').forEach((b) => b.classList.toggle('active', b === btn));
+        document.getElementById('mibPaneBasico')?.classList.toggle('d-none', tab !== 'basico');
+        document.getElementById('mibPaneAvancado')?.classList.toggle('d-none', tab !== 'avancado');
+        document.getElementById('mibPaneCognitivo')?.classList.toggle('d-none', tab !== 'cognitivo');
+      });
+    });
+    document.getElementById('btnMibAtualizarDiag')?.addEventListener('click', () => carregarDiagnosticoMib());
+    document.getElementById('btnMibBenchmark')?.addEventListener('click', () => executarBenchmarkMib());
+    const postMib = async (path, okMsg) => {
+      try {
+        const token = localStorage.getItem('token');
+        const resp = await fetch(`${global.API_URL}${path}`, {
+          method: 'POST',
+          headers: token ? { Authorization: `Bearer ${token}` } : {}
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+        if (typeof global.showNotification === 'function') {
+          global.showNotification(okMsg(data), 'success');
+        }
+        await carregarDiagnosticoMib();
+      } catch (err) {
+        if (typeof global.showNotification === 'function') {
+          global.showNotification(err.message || 'Falha MIB', 'danger');
+        }
+      }
+    };
+    document.getElementById('btnMibRefresh')?.addEventListener('click', () => {
+      postMib('/produtos/mib/refresh', (d) => `Refresh MIB v${d.versao ?? '—'} (${d.produtos ?? 0} produtos)`);
+    });
+    document.getElementById('btnMibRecarregarCat')?.addEventListener('click', () => {
+      postMib('/produtos/mib/rebuild', (d) => `Rebuild OK (${d.catalogo?.produtos ?? d.produtos ?? 0} produtos)`);
+    });
+    document.getElementById('btnMibHotRebuild')?.addEventListener('click', () => {
+      postMib('/produtos/mib/hotcache/rebuild', (d) => `HotCache ${d.produtos ?? 0} produtos`);
+    });
+    const salvarConfigMib = async (body, msg) => {
+      const token = localStorage.getItem('token');
+      const resp = await fetch(`${global.API_URL}/produtos/mib/config`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify(body)
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      if (typeof global.showNotification === 'function') {
+        global.showNotification(msg || 'Configuração MIB salva.', 'success');
+      }
+    };
+    document.getElementById('btnMibSalvarConfig')?.addEventListener('click', async () => {
+      try {
+        await salvarConfigMib({
+          tempoRefreshMs: Number(document.getElementById('mibCfgRefresh')?.value) || 400,
+          limiteCache: Number(document.getElementById('mibCfgCache')?.value) || 300,
+          limiteRamMb: Number(document.getElementById('mibCfgRam')?.value) || 512,
+          hotCacheSize: Number(document.getElementById('mibCfgHot')?.value) || 100,
+          ativarAtualizacaoAutomatica: !!document.getElementById('mibCfgAuto')?.checked,
+          ativarEstatisticas: !!document.getElementById('mibCfgStats')?.checked,
+          ativarBenchmark: !!document.getElementById('mibCfgBench')?.checked,
+          modoDesenvolvimento: !!document.getElementById('mibCfgDev')?.checked
+        });
+      } catch (err) {
+        if (typeof global.showNotification === 'function') {
+          global.showNotification(err.message || 'Falha ao salvar config MIB', 'danger');
+        }
+      }
+    });
+    document.getElementById('btnMibSalvarCognitivo')?.addEventListener('click', async () => {
+      try {
+        await salvarConfigMib({
+          ativarAprendizado: !!document.getElementById('mibCfgAprendizado')?.checked,
+          ativarFuzzy: !!document.getElementById('mibCfgFuzzy')?.checked,
+          ativarSinonimos: !!document.getElementById('mibCfgSinonimos')?.checked,
+          ativarAutoCorrecao: !!document.getElementById('mibCfgAutoCorr')?.checked,
+          sensibilidadeLevenshtein: Number(document.getElementById('mibCfgLevenshtein')?.value) || 2,
+          limiteHistorico: Number(document.getElementById('mibCfgHist')?.value) || 5000,
+          tempoRetencaoDias: Number(document.getElementById('mibCfgRetencao')?.value) || 180,
+          limitePreferencia: Number(document.getElementById('mibCfgPref')?.value) || 3
+        }, 'Configuração cognitiva MIB salva.');
+      } catch (err) {
+        if (typeof global.showNotification === 'function') {
+          global.showNotification(err.message || 'Falha ao salvar config cognitiva', 'danger');
+        }
+      }
+    });
+    document.getElementById('btnMibRetrain')?.addEventListener('click', () => {
+      postMib('/produtos/mib/retrain', () => 'Retrain MIB concluído');
+    });
+    document.getElementById('btnMibResetLearn')?.addEventListener('click', () => {
+      if (!confirm('Zerar todo o aprendizado do MIB?')) return;
+      postMib('/produtos/mib/reset-learning', () => 'Aprendizado MIB resetado');
+    });
+    document.getElementById('btnCfgAbrirDiagMib')?.addEventListener('click', () => {
+      ativarCategoria('diagnostico');
+      carregarDiagnosticoMib();
+      try {
+        document.getElementById('cdsCfgMibDiag')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      } catch { /* ignore */ }
+    });
+    carregarDiagnosticoMib();
 
     document.getElementById('btnAbrirConfigFiscalOficial')?.addEventListener('click', () => {
       ativarCategoria('plataformaFiscal');

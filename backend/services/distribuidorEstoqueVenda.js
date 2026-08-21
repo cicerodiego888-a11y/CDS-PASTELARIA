@@ -9,7 +9,9 @@
  * (unidades não fracionáveis nunca ficam fracionadas na composição).
  *
  * O Motor NUNCA altera total da venda, preços, descontos ou produtos.
- * RC7.10.1: desconto/acréscimo comercial são aplicados depois, via valorFiscalLiquido.
+ * RC7.10.1 / HOTFIX FISCAL-4.0.2: desconto/acréscimo comercial (Valor Fiscal Líquido)
+ * são aplicados na faixa F×NF máxima ANTES do efetivo/MIDP, para a validação de
+ * pagamento operar sempre sobre o líquido (nunca sobre o subtotal bruto).
  */
 
 const {
@@ -520,40 +522,80 @@ function somarPagamentosNaoDinheiro(pagamentos = [], totalVenda = 0) {
     }
   }
   dinheiro = round2(dinheiro);
-  const total = round2(totalVenda);
+  informado = round2(informado);
+  // HOTFIX FISCAL-4.0.2: quando há pagamentos informados, a capacidade comercial
+  // é a soma paga (líquida), não o subtotal bruto — evita tratar desconto como
+  // "pagamento eletrônico fantasma" (totalBruto - dinheiro).
+  const totalReferencia = informado > 0.009 ? informado : round2(totalVenda);
   // Se não há detalhe de pagamentos, não há preservação a aplicar.
   if (lista.length === 0 || informado <= 0) {
-    return { valorDinheiro: 0, valorNaoDinheiro: total };
+    return { valorDinheiro: 0, valorNaoDinheiro: round2(totalVenda) };
   }
   return {
     valorDinheiro: dinheiro,
-    valorNaoDinheiro: round2(Math.max(0, total - dinheiro))
+    valorNaoDinheiro: round2(Math.max(0, totalReferencia - dinheiro))
   };
 }
 
 /**
  * Escolhe Valor Fiscal Efetivo dentro da faixa válida [min, max].
- * MIDP off → efetivo = máximo (legado).
- * MIDP on → menor fiscal que ainda cubra os meios não-dinheiro (preserva dinheiro no NF).
+ * FIXA + preservarDinheiro (midpAtivo) → PRESERVAR DINHEIRO (legado 3.8B/C).
+ * FIXA sem preservar → efetivo = máximo.
+ * FLEXIVEL → eletrônicos + % do dinheiro no fiscal (RC8.2).
+ *
+ * @param {object} [opcoes.politicaFiscalComercial] — PoliticaFiscalComercialV1 (RC8.2)
  */
 function calcularValorFiscalEfetivo({
   valorFiscalMaximo,
   valorFiscalMinimo,
   totalVenda,
   pagamentos = [],
-  midpAtivo = false
+  midpAtivo = false,
+  politicaFiscalComercial = null
 } = {}) {
   const max = round2(valorFiscalMaximo);
   const min = round2(valorFiscalMinimo);
   const total = round2(totalVenda);
+  const politica = politicaFiscalComercial || null;
+  const modo = politica && politica.modo === 'FLEXIVEL' ? 'FLEXIVEL' : 'FIXA';
 
-  if (!midpAtivo) {
+  // RC8.2 — FLEXÍVEL: max dinheiro no fiscal = percentual% do valor em dinheiro pago.
+  if (modo === 'FLEXIVEL') {
+    const percentual = Math.min(100, Math.max(0, Number(politica.percentualDinheiroFiscal || 0)));
+    const { valorDinheiro, valorNaoDinheiro } = somarPagamentosNaoDinheiro(pagamentos, total);
+    const dinheiroPermitidoFiscal = round2(valorDinheiro * (percentual / 100));
+    let efetivo = round2(valorNaoDinheiro + dinheiroPermitidoFiscal);
+    efetivo = Math.min(max, efetivo);
+    efetivo = Math.max(min, efetivo);
+    efetivo = round2(efetivo);
+    const preservacaoAplicada = efetivo + 0.009 < max;
+    return {
+      valorFiscalMaximo: max,
+      valorFiscalMinimo: min,
+      valorFiscalEfetivo: efetivo,
+      valorNaoFiscal: round2(total - efetivo),
+      preservacaoAplicada,
+      valorDinheiro,
+      valorNaoDinheiro,
+      dinheiroPermitidoFiscal,
+      modoPolitica: 'FLEXIVEL',
+      percentualDinheiroFiscal: percentual
+    };
+  }
+
+  // FIXA — midpAtivo: política.preservarDinheiro OU flag legado
+  const preservar = politica && politica.preservarDinheiro != null
+    ? Boolean(politica.preservarDinheiro)
+    : Boolean(midpAtivo);
+
+  if (!preservar) {
     return {
       valorFiscalMaximo: max,
       valorFiscalMinimo: min,
       valorFiscalEfetivo: max,
       valorNaoFiscal: round2(total - max),
-      preservacaoAplicada: false
+      preservacaoAplicada: false,
+      modoPolitica: 'FIXA'
     };
   }
 
@@ -568,7 +610,8 @@ function calcularValorFiscalEfetivo({
       valorNaoFiscal: round2(total - max),
       preservacaoAplicada: false,
       valorDinheiro,
-      valorNaoDinheiro
+      valorNaoDinheiro,
+      modoPolitica: 'FIXA'
     };
   }
 
@@ -586,7 +629,8 @@ function calcularValorFiscalEfetivo({
     valorNaoFiscal: round2(total - efetivo),
     preservacaoAplicada,
     valorDinheiro,
-    valorNaoDinheiro
+    valorNaoDinheiro,
+    modoPolitica: 'FIXA'
   };
 }
 
@@ -657,12 +701,17 @@ function ajustarItensParaValorFiscalEfetivo(itens = [], metaValorFiscalEfetivo) 
  * @param {boolean} opcoes.midpAtivo
  * @param {number} [opcoes.desconto=0]
  * @param {number} [opcoes.acrescimo=0]
+ * @param {object} [opcoes.politicaFiscalComercial] — RC8.1 MPFC (recebido; não utilizado nos cálculos)
  */
 function distribuirItensVendaComValorFiscalEfetivo(entradas = [], vendaFiscal = true, opcoes = {}) {
-  const midpAtivo = Boolean(opcoes.midpAtivo);
   const pagamentos = Array.isArray(opcoes.pagamentos) ? opcoes.pagamentos : [];
   const desconto = Number(opcoes.desconto || 0);
   const acrescimo = Number(opcoes.acrescimo || 0);
+  // RC8.2 — política oficial do MPFC (obrigatória para novos fluxos; opcional em testes legados)
+  const politicaFiscalComercial = opcoes.politicaFiscalComercial || null;
+  const midpAtivo = politicaFiscalComercial
+    ? Boolean(politicaFiscalComercial.preservarDinheiro)
+    : Boolean(opcoes.midpAtivo);
 
   const itensMax = [];
   let valorFiscalMinimo = 0;
@@ -707,45 +756,86 @@ function distribuirItensVendaComValorFiscalEfetivo(entradas = [], vendaFiscal = 
     itensMax.reduce((s, i) => s + Number(i.valor_nao_fiscal || 0), 0)
   );
   const totalVendaBruto = round2(valorFiscalMaximoBruto + valorNaoFiscalMaximoBruto);
+  const valorFiscalMinimoBruto = valorFiscalMinimo;
 
-  const efetivo = calcularValorFiscalEfetivo({
-    valorFiscalMaximo: valorFiscalMaximoBruto,
-    valorFiscalMinimo,
-    totalVenda: totalVendaBruto,
-    pagamentos,
-    midpAtivo
-  });
-
-  let itens = efetivo.preservacaoAplicada
-    ? ajustarItensParaValorFiscalEfetivo(itensMax, efetivo.valorFiscalEfetivo)
-    : itensMax.map((i) => ({ ...i }));
-
-  // Sprint 3.12 — Regra nº 3: integridade (só age se houver qtd inválida em UN etc.)
-  const integridade = corrigirIntegridadeQuantidadesFiscais(itens, {
-    valorFiscalEfetivoMeta: efetivo.valorFiscalEfetivo,
-    valorFiscalMinimo,
-    valorFiscalMaximo: valorFiscalMaximoBruto
-  });
-  itens = integridade.itens;
-
-  const totalFiscalBruto = round2(itens.reduce((s, i) => s + Number(i.valor_fiscal || 0), 0));
-  const totalNaoFiscalBruto = round2(itens.reduce((s, i) => s + Number(i.valor_nao_fiscal || 0), 0));
-
-  // RC7.10.1 — Valor Fiscal Líquido (desconto/acréscimo comercial)
-  const liquido = calcularValorFiscalLiquido({
-    valorFiscalBruto: totalFiscalBruto,
-    valorNaoFiscalBruto: totalNaoFiscalBruto,
+  // HOTFIX FISCAL-4.0.2 — rateio comercial (líquido) ANTES do efetivo/MIDP.
+  // Antes: efetivo rodava no bruto com pagamentos já líquidos → desconto virava
+  // "falso eletrônico" em somarPagamentosNaoDinheiro e a validação podia
+  // exigir valor fiscal bruto enquanto o operador pagava o líquido.
+  const liquidoMax = calcularValorFiscalLiquido({
+    valorFiscalBruto: valorFiscalMaximoBruto,
+    valorNaoFiscalBruto: valorNaoFiscalMaximoBruto,
     desconto,
     acrescimo
   });
 
-  itens = aplicarValorFiscalLiquidoNosItens(itens, liquido);
+  const fatorComercial = liquidoMax.ajustado ? Number(liquidoMax.fator) : 1;
+  let itensLiquidosMax = aplicarValorFiscalLiquidoNosItens(itensMax, liquidoMax).map((item, idx) => {
+    const src = itensMax[idx] || item;
+    return {
+      ...item,
+      valor_fiscal_minimo: round2(Number(src.valor_fiscal_minimo || 0) * fatorComercial),
+      valor_nao_fiscal_maximo: round2(Number(src.valor_nao_fiscal_maximo || 0) * fatorComercial),
+      valor_fiscal_maximo: round2(Number(src.valor_fiscal_maximo || 0) * fatorComercial)
+    };
+  });
 
-  const valorFiscalMaximo = calcularValorFiscalMaximoLiquido(valorFiscalMaximoBruto, liquido);
-  const valorFiscalMinimoLiquido = calcularValorFiscalMaximoLiquido(valorFiscalMinimo, liquido);
+  const valorFiscalMaximoLiquido = round2(
+    itensLiquidosMax.reduce((s, i) => s + Number(i.valor_fiscal || 0), 0)
+  );
+  const valorFiscalMinimoLiquido = calcularValorFiscalMaximoLiquido(
+    valorFiscalMinimoBruto,
+    liquidoMax
+  );
+  const totalVendaLiquido = round2(
+    Number(liquidoMax.totalLiquido != null ? liquidoMax.totalLiquido : (
+      valorFiscalMaximoLiquido
+      + itensLiquidosMax.reduce((s, i) => s + Number(i.valor_nao_fiscal || 0), 0)
+    ))
+  );
+
+  const efetivo = calcularValorFiscalEfetivo({
+    valorFiscalMaximo: valorFiscalMaximoLiquido,
+    valorFiscalMinimo: valorFiscalMinimoLiquido,
+    totalVenda: totalVendaLiquido,
+    pagamentos,
+    midpAtivo,
+    politicaFiscalComercial
+  });
+
+  let itens = efetivo.preservacaoAplicada
+    ? ajustarItensParaValorFiscalEfetivo(itensLiquidosMax, efetivo.valorFiscalEfetivo)
+    : itensLiquidosMax.map((i) => ({ ...i }));
+
+  // Sprint 3.12 — Regra nº 3: integridade (só age se houver qtd inválida em UN etc.)
+  const integridade = corrigirIntegridadeQuantidadesFiscais(itens, {
+    valorFiscalEfetivoMeta: efetivo.valorFiscalEfetivo,
+    valorFiscalMinimo: valorFiscalMinimoLiquido,
+    valorFiscalMaximo: valorFiscalMaximoLiquido
+  });
+  itens = integridade.itens;
+
   const totalFiscal = round2(itens.reduce((s, i) => s + Number(i.valor_fiscal || 0), 0));
   const totalNaoFiscal = round2(itens.reduce((s, i) => s + Number(i.valor_nao_fiscal || 0), 0));
   const totalVenda = round2(totalFiscal + totalNaoFiscal);
+  const valorFiscalMaximo = valorFiscalMaximoLiquido;
+  const liquido = {
+    ...liquidoMax,
+    valorFiscalLiquido: totalFiscal,
+    valorNaoFiscalLiquido: totalNaoFiscal,
+    totalLiquido: totalVenda
+  };
+  // Espelho bruto da partilha final (antes do desconto comercial), p/ auditoria RC7.10.1
+  const totalFiscalBruto = liquidoMax.ajustado
+    ? (fatorComercial > 0.0000001
+      ? round2(totalFiscal / fatorComercial)
+      : valorFiscalMaximoBruto)
+    : totalFiscal;
+  const totalNaoFiscalBruto = liquidoMax.ajustado
+    ? (fatorComercial > 0.0000001
+      ? round2(totalNaoFiscal / fatorComercial)
+      : valorNaoFiscalMaximoBruto)
+    : totalNaoFiscal;
 
   // Limpa campos auxiliares internos antes de retornar (mantém espelho útil mínimo).
   const itensLimpos = itens.map((i) => {
@@ -789,7 +879,18 @@ function distribuirItensVendaComValorFiscalEfetivo(entradas = [], vendaFiscal = 
         ? integridade.valorFiscalEfetivoAjustado
         : totalFiscal
     },
-    meta: efetivo
+    meta: efetivo,
+    // RC8.2 — eco da política aplicada no cálculo de efetivo
+    politicaFiscalComercialRecebida: politicaFiscalComercial
+      ? {
+          versao: politicaFiscalComercial.versao,
+          codigoPolitica: politicaFiscalComercial.codigoPolitica,
+          modo: politicaFiscalComercial.modo,
+          percentualDinheiroFiscal: politicaFiscalComercial.percentualDinheiroFiscal,
+          utilizada: true,
+          modoPoliticaEfetivo: efetivo.modoPolitica || politicaFiscalComercial.modo
+        }
+      : null
   };
 }
 

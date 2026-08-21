@@ -106,13 +106,13 @@ class DiagnosticoEquipamentos {
    */
   async socket(equipamentoId, equipamento) {
     const eq = equipamento || await this._repo().buscarPorId(equipamentoId);
-    const chave = eq?.id != null ? `eq:${eq.id}` : `${eq?.ip}:${eq?.porta_tcp || 9100}`;
+    const chave = eq?.id != null ? `eq:${eq.id}` : `${eq?.ip}:${eq?.porta_tcp || 9000}`;
     const monitor = connectionMonitor.obterStatus(chave);
     return {
       conectado: monitor.conectado === true,
       chave,
       host: eq?.ip,
-      porta: eq?.porta_tcp || 9100,
+      porta: eq?.porta_tcp || 9000,
       monitor
     };
   }
@@ -154,7 +154,7 @@ class DiagnosticoEquipamentos {
   }
 
   porta(eq) {
-    return eq?.porta_tcp ?? 9100;
+    return eq?.porta_tcp ?? 9000;
   }
 
   mac(eq) {

@@ -14,7 +14,17 @@ const tefContrato = require('./tef/tefContrato');
 const tefConfigService = require('./tef/tefConfigService');
 const tefFluxoPagamento = require('./tef/tefFluxoPagamento');
 const midp = require('./midp');
-const configService = require('./configuracaoService');
+
+/**
+ * ORQUESTRADOR DE PAGAMENTOS - ARQUITETURA OFICIAL CDS SISTEMAS
+ *
+ * FLUXO OBRIGATÓRIO (RC8.2+):
+ * Venda → Motor F×NF → MPFC (política) → MIDP (distribuição de meios) →
+ * Orquestrador (TEF/confirmação) → status → NFC-e / Financeiro
+ *
+ * Sprint 3.8C — MIDP V1: política PRESERVAR DINHEIRO (via midpAtivo da política MPFC).
+ * RC8.2.2 — Orquestrador NÃO lê isMidpAtivado(); recebe midpAtivo do núcleo/MPFC.
+ */
 
 /**
  * Processa o fluxo completo de pagamento de uma venda
@@ -28,20 +38,31 @@ async function processarFluxoPagamentoVenda({
   tefHabilitado,
   modoConfirmacaoFiscal,
   valorFiscalMaximo,
-  preservacaoAplicada
+  preservacaoAplicada,
+  midpAtivo: midpAtivoEntrada,
+  desconto,
+  acrescimo,
+  subtotalBruto,
+  debugDescontoFiscal
 }) {
-  // Validações básicas
+  // Validações básicas — totalFiscal/totalNaoFiscal DEVEM ser líquidos (RC7.10.1 / FISCAL-4.0.2)
   totalFiscal = Number(totalFiscal || 0);
   totalNaoFiscal = Number(totalNaoFiscal || 0);
   const fiscalMaximo = Number(
     valorFiscalMaximo != null ? valorFiscalMaximo : totalFiscal
   );
+  const totalLiquidoEsperado = Math.round((totalFiscal + totalNaoFiscal) * 100) / 100;
   
-  // Normalizar pagamentos de entrada
-  const pagamentosEntrada = normalizarPagamentosEntrada(pagamentos, formaPagamento);
+  // Normalizar pagamentos de entrada (fallback cobre o líquido F+NF)
+  const pagamentosEntrada = normalizarPagamentosEntrada(
+    pagamentos,
+    formaPagamento,
+    totalLiquidoEsperado
+  );
   
-  // MIDP V1 (3.8C) — política única PRESERVAR DINHEIRO; consome só efetivo do Motor
-  const midpAtivo = Boolean(configService.isMidpAtivado && configService.isMidpAtivado());
+  // RC8.2.2 — midpAtivo vem exclusivamente da política MPFC (núcleo).
+  // Migração: omitido → false (não consulta configuracaoService).
+  const midpAtivo = midpAtivoEntrada != null ? Boolean(midpAtivoEntrada) : false;
   const resultadoMidp = midp.executar({
     pagamentosComerciais: pagamentosEntrada,
     valorFiscalLiquido: totalFiscal,
@@ -62,9 +83,49 @@ async function processarFluxoPagamentoVenda({
       auditoria: resultadoMidp.auditoria
     }
   };
+
+  const totalPagamentos = pagamentosEntrada.reduce(
+    (s, p) => s + Number(p.valor || 0),
+    0
+  );
+  const pagamentoFiscalRecebido = (distribuicao.recebimentosFiscal || []).reduce(
+    (s, p) => s + Number(p.valor || 0),
+    0
+  );
+
+  logDebugDescontoFiscal({
+    ativo: debugDescontoFiscal,
+    subtotal: subtotalBruto,
+    desconto,
+    acrescimo,
+    total: totalLiquidoEsperado,
+    valorFiscal: totalFiscal,
+    valorNaoFiscal: totalNaoFiscal,
+    pagamentoFiscal: pagamentoFiscalRecebido,
+    pagamentoNaoFiscal: (distribuicao.recebimentosNaoFiscal || []).reduce(
+      (s, p) => s + Number(p.valor || 0),
+      0
+    ),
+    valorEsperado: totalFiscal,
+    valorRecebido: totalPagamentos,
+    saldoFiscal: distribuicao.saldoFiscal,
+    saldoNaoFiscal: distribuicao.saldoNaoFiscal
+  });
   
-  // Validar se o pagamento fiscal é suficiente
-  if (distribuicao.saldoFiscal > 0) {
+  // Validar se o pagamento fiscal é suficiente (tolerância de centavos)
+  if (Number(distribuicao.saldoFiscal || 0) > 0.009) {
+    logDebugDescontoFiscal({
+      ativo: debugDescontoFiscal,
+      motivoRejeicao: 'Pagamento fiscal insuficiente.',
+      subtotal: subtotalBruto,
+      desconto,
+      total: totalLiquidoEsperado,
+      valorFiscal: totalFiscal,
+      valorNaoFiscal: totalNaoFiscal,
+      valorEsperado: totalFiscal,
+      valorRecebido: totalPagamentos,
+      saldoFiscal: distribuicao.saldoFiscal
+    });
     return {
       sucesso: false,
       erro: 'Pagamento fiscal insuficiente.',
@@ -89,12 +150,26 @@ async function processarFluxoPagamentoVenda({
       distribuicao
     };
   }
-  
-  // Determinar status do pagamento (somente recebimentos confirmados, nunca o plano do distribuidor)
-  const recebimentosNaoFiscalConfirmados =
-    totalFiscal > 0 && totalNaoFiscal > 0
-      ? []
-      : (distribuicao.recebimentosNaoFiscal || []);
+
+  /**
+   * Pagamento integral: totais comerciais cobrem F+NF e MIDP zerou saldos.
+   * Nesse caso a parcela não fiscal já está confirmada nesta operação
+   * (ex.: prestação de entrega / PDV com pagamento completo).
+   * Caso contrário, venda mista permanece em 2 etapas (aguardando_nao_fiscal).
+   */
+  const pagamentoIntegralConfirmado = isPagamentoIntegralConfirmado({
+    totalPagamentos,
+    totalLiquidoEsperado,
+    saldoFiscal: distribuicao.saldoFiscal,
+    saldoNaoFiscal: distribuicao.saldoNaoFiscal
+  });
+
+  const vendaMista = totalFiscal > 0 && totalNaoFiscal > 0;
+
+  // Somente recebimentos efetivamente confirmados — nunca o plano MIDP “pendente”
+  const recebimentosNaoFiscalConfirmados = vendaMista
+    ? (pagamentoIntegralConfirmado ? (distribuicao.recebimentosNaoFiscal || []) : [])
+    : (distribuicao.recebimentosNaoFiscal || []);
 
   const statusPagamento = determinarStatusPagamento({
     totalFiscal,
@@ -118,6 +193,7 @@ async function processarFluxoPagamentoVenda({
     recebimentos: recebimentosParaGravar,
     distribuicao,
     resultadoFiscal,
+    pagamentoIntegralConfirmado,
     proximaAcao: determinarProximaAcao(statusPagamento, totalNaoFiscal)
   };
 }
@@ -329,8 +405,28 @@ function determinarStatusPagamento({
 }
 
 /**
+ * Pagamento cobre F+NF e MIDP não deixou saldo pendente.
+ */
+function isPagamentoIntegralConfirmado({
+  totalPagamentos,
+  totalLiquidoEsperado,
+  saldoFiscal,
+  saldoNaoFiscal
+}) {
+  const pagos = Math.round((Number(totalPagamentos || 0) + Number.EPSILON) * 100) / 100;
+  const esperado = Math.round((Number(totalLiquidoEsperado || 0) + Number.EPSILON) * 100) / 100;
+  return (
+    Math.abs(pagos - esperado) <= 0.01
+    && Number(saldoFiscal || 0) <= 0.009
+    && Number(saldoNaoFiscal || 0) <= 0.009
+  );
+}
+
+/**
  * Monta os recebimentos para gravar no banco.
- * Venda mista na 1ª etapa grava somente recebimentos fiscais.
+ *
+ * - aguardando_nao_fiscal (2ª etapa legítima): grava somente fiscais.
+ * - quitada / demais: grava fiscais + não fiscais da distribuição MIDP.
  */
 function montarRecebimentosParaGravar({
   distribuicao,
@@ -340,31 +436,23 @@ function montarRecebimentosParaGravar({
   resultadoFiscal
 }) {
   const { recebimentosFiscal, recebimentosNaoFiscal } = distribuicao;
-  const vendaMista = Number(totalFiscal || 0) > 0 && Number(totalNaoFiscal || 0) > 0;
-  const somenteFiscal =
-    statusPagamento === 'aguardando_nao_fiscal'
-    || vendaMista;
+  const fiscais = (Array.isArray(recebimentosFiscal) ? recebimentosFiscal : []).map((recebimento) => ({
+    ...recebimento,
+    tipo_recebimento: 'fiscal',
+    status: 'aprovado'
+  }));
 
-  if (somenteFiscal) {
-    return recebimentosFiscal.map((recebimento) => ({
-      ...recebimento,
-      tipo_recebimento: 'fiscal',
-      status: 'aprovado'
-    }));
+  if (statusPagamento === 'aguardando_nao_fiscal') {
+    return fiscais;
   }
 
-  return [
-    ...recebimentosFiscal.map((recebimento) => ({
-      ...recebimento,
-      tipo_recebimento: recebimento.tipo_recebimento || 'fiscal',
-      status: 'aprovado'
-    })),
-    ...recebimentosNaoFiscal.map((recebimento) => ({
-      ...recebimento,
-      tipo_recebimento: 'nao_fiscal',
-      status: 'aprovado'
-    }))
-  ];
+  const naoFiscais = (Array.isArray(recebimentosNaoFiscal) ? recebimentosNaoFiscal : []).map((recebimento) => ({
+    ...recebimento,
+    tipo_recebimento: 'nao_fiscal',
+    status: 'aprovado'
+  }));
+
+  return [...fiscais, ...naoFiscais];
 }
 
 /**
@@ -387,14 +475,14 @@ function determinarProximaAcao(statusPagamento, totalNaoFiscal) {
 }
 
 /**
- * Normaliza os pagamentos de entrada
+ * Normaliza os pagamentos de entrada.
+ * HOTFIX FISCAL-4.0.2: fallback usa o total líquido F+NF (nunca 0).
  */
-function normalizarPagamentosEntrada(pagamentos, formaPagamentoPadrao) {
+function normalizarPagamentosEntrada(pagamentos, formaPagamentoPadrao, totalLiquidoEsperado = 0) {
   if (!Array.isArray(pagamentos) || pagamentos.length === 0) {
-    // Se não informou pagamentos, cria um com a forma padrão
     return [{
       forma_pagamento: formaPagamentoPadrao || 'dinheiro',
-      valor: 0 // Será ajustado pelo distribuidor
+      valor: Number(totalLiquidoEsperado || 0)
     }];
   }
   
@@ -404,6 +492,33 @@ function normalizarPagamentosEntrada(pagamentos, formaPagamentoPadrao) {
     tef_transacao_id: p.tef_transacao_id || null,
     nsu: p.nsu || null,
     autorizacao: p.autorizacao || null
+  }));
+}
+
+/**
+ * Log temporário de auditoria desconto × pagamento (só com CDS_DEBUG_DESCONTO_FISCAL=1).
+ */
+function logDebugDescontoFiscal(payload = {}) {
+  const ativoEnv = process.env.CDS_DEBUG_DESCONTO_FISCAL === '1';
+  if (!ativoEnv && !payload.ativo) return;
+  const {
+    ativo,
+    ...resto
+  } = payload;
+  console.log('[DEBUG_DESCONTO_FISCAL]', JSON.stringify({
+    subtotal: resto.subtotal != null ? Number(resto.subtotal) : null,
+    desconto: resto.desconto != null ? Number(resto.desconto) : null,
+    acrescimo: resto.acrescimo != null ? Number(resto.acrescimo) : null,
+    total: resto.total != null ? Number(resto.total) : null,
+    valorFiscal: resto.valorFiscal != null ? Number(resto.valorFiscal) : null,
+    valorNaoFiscal: resto.valorNaoFiscal != null ? Number(resto.valorNaoFiscal) : null,
+    pagamentoFiscal: resto.pagamentoFiscal != null ? Number(resto.pagamentoFiscal) : null,
+    pagamentoNaoFiscal: resto.pagamentoNaoFiscal != null ? Number(resto.pagamentoNaoFiscal) : null,
+    valorEsperado: resto.valorEsperado != null ? Number(resto.valorEsperado) : null,
+    valorRecebido: resto.valorRecebido != null ? Number(resto.valorRecebido) : null,
+    saldoFiscal: resto.saldoFiscal != null ? Number(resto.saldoFiscal) : null,
+    saldoNaoFiscal: resto.saldoNaoFiscal != null ? Number(resto.saldoNaoFiscal) : null,
+    motivoRejeicao: resto.motivoRejeicao || null
   }));
 }
 
@@ -449,5 +564,8 @@ module.exports = {
   processarFluxoPagamentoVenda,
   processarPagamentoNaoFiscal,
   determinarStatusPagamento,
-  montarRecebimentosParaGravar
+  montarRecebimentosParaGravar,
+  isPagamentoIntegralConfirmado,
+  normalizarPagamentosEntrada,
+  logDebugDescontoFiscal
 };

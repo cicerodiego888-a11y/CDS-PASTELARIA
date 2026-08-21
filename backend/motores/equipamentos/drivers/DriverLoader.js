@@ -77,6 +77,18 @@ class DriverLoader {
           }
         });
 
+        // RC14.14.3 — aliases de identidade
+        const aliases = Array.isArray(entrada.aliases) ? entrada.aliases : [];
+        for (const alias of aliases) {
+          driverRegistry.registrarAlias(entrada.codigo, alias);
+        }
+        try {
+          const identity = require('../sdk/DriverIdentityResolver');
+          if (identity.ehToledo(entrada.codigo)) {
+            identity.aplicarAliasesNosRegistries(driverRegistry, null);
+          }
+        } catch (_) { /* ignore */ }
+
         carregados.push({
           codigo: entrada.codigo,
           fabricante: registro.fabricante,

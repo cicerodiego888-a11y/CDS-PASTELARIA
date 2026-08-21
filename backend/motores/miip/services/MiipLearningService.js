@@ -1,7 +1,9 @@
 /**
  * MiipLearningService — Único serviço autorizado a persistir aprendizado MIIP.
  *
- * Sprint 5: grava associações em `miip_associacoes` somente com confirmação explícita.
+ * Sprint 5: grava associações em `miip_associacoes` com confirmação explícita
+ * ou auto-aprendizado RC9.3 (AUTO_VINCULAR / origem auto_*).
+ *
  * Nenhum Engine grava aprendizado — toda persistência via `MiipAssociacoesRepository`.
  *
  * @class MiipLearningService
@@ -312,7 +314,7 @@ class MiipLearningService {
         });
       }
 
-      if (!entrada.confirmarSubstituicao) {
+      if (!entrada.confirmarSubstituicao && !String(entrada.origem || '').startsWith('auto_')) {
         return this._retornarAssociacaoExistenteDiferente(entrada, existente, evento);
       }
 

@@ -4,7 +4,7 @@
  * Regra MOC:
  * - cStat do lote (retEnviNFe) NÃO é o resultado final da nota.
  * - Resultado oficial vem de protNFe/infProt (cStat, xMotivo, nProt, dhRecbto, chNFe).
- * - Só permanece "aguardando_retorno" quando o lote foi aceito (104/105) SEM infProt.
+ * - Só permanece "aguardando_retorno" quando o lote foi aceito (103/104/105) SEM infProt.
  */
 
 'use strict';
@@ -128,11 +128,14 @@ function parseRetornoAutorizacaoNfe(xmlRetorno) {
     if (cStat === '100' || cStat === '150') status = 'autorizada';
     else if (cStat === '110' || cStat === '301' || cStat === '302') status = 'denegada';
     else status = 'rejeitada';
-  } else if (cStatLote === '104' || cStatLote === '105') {
-    // Lote aceito / em processamento — ainda sem protocolo da nota
+  } else if (cStatLote === '103' || cStatLote === '104' || cStatLote === '105') {
+    // 103 = lote recebido; 104/105 = processado / em processamento — ainda sem protocolo da nota
     status = 'aguardando_retorno';
     cStat = cStatLote;
-    xMotivo = xMotivoLote || (cStatLote === '105' ? 'Lote em processamento' : 'Lote processado');
+    xMotivo = xMotivoLote
+      || (cStatLote === '103'
+        ? 'Lote recebido com sucesso'
+        : (cStatLote === '105' ? 'Lote em processamento' : 'Lote processado'));
   } else if (cStatLote) {
     // Rejeição no próprio lote (sem infProt)
     status = 'rejeitada';

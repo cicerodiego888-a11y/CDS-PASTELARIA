@@ -1,4 +1,96 @@
 /* Sprint UX 03 — Polimento visual da árvore Categoria → Subcategoria → Produtos */
+/* Sprint UX-01 — Densidade / tamanho da fonte da listagem */
+
+.cds-prod-lista {
+  --cds-prod-font: 14px;
+  --cds-prod-row: 40px;
+  --cds-prod-cell-pad-y: 0.4rem;
+  --cds-prod-cell-pad-x: 0.55rem;
+  --cds-prod-icon: 0.85rem;
+  --cds-prod-btn-pad-y: 0.2rem;
+  --cds-prod-btn-pad-x: 0.45rem;
+  --cds-prod-check: 1rem;
+}
+
+.cds-prod-lista[data-cds-prod-visualizacao="medium"] {
+  --cds-prod-font: 16px;
+  --cds-prod-row: 48px;
+  --cds-prod-cell-pad-y: 0.55rem;
+  --cds-prod-cell-pad-x: 0.65rem;
+  --cds-prod-icon: 1rem;
+  --cds-prod-btn-pad-y: 0.3rem;
+  --cds-prod-btn-pad-x: 0.55rem;
+  --cds-prod-check: 1.15rem;
+}
+
+.cds-prod-lista[data-cds-prod-visualizacao="large"] {
+  --cds-prod-font: 18px;
+  --cds-prod-row: 56px;
+  --cds-prod-cell-pad-y: 0.7rem;
+  --cds-prod-cell-pad-x: 0.75rem;
+  --cds-prod-icon: 1.15rem;
+  --cds-prod-btn-pad-y: 0.4rem;
+  --cds-prod-btn-pad-x: 0.65rem;
+  --cds-prod-check: 1.3rem;
+}
+
+.cds-prod-lista .cds-prod-tree__table-wrap .table,
+.cds-prod-lista #tabela-produtos-container .table {
+  font-size: var(--cds-prod-font);
+}
+
+.cds-prod-lista .cds-prod-tree__table-wrap .table > :not(caption) > * > *,
+.cds-prod-lista #tabela-produtos-container .table > :not(caption) > * > * {
+  padding: var(--cds-prod-cell-pad-y) var(--cds-prod-cell-pad-x);
+  vertical-align: middle;
+}
+
+.cds-prod-lista .cds-prod-tree__table-wrap .table tbody tr,
+.cds-prod-lista #tabela-produtos-container .table tbody tr {
+  height: var(--cds-prod-row);
+}
+
+.cds-prod-lista .cds-prod-tree__table-wrap .table td .btn,
+.cds-prod-lista #tabela-produtos-container .table td .btn {
+  padding: var(--cds-prod-btn-pad-y) var(--cds-prod-btn-pad-x);
+  font-size: var(--cds-prod-font);
+  line-height: 1.2;
+}
+
+.cds-prod-lista .cds-prod-tree__table-wrap .table td .btn i,
+.cds-prod-lista #tabela-produtos-container .table td .btn i,
+.cds-prod-lista .cds-prod-tree__table-wrap .table td .fas,
+.cds-prod-lista #tabela-produtos-container .table td .fas {
+  font-size: var(--cds-prod-icon);
+}
+
+.cds-prod-lista .cds-prod-tree__table-wrap .table input[type="checkbox"],
+.cds-prod-lista .cds-prod-tree__table-wrap .table .form-check-input,
+.cds-prod-lista #tabela-produtos-container .table input[type="checkbox"],
+.cds-prod-lista #tabela-produtos-container .table .form-check-input {
+  width: var(--cds-prod-check);
+  height: var(--cds-prod-check);
+}
+
+.cds-prod-lista-header__zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  flex: 0 0 auto;
+}
+
+.cds-prod-lista-header__zoom .btn {
+  min-width: 2.25rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0.25rem 0.45rem;
+}
+
+.cds-prod-lista-header__zoom .btn.is-active {
+  background-color: #0d6efd;
+  border-color: #0d6efd;
+  color: #fff;
+}
 
 .cds-prod-lista-header {
   display: flex;
@@ -72,6 +164,11 @@
 
   .cds-prod-lista-header__categoria {
     flex: 1 1 100%;
+  }
+
+  .cds-prod-lista-header__zoom {
+    width: 100%;
+    justify-content: flex-start;
   }
 }
 

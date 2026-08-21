@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { resolverIconeJanela } = require('./electron-icon');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
@@ -67,6 +68,10 @@ ipcMain.handle('selecionar-pasta-backup', async (event) => {
   }
   return null;
 });
+
+// RC3.5.1 — Portal Nacional da NF-e (handlers IPC centralizados)
+const { registrarPortalNfeHandlers } = require('./electron-registrar-portal-nfe');
+registrarPortalNfeHandlers(ipcMain, () => mainWindow);
 
 ipcMain.removeHandler('rede-obter-modo-estacao');
 ipcMain.handle('rede-obter-modo-estacao', async () => {
@@ -328,18 +333,21 @@ function registrarHandlersIpc() {
       }
     });
 
+    const papelMatch = String(html || '').match(/danfe-(58|80)/);
+    const papelMm = papelMatch ? papelMatch[1] : '80';
+    const utilMm = papelMm === '58' ? '54' : '76';
     const htmlFinal = html.replace('</head>', `
     <style>
-      @page { size: 80mm auto; margin: 0; }
-      html, body {
-        width: 76mm !important; max-width: 76mm !important;
-        margin: 0 auto !important; padding: 2mm !important;
+      @page { size: ${papelMm}mm auto; margin: 0; }
+      html, body.danfe {
+        width: ${utilMm}mm !important; max-width: ${utilMm}mm !important;
+        margin: 0 auto !important;
         background: #fff !important; color: #000 !important;
-        font-family: "Courier New", monospace !important;
-        font-size: 11px !important; line-height: 1.18 !important;
+        -webkit-print-color-adjust: exact !important;
+        print-color-adjust: exact !important;
       }
-      img { display: block !important; margin: 8px auto !important; width: 180px !important; height: 180px !important; }
-      table { width: 100% !important; border-collapse: collapse !important; }
+      .qr img { display: block !important; margin: 8px auto !important; object-fit: contain !important; image-rendering: pixelated !important; }
+      table.items { width: 100% !important; border-collapse: collapse !important; table-layout: fixed !important; }
     </style>
   </head>`);
 
@@ -482,7 +490,7 @@ function criarMainWindow(tituloJanela, opcoes = {}) {
     autoHideMenuBar: true,
     focusable: true,
     skipTaskbar: false,
-    icon: require('./assets/branding/BrandService').electronIconPath(),
+    icon: resolverIconeJanela(),
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -709,7 +717,22 @@ function iniciarAplicacaoElectron(options = {}) {
   });
 
   app.on('window-all-closed', () => {
+    try {
+      const cm = require('./backend/motores/equipamentos/connection/ConnectionManager');
+      if (cm && typeof cm.closeAll === 'function') {
+        cm.closeAll().catch(() => {});
+      }
+    } catch (_) { /* ignore */ }
     if (process.platform !== 'darwin') app.quit();
+  });
+
+  app.on('will-quit', () => {
+    try {
+      const cm = require('./backend/motores/equipamentos/connection/ConnectionManager');
+      if (cm && typeof cm.closeAll === 'function') {
+        cm.closeAll().catch(() => {});
+      }
+    } catch (_) { /* ignore */ }
   });
 }
 

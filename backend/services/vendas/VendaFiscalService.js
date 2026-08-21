@@ -4,6 +4,24 @@ const db = require('../../database');
 const { emitirPorVendaId } = require('../fiscal/emissor');
 const cancelarNfce = require('../fiscal/cancelarNfce');
 const tefManager = require('../tef/TefManager');
+const mpfc = require('../mpfc');
+
+/**
+ * RC8.2.2 — reprocessamento / reemissão: amarra auditoria ao snapshot da venda.
+ * Não altera cálculo nem XML; apenas garante que a política usada é a gravada.
+ */
+function registrarPoliticaSnapshotReprocessamento(vendaId, callback) {
+  db.get(
+    'SELECT id, mpfc_politica_snapshot FROM vendas WHERE id = ?',
+    [vendaId],
+    (err, venda) => {
+      if (err) return callback(err);
+      if (!venda) return callback(null, null);
+      const resolvido = mpfc.resolverPoliticaOperacionalDaVenda(venda, 'reprocessamento');
+      callback(null, resolvido);
+    }
+  );
+}
 
 function extrairTagXmlCancelamento(xml, tag) {
   const regex = new RegExp(`<${tag}>([^<]*)</${tag}>`, 'i');
@@ -184,6 +202,11 @@ async function responderVendaComFiscal(res, payload) {
     });
   }
 
+  // RC8.2.2 — reprocessamento/reemissão amarra auditoria ao snapshot (não altera XML/cálculo)
+  await new Promise((resolve) => {
+    registrarPoliticaSnapshotReprocessamento(payload.vendaId, () => resolve());
+  });
+
   try {
     const fiscal = await emitirPorVendaId(payload.vendaId);
 
@@ -256,5 +279,6 @@ module.exports = {
   cancelarNfceAutorizadaVenda,
   vincularNfceTransacoesVenda,
   emitirFiscalSeSolicitado,
-  responderVendaComFiscal
+  responderVendaComFiscal,
+  registrarPoliticaSnapshotReprocessamento
 };

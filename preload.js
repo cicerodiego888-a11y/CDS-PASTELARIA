@@ -46,5 +46,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // RC3.16.5 — Diagnóstico Electron
   obterDiagnosticoElectron: (extra) => ipcRenderer.invoke('electron-diagnostico', extra || {}),
   abrirDiagnosticoElectron: (extra) => ipcRenderer.invoke('electron-diagnostico-abrir', extra || {}),
-  copiarDiagnosticoElectron: (extra) => ipcRenderer.invoke('electron-diagnostico-copiar', extra || {})
+  copiarDiagnosticoElectron: (extra) => ipcRenderer.invoke('electron-diagnostico-copiar', extra || {}),
+
+  // RC3.5.0 — Portal Nacional da NF-e (recuperação oficial)
+  portalNfe: {
+    validar: () => ipcRenderer.invoke('portal-nfe-validar'),
+    abrir: (payload) => ipcRenderer.invoke('portal-nfe-abrir', payload || {}),
+    fechar: (payload) => ipcRenderer.invoke('portal-nfe-fechar', payload || {}),
+    status: () => ipcRenderer.invoke('portal-nfe-status'),
+    download: () => ipcRenderer.invoke('portal-nfe-download'),
+    abrirPasta: (payload) => ipcRenderer.invoke('portal-nfe-abrir-pasta', payload || {}),
+    sucesso: (payload) => ipcRenderer.invoke('portal-nfe-sucesso', payload || {}),
+    dirDownloads: () => ipcRenderer.invoke('portal-nfe-dir-downloads'),
+    onEvento: (callback) => {
+      if (typeof callback !== 'function') return () => {};
+      const handler = (_event, payload) => callback(payload);
+      ipcRenderer.on('portal-nfe-evento', handler);
+      return () => ipcRenderer.removeListener('portal-nfe-evento', handler);
+    }
+  }
 });

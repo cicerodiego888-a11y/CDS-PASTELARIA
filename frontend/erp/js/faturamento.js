@@ -380,11 +380,18 @@ async function loadFaturamento() {
     return !!(row.nfe_id && String(row.nfe_status || '').toLowerCase() === 'autorizada');
   }
 
+  function podeEmitirNfeDevolucaoVenda(row) {
+    const cancelada = String(row.status || '').toLowerCase() === 'cancelada';
+    const temCliente = !!(row.cliente_id || row.cliente_nome);
+    return temNfeAutorizada(row) && temCliente && !cancelada;
+  }
+
   function acoesVenda(row) {
     const id = Number(row.id);
     const pedidoId = row.pedido_id ? Number(row.pedido_id) : null;
     const nfeId = row.nfe_id ? Number(row.nfe_id) : '';
     // RC3.15 — documentos fiscais só na Central NF-e (sem Emitir/DANFE aqui)
+    // RC5 — exceção: Emitir NF-e de Devolução (modo DEVOLUÇÃO)
 
     return `
       <div class="dropdown">
@@ -403,6 +410,9 @@ async function loadFaturamento() {
           ${nfeId && nfeHabilitado ? `
           <li><button type="button" class="dropdown-item fat-acao-abrir-central-nfe" data-nfe-id="${nfeId}">
             <i class="fas fa-file-invoice-dollar me-1"></i> Abrir Central NF-e</button></li>` : ''}
+          ${podeEmitirNfeDevolucaoVenda(row) && nfeHabilitado ? `
+          <li><button type="button" class="dropdown-item fat-acao-nfe-devolucao" data-id="${id}">
+            <i class="fas fa-undo me-1"></i> Emitir NF-e de Devolução</button></li>` : ''}
           ${podeCancelar(row) ? `<li><hr class="dropdown-divider">
             <button type="button" class="dropdown-item text-danger fat-acao-cancelar"
               data-id="${id}" data-nfe-id="${nfeId}"
@@ -431,6 +441,9 @@ async function loadFaturamento() {
         window.__CDS_NFE_OPEN_FICHA = true;
         loadPage('nfe-central');
       }
+    });
+    $('.fat-acao-nfe-devolucao').off('click').on('click', function () {
+      abrirModalNFeDevolucaoVenda(Number($(this).data('id')));
     });
     $('.fat-acao-cancelar').off('click').on('click', function () {
       cancelarVendaCentral({
@@ -1321,5 +1334,274 @@ async function loadFaturamento() {
 
   await atualizarTudo();
 }
+
+/** RC5 — Modal Central NF-e modo DEVOLUÇÃO (origem VENDA) */
+function abrirModalNFeDevolucaoVenda(vendaId) {
+  const id = Number(vendaId);
+  if (!(id > 0)) return;
+
+  $.ajax({
+    url: `${API_URL}/vendas/${id}/nfe-devolucao/preparar`,
+    method: 'GET'
+  }).done(function (prep) {
+    const venda = prep.venda || {};
+    const ctrl = prep.controleSaldo || {};
+    const itens = prep.itens || [];
+    const chave = prep.chaveReferenciada || prep.nfeOriginal?.chave || '';
+    const bloqueado = Boolean(prep.bloqueado);
+    const escapeHtml = (typeof window.escapeHtml === 'function')
+      ? window.escapeHtml
+      : (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[c]));
+
+    const badgeSaldo = (ui) => {
+      if (!ui) return '';
+      const cls = ui.cor === 'verde' ? 'bg-success' : (ui.cor === 'amarelo' ? 'bg-warning text-dark' : (ui.cor === 'azul' ? 'bg-primary' : 'bg-danger'));
+      return `<span class="badge ${cls}">${escapeHtml(ui.emoji || '')} ${escapeHtml(ui.label || '')}</span>`;
+    };
+
+    const linhas = itens.map((item) => `
+      <tr>
+        <td>${escapeHtml(item.produto_nome || '-')}</td>
+        <td class="text-end small">${Number(item.quantidade_vendida || 0)}</td>
+        <td class="text-end small">${Number(item.quantidade_devolvida || 0)}</td>
+        <td class="text-end small text-primary">${Number(item.saldo || 0)}</td>
+        <td>
+          <input type="number" min="0.001" step="0.001" class="form-control form-control-sm nfe-dev-venda-qtd"
+            data-venda-item-id="${item.venda_item_id}"
+            data-produto-id="${item.produto_id || ''}"
+            data-valor-unitario="${Number(item.valor_unitario || 0)}"
+            data-max="${Number(item.saldo || 0)}"
+            value="${Number(item.quantidade || item.saldo || 0)}"
+            ${bloqueado ? 'disabled' : ''}>
+        </td>
+        <td>
+          <input type="text" maxlength="4" class="form-control form-control-sm nfe-dev-venda-cfop"
+            value="${escapeHtml(item.cfop || prep.cfopSugerido || '1202')}" ${bloqueado ? 'disabled' : ''}>
+        </td>
+        <td class="small">${badgeSaldo(item.status_ui)}</td>
+      </tr>
+    `).join('');
+
+    const historico = (prep.nfeDevolucoes || []).map((n) => {
+      const ui = n.statusUi || {};
+      const acoes = n.acoes || {};
+      return `
+        <li class="mb-2">
+          <strong>NF-e ${escapeHtml(String(n.numero || n.id))}/${escapeHtml(String(n.serie || '-'))}</strong>
+          — ${escapeHtml(ui.emoji || '')} ${escapeHtml(ui.label || n.status || '-')}
+          <div class="text-muted small" style="word-break:break-all">Chave: ${escapeHtml(n.chave_acesso || '-')}</div>
+          <div class="d-flex flex-wrap gap-2 mt-1">
+            ${n.tem_xml ? `<a class="btn btn-sm btn-outline-primary" target="_blank" href="${API_URL}/vendas/nfe-devolucao/${n.id}/xml">XML</a>` : ''}
+            ${n.tem_danfe ? `<a class="btn btn-sm btn-outline-secondary" target="_blank" href="${API_URL}/vendas/nfe-devolucao/${n.id}/danfe">DANFE</a>` : ''}
+            ${acoes.consultar ? `<button type="button" class="btn btn-sm btn-outline-info" onclick="consultarSituacaoNfeDevolucaoVenda(${n.id}, ${id})">Consultar Situação</button>` : ''}
+            ${acoes.reenviar ? `<button type="button" class="btn btn-sm btn-outline-warning" onclick="reenviarNfeDevolucaoVenda(${n.id}, ${id})">Reenviar</button>` : ''}
+            ${acoes.cancelar ? `<button type="button" class="btn btn-sm btn-outline-danger" onclick="cancelarNfeDevolucaoVendaUi(${n.id}, ${id})">Cancelar (SEFAZ)</button>` : ''}
+          </div>
+        </li>`;
+    }).join('');
+
+    const finOps = (prep.financeiroOpcoes || []).map((o) =>
+      `<span class="badge bg-secondary me-1">${escapeHtml(String(o).replace(/_/g, ' '))}</span>`
+    ).join('');
+
+    const modalHtml = `
+      <div class="modal fade" id="modalNFeDevolucaoVenda" tabindex="-1">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable">
+          <div class="modal-content">
+            <div class="modal-header bg-danger text-white">
+              <h5 class="modal-title"><i class="fas fa-file-invoice"></i> Central NF-e — Modo DEVOLUÇÃO (Venda)</h5>
+              <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+              <pre class="border rounded p-3 bg-dark text-warning text-center mb-3" style="font-family: Consolas, monospace; white-space: pre-wrap;">═══════════════════════════════
+NF-e DE DEVOLUÇÃO DE VENDA
+
+Venda nº: ${venda.id || id}
+Cliente: ${escapeHtml(venda.cliente_nome || '-')}
+NF-e Original: ${escapeHtml(chave || '-')}
+═══════════════════════════════</pre>
+              ${prep.motivoBloqueio ? `<div class="alert alert-warning">${escapeHtml(prep.motivoBloqueio)}</div>` : ''}
+              <div class="border rounded p-3 mb-3">
+                <h6>Controle de Saldo ${badgeSaldo(ctrl.statusVendaUi || ctrl.statusCompraUi)}</h6>
+                <div class="row small mb-2">
+                  <div class="col-md-4"><strong>Vendido:</strong> ${Number(ctrl.totais?.vendido || ctrl.totais?.comprado || 0)}</div>
+                  <div class="col-md-4"><strong>Devolvido:</strong> ${Number(ctrl.totais?.devolvido || 0)}</div>
+                  <div class="col-md-4"><strong>Saldo:</strong> ${Number(ctrl.totais?.saldo || 0)}</div>
+                </div>
+                <div class="table-responsive">
+                  <table class="table table-sm table-bordered">
+                    <thead><tr><th>Produto</th><th class="text-end">Vendido</th><th class="text-end">Devolvido</th><th class="text-end">Saldo</th><th>Qtd</th><th>CFOP</th><th>Status</th></tr></thead>
+                    <tbody>${linhas || '<tr><td colspan="7" class="text-muted text-center">Sem itens</td></tr>'}</tbody>
+                  </table>
+                </div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Observações</label>
+                <input type="text" id="nfeDevVendaObs" class="form-control" maxlength="500" ${bloqueado ? 'disabled' : ''}>
+              </div>
+              <div class="border rounded p-3 mb-3 bg-light">
+                <h6 class="mb-2">Financeiro (disponível — não executa automaticamente)</h6>
+                <div>${finOps || '<span class="text-muted small">—</span>'}</div>
+              </div>
+              <div class="border rounded p-3 bg-light">
+                <h6>Histórico — NF-e de Devolução</h6>
+                <ol class="mb-0 ps-3">${historico || '<li class="text-muted">Nenhuma emissão ainda.</li>'}</ol>
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button class="btn btn-secondary" data-bs-dismiss="modal">Fechar</button>
+              <button class="btn btn-danger" id="btnEmitirNfeDevVenda"
+                onclick="confirmarEmissaoNFeDevolucaoVenda(${id})"
+                ${bloqueado || !itens.length ? 'disabled' : ''}>
+                Emitir NF-e de Devolução
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>`;
+
+    $('#modalNFeDevolucaoVenda').remove();
+    $('body').append(modalHtml);
+    $('#modalNFeDevolucaoVenda').modal('show');
+    $('#modalNFeDevolucaoVenda').on('hidden.bs.modal', function () {
+      $('#modalNFeDevolucaoVenda').remove();
+    });
+  }).fail(function (xhr) {
+    const msg = xhr.responseJSON?.error || 'Erro ao preparar devolução de venda.';
+    if (typeof showNotification === 'function') showNotification(msg, 'danger');
+    else alert(msg);
+  });
+}
+
+function confirmarEmissaoNFeDevolucaoVenda(vendaId) {
+  const itens = [];
+  let excedeu = false;
+  $('#modalNFeDevolucaoVenda .nfe-dev-venda-qtd').each(function () {
+    const qtd = Number($(this).val() || 0);
+    if (!(qtd > 0)) return;
+    const max = Number($(this).data('max') || 0);
+    if (qtd > max + 1e-9) {
+      excedeu = true;
+      if (typeof showNotification === 'function') {
+        showNotification(`Quantidade ${qtd} excede o saldo (${max}).`, 'warning');
+      }
+      return false;
+    }
+    const $tr = $(this).closest('tr');
+    itens.push({
+      venda_item_id: Number($(this).data('venda-item-id')),
+      produto_id: Number($(this).data('produto-id')) || null,
+      quantidade: qtd,
+      valor_unitario: Number($(this).data('valor-unitario') || 0),
+      cfop: String($tr.find('.nfe-dev-venda-cfop').val() || '1202').replace(/\D/g, '').slice(0, 4)
+    });
+  });
+  if (excedeu || !itens.length) {
+    if (!itens.length && typeof showNotification === 'function') {
+      showNotification('Informe a quantidade de pelo menos um item.', 'warning');
+    }
+    return;
+  }
+  if (!confirm('Confirma emissão da NF-e de Devolução de Venda para a SEFAZ?')) return;
+
+  $.ajax({
+    url: `${API_URL}/vendas/${vendaId}/emitir-nfe-devolucao`,
+    method: 'POST',
+    contentType: 'application/json',
+    data: JSON.stringify({
+      itens,
+      observacoes: $('#nfeDevVendaObs').val() || null
+    })
+  }).done(function (resp) {
+    const r = resp.resultado || resp;
+    const msg = resp.message || r.message || `Status: ${r.status}`;
+    if (typeof showNotification === 'function') {
+      showNotification(msg, r.success ? 'success' : 'warning');
+    }
+    $('#modalNFeDevolucaoVenda').modal('hide');
+    abrirModalNFeDevolucaoVenda(vendaId);
+  }).fail(function (xhr) {
+    const body = xhr.responseJSON || {};
+    const msg = body.mensagem || body.error || body.resultado?.message || 'Falha na emissão.';
+    if (typeof showNotification === 'function') showNotification(msg, 'danger');
+  });
+}
+
+function consultarSituacaoNfeDevolucaoVenda(notaId, vendaId) {
+  $.ajax({
+    url: `${API_URL}/vendas/nfe-devolucao/${notaId}/consultar`,
+    method: 'POST',
+    contentType: 'application/json',
+    data: '{}'
+  }).done(function (resp) {
+    if (typeof showNotification === 'function') {
+      showNotification(resp.mensagem || resp.xMotivo || resp.status, 'info');
+    }
+    if (vendaId) {
+      $('#modalNFeDevolucaoVenda').modal('hide');
+      abrirModalNFeDevolucaoVenda(vendaId);
+    }
+  }).fail(function (xhr) {
+    if (typeof showNotification === 'function') {
+      showNotification(xhr.responseJSON?.error || 'Erro na consulta.', 'danger');
+    }
+  });
+}
+
+function reenviarNfeDevolucaoVenda(notaId, vendaId) {
+  if (!confirm('Reenviar XML assinado à SEFAZ?')) return;
+  $.ajax({
+    url: `${API_URL}/vendas/nfe-devolucao/${notaId}/reenviar`,
+    method: 'POST',
+    contentType: 'application/json',
+    data: '{}'
+  }).done(function (resp) {
+    if (typeof showNotification === 'function') {
+      showNotification(resp.message || resp.status, resp.success ? 'success' : 'warning');
+    }
+    $('#modalNFeDevolucaoVenda').modal('hide');
+    abrirModalNFeDevolucaoVenda(vendaId);
+  }).fail(function (xhr) {
+    if (typeof showNotification === 'function') {
+      showNotification(xhr.responseJSON?.error || 'Reenvio bloqueado.', 'danger');
+    }
+  });
+}
+
+function cancelarNfeDevolucaoVendaUi(notaId, vendaId) {
+  const motivo = prompt('Motivo do cancelamento (mín. 15 caracteres):');
+  if (motivo == null) return;
+  if (String(motivo).trim().length < 15) {
+    if (typeof showNotification === 'function') {
+      showNotification('Motivo com pelo menos 15 caracteres.', 'warning');
+    }
+    return;
+  }
+  if (!confirm('Enviar evento oficial de cancelamento à SEFAZ e reabrir saldo?')) return;
+  $.ajax({
+    url: `${API_URL}/vendas/nfe-devolucao/${notaId}/cancelar`,
+    method: 'POST',
+    contentType: 'application/json',
+    data: JSON.stringify({ motivo: String(motivo).trim() })
+  }).done(function (resp) {
+    if (typeof showNotification === 'function') {
+      showNotification(resp.message || (resp.success ? 'Cancelada.' : 'Rejeitado'), resp.success ? 'success' : 'danger');
+    }
+    $('#modalNFeDevolucaoVenda').modal('hide');
+    abrirModalNFeDevolucaoVenda(vendaId);
+  }).fail(function (xhr) {
+    if (typeof showNotification === 'function') {
+      showNotification(xhr.responseJSON?.error || xhr.responseJSON?.message || 'Erro ao cancelar.', 'danger');
+    }
+  });
+}
+
+window.abrirModalNFeDevolucaoVenda = abrirModalNFeDevolucaoVenda;
+window.confirmarEmissaoNFeDevolucaoVenda = confirmarEmissaoNFeDevolucaoVenda;
+window.consultarSituacaoNfeDevolucaoVenda = consultarSituacaoNfeDevolucaoVenda;
+window.reenviarNfeDevolucaoVenda = reenviarNfeDevolucaoVenda;
+window.cancelarNfeDevolucaoVendaUi = cancelarNfeDevolucaoVendaUi;
 
 window.loadFaturamento = loadFaturamento;

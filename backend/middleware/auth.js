@@ -22,6 +22,7 @@ const PERMISSOES_DISPONIVEIS = [
   'abrir_caixa',
   'sangria_caixa',
   'suprimento_caixa',
+  'fechar_caixa',
   'fiscal',
   'configuracoes',
   'usuarios',

@@ -30,7 +30,8 @@ const SCORE_POR_STATUS = Object.freeze({
   [DocumentoFiscalStatus.RECEBIDA]: 55,
   [DocumentoFiscalStatus.ERRO]: 15,
   [DocumentoFiscalStatus.DUPLICADA]: 25,
-  [DocumentoFiscalStatus.DESCARTADA]: 0
+  [DocumentoFiscalStatus.DESCARTADA]: 0,
+  [DocumentoFiscalStatus.XML_INDISPONIVEL]: 0
 });
 
 class CentralScoreDocumentoService {

@@ -2,14 +2,19 @@
  * Mapeamento declarativo Driver → FrameBuilder.
  * Laboratório não importa drivers diretamente — apenas resolve por código.
  *
- * Novos drivers: adicionar entrada com caminho relativo ao módulo FrameBuilder.
+ * RC14.14.3 — códigos Toledo (oficial + aliases) → FrameBuilder oficial 90AX.
  */
 
 const path = require('path');
 
 /** @type {Record<string, string>} */
 const FRAME_BUILDER_MAP = {
-  TOLEDO_PRIX4_UNO: '../drivers/toledo/prix4/ToledoPrix4FrameBuilder'
+  // Oficial + aliases → framing 90AX com CHK (RC14.14.2)
+  TOLEDO_PRIX4_UNO: '../drivers/toledo/protocol/ToledoFrameBuilder',
+  TOLEDO_PRIX4: '../drivers/toledo/protocol/ToledoFrameBuilder',
+  'toledo-prix4': '../drivers/toledo/protocol/ToledoFrameBuilder',
+  // Lab legado 11A sem CHK — apenas migração / captura antiga
+  TOLEDO_PRIX4_UNO_LEGACY_11A: '../drivers/toledo/prix4/ToledoPrix4FrameBuilder'
 };
 
 /**
@@ -17,7 +22,15 @@ const FRAME_BUILDER_MAP = {
  * @returns {Object|null}
  */
 function resolverFrameBuilder(codigoDriver) {
-  const rel = FRAME_BUILDER_MAP[String(codigoDriver || '').toUpperCase()];
+  let rel = FRAME_BUILDER_MAP[String(codigoDriver || '')];
+  if (!rel) {
+    try {
+      const identity = require('../sdk/DriverIdentityResolver');
+      if (identity.ehToledo(codigoDriver)) {
+        rel = FRAME_BUILDER_MAP.TOLEDO_PRIX4_UNO;
+      }
+    } catch (_) { /* ignore */ }
+  }
   if (!rel) return null;
   try {
     // eslint-disable-next-line import/no-dynamic-require, global-require

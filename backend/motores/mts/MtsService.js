@@ -2,15 +2,22 @@
  * MTS V1.0 — Motor de Transferência de Saldos
  *
  * API interna:
- *   transferirSaldo({ produto, origem, destino, quantidade, motivo, usuario })
+ *   transferirSaldo({ produto, origem, destino, quantidade, motivo, usuario, contextoAutorizacao })
  *   consultarTransferencia(id)
  *
  * Toda mutação de saldo ocorre exclusivamente via
  * backend/services/fiscalNaoFiscal (Interface Pública).
+ *
+ * RC5.1.2 — blindagem interna: transferirSaldo exige contexto de autorização
+ * (validação de token/perfil permanece no orquestrador, ex.: Motor Comercial).
  */
 'use strict';
 
 const estoqueSaldosPublico = require('../../services/fiscalNaoFiscal/estoqueSaldosPublico');
+const {
+  resolverEmpresaId,
+  COMPAT_CERTIFICADA_PRE_MULTIEMPRESA
+} = require('../../services/fiscalNaoFiscal/empresaContexto');
 const { TipoSaldo, ResultadoTransferencia } = require('./contracts');
 const auditoria = require('./MtsAuditoriaRepository');
 const schema = require('./schema');
@@ -49,14 +56,53 @@ function resolverUsuarioId(usuario) {
 }
 
 /**
+ * RC5.1.2 — extrai contexto de autorização sem validar token/perfil.
+ * @param {object} params
+ * @param {object} deps
+ * @returns {*|null}
+ */
+function extrairContextoAutorizacao(params = {}, deps = {}) {
+  const ctx = params.contextoAutorizacao
+    ?? params.autorizacao
+    ?? deps.contextoAutorizacao
+    ?? deps.autorizacao
+    ?? null;
+  return ctx == null ? null : ctx;
+}
+
+/**
+ * RC5.1.2 — bloqueia transferência sem contexto de autorização.
+ * @param {object} params
+ * @param {object} deps
+ */
+function garantirContextoAutorizacao(params = {}, deps = {}) {
+  const ctx = extrairContextoAutorizacao(params, deps);
+  if (ctx == null || ctx === false) {
+    throw erro(
+      'AUTORIZACAO_AUSENTE',
+      'Transferência de saldo exige contexto de autorização.'
+    );
+  }
+  if (typeof ctx === 'object' && Object.prototype.hasOwnProperty.call(ctx, 'autorizado') && ctx.autorizado !== true) {
+    throw erro(
+      'AUTORIZACAO_AUSENTE',
+      'Transferência de saldo exige contexto de autorização.'
+    );
+  }
+  return ctx;
+}
+
+/**
  * @param {object} params
  * @param {number|object} params.produto
+ * @param {number} [params.empresaId] - contexto multiempresa (Fase 1)
  * @param {string} params.origem - FISCAL | NAO_FISCAL
  * @param {string} params.destino - FISCAL | NAO_FISCAL
  * @param {number} params.quantidade
  * @param {string} [params.motivo]
  * @param {number|object} [params.usuario]
- * @param {{ db?: object, estoque?: object }} [deps]
+ * @param {object|true} [params.contextoAutorizacao] - RC5.1.2 contexto de autorização pré-validado
+ * @param {{ db?: object, estoque?: object, contextoAutorizacao?: object, modoLegadoSemEmpresa?: boolean }} [deps]
  */
 async function transferirSaldo(params = {}, deps = {}) {
   const db = deps.db || getDefaultDb();
@@ -68,6 +114,25 @@ async function transferirSaldo(params = {}, deps = {}) {
   const quantidade = round3(params.quantidade);
   const motivo = params.motivo != null ? String(params.motivo).trim() : '';
   const usuarioId = resolverUsuarioId(params.usuario ?? params.usuario_id ?? params.usuarioId);
+  const empresaId = resolverEmpresaId(params) ?? resolverEmpresaId(deps);
+  const usarLegado = empresaId == null && (
+    deps.modoLegadoSemEmpresa === true
+    || params.modoLegadoSemEmpresa === true
+    || deps.compatCertificadaPreMultiempresa === true
+  );
+  const optsEmpresa = {
+    db,
+    empresaId,
+    usuarioId,
+    ...(usarLegado ? COMPAT_CERTIFICADA_PRE_MULTIEMPRESA : {}),
+    validarEmpresa: deps.validarEmpresa || params.validarEmpresa
+  };
+  if (empresaId == null && !usarLegado) {
+    throw erro(
+      'EMPRESA_OBRIGATORIA',
+      'empresaId é obrigatório para transferência MTS via porta pública de saldos.'
+    );
+  }
 
   let origem;
   let destino;
@@ -92,14 +157,19 @@ async function transferirSaldo(params = {}, deps = {}) {
     throw erro('ORIGEM_DESTINO_IGUAIS', 'Origem e destino devem ser diferentes.');
   }
 
+  // RC5.1.2 — antes de iniciar a transferência
+  garantirContextoAutorizacao(params, deps);
+
   const executarTx = deps.jaEmTransacao
     ? async (work) => work(db)
     : (estoque.executarEmTransacao || estoqueSaldosPublico.executarEmTransacao);
 
   try {
     const resultado = await executarTx(async (txDb) => {
+      const optsTx = { ...optsEmpresa, db: txDb };
+
       // 1) Consultar via Interface Pública
-      const antes = await estoque.consultarSaldo(produtoId, { db: txDb });
+      const antes = await estoque.consultarSaldo(produtoId, optsTx);
 
       const saldoOrigemAntes = origem === TipoSaldo.FISCAL
         ? antes.saldo_fiscal
@@ -119,10 +189,10 @@ async function transferirSaldo(params = {}, deps = {}) {
       }
 
       // 2) Debitar origem / 3) Creditar destino — Interface Pública
-      await estoque.debitarSaldo(produtoId, origem, quantidade, { db: txDb });
-      await estoque.creditarSaldo(produtoId, destino, quantidade, { db: txDb });
+      await estoque.debitarSaldo(produtoId, origem, quantidade, optsTx);
+      await estoque.creditarSaldo(produtoId, destino, quantidade, optsTx);
 
-      const depois = await estoque.consultarSaldo(produtoId, { db: txDb });
+      const depois = await estoque.consultarSaldo(produtoId, optsTx);
       const saldoOrigemDepois = origem === TipoSaldo.FISCAL
         ? depois.saldo_fiscal
         : depois.saldo_nao_fiscal;
@@ -150,6 +220,7 @@ async function transferirSaldo(params = {}, deps = {}) {
         resultado: ResultadoTransferencia.SUCESSO,
         transferencia_id: movimento.id,
         produto_id: produtoId,
+        empresa_id: empresaId,
         origem,
         destino,
         quantidade,

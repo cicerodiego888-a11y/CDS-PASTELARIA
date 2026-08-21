@@ -10,6 +10,8 @@ const TIPOS_IDENTIFICADOR = Object.freeze({
   EAN13: 'EAN13',
   GTIN: 'GTIN',
   PLU: 'PLU',
+  /** Compatibilidade MGV6 / TXITENS — NÃO confundir com PLU, EAN ou GTIN comercial */
+  MGV6: 'MGV6',
   FORNECEDOR: 'FORNECEDOR',
   SKU_MARKETPLACE: 'SKU_MARKETPLACE',
   QR: 'QR',

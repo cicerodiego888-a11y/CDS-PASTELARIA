@@ -81,11 +81,29 @@ class DriverRegistry {
     if (this._registro.has(chave)) {
       return this._registro.get(chave);
     }
+    // RC14.14.3 — aliases Toledo → código oficial
+    try {
+      const identity = require('../sdk/DriverIdentityResolver');
+      if (identity.ehToledo(chave)) {
+        const can = identity.canonical(chave);
+        if (this._registro.has(can)) return this._registro.get(can);
+      }
+    } catch (_) { /* ignore */ }
     const lower = chave.toLowerCase();
     for (const item of this._registro.values()) {
       if (item.codigo && item.codigo.toLowerCase() === lower) return item;
     }
     return null;
+  }
+
+  /**
+   * RC14.14.3 — registra alias apontando para o mesmo registro canônico.
+   */
+  registrarAlias(codigoCanonico, alias) {
+    const item = this.buscar(codigoCanonico);
+    if (!item || !alias) return false;
+    this._registro.set(String(alias), item);
+    return true;
   }
 
   listar() {

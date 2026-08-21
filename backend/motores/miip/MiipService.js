@@ -12,6 +12,7 @@
 
 const MiipOrchestratorMod = require('./MiipOrchestrator');
 const MiipContext = require('./core/MiipContext');
+const MiipAction = require('./core/MiipAction');
 const { inicializarMiip } = require('./MiipBootstrap');
 const { mapearItemCompraParaIdentificavel } = require('./utils/mapearItemCompra');
 const miipFeatureFlags = require('./config/miipFeatureFlags');
@@ -64,9 +65,12 @@ class MiipService {
       ?? new MiipLearningService({ db: deps.db ?? null });
     /** @private */
     this._importacaoXmlService = deps.importacaoXmlService ?? new MiipImportacaoXmlService({
-      integracaoLog: deps.integracaoLog ?? integracaoLogService
+      integracaoLog: deps.integracaoLog ?? integracaoLogService,
+      db: deps.db ?? null
     });
     this._importacaoXmlService.definirMiipService(this);
+    /** @private @type {*} */
+    this.db = deps.db ?? null;
     /** @private */
     this._flagSincronizada = false;
   }
@@ -197,6 +201,20 @@ class MiipService {
     const produtoId = this.extrairProdutoId(resultado);
     const duracaoMs = Date.now() - inicio;
 
+    // RC9.3 — auto-aprendizado em AUTO_VINCULAR (GTIN ou associação)
+    let aprendizado = null;
+    try {
+      aprendizado = await this._aprenderAutoVinculo(itemNormalizado, resultado, contextoNormalizado);
+    } catch (learnErr) {
+      this.registrarIntegracao({
+        evento: 'miip_aprendizado_auto_erro',
+        origem: contextoNormalizado.origem,
+        item: itemNormalizado,
+        erro: learnErr?.message,
+        duracaoMs: Date.now() - inicio
+      });
+    }
+
     if (produtoId) {
       this.registrarIntegracao({
         evento: 'miip_sucesso',
@@ -205,6 +223,7 @@ class MiipService {
         item: itemNormalizado,
         produtoId,
         resultado,
+        aprendizado,
         duracaoMs
       });
     } else {
@@ -215,15 +234,106 @@ class MiipService {
         item: itemNormalizado,
         resultado,
         motivo: 'nenhum candidato confiável',
+        mubc: resultado?.decisao?.mubcDiagnostico
+          ?? resultado?.candidatos?._meta?.mubcDiagnostico
+          ?? null,
+        topCandidatos: (resultado?.candidatos || []).slice(0, 10).map((c) => ({
+          produtoId: c.produtoId,
+          score: c.scoreTotal,
+          motores: c.motoresQueVotaram
+        })),
         duracaoMs
       });
+    }
+
+    // MIB-RC4.0 — consulta Knowledge Graph quando sem match (não bloqueia decisão)
+    let knowledge = null;
+    if (produtoId == null) {
+      try {
+        const { consultarGrafoMiip } = require('../mib/knowledge/MiipKnowledgeBridge');
+        const db = this.db || require('../../database');
+        knowledge = await consultarGrafoMiip(db, {
+          nome: itemNormalizado?.descricao || itemNormalizado?.nome || item?.descricao || item?.nome,
+          gtin: itemNormalizado?.gtin || itemNormalizado?.codigoBarras || item?.gtin || item?.codigo_barras,
+          ncm: itemNormalizado?.ncm || item?.ncm,
+          preco: itemNormalizado?.preco || item?.preco
+        }, { origem: 'miip' });
+      } catch (_) {
+        knowledge = null;
+      }
     }
 
     return {
       encontrado: produtoId != null,
       produtoId,
-      resultado
+      resultado,
+      aprendizado,
+      knowledge
     };
+  }
+
+  /**
+   * RC9.3 — Grava miip_associacoes quando AUTO_VINCULAR (inclui match por GTIN).
+   * Não altera MotorGTIN / MotorAssociacao — hook pós-decisão.
+   *
+   * @private
+   */
+  async _aprenderAutoVinculo(item, resultado, contexto) {
+    const acao = resultado?.decisao?.acao;
+    if (acao !== MiipAction.AUTO_VINCULAR) {
+      return { gravado: false, motivo: 'acao_nao_auto' };
+    }
+
+    const produtoId = this.extrairProdutoId(resultado)
+      ?? Number(resultado?.decisao?.melhorCandidato?.produtoId);
+    const fornecedorCnpj = item?.fornecedorCnpj ?? item?.fornecedor_cnpj;
+    const codigoFornecedor = item?.codigoFornecedor ?? item?.codigo_fornecedor;
+
+    if (!produtoId || !fornecedorCnpj || !codigoFornecedor) {
+      return {
+        gravado: false,
+        motivo: 'dados_insuficientes_para_associacao',
+        produtoId: produtoId || null,
+        fornecedorCnpj: fornecedorCnpj || null,
+        codigoFornecedor: codigoFornecedor || null
+      };
+    }
+
+    const motor = (resultado?.decisao?.melhorCandidato?.motoresQueVotaram || [])[0]
+      || resultado?.decisao?.motor
+      || 'auto_vinculo';
+
+    const learn = await this._learningService.registrarConfirmacao({
+      confirmado: true,
+      produtoId,
+      fornecedorCnpj,
+      codigoFornecedor,
+      codigoBarras: item?.codigoBarras ?? item?.codigo_barras ?? null,
+      ncm: item?.ncm ?? null,
+      unidade: item?.unidade ?? null,
+      fornecedorNome: item?.fornecedorNome ?? item?.fornecedor_nome ?? null,
+      descricaoFornecedor: item?.produtoNome ?? item?.produto_nome ?? null,
+      origem: `auto_${motor}`,
+      operacaoId: resultado?.requestId ?? contexto?.operacaoId ?? null,
+      usuarioId: contexto?.usuarioId ?? null
+    });
+
+    this.registrarIntegracao({
+      evento: 'miip_aprendizado_auto',
+      origem: contexto?.origem ?? 'compra',
+      ponto: 'auto_vinculo',
+      item,
+      produtoId,
+      aprendizado: {
+        gravado: Boolean(learn.gravado),
+        associacaoId: learn.associacaoId ?? null,
+        motivo: learn.motivo ?? null,
+        reutilizacao: Boolean(learn.reutilizacao),
+        origem: `auto_${motor}`
+      }
+    });
+
+    return learn;
   }
 
   /**
@@ -274,18 +384,19 @@ class MiipService {
   /**
    * Registra confirmação manual do operador e grava aprendizado em `miip_associacoes`.
    *
-   * Exige `confirmado: true` — nunca grava automaticamente.
-   *
-   * @param {Object} feedback
-   * @param {boolean} feedback.confirmado - Confirmação explícita do usuário
-   * @param {number} feedback.produtoId - Produto escolhido
-   * @param {string} feedback.fornecedorCnpj - CNPJ do fornecedor
-   * @param {string} feedback.codigoFornecedor - Código cProd do fornecedor
-   * @param {number} [feedback.usuarioId]
-   * @param {string} [feedback.operacaoId]
-   * @param {Object} [feedback.item]
-   * @returns {Promise<{ sucesso: boolean, gravado: boolean, associacaoId: number|null, operacaoId: string, motivo: string|null, substituiu?: boolean }>}
-   */
+ * Exige `confirmado: true` — confirmação do operador OU auto-aprendizado RC9.3
+ * (origem auto_* após AUTO_VINCULAR).
+ *
+ * @param {Object} feedback
+ * @param {boolean} feedback.confirmado - Confirmação explícita / auto
+ * @param {number} feedback.produtoId - Produto escolhido
+ * @param {string} feedback.fornecedorCnpj - CNPJ do fornecedor
+ * @param {string} feedback.codigoFornecedor - Código cProd do fornecedor
+ * @param {number} [feedback.usuarioId]
+ * @param {string} [feedback.operacaoId]
+ * @param {Object} [feedback.item]
+ * @returns {Promise<{ sucesso: boolean, gravado: boolean, associacaoId: number|null, operacaoId: string, motivo: string|null, substituiu?: boolean }>}
+ */
   async registrarFeedback(feedback) {
     await this._garantirInicializado();
 
@@ -392,7 +503,7 @@ class MiipService {
 
     const registryTotal = MotorRegistry.total();
     const registryAtivos = MotorRegistry.totalAtivos();
-    const enginesOk = engines.length >= 6 && registryAtivos >= 6;
+    const enginesOk = engines.length >= 7 && registryAtivos >= 7;
 
     let telemetria = { ok: true, execucoesRegistradas: 0, ultimaExecucao: null };
     try {
@@ -434,7 +545,7 @@ class MiipService {
       componentes: {
         pipeline: { ok: pipelineOk && inicializado },
         registry: {
-          ok: registryAtivos >= 6,
+          ok: registryAtivos >= 7,
           totalRegistrados: registryTotal,
           totalAtivos: registryAtivos,
           motores: MotorRegistry.listarAtivos().map((m) => ({

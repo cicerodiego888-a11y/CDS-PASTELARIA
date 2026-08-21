@@ -203,6 +203,23 @@ function renderPainelDiagnosticoCentral(dados) {
   const perf = dados.performance || {};
   const sistema = dados.sistema || {};
 
+  // RC3.7.5.3 — UX cooldown 656 (somente apresentação)
+  const cooldownAteMs = sefaz.cooldownNsuAte ? new Date(sefaz.cooldownNsuAte).getTime() : 0;
+  const cooldownAtivo = Boolean(
+    cooldownAteMs > Date.now()
+    && (String(sefaz.ultimoCstat || sefaz.codigoRejeicao || '') === '656'
+      || /Aguardando cooldown|Atualizado automaticamente/i.test(String(sefaz.statusNsu || '')))
+  );
+  const restanteMin = cooldownAtivo
+    ? Math.max(1, Math.ceil((cooldownAteMs - Date.now()) / 60000))
+    : 0;
+  const proximaHora = cooldownAtivo
+    ? new Date(cooldownAteMs).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' })
+    : '—';
+  const statusNsuLabel = cooldownAtivo
+    ? 'AGUARDANDO COOLDOWN DA SEFAZ'
+    : (sefaz.statusNsu || '—');
+
   return `
     <div class="central-diag-page central-entradas-anim-in">
       <div class="central-diag-hero d-flex flex-wrap justify-content-between align-items-center mb-4">
@@ -210,9 +227,18 @@ function renderPainelDiagnosticoCentral(dados) {
           <h2 class="mb-1"><i class="fas fa-heartbeat me-2"></i>Saúde da Central</h2>
           <p class="text-muted mb-0">Ferramenta de suporte técnico — somente leitura e ações operacionais seguras.</p>
           <small class="text-muted">Atualizado: ${dados.geradoEm ? new Date(dados.geradoEm).toLocaleString('pt-BR') : '—'}</small>
+          ${cooldownAtivo ? `
+          <div class="alert alert-warning py-2 px-3 mt-2 mb-0" role="status">
+            🟡 Aguardando liberação da SEFAZ · Próxima tentativa: <strong>${proximaHora}</strong>
+            · Tempo restante: <strong>${restanteMin} minuto${restanteMin === 1 ? '' : 's'}</strong>
+          </div>` : ''}
         </div>
         <div class="central-diag-actions d-flex flex-wrap gap-2 mt-2 mt-md-0">
-          <button class="btn btn-outline-primary btn-sm" id="btnDiagSync"><i class="fas fa-sync"></i> Sincronizar</button>
+          <button class="btn btn-outline-primary btn-sm" id="btnDiagSync"
+            ${cooldownAtivo ? 'disabled' : ''}
+            title="${cooldownAtivo ? 'A SEFAZ bloqueia novas consultas durante o período de espera.' : 'Sincronizar com a SEFAZ'}">
+            <i class="fas fa-sync"></i> Sincronizar
+          </button>
           <button class="btn btn-outline-secondary btn-sm" id="btnDiagReprocessar"><i class="fas fa-redo"></i> Reprocessar pendências</button>
           <button class="btn btn-outline-secondary btn-sm" id="btnDiagAtualizar"><i class="fas fa-refresh"></i> Atualizar</button>
           <button class="btn btn-outline-info btn-sm" id="btnDiagCert"><i class="fas fa-certificate"></i> Testar certificado</button>
@@ -229,6 +255,11 @@ function renderPainelDiagnosticoCentral(dados) {
         { label: 'Próxima sincronização', valor: sefaz.proximaSincronizacao ? new Date(sefaz.proximaSincronizacao).toLocaleString('pt-BR') : '—' },
         { label: 'Tempo última consulta', valor: formatarMsCentral(sefaz.tempoUltimaConsultaMs) },
         { label: 'Documentos encontrados', valor: sefaz.documentosEncontrados ?? 0 },
+        { label: 'NSU Local', valor: sefaz.nsuLocal || sefaz.ultimoNsuSalvo || '—' },
+        { label: 'NSU SEFAZ', valor: sefaz.nsuSefaz || sefaz.ultimoNsuRecebido || '—' },
+        { label: 'Último cStat', valor: sefaz.ultimoCstat || sefaz.codigoRejeicao || '—' },
+        { label: 'Status NSU', valor: statusNsuLabel },
+        { label: 'Cooldown NSU até', valor: sefaz.cooldownNsuAte ? new Date(sefaz.cooldownNsuAte).toLocaleString('pt-BR') : '—' },
         { label: 'Último NSU recebido', valor: sefaz.ultimoNsuRecebido || '—' },
         { label: 'Último NSU processado', valor: sefaz.ultimoNsuProcessado || '—' },
         { label: 'Último NSU salvo', valor: sefaz.ultimoNsuSalvo || '—' },

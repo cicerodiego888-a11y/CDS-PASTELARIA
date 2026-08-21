@@ -18,7 +18,9 @@ class MonitoringWidgetBuilder {
   build(payload = {}, opcoes = {}) {
     const updatedAt = opcoes.updatedAt || new Date().toISOString();
     return [
-      ...buildFiscalWidgets(payload, updatedAt),
+      ...buildFiscalWidgets(payload, updatedAt, {
+        competenciaLabel: opcoes.competenciaLabel
+      }),
       ...buildFinanceiroWidgets(payload, updatedAt),
       ...buildCaixaWidgets(payload, updatedAt),
       ...buildRecebimentosWidgets(payload, updatedAt),

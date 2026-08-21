@@ -18,6 +18,7 @@ const { criarVendaContract } = require('../vendas/VendaContract');
 const { criarVendaContext } = require('../vendas/VendaContext');
 const VendaApplicationService = require('../vendas/VendaApplicationService');
 const { consumirReservasDaVenda } = require('../estoque/EstoqueConsumoReserva');
+const { montarOptsPortaReservaPdv } = require('../estoque/EstoqueReservaService');
 
 function assertModuloHabilitado() {
   if (!configService.recursoHabilitado('expedicao')) {
@@ -270,7 +271,10 @@ async function faturarPedido(pedidoId, body = {}, reqHttp = {}) {
   }
 
   try {
-    await consumirReservasDaVenda(vendaId);
+    await consumirReservasDaVenda(
+      vendaId,
+      montarOptsPortaReservaPdv(reqHttp, db)
+    );
   } catch (resErr) {
     console.warn('[Faturamento] consumirReservasDaVenda:', resErr.message);
   }
@@ -278,7 +282,12 @@ async function faturarPedido(pedidoId, body = {}, reqHttp = {}) {
   // RC4.1.2 — garantia: consome reservas do pedido (idempotente se Núcleo já consumiu)
   try {
     const { consumirReservasPedidoNaVenda } = require('../estoque/pedidoReservaPonteNucleo');
-    await consumirReservasPedidoNaVenda(id, vendaId);
+    await consumirReservasPedidoNaVenda(id, vendaId, {
+      db,
+      empresaId: reqHttp.empresaId ?? reqHttp.empresa_id,
+      contexto: reqHttp,
+      usuarioId: reqHttp.operadorId || reqHttp.user?.id || null
+    });
   } catch (pedResErr) {
     console.warn('[Faturamento] consumirReservasPedidoNaVenda:', pedResErr.message);
   }

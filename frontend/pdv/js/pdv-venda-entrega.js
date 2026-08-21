@@ -156,6 +156,8 @@
       quantidade_estoque: item.quantidade_estoque,
       preco_unitario: item.preco_unitario,
       desconto_percentual: item.desconto_percentual || 0,
+      desconto_valor: item.desconto_valor || 0,
+      desconto_manual: Number(item.desconto_manual || 0) === 1 ? 1 : 0,
       subtotal: item.subtotal,
       tipo_venda: item.tipo_venda || item.tipoVenda,
       nome: item.nome

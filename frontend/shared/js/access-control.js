@@ -14,6 +14,7 @@ const PERMISSOES_PAGINAS = {
     compras: 'compras',
     'central-entradas': 'compras',
     'central-diagnostico': 'compras',
+    'dfe-auditoria': 'compras',
     fornecedores: 'fornecedores',
     vendas: 'vendas',
     entregas: 'vendas',
@@ -31,6 +32,7 @@ const PERMISSOES_PAGINAS = {
     categorias: 'categorias',
     fiscal: 'fiscal',
     configuracoes: 'configuracoes',
+    'importacao-inicial-produtos': 'configuracoes',
     equipamentos: 'configuracoes',
     'central-equipamentos': 'configuracoes',
     'laboratorio-equipamentos': 'configuracoes',
@@ -226,7 +228,7 @@ function usuarioTemPermissao(page) {
         return !!localStorage.getItem('token');
     }
 
-    if (page === 'central-diagnostico') {
+    if (page === 'central-diagnostico' || page === 'dfe-auditoria') {
         return usuarioPodeAcessarDiagnosticoCentral();
     }
 
@@ -234,7 +236,7 @@ function usuarioTemPermissao(page) {
         return podeGerenciarUsuariosSistema();
     }
 
-    if (page === 'configuracoes-avancadas' || page === 'configuracao-rede' || page === 'nome-terminal-pdv' || page === 'observabilidade') {
+    if (page === 'configuracoes-avancadas' || page === 'importacao-inicial-produtos' || page === 'configuracao-rede' || page === 'nome-terminal-pdv' || page === 'observabilidade' || page === 'mib-analytics' || page === 'enterprise-search' || page === 'knowledge-center' || page === 'cip-insights' || page === 'cds-copiloto') {
         return isSuperAdminUser();
     }
 

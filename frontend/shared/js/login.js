@@ -1,6 +1,7 @@
 /**
  * Login — autenticação.
  * Hotfix RC2.2 — primeiro acesso (admin/1234 + troca obrigatória).
+ * Persistência do último acesso (usuário + senha) para login mais rápido em estação local.
  */
 const API_URL = (() => {
   if (typeof window.API_URL === 'string' && window.API_URL.trim() !== '') {
@@ -11,6 +12,31 @@ const API_URL = (() => {
   window.API_URL = resolved;
   return resolved;
 })();
+
+const CDS_LOGIN_ULTIMO_USER_KEY = 'cds_login_ultimo_usuario';
+const CDS_LOGIN_ULTIMO_PASS_KEY = 'cds_login_ultima_senha';
+
+function salvarUltimoAcessoLogin(username, password) {
+  try {
+    const user = String(username || '').trim();
+    if (!user) return;
+    localStorage.setItem(CDS_LOGIN_ULTIMO_USER_KEY, user);
+    localStorage.setItem(CDS_LOGIN_ULTIMO_PASS_KEY, String(password || ''));
+  } catch (_) { /* ignore quota / private mode */ }
+}
+
+function carregarUltimoAcessoLogin() {
+  try {
+    const username = localStorage.getItem(CDS_LOGIN_ULTIMO_USER_KEY) || '';
+    const password = localStorage.getItem(CDS_LOGIN_ULTIMO_PASS_KEY) || '';
+    if (!username && !password) return false;
+    if (username) $('#username').val(username);
+    if (password) $('#password').val(password);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
 
 (function redirectIfLoggedIn() {
   const token = localStorage.getItem('token');
@@ -104,6 +130,7 @@ $('#loginForm').on('submit', function (e) {
     contentType: 'application/json',
     data: JSON.stringify({ username, password }),
     success: function (data) {
+      salvarUltimoAcessoLogin(username, password);
       localStorage.setItem('token', data.token);
       localStorage.setItem('user', JSON.stringify(data.user));
       publicarLoginDuration(true);
@@ -179,6 +206,11 @@ $('#primeiroAcessoForm').on('submit', function (e) {
       })();
       user.troca_senha_obrigatoria = false;
       localStorage.setItem('user', JSON.stringify(user));
+      // Persiste a nova senha como último acesso
+      salvarUltimoAcessoLogin(
+        $('#username').val() || user.username || localStorage.getItem(CDS_LOGIN_ULTIMO_USER_KEY) || '',
+        nova
+      );
       concluirPosLogin({ token, user });
     },
     error: function (xhr) {
@@ -195,7 +227,11 @@ function aplicarAutofillPrimeiroAcesso() {
     url: `${API_URL}/auth/primeiro-acesso`,
     method: 'GET',
     success: function (data) {
-      if (!data || !data.primeiro_acesso) return;
+      if (!data || !data.primeiro_acesso) {
+        // Não é primeiro acesso — mantém/preenche último login salvo
+        carregarUltimoAcessoLogin();
+        return;
+      }
       $('#username').val(data.username || 'admin');
       $('#password').val('1234');
       const btn = document.getElementById('btn-entrar');
@@ -205,6 +241,9 @@ function aplicarAutofillPrimeiroAcesso() {
       } else if (pwd) {
         pwd.focus();
       }
+    },
+    error: function () {
+      carregarUltimoAcessoLogin();
     }
   });
 }
@@ -216,12 +255,20 @@ $(document).ready(function () {
   $('*').css('pointer-events', '');
   $('body, html').css('pointer-events', 'auto');
 
+  // Preenche imediatamente com o último acesso; primeiro acesso pode sobrescrever
+  carregarUltimoAcessoLogin();
   aplicarAutofillPrimeiroAcesso();
 
   setTimeout(() => {
     if (!$('#username').val()) {
       const campoUsername = $('#username');
       if (campoUsername.length > 0) campoUsername[0].focus();
+    } else if (!$('#password').val()) {
+      const campoSenha = $('#password');
+      if (campoSenha.length > 0) campoSenha[0].focus();
+    } else {
+      const btn = document.getElementById('btn-entrar');
+      if (btn && typeof btn.focus === 'function') btn.focus();
     }
   }, 250);
 

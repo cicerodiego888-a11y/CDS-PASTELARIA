@@ -321,7 +321,10 @@ function buildNfeXml({ config, venda, itens, numero, dadosNfe = {} }) {
     const qCom = obterQuantidadeFiscalItem(item);
     const vItem = round2(obterValorFiscalItem(item));
     const vUn = obterPrecoUnitarioFiscalItem(item);
-    const descontoItem = usarModeloBruto ? round2(item.desconto_rateado || 0) : 0;
+    // Só rateio do desconto da venda; desconto de item já está no valor líquido.
+    let descontoItem = usarModeloBruto ? round2(item.desconto_rateado || 0) : 0;
+    if (descontoItem > vItem) descontoItem = vItem;
+    if (descontoItem < 0) descontoItem = 0;
     vProd += vItem;
     vDesc += descontoItem;
     const ncm = onlyDigits(item.produto_ncm || item.ncm || '00000000').padStart(8, '0').substring(0, 8);

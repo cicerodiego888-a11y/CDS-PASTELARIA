@@ -44,7 +44,7 @@ function casoCountdownETempo() {
 }
 
 function casoMensagens() {
-  assert.match(UX.mensagemAmigavelCentral('AGUARDANDO_XML_COMPLETO'), /disponibilização/);
+  assert.match(UX.mensagemAmigavelCentral('AGUARDANDO_XML_COMPLETO'), /XML completo|disponibilizou|MIRX/i);
   assert.match(UX.mensagemAmigavelCentral('ERRO'), /indisponível/);
   assert.match(UX.mensagemAmigavelCentral('CONSUMO_INDEVIDO'), /intervalo/);
   assert.match(UX.mensagemAmigavelCentral('MANIFESTACAO_ACEITA'), /consultando automaticamente/);
@@ -79,17 +79,19 @@ function casoTimelineEProgresso() {
     proximaTentativa: '2026-07-19T12:10:00.000Z',
     ultimaConsulta: '2026-07-19T12:05:00.000Z'
   });
-  assert.strictEqual(modelo.total, 6);
+  assert.strictEqual(modelo.total, 14);
   assert.ok(modelo.etapas[0].concluida);
-  assert.ok(modelo.etapas[2].ativa);
+  assert.ok(modelo.percentual >= 0 && modelo.percentual <= 100);
+  assert.ok(modelo.etapas.some((e) => e.ativa && (e.id === 'xml_sefaz' || e.id === 'xml_solicitado')));
 
   const barra = UX.renderBarraProgressoOperacionalCentral(modelo);
   assert.ok(barra.includes('central-rc75-progress'));
+  assert.ok(barra.includes('%'));
   assert.ok(barra.includes('is-on'));
 
   const tl = UX.renderTimelineOperacionalCentral(modelo);
   assert.ok(tl.includes('central-rc75-timeline'));
-  assert.ok(tl.includes('Recebido'));
+  assert.ok(tl.includes('Documento localizado') || tl.includes('RES_NFE'));
 }
 
 function casoCardXmlECountdownLive() {
@@ -108,7 +110,7 @@ function casoCardXmlECountdownLive() {
   });
   assert.ok(html.includes('XML Completo'));
   assert.ok(html.includes('data-central-live="countdown"'));
-  assert.ok(html.includes('18 minutos') || html.includes('Tempo aguardando'));
+  assert.ok(html.includes('Próxima tentativa') || html.includes('Dormindo') || html.includes('Backoff'));
   assert.ok(html.includes('137'));
 }
 

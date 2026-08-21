@@ -442,7 +442,7 @@ Controller (POST /api/vendas + validarCaixaSeOrigemPdv)
     ↓
 VendaApplicationService(VendaContract, VendaContext)
     ↓
-├─ PDV → VendaPagamentoService → Motor F×NF → Financeiro → Estoque → NFC-e 65
+├─ PDV → VendaPagamentoService → MPFC → Motor F×NF → Financeiro → Estoque → NFC-e 65
 └─ ≠ PDV → reconhece origem / não conclui (Sprint 2.2)
 ```
 
@@ -450,6 +450,7 @@ VendaApplicationService(VendaContract, VendaContext)
 > O PDV **inicia** o pipeline; **não** é o centro das regras.  
 > `VendaApplicationService` é a **única porta oficial** de entrada do núcleo.  
 > `VendaOrigin` / `VendaContext` formalizam múltiplas origens (Sprint 2.2).  
+> **MPFC** (`PoliticaFiscalComercialV1` **CONGELADO** — RC8.2.2) fica entre configuração e os motores; MIDP/Orquestrador **recebem** política, não decidem.  
 > Regras F×NF, financeiro, estoque, TEF, PIX e NFC-e estão congeladas neste núcleo.  
 > Nenhuma origem futura implementa regras próprias de estoque, financeiro, pagamentos, F×NF ou documento fiscal.
 
@@ -493,8 +494,9 @@ flowchart TB
 | `MiipOrchestrator` | MIIP | Delega execução ao `MiipPipeline` |
 | `VendaApplicationService.criarVenda` | Núcleo Venda (porta) | Porta oficial — `VendaContract`/`VendaContext`; PDV delega; demais origens reconhecidas (Sprint 2.2) |
 | `VendaPagamentoService.criarVenda` | Núcleo Venda | Orquestra criação completa da venda (estoque, pagamento, financeiro, fiscal) |
-| `OrquestradorPagamento` | Núcleo Venda | Coordena TEF/status após o MIDP; não decide valores F×NF |
-| `MIDP` (`MotorInteligenteDistribuicaoPagamentos`) | Núcleo Venda | Distribui meios sobre Valor Fiscal Efetivo; política V1 PRESERVAR DINHEIRO (Sprint 3.8C) |
+| `MPFC` (`MotorPoliticaFiscalComercial`) | Núcleo Venda | Política fiscal-comercial; contrato `PoliticaFiscalComercialV1` **CONGELADO** (RC8.2.2) |
+| `OrquestradorPagamento` | Núcleo Venda | Coordena TEF/status após o MIDP; não decide valores F×NF nem política |
+| `MIDP` (`MotorInteligenteDistribuicaoPagamentos`) | Núcleo Venda | Distribui meios sobre Valor Fiscal Efetivo; recebe `midpAtivo` da política MPFC |
 
 ### 7.2 Quem pode chamar
 
@@ -712,6 +714,8 @@ Fica registrado oficialmente que:
 | **Contexto Central** | Pacote operacional (`obterContextoOperacional`) para sync/SOAP |
 | **Bridge Compras** | Integração oficial Central → abertura/vínculo de compra |
 | **Plataforma Fiscal** | Camada de transporte/resolução SEFAZ (`FiscalWebServices`) |
+| **MPFC** | Motor de Política Fiscal Comercial — mapeia config → `PoliticaFiscalComercialV1` |
+| **PoliticaFiscalComercialV1** | Contrato de política fiscal-comercial **CONGELADO** (RC8.2.2); evoluções → V2 |
 
 ---
 
@@ -723,6 +727,7 @@ Fica registrado oficialmente que:
 | **1.0 + Núcleo Venda** | **2026-07-11** | Inclusão do pipeline oficial de venda e referência a [NUCLEO_TRANSACIONAL_VENDA_V1.md](./NUCLEO_TRANSACIONAL_VENDA_V1.md) (somente documentação) |
 | **1.1 + Porta de Aplicação** | **2026-07-11** | Sprint 2.0 — `VendaApplicationService` como porta oficial do Núcleo Transacional (sem alteração de regras) |
 | **1.2 + Multi-origem** | **2026-07-20** | Sprint 2.2 — `VendaOrigin` / `VendaContext` / política de porta (PDV exige caixa; demais reconhecidas sem concluir) |
+| **1.3 + MPFC V1 congelado** | **2026-07-28** | RC8.2.2 — MPFC no pipeline; `PoliticaFiscalComercialV1` CONGELADO; snapshot pós-venda obrigatório |
 
 ---
 

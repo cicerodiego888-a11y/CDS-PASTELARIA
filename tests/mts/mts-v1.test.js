@@ -59,6 +59,8 @@ async function setupDb() {
       nome TEXT,
       saldo_fiscal REAL DEFAULT 0,
       saldo_nao_fiscal REAL DEFAULT 0,
+      reservado_fiscal REAL DEFAULT 0,
+      reservado_nao_fiscal REAL DEFAULT 0,
       estoque_atual REAL DEFAULT 0,
       updated_at DATETIME
     )
@@ -99,15 +101,19 @@ function assertRejects(promise, code) {
   );
 }
 
+const CTX_AUTH = Object.freeze({ autorizado: true });
+
 async function testFiscalParaNaoFiscal() {
   const { db, produtoId } = await setupDb();
   const r = await transferirSaldo({
     produto: produtoId,
+    empresaId: 1,
     origem: TipoSaldo.FISCAL,
     destino: TipoSaldo.NAO_FISCAL,
     quantidade: 20,
     motivo: 'Homologação F→NF',
-    usuario: 7
+    usuario: 7,
+    contextoAutorizacao: CTX_AUTH
   }, { db, estoque: estoqueSaldosPublico });
 
   assert.strictEqual(r.sucesso, true);
@@ -129,11 +135,13 @@ async function testNaoFiscalParaFiscal() {
   const { db, produtoId } = await setupDb();
   const r = await transferirSaldo({
     produto: produtoId,
+    empresaId: 1,
     origem: 'NAO_FISCAL',
     destino: 'FISCAL',
     quantidade: 10,
     motivo: 'Homologação NF→F',
-    usuario: { id: 3 }
+    usuario: { id: 3 },
+    contextoAutorizacao: CTX_AUTH
   }, { db, estoque: estoqueSaldosPublico });
 
   assert.strictEqual(r.origem, TipoSaldo.NAO_FISCAL);
@@ -152,10 +160,12 @@ async function testSaldoInsuficiente() {
   await assertRejects(
     transferirSaldo({
       produto: produtoId,
+      empresaId: 1,
       origem: TipoSaldo.FISCAL,
       destino: TipoSaldo.NAO_FISCAL,
       quantidade: 999,
-      motivo: 'deve falhar'
+      motivo: 'deve falhar',
+      contextoAutorizacao: CTX_AUTH
     }, { db, estoque: estoqueSaldosPublico }),
     'SALDO_INSUFICIENTE'
   );
@@ -186,10 +196,12 @@ async function testRollback() {
   await assertRejects(
     transferirSaldo({
       produto: produtoId,
+      empresaId: 1,
       origem: TipoSaldo.FISCAL,
       destino: TipoSaldo.NAO_FISCAL,
       quantidade: 5,
-      motivo: 'rollback'
+      motivo: 'rollback',
+      contextoAutorizacao: CTX_AUTH
     }, { db, estoque: estoqueQuebrado }),
     'FALHA_SIMULADA'
   );
@@ -207,11 +219,13 @@ async function testAuditoria() {
   const { db, produtoId } = await setupDb();
   const r = await transferirSaldo({
     produto: { id: produtoId },
+    empresaId: 1,
     origem: TipoSaldo.FISCAL,
     destino: TipoSaldo.NAO_FISCAL,
     quantidade: 3,
     motivo: 'auditoria',
-    usuario: 99
+    usuario: 99,
+    contextoAutorizacao: CTX_AUTH
   }, { db, estoque: estoqueSaldosPublico });
 
   const row = await consultarTransferencia(r.transferencia_id, { db });
@@ -240,6 +254,8 @@ async function testConcorrencia() {
       nome TEXT,
       saldo_fiscal REAL DEFAULT 0,
       saldo_nao_fiscal REAL DEFAULT 0,
+      reservado_fiscal REAL DEFAULT 0,
+      reservado_nao_fiscal REAL DEFAULT 0,
       estoque_atual REAL DEFAULT 0,
       updated_at DATETIME
     )
@@ -276,18 +292,22 @@ async function testConcorrencia() {
 
   const p1 = transferirSaldo({
     produto: produtoId,
+    empresaId: 1,
     origem: TipoSaldo.FISCAL,
     destino: TipoSaldo.NAO_FISCAL,
     quantidade: 10,
-    motivo: 'conc-1'
+    motivo: 'conc-1',
+    contextoAutorizacao: CTX_AUTH
   }, { db: db1, estoque: estoqueSaldosPublico });
 
   const p2 = transferirSaldo({
     produto: produtoId,
+    empresaId: 1,
     origem: TipoSaldo.FISCAL,
     destino: TipoSaldo.NAO_FISCAL,
     quantidade: 10,
-    motivo: 'conc-2'
+    motivo: 'conc-2',
+    contextoAutorizacao: CTX_AUTH
   }, { db: db2, estoque: estoqueSaldosPublico });
 
   const results = await Promise.allSettled([p1, p2]);
@@ -357,6 +377,7 @@ async function testValidacoesBasicas() {
   await assertRejects(
     transferirSaldo({
       produto: produtoId,
+      empresaId: 1,
       origem: TipoSaldo.FISCAL,
       destino: TipoSaldo.FISCAL,
       quantidade: 1
@@ -367,6 +388,7 @@ async function testValidacoesBasicas() {
   await assertRejects(
     transferirSaldo({
       produto: produtoId,
+      empresaId: 1,
       origem: TipoSaldo.FISCAL,
       destino: TipoSaldo.NAO_FISCAL,
       quantidade: 0
@@ -377,13 +399,62 @@ async function testValidacoesBasicas() {
   await assertRejects(
     transferirSaldo({
       produto: 99999,
+      empresaId: 1,
       origem: TipoSaldo.FISCAL,
       destino: TipoSaldo.NAO_FISCAL,
-      quantidade: 1
+      quantidade: 1,
+      contextoAutorizacao: CTX_AUTH
     }, { db, estoque: estoqueSaldosPublico }),
     'PRODUTO_NAO_ENCONTRADO'
   );
 
+  await assertRejects(
+    transferirSaldo({
+      produto: produtoId,
+      origem: TipoSaldo.FISCAL,
+      destino: TipoSaldo.NAO_FISCAL,
+      quantidade: 1,
+      contextoAutorizacao: CTX_AUTH
+    }, { db, estoque: estoqueSaldosPublico }),
+    'EMPRESA_OBRIGATORIA'
+  );
+
+  await closeDb(db);
+}
+
+/** RC5.1.2 — chamada direta sem contexto de autorização deve ser bloqueada. */
+async function testSemContextoAutorizacao() {
+  const { db, produtoId } = await setupDb();
+
+  await assertRejects(
+    transferirSaldo({
+      produto: produtoId,
+      empresaId: 1,
+      origem: TipoSaldo.FISCAL,
+      destino: TipoSaldo.NAO_FISCAL,
+      quantidade: 1,
+      motivo: 'sem auth'
+    }, { db, estoque: estoqueSaldosPublico }),
+    'AUTORIZACAO_AUSENTE'
+  );
+
+  await assertRejects(
+    transferirSaldo({
+      produto: produtoId,
+      empresaId: 1,
+      origem: TipoSaldo.FISCAL,
+      destino: TipoSaldo.NAO_FISCAL,
+      quantidade: 1,
+      contextoAutorizacao: { autorizado: false }
+    }, { db, estoque: estoqueSaldosPublico }),
+    'AUTORIZACAO_AUSENTE'
+  );
+
+  const prod = await get(db, 'SELECT * FROM produtos WHERE id = ?', [produtoId]);
+  assert.strictEqual(prod.saldo_fiscal, 100);
+  assert.strictEqual(prod.saldo_nao_fiscal, 50);
+  const auditCount = await get(db, 'SELECT COUNT(*) AS c FROM movimentos_transferencia_saldos');
+  assert.strictEqual(auditCount.c, 0);
   await closeDb(db);
 }
 
@@ -396,7 +467,8 @@ async function main() {
     ['rollback', testRollback],
     ['auditoria', testAuditoria],
     ['concorrência', testConcorrencia],
-    ['validações básicas', testValidacoesBasicas]
+    ['validações básicas', testValidacoesBasicas],
+    ['RC5.1.2 sem contexto de autorização', testSemContextoAutorizacao]
   ];
 
   let falhas = 0;

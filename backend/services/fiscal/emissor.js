@@ -503,8 +503,18 @@ async function emitirPorVendaId(vendaId) {
     itensFiscal,
     empresa: {
       nome: config.nomeEmpresa,
+      nomeFantasia: config.nomeFantasia || config.nomeEmpresa,
+      razaoSocial: config.razaoSocial || config.nomeEmpresa,
       cnpj: config.cnpj,
-      endereco: config.endereco
+      endereco: config.endereco,
+      telefone: config.telefone,
+      logradouro: config.logradouro,
+      numero: config.numeroEndereco,
+      bairro: config.bairro,
+      municipio: config.municipioNome,
+      uf: config.uf,
+      cep: config.cep,
+      larguraMm: config.danfeLarguraMm || 80
     },
     chave: xmlBase.chave,
     numero,
@@ -665,15 +675,29 @@ async function obterDanfeHtmlAtualizado(vendaId) {
     itensFiscal: (itens || []).filter(itemEntraNaNfce),
     empresa: {
       nome: config.nomeEmpresa,
+      nomeFantasia: config.nomeFantasia || config.nomeEmpresa,
+      razaoSocial: config.razaoSocial || config.nomeEmpresa,
       cnpj: config.cnpj,
-      endereco: config.endereco
+      endereco: config.endereco,
+      telefone: config.telefone,
+      logradouro: config.logradouro,
+      numero: config.numeroEndereco,
+      bairro: config.bairro,
+      municipio: config.municipioNome,
+      uf: config.uf,
+      cep: config.cep,
+      larguraMm: config.danfeLarguraMm || 80
     },
     chave: nota.chave_acesso,
     numero: nota.numero,
     serie: nota.serie || config.serie,
     qrCodeUrl: nota.qr_code_url || '',
     tributos: null,
-    nota: { tpAmb: ambiente }
+    nota: {
+      tpAmb: ambiente,
+      protocolo: nota.protocolo || null,
+      data_autorizacao: nota.updated_at || nota.created_at || null
+    }
   });
 
   if (nota.id && danfeHtml) {

@@ -4,6 +4,7 @@ const MotorCanonical = require('./canonical/MotorCanonical');
 const MotorAttributeExtractor = require('./attributes/MotorAttributeExtractor');
 const MotorSynonyms = require('./synonyms/MotorSynonyms');
 const MotorSimilarity = require('./similarity/MotorSimilarity');
+const MotorUniversalBuscaCandidatos = require('./mubc/MotorUniversalBuscaCandidatos');
 
 module.exports = {
   MotorGTIN,
@@ -11,5 +12,6 @@ module.exports = {
   MotorCanonical,
   MotorAttributeExtractor,
   MotorSynonyms,
-  MotorSimilarity
+  MotorSimilarity,
+  MotorUniversalBuscaCandidatos
 };

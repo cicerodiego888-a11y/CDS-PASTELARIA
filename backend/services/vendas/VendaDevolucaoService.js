@@ -6,8 +6,22 @@ const { resolverQuantidadesVendaItem, calcularDevolucaoVendaFiscalPrimeiro } = r
 const { gravarAuditoria } = require('../auditoria');
 const { validarMotivoTexto } = require('../validacao/validarMotivoTexto');
 const { recalcularFinanceiroDevolucaoVenda } = require('./VendaFinanceiroService');
+const mpfc = require('../mpfc');
+const {
+  creditarEstoqueItemVenda,
+  montarOpcoesRetornoEstoqueVenda
+} = require('./creditoEstoqueVendaViaPorta');
 
-function devolverSaldosDistribuidos(produtoId, quantidadeFiscal, quantidadeNaoFiscal, callback) {
+function dbDeOpcoes(opcoes) {
+  return (opcoes && opcoes.db) || db;
+}
+
+/**
+ * Retorno F/NF da venda via porta pública (02.5).
+ * Quantidades já resolvidas pelo caller — não recalcula distribuição.
+ * Assinatura legado: (produtoId, qtdF, qtdNF, callback [, opcoes])
+ */
+function devolverSaldosDistribuidos(produtoId, quantidadeFiscal, quantidadeNaoFiscal, callback, opcoes = {}) {
   const qtdFiscal = Number(quantidadeFiscal || 0);
   const qtdNaoFiscal = Number(quantidadeNaoFiscal || 0);
 
@@ -15,21 +29,25 @@ function devolverSaldosDistribuidos(produtoId, quantidadeFiscal, quantidadeNaoFi
     return callback(null);
   }
 
-  db.run(`
-    UPDATE produtos
-    SET
-      saldo_fiscal = saldo_fiscal + ?,
-      saldo_nao_fiscal = saldo_nao_fiscal + ?,
-      estoque_atual = (saldo_fiscal + ?) + (saldo_nao_fiscal + ?),
-      updated_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  `, [qtdFiscal, qtdNaoFiscal, qtdFiscal, qtdNaoFiscal, produtoId], callback);
+  creditarEstoqueItemVenda(dbDeOpcoes(opcoes), {
+    produtoId,
+    quantidadeFiscal: qtdFiscal,
+    quantidadeNaoFiscal: qtdNaoFiscal,
+    empresaId: opcoes.empresaId ?? opcoes.empresa_id,
+    usuarioId: opcoes.usuarioId,
+    exigirEmpresa: opcoes.exigirEmpresa,
+    origem: opcoes.origem,
+    contexto: opcoes.contexto,
+    ctx: opcoes.ctx,
+    validarEmpresa: opcoes.validarEmpresa
+  }, callback);
 }
 
-function devolverEstoqueItemVenda(item, callback) {
+function devolverEstoqueItemVenda(item, callback, opcoes = {}) {
   const qtds = resolverQuantidadesVendaItem(item);
+  const dbConn = dbDeOpcoes(opcoes);
 
-  db.get(`
+  dbConn.get(`
     SELECT
       COALESCE(SUM(quantidade_fiscal), 0) AS devolvido_fiscal,
       COALESCE(SUM(quantidade_nao_fiscal), 0) AS devolvido_nao_fiscal
@@ -56,7 +74,8 @@ function devolverEstoqueItemVenda(item, callback) {
           item.produto_id,
           qtdFiscal,
           qtdNaoFiscal,
-          callback
+          callback,
+          opcoes
         );
       };
 
@@ -131,7 +150,7 @@ function devolverLotesParcialItem(vendaItemId, quantidade, callback) {
   );
 }
 
-function devolverEstoqueParcialItem(item, splitDevolucao, callback) {
+function devolverEstoqueParcialItem(item, splitDevolucao, callback, opcoes = {}) {
   lotesService.produtoControlaValidade(item.produto_id, (controlErr, controlaValidade) => {
     if (controlErr) return callback(controlErr);
 
@@ -141,7 +160,8 @@ function devolverEstoqueParcialItem(item, splitDevolucao, callback) {
         item.produto_id,
         splitDevolucao.qtdFiscal,
         splitDevolucao.qtdNaoFiscal,
-        callback
+        callback,
+        opcoes
       );
     };
 
@@ -154,7 +174,7 @@ function devolverEstoqueParcialItem(item, splitDevolucao, callback) {
   });
 }
 
-function devolverEstoqueItensVenda(itens, callback) {
+function devolverEstoqueItensVenda(itens, callback, opcoes = {}) {
   if (!itens || itens.length === 0) {
     return callback(null);
   }
@@ -172,7 +192,7 @@ function devolverEstoqueItensVenda(itens, callback) {
     devolverEstoqueItemVenda(item, (err) => {
       if (err) return callback(err);
       processarProximo();
-    });
+    }, opcoes);
   }
 
   processarProximo();
@@ -232,6 +252,7 @@ garantirTabelaDevolucoesVenda((tableErr) => {
     db.serialize(() => {
       db.run('BEGIN IMMEDIATE');
 
+      const opcoesEstoque = montarOpcoesRetornoEstoqueVenda(req, 'devolucao_venda', db);
       let index = 0;
       let valorTotalDevolvido = 0;
       const itensProcessados = [];
@@ -334,7 +355,8 @@ garantirTabelaDevolucoesVenda((tableErr) => {
                 });
 
                 processarProximo();
-              }
+              },
+              opcoesEstoque
             );
           });
         });
@@ -362,7 +384,16 @@ garantirTabelaDevolucoesVenda((tableErr) => {
                 financeiro: financeiroResumo,
                 sessao_id: req.caixaSessaoId || null,
                 autorizado_admin: true,
-                ip: req.ip || null
+                ip: req.ip || null,
+                // RC8.2.2 — estorno/devolução usa snapshot da venda (nunca config atual)
+                ...(() => {
+                  const r = mpfc.resolverPoliticaOperacionalDaVenda(venda, 'estorno');
+                  return {
+                    mpfc_snapshot_presente: r.snapshotPresente,
+                    mpfc_fonte: r.fonte,
+                    mpfc_politica: r.payload
+                  };
+                })()
               },
               ip_requisicao: req.ip || null
             }).catch((auditErr) => console.error('Erro ao gravar auditoria de devolução:', auditErr));
@@ -391,6 +422,7 @@ module.exports = {
   devolverSaldosDistribuidos,
   devolverEstoqueItemVenda,
   devolverEstoqueItensVenda,
+  devolverLotesParcialItem,
   garantirTabelaDevolucoesVenda,
   devolverParcial
 };

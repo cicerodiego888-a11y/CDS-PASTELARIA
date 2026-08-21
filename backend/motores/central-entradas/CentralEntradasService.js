@@ -50,6 +50,23 @@ class CentralEntradasService {
     return this._orchestrator.obterDashboard();
   }
 
+  /** RC3.4.6 — Health Monitor (somente diagnóstico local). */
+  obterSaudeCentral(opcoes = {}) {
+    return this._orchestrator.obterSaudeCentral(opcoes);
+  }
+
+  listarAlertasSaude(filtros = {}) {
+    return this._orchestrator.listarAlertasSaude(filtros);
+  }
+
+  obterSaudeDocumento(id) {
+    return this._orchestrator.obterSaudeDocumento(id);
+  }
+
+  analisarSaudeCentral(opcoes = {}) {
+    return this._orchestrator.analisarSaudeCentral(opcoes);
+  }
+
   alterarStatus(id, novoStatus, opcoes = {}) {
     return this._orchestrator.alterarStatusManual(id, novoStatus, opcoes);
   }
@@ -86,6 +103,23 @@ class CentralEntradasService {
     return this._orchestrator.processarCicloDfeDocumento(id, opcoes);
   }
 
+  /**
+   * RC3.4.2 — recuperação manual excepcional (respeita Gate / SLEEP).
+   */
+  async solicitarXmlCompletoManual(id, opcoes = {}) {
+    const xmlWait = require('./services/CentralXmlWaitScheduler');
+    if (typeof xmlWait.solicitarXmlManual !== 'function') {
+      return this.processarCicloDfeDocumento(id, {
+        ...opcoes,
+        confirmado: true
+      });
+    }
+    return xmlWait.solicitarXmlManual(id, {
+      usuarioId: opcoes.usuarioId,
+      correlationId: opcoes.correlationId
+    });
+  }
+
   concluirRevisao(id, dados = {}) {
     return this._orchestrator.concluirRevisao(id, dados);
   }
@@ -110,8 +144,8 @@ class CentralEntradasService {
     return this._orchestrator.obterPendencias(opcoes);
   }
 
-  obterOperacional() {
-    return this._orchestrator.obterOperacional();
+  obterOperacional(opcoes = {}) {
+    return this._orchestrator.obterOperacional(opcoes);
   }
 
   obterItensAtencao(opcoes = {}) {
@@ -204,6 +238,114 @@ class CentralEntradasService {
 
   exportarRelatorioHomologacao(documentoId, formato = 'json') {
     return this._orchestrator.exportarRelatorioHomologacao(documentoId, formato);
+  }
+
+  /**
+   * RC3.4.8 — recuperação em lote de XMLs legados (fluxo oficial MIRX).
+   * @param {Object} [opcoes]
+   */
+  recuperarXmlLoteLegado(opcoes = {}) {
+    const CentralRecuperacaoXmlLoteLegadoService = require('./services/CentralRecuperacaoXmlLoteLegadoService');
+    const svc = new CentralRecuperacaoXmlLoteLegadoService();
+    return svc.executar(opcoes);
+  }
+
+  /**
+   * RC3.4.9 — importação manual de XML legado (Portal Nacional / nfeProc).
+   * Reutiliza repositório oficial + Parser/MIIP. Não cria documento novo.
+   * @param {Object[]} arquivos
+   * @param {Object} [opcoes]
+   */
+  importarXmlLegado(arquivos = [], opcoes = {}) {
+    const CentralImportacaoXmlLegadoService = require('./services/CentralImportacaoXmlLegadoService');
+    const svc = new CentralImportacaoXmlLegadoService();
+    return svc.executar(arquivos, opcoes);
+  }
+
+  /**
+   * RC3.4.9 — análise/dry-run do lote (sem persistir).
+   * @param {Object[]} arquivos
+   * @param {Object} [opcoes]
+   */
+  analisarImportacaoXmlLegado(arquivos = [], opcoes = {}) {
+    const CentralImportacaoXmlLegadoService = require('./services/CentralImportacaoXmlLegadoService');
+    const svc = new CentralImportacaoXmlLegadoService();
+    return svc.analisar(arquivos, opcoes);
+  }
+
+  /**
+   * RC3.5.0 — elegibilidade / importação via Portal Nacional.
+   */
+  avaliarRecuperacaoPortalNfe(documentoId, opcoes = {}) {
+    const PortalNfeRecoveryService = require('./services/PortalNfeRecoveryService');
+    const svc = new PortalNfeRecoveryService();
+    return svc.avaliarDocumento(documentoId, opcoes);
+  }
+
+  registrarPortalNfeAberto(documentoId, opcoes = {}) {
+    const PortalNfeRecoveryService = require('./services/PortalNfeRecoveryService');
+    const svc = new PortalNfeRecoveryService();
+    return svc.registrarPortalAberto(documentoId, opcoes);
+  }
+
+  /** RC3.6.0 — Central de Recuperação CDS */
+  registrarCentralRecuperacaoAberta(documentoId, opcoes = {}) {
+    const PortalNfeRecoveryService = require('./services/PortalNfeRecoveryService');
+    const svc = new PortalNfeRecoveryService();
+    return svc.registrarCentralRecuperacaoAberta(documentoId, opcoes);
+  }
+
+  registrarConsultaPortalIniciada(documentoId, opcoes = {}) {
+    const PortalNfeRecoveryService = require('./services/PortalNfeRecoveryService');
+    const svc = new PortalNfeRecoveryService();
+    return svc.registrarConsultaPortalIniciada(documentoId, opcoes);
+  }
+
+  registrarDownloadDetectadoPortalNfe(documentoId, opcoes = {}) {
+    const PortalNfeRecoveryService = require('./services/PortalNfeRecoveryService');
+    const svc = new PortalNfeRecoveryService();
+    return svc.registrarDownloadDetectado(documentoId, opcoes);
+  }
+
+  importarXmlPortalNfe(documentoId, arquivo, opcoes = {}) {
+    const PortalNfeRecoveryService = require('./services/PortalNfeRecoveryService');
+    const svc = new PortalNfeRecoveryService();
+    return svc.importarXmlBaixado(documentoId, arquivo, opcoes);
+  }
+
+  /** RC3.6.H — usuário copiou chave de acesso (ação independente do Portal). */
+  async registrarChaveCopiada(documentoId, opcoes = {}) {
+    const { emitirEvento } = require('./utils/centralEventosEmitter');
+    const { TIPOS_EVENTO, ORIGENS } = require('./config/centralEventosTipos');
+    const CentralHistoricoRepository = require('./repositories/CentralHistoricoRepository');
+    const historicoRepository = new CentralHistoricoRepository();
+    const id = Number(documentoId);
+    const usuarioId = opcoes.usuarioId ?? null;
+    const usuarioLabel = opcoes.usuarioNome || usuarioId || 'sistema';
+
+    await emitirEvento({
+      tipo: TIPOS_EVENTO.CHAVE_COPIADA,
+      origem: ORIGENS.MANUAL,
+      documentoId: id,
+      usuarioId,
+      descricao: 'Chave de acesso copiada pelo usuário',
+      resultado: 'sucesso',
+      sucesso: true
+    });
+
+    try {
+      await historicoRepository.inserir({
+        documentoId: id,
+        statusAnterior: null,
+        statusNovo: null,
+        usuarioId,
+        detalhe: `CHAVE_COPIADA — Chave copiada para área de transferência\nUsuário: ${usuarioLabel}`
+      });
+    } catch {
+      /* ignore */
+    }
+
+    return { sucesso: true };
   }
 }
 

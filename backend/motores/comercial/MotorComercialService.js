@@ -12,9 +12,37 @@
 
 const fxnfSaldos = require('../../services/fiscalNaoFiscal/estoqueSaldosPublico');
 const fxnfReservas = require('../../services/fiscalNaoFiscal/reservasPublico');
+const {
+  resolverEmpresaId,
+  COMPAT_CERTIFICADA_PRE_MULTIEMPRESA
+} = require('../../services/fiscalNaoFiscal/empresaContexto');
 const mts = require('../mts');
 const auditoria = require('./PedidoEstoqueAuditoria');
 const { TipoSaldo } = require('../../services/fiscalNaoFiscal/constants');
+
+/**
+ * Contexto de empresa para a porta F×NF.
+ * Se empresaId ainda não existir no pedido (pré-multiempresa), usa flag
+ * EXPLÍCITA COMPAT_CERTIFICADA_PRE_MULTIEMPRESA — nunca inventa empresa.
+ */
+function optsPortaSaldos(opts = {}) {
+  const empresaId = resolverEmpresaId(opts)
+    ?? resolverEmpresaId(opts.contexto)
+    ?? resolverEmpresaId(opts.pedido);
+  if (empresaId != null) {
+    return {
+      db: opts.db,
+      empresaId,
+      usuarioId: opts.usuarioId,
+      validarEmpresa: opts.validarEmpresa
+    };
+  }
+  return {
+    db: opts.db,
+    usuarioId: opts.usuarioId,
+    ...COMPAT_CERTIFICADA_PRE_MULTIEMPRESA
+  };
+}
 
 function round3(n) {
   return Math.round(Number(n || 0) * 1000) / 1000;
@@ -66,19 +94,54 @@ function agregarPorProduto(itens) {
   return [...map.values()];
 }
 
-async function verificarSupervisor(token, deps = {}) {
+async function verificarSupervisor(token, deps = {}, escopoOperacao = null) {
   if (!token) return null;
   const verify = deps.verificarSupervisorToken
     || require('../../rotas/auth').verificarSupervisorToken;
   try {
-    return await verify(token);
+    return await verify(token, escopoOperacao);
   } catch (e) {
+    // RC5.1.4 — propaga reutilização sem alterar regras de perfil/autorização
+    if (e && (e.code === 'TOKEN_JA_UTILIZADO' || e.codigo === 'TOKEN_JA_UTILIZADO')) {
+      throw erro(
+        'TOKEN_JA_UTILIZADO',
+        e.message || 'Token de autorização já utilizado.',
+        { statusCode: 403 }
+      );
+    }
+    // RC5.1.5 — token vinculado a outro pedido/produto/quantidade
+    if (e && (e.code === 'TOKEN_FORA_DO_ESCOPO' || e.codigo === 'TOKEN_FORA_DO_ESCOPO')) {
+      throw erro(
+        'TOKEN_FORA_DO_ESCOPO',
+        e.message || 'Token de autorização fora do escopo da operação.',
+        { statusCode: 403 }
+      );
+    }
     throw erro(
       'AUTORIZACAO_REJEITADA',
       e.message || 'Autorização de supervisor inválida.',
       { statusCode: 403 }
     );
   }
+}
+
+/**
+ * RC5.1.5 — escopo da operação a partir do plano que exige transferência.
+ */
+function montarEscopoAutorizacao(pedidoId, analise) {
+  const passos = (analise?.plano || [])
+    .filter((p) => p.acao === 'TRANSFERIR_E_RESERVAR')
+    .map((p) => ({
+      produto_id: Number(p.produto_id),
+      quantidade: round3(p.quantidade)
+    }))
+    .sort((a, b) => a.produto_id - b.produto_id);
+
+  return {
+    pedido_id: Number(pedidoId),
+    produtos: passos.map((p) => p.produto_id),
+    quantidades: passos.map((p) => p.quantidade)
+  };
 }
 
 /**
@@ -97,7 +160,7 @@ async function analisarDisponibilidadeFiscal(itensBrutos, opts = {}) {
     const disp = await fxnfReservas.consultarDisponibilidadeParaPedido(
       item.produto_id,
       opts.pedidoId || null,
-      { db }
+      optsPortaSaldos({ ...opts, db })
     );
     await auditoria.registrar(db, {
       pedido_id: opts.pedidoId || null,
@@ -224,7 +287,9 @@ async function executarConfirmacaoFiscal(params = {}, deps = {}) {
         }
       );
     }
-    supervisor = await verificarSupervisor(params.supervisorToken, deps);
+    // RC5.1.5 — valida claims do token contra a operação atual
+    const escopoOperacao = montarEscopoAutorizacao(pedidoId, analise);
+    supervisor = await verificarSupervisor(params.supervisorToken, deps, escopoOperacao);
     await auditoria.registrar(db, {
       pedido_id: pedidoId,
       evento: auditoria.Evento.AUTORIZACAO_CONCEDIDA,
@@ -241,21 +306,68 @@ async function executarConfirmacaoFiscal(params = {}, deps = {}) {
 
   try {
     await executarTx(async (txDb) => {
-      // Libera reservas anteriores do mesmo pedido (reativação / edição)
-      await fxnfReservas.liberarReservasPedido(pedidoId, { db: txDb });
+      // RC5.1.3 — após BEGIN IMMEDIATE, descartar plano pré-TX e recalcular sob lock
+      const analiseLock = await analisarDisponibilidadeFiscal(itens, {
+        db: txDb,
+        pedidoId,
+        usuarioId,
+        empresaId: resolverEmpresaId(params) ?? resolverEmpresaId(deps),
+        validarEmpresa: deps.validarEmpresa || params.validarEmpresa
+      });
 
-      for (const passo of analise.plano) {
+      if (analiseLock.bloqueado) {
+        throw erro(
+          'SALDO_INSUFICIENTE',
+          'Saldo insuficiente para atender o pedido.',
+          { statusCode: 409, plano: analiseLock.plano, consultas: analiseLock.consultas }
+        );
+      }
+
+      // Autorização já resolvida fora da TX; se o plano fresco ainda exige e não há supervisor, bloqueia
+      if (analiseLock.requerAutorizacao && !supervisor) {
+        throw erro(
+          'REQUER_AUTORIZACAO_SUPERVISOR',
+          'Saldo fiscal insuficiente. É necessária autorização do supervisor para transferir do saldo não fiscal.',
+          {
+            statusCode: 409,
+            requer_autorizacao: true,
+            plano: analiseLock.plano.filter((p) => p.acao === 'TRANSFERIR_E_RESERVAR'),
+            consultas: analiseLock.consultas
+          }
+        );
+      }
+
+      const portaOpts = optsPortaSaldos({
+        ...params,
+        ...deps,
+        db: txDb,
+        usuarioId
+      });
+
+      // Libera reservas anteriores do mesmo pedido (reativação / edição)
+      await fxnfReservas.liberarReservasPedido(pedidoId, portaOpts);
+
+      for (const passo of analiseLock.plano) {
         if (passo.acao === 'TRANSFERIR_E_RESERVAR' && passo.transferir > 0) {
           const tr = await mts.transferirSaldo({
             produto: passo.produto_id,
+            empresaId: portaOpts.empresaId,
             origem: TipoSaldo.NAO_FISCAL,
             destino: TipoSaldo.FISCAL,
             quantidade: passo.transferir,
             motivo,
-            usuario: supervisor?.id || usuarioId
+            usuario: supervisor?.id || usuarioId,
+            // RC5.1.2 — contexto já validado (token/perfil no Motor Comercial)
+            contextoAutorizacao: {
+              autorizado: true,
+              supervisor_id: supervisor?.id || supervisor?.usuario_id || null,
+              usuario_id: usuarioId
+            },
+            ...(portaOpts.modoLegadoSemEmpresa ? COMPAT_CERTIFICADA_PRE_MULTIEMPRESA : {})
           }, {
             db: txDb,
             jaEmTransacao: true,
+            modoLegadoSemEmpresa: portaOpts.modoLegadoSemEmpresa === true,
             estoque: {
               ...fxnfSaldos,
               executarEmTransacao: async (work) => work(txDb)
@@ -283,8 +395,10 @@ async function executarConfirmacaoFiscal(params = {}, deps = {}) {
             pedidoId,
             produtoId: linha.produto_id,
             quantidade: linha.quantidade,
-            pedidoItemId: linha.pedido_item_id
-          }, { db: txDb });
+            pedidoItemId: linha.pedido_item_id,
+            empresaId: portaOpts.empresaId,
+            ...(portaOpts.modoLegadoSemEmpresa ? COMPAT_CERTIFICADA_PRE_MULTIEMPRESA : {})
+          }, portaOpts);
           reservas.push(res);
           await auditoria.registrar(txDb, {
             pedido_id: pedidoId,
@@ -342,7 +456,9 @@ async function confirmarPedidoFiscal(params = {}, deps = {}) {
   const analise = await analisarDisponibilidadeFiscal(itens, {
     db,
     pedidoId,
-    usuarioId
+    usuarioId,
+    empresaId: resolverEmpresaId(params) ?? resolverEmpresaId(deps),
+    validarEmpresa: deps.validarEmpresa || params.validarEmpresa
   });
 
   return executarConfirmacaoFiscal({
@@ -351,7 +467,9 @@ async function confirmarPedidoFiscal(params = {}, deps = {}) {
     analise,
     supervisorToken: params.supervisorToken || params.supervisor_token || null,
     usuarioId,
-    motivo: params.motivo
+    motivo: params.motivo,
+    empresaId: resolverEmpresaId(params) ?? resolverEmpresaId(deps),
+    validarEmpresa: deps.validarEmpresa || params.validarEmpresa
   }, deps);
 }
 
@@ -360,7 +478,10 @@ async function confirmarPedidoFiscal(params = {}, deps = {}) {
  */
 async function liberarReservasDoPedido(pedidoId, deps = {}) {
   const db = getDb(deps.db);
-  return fxnfReservas.liberarReservasPedido(pedidoId, { db });
+  return fxnfReservas.liberarReservasPedido(
+    pedidoId,
+    optsPortaSaldos({ ...deps, db })
+  );
 }
 
 module.exports = {

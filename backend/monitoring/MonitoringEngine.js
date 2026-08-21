@@ -54,7 +54,8 @@ class MonitoringEngine {
    */
   async summary(context = {}) {
     const metrics = criarMonitoringMetrics();
-    const cacheKey = 'summary:v4';
+    const competenciaKey = context.competencia?.competencia || 'atual';
+    const cacheKey = `summary:v5:${competenciaKey}`;
     // Cache desabilitado em M1–M4 (estrutura); ações dependem de contexto/usuário
     metrics.markCacheHit(false);
     void this.cache.get(cacheKey);
@@ -69,10 +70,14 @@ class MonitoringEngine {
     const tefResult = await this._safeCollect('tef', context, metrics);
 
     const fiscalData = fiscalResult.data || {};
+    const indicadoresFiscais = fiscalData.indicadoresFiscais || {};
     const payload = {
+      competencia: context.competencia || null,
+      indicadoresFiscais,
       fiscal: {
         vendas: fiscalData.vendas || {},
-        entradas: fiscalData.entradas || {}
+        entradas: fiscalData.entradas || {},
+        indicadoresFiscais
       },
       naoFiscal: {
         vendas: (fiscalData.naoFiscal && fiscalData.naoFiscal.vendas) || {},
@@ -88,7 +93,10 @@ class MonitoringEngine {
     };
 
     const updatedAt = new Date().toISOString();
-    const rawWidgets = this.widgetBuilder.build(payload, { updatedAt });
+    const rawWidgets = this.widgetBuilder.build(payload, {
+      updatedAt,
+      competenciaLabel: indicadoresFiscais.competenciaLabel
+    });
 
     const snapPre = metrics.snapshot();
     const intelligence = await this.intelligence.analyze(payload, rawWidgets, snapPre);

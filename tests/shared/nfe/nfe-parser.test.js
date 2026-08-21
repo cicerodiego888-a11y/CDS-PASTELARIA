@@ -123,8 +123,8 @@ async function main() {
     assert.strictEqual(item1.quantidade, 10);
     assert.strictEqual(item1.preco_unitario, 5.5);
     assert.strictEqual(item1.subtotal, 55);
-    assert.strictEqual(item1.margem_lucro, 30);
-    assert.strictEqual(item1.preco_venda_sugerido, 7.15);
+    assert.strictEqual(item1.margem_lucro, null);
+    assert.strictEqual(item1.preco_venda_sugerido, null);
 
     const item2 = parsed.itens[1];
     assert.strictEqual(item2.codigo_barras, '7891234567891');
@@ -146,7 +146,9 @@ async function main() {
     assert.strictEqual(parsed.valor_total_nota, 450);
     assert.strictEqual(parsed.itens.length, 1);
     assert.strictEqual(parsed.itens[0].produto_nome, 'Arroz Tipo 1 5kg');
-    assert.strictEqual(parsed.itens[0].preco_venda_sugerido, 22.5 * 1.3);
+    // CORREÇÃO-NF-MARGEM-01 — parser não fabrica margem/venda comercial
+    assert.strictEqual(parsed.itens[0].margem_lucro, null);
+    assert.strictEqual(parsed.itens[0].preco_venda_sugerido, null);
   });
 
   await test('XML inválido retorna erro de parse', async () => {

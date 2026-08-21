@@ -5,13 +5,11 @@
  */
 
 const driverRegistry = require('../drivers/DriverRegistry');
-const driverLoader = require('../drivers/DriverLoader');
+const officialLoader = require('../sdk/OfficialDriverLoader');
 const equipamentosRepository = require('../repositories/EquipamentosRepository');
 
 function garantirDriversCarregados() {
-  if (!driverLoader.estaCarregado()) {
-    driverLoader.carregarTodos();
-  }
+  officialLoader.ensureLoaded();
 }
 
 class DriverManager {
@@ -108,12 +106,11 @@ class DriverManager {
 
   obterRelatorioCarregamento() {
     garantirDriversCarregados();
-    return driverLoader.obterRelatorio();
+    return officialLoader.obterRelatorio();
   }
 
   recarregarDrivers() {
-    driverLoader.reiniciar();
-    return driverLoader.carregarTodos({ forcar: true });
+    return officialLoader.reload();
   }
 
   // Delegação direta ao Registry

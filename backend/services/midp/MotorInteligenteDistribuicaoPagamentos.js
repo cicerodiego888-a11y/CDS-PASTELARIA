@@ -204,12 +204,9 @@ function executar(entrada = {}) {
   if (entrada.midpAtivo != null) {
     midpAtivo = Boolean(entrada.midpAtivo);
   } else {
-    try {
-      const configService = require('../configuracaoService');
-      midpAtivo = Boolean(configService.isMidpAtivado && configService.isMidpAtivado());
-    } catch (_) {
-      midpAtivo = false;
-    }
+            // RC8.2.2 — MIDP NÃO consulta configuração (midpAtivo vem do núcleo/Orquestrador).
+            // Migração: se midpAtivo omitido → false (rótulo LEGACY_PARITY). Algoritmo de alocação inalterado.
+    midpAtivo = false;
   }
 
   const alocacao = alocarPagamentos(

@@ -4,12 +4,61 @@ const db = require('../database');
 const { verificarToken } = require('../middleware/auth');
 const { validarCaixaAberto } = require('../middleware/validarCaixaAberto');
 const { gravarAuditoria } = require('../services/auditoria');
-const { FILTRO_VENDA_VALIDA, getExprValorVenda } = require('../services/reportFiscalHelpers');
 const { isMultiCaixaAtivo, exigirTerminalId, obterTerminalIdDaRequisicao } = require('../utils/multiCaixa');
 const { obterCaixaTurnoId } = require('../utils/caixaSessaoHelpers');
+const FechamentoCaixaResumoService = require('../services/caixa/FechamentoCaixaResumoService');
+const { gerarHtmlCupomFechamento } = require('../services/caixa/FechamentoCaixaCupomService');
 
 function n(valor) {
   return Number(valor || 0);
+}
+
+function obterConfigsEmpresa(callback) {
+  db.all(
+    `SELECT chave, valor FROM configuracoes WHERE chave IN ('nome_empresa', 'nome_fantasia', 'razao_social', 'cnpj')`,
+    [],
+    (err, rows) => {
+      if (err) return callback(err);
+      const map = {};
+      (rows || []).forEach((r) => { map[r.chave] = r.valor; });
+      callback(null, {
+        empresa_nome: map.nome_fantasia || map.nome_empresa || map.razao_social || 'CDS Sistemas',
+        empresa_cnpj: map.cnpj || ''
+      });
+    }
+  );
+}
+
+function obterMetaSessao(sessao, operadorNome, callback) {
+  obterConfigsEmpresa((cfgErr, empresa) => {
+    if (cfgErr) return callback(cfgErr);
+    if (!sessao?.terminal_id) {
+      return callback(null, {
+        ...empresa,
+        terminal_id: null,
+        terminal_nome: null,
+        operador_id: sessao?.operador_id || null,
+        operador_nome: operadorNome || null
+      });
+    }
+    db.get(
+      `SELECT t.id, t.nome, c.nome AS caixa_nome
+       FROM terminais t
+       LEFT JOIN caixas c ON c.id = t.caixa_id
+       WHERE t.id = ?`,
+      [sessao.terminal_id],
+      (tErr, terminal) => {
+        if (tErr) return callback(tErr);
+        callback(null, {
+          ...empresa,
+          terminal_id: sessao.terminal_id,
+          terminal_nome: terminal?.nome || terminal?.caixa_nome || `Terminal ${sessao.terminal_id}`,
+          operador_id: sessao.operador_id || null,
+          operador_nome: operadorNome || null
+        });
+      }
+    );
+  });
 }
 
 function agoraLocalBrasil() {
@@ -108,134 +157,19 @@ function validarTerminalParaAbertura(terminalId, callback) {
   );
 }
 
-function normalizarForma(forma) {
-  return String(forma || '').toLowerCase().trim();
-}
-
 function buscarCaixaTurnoDaSessao(sessao, callback) {
   const turnoId = obterCaixaTurnoId(sessao);
   if (!turnoId) return callback(null, null);
   db.get('SELECT * FROM caixa WHERE id = ?', [turnoId], callback);
 }
 
+/** Fonte única: FechamentoCaixaResumoService (resumo aberto e fechamento). */
 function calcularResumoCaixa(caixa, options = {}, callback) {
-  const data = caixa.data;
-  const sessaoId = options.sessaoId || null;
-  const modoFiscal = options.modo_fiscal || '0';
-  const exprValor = getExprValorVenda(modoFiscal);
+  FechamentoCaixaResumoService.calcularResumoCaixa(caixa, options, callback);
+}
 
-  // Se não recebeu sessaoId, tentar resolver a última sessão para este caixa
-  const obterSessao = (cb) => {
-    // Não tentar resolver "última sessão" implicitamente aqui.
-    // Se a função não recebeu `sessaoId`, retornamos null e deixamos o chamador decidir.
-    return cb(null, sessaoId || null);
-  };
-
-  obterSessao((sessErr, resolvedSessaoId) => {
-    if (sessErr) return callback(sessErr);
-
-    if (!resolvedSessaoId) {
-      // Sem sessão associada -> retornar resumo vazio baseado no caixa
-      return callback(null, {
-        caixa,
-        total_vendido: 0,
-        dinheiro: {
-          valor_inicial: n(caixa.valor_inicial),
-          vendas_dinheiro: 0,
-          suprimentos: 0,
-          sangrias: 0,
-          dinheiro_esperado: n(caixa.valor_inicial)
-        },
-        digital: { pix: 0, cartao_credito: 0, cartao_debito: 0, total_digital: 0 },
-        prazo: 0,
-        outras_formas: 0,
-        saldo_geral: n(caixa.valor_inicial)
-      });
-    }
-
-    db.all(`
-      SELECT v.forma_pagamento, SUM(${exprValor}) AS total
-      FROM vendas v
-      WHERE ${FILTRO_VENDA_VALIDA}
-        AND v.caixa_sessao_id = ?
-      GROUP BY v.forma_pagamento
-    `, [resolvedSessaoId], (err, vendas) => {
-      if (err) return callback(err);
-
-      db.get(`
-        SELECT SUM(valor) AS total_sangrias
-        FROM caixa_movimentacoes
-        WHERE sessao_id = ? AND tipo = 'sangria'
-      `, [resolvedSessaoId], (err2, sangriasRow) => {
-      if (err2) return callback(err2);
-        db.get(`
-          SELECT SUM(valor) AS total_suprimentos
-          FROM caixa_movimentacoes
-          WHERE sessao_id = ? AND tipo = 'suprimento'
-        `, [resolvedSessaoId], (err3, suprimentosRow) => {
-        if (err3) return callback(err3);
-
-        let vendasDinheiro = 0;
-        let vendasPix = 0;
-        let vendasCartaoCredito = 0;
-        let vendasCartaoDebito = 0;
-        let vendasPrazo = 0;
-        let outrasFormas = 0;
-
-        (vendas || []).forEach(v => {
-          const forma = normalizarForma(v.forma_pagamento);
-          const total = n(v.total);
-
-          if (forma === 'dinheiro') vendasDinheiro += total;
-          else if (forma === 'pix') vendasPix += total;
-          else if (forma === 'cartao_credito' || forma === 'credito') vendasCartaoCredito += total;
-          else if (forma === 'cartao_debito' || forma === 'debito') vendasCartaoDebito += total;
-          else if (forma === 'prazo') vendasPrazo += total;
-          else outrasFormas += total;
-        });
-
-        const totalSangrias = n(sangriasRow?.total_sangrias);
-        const totalSuprimentos = n(suprimentosRow?.total_suprimentos);
-
-        const totalDigital = vendasPix + vendasCartaoCredito + vendasCartaoDebito;
-        const totalVendido = vendasDinheiro + totalDigital + vendasPrazo + outrasFormas;
-
-        const dinheiroEsperado =
-          n(caixa.valor_inicial) +
-          vendasDinheiro +
-          totalSuprimentos -
-          totalSangrias;
-
-        const saldoGeral =
-          n(caixa.valor_inicial) +
-          totalVendido +
-          totalSuprimentos -
-          totalSangrias;
-
-        callback(null, {
-          caixa,
-          total_vendido: totalVendido,
-          dinheiro: {
-            valor_inicial: n(caixa.valor_inicial),
-            vendas_dinheiro: vendasDinheiro,
-            suprimentos: totalSuprimentos,
-            sangrias: totalSangrias,
-            dinheiro_esperado: dinheiroEsperado
-          },
-          digital: {
-            pix: vendasPix,
-            cartao_credito: vendasCartaoCredito,
-            cartao_debito: vendasCartaoDebito,
-            total_digital: totalDigital
-          },
-          prazo: vendasPrazo,
-          outras_formas: outrasFormas,
-          saldo_geral: saldoGeral
-        });
-      });
-    });
-  });
-});
+function calcularFechamentoDetalhado(caixa, options = {}, callback) {
+  FechamentoCaixaResumoService.calcularFechamentoDetalhado(caixa, options, callback);
 }
 
 const { exigirPermissaoOuSenhaAdmin } = require('../middleware/exigirPermissaoOuSenhaAdmin');
@@ -357,7 +291,7 @@ function executarAberturaCaixa(req, res, { valorInicial, terminalId, caixaConfig
           valor_inicial: valorInicial,
           status: 'aberto',
           aberto_em: agoraLocalBrasil(),
-          operador_abertura_id: req.user?.id || null,
+          aberto_por: req.user?.id || null,
           terminal_id: terminalId || null
         };
 
@@ -669,7 +603,7 @@ router.post('/suprimento', verificarToken, validarCaixaAberto, exigirPermissaoOu
   );
 });
 
-router.post('/fechar', verificarToken, validarCaixaAberto, (req, res) => {
+router.post('/fechar', verificarToken, validarCaixaAberto, exigirPermissaoOuSenhaAdmin('fechar_caixa'), (req, res) => {
   const valorInformado = n(req.body.valor_informado);
   const observacao = req.body.observacao || '';
   const operadorId = req.user?.id || null;
@@ -683,198 +617,248 @@ router.post('/fechar', verificarToken, validarCaixaAberto, (req, res) => {
         if (err) return res.status(500).json({ error: err.message });
         if (!caixa) return res.status(400).json({ error: 'Caixa vinculado à sessão não encontrado.' });
 
-        // Verificar se sessão já possui fechamento (impedir duplicidade)
         db.get(`SELECT id FROM caixa_fechamentos WHERE sessao_id = ? LIMIT 1`, [sessao.id], (checkErr, jaFechado) => {
           if (checkErr) return res.status(500).json({ error: checkErr.message });
           if (jaFechado) {
             return res.status(400).json({ error: 'Esta sessão de caixa já foi fechada. Use REIMPRESSÃO se necessário reimprimir.' });
           }
 
-          calcularFechamentoDetalhado(caixa, { sessaoId: sessao.id }, (calcErr, detalhes) => {
-            if (calcErr) return res.status(500).json({ error: calcErr.message });
+          obterMetaSessao(sessao, operadorNome, (metaErr, meta) => {
+            if (metaErr) return res.status(500).json({ error: metaErr.message });
 
-            const diferenca = valorInformado - detalhes.total_esperado;
+            calcularFechamentoDetalhado(caixa, {
+              sessaoId: sessao.id,
+              valorInformado,
+              meta,
+              validar: true
+            }, (calcErr, detalhes) => {
+              if (calcErr) return res.status(400).json({ error: calcErr.message });
 
-            db.serialize(() => {
-              db.run('BEGIN IMMEDIATE');
+              const diferenca = n(detalhes.diferenca);
+              const consolidacao = detalhes.consolidacao || null;
+              const fechadoEm = agoraLocalBrasil();
+              if (consolidacao) {
+                consolidacao.fechamento = consolidacao.fechamento || {};
+                consolidacao.fechamento.em = fechadoEm;
+                consolidacao.periodo = consolidacao.periodo || {};
+                consolidacao.periodo.fechado_em = fechadoEm;
+                consolidacao.operador = {
+                  ...(consolidacao.operador || {}),
+                  id: operadorId,
+                  nome: operadorNome
+                };
+                consolidacao.empresa = {
+                  nome: meta.empresa_nome,
+                  cnpj: meta.empresa_cnpj
+                };
+                consolidacao.terminal = {
+                  id: meta.terminal_id,
+                  nome: meta.terminal_nome
+                };
+              }
 
-              // Atualizar status do caixa e resumos do fechamento
-              db.run(`
-                UPDATE caixa SET
-                  status = 'fechado',
-                  fechado_em = DATETIME('now', 'localtime'),
-                  fechado_por = ?,
-                  valor_fechamento = ?,
-                  total_sangrias = ?,
-                  total_suprimentos = ?,
-                  saldo_esperado = ?,
-                  diferenca = ?,
-                  observacao = ?
-                WHERE id = ?
-              `, [
-                operadorId,
-                valorInformado,
-                detalhes.total_sangrias,
-                detalhes.total_suprimentos,
-                detalhes.total_esperado,
-                diferenca,
-                observacao,
-                caixa.id
-              ], (updateErr) => {
-                if (updateErr) {
-                  db.run('ROLLBACK');
-                  return res.status(500).json({ error: updateErr.message });
-                }
+              const cupomHtml = gerarHtmlCupomFechamento(consolidacao, {
+                empresa_nome: meta.empresa_nome,
+                empresa_cnpj: meta.empresa_cnpj,
+                terminal_nome: meta.terminal_nome,
+                operador_nome: operadorNome,
+                caixa_id: caixa.id,
+                fechado_em: fechadoEm,
+                reimpressao: false
+              });
 
-                // Registrar fechamento detalhado
+              const resumoJson = consolidacao ? JSON.stringify(consolidacao) : null;
+
+              db.serialize(() => {
+                db.run('BEGIN IMMEDIATE');
+
                 db.run(`
-                  INSERT INTO caixa_fechamentos (
-                    sessao_id,
-                    caixa_id,
-                    operador_id,
-                    terminal_id,
-                    data_fechamento,
-                    valor_inicial,
-                    vendas_dinheiro,
-                    vendas_pix,
-                    vendas_debito,
-                    vendas_credito,
-                    vendas_prazo,
-                    vendas_tef,
-                    total_sangrias,
-                    total_suprimentos,
-                    total_vendido,
-                    total_esperado,
-                    total_informado,
-                    diferenca,
-                    observacao
-                  ) VALUES (?, ?, ?, ?, DATETIME('now', 'localtime'), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  UPDATE caixa SET
+                    status = 'fechado',
+                    fechado_em = ?,
+                    fechado_por = ?,
+                    valor_fechamento = ?,
+                    total_sangrias = ?,
+                    total_suprimentos = ?,
+                    saldo_esperado = ?,
+                    diferenca = ?,
+                    observacao = ?
+                  WHERE id = ?
                 `, [
-                  sessao.id,
-                  caixa.id,
+                  fechadoEm,
                   operadorId,
-                  sessao.terminal_id || terminalId,
-                  detalhes.valor_inicial,
-                  detalhes.vendas_dinheiro,
-                  detalhes.vendas_pix,
-                  detalhes.vendas_debito,
-                  detalhes.vendas_credito,
-                  detalhes.vendas_prazo,
-                  detalhes.vendas_tef,
+                  valorInformado,
                   detalhes.total_sangrias,
                   detalhes.total_suprimentos,
-                  detalhes.total_vendido,
                   detalhes.total_esperado,
-                  valorInformado,
                   diferenca,
-                  observacao
-                ], (insertErr) => {
-                  if (insertErr) {
+                  observacao,
+                  caixa.id
+                ], (updateErr) => {
+                  if (updateErr) {
                     db.run('ROLLBACK');
-                    return res.status(500).json({ error: insertErr.message });
+                    return res.status(500).json({ error: updateErr.message });
                   }
 
-                  // Fecha a sessão atual e quaisquer órfãs do mesmo turno/terminal
-                  // (evita toast de sucesso com a tela ainda em "aberto").
-                  const paramsSessao = [valorInformado, sessao.id, caixa.id];
-                  let sqlSessoes = `
-                    UPDATE caixa_sessoes
-                    SET status = 'fechado',
-                        fechado_em = DATETIME('now','localtime'),
-                        valor_fechamento = ?
-                    WHERE status = 'aberto'
-                      AND (id = ? OR caixa_turno_id = ?)
-                  `;
-                  if (terminalId) {
-                    sqlSessoes += ' AND (terminal_id = ? OR terminal_id IS NULL)';
-                    paramsSessao.push(terminalId);
-                  }
-
-                  db.run(sqlSessoes, paramsSessao, function(sessUpdErr) {
-                    if (sessUpdErr) {
+                  db.run(`
+                    INSERT INTO caixa_fechamentos (
+                      sessao_id,
+                      caixa_id,
+                      operador_id,
+                      terminal_id,
+                      data_fechamento,
+                      valor_inicial,
+                      vendas_dinheiro,
+                      vendas_pix,
+                      vendas_debito,
+                      vendas_credito,
+                      vendas_prazo,
+                      vendas_tef,
+                      vendas_outros,
+                      total_sangrias,
+                      total_suprimentos,
+                      total_vendido,
+                      total_esperado,
+                      total_informado,
+                      diferenca,
+                      observacao,
+                      resumo_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  `, [
+                    sessao.id,
+                    caixa.id,
+                    operadorId,
+                    sessao.terminal_id || terminalId,
+                    fechadoEm,
+                    detalhes.valor_inicial,
+                    detalhes.vendas_dinheiro,
+                    detalhes.vendas_pix,
+                    detalhes.vendas_debito,
+                    detalhes.vendas_credito,
+                    detalhes.vendas_prazo,
+                    detalhes.vendas_tef,
+                    detalhes.vendas_outros || 0,
+                    detalhes.total_sangrias,
+                    detalhes.total_suprimentos,
+                    detalhes.total_vendido,
+                    detalhes.total_esperado,
+                    valorInformado,
+                    diferenca,
+                    observacao,
+                    resumoJson
+                  ], (insertErr) => {
+                    if (insertErr) {
                       db.run('ROLLBACK');
-                      return res.status(500).json({ error: sessUpdErr.message });
-                    }
-                    if (this.changes < 1) {
-                      db.run('ROLLBACK');
-                      return res.status(500).json({ error: 'Não foi possível encerrar a sessão de caixa.' });
+                      return res.status(500).json({ error: insertErr.message });
                     }
 
-                    // Registrar auditoria
-                    db.run(`
-                      INSERT INTO auditoria_caixa (
-                        sessao_id,
-                        caixa_id,
-                        operador_id,
-                        terminal_id,
-                        acao,
-                        tipo_movimentacao,
-                        valor,
-                        detalhes,
-                        ip_requisicao
-                      ) VALUES (?, ?, ?, ?, 'fechamento', 'fechamento', ?, ?, ?)
-                    `, [
-                      sessao.id,
-                      caixa.id,
-                      operadorId,
-                      sessao.terminal_id || terminalId,
-                      valorInformado,
-                      JSON.stringify({
-                        diferenca,
-                        operador: operadorNome,
-                        observacao,
-                        sessao_id: sessao.id,
-                        sessoes_encerradas: this.changes
-                      }),
-                      req.ip || null
-                    ], (auditErr) => {
-                      if (auditErr) console.error('Erro ao registrar auditoria:', auditErr);
+                    const paramsSessao = [valorInformado, sessao.id, caixa.id];
+                    let sqlSessoes = `
+                      UPDATE caixa_sessoes
+                      SET status = 'fechado',
+                          fechado_em = ?,
+                          valor_fechamento = ?
+                      WHERE status = 'aberto'
+                        AND (id = ? OR caixa_turno_id = ?)
+                    `;
+                    const paramsSessaoFull = [fechadoEm, ...paramsSessao];
+                    if (terminalId) {
+                      sqlSessoes += ' AND (terminal_id = ? OR terminal_id IS NULL)';
+                      paramsSessaoFull.push(terminalId);
+                    }
 
-                      // Registrar movimentação
+                    db.run(sqlSessoes, paramsSessaoFull, function(sessUpdErr) {
+                      if (sessUpdErr) {
+                        db.run('ROLLBACK');
+                        return res.status(500).json({ error: sessUpdErr.message });
+                      }
+                      if (this.changes < 1) {
+                        db.run('ROLLBACK');
+                        return res.status(500).json({ error: 'Não foi possível encerrar a sessão de caixa.' });
+                      }
+
                       db.run(`
-                        INSERT INTO caixa_movimentacoes (
-                          caixa_id,
+                        INSERT INTO auditoria_caixa (
                           sessao_id,
-                          tipo,
+                          caixa_id,
+                          operador_id,
+                          terminal_id,
+                          acao,
+                          tipo_movimentacao,
                           valor,
-                          motivo,
-                          usuario_id,
-                          operador_nome
-                        ) VALUES (?, ?, 'fechamento', ?, 'Fechamento de caixa', ?, ?)
-                      `, [caixa.id, sessao.id, valorInformado, operadorId, operadorNome], (movErr) => {
-                        if (movErr) {
-                          db.run('ROLLBACK');
-                          return res.status(500).json({ error: movErr.message });
-                        }
+                          detalhes,
+                          ip_requisicao
+                        ) VALUES (?, ?, ?, ?, 'fechamento', 'fechamento', ?, ?, ?)
+                      `, [
+                        sessao.id,
+                        caixa.id,
+                        operadorId,
+                        sessao.terminal_id || terminalId,
+                        valorInformado,
+                        JSON.stringify({
+                          diferenca,
+                          operador: operadorNome,
+                          observacao,
+                          sessao_id: sessao.id,
+                          sessoes_encerradas: this.changes,
+                          total_recebido: detalhes.total_vendido,
+                          entregas_pendentes: detalhes.entregas_pendentes || 0
+                        }),
+                        req.ip || null
+                      ], (auditErr) => {
+                        if (auditErr) console.error('Erro ao registrar auditoria:', auditErr);
 
-                        db.run('COMMIT', (commitErr) => {
-                          if (commitErr) {
+                        db.run(`
+                          INSERT INTO caixa_movimentacoes (
+                            caixa_id,
+                            sessao_id,
+                            tipo,
+                            valor,
+                            motivo,
+                            usuario_id,
+                            operador_nome
+                          ) VALUES (?, ?, 'fechamento', ?, 'Fechamento de caixa', ?, ?)
+                        `, [caixa.id, sessao.id, valorInformado, operadorId, operadorNome], (movErr) => {
+                          if (movErr) {
                             db.run('ROLLBACK');
-                            return res.status(500).json({ error: commitErr.message });
+                            return res.status(500).json({ error: movErr.message });
                           }
 
-                          // auditoria centralizada do fechamento
-                          gravarAuditoria({
-                            usuario_id: operadorId,
-                            usuario_nome: operadorNome,
-                            modulo: 'caixa',
-                            acao: 'fechar_caixa',
-                            referencia_tipo: 'caixa_sessao',
-                            referencia_id: sessao.id,
-                            detalhes: { valor_informado: valorInformado, diferenca, observacao, caixa_id: caixa.id },
-                            ip_requisicao: req.ip || null
-                          }).catch((auditErr) => console.error('Erro ao gravar auditoria de fechamento de caixa:', auditErr));
-
-                          res.json({
-                            message: 'Caixa fechado com sucesso.',
-                            caixa_id: caixa.id,
-                            sessao_id: sessao.id,
-                            operador: operadorNome,
-                            detalhes: {
-                              ...detalhes,
-                              total_informado: valorInformado,
-                              diferenca
+                          db.run('COMMIT', (commitErr) => {
+                            if (commitErr) {
+                              db.run('ROLLBACK');
+                              return res.status(500).json({ error: commitErr.message });
                             }
+
+                            gravarAuditoria({
+                              usuario_id: operadorId,
+                              usuario_nome: operadorNome,
+                              modulo: 'caixa',
+                              acao: 'fechar_caixa',
+                              referencia_tipo: 'caixa_sessao',
+                              referencia_id: sessao.id,
+                              detalhes: {
+                                valor_informado: valorInformado,
+                                diferenca,
+                                observacao,
+                                caixa_id: caixa.id,
+                                total_recebido: detalhes.total_vendido
+                              },
+                              ip_requisicao: req.ip || null
+                            }).catch((aErr) => console.error('Erro ao gravar auditoria de fechamento de caixa:', aErr));
+
+                            res.json({
+                              message: 'Caixa fechado com sucesso.',
+                              caixa_id: caixa.id,
+                              sessao_id: sessao.id,
+                              operador: operadorNome,
+                              cupom_html: cupomHtml,
+                              detalhes: {
+                                ...detalhes,
+                                total_informado: valorInformado,
+                                diferenca
+                              }
+                            });
                           });
                         });
                       });
@@ -889,83 +873,6 @@ router.post('/fechar', verificarToken, validarCaixaAberto, (req, res) => {
     }
   );
 });
-
-// Função para calcular fechamento detalhado com todas as formas de pagamento
-function calcularFechamentoDetalhado(caixa, options = {}, callback) {
-  const data = caixa.data;
-  const sessaoId = options.sessaoId || null;
-  const modoFiscal = options.modo_fiscal || '0';
-  const exprValor = getExprValorVenda(modoFiscal);
-
-  const vendasWhere = 'v.caixa_sessao_id = ?';
-
-  db.all(`
-    SELECT v.forma_pagamento, SUM(${exprValor}) AS total
-    FROM vendas v
-    WHERE ${FILTRO_VENDA_VALIDA}
-      AND ${vendasWhere}
-    GROUP BY v.forma_pagamento
-  `, [sessaoId], (err, vendas) => {
-    if (err) return callback(err);
-
-      const whereMov = 'sessao_id = ?';
-      db.get(`
-        SELECT SUM(valor) AS total_sangrias
-        FROM caixa_movimentacoes
-        WHERE ${whereMov} AND tipo = 'sangria'
-      `, [sessaoId], (err2, sangriasRow) => {
-      if (err2) return callback(err2);
-
-        db.get(`
-          SELECT SUM(valor) AS total_suprimentos
-          FROM caixa_movimentacoes
-          WHERE ${whereMov} AND tipo = 'suprimento'
-        `, [sessaoId], (err3, suprimentosRow) => {
-        if (err3) return callback(err3);
-
-        let vendasDinheiro = 0;
-        let vendasPix = 0;
-        let vendasCartaoCredito = 0;
-        let vendasCartaoDebito = 0;
-        let vendasPrazo = 0;
-        let vendasTef = 0;
-
-        (vendas || []).forEach(v => {
-          const forma = normalizarForma(v.forma_pagamento);
-          const total = n(v.total);
-
-          if (forma === 'dinheiro') vendasDinheiro += total;
-          else if (forma === 'pix') vendasPix += total;
-          else if (forma === 'cartao_credito' || forma === 'credito') vendasCartaoCredito += total;
-          else if (forma === 'cartao_debito' || forma === 'debito') vendasCartaoDebito += total;
-          else if (forma === 'prazo') vendasPrazo += total;
-          else if (forma === 'tef' || forma === 'cartao') vendasTef += total;
-        });
-
-        const totalSangrias = n(sangriasRow?.total_sangrias);
-        const totalSuprimentos = n(suprimentosRow?.total_suprimentos);
-        const valorInicial = n(caixa.valor_inicial);
-
-        const totalVendido = vendasDinheiro + vendasPix + vendasCartaoCredito + vendasCartaoDebito + vendasPrazo + vendasTef;
-        const totalEsperado = valorInicial + vendasDinheiro + totalSuprimentos - totalSangrias;
-
-        callback(null, {
-          valor_inicial: valorInicial,
-          vendas_dinheiro: vendasDinheiro,
-          vendas_pix: vendasPix,
-          vendas_debito: vendasCartaoDebito,
-          vendas_credito: vendasCartaoCredito,
-          vendas_prazo: vendasPrazo,
-          vendas_tef: vendasTef,
-          total_sangrias: totalSangrias,
-          total_suprimentos: totalSuprimentos,
-          total_vendido: totalVendido,
-          total_esperado: totalEsperado
-        });
-      });
-    });
-  });
-}
 
 function obterDetalhesCaixa(caixaId, callback) {
   db.get(`
@@ -1030,11 +937,123 @@ router.get('/fechamento/:caixa_id', (req, res) => {
     if (err) return res.status(500).json({ error: err.message });
     if (!detalhes) return res.status(404).json({ error: 'Caixa não encontrado.' });
 
+    let consolidacao = null;
+    if (detalhes.fechamento?.resumo_json) {
+      try {
+        consolidacao = JSON.parse(detalhes.fechamento.resumo_json);
+      } catch (_) {
+        consolidacao = null;
+      }
+    }
+
     res.json({
       caixa: detalhes.caixa,
       fechamento: detalhes.fechamento,
+      consolidacao,
       movimentacoes: detalhes.movimentacoes,
       auditoria: detalhes.auditoria
+    });
+  });
+});
+
+/**
+ * Reimpressão do cupom de fechamento — não altera valores financeiros.
+ * Marca ja_reimpresso = 1 apenas como flag informativa (não bloqueia novas reimpressões).
+ */
+router.post('/:caixa_id/reimprimir', verificarToken, (req, res) => {
+  const caixaId = Number(req.params.caixa_id);
+  if (!caixaId) return res.status(400).json({ error: 'ID do caixa inválido.' });
+
+  obterDetalhesCaixa(caixaId, (err, detalhes) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!detalhes?.caixa) return res.status(404).json({ error: 'Caixa não encontrado.' });
+    if (detalhes.caixa.status !== 'fechado') {
+      return res.status(400).json({ error: 'Somente caixas fechados podem ser reimpressos.' });
+    }
+
+    const fechamento = detalhes.fechamento;
+    if (!fechamento) {
+      return res.status(404).json({ error: 'Registro de fechamento não encontrado para este caixa.' });
+    }
+
+    const operadorNome = req.user?.nome || req.user?.username || detalhes.caixa.fechado_por_nome || 'Operador';
+
+    const finalizarComHtml = (consolidacao, meta = {}) => {
+      const cupomHtml = gerarHtmlCupomFechamento(consolidacao, {
+        empresa_nome: meta.empresa_nome || consolidacao?.empresa?.nome,
+        empresa_cnpj: meta.empresa_cnpj || consolidacao?.empresa?.cnpj,
+        terminal_nome: meta.terminal_nome || consolidacao?.terminal?.nome,
+        operador_nome: consolidacao?.operador?.nome || operadorNome,
+        caixa_id: caixaId,
+        fechado_em: detalhes.caixa.fechado_em || fechamento.data_fechamento,
+        reimpressao: true
+      });
+
+      db.run(
+        `UPDATE caixa SET ja_reimpresso = 1 WHERE id = ?`,
+        [caixaId],
+        (updErr) => {
+          if (updErr) console.error('Erro ao marcar ja_reimpresso:', updErr.message);
+
+          gravarAuditoria({
+            usuario_id: req.user?.id || null,
+            usuario_nome: operadorNome,
+            modulo: 'caixa',
+            acao: 'reimprimir_fechamento',
+            referencia_tipo: 'caixa',
+            referencia_id: caixaId,
+            detalhes: { fechamento_id: fechamento.id, sessao_id: fechamento.sessao_id },
+            ip_requisicao: req.ip || null
+          }).catch(() => {});
+
+          res.json({
+            message: 'Reimpressão do fechamento gerada com sucesso.',
+            caixa_id: caixaId,
+            ja_reimpresso: 1,
+            cupom_html: cupomHtml,
+            consolidacao,
+            fechamento
+          });
+        }
+      );
+    };
+
+    if (fechamento.resumo_json) {
+      try {
+        const consolidacao = JSON.parse(fechamento.resumo_json);
+        return finalizarComHtml(consolidacao);
+      } catch (parseErr) {
+        console.warn('resumo_json inválido no fechamento, recalculando:', parseErr.message);
+      }
+    }
+
+    // Fallback: recomputa a partir da sessão (não altera o registro de fechamento)
+    db.get('SELECT * FROM caixa_sessoes WHERE id = ?', [fechamento.sessao_id], (sErr, sessao) => {
+      if (sErr) return res.status(500).json({ error: sErr.message });
+      if (!sessao) return res.status(404).json({ error: 'Sessão do fechamento não encontrada.' });
+
+      obterMetaSessao(sessao, operadorNome, (metaErr, meta) => {
+        if (metaErr) return res.status(500).json({ error: metaErr.message });
+
+        FechamentoCaixaResumoService.consolidarSessaoCaixa(detalhes.caixa, {
+          sessaoId: sessao.id,
+          valorInformado: n(fechamento.total_informado),
+          meta
+        }).then((consolidacao) => {
+          consolidacao.operador = {
+            ...(consolidacao.operador || {}),
+            id: fechamento.operador_id,
+            nome: operadorNome
+          };
+          consolidacao.fechamento = {
+            em: detalhes.caixa.fechado_em || fechamento.data_fechamento,
+            valor_informado: n(fechamento.total_informado)
+          };
+          consolidacao.dinheiro.informado = n(fechamento.total_informado);
+          consolidacao.dinheiro.diferenca = n(fechamento.diferenca);
+          finalizarComHtml(consolidacao, meta);
+        }).catch((calcErr) => res.status(500).json({ error: calcErr.message }));
+      });
     });
   });
 });

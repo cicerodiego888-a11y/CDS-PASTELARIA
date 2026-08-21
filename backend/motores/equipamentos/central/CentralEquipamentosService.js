@@ -342,7 +342,85 @@ class CentralEquipamentosService {
   }
 
   async diagnosticar(equipamentoId) {
-    return equipamentosService.diagnosticarEquipamento(equipamentoId);
+    console.log('[DIAG RC14.14.5] Diagnóstico iniciado', { equipamentoId });
+
+    const equipamentosRepository = require('../repositories/EquipamentosRepository');
+    const { diagnostics, resolverAlvoDiagnostico } = require('../drivers/toledo/certificacao/ToledoDiagnostics');
+
+    const equipamento = await equipamentosRepository.buscarPorId(equipamentoId);
+    if (!equipamento) {
+      const err = new Error('Equipamento não encontrado');
+      err.statusCode = 404;
+      throw err;
+    }
+
+    // Enriquecer com identidade (ip_atual) quando cadastro.ip estiver vazio/desatualizado
+    let identidade = null;
+    try {
+      const identidadeService = require('../identidade/IdentidadeService');
+      const lista = await identidadeService.listar(200);
+      identidade = (lista || []).find((idn) =>
+        (equipamento.ip && idn.ip_atual && String(idn.ip_atual) === String(equipamento.ip))
+        || (idn.driver_codigo && equipamento.driver_codigo
+          && String(idn.driver_codigo) === String(equipamento.driver_codigo)
+          && idn.ip_atual)
+      ) || null;
+    } catch (_) { /* identidade opcional */ }
+
+    const eqCtx = {
+      ...equipamento,
+      ultimo_ip: identidade?.ip_atual || equipamento.ip || null,
+      identidade: identidade
+        ? { ip_atual: identidade.ip_atual, porta_atual: identidade.porta_atual }
+        : null
+    };
+
+    const alvo = resolverAlvoDiagnostico({
+      equipamento: eqCtx,
+      identidade,
+      host: equipamento.ip || identidade?.ip_atual || null,
+      porta: equipamento.porta_tcp != null
+        ? Number(equipamento.porta_tcp)
+        : (identidade?.porta_atual != null ? Number(identidade.porta_atual) : 9000)
+    });
+
+    const driverCodigo = equipamento.driver_codigo || equipamento.fabricante || null;
+    console.log('[DIAG RC14.14.5] Alvo resolvido', {
+      driverCodigo,
+      host: alvo.host,
+      porta: alvo.porta,
+      ipCadastro: equipamento.ip,
+      ipIdentidade: identidade?.ip_atual || null
+    });
+
+    // Pipeline oficial: probe ativo (connect → handshake → health → read)
+    const resultado = await diagnostics({
+      host: alvo.host || undefined,
+      porta: alvo.host ? alvo.porta : undefined,
+      equipamento: eqCtx,
+      identidade,
+      probe: true
+    });
+    console.log('[DIAG RC14.14.5] Diagnóstico executado', {
+      status: resultado?.health?.status,
+      online: resultado?.health?.online,
+      etapaFalha: resultado?.etapas_conexao?.etapaFalha,
+      tcp: resultado?.probe?.tcp?.codigo || resultado?.probe?.tcp,
+      handshake: resultado?.probe?.handshake?.codigo || resultado?.probe?.handshake,
+      ip: resultado?.equipamento?.ip,
+      hasTrace: Boolean(resultado?.connection_trace)
+    });
+
+    try {
+      await equipamentosRepository.atualizarUltimoDiagnostico(equipamentoId);
+    } catch (_) { /* não bloqueia painel */ }
+
+    console.log('[DIAG RC14.14.5] Diagnóstico finalizado');
+    return {
+      ...resultado,
+      equipamento_id: Number(equipamentoId),
+      pipeline: 'toledo-diagnostics-v2'
+    };
   }
 
   async cadastrar(dados) {

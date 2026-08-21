@@ -114,6 +114,19 @@ class CentralSyncBackgroundService {
       });
     }
 
+    // RC3.7.5 — Motor de recuperação automática de XML (consChNFe).
+    try {
+      const { obterMotorRecuperacaoXml } = require('../recuperacao-xml');
+      await obterMotorRecuperacaoXml().iniciar({ delayMs: 20 * 1000 });
+    } catch (error) {
+      logCentralErro('BACKGROUND', error, {
+        Evento: 'BACKGROUND ERROR',
+        CorrelationId: correlationId,
+        RequestId: requestId,
+        Motivo: 'falha_iniciar_recuperacao_xml'
+      });
+    }
+
     if (!this._flags.syncAutomaticaHabilitada()) {
       this._ativo = false;
       this._log('BACKGROUND SLEEP', {
@@ -161,6 +174,11 @@ class CentralSyncBackgroundService {
         });
       } catch { /* ignore */ }
     }
+
+    try {
+      const { obterMotorRecuperacaoXml } = require('../recuperacao-xml');
+      obterMotorRecuperacaoXml().parar({ silencioso: true });
+    } catch { /* ignore */ }
 
     try {
       this._orch().definirProximaExecucaoSync(null);

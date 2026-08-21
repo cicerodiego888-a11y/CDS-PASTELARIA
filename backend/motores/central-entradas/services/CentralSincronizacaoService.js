@@ -109,9 +109,39 @@ class CentralSincronizacaoService {
     }
 
     const chaveLimpa = String(chave || '').replace(/\D/g, '');
+
+    // RC3.4.1 — Gate único também cobre consChNFe (buscar-chave).
+    try {
+      const gate = require('./CentralSefazOperationalGate');
+      const auth = await gate.autorizarConsultaDistDfe({
+        chave: chaveLimpa,
+        motivo: 'buscar_chave_consChNFe',
+        origem: 'api'
+      });
+      if (!auth.permitido) {
+        const erro = new Error(auth.mensagem || 'Consulta bloqueada pelo Gate SEFAZ.');
+        erro.statusCode = 429;
+        erro.codigoErro = auth.codigo;
+        erro.detalhe = auth;
+        throw erro;
+      }
+    } catch (gateErr) {
+      if (gateErr.statusCode) throw gateErr;
+      // Gate indisponível: não bloqueia busca manual pontual (compat).
+    }
+
     const resultado = await consultarNotaPorChave(chaveLimpa, {
       contextoCentral: ctxResult.contexto
     });
+
+    try {
+      if (resultado?.cStat) {
+        await require('./CentralSefazOperationalGate').processarRespostaSefaz(resultado, {
+          chave: chaveLimpa
+        });
+      }
+    } catch { /* ignore */ }
+
     const documento = await this._documentosRepository.buscarPorChave(chaveLimpa);
 
     return {

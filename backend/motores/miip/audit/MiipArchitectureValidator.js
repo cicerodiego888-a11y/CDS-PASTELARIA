@@ -20,7 +20,8 @@ const ENGINES_INTELIGENCIA = Object.freeze([
 
 const ENGINES_IDENTIFICACAO = Object.freeze([
   'engines/gtin/MotorGTIN.js',
-  'engines/fornecedor/MotorAssociacaoFornecedor.js'
+  'engines/fornecedor/MotorAssociacaoFornecedor.js',
+  'engines/mubc/MotorUniversalBuscaCandidatos.js'
 ]);
 
 const PADROES_SQL_PROIBIDOS = [

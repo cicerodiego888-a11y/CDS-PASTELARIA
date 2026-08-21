@@ -33,6 +33,7 @@
   "win": {
     "target": "nsis",
     "icon": "assets/branding/icon.ico",
+    "signAndEditExecutable": false,
     "signtoolOptions": {
       "publisherName": "CDS Sistemas"
     }

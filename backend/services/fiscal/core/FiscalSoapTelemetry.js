@@ -91,12 +91,23 @@ function contarDocZipPorTipo(xmlRetorno) {
  */
 function extrairMetadadosLeve(xmlRetorno) {
   const texto = String(xmlRetorno || '');
-  const pad = (v) => String(v || '').replace(/\D/g, '').padStart(15, '0') || '000000000000000';
+  const extrair = (tag) => {
+    const regex = new RegExp(
+      `<(?:[\\w.-]+:)?${tag}(?:\\s[^>]*)?>\\s*(\\d+)\\s*<\\/(?:[\\w.-]+:)?${tag}>`,
+      'i'
+    );
+    const m = texto.match(regex);
+    if (!m) return null;
+    const digitos = String(m[1]).replace(/\D/g, '');
+    return digitos ? digitos.padStart(15, '0') : null;
+  };
+  const cStat = texto.match(/<(?:[\w.-]+:)?cStat(?:\s[^>]*)?>\s*(\d+)\s*<\/(?:[\w.-]+:)?cStat>/i)?.[1] || '';
+  const xMotivo = texto.match(/<(?:[\w.-]+:)?xMotivo(?:\s[^>]*)?>\s*(.*?)\s*<\/(?:[\w.-]+:)?xMotivo>/i)?.[1] || '';
   return {
-    cStat: texto.match(/<cStat>(\d+)<\/cStat>/)?.[1] || '',
-    xMotivo: texto.match(/<xMotivo>(.*?)<\/xMotivo>/)?.[1] || '',
-    ultNSU: pad(texto.match(/<ultNSU>(\d+)<\/ultNSU>/)?.[1]),
-    maxNSU: pad(texto.match(/<maxNSU>(\d+)<\/maxNSU>/)?.[1])
+    cStat,
+    xMotivo,
+    ultNSU: extrair('ultNSU'),
+    maxNSU: extrair('maxNSU')
   };
 }
 

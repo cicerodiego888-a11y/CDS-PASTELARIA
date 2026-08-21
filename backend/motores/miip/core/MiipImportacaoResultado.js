@@ -24,6 +24,9 @@ class MiipImportacaoResultado {
     this.score = Number(dados.score ?? 0);
     this.motor = dados.motor ?? null;
     this.operacaoId = dados.operacaoId ?? null;
+    this.mie = dados.mie ?? null;
+    this.candidatos = Array.isArray(dados.candidatos) ? [...dados.candidatos] : [];
+    this.diagnosticoBusca = dados.diagnosticoBusca ?? null;
   }
 
   /**
@@ -51,7 +54,10 @@ class MiipImportacaoResultado {
       associadoAutomaticamente: this.associadoAutomaticamente,
       score: this.score,
       motor: this.motor,
-      operacaoId: this.operacaoId
+      operacaoId: this.operacaoId,
+      mie: this.mie,
+      candidatos: this.candidatos,
+      diagnosticoBusca: this.diagnosticoBusca
     };
   }
 }

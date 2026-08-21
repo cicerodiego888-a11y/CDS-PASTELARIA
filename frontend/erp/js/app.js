@@ -11,15 +11,27 @@ const CDS_ERP_PAGE_SCRIPTS = Object.freeze({
         '/erp/js/dashboard.js'
     ],
     monitoring: ['/erp/js/cds-monitoring-engine.js'],
-    produtos: ['/erp/js/produtos.js', '/erp/js/subcategorias.js'],
+    produtos: ['/shared/js/SearchSDK.js', '/erp/js/categorias.js', '/erp/js/subcategorias.js', '/erp/js/motor-unidades-medida.js', '/erp/js/produto-apresentacao-resolver.js', '/erp/js/produto-embalagens.js', '/shared/js/motor-preco-atacado.js', '/erp/js/formacao-preco-margem.js', '/erp/js/produtos.js'],
     clientes: ['/erp/js/clientes.js'],
-    compras: ['/erp/js/miip-central-revisao.js', '/erp/js/compras.js'],
+    compras: ['/erp/js/categorias.js', '/erp/js/subcategorias.js', '/erp/js/produto-apresentacao-resolver.js', '/erp/js/produto-embalagens.js', '/shared/js/motor-preco-atacado.js', '/erp/js/formacao-preco-margem.js', '/erp/js/produtos.js', '/erp/js/motor-unidades-medida.js', '/shared/js/motor-quantidade-compra.js', '/erp/js/compra-muc-client.js', '/erp/js/tratamento-fiscal-item-compra.js', '/erp/js/miip-central-revisao.js', '/erp/js/compras-fornecedor-cnpj-rc831.js', '/erp/js/compras.js'],
     'central-entradas': [
         '/erp/js/central-entradas-ux.js',
+        '/erp/js/categorias.js',
+        '/erp/js/subcategorias.js',
+        '/erp/js/motor-unidades-medida.js',
+        '/erp/js/produto-apresentacao-resolver.js',
+        '/erp/js/produto-embalagens.js',
+        '/shared/js/motor-preco-atacado.js',
+        '/erp/js/formacao-preco-margem.js',
+        '/erp/js/produtos.js',
+        '/erp/js/tratamento-fiscal-item-compra.js',
         '/erp/js/miip-central-revisao.js',
+        '/erp/js/central-recuperacao-xml.js',
+        '/erp/js/central-entradas-review-ux.js',
         '/erp/js/central-entradas.js'
     ],
     'central-diagnostico': ['/erp/js/central-diagnostico.js'],
+    'dfe-auditoria': ['/erp/js/dfe-auditoria.js'],
     fornecedores: ['/erp/js/fornecedores.js'],
     vendas: [
         '/shared/js/fiscalImpressao.js',
@@ -36,6 +48,7 @@ const CDS_ERP_PAGE_SCRIPTS = Object.freeze({
         '/erp/js/financeiro-pagar.js',
         '/erp/js/financeiro-historico.js',
         '/erp/js/financeiro-relatorios.js',
+        '/erp/js/financeiro-condicoes.js',
         '/erp/js/financeiro.js'
     ],
     licenca: ['/erp/js/licenca.js'],
@@ -45,13 +58,19 @@ const CDS_ERP_PAGE_SCRIPTS = Object.freeze({
         '/shared/js/configuracaoRede.js',
         '/erp/js/configuracoes.js'
     ],
+    'importacao-inicial-produtos': [
+        '/erp/js/importacao-inicial-estado.js',
+        '/erp/js/importacao-inicial-produtos.js'
+    ],
     usuarios: ['/erp/js/usuarios.js'],
     equipamentos: ['/erp/js/equipamentos.js'],
     'central-equipamentos': ['/erp/js/central-equipamentos.js'],
     'laboratorio-equipamentos': ['/erp/js/laboratorio-equipamentos.js'],
+    'enviar-produtos-balanca': ['/erp/js/enviar-produtos-balanca.js'],
     'configuracoes-avancadas': [
         '/shared/js/fiscalImpressao.js',
         '/shared/js/configuracaoRede.js',
+        '/erp/js/fiscal.js',
         '/erp/js/configuracoes.js',
         '/erp/js/cds-centro-configuracoes.js'
     ],
@@ -65,6 +84,11 @@ const CDS_ERP_PAGE_SCRIPTS = Object.freeze({
     categorias: ['/erp/js/subcategorias.js', '/erp/js/categorias.js'],
     auditoria: ['/erp/js/auditoria.js'],
     observabilidade: ['/erp/js/observabilidade.js'],
+    'mib-analytics': ['/erp/js/mib-analytics.js'],
+    'enterprise-search': ['/shared/js/SearchSDK.js', '/erp/js/enterprise-search.js'],
+    'knowledge-center': ['/erp/js/knowledge-center.js'],
+    'cip-insights': ['/erp/js/cip-insights.js'],
+    'cds-copiloto': ['/shared/js/AgentSDK.js', '/erp/js/cds-copiloto.js'],
     caixas: ['/erp/js/caixas.js'],
     'feature:central-homologacao': ['/erp/js/central-homologacao.js'],
     'feature:configuracao-tef': ['/erp/js/configuracao_tef.js']
@@ -335,6 +359,10 @@ async function loadPage(page) {
             return typeof loadCentralDiagnostico === 'function'
                 ? loadCentralDiagnostico()
                 : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar diagnóstico da Central.</div>');
+        case 'dfe-auditoria':
+            return typeof loadDfeAuditoria === 'function'
+                ? loadDfeAuditoria()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar Auditoria DF-e.</div>');
         case 'fornecedores':
             return typeof loadFornecedores === 'function'
                 ? loadFornecedores()
@@ -375,6 +403,10 @@ async function loadPage(page) {
             return typeof loadConfiguracoes === 'function'
                 ? loadConfiguracoes()
                 : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar configurações.</div>');
+        case 'importacao-inicial-produtos':
+            return typeof loadImportacaoInicialProdutos === 'function'
+                ? loadImportacaoInicialProdutos()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar Importação Inicial de Produtos.</div>');
         case 'usuarios':
             return typeof loadUsuarios === 'function'
                 ? loadUsuarios()
@@ -391,6 +423,10 @@ async function loadPage(page) {
             return typeof loadLaboratorioEquipamentos === 'function'
                 ? loadLaboratorioEquipamentos()
                 : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar laboratório.</div>');
+        case 'enviar-produtos-balanca':
+            return typeof loadEnviarProdutosBalanca === 'function'
+                ? loadEnviarProdutosBalanca()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar Enviar Produtos.</div>');
         case 'configuracoes-avancadas':
             return typeof loadConfiguracoesAvancadas === 'function'
                 ? loadConfiguracoesAvancadas()
@@ -443,6 +479,26 @@ async function loadPage(page) {
             return typeof loadObservabilidade === 'function'
                 ? loadObservabilidade()
                 : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar Observabilidade.</div>');
+        case 'mib-analytics':
+            return typeof carregarMibAnalytics === 'function'
+                ? carregarMibAnalytics()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar MIB Analytics.</div>');
+        case 'enterprise-search':
+            return typeof carregarEnterpriseSearch === 'function'
+                ? carregarEnterpriseSearch()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar Enterprise Search.</div>');
+        case 'knowledge-center':
+            return typeof carregarKnowledgeCenter === 'function'
+                ? carregarKnowledgeCenter()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar Knowledge Center.</div>');
+        case 'cip-insights':
+            return typeof carregarCipInsights === 'function'
+                ? carregarCipInsights()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar CIP Insights.</div>');
+        case 'cds-copiloto':
+            return typeof carregarCdsCopiloto === 'function'
+                ? carregarCdsCopiloto()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar CDS Copiloto.</div>');
         case 'caixas':
             return carregarPaginaHtml('caixas.html', function () {
                 if (typeof loadCaixas === 'function') {

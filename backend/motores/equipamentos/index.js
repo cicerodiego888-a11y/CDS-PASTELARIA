@@ -38,8 +38,16 @@ module.exports = {
   equipamentosManager,
   contracts,
   discoveryService,
+  discoveryEngineV1: require('./discovery/DiscoveryEngineV1'),
+  ethernetDiscovery: require('./discovery/EthernetDiscovery'),
+  discoveryManager: require('./discovery/DiscoveryManager'),
   identidadeService: require('./identidade/IdentidadeService'),
   centralEquipamentosService: require('./central/CentralEquipamentosService'),
   monitorService: require('./monitor/MonitorService'),
-  heartbeatEngine: require('./monitor/HeartbeatEngine')
+  heartbeatEngine: require('./monitor/HeartbeatEngine'),
+  orchestrator: require('./orchestrator'),
+  getOrchestrator: require('./orchestrator').getOrchestrator,
+  sdk: require('./sdk'),
+  deviceProfileSdk: require('./sdk'),
+  observability: require('./observability')
 };

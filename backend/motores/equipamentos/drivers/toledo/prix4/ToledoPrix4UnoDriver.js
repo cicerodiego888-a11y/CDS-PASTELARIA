@@ -20,14 +20,102 @@ const {
   CODIGO_DRIVER,
   VERSAO_DRIVER,
   PROTOCOLOS,
-  TRANSPORTES
+  TRANSPORTES,
+  PORTAS_PADRAO,
+  FIRMWARE_CONHECIDO
 } = require('./ToledoPrix4Constants');
 const { ToledoPrix4ValidationError } = require('./ToledoPrix4Errors');
 const connectionMonitor = require('../../../monitor/ConnectionMonitor');
 const perfilOficial = require('./ToledoOficialPerfil');
 const core = require('../../comum/oficial/DriverOficialCore');
+const frameBuilder = require('./ToledoPrix4FrameBuilder');
 
 class ToledoPrix4UnoDriver extends BaseDriver {
+  /**
+   * Sprint 15.0 — metadados de discovery Ethernet (auto-detecção).
+   * Portas: 9000 (implantação V1) + 9100/4001 (legado Prix 4).
+   */
+  static get discovery() {
+    return {
+      transport: 'ethernet',
+      ports: [Number(PORTAS_PADRAO.ethernet) || 9000, 9100, Number(PORTAS_PADRAO.alternativa) || 4001],
+      timeout: 500,
+      priority: 1,
+      driver: CODIGO_DRIVER
+    };
+  }
+
+  getDiscoveryProfile() {
+    return ToledoPrix4UnoDriver.discovery;
+  }
+
+  /**
+   * Frame de identificação enviado no probe TCP.
+   * @returns {Buffer}
+   */
+  buildProbe() {
+    return frameBuilder.buildHandshake();
+  }
+
+  /**
+   * @param {Buffer} rx
+   * @returns {boolean}
+   */
+  matches(rx) {
+    const buf = Buffer.isBuffer(rx) ? rx : Buffer.from(rx || []);
+    if (!buf.length) return false;
+    // STX + comando 2 bytes (HS/AK/RS/ST/PN…)
+    if (buf[0] === 0x02 && buf.length >= 3) {
+      const cmd = buf.slice(1, 3).toString('ascii');
+      if (/^[A-Z0-9]{2}$/.test(cmd)) return true;
+    }
+    // Resposta ASCII com marcas Toledo / Prix
+    const ascii = buf.toString('ascii').toUpperCase();
+    if (ascii.includes('TOLEDO') || ascii.includes('PRIX') || ascii.includes('90AX')) {
+      return true;
+    }
+    // Qualquer frame com STX/ETX
+    return buf.includes(0x02) && buf.includes(0x03);
+  }
+
+  /**
+   * @param {Buffer} rx
+   * @returns {object}
+   */
+  parseIdentity(rx) {
+    const buf = Buffer.isBuffer(rx) ? rx : Buffer.from(rx || []);
+    let versao = FIRMWARE_CONHECIDO[0] || '90AX';
+    let confianca = 0.85;
+    try {
+      const parsed = this.parser?.parseFrame?.(buf);
+      if (parsed) {
+        confianca = 0.98;
+        if (parsed.comando === 'RS' || parsed.comando === 'AK' || parsed.comando === 'ST') {
+          try {
+            const status = this.parser.parseStatus?.(buf);
+            if (status?.firmware) versao = status.firmware;
+          } catch (_) { /* ignore */ }
+        }
+      } else if (this.matches(buf)) {
+        confianca = 0.9;
+      }
+      const ascii = buf.toString('ascii');
+      const m = /90A[X0-9]/i.exec(ascii);
+      if (m) versao = m[0].toUpperCase();
+    } catch (_) { /* ignore */ }
+
+    return {
+      driver: CODIGO_DRIVER,
+      fabricante: FABRICANTE,
+      modelo: MODELO,
+      versao,
+      firmware: versao,
+      protocolo: PROTOCOLOS[0] || 'toledo-prix4',
+      confianca,
+      timeout: ToledoPrix4UnoDriver.discovery.timeout
+    };
+  }
+
   constructor(config = {}) {
     super(config);
     this.modo = 'oficial';
@@ -334,7 +422,7 @@ class ToledoPrix4UnoDriver extends BaseDriver {
       driver: this.informacoes(),
       metodo: 'desconectar',
       conexao: resultado,
-      monitor: connectionMonitor.obterStatus(`${this.config.host || this.config.ip}:${this.config.porta || 9100}`)
+      monitor: connectionMonitor.obterStatus(`${this.config.host || this.config.ip}:${this.config.porta || PORTAS_PADRAO.ethernet || 9000}`)
     };
   }
 

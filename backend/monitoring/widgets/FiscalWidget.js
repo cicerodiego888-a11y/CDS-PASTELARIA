@@ -34,10 +34,17 @@ function trendFromBlocos(hoje, mes) {
 
 /**
  * @param {Object} data — payload fiscal do summary (fiscal + naoFiscal)
+ * @param {string} [updatedAt]
+ * @param {Object} [opts]
+ * @param {string} [opts.competenciaLabel]
  */
-function buildFiscalWidgets(data = {}, updatedAt) {
+function buildFiscalWidgets(data = {}, updatedAt, opts = {}) {
   const fiscal = data.fiscal || {};
   const naoFiscal = data.naoFiscal || {};
+  const indicadores = data.indicadoresFiscais || fiscal.indicadoresFiscais || {};
+  const competenciaLabel = opts.competenciaLabel
+    || indicadores.competenciaLabel
+    || 'competência';
   const widgets = [];
 
   const vf = fiscal.vendas || {};
@@ -48,8 +55,8 @@ function buildFiscalWidgets(data = {}, updatedAt) {
     title: 'Vendas Fiscais',
     icon: 'fa-credit-card',
     badge: 'Fiscal',
-    value: formatMoneyLabel(vf.valor),
-    subtitle: `${num(vf.quantidade)} operações (hoje)`,
+    value: formatMoneyLabel(vf.mes?.valor ?? vf.valor),
+    subtitle: `${num(vf.mes?.quantidade ?? vf.quantidade)} operações (${competenciaLabel})`,
     trend: trendFromBlocos(vf.hoje || vf, vf.mes),
     updatedAt,
     metrics: blocoParaMetrics(vf)
@@ -63,8 +70,8 @@ function buildFiscalWidgets(data = {}, updatedAt) {
     title: 'Vendas Não Fiscais',
     icon: 'fa-money-bill',
     badge: 'Não Fiscal',
-    value: formatMoneyLabel(vnf.valor),
-    subtitle: `${num(vnf.quantidade)} operações (hoje)`,
+    value: formatMoneyLabel(vnf.mes?.valor ?? vnf.valor),
+    subtitle: `${num(vnf.mes?.quantidade ?? vnf.quantidade)} operações (${competenciaLabel})`,
     trend: trendFromBlocos(vnf.hoje || vnf, vnf.mes),
     updatedAt,
     metrics: blocoParaMetrics(vnf)
@@ -78,8 +85,8 @@ function buildFiscalWidgets(data = {}, updatedAt) {
     title: 'Entradas NF Fiscal',
     icon: 'fa-download',
     badge: 'Fiscal',
-    value: formatMoneyLabel(ef.valor),
-    subtitle: ef.fornecedor ? `Fornecedor: ${ef.fornecedor}` : 'Entradas DF-e',
+    value: formatMoneyLabel(ef.mes?.valor ?? ef.valor),
+    subtitle: `${num(ef.mes?.quantidade ?? ef.quantidade)} documentos (${competenciaLabel})`,
     trend: trendFromBlocos(ef.hoje || ef, ef.mes),
     updatedAt,
     metrics: blocoParaMetrics(ef, { ultimoLancamento: ef.ultimaNf, fornecedor: ef.fornecedor })
@@ -93,12 +100,32 @@ function buildFiscalWidgets(data = {}, updatedAt) {
     title: 'Entradas NF Não Fiscal',
     icon: 'fa-box',
     badge: 'Não Fiscal',
-    value: formatMoneyLabel(enf.valor),
-    subtitle: enf.fornecedor ? `Fornecedor: ${enf.fornecedor}` : 'Compras manuais',
+    value: formatMoneyLabel(enf.mes?.valor ?? enf.valor),
+    subtitle: `${num(enf.mes?.quantidade ?? enf.quantidade)} compras (${competenciaLabel})`,
     trend: trendFromBlocos(enf.hoje || enf, enf.mes),
     updatedAt,
     metrics: blocoParaMetrics(enf, { ultimoLancamento: enf.ultimaNf, fornecedor: enf.fornecedor })
   }));
+
+  if (indicadores.quantidadeNfeEmitidas != null) {
+    widgets.push(criarWidget({
+      id: 'fiscal.nfe_emitidas',
+      domain: 'fiscal',
+      scope: 'fiscal',
+      title: 'NF-e Emitidas',
+      icon: 'fa-file-invoice',
+      badge: indicadores.ambienteLabel || 'NF-e',
+      value: num(indicadores.quantidadeNfeEmitidas),
+      subtitle: `Autorizadas · ${competenciaLabel} · ${indicadores.ambienteLabel || '—'}`,
+      trend: 'flat',
+      updatedAt,
+      metrics: {
+        quantidade: num(indicadores.quantidadeNfeEmitidas),
+        competencia: indicadores.competencia,
+        ambiente: indicadores.ambiente
+      }
+    }));
+  }
 
   return widgets;
 }

@@ -1,6 +1,6 @@
-# Mercadão da Economia - Sistema de Gestão
+# CDS Sistemas - Plataforma Inteligente de Gestão
 
-Sistema completo de gestão para supermercados e mercados.
+Plataforma inteligente de gestão comercial (ERP/PDV) da CDS Sistemas.
 
 ## Funcionalidades
 
@@ -65,35 +65,23 @@ Sistema completo de gestão para supermercados e mercados.
 
 1. Clone o repositório:
 ```bash
-git clone https://github.com/seu-usuario/mercadao-da-economia.git
-cd mercadao-da-economia
+git clone https://github.com/seu-usuario/cds-sistemas.git
+cd cds-sistemas
+```
 
+Estrutura principal:
 ```
 ├── backend/
 │   ├── banco/
-│   │   └── mercadao.db
+│   │   └── mercadao.db   # arquivo SQLite legado (nome técnico)
 │   ├── rotas/
-│   │   ├── produtos.js
-│   │   ├── clientes.js
-│   │   ├── compras.js
-│   │   ├── vendas.js
-│   │   ├── financeiro.js
-│   │   └── configuracoes.js
 │   ├── database.js
 │   └── server.js
 ├── frontend/
-│   ├── css/
-│   │   └── style.css
-│   ├── js/
-│   │   ├── app.js
-│   │   ├── produtos.js
-│   │   ├── clientes.js
-│   │   ├── compras.js
-│   │   ├── vendas.js
-│   │   ├── financeiro.js
-│   │   └── configuracoes.js
-│   └── index.html
-├── backups/
+│   ├── erp/
+│   ├── pdv/
+│   └── shared/
+├── assets/branding/
 ├── package.json
 └── README.md
 ```

@@ -44,11 +44,13 @@ function criarRepoConfig() {
 }
 
 async function testBackoff() {
+  // RC3.4.1 — backoff MIRX: 5 → 15 → 30 → 60 → 120 → 240 → 480 → 1440
   assert.strictEqual(calcularBackoffMs(0), 5 * 60 * 1000);
-  assert.strictEqual(calcularBackoffMs(1), 10 * 60 * 1000);
-  assert.strictEqual(calcularBackoffMs(5), 120 * 60 * 1000);
-  assert.strictEqual(calcularBackoffMs(99), 120 * 60 * 1000);
-  assert.deepStrictEqual([...BACKOFF_MINUTOS], [5, 10, 20, 30, 60, 120]);
+  assert.strictEqual(calcularBackoffMs(1), 15 * 60 * 1000);
+  assert.strictEqual(calcularBackoffMs(2), 30 * 60 * 1000);
+  assert.strictEqual(calcularBackoffMs(7), 1440 * 60 * 1000);
+  assert.strictEqual(calcularBackoffMs(99), 1440 * 60 * 1000);
+  assert.deepStrictEqual([...BACKOFF_MINUTOS], [5, 15, 30, 60, 120, 240, 480, 1440]);
 }
 
 async function testSemProcContinuaComBackoff() {

@@ -1,0 +1,41 @@
+{
+  "schema": "cds-electron-build-manifest/v1",
+  "versao": "1.0.3",
+  "data": "2026-08-15T12:25:05.077Z",
+  "build": "2026-08-15T12:24:25.965Z",
+  "commit": "ad2b88e",
+  "branch": "main",
+  "modulo": "erp",
+  "hashAppAsar": "40069ffe13fb0873d5731b981e414a297954919635d1eaea9f4d58b560dd3528",
+  "hashFrontend": "f0b7e1f6612e39eb37a1481157e853923c1cf6452a424179e5b7305715abb5f0",
+  "hashBackend": "cdfcdcaaab8b0f7050b673145bbaa7c8a32bf1bfa4d69a39ad3db6e1ab945aff",
+  "hashElectron": "42dabf10f54ed04757141195d14e92415787790fbf14dc875c063b48642378ac",
+  "hashGlobal": "8b05023e6e5f99e3b78ff8f9c6857cdc2bf1d352f16fc8b4cb068d24aa3da3bc",
+  "quantidadeArquivosEmpacotados": 2774,
+  "modulosPrincipais": {
+    "frontend": 234,
+    "backend": 2515,
+    "electron": 14,
+    "recursos": 11
+  },
+  "certificacao": {
+    "resultado": "APROVADO",
+    "integridadeAsar": true,
+    "smokeTest": true,
+    "divergencias": 0,
+    "ausentesNoAsar": 0,
+    "modulosSmokeOk": [
+      "erp_core",
+      "database",
+      "sql_cert",
+      "compras",
+      "produtos",
+      "financeiro",
+      "nfce",
+      "nfe",
+      "muc"
+    ],
+    "timestamp": "2026-08-15T12:25:05.077Z"
+  },
+  "asarPath": "dist/erp/win-unpacked/resources/app.asar"
+}

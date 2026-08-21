@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CDS PDV — Frente de Caixa</title>
+    <title>CDS Sistemas - PDV</title>
     <link rel="icon" type="image/x-icon" href="/branding/favicon.ico">
     <link href="/vendor/bootstrap/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="/vendor/fontawesome/css/all.min.css">
@@ -21,7 +21,7 @@
                             <img src="/branding/logo-oficial.png" alt="CDS Sistemas" class="img-fluid brand-sidebar-logo" style="max-height:88px;object-fit:contain;margin:0 auto 0.35rem;display:block;">
                             <small class="text-muted brand-sidebar-slogan" style="display:block;line-height:1.25;max-width:11.5rem;margin:0.15rem auto 0;">Inteligência para gerir, Tecnologia para crescer</small>
                         </div>
-                        <div id="sidebar-modo-fiscal-bar" class="sidebar-modo-fiscal-bar sidebar-modo-fiscal-bar--off" title="Modo completo"></div>
+                        <div id="sidebar-modo-fiscal-bar" class="sidebar-modo-fiscal-bar sidebar-modo-fiscal-bar--on" title="Modo fiscal ativo"></div>
                     </div>
                     <ul class="nav flex-column">
                         <li class="nav-item">
@@ -77,6 +77,7 @@
                     </ul>
 
                     <div class="sidebar-footer">
+                        <div id="cds-empresa-seletor" class="cds-empresa-seletor mb-2" hidden></div>
                         <div class="text-white mb-2 small">
                             <i class="fas fa-user"></i> <span id="user-nome">Carregando...</span>
                             <br>
@@ -115,6 +116,7 @@
     <script src="/shared/js/modalDevolucaoVenda.js"></script>
     <script src="/shared/js/access-control.js"></script>
     <script src="/shared/js/caixaPermissoes.js"></script>
+    <script src="/shared/js/cds-empresa-contexto.js"></script>
     <script src="/shared/js/core.js"></script>
     <script src="/shared/js/cds-nomenclatura.js"></script>
     <script src="/shared/js/configuracaoRede.js"></script>
@@ -122,6 +124,7 @@
     <script src="/shared/js/fiscalImpressao.js"></script>
     <script src="/shared/js/vendasHistoricoUi.js"></script>
     <script src="/shared/js/pdvBuscaProduto.js"></script>
+    <script src="/shared/js/motor-preco-atacado.js"></script>
     <script src="/shared/js/tefFluxoPagamento.js"></script>
     <script src="/pdv/js/pdv-theme-manager.js"></script>
     <script src="/pdv/js/pdv-footer-widgets.js"></script>
@@ -134,7 +137,12 @@
     <script src="/pdv/js/clientes.js"></script>
     <script src="/pdv/js/vendas.js"></script>
     <script src="/pdv/js/entregas.js"></script>
+    <script src="/shared/js/AgentSDK.js"></script>
+    <script src="/shared/js/cds-copiloto-widget.js"></script>
     <script src="/pdv/js/app.js"></script>
+    <script>
+        if (typeof initCdsCopilotoWidget === 'function') initCdsCopilotoWidget();
+    </script>
 
     <div id="notification-container" style="position: fixed; top: 20px; right: 20px; z-index: 9999; pointer-events: none;"></div>
 

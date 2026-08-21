@@ -1,9 +1,12 @@
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { gravarAuditoria } = require('../services/auditoria');
 const db = require('../database');
+const UsuarioEmpresaService = require('../services/empresas/UsuarioEmpresaService');
+const { criarMiddlewareContextoEmpresa, exigirEmpresaAlvoDoContexto } = require('../services/fiscalNaoFiscal/empresaContexto');
 const {
   JWT_SECRET,
   PERMISSOES_DISPONIVEIS,
@@ -14,6 +17,129 @@ const {
   exigirPerfilAjusteEstoque,
   buscarPermissoesUsuario
 } = require('../middleware/auth');
+
+/** RC5.1.4 — jti de tokens de supervisor já consumidos (jti → expMs). */
+const supervisorJtIsUsados = new Map();
+
+function gerarSupervisorJti() {
+  return crypto.randomUUID();
+}
+
+function limparSupervisorJtIsExpirados(agora = Date.now()) {
+  for (const [jti, expMs] of supervisorJtIsUsados) {
+    if (expMs != null && agora > expMs) {
+      supervisorJtIsUsados.delete(jti);
+    }
+  }
+}
+
+/**
+ * RC5.1.4 — registra uso único do jti. Retorna false se já estava utilizado.
+ * @param {string} jti
+ * @param {number} [expMs]
+ * @returns {boolean}
+ */
+function registrarUsoSupervisorJti(jti, expMs) {
+  if (!jti) return false;
+  limparSupervisorJtIsExpirados();
+  if (supervisorJtIsUsados.has(jti)) return false;
+  supervisorJtIsUsados.set(
+    jti,
+    expMs != null ? Number(expMs) : Date.now() + 15 * 60 * 1000
+  );
+  return true;
+}
+
+/** Uso em testes — limpa o registro de jtis consumidos. */
+function limparSupervisorTokensUsados() {
+  supervisorJtIsUsados.clear();
+}
+
+function round3Escopo(n) {
+  return Math.round(Number(n || 0) * 1000) / 1000;
+}
+
+/**
+ * RC5.1.5 — normaliza escopo do token / operação.
+ * Claims: pedido_id, produtos[], quantidades[] (aprovadas).
+ * @param {object} raw
+ * @returns {{ pedido_id: number|null, produtos: number[], quantidades: number[] }}
+ */
+function normalizarEscopoSupervisor(raw = {}) {
+  const pedidoRaw = raw.pedido_id != null ? raw.pedido_id : raw.pedidoId;
+  const pedidoId = pedidoRaw != null ? Number(pedidoRaw) : null;
+
+  const pares = [];
+  if (Array.isArray(raw.itens) && raw.itens.length) {
+    for (const item of raw.itens) {
+      pares.push({
+        produto_id: Number(item.produto_id || item.produtoId),
+        quantidade: round3Escopo(item.quantidade ?? item.quantidade_aprovada)
+      });
+    }
+  } else {
+    const produtos = Array.isArray(raw.produtos) ? raw.produtos : [];
+    const quantidades = Array.isArray(raw.quantidades)
+      ? raw.quantidades
+      : (Array.isArray(raw.quantidades_aprovadas) ? raw.quantidades_aprovadas : []);
+    for (let i = 0; i < produtos.length; i += 1) {
+      const p = produtos[i];
+      const q = quantidades[i];
+      pares.push({
+        produto_id: Number(p && typeof p === 'object' ? (p.produto_id || p.produtoId) : p),
+        quantidade: round3Escopo(q && typeof q === 'object' ? (q.quantidade ?? q.quantidade_aprovada) : q)
+      });
+    }
+  }
+
+  const map = new Map();
+  for (const par of pares) {
+    if (!Number.isInteger(par.produto_id) || par.produto_id <= 0) continue;
+    map.set(par.produto_id, round3Escopo((map.get(par.produto_id) || 0) + par.quantidade));
+  }
+
+  const agregados = [...map.entries()]
+    .map(([produto_id, quantidade]) => ({ produto_id, quantidade }))
+    .sort((a, b) => a.produto_id - b.produto_id);
+
+  return {
+    pedido_id: Number.isInteger(pedidoId) && pedidoId > 0 ? pedidoId : null,
+    produtos: agregados.map((p) => p.produto_id),
+    quantidades: agregados.map((p) => p.quantidade)
+  };
+}
+
+function escoposSupervisorIguais(a, b) {
+  if (!a || !b) return false;
+  if (a.pedido_id !== b.pedido_id) return false;
+  if (a.produtos.length !== b.produtos.length) return false;
+  for (let i = 0; i < a.produtos.length; i += 1) {
+    if (a.produtos[i] !== b.produtos[i]) return false;
+    if (Math.abs(Number(a.quantidades[i]) - Number(b.quantidades[i])) > 1e-9) return false;
+  }
+  return true;
+}
+
+/**
+ * RC5.1.5 — compara claims do token com a operação em execução.
+ * @param {object} userPayload
+ * @param {object} escopoOperacao
+ */
+function assertEscopoSupervisorToken(userPayload, escopoOperacao) {
+  const tokenEscopo = normalizarEscopoSupervisor({
+    pedido_id: userPayload.pedido_id,
+    produtos: userPayload.produtos,
+    quantidades: userPayload.quantidades != null
+      ? userPayload.quantidades
+      : userPayload.quantidades_aprovadas
+  });
+  const operacao = normalizarEscopoSupervisor(escopoOperacao);
+  if (!escoposSupervisorIguais(tokenEscopo, operacao)) {
+    const err = new Error('Token de autorização fora do escopo da operação.');
+    err.code = 'TOKEN_FORA_DO_ESCOPO';
+    throw err;
+  }
+}
 
 function parsePositiveInteger(value) {
   const num = Number(value);
@@ -126,23 +252,54 @@ function isSupervisorPerfil(usuario) {
   return usuario?.role === 'admin' || ['SUPER_ADMIN', 'ADMIN', 'SUPERVISOR'].includes(perfil);
 }
 
-function verificarSupervisorToken(token) {
+function verificarSupervisorToken(token, escopoOperacao = null) {
   return new Promise((resolve, reject) => {
     if (!token) {
-      return reject(new Error('Token de supervisor ausente.'));
+      const err = new Error('Token de supervisor ausente.');
+      err.code = 'AUTORIZACAO_REJEITADA';
+      return reject(err);
     }
 
-    jwt.verify(token, JWT_SECRET, (err, user) => {
-      if (err) {
-        return reject(new Error('Token de supervisor inválido ou expirado.'));
-      }
+    // Verificação síncrona para check-and-set atômico do jti (RC5.1.4)
+    let user;
+    try {
+      user = jwt.verify(token, JWT_SECRET);
+    } catch (_) {
+      const err = new Error('Token de supervisor inválido ou expirado.');
+      err.code = 'AUTORIZACAO_REJEITADA';
+      return reject(err);
+    }
 
-      if (!isSupervisorPerfil(user)) {
-        return reject(new Error('Usuário não possui permissão de supervisor.'));
-      }
+    if (!isSupervisorPerfil(user)) {
+      const err = new Error('Usuário não possui permissão de supervisor.');
+      err.code = 'AUTORIZACAO_REJEITADA';
+      return reject(err);
+    }
 
-      resolve(user);
-    });
+    const jti = user.jti;
+    if (!jti) {
+      const err = new Error('Token de supervisor sem identificador único.');
+      err.code = 'AUTORIZACAO_REJEITADA';
+      return reject(err);
+    }
+
+    // RC5.1.5 — valida escopo antes de consumir o jti
+    if (escopoOperacao != null) {
+      try {
+        assertEscopoSupervisorToken(user, escopoOperacao);
+      } catch (escopoErr) {
+        return reject(escopoErr);
+      }
+    }
+
+    const expMs = user.exp != null ? Number(user.exp) * 1000 : undefined;
+    if (!registrarUsoSupervisorJti(jti, expMs)) {
+      const err = new Error('Token de autorização já utilizado.');
+      err.code = 'TOKEN_JA_UTILIZADO';
+      return reject(err);
+    }
+
+    resolve(user);
   });
 }
 
@@ -181,6 +338,10 @@ router.post('/supervisor/authorize', (req, res) => {
       const terminalId = parsePositiveInteger(req.body?.terminal_id);
       const caixaSessaoId = parsePositiveInteger(req.body?.caixa_sessao_id);
 
+      // RC5.1.5 — escopo da operação autorizada (pedido + produtos + quantidades)
+      const escopo = normalizarEscopoSupervisor(req.body || {});
+
+      // RC5.1.4 — jti único; expiresIn permanece 15m
       const token = jwt.sign(
         {
           id: usuario.id,
@@ -190,10 +351,13 @@ router.post('/supervisor/authorize', (req, res) => {
           role: usuario.role,
           perfil: usuario.perfil || 'USUARIO',
           terminal_id: terminalId,
-          caixa_sessao_id: caixaSessaoId
+          caixa_sessao_id: caixaSessaoId,
+          pedido_id: escopo.pedido_id,
+          produtos: escopo.produtos,
+          quantidades: escopo.quantidades
         },
         JWT_SECRET,
-        { expiresIn: '15m' }
+        { expiresIn: '15m', jwtid: gerarSupervisorJti() }
       );
 
       res.json({
@@ -207,7 +371,8 @@ router.post('/supervisor/authorize', (req, res) => {
           perfil: usuario.perfil || 'USUARIO',
           terminal_id: terminalId,
           caixa_sessao_id: caixaSessaoId
-        }
+        },
+        escopo
       });
     }
   );
@@ -524,6 +689,92 @@ router.post('/usuarios', exigirAdmin, (req, res) => {
       }
     );
   });
+});
+
+const exigirContexto = criarMiddlewareContextoEmpresa(db, { obrigatorio: true });
+
+function responderErroVinculo(res, err) {
+  const code = err && err.code ? err.code : 'ERRO_VINCULO';
+  const STATUS_POR_CODIGO = {
+    EMPRESA_OBRIGATORIA: 400,
+    EMPRESA_NAO_ENCONTRADA: 404,
+    EMPRESA_INATIVA: 400,
+    EMPRESA_NAO_AUTORIZADA: 403,
+    EMPRESA_ID_OBRIGATORIO: 400,
+    USUARIO_OBRIGATORIO: 400,
+    VINCULO_EMPRESA_DUPLICADO: 409,
+    VINCULO_NAO_ENCONTRADO: 404,
+    VINCULO_JA_INATIVO: 409
+  };
+  const status = Number(err && err.status) || STATUS_POR_CODIGO[code] || 500;
+  const payload = {
+    error: err && err.message ? err.message : 'Erro ao processar vínculo empresarial.',
+    code
+  };
+  if (err && err.usuario_id != null) payload.usuario_id = err.usuario_id;
+  if (err && err.empresa_id != null) payload.empresa_id = err.empresa_id;
+  if (status >= 500) console.error('Erro em vínculo usuário-empresa:', err);
+  return res.status(status).json(payload);
+}
+
+router.get('/usuarios/:id/empresas', exigirAdmin, exigirContexto, async (req, res) => {
+  try {
+    const lista = await UsuarioEmpresaService.listarVinculosDoUsuario(req.params.id, { db });
+    return res.json(lista);
+  } catch (err) {
+    return responderErroVinculo(res, err);
+  }
+});
+
+router.post('/usuarios/:id/empresas', exigirAdmin, exigirContexto, async (req, res) => {
+  try {
+    const empresaId = exigirEmpresaAlvoDoContexto(req.empresaId, req.body || {});
+    const vinculo = await UsuarioEmpresaService.vincularUsuarioEmpresa(
+      req.params.id,
+      { empresaId },
+      { db }
+    );
+    return res.status(201).json(vinculo);
+  } catch (err) {
+    return responderErroVinculo(res, err);
+  }
+});
+
+router.patch('/usuarios/:id/empresas/:empresaId', exigirAdmin, exigirContexto, async (req, res) => {
+  try {
+    const empresaId = exigirEmpresaAlvoDoContexto(req.empresaId, req.params.empresaId);
+    const ativo = req.body && req.body.ativo;
+    if (Number(ativo) === 1) {
+      const vinculo = await UsuarioEmpresaService.vincularUsuarioEmpresa(
+        req.params.id,
+        { empresaId },
+        { db }
+      );
+      return res.json(vinculo);
+    }
+    const vinculo = await UsuarioEmpresaService.inativarVinculo(
+      req.params.id,
+      { empresaId },
+      { db }
+    );
+    return res.json(vinculo);
+  } catch (err) {
+    return responderErroVinculo(res, err);
+  }
+});
+
+router.delete('/usuarios/:id/empresas/:empresaId', exigirAdmin, exigirContexto, async (req, res) => {
+  try {
+    const empresaId = exigirEmpresaAlvoDoContexto(req.empresaId, req.params.empresaId);
+    const vinculo = await UsuarioEmpresaService.inativarVinculo(
+      req.params.id,
+      { empresaId },
+      { db }
+    );
+    return res.json(vinculo);
+  } catch (err) {
+    return responderErroVinculo(res, err);
+  }
 });
 
 router.put('/usuarios/:id', exigirAdmin, (req, res) => {
@@ -881,6 +1132,9 @@ module.exports = {
   exigirPerfilAjusteEstoque,
   verificarSupervisorToken,
   isSupervisorPerfil,
+  limparSupervisorTokensUsados,
+  normalizarEscopoSupervisor,
+  assertEscopoSupervisorToken,
   PERMISSOES_DISPONIVEIS,
   buscarPermissoesUsuario,
   verificarPermissaoEspecifica

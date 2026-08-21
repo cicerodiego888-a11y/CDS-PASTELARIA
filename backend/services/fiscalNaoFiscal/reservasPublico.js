@@ -2,6 +2,9 @@
  * Interface Pública de Reservas — Motor Fiscal × Não Fiscal.
  * RC3.16.1: reservas fiscais de Pedido. MTS NÃO cria reservas.
  *
+ * Fase 1 / Implementação 01: contrato preparado para produtoId + empresaId.
+ * Storage de reservado_* permanece em `produtos` (sem nova estrutura).
+ *
  * @module services/fiscalNaoFiscal/reservasPublico
  */
 'use strict';
@@ -11,6 +14,13 @@ const {
   produtoControlaEstoque,
   SALDO_VIRTUAL_SEM_CONTROLE
 } = require('../estoque/produtoControlaEstoque');
+const { TipoSaldo, normalizarTipoSaldo } = require('./constants');
+const {
+  resolverEmpresaId,
+  resolverContextoEmpresa,
+  logOperacaoSaldo,
+  COMPAT_CERTIFICADA_PRE_MULTIEMPRESA
+} = require('./empresaContexto');
 
 function round3(n) {
   return Math.round(Number(n || 0) * 1000) / 1000;
@@ -98,18 +108,42 @@ async function garantirSchemaReservas(db) {
     ON pedido_estoque_reservas(produto_id, status)`);
 }
 
+function mesclarOptsEmpresa(produtoIdOrParams, opts = {}) {
+  if (
+    produtoIdOrParams
+    && typeof produtoIdOrParams === 'object'
+    && !Array.isArray(produtoIdOrParams)
+  ) {
+    const p = produtoIdOrParams;
+    return {
+      produtoId: p.produtoId != null ? p.produtoId : p.produto_id,
+      opts: {
+        ...opts,
+        ...p,
+        empresaId: resolverEmpresaId(p) ?? resolverEmpresaId(opts),
+        db: opts.db != null ? opts.db : p.db
+      }
+    };
+  }
+  return { produtoId: produtoIdOrParams, opts };
+}
+
 /**
- * Consulta disponibilidade líquida (saldo − reservado).
+ * Consulta disponibilidade líquida (saldo − reservado) no contexto de empresa.
  */
-async function consultarDisponibilidade(produtoId, opts = {}) {
-  const id = Number(produtoId);
+async function consultarDisponibilidade(produtoIdOrParams, opts = {}) {
+  const normalized = mesclarOptsEmpresa(produtoIdOrParams, opts);
+  const id = Number(normalized.produtoId);
+  const callOpts = normalized.opts;
+
   if (!Number.isInteger(id) || id <= 0) {
     const err = new Error('Produto inválido.');
     err.code = 'PRODUTO_INVALIDO';
     throw err;
   }
 
-  const db = getDb(opts.db);
+  const ctx = await resolverContextoEmpresa(callOpts);
+  const db = getDb(callOpts.db);
   await garantirSchemaReservas(db);
 
   const row = await dbGet(
@@ -134,9 +168,12 @@ async function consultarDisponibilidade(produtoId, opts = {}) {
   if (!produtoControlaEstoque(row)) {
     return Object.freeze({
       produto_id: id,
+      empresa_id: ctx.empresaId,
+      legado: ctx.legado,
       existe: true,
       controla_estoque: 0,
       estoque_fisico: Number(row.estoque_atual || 0),
+      estoque_atual: Number(row.estoque_atual || 0),
       saldo_fiscal: Number(row.saldo_fiscal || 0),
       saldo_nao_fiscal: Number(row.saldo_nao_fiscal || 0),
       reservado_fiscal: 0,
@@ -150,8 +187,11 @@ async function consultarDisponibilidade(produtoId, opts = {}) {
   const calc = calcularEstoqueProduto(row);
   return Object.freeze({
     produto_id: id,
+    empresa_id: ctx.empresaId,
+    legado: ctx.legado,
     existe: true,
     controla_estoque: 1,
+    estoque_atual: calc.estoque_fisico,
     ...calc
   });
 }
@@ -173,7 +213,7 @@ async function consultarDisponibilidadeParaPedido(produtoId, pedidoId, opts = {}
     `SELECT COALESCE(SUM(quantidade_fiscal), 0) AS q
      FROM pedido_estoque_reservas
      WHERE pedido_id = ? AND produto_id = ? AND status = 'ATIVA'`,
-    [pid, Number(produtoId)]
+    [pid, Number(disp.produto_id)]
   );
   const propria = round3(row?.q || 0);
   if (propria <= 0) return disp;
@@ -185,13 +225,30 @@ async function consultarDisponibilidadeParaPedido(produtoId, pedidoId, opts = {}
     disponivel_total: round3(disp.disponivel_total + propria)
   });
 }
-async function criarReservaFiscal(params = {}, opts = {}) {
+
+async function _criarReservaTipo(params = {}, opts = {}, tipoSaldo) {
+  const tipo = normalizarTipoSaldo(tipoSaldo);
   const pedidoId = Number(params.pedidoId || params.pedido_id);
   const produtoId = Number(params.produtoId || params.produto_id);
-  const quantidade = round3(params.quantidade || params.quantidade_fiscal);
+  const quantidade = round3(
+    params.quantidade
+    ?? params.quantidade_fiscal
+    ?? params.quantidade_nao_fiscal
+  );
   const pedidoItemId = params.pedidoItemId != null || params.pedido_item_id != null
     ? Number(params.pedidoItemId ?? params.pedido_item_id)
     : null;
+
+  const callOpts = {
+    ...opts,
+    empresaId: resolverEmpresaId(params) ?? resolverEmpresaId(opts),
+    modoLegadoSemEmpresa: opts.modoLegadoSemEmpresa === true
+      || params.modoLegadoSemEmpresa === true,
+    motivoCompat: opts.motivoCompat || params.motivoCompat,
+    validarEmpresa: opts.validarEmpresa || params.validarEmpresa,
+    usuarioId: opts.usuarioId != null ? opts.usuarioId : params.usuarioId,
+    db: opts.db != null ? opts.db : params.db
+  };
 
   if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
     const err = new Error('Pedido inválido para reserva.');
@@ -204,61 +261,100 @@ async function criarReservaFiscal(params = {}, opts = {}) {
     throw err;
   }
 
-  const db = getDb(opts.db);
+  const ctx = await resolverContextoEmpresa(callOpts);
+  const db = getDb(callOpts.db);
   await garantirSchemaReservas(db);
 
-  const disp = await consultarDisponibilidade(produtoId, { db });
+  const disp = await consultarDisponibilidade(produtoId, { ...callOpts, db });
   if (!produtoControlaEstoque(disp)) {
     return Object.freeze({
       id: null,
       pedido_id: pedidoId,
       produto_id: produtoId,
-      quantidade_fiscal: quantidade,
+      empresa_id: ctx.empresaId,
+      legado: ctx.legado,
+      tipo,
+      quantidade_fiscal: tipo === TipoSaldo.FISCAL ? quantidade : 0,
+      quantidade_nao_fiscal: tipo === TipoSaldo.NAO_FISCAL ? quantidade : 0,
       status: 'IGNORADA',
       controla_estoque: 0
     });
   }
 
-  if (disp.disponivel_fiscal + 1e-9 < quantidade) {
-    const err = new Error('Saldo fiscal insuficiente para reserva.');
+  const disponivel = tipo === TipoSaldo.FISCAL
+    ? disp.disponivel_fiscal
+    : disp.disponivel_nao_fiscal;
+
+  if (disponivel + 1e-9 < quantidade) {
+    const err = new Error(
+      tipo === TipoSaldo.FISCAL
+        ? 'Saldo fiscal insuficiente para reserva.'
+        : 'Saldo não fiscal insuficiente para reserva.'
+    );
     err.code = 'SALDO_INSUFICIENTE';
-    err.saldo_disponivel = disp.disponivel_fiscal;
+    err.saldo_disponivel = disponivel;
     throw err;
   }
 
-  // RC5.1.2 — UPDATE + INSERT atômicos (reutiliza TX do Pedido se já houver)
   const ins = await executarComTxOuReutilizar(db, async () => {
-    await dbRun(
-      db,
-      `UPDATE produtos
-     SET reservado_fiscal = COALESCE(reservado_fiscal, 0) + ?
-     WHERE id = ?`,
-      [quantidade, produtoId]
-    );
+    await _aplicarDeltaReservado(db, produtoId, tipo, quantidade);
 
-    return dbRun(
-      db,
-      `INSERT INTO pedido_estoque_reservas (
-      pedido_id, pedido_item_id, produto_id, quantidade_fiscal, status, criado_em
-    ) VALUES (?, ?, ?, ?, 'ATIVA', CURRENT_TIMESTAMP)`,
-      [pedidoId, pedidoItemId, produtoId, quantidade]
-    );
+    // Tracking de pedido permanece na estrutura fiscal existente (sem migration).
+    // Reservas NF atualizam apenas reservado_nao_fiscal em produtos nesta Sprint.
+    if (tipo === TipoSaldo.FISCAL) {
+      return dbRun(
+        db,
+        `INSERT INTO pedido_estoque_reservas (
+        pedido_id, pedido_item_id, produto_id, quantidade_fiscal, status, criado_em
+      ) VALUES (?, ?, ?, ?, 'ATIVA', CURRENT_TIMESTAMP)`,
+        [pedidoId, pedidoItemId, produtoId, quantidade]
+      );
+    }
+
+    return { lastID: null, changes: 1 };
+  });
+
+  logOperacaoSaldo({
+    operacao: tipo === TipoSaldo.FISCAL ? 'criarReservaFiscal' : 'criarReservaNaoFiscal',
+    produtoId,
+    empresaId: ctx.empresaId,
+    tipo,
+    quantidade,
+    legado: ctx.legado,
+    usuarioId: callOpts.usuarioId
   });
 
   return Object.freeze({
     id: ins.lastID,
     pedido_id: pedidoId,
     produto_id: produtoId,
-    quantidade_fiscal: quantidade,
+    empresa_id: ctx.empresaId,
+    legado: ctx.legado,
+    tipo,
+    quantidade_fiscal: tipo === TipoSaldo.FISCAL ? quantidade : 0,
+    quantidade_nao_fiscal: tipo === TipoSaldo.NAO_FISCAL ? quantidade : 0,
     status: 'ATIVA'
   });
 }
 
+async function criarReservaFiscal(params = {}, opts = {}) {
+  return _criarReservaTipo(params, opts, TipoSaldo.FISCAL);
+}
+
 /**
- * Libera reservas ativas de um pedido.
+ * Reserva não fiscal no contexto produto + empresa.
+ * Storage: produtos.reservado_nao_fiscal (sem nova tabela nesta Sprint).
+ */
+async function criarReservaNaoFiscal(params = {}, opts = {}) {
+  return _criarReservaTipo(params, opts, TipoSaldo.NAO_FISCAL);
+}
+
+/**
+ * Libera reservas ativas de um pedido (tracking fiscal em pedido_estoque_reservas).
  */
 async function liberarReservasPedido(pedidoId, opts = {}) {
   const id = Number(pedidoId);
+  await resolverContextoEmpresa(opts);
   const db = getDb(opts.db);
   await garantirSchemaReservas(db);
 
@@ -270,16 +366,9 @@ async function liberarReservasPedido(pedidoId, opts = {}) {
 
   for (const row of rows) {
     const q = round3(row.quantidade_fiscal);
-    await dbRun(
-      db,
-      `UPDATE produtos
-       SET reservado_fiscal = CASE
-         WHEN COALESCE(reservado_fiscal, 0) - ? < 0 THEN 0
-         ELSE COALESCE(reservado_fiscal, 0) - ?
-       END
-       WHERE id = ?`,
-      [q, q, row.produto_id]
-    );
+    if (q > 0) {
+      await _aplicarDeltaReservado(db, row.produto_id, TipoSaldo.FISCAL, -q);
+    }
     await dbRun(
       db,
       `UPDATE pedido_estoque_reservas
@@ -289,7 +378,101 @@ async function liberarReservasPedido(pedidoId, opts = {}) {
     );
   }
 
-  return { liberadas: rows.length };
+  return { liberadas: rows.length, empresa_id: resolverEmpresaId(opts) };
+}
+
+/**
+ * Aplica delta em reservado_fiscal ou reservado_nao_fiscal.
+ * Não altera saldo físico. Não grava tracking de pedido/venda.
+ * delta > 0 incrementa; delta < 0 decrementa com piso 0.
+ */
+async function _aplicarDeltaReservado(db, produtoId, tipo, delta) {
+  const tipoN = normalizarTipoSaldo(tipo);
+  const d = round3(delta);
+  if (d === 0) return { changes: 0 };
+
+  const id = Number(produtoId);
+  if (!Number.isInteger(id) || id <= 0) {
+    const err = new Error('Produto inválido.');
+    err.code = 'PRODUTO_INVALIDO';
+    throw err;
+  }
+
+  const row = await dbGet(db, `SELECT id FROM produtos WHERE id = ?`, [id]);
+  if (!row) {
+    const err = new Error('Produto não encontrado.');
+    err.code = 'PRODUTO_NAO_ENCONTRADO';
+    throw err;
+  }
+
+  const coluna = tipoN === TipoSaldo.FISCAL ? 'reservado_fiscal' : 'reservado_nao_fiscal';
+  if (d > 0) {
+    return dbRun(
+      db,
+      `UPDATE produtos SET ${coluna} = COALESCE(${coluna}, 0) + ? WHERE id = ?`,
+      [d, id]
+    );
+  }
+
+  const q = Math.abs(d);
+  return dbRun(
+    db,
+    `UPDATE produtos
+     SET ${coluna} = CASE
+       WHEN COALESCE(${coluna}, 0) - ? < 0 THEN 0
+       ELSE COALESCE(${coluna}, 0) - ?
+     END
+     WHERE id = ?`,
+    [q, q, id]
+  );
+}
+
+/**
+ * Incrementa ou decrementa reservado_* no contexto de empresa.
+ * Não exige pedidoId (reservas PDV / venda_estoque_reservas).
+ * Não altera saldo_fiscal / saldo_nao_fiscal / estoque_atual.
+ */
+async function ajustarReservado(produtoIdOrParams, tipo, delta, opts = {}) {
+  const normalized = mesclarOptsEmpresa(produtoIdOrParams, opts);
+  const produtoId = Number(normalized.produtoId);
+  const callOpts = normalized.opts;
+  const d = round3(delta);
+
+  const ctx = await resolverContextoEmpresa(callOpts);
+  const db = getDb(callOpts.db);
+  await _aplicarDeltaReservado(db, produtoId, tipo, d);
+
+  logOperacaoSaldo({
+    operacao: d >= 0 ? 'reservarQuantidade' : 'liberarQuantidadeReservada',
+    produtoId,
+    empresaId: ctx.empresaId,
+    tipo: normalizarTipoSaldo(tipo),
+    quantidade: Math.abs(d),
+    legado: ctx.legado,
+    usuarioId: callOpts.usuarioId
+  });
+
+  return consultarDisponibilidade(produtoId, { ...callOpts, db });
+}
+
+async function reservarQuantidade(produtoId, tipo, quantidade, opts = {}) {
+  const q = round3(quantidade);
+  if (!(q > 0)) {
+    const err = new Error('Quantidade de reserva inválida.');
+    err.code = 'QUANTIDADE_INVALIDA';
+    throw err;
+  }
+  return ajustarReservado(produtoId, tipo, q, opts);
+}
+
+async function liberarQuantidadeReservada(produtoId, tipo, quantidade, opts = {}) {
+  const q = round3(quantidade);
+  if (!(q > 0)) {
+    const err = new Error('Quantidade de reserva inválida.');
+    err.code = 'QUANTIDADE_INVALIDA';
+    throw err;
+  }
+  return ajustarReservado(produtoId, tipo, -q, opts);
 }
 
 module.exports = {
@@ -298,5 +481,10 @@ module.exports = {
   consultarDisponibilidade,
   consultarDisponibilidadeParaPedido,
   criarReservaFiscal,
-  liberarReservasPedido
+  criarReservaNaoFiscal,
+  liberarReservasPedido,
+  ajustarReservado,
+  reservarQuantidade,
+  liberarQuantidadeReservada,
+  COMPAT_CERTIFICADA_PRE_MULTIEMPRESA
 };

@@ -7,6 +7,8 @@
 const { criarDbHelpers, resolverDb } = require('../../miip/repositories/dbHelpers');
 const ProdutoIdentificadoresRepository = require('../repositories/ProdutoIdentificadoresRepository');
 const { normalizarCodigoIdentificador } = require('../normalizers/normalizarCodigoIdentificador');
+const { TIPOS_IDENTIFICADOR } = require('../constants/tiposIdentificador');
+const { variantesPlu } = require('../utils/normalizarPlu');
 const MipLookupCache = require('../observability/MipLookupCache');
 
 const COLUNAS_PRODUTO = `
@@ -109,6 +111,7 @@ class ProdutoIdentidadeCatalogo {
 
   /**
    * Resolve via produto_identificadores e carrega produto.
+   * Para tipo PLU, tenta variantes com zeros (0 / 00 / 0000 / …).
    * @param {string} tipo
    * @param {string} codigo
    */
@@ -116,7 +119,8 @@ class ProdutoIdentidadeCatalogo {
     const codigoNorm = normalizarCodigoIdentificador(codigo, tipo);
     if (!codigoNorm) return null;
 
-    const key = `ident:${String(tipo).toUpperCase()}:${codigoNorm}`;
+    const tipoU = String(tipo || '').toUpperCase();
+    const key = `ident:${tipoU}:${codigoNorm}`;
     if (this._cache) {
       const hit = this._cache.get(key);
       if (hit !== undefined) {
@@ -125,36 +129,50 @@ class ProdutoIdentidadeCatalogo {
       }
     }
 
-    console.log('[MIP DEBUG] Repository buscarPorTipoCodigo', { tipo, codigo: codigoNorm });
-    const ident = await this._ids.buscarPorTipoCodigo(tipo, codigoNorm, {
-      escopo: null,
-      escopoValor: null,
-      apenasAtivos: true
-    });
-    if (!ident) {
-      console.log('[MIP DEBUG] Repository: nenhum identificador', { tipo, codigo: codigoNorm });
-      if (this._cache) this._cache.set(key, null);
-      return null;
+    const candidatos = tipoU === TIPOS_IDENTIFICADOR.PLU
+      ? variantesPlu(codigoNorm)
+      : [codigoNorm];
+
+    let found = null;
+    for (const cand of candidatos) {
+      console.log('[MIP DEBUG] Repository buscarPorTipoCodigo', { tipo, codigo: cand });
+      const ident = await this._ids.buscarPorTipoCodigo(tipo, cand, {
+        escopo: null,
+        escopoValor: null,
+        apenasAtivos: true
+      });
+      if (!ident) continue;
+
+      console.log('[MIP DEBUG] Repository: identificador encontrado', {
+        id: ident.id,
+        produtoId: ident.produtoId,
+        tipo: ident.tipo,
+        codigo: ident.codigo,
+        buscadoComo: cand,
+        entrada: codigoNorm
+      });
+
+      const produto = await this.buscarProdutoPorId(ident.produtoId);
+      if (!produto) {
+        console.log('[MIP DEBUG] Repository: produto_id sem produto', ident.produtoId);
+        continue;
+      }
+
+      console.log('[MIP DEBUG] Repository → Produto', { id: produto.id, nome: produto.nome });
+      found = { produto, identificador: ident };
+      break;
     }
 
-    console.log('[MIP DEBUG] Repository: identificador encontrado', {
-      id: ident.id,
-      produtoId: ident.produtoId,
-      tipo: ident.tipo,
-      codigo: ident.codigo
-    });
-
-    const produto = await this.buscarProdutoPorId(ident.produtoId);
-    if (!produto) {
-      console.log('[MIP DEBUG] Repository: produto_id sem produto', ident.produtoId);
-      if (this._cache) this._cache.set(key, null);
-      return null;
+    if (!found) {
+      console.log('[MIP DEBUG] Repository: nenhum identificador', {
+        tipo,
+        codigo: codigoNorm,
+        variantes: candidatos.length
+      });
     }
 
-    console.log('[MIP DEBUG] Repository → Produto', { id: produto.id, nome: produto.nome });
-    const result = { produto, identificador: ident };
-    if (this._cache) this._cache.set(key, result);
-    return result;
+    if (this._cache) this._cache.set(key, found);
+    return found;
   }
 }
 

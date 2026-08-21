@@ -6,13 +6,14 @@
  * Não implementa transporte SOAP, parser fiscal, MIIP ou promoção de documento.
  */
 
-const { DocumentoFiscalStatus } = require('../core/DocumentoFiscalStatus');
+const { DocumentoFiscalStatus, isTerminal } = require('../core/DocumentoFiscalStatus');
 const { DocumentoDfeTipo } = require('../core/DocumentoDfeTipo');
 const { TIPOS_EVENTO, ORIGENS } = require('../config/centralEventosTipos');
 const CentralDocumentosRepository = require('../repositories/CentralDocumentosRepository');
 const CentralHistoricoRepository = require('../repositories/CentralHistoricoRepository');
 const CentralEventosRepository = require('../repositories/CentralEventosRepository');
 const CentralConfiguracaoService = require('./CentralConfiguracaoService');
+const DocumentoTransitionService = require('./DocumentoTransitionService');
 const { emitirEvento } = require('../utils/centralEventosEmitter');
 const { logCentral, logCentralErro } = require('../utils/centralLog');
 const { OperationType } = require('../../../services/fiscal/core/OperationType');
@@ -20,7 +21,7 @@ const {
   enviarManifestacao,
   montarEnvelopeManifestacao
 } = require('../../../services/fiscal/manifestacaoRuntime');
-const { sincronizarDistribuicaoDFe } = require('../../../services/fiscal/distribuicaoDFe');
+const { sincronizarDistribuicaoDFe, consultarNotaPorChave } = require('../../../services/fiscal/distribuicaoDFe');
 const { carregarCertificadoPfx } = require('../../../services/fiscal/certificateService');
 const { assinarEvento } = require('../../../services/fiscal/signer');
 const CentralNsuRepository = require('../repositories/CentralNsuRepository');
@@ -41,6 +42,10 @@ const POLITICAS_MANIFESTACAO = Object.freeze({
 });
 
 const CSTAT_MANIFESTACAO_ACEITA = new Set(['135', '573']);
+/** RC7.4.7 — SEFAZ: evento após o prazo; XML completo nunca será disponibilizado. */
+const CSTAT_XML_INDISPONIVEL = new Set(['596']);
+const MENSAGEM_XML_INDISPONIVEL =
+  'XML completo indisponível: evento apresentado após o prazo permitido pela SEFAZ.';
 const INTERVALO_SEGURO_MS = 60 * 60 * 1000;
 const LIMITE_CANDIDATOS_PADRAO = 10;
 const MENSAGEM_AGUARDANDO_XML =
@@ -150,6 +155,7 @@ class CentralManifestacaoDfeService {
       ?? new CentralConfiguracaoService({ configuracaoRepository: deps.configuracaoRepository });
     this._enviarManifestacao = deps.enviarManifestacao || enviarManifestacao;
     this._sincronizarDfe = deps.sincronizarDfe || sincronizarDistribuicaoDFe;
+    this._consultarNotaPorChave = deps.consultarNotaPorChave || consultarNotaPorChave;
     this._nsuRepository = deps.nsuRepository
       ?? new CentralNsuRepository(repoDeps);
     this._nsuService = deps.nsuService
@@ -157,6 +163,16 @@ class CentralManifestacaoDfeService {
     this._syncExecucao = deps.syncExecucao || null;
     this._emitirEvento = deps.emitirEvento || emitirEvento;
     this._prepararEnvelopeAssinado = deps.prepararEnvelopeAssinado || prepararEnvelopeAssinado;
+    this._transitionService = deps.transitionService
+      ?? new DocumentoTransitionService({
+        documentosRepository: this._documentosRepository,
+        historicoRepository: this._historicoRepository
+      });
+    this._cancelarXmlWait = deps.cancelarXmlWait || ((documentoId, motivo) => {
+      try {
+        require('./CentralXmlWaitScheduler').cancelar(documentoId, motivo || 'xml_indisponivel');
+      } catch { /* scheduler opcional em testes */ }
+    });
     this._agora = deps.agora || (() => new Date());
     this._emExecucao = new Set();
   }
@@ -237,6 +253,19 @@ class CentralManifestacaoDfeService {
         throw erro;
       }
 
+      if (documento.status === DocumentoFiscalStatus.XML_INDISPONIVEL) {
+        return {
+          documentoId: id,
+          sucesso: false,
+          ignorado: true,
+          encerrado: true,
+          status: documento.status,
+          xmlCompleto: false,
+          aguardandoDisponibilizacao: false,
+          mensagem: MENSAGEM_XML_INDISPONIVEL
+        };
+      }
+
       if (
         documento.status !== DocumentoFiscalStatus.AGUARDANDO_XML_COMPLETO
         || documento.tipoDocumento !== DocumentoDfeTipo.RES_NFE
@@ -245,8 +274,12 @@ class CentralManifestacaoDfeService {
           documentoId: id,
           sucesso: true,
           ignorado: true,
-          xmlCompleto: documento.status !== DocumentoFiscalStatus.AGUARDANDO_XML_COMPLETO,
-          mensagem: 'Documento não é mais candidato ao ciclo RES_NFE.'
+          encerrado: isTerminal(documento.status),
+          xmlCompleto: documento.status !== DocumentoFiscalStatus.AGUARDANDO_XML_COMPLETO
+            && documento.status !== DocumentoFiscalStatus.XML_INDISPONIVEL,
+          mensagem: isTerminal(documento.status)
+            ? `Documento encerrado (${documento.status}). Ciclo DF-e não será reiniciado.`
+            : 'Documento não é mais candidato ao ciclo RES_NFE.'
         };
       }
 
@@ -254,8 +287,10 @@ class CentralManifestacaoDfeService {
         || await this._configuracao.obterPoliticaManifestacao();
       const confirmado = opcoes.confirmado === true
         || politica === POLITICAS_MANIFESTACAO.AUTOMATICA_CIENCIA;
+      /** RC3.3.6 — recuperação XML_WAIT: só DistDFe, nunca remanifestação. */
+      const recuperacaoXml = opcoes.modoRecuperacaoXml === true;
 
-      if (!confirmado) {
+      if (!confirmado && !recuperacaoXml) {
         return {
           documentoId: id,
           sucesso: false,
@@ -274,6 +309,17 @@ class CentralManifestacaoDfeService {
       }
       const contexto = contextoResult.contexto;
 
+      // RC3.3.6 / RC3.4.1 — recuperação: DistDFe direto (sem remanifestar).
+      // forcarConsulta NÃO é permanente: herda do caller (MIRX = false).
+      // Só true com justificativa técnica explícita no caller (ex.: admin).
+      if (recuperacaoXml) {
+        return this._consultarDistDfePorNsu(documento, contexto, {
+          ...opcoes,
+          forcarConsulta: opcoes.forcarConsulta === true,
+          apenasManifestacao: false
+        });
+      }
+
       let aceita = await this._obterUltimoEvento(
         TIPOS_EVENTO.MANIFESTACAO_ACEITA,
         documento.id
@@ -284,6 +330,27 @@ class CentralManifestacaoDfeService {
           TIPOS_EVENTO.MANIFESTACAO_REJEITADA,
           documento.id
         );
+        // RC7.4.7 — rejeição 596 já registrada: encerra sem retry / XML_WAIT.
+        // (Não se aplica ao modoRecuperacaoXml — tratado acima.)
+        if (this._ehRejeicaoXmlIndisponivel(rejeitada)) {
+          await this._encerrarXmlIndisponivel(documento, {
+            cStat: String(rejeitada.resultado || rejeitada.detalhe?.cStat || '596'),
+            xMotivo: rejeitada.detalhe?.xMotivo || rejeitada.descricao,
+            usuarioId: opcoes.usuarioId,
+            correlationId: opcoes.correlationId || rejeitada.detalhe?.correlationId
+          });
+          return {
+            documentoId: id,
+            sucesso: false,
+            cStat: String(rejeitada.resultado || '596'),
+            status: DocumentoFiscalStatus.XML_INDISPONIVEL,
+            encerrado: true,
+            xmlCompleto: false,
+            aguardandoDisponibilizacao: false,
+            mensagem: rejeitada.detalhe?.xMotivo || MENSAGEM_XML_INDISPONIVEL
+          };
+        }
+
         const bloqueioRejeicao = this._obterBloqueioRejeicao(rejeitada);
         if (!opcoes.forcarConsulta && bloqueioRejeicao && this._agora() < bloqueioRejeicao) {
           return {
@@ -358,7 +425,7 @@ class CentralManifestacaoDfeService {
         };
       }
 
-      // Nova consulta somente via DistDFe (ultNSU), nunca consChNFe imediata.
+      // DistDFe (ultNSU); se sem PROC, fallback consChNFe em _consultarDistDfePorNsu.
       return this._consultarDistDfePorNsu(documento, contexto, opcoes);
     } finally {
       this._emExecucao.delete(id);
@@ -460,19 +527,70 @@ class CentralManifestacaoDfeService {
       };
 
       if (!runtime.success || !fiscal.aceita) {
-        detalhe.proximaConsultaEm = new Date(
-          this._agora().getTime() + INTERVALO_SEGURO_MS
-        ).toISOString();
+        const cStat = String(fiscal.cStat || '');
+        const xmlIndisponivel = CSTAT_XML_INDISPONIVEL.has(cStat);
+        detalhe.proximaConsultaEm = xmlIndisponivel
+          ? null
+          : new Date(this._agora().getTime() + INTERVALO_SEGURO_MS).toISOString();
+        detalhe.xmlIndisponivel = xmlIndisponivel || undefined;
+
         await this._registrarEtapa({
           tipo: TIPOS_EVENTO.MANIFESTACAO_REJEITADA,
           documento,
-          descricao: `Manifestação rejeitada: ${fiscal.xMotivo || runtime.error || 'retorno inválido'}`,
+          descricao: xmlIndisponivel
+            ? `Manifestação rejeitada (prazo): ${fiscal.xMotivo || 'cStat 596'}`
+            : `Manifestação rejeitada: ${fiscal.xMotivo || runtime.error || 'retorno inválido'}`,
           resultado: fiscal.cStat || 'ERRO',
           sucesso: false,
           duracaoMs,
           usuarioId: opcoes.usuarioId,
           detalhe
         });
+
+        if (xmlIndisponivel) {
+          // RC3.3.6 — recuperação XML_WAIT nunca encerra por 596 de remanifestação.
+          if (opcoes.modoRecuperacaoXml === true) {
+            logOperacaoCentral({
+              correlationId,
+              chave: documento.chave,
+              operacao: 'MANIFESTACAO_210210',
+              tempoMs: duracaoMs,
+              resultado: '596_IGNORADO_RECUPERACAO',
+              cStat,
+              origem: 'CentralManifestacaoDfeService',
+              runtime: runtime.source || 'PLATFORM'
+            });
+            return {
+              documentoId: documento.id,
+              sucesso: false,
+              cStat,
+              xmlCompleto: false,
+              aguardandoDisponibilizacao: true,
+              recuperacaoSemEncerrar: true,
+              mensagem: fiscal.xMotivo || MENSAGEM_XML_INDISPONIVEL,
+              detalhe
+            };
+          }
+          await this._encerrarXmlIndisponivel(documento, {
+            cStat,
+            xMotivo: fiscal.xMotivo,
+            usuarioId: opcoes.usuarioId,
+            correlationId,
+            detalhe
+          });
+          return {
+            documentoId: documento.id,
+            sucesso: false,
+            cStat,
+            status: DocumentoFiscalStatus.XML_INDISPONIVEL,
+            encerrado: true,
+            xmlCompleto: false,
+            aguardandoDisponibilizacao: false,
+            mensagem: fiscal.xMotivo || MENSAGEM_XML_INDISPONIVEL,
+            detalhe
+          };
+        }
+
         return {
           documentoId: documento.id,
           sucesso: false,
@@ -575,6 +693,19 @@ class CentralManifestacaoDfeService {
       });
     }
 
+    // RC3.4.1 — enfileira no MIRX (não consulta SEFAZ aqui).
+    try {
+      const xmlWait = require('./CentralXmlWaitScheduler');
+      if (typeof xmlWait.enfileirarRecuperacao === 'function') {
+        await xmlWait.enfileirarRecuperacao(documento, {
+          origem: ORIGENS.SISTEMA,
+          motivo: 'pos_ciencia_aguardar_janela',
+          correlationId: opcoes.correlationId,
+          proximaEm: proximaConsultaEm
+        });
+      }
+    } catch { /* ignore */ }
+
     return {
       documentoId: documento.id,
       sucesso: true,
@@ -667,6 +798,37 @@ class CentralManifestacaoDfeService {
           runtime: 'PLATFORM'
         });
 
+        // RC3.3.6+ — DistDFe sem PROC: fallback oficial consChNFe (exceto 656).
+        if (!xmlCompleto && cStat !== '656' && resultado.sucesso !== false) {
+          const porChave = await this._consultarXmlCompletoPorChave(documento, contexto, {
+            ...opcoes,
+            correlationId,
+            inicioMs: inicio,
+            origemDist: {
+              cStat,
+              ultNsu: resultado.ultNsu || null,
+              maxNsu: resultado.maxNsu || null
+            }
+          });
+          if (porChave.xmlCompleto) {
+            return porChave;
+          }
+          // Mantém janela de espera (DistDFe ou consChNFe).
+          return {
+            documentoId: documento.id,
+            sucesso: true,
+            cStat: porChave.cStat || cStat,
+            ultNsu: resultado.ultNsu || null,
+            maxNsu: resultado.maxNsu || null,
+            xmlCompleto: false,
+            documento: await this._documentosRepository.buscarPorId(documento.id),
+            proximaConsultaEm: porChave.proximaConsultaEm || proximaConsultaEm,
+            aguardandoDisponibilizacao: true,
+            consultaPorChave: true,
+            mensagem: MENSAGEM_AGUARDANDO_XML
+          };
+        }
+
         return {
           documentoId: documento.id,
           sucesso: cStat !== '656' && resultado.sucesso !== false,
@@ -731,6 +893,112 @@ class CentralManifestacaoDfeService {
     }
 
     return executarConsulta();
+  }
+
+  /**
+   * RC3.3.6+ — Fallback após DistDFe sem PROC: consChNFe da mesma chave.
+   * Reutiliza consultarNotaPorChave (Plataforma Fiscal) + persistência Central.
+   * @private
+   */
+  async _consultarXmlCompletoPorChave(documento, contexto, opcoes = {}) {
+    const correlationId = opcoes.correlationId || criarCorrelationId();
+    const inicio = opcoes.inicioMs || Date.now();
+    try {
+      await this._consultarNotaPorChave(documento.chave, {
+        contextoCentral: contexto
+      });
+    } catch (error) {
+      const duracaoMs = Date.now() - inicio;
+      const proximaConsultaEm = this._resolverProximaJanela().toISOString();
+      await this._registrarEtapa({
+        tipo: TIPOS_EVENTO.CONSULTA_DFE_POS_MANIFESTACAO,
+        documento,
+        descricao: `Consulta por chave sem XML completo: ${error.message}`,
+        resultado: 'CONS_CHNFE_ERRO',
+        sucesso: false,
+        duracaoMs,
+        usuarioId: opcoes.usuarioId,
+        detalhe: {
+          modo: 'consChNFe',
+          correlationId,
+          erro: error.message,
+          origemDist: opcoes.origemDist || null,
+          aguardandoXml: true,
+          proximaConsultaEm
+        }
+      });
+      logOperacaoCentral({
+        correlationId,
+        chave: documento.chave,
+        operacao: 'CONS_CHNFE_POS_DIST',
+        tempoMs: duracaoMs,
+        resultado: 'ERRO',
+        origem: 'CentralManifestacaoDfeService',
+        runtime: 'PLATFORM'
+      });
+      return {
+        documentoId: documento.id,
+        sucesso: false,
+        xmlCompleto: false,
+        aguardandoDisponibilizacao: true,
+        proximaConsultaEm,
+        mensagem: error.message,
+        consultaPorChave: true
+      };
+    }
+
+    const atualizado = await this._documentosRepository.buscarPorId(documento.id);
+    const xmlCompleto = atualizado
+      && atualizado.status !== DocumentoFiscalStatus.AGUARDANDO_XML_COMPLETO
+      && [DocumentoDfeTipo.PROC_NFE, DocumentoDfeTipo.NFE].includes(atualizado.tipoDocumento);
+    const duracaoMs = Date.now() - inicio;
+    const proximaConsultaEm = xmlCompleto
+      ? null
+      : this._resolverProximaJanela().toISOString();
+
+    await this._registrarEtapa({
+      tipo: TIPOS_EVENTO.CONSULTA_DFE_POS_MANIFESTACAO,
+      documento: atualizado || documento,
+      descricao: xmlCompleto
+        ? 'XML completo recebido via consulta por chave (consChNFe).'
+        : MENSAGEM_AGUARDANDO_XML,
+      resultado: xmlCompleto ? 'XML_COMPLETO_CHAVE' : 'AGUARDANDO_CHAVE',
+      sucesso: true,
+      duracaoMs,
+      usuarioId: opcoes.usuarioId,
+      detalhe: {
+        modo: 'consChNFe',
+        correlationId,
+        origemDist: opcoes.origemDist || null,
+        tipoDocumento: atualizado?.tipoDocumento || documento.tipoDocumento,
+        xmlCompleto,
+        aguardandoXml: !xmlCompleto,
+        proximaConsultaEm
+      }
+    });
+
+    logOperacaoCentral({
+      correlationId,
+      chave: documento.chave,
+      operacao: 'CONS_CHNFE_POS_DIST',
+      tempoMs: duracaoMs,
+      resultado: xmlCompleto ? 'PROC_NFE' : 'AGUARDANDO',
+      origem: 'CentralManifestacaoDfeService',
+      runtime: 'PLATFORM'
+    });
+
+    return {
+      documentoId: documento.id,
+      sucesso: true,
+      xmlCompleto,
+      documento: atualizado,
+      consultaPorChave: true,
+      proximaConsultaEm,
+      aguardandoDisponibilizacao: !xmlCompleto,
+      mensagem: xmlCompleto
+        ? 'XML completo recebido via consulta por chave.'
+        : MENSAGEM_AGUARDANDO_XML
+    };
   }
 
   async _reclamarManifestacao(documento, opcoes = {}) {
@@ -828,8 +1096,56 @@ class CentralManifestacaoDfeService {
     return new Date(Math.max(...datas.map((data) => data.getTime())));
   }
 
+  _ehRejeicaoXmlIndisponivel(eventoRejeicao) {
+    if (!eventoRejeicao) return false;
+    const cStat = String(
+      eventoRejeicao.detalhe?.cStat
+      || eventoRejeicao.resultado
+      || ''
+    );
+    return CSTAT_XML_INDISPONIVEL.has(cStat);
+  }
+
+  /**
+   * RC7.4.7 — Encerra documento em XML_INDISPONIVEL e cancela XML_WAIT.
+   * @private
+   */
+  async _encerrarXmlIndisponivel(documento, meta = {}) {
+    const cStat = String(meta.cStat || '596');
+    const xMotivo = meta.xMotivo || MENSAGEM_XML_INDISPONIVEL;
+    const detalhe = `XML indisponível (cStat ${cStat}): ${xMotivo}`;
+
+    if (documento.status === DocumentoFiscalStatus.AGUARDANDO_XML_COMPLETO) {
+      await this._transitionService.transicionar(
+        documento.id,
+        documento.status,
+        DocumentoFiscalStatus.XML_INDISPONIVEL,
+        {
+          detalhe,
+          usuarioId: meta.usuarioId || null,
+          origem: 'RC7.4.7_CSTAT_596'
+        }
+      );
+    }
+
+    this._cancelarXmlWait(documento.id, 'xml_indisponivel');
+
+    logOperacaoCentral({
+      correlationId: meta.correlationId || null,
+      chave: documento.chave,
+      operacao: 'MANIFESTACAO_210210',
+      tempoMs: null,
+      resultado: 'XML_INDISPONIVEL',
+      cStat,
+      origem: 'CentralManifestacaoDfeService',
+      runtime: 'PLATFORM'
+    });
+  }
+
   _obterBloqueioRejeicao(eventoRejeicao) {
     if (!eventoRejeicao) return null;
+    // RC7.4.7 — 596 nunca entra em cooldown de retry.
+    if (this._ehRejeicaoXmlIndisponivel(eventoRejeicao)) return null;
     if (eventoRejeicao.detalhe?.proximaConsultaEm) {
       const data = new Date(eventoRejeicao.detalhe.proximaConsultaEm);
       return Number.isNaN(data.getTime()) ? null : data;
@@ -863,7 +1179,9 @@ class CentralManifestacaoDfeService {
 module.exports = CentralManifestacaoDfeService;
 module.exports.POLITICAS_MANIFESTACAO = POLITICAS_MANIFESTACAO;
 module.exports.CSTAT_MANIFESTACAO_ACEITA = CSTAT_MANIFESTACAO_ACEITA;
+module.exports.CSTAT_XML_INDISPONIVEL = CSTAT_XML_INDISPONIVEL;
 module.exports.INTERVALO_SEGURO_MS = INTERVALO_SEGURO_MS;
 module.exports.MENSAGEM_AGUARDANDO_XML = MENSAGEM_AGUARDANDO_XML;
+module.exports.MENSAGEM_XML_INDISPONIVEL = MENSAGEM_XML_INDISPONIVEL;
 module.exports.extrairRetornoManifestacao = extrairRetornoManifestacao;
 module.exports.prepararEnvelopeAssinado = prepararEnvelopeAssinado;

@@ -13,14 +13,16 @@ const DRIVER_CATALOG = [
   {
     codigo: 'TOLEDO_PRIX4_UNO',
     fabricante: 'Toledo',
-    modelo: 'Prix 4 Uno',
+    modelo: 'Prix IV Uno',
     tipo: 'balanca',
-    protocolos: ['toledo-prix4', 'ethernet-tcp'],
+    protocolos: ['90AX', 'toledo-prix4', 'ethernet-tcp'],
     transportes: ['ethernet'],
-    status: 'estrutura',
+    status: 'homologacao',
     versao_minima: '1.0.0',
     modulo: './toledo/prix4/ToledoPrix4UnoDriver',
-    nome_exibicao: 'Toledo Prix 4 Uno'
+    nome_exibicao: 'Toledo Prix IV Uno',
+    aliases: ['TOLEDO_PRIX4', 'toledo-prix4'],
+    runtime_modulo: './toledo/ToledoPrixIVDriver'
   },
   {
     codigo: 'FILIZOLA_PLATINA',

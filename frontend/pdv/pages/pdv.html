@@ -1,8 +1,6 @@
 <div class="pdv-profissional pdv-fullscreen">
 
-  <div id="faixaSistemaFiscalPdv" class="faixa-sistema-fiscal" style="display:none;">
-    <span>SISTEMA FISCAL ATIVO</span>
-  </div>
+  <div id="faixaSistemaFiscalPdv" class="faixa-sistema-fiscal faixa-sistema-fiscal--off" style="display:none;" role="status" aria-label="Sistema fiscal inativo"></div>
 
   <header class="pdv-topo">
     <div class="pdv-header-left">
@@ -42,13 +40,13 @@
 
       <section class="pdv-card pdv-busca-topo">
         <label class="pdv-busca-label" for="buscaProdutoPdv">
-          <i class="fas fa-search"></i> Código de barras / Código interno / Nome do produto
+          <i class="fas fa-search"></i> Código de barras / Código interno / PLU / Nome
         </label>
         <div class="pdv-busca-linha">
           <input
             type="text"
             id="buscaProdutoPdv"
-            placeholder="Digite o código de barras, código ou nome do produto"
+            placeholder="Digite código de barras, código, PLU ou nome do produto"
             autocomplete="off"
           >
           <button id="btnBuscarProdutoPdv" type="button">
@@ -76,14 +74,15 @@
               <th class="col-un">UN</th>
               <th class="col-produto">Produto</th>
               <th class="col-unit">Unitário</th>
-              <th class="col-desc">Desc</th>
+              <th class="col-desc-pct">Desc %</th>
+              <th class="col-desc-rs">Desc R$</th>
               <th class="col-total">Total</th>
               <th class="col-acao"></th>
             </tr>
           </thead>
           <tbody id="tabelaItensVendaPdv">
             <tr>
-              <td colspan="7" class="vazio">Nenhum item adicionado</td>
+              <td colspan="8" class="vazio">Nenhum item adicionado</td>
             </tr>
           </tbody>
         </table>

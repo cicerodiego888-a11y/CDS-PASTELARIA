@@ -246,6 +246,14 @@ function criarCenario(opcoes = {}) {
           : (cStat === '137' ? 'Nenhum documento localizado' : 'ok')
       };
     },
+    // RC3.3.6+ — fallback consChNFe: sem PROC nos testes RC3.3 (exceto se injetado).
+    consultarNotaPorChave: async () => ({
+      sucesso: true,
+      cStat: '137',
+      notasNovas: 0,
+      notasDuplicadas: 0,
+      mensagem: 'Nenhum documento localizado'
+    }),
     emitirEvento,
     agora: () => agora
   });

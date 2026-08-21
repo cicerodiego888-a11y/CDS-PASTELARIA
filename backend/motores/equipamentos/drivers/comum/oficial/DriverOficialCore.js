@@ -145,7 +145,7 @@ function schemaConfigPadrao(perfil) {
     campos: perfil.configSchema?.campos || [
       { chave: 'timeout_ms', tipo: 'number', padrao: 5000 },
       { chave: 'baud_rate', tipo: 'number', padrao: 9600 },
-      { chave: 'porta_tcp', tipo: 'number', padrao: 9100 },
+      { chave: 'porta_tcp', tipo: 'number', padrao: 9000 },
       { chave: 'departamento_padrao', tipo: 'number', padrao: 1 },
       { chave: 'unidade', tipo: 'string', padrao: 'kg' }
     ],

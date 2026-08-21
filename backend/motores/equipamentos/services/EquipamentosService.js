@@ -7,8 +7,9 @@
 
 const equipamentosRepository = require('../repositories/EquipamentosRepository');
 const driverManager = require('../core/DriverManager');
-const connectionManager = require('../transport/ConnectionManager');
-const EthernetTransport = require('../transport/EthernetTransport');
+const connectionManager = require('../connection/ConnectionManager');
+const { PORTA_PADRAO } = require('../drivers/toledo/ToledoProtocol');
+const ToledoTimeouts = require('../drivers/toledo/ToledoTimeouts');
 const equipamentosEvents = require('../events/EquipamentosEvents');
 const loggerService = require('./LoggerService');
 const diagnosticoService = require('../diagnostics/DiagnosticoService');
@@ -22,6 +23,12 @@ class EquipamentosService {
    */
   async _resolverDriver(dados) {
     const payload = { ...dados };
+    if (payload.driver_codigo) {
+      try {
+        const identity = require('../sdk/DriverIdentityResolver');
+        payload.driver_codigo = identity.canonical(payload.driver_codigo) || payload.driver_codigo;
+      } catch (_) { /* ignore */ }
+    }
     if (payload.driver_codigo && !payload.driver_id) {
       const driverCat = await equipamentosRepository.buscarDriverCatalogoPorCodigo(payload.driver_codigo);
       if (driverCat) {
@@ -116,7 +123,7 @@ class EquipamentosService {
     const existente = await equipamentosRepository.buscarPorId(id);
     if (!existente) throw Object.assign(new Error('Equipamento não encontrado'), { statusCode: 404 });
 
-    await connectionManager.fechar(id).catch(() => {});
+    await connectionManager.disconnect({ equipamentoId: id, id }).catch(() => {});
     const resultado = await equipamentosRepository.remover(id);
     await equipamentosEvents.emitirEquipamentoRemovido({ id: Number(id), equipamento: existente });
     await loggerService.logOperacao(id, 'remocao', { equipamento: existente, resultado });
@@ -137,7 +144,7 @@ class EquipamentosService {
   }
 
   async desativar(id) {
-    await connectionManager.fechar(id).catch(() => {});
+    await connectionManager.disconnect({ equipamentoId: id, id }).catch(() => {});
     const equipamento = await equipamentosRepository.editar(id, { ativo: false, status: 'offline' });
     await loggerService.logOperacao(id, 'desativar', { equipamento });
     return this.formatarParaApi(equipamento);
@@ -152,7 +159,7 @@ class EquipamentosService {
   }
 
   /**
-   * Teste de conexão TCP — abre e fecha conexão (sem comandos de protocolo).
+   * Teste de conexão TCP — RC14.14.8: abre/reutiliza sessão persistente (não fecha o socket).
    * @param {number|string} equipamentoId
    * @returns {Promise<Object>}
    */
@@ -189,14 +196,10 @@ class EquipamentosService {
     const config = {
       equipamento_id: Number(equipamentoId),
       host: equipamento.ip,
-      porta: equipamento.porta_tcp || 9100,
-      timeout: equipamento.timeout_ms || 5000,
-      tentativas: 1,
-      intervaloReconexao: 0,
-      heartbeatInterval: 0
+      porta: equipamento.porta_tcp || PORTA_PADRAO,
+      timeoutMs: equipamento.timeout_ms || ToledoTimeouts.CONNECT,
+      persistir: true
     };
-
-    const transport = new EthernetTransport(config);
 
     try {
       await loggerService.info('Teste de conexão iniciado', {
@@ -205,9 +208,18 @@ class EquipamentosService {
         contexto: { host: config.host, porta: config.porta }
       });
 
-      const conexao = await transport.connect();
-      const ping = await transport.ping();
-      await transport.disconnect();
+      const conexao = await connectionManager.connect({
+        host: config.host,
+        porta: config.porta,
+        timeoutMs: config.timeoutMs,
+        equipamentoId: config.equipamento_id,
+        persistir: true
+      });
+      const ping = connectionManager.isConnected({
+        host: config.host,
+        porta: config.porta
+      });
+      // RC14.14.8 — NÃO desconectar: sessão permanece CONNECTED + heartbeat
 
       await equipamentosRepository.atualizarComunicacao(equipamentoId, {
         status: 'online',
@@ -215,24 +227,32 @@ class EquipamentosService {
       });
 
       const atualizado = await equipamentosRepository.buscarPorId(equipamentoId);
+      const session = typeof connectionManager.getSessionSnapshot === 'function'
+        ? connectionManager.getSessionSnapshot({ host: config.host, porta: config.porta })
+        : null;
 
       const resultado = {
         success: true,
         sucesso: true,
         simulado: false,
         comunicacao_real: true,
-        mensagem: 'Conexão TCP aberta e fechada com sucesso',
+        mensagem: conexao.reutilizada
+          ? 'Sessão TCP reutilizada (persistente)'
+          : 'Conexão TCP estabelecida e mantida (sessão persistente)',
         equipamento_id: Number(equipamentoId),
         equipamento: this.formatarParaApi(atualizado),
         driver_registrado: driverRegistrado,
         driver: driverInfo,
+        latencia: conexao.latencia,
+        ping,
         conexao: {
           host: config.host,
           porta: config.porta,
-          conectado: false,
-          teste_abrir_fechar: true
+          conectado: ping === true,
+          reutilizada: Boolean(conexao.reutilizada),
+          persistente: true
         },
-        ping,
+        session: session?.session || null,
         detalhe_conexao: conexao,
         timestamp: new Date().toISOString()
       };
@@ -245,8 +265,6 @@ class EquipamentosService {
 
       return resultado;
     } catch (err) {
-      await transport.disconnect().catch(() => {});
-
       await equipamentosRepository.atualizarComunicacao(equipamentoId, {
         status: 'erro',
         ultimoErro: err.message
@@ -282,14 +300,18 @@ class EquipamentosService {
     const equipamento = await equipamentosRepository.buscarPorId(equipamentoId);
     if (!equipamento) throw Object.assign(new Error('Equipamento não encontrado'), { statusCode: 404 });
 
-    const conexaoAtiva = connectionManager.obterStatus(equipamentoId);
+    const conexaoAtiva = connectionManager.health({
+      equipamentoId: Number(equipamentoId),
+      host: equipamento.ip,
+      porta: equipamento.porta_tcp || PORTA_PADRAO
+    });
 
     return {
       equipamento_id: Number(equipamentoId),
       equipamento: this.formatarParaApi(equipamento),
       conexao: conexaoAtiva,
       ultima_comunicacao: equipamento.ultima_comunicacao,
-      ultimo_erro: equipamento.ultimo_erro || conexaoAtiva.ultimo_erro
+      ultimo_erro: equipamento.ultimo_erro || null
     };
   }
 
@@ -305,33 +327,75 @@ class EquipamentosService {
 
     let ping = null;
     let tempoRespostaMs = null;
+    const { montarEtapasConexao } = require('../connection/ConnectionStages');
+    let etapasConexao = montarEtapasConexao({});
+    const porta = equipamento.porta_tcp || PORTA_PADRAO;
 
     if (equipamento.transporte === 'ethernet' && equipamento.ip) {
+      const t0 = Date.now();
+      const { classificarErroTcp } = require('../connection/TcpConnectStatus');
       try {
-        const transport = new EthernetTransport({
+        // RC14.14.8 — diagnóstico reutiliza/mantém a mesma sessão (sem disconnect)
+        const r = await connectionManager.connect({
           host: equipamento.ip,
-          porta: equipamento.porta_tcp || 9100,
-          timeout: equipamento.timeout_ms || 5000,
-          equipamento_id: equipamentoId
+          porta,
+          timeoutMs: equipamento.timeout_ms || ToledoTimeouts.CONNECT,
+          equipamentoId: Number(equipamentoId),
+          persistir: true
         });
-        await transport.connect();
-        ping = await transport.ping();
-        tempoRespostaMs = ping.latencia_ms ?? null;
-        await transport.disconnect();
+        const ok = connectionManager.isConnected({ host: equipamento.ip, porta });
+        tempoRespostaMs = r.latencia != null ? r.latencia : (Date.now() - t0);
+        ping = { sucesso: ok === true, latencia_ms: tempoRespostaMs };
+        etapasConexao = montarEtapasConexao({
+          tcp: true,
+          tcpCodigo: r.connectCodigo || 'TCP_CONNECT_OK',
+          tcpLatenciaMs: tempoRespostaMs,
+          handshake: null,
+          health: ok === true,
+          driver: Boolean(driverMeta),
+          incluirRead: true,
+          read: null
+        });
       } catch (err) {
-        ping = { sucesso: false, mensagem: err.message };
+        const codigo = err.connectCodigo || classificarErroTcp(err);
+        ping = { sucesso: false, mensagem: err.message, codigo };
+        etapasConexao = montarEtapasConexao({
+          tcp: false,
+          tcpCodigo: codigo,
+          tcpErro: err.message,
+          handshake: null,
+          health: false,
+          healthErro: err.message,
+          driver: Boolean(driverMeta),
+          incluirRead: true,
+          read: null
+        });
       }
+    } else {
+      etapasConexao = montarEtapasConexao({
+        tcp: false,
+        tcpCodigo: 'TCP_CONNECT_SOCKET_EXCEPTION',
+        tcpErro: 'Transporte não ethernet ou IP ausente',
+        handshake: null,
+        health: false,
+        driver: Boolean(driverMeta),
+        incluirRead: true,
+        read: null
+      });
     }
 
     const resultado = {
       equipamento_id: Number(equipamentoId),
-      sucesso: true,
-      mensagem: 'Diagnóstico de equipamento concluído',
+      sucesso: etapasConexao.sucesso,
+      mensagem: etapasConexao.sucesso
+        ? 'Diagnóstico de equipamento concluído'
+        : `Falha na etapa: ${etapasConexao.etapaFalhaTitulo || etapasConexao.etapaFalha}`,
       equipamento: this.formatarParaApi(equipamento),
+      etapas_conexao: etapasConexao,
       diagnostico: {
         ping: ping?.sucesso === true ? 'OK' : 'Falhou',
         tempo_resposta_ms: tempoRespostaMs,
-        porta: equipamento.porta_tcp || 9100,
+        porta,
         ip: equipamento.ip,
         driver: driverMeta?.nome_exibicao || equipamento.driver_nome || equipamento.driver_codigo,
         driver_codigo: equipamento.driver_codigo,

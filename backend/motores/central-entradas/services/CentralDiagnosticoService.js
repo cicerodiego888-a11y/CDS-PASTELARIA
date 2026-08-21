@@ -349,18 +349,30 @@ class CentralDiagnosticoService {
   /** @private */
   async _obterSefaz() {
     const CentralConfiguracaoService = require('./CentralConfiguracaoService');
+    const NsuRecoveryService = require('./NsuRecoveryService');
     const cfgSvc = new CentralConfiguracaoService();
-    const [ctxResult, ultimoNsu, ultimaSync, ultimoErro, tempoMedioMs, statusServico] = await Promise.all([
+    const [ctxResult, ultimoNsu, ultimaSync, ultimoErro, tempoMedioMs, statusServico, ultimoAutoSync] = await Promise.all([
       cfgSvc.obterContextoOperacional().catch(() => ({ ok: false })),
       this._nsuRepository.obterUltimaSincronizacao(),
       this._eventosService.obterUltimaSyncConcluida(),
       this._eventosService.obterUltimoErroSync(),
       this._eventosService.obterTempoMedioSyncMs(),
-      Promise.resolve(require('./CentralSyncBackgroundService').obterStatus())
+      Promise.resolve(require('./CentralSyncBackgroundService').obterStatus()),
+      this._eventosRepository.obterUltimoPorTipo(TIPOS_EVENTO.AUTO_SYNC_NSU).catch(() => null)
     ]);
 
     const ambienteNum = ctxResult.ok ? Number(ctxResult.contexto.ambiente) : 2;
     const detalheErro = ultimoErro?.detalhe || {};
+    const detalheAuto = ultimoAutoSync?.detalhe || {};
+    const recovery = new NsuRecoveryService({ nsuRepository: this._nsuRepository });
+    const autoRecente = Boolean(
+      ultimoAutoSync?.createdAt
+      && (Date.now() - new Date(ultimoAutoSync.createdAt).getTime()) < (24 * 60 * 60 * 1000)
+    );
+    const statusNsu = recovery.statusDiagnostico(ultimoNsu, {
+      atualizou: autoRecente,
+      nsuRemoto: detalheAuto.nsuRemoto || detalheAuto.nsuAtualizado || null
+    });
 
     return {
       ambiente: ambienteNum === 1 ? 'Produção' : 'Homologação',
@@ -371,6 +383,13 @@ class CentralDiagnosticoService {
       ultimoNsuRecebido: ultimoNsu?.maxNsu || null,
       ultimoNsuProcessado: ultimaSync?.detalhe?.ultNsu || ultimoNsu?.ultNsu || null,
       ultimoNsuSalvo: ultimoNsu?.ultNsu || null,
+      /** RC3.7.5.1 — painel NSU */
+      nsuLocal: statusNsu.nsuLocal,
+      nsuSefaz: statusNsu.nsuSefaz || detalheAuto.nsuRemoto || ultimoNsu?.maxNsu || null,
+      ultimoCstat: statusNsu.ultimoCstat || detalheErro.cStat || null,
+      statusNsu: statusNsu.status,
+      cooldownNsuAte: statusNsu.cooldownAte,
+      recuperadoAutomaticamente: statusNsu.recuperadoAutomaticamente,
       ultimoErroSefaz: ultimoErro ? this._sanitizarTexto(ultimoErro.descricao) : null,
       codigoRejeicao: detalheErro.cStat || detalheErro.codigo || null,
       mensagemRejeicao: this._sanitizarTexto(detalheErro.xMotivo || detalheErro.mensagem || ultimoErro?.resultado),

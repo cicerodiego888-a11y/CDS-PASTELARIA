@@ -54,9 +54,33 @@ function montarRetornoSoap({ cStat = '138', ultNSU = '5', maxNSU = '10', documen
 async function main() {
   console.log('\n=== Testes dfeRetornoParser — Sprint 4 ===\n');
 
-  await test('normalizarNsu preenche 15 dígitos', async () => {
+  await test('normalizarNsu preenche 15 dígitos e não fabrica zero', async () => {
     assert.strictEqual(normalizarNsu('5'), '000000000000005');
-    assert.strictEqual(normalizarNsu(''), '000000000000000');
+    assert.strictEqual(normalizarNsu(''), null);
+    assert.strictEqual(normalizarNsu(null), null);
+    assert.strictEqual(normalizarNsu(undefined), null);
+  });
+
+  await test('extrairMetadadosRetorno: tag ausente → null (RC3.7.5.2)', async () => {
+    const meta = extrairMetadadosRetorno(
+      '<retDistDFeInt><cStat>656</cStat><xMotivo>Consumo Indevido</xMotivo></retDistDFeInt>'
+    );
+    assert.strictEqual(meta.cStat, '656');
+    assert.strictEqual(meta.ultNSU, null);
+    assert.strictEqual(meta.maxNSU, null);
+  });
+
+  await test('extrairMetadadosRetorno: namespace → valor correto (RC3.7.5.2)', async () => {
+    const meta = extrairMetadadosRetorno(
+      '<nfe:retDistDFeInt xmlns:nfe="http://www.portalfiscal.inf.br/nfe">'
+      + '<nfe:cStat>656</nfe:cStat>'
+      + '<nfe:ultNSU>000000000000428</nfe:ultNSU>'
+      + '<nfe:maxNSU>000000000000500</nfe:maxNSU>'
+      + '</nfe:retDistDFeInt>'
+    );
+    assert.strictEqual(meta.cStat, '656');
+    assert.strictEqual(meta.ultNSU, '000000000000428');
+    assert.strictEqual(meta.maxNSU, '000000000000500');
   });
 
   await test('nsuMenorQue compara corretamente', async () => {

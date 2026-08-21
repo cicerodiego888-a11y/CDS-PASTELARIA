@@ -6,6 +6,23 @@
 (function initCentralEntradasUx(global) {
     const STORAGE_KEY = 'central_entradas_kpi_snapshot_v1';
 
+    /** RC3.6.H — flags de exposição (somente UI). */
+    const _featureFlags = { recuperacaoPortalNacional: false };
+
+    function setFeatureFlagsCentral(flags = {}) {
+        if (flags.recuperacaoPortalNacional != null) {
+            _featureFlags.recuperacaoPortalNacional = flags.recuperacaoPortalNacional === true;
+        }
+    }
+
+    function recuperacaoPortalNacionalAtiva() {
+        return _featureFlags.recuperacaoPortalNacional === true;
+    }
+
+    function documentoTemChaveValidaUx(doc = {}) {
+        return String(doc.chave || '').replace(/\D/g, '').length === 44;
+    }
+
     const EMPTY_PRESETS = {
         documentos: {
             icone: 'fa-inbox',
@@ -20,6 +37,13 @@
             descricao: 'Ajuste os filtros ou limpe a pesquisa para ver mais documentos.',
             acaoLabel: 'Limpar filtros',
             acaoId: 'centralEmptyLimparFiltros'
+        },
+        pesquisa_filtros: {
+            icone: 'fa-filter',
+            titulo: 'Nenhum documento encontrado',
+            descricao: 'Existem filtros ativos que podem estar ocultando o resultado. O documento pode não aparecer devido aos filtros ativos.',
+            acaoLabel: 'Limpar filtros e pesquisar novamente',
+            acaoId: 'centralEmptyLimparFiltrosManterBusca'
         },
         alertas: {
             icone: 'fa-bell-slash',
@@ -254,14 +278,116 @@
         } catch { /* ignore quota */ }
     }
 
+    /**
+     * RC3.7.5.3 — cooldown 656 pós AUTO_SYNC_NSU (somente apresentação).
+     * Ativo quando há espera SEFAZ (gate ou NSU) e evidência de recuperação NSU.
+     */
+    function nsuNumericoCentral(valor) {
+        const digits = String(valor == null ? '' : valor).replace(/\D/g, '');
+        if (!digits) return 0;
+        return Number(digits.replace(/^0+(?=\d)/, '')) || 0;
+    }
+
+    function formatarHoraCurtaCentral(iso) {
+        if (!iso) return '—';
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return '—';
+        const pad = (n) => String(n).padStart(2, '0');
+        return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+
+    function formatarMinutosRestantesCentral(restanteMs) {
+        const ms = Math.max(0, Number(restanteMs) || 0);
+        if (ms <= 0) return 'agora';
+        const minutos = Math.max(1, Math.ceil(ms / 60000));
+        return minutos === 1 ? '1 minuto' : `${minutos} minutos`;
+    }
+
+    function resolverCooldownSefaz656Ux(state = {}, agora = Date.now()) {
+        const sefaz = state.sefazOperacional || {};
+        const nsu = state.sincronizacaoNsu || state.sincronizacao || {};
+        const ultimo = (state.servicoStatus || {}).ultimoResultado || {};
+        const bloqueio = sefaz.bloqueio656 || null;
+        const gateBloqueado = Boolean(
+            bloqueio?.ativo
+            || sefaz.estadoOperacional?.codigo === 'BLOCKED'
+            || sefaz.consultaBloqueada
+        );
+        const cStat = String(
+            sefaz.ultimoCStat
+            || bloqueio?.cStat
+            || nsu.ultimoCstat
+            || ultimo.cStat
+            || ''
+        );
+        const is656 = cStat === '656'
+            || /656|Consumo Indevido|CONSUMO_INDEVIDO/i.test(String(ultimo.mensagem || ultimo.codigoErro || ''));
+
+        const candidatos = [
+            bloqueio?.bloqueadoAte,
+            sefaz.proximaConsulta,
+            nsu.cooldownAte
+        ].filter(Boolean);
+        let proximaTentativa = null;
+        let restanteMs = 0;
+        for (let i = 0; i < candidatos.length; i += 1) {
+            const t = new Date(candidatos[i]).getTime();
+            if (Number.isNaN(t)) continue;
+            const rest = t - agora;
+            if (rest > restanteMs) {
+                restanteMs = rest;
+                proximaTentativa = candidatos[i];
+            }
+        }
+        // tempoRestanteMs do gate só reforça se ainda houver alvo futuro
+        if (
+            proximaTentativa
+            && restanteMs > 0
+            && sefaz.tempoRestanteMs != null
+            && Number(sefaz.tempoRestanteMs) > restanteMs
+        ) {
+            restanteMs = Number(sefaz.tempoRestanteMs);
+        }
+
+        const cooldownNsuAtivo = Boolean(
+            nsu.cooldownAte && new Date(nsu.cooldownAte).getTime() > agora
+        );
+        const cooldownAtivo = (gateBloqueado || cooldownNsuAtivo) && restanteMs > 0;
+        const nsuLocal = nsuNumericoCentral(nsu.ultNsu);
+        const autoSyncNsu = Boolean(
+            nsuLocal > 0
+            && (is656 || String(nsu.ultimoCstat || '') === '656')
+            && (cooldownAtivo || cooldownNsuAtivo || gateBloqueado)
+        );
+
+        const ativo = Boolean(cooldownAtivo && (autoSyncNsu || (is656 && nsuLocal > 0)));
+
+        return {
+            ativo,
+            autoSyncNsu,
+            cStat: cStat || (ativo ? '656' : null),
+            proximaTentativa,
+            restanteMs: ativo ? restanteMs : 0,
+            proximaLabel: ativo ? formatarHoraCurtaCentral(proximaTentativa) : '—',
+            restanteLabel: ativo ? formatarMinutosRestantesCentral(restanteMs) : '—',
+            indicador: '🟡',
+            estado: 'AGUARDANDO_COOLDOWN_SEFAZ',
+            label: 'AGUARDANDO COOLDOWN DA SEFAZ',
+            descricao: 'Aguardando liberação da SEFAZ',
+            tooltipSync: 'A SEFAZ bloqueia novas consultas durante o período de espera.'
+        };
+    }
+
     function resolverEstadoServicoCentral(state) {
         const s = state.servicoStatus || {};
         const executando = s.executando || state.sincronizando;
         const syncAuto = s.syncAutomaticaHabilitada || s.servicoAtivo;
         const ultimo = s.ultimoResultado || {};
         const erroRecente = ultimo.sucesso === false && !executando;
+        const online = typeof navigator === 'undefined' ? true : navigator.onLine;
+        const cooldown = resolverCooldownSefaz656Ux(state);
 
-        if (!navigator.onLine) {
+        if (!online) {
             return {
                 codigo: 'offline',
                 label: 'Offline',
@@ -277,6 +403,17 @@
                 descricao: 'Buscando documentos na SEFAZ',
                 icone: 'fa-sync-alt fa-spin',
                 classe: 'central-ux-servico--sincronizando'
+            };
+        }
+        // RC3.7.5.3 — 656 + AUTO_SYNC_NSU: não exibir como ERRO
+        if (cooldown.ativo) {
+            return {
+                codigo: 'cooldown_656',
+                label: cooldown.label,
+                descricao: `${cooldown.indicador} ${cooldown.descricao} · Próxima tentativa: ${cooldown.proximaLabel} · Tempo restante: ${cooldown.restanteLabel}`,
+                icone: 'fa-hourglass-half',
+                classe: 'central-ux-servico--cooldown',
+                cooldown
             };
         }
         if (erroRecente) {
@@ -322,6 +459,74 @@
         };
     }
 
+    /**
+     * RC3.4.9A — data de emissão reduzida (dd/MM/aa). Nunca inclui horário.
+     * @param {string|null|undefined} data
+     * @returns {string}
+     */
+    function formatarDataEmissaoCurtaCentral(data) {
+        if (!data) return '—';
+        const texto = String(data).trim();
+        const soData = texto.match(/^(\d{4})-(\d{2})-(\d{2})/);
+        if (soData) {
+            return `${soData[3]}/${soData[2]}/${soData[1].slice(-2)}`;
+        }
+        const d = new Date(texto);
+        if (Number.isNaN(d.getTime())) return '—';
+        const dia = String(d.getDate()).padStart(2, '0');
+        const mes = String(d.getMonth() + 1).padStart(2, '0');
+        const ano = String(d.getFullYear()).slice(-2);
+        return `${dia}/${mes}/${ano}`;
+    }
+
+    /**
+     * RC3.4.9A — situação curta para linha da Saúde (NF • Emissão • Situação).
+     * @param {Object} alerta
+     * @returns {string}
+     */
+    function resolverSituacaoSaudeCurtaCentral(alerta = {}) {
+        const status = alerta.status || '';
+        const mapa = {
+            XML_INDISPONIVEL: 'XML indisponível na SEFAZ',
+            ERRO: 'Atenção',
+            EM_COMPRA: 'Em Compra',
+            AGUARDANDO_REVISAO: 'Em revisão',
+            EM_PROCESSAMENTO: 'Processando',
+            AGUARDANDO_XML_COMPLETO: 'Aguardando XML',
+            SINCRONIZADA: 'Recebido',
+            RECEBIDA: 'Recebido',
+            REVISADA: 'Pronto para importar',
+            PRONTA_PARA_COMPRA: 'Pronto para importar',
+            GRAVADA: 'Importado',
+            DUPLICADA: 'Duplicada',
+            DESCARTADA: 'Encerrado',
+            XML_IMPORTADO_MANUALMENTE: 'XML importado'
+        };
+        if (mapa[status]) return mapa[status];
+        const diag = String(alerta.diagnostico || '').trim();
+        if (/XML indisponível/i.test(diag)) return 'XML indisponível na SEFAZ';
+        if (/parado na etapa EM_COMPRA/i.test(diag)) return 'Em Compra';
+        if (/parado na etapa/i.test(diag)) {
+            const m = diag.match(/etapa\s+([A-Z_]+)/i);
+            if (m?.[1] && mapa[m[1]]) return mapa[m[1]];
+        }
+        return alerta.nivelLabel || diag || 'Atenção';
+    }
+
+    /**
+     * RC3.4.9A — monta linha compacta: NF • Emissão • Situação
+     * @param {Object} alerta
+     * @returns {string}
+     */
+    function montarLinhaSaudeCompactaCentral(alerta = {}) {
+        const nf = alerta.numero != null && String(alerta.numero).trim() !== ''
+            ? String(alerta.numero).trim()
+            : '—';
+        const emissao = formatarDataEmissaoCurtaCentral(alerta.dataEmissao || alerta.data_emissao);
+        const situacao = resolverSituacaoSaudeCurtaCentral(alerta);
+        return `${nf} • ${emissao} • ${situacao}`;
+    }
+
     function inferirOrigemTimelineCentral(item) {
         const detalhe = String(item.detalhe || '').toLowerCase();
         if (detalhe.includes('dfe') || detalhe.includes('sefaz')) return 'SEFAZ / DF-e';
@@ -344,19 +549,107 @@
     }
 
     function badgeStatusUx1(status, label) {
+        // RC4.0.0 / RC3.7.1 — linguagem operacional
         const mapa = {
-            PRONTA_PARA_COMPRA: { classe: 'central-ux1-badge--verde', texto: 'Pronta para Importar' },
-            REVISADA: { classe: 'central-ux1-badge--verde', texto: 'Pronta para Importar' },
-            AGUARDANDO_REVISAO: { classe: 'central-ux1-badge--amarelo', texto: 'Aguardando Revisão' },
-            EM_PROCESSAMENTO: { classe: 'central-ux1-badge--azul', texto: 'Processando' },
-            GRAVADA: { classe: 'central-ux1-badge--cinza', texto: 'Importada' },
+            NOVA: { classe: 'central-ux1-badge--azul', texto: 'Nova' },
+            RESUMO_RECEBIDO: { classe: 'central-ux1-badge--azul', texto: 'Resumo recebido' },
+            XML_COMPLETO: { classe: 'central-ux1-badge--azul', texto: 'XML completo' },
+            EM_REVISAO: { classe: 'central-ux1-badge--amarelo', texto: 'Em revisão' },
+            PRONTA_IMPORTACAO: { classe: 'central-ux1-badge--verde', texto: 'Pronta' },
+            EM_IMPORTACAO: { classe: 'central-ux1-badge--azul', texto: 'Em importação' },
+            IMPORTADA: { classe: 'central-ux1-badge--cinza', texto: 'Importada' },
+            FINALIZADA: { classe: 'central-ux1-badge--cinza', texto: 'Finalizada' },
+            CANCELADA: { classe: 'central-ux1-badge--vermelho', texto: 'Cancelada' },
+            DENEGADA: { classe: 'central-ux1-badge--vermelho', texto: 'Denegada' },
+            INUTILIZADA: { classe: 'central-ux1-badge--cinza', texto: 'Inutilizada' },
             ERRO: { classe: 'central-ux1-badge--vermelho', texto: 'Erro' },
-            DUPLICADA: { classe: 'central-ux1-badge--vermelho', texto: 'Duplicada' },
-            DESCARTADA: { classe: 'central-ux1-badge--cinza', texto: 'Cancelada' },
-            SINCRONIZADA: { classe: 'central-ux1-badge--azul', texto: 'Nova' }
+            XML_INDISPONIVEL: { classe: 'central-ux1-badge--vermelho', texto: 'XML indisponível' },
+            RECEBIDA: { classe: 'central-ux1-badge--azul', texto: 'Recebido' },
+            SINCRONIZADA: { classe: 'central-ux1-badge--azul', texto: 'Recebido' },
+            AGUARDANDO_XML_COMPLETO: { classe: 'central-ux1-badge--azul', texto: 'Aguardando XML' },
+            EM_PROCESSAMENTO: { classe: 'central-ux1-badge--azul', texto: 'Processando' },
+            AGUARDANDO_REVISAO: { classe: 'central-ux1-badge--amarelo', texto: 'Em revisão' },
+            REVISADA: { classe: 'central-ux1-badge--verde', texto: 'Pronto para importar' },
+            PRONTA_PARA_COMPRA: { classe: 'central-ux1-badge--verde', texto: 'Pronto para importar' },
+            EM_COMPRA: { classe: 'central-ux1-badge--azul', texto: 'Em importação' },
+            GRAVADA: { classe: 'central-ux1-badge--cinza', texto: 'Importada' },
+            DUPLICADA: { classe: 'central-ux1-badge--cinza', texto: 'Importada' },
+            DESCARTADA: { classe: 'central-ux1-badge--cinza', texto: 'Finalizada' },
+            XML_IMPORTADO_MANUALMENTE: { classe: 'central-ux1-badge--azul', texto: 'XML completo' }
         };
         const meta = mapa[status] || { classe: 'central-ux1-badge--cinza', texto: label || status || '—' };
-        return `<span class="central-ux1-badge ${meta.classe}" title="${escapeUx(meta.texto)}">${escapeUx(label || meta.texto)}</span>`;
+        return `<span class="central-ux1-badge ${meta.classe}" title="${escapeUx(meta.texto)}">${escapeUx(meta.texto)}</span>`;
+    }
+
+    /**
+     * RC4.0.0 / RC3.7.1 — próxima ação operacional (lista / painel).
+     */
+    function resolverProximaAcaoOperacional(doc = {}) {
+        const status = doc.status || '';
+        if (status === 'EM_REVISAO' || status === 'AGUARDANDO_REVISAO') {
+            return { emoji: '🟡', label: 'Revisar Produtos', tom: 'revisao', acao: 'revisar' };
+        }
+        if (status === 'PRONTA_IMPORTACAO' || status === 'PRONTA_PARA_COMPRA' || status === 'REVISADA') {
+            return { emoji: '🟢', label: 'Importar Compra', tom: 'pronto', acao: 'importar' };
+        }
+        if (status === 'RESUMO_RECEBIDO' || status === 'AGUARDANDO_XML_COMPLETO') {
+            return { emoji: '🔵', label: 'Aguardando XML', tom: 'processando', acao: 'aguardar' };
+        }
+        if (status === 'XML_INDISPONIVEL' || status === 'ERRO') {
+            if (recuperacaoPortalNacionalAtiva()) {
+                return { emoji: '☁️', label: 'Portal Nacional', tom: 'atencao', acao: 'portal-nfe' };
+            }
+            if (status === 'XML_INDISPONIVEL' && documentoTemChaveValidaUx(doc)) {
+                return { emoji: '📋', label: 'Copiar Chave', tom: 'atencao', acao: 'copiar-chave' };
+            }
+            if (status === 'ERRO') {
+                return { emoji: '🔴', label: 'Ver Diagnóstico', tom: 'atencao', acao: 'diagnostico' };
+            }
+            return { emoji: '🔴', label: 'Atenção', tom: 'atencao', acao: null };
+        }
+        if (status === 'CANCELADA' || status === 'DENEGADA' || status === 'INUTILIZADA') {
+            return { emoji: '⚫', label: status === 'CANCELADA' ? 'Cancelada' : status, tom: 'encerrado', acao: null };
+        }
+        if (status === 'IMPORTADA' || status === 'GRAVADA' || status === 'FINALIZADA' || status === 'DESCARTADA' || status === 'DUPLICADA') {
+            return { emoji: '⚫', label: 'Importada', tom: 'encerrado', acao: null };
+        }
+        if (status === 'EM_IMPORTACAO' || status === 'EM_COMPRA') {
+            return { emoji: '🔵', label: 'Importando…', tom: 'processando', acao: null };
+        }
+        if ((status === 'XML_COMPLETO' || status === 'SINCRONIZADA') && doc.parseDisponivel) {
+            return { emoji: '🔵', label: 'Processar', tom: 'processando', acao: 'processar' };
+        }
+        return { emoji: '🔵', label: 'Acompanhar', tom: 'processando', acao: null };
+    }
+
+    function labelStatusOperacionalCentral(status) {
+        const mapa = {
+            NOVA: 'Nova',
+            RESUMO_RECEBIDO: 'Resumo recebido',
+            XML_COMPLETO: 'XML completo',
+            EM_REVISAO: 'Em revisão',
+            PRONTA_IMPORTACAO: 'Pronta',
+            EM_IMPORTACAO: 'Em importação',
+            IMPORTADA: 'Importada',
+            FINALIZADA: 'Finalizada',
+            CANCELADA: 'Cancelada',
+            DENEGADA: 'Denegada',
+            INUTILIZADA: 'Inutilizada',
+            ERRO: 'Erro',
+            XML_INDISPONIVEL: 'XML indisponível',
+            RECEBIDA: 'Recebido',
+            SINCRONIZADA: 'Recebido',
+            AGUARDANDO_XML_COMPLETO: 'Aguardando XML',
+            EM_PROCESSAMENTO: 'Processando',
+            AGUARDANDO_REVISAO: 'Em revisão',
+            REVISADA: 'Pronto para importar',
+            PRONTA_PARA_COMPRA: 'Pronto para importar',
+            EM_COMPRA: 'Em importação',
+            GRAVADA: 'Importada',
+            DESCARTADA: 'Finalizada',
+            DUPLICADA: 'Importada'
+        };
+        return mapa[status] || status || '—';
     }
 
     function renderPipelineTimelineUx1(doc, historico) {
@@ -501,7 +794,7 @@
 
     function mensagemAmigavelCentral(chave, fallback) {
         const mapa = {
-            AGUARDANDO_XML_COMPLETO: 'Aguardando a disponibilização do XML completo pela SEFAZ.',
+            AGUARDANDO_XML_COMPLETO: 'A SEFAZ ainda não disponibilizou o XML completo. A recuperação automática ocorrerá no horário programado.',
             ERRO: 'Consulta temporariamente indisponível.',
             CONSUMO_INDEVIDO: 'A SEFAZ solicitou um intervalo antes da próxima consulta.',
             '656': 'A SEFAZ solicitou um intervalo antes da próxima consulta.',
@@ -511,6 +804,76 @@
             '593': '593 — Configuração de certificado/CNPJ inválida'
         };
         return mapa[chave] || fallback || chave || '—';
+    }
+
+    /** RC3.4.5 — status reais (linguagem operacional). */
+    function resolverStatusRealCentral(doc, wait = {}) {
+        const w = wait || {};
+        const status = doc?.status || '';
+        if (status === 'AGUARDANDO_XML_COMPLETO') {
+            if (w.estadoMirx === 'CONSULTANDO_XML') return 'Recuperando XML automaticamente';
+            return 'Recuperação automática do XML agendada';
+        }
+        if (status === 'SINCRONIZADA' && doc?.tipoDocumento === 'RES_NFE') return 'Aguardando manifestação';
+        if (status === 'EM_PROCESSAMENTO') return 'Identificando produtos';
+        if (status === 'SINCRONIZADA' && ['PROC_NFE', 'NFE'].includes(doc?.tipoDocumento)) {
+            return 'Processando XML';
+        }
+        if (status === 'AGUARDANDO_REVISAO') return 'Aguardando revisão MIIP';
+        if (status === 'EM_COMPRA') return 'Importando compra';
+        if (status === 'GRAVADA') return 'Finalizado';
+        if (status === 'RECEBIDA') return 'Recebendo documento';
+        if (status === 'PRONTA_PARA_COMPRA') return 'Pronto para importar compra';
+        if (status === 'REVISADA') return 'Revisão MIIP concluída';
+        return mensagemAmigavelCentral(status, status) || status || '—';
+    }
+
+    /** RC3.4.6.1 — documento encerrado (sem próximas tentativas). */
+    function documentoEncerradoCentral(doc) {
+        const status = doc?.status || '';
+        return status === 'GRAVADA' || status === 'DESCARTADA' || status === 'DUPLICADA';
+    }
+
+    /** RC3.4.5 — explicação com próxima tentativa DD/MM/AAAA HH:MM. */
+    function explicarStatusCentral(doc, wait = {}) {
+        const w = wait || {};
+        const status = doc?.status || '';
+
+        if (documentoEncerradoCentral(doc)) {
+            return 'Documento encerrado. Não existem próximas tentativas.';
+        }
+
+        const proxima = w.proximaTentativa || w.bloqueio656?.bloqueadoAte || null;
+        let proximaLabel = null;
+        if (proxima) {
+            const d = new Date(proxima);
+            if (!Number.isNaN(d.getTime())) {
+                const pad = (n) => String(n).padStart(2, '0');
+                proximaLabel = `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+            }
+        }
+
+        if (status === 'AGUARDANDO_XML_COMPLETO') {
+            if (w.estadoMirx === 'CONSULTANDO_XML') {
+                return 'O sistema está consultando a SEFAZ para recuperar o XML completo.';
+            }
+            return proximaLabel
+                ? `Recuperação automática do XML agendada. Próxima tentativa: ${proximaLabel}.`
+                : 'Recuperação automática do XML agendada. Nova tentativa no horário programado.';
+        }
+        if (status === 'EM_PROCESSAMENTO') {
+            return 'O XML está sendo lido: itens, valores e tributos estão sendo extraídos.';
+        }
+        if (status === 'AGUARDANDO_REVISAO') {
+            return 'O MIIP identificou os produtos. Confirme ou cadastre os itens pendentes na Central de Revisão.';
+        }
+        if (status === 'EM_COMPRA') {
+            return 'A compra está sendo importada. Estoque e financeiro serão atualizados na conclusão.';
+        }
+        if (status === 'SINCRONIZADA' && doc?.tipoDocumento === 'RES_NFE') {
+            return 'Resumo da NF-e recebido. Aguardando manifestação e disponibilização do XML completo.';
+        }
+        return resolverStatusRealCentral(doc, w);
     }
 
     function resolverDataDocumentoCentral(doc) {
@@ -530,25 +893,36 @@
         if (status === 'ERRO') {
             return { codigo: 'ERRO', label: 'Erro', indicador: '🔴', cor: '#dc3545' };
         }
-        if (status === 'GRAVADA' || status === 'EM_COMPRA') {
-            return { codigo: 'COMPRA', label: 'Compra criada', indicador: '🟢', cor: '#198754' };
+        if (status === 'GRAVADA') {
+            return { codigo: 'FINALIZADO', label: 'Finalizado', indicador: '🟢', cor: '#198754' };
+        }
+        if (status === 'EM_COMPRA') {
+            return { codigo: 'COMPRA', label: 'Importando compra', indicador: '🟣', cor: '#6610f2' };
         }
         if (status === 'AGUARDANDO_REVISAO' || status === 'REVISADA' || status === 'PRONTA_PARA_COMPRA') {
-            return { codigo: 'MIIP', label: 'MIIP', indicador: '🟠', cor: '#fd7e14' };
+            return { codigo: 'MIIP', label: resolverStatusRealCentral(doc, wait), indicador: '🟠', cor: '#fd7e14' };
         }
         if (status === 'EM_PROCESSAMENTO') {
-            return { codigo: 'PARSER', label: 'Parser', indicador: '🟣', cor: '#6610f2' };
+            return { codigo: 'PARSER', label: 'Processando XML', indicador: '🟣', cor: '#6610f2' };
         }
         if (status === 'AGUARDANDO_XML_COMPLETO') {
-            if (wait?.consultaBloqueada || wait?.bloqueio656?.ativo) {
-                return { codigo: 'CONSULTANDO', label: 'Aguardando intervalo SEFAZ', indicador: '🔵', cor: '#0dcaf0' };
+            if (wait?.estadoMirx === 'CONSULTANDO_XML') {
+                return { codigo: 'CONSULTANDO', label: 'Recuperando XML automaticamente', indicador: '🔵', cor: '#0d6efd' };
             }
-            return { codigo: 'AGUARDANDO_XML', label: 'Aguardando XML', indicador: '🟡', cor: '#f59e0b' };
+            return {
+                codigo: 'AGENDADO',
+                label: 'Recuperação automática do XML agendada',
+                indicador: '🟡',
+                cor: '#f59e0b'
+            };
         }
         if (['SINCRONIZADA', 'RECEBIDA'].includes(status) && (doc?.tipoDocumento === 'PROC_NFE' || doc?.tipoDocumento === 'NFE')) {
-            return { codigo: 'XML_RECEBIDO', label: 'XML Recebido', indicador: '🟢', cor: '#198754' };
+            return { codigo: 'XML_RECEBIDO', label: 'XML disponível', indicador: '🟢', cor: '#198754' };
         }
-        return { codigo: 'RECEBIDO', label: 'Recebido', indicador: '🟢', cor: '#0d6efd' };
+        if (status === 'SINCRONIZADA' && doc?.tipoDocumento === 'RES_NFE') {
+            return { codigo: 'MANIFESTACAO', label: 'Aguardando manifestação', indicador: '🔵', cor: '#0dcaf0' };
+        }
+        return { codigo: 'RECEBIDO', label: 'Recebendo documento', indicador: '🟢', cor: '#0d6efd' };
     }
 
     function _buscarHistoricoStatus(historico, pred) {
@@ -560,9 +934,10 @@
         return null;
     }
 
-    function montarEtapasOperacionaisCentral(doc, historico, wait) {
+    function montarEtapasOperacionaisCentral(doc, historico, wait, eventosMirx) {
         const hist = Array.isArray(historico) ? [...historico] : [];
         hist.sort((a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0));
+        const mirx = Array.isArray(eventosMirx) ? eventosMirx : [];
 
         const hRes = _buscarHistoricoStatus(hist, (h) =>
             h.statusNovo === 'SINCRONIZADA' || h.statusNovo === 'AGUARDANDO_XML_COMPLETO' || /RES_NFE|receb/i.test(h.detalhe || ''));
@@ -583,67 +958,142 @@
         const status = doc?.status || '';
         const xmlCompleto = ['PROC_NFE', 'NFE'].includes(doc?.tipoDocumento)
             && status !== 'AGUARDANDO_XML_COMPLETO';
+        const mirxEnfileirado = mirx.find((e) => e.tipoMirx === 'MIRX_ENFILEIRADO');
+        const mirxXml = mirx.find((e) => e.tipoMirx === 'MIRX_XML_RECUPERADO');
+        const posParser = ['AGUARDANDO_REVISAO', 'REVISADA', 'PRONTA_PARA_COMPRA', 'EM_COMPRA', 'GRAVADA'].includes(status);
+        const posMiip = ['AGUARDANDO_REVISAO', 'REVISADA', 'PRONTA_PARA_COMPRA', 'EM_COMPRA', 'GRAVADA'].includes(status);
+        const finalizado = status === 'GRAVADA';
+        const emCompra = status === 'EM_COMPRA' || finalizado;
 
         const etapas = [
             {
-                id: 'recebido',
-                label: 'Recebido',
-                detalhe: 'RES_NFE / documento na Central',
+                id: 'localizado',
+                label: 'Documento localizado',
+                detalhe: 'Documento encontrado na Central',
+                icone: 'fa-search-location',
+                em: doc?.createdAt || hRes?.createdAt || null,
+                concluida: true,
+                ativa: false
+            },
+            {
+                id: 'res_nfe',
+                label: 'RES_NFE recebido',
+                detalhe: 'Resumo DF-e disponível',
                 icone: 'fa-inbox',
                 em: hRes?.createdAt || doc?.createdAt || null,
                 concluida: true,
                 ativa: false
             },
             {
-                id: 'manifestacao',
-                label: 'Manifestação',
+                id: 'manif_enviada',
+                label: 'Manifestação enviada',
+                detalhe: 'Ciência / evento enviado à SEFAZ',
+                icone: 'fa-paper-plane',
+                em: hManif?.createdAt || null,
+                concluida: Boolean(hManif) || status === 'AGUARDANDO_XML_COMPLETO' || xmlCompleto || posParser,
+                ativa: status === 'SINCRONIZADA' && doc?.tipoDocumento === 'RES_NFE'
+            },
+            {
+                id: 'manif_ok',
+                label: 'Manifestação autorizada',
                 detalhe: mensagemAmigavelCentral('MANIFESTACAO_ACEITA'),
                 icone: 'fa-file-signature',
-                em: hManif?.createdAt || (status !== 'RECEBIDA' ? (hRes?.createdAt || null) : null),
-                concluida: !['RECEBIDA'].includes(status) || Boolean(hManif),
+                em: hManif?.createdAt || null,
+                concluida: Boolean(hManif) || status === 'AGUARDANDO_XML_COMPLETO' || xmlCompleto || posParser,
                 ativa: false
             },
             {
-                id: 'xml',
-                label: 'XML Completo',
-                detalhe: status === 'AGUARDANDO_XML_COMPLETO'
-                    ? mensagemAmigavelCentral('AGUARDANDO_XML_COMPLETO')
-                    : 'PROC_NFE disponível',
-                icone: 'fa-file-code',
-                em: xmlCompleto ? (hXml?.createdAt || doc?.updatedAt) : (wait?.ultimaConsulta || null),
+                id: 'xml_solicitado',
+                label: 'XML solicitado automaticamente',
+                detalhe: 'MIRX acompanhou a recuperação do XML',
+                icone: 'fa-robot',
+                em: mirxEnfileirado?.createdAt || wait?.iniciadoEm || null,
+                concluida: Boolean(mirxEnfileirado) || status === 'AGUARDANDO_XML_COMPLETO' || xmlCompleto || posParser,
+                ativa: status === 'AGUARDANDO_XML_COMPLETO' && !xmlCompleto
+            },
+            {
+                id: 'xml_sefaz',
+                label: 'XML disponibilizado pela SEFAZ',
+                detalhe: xmlCompleto ? 'PROC_NFE / NFe disponível' : 'Aguardando SEFAZ',
+                icone: 'fa-cloud-download-alt',
+                em: xmlCompleto ? (mirxXml?.createdAt || hXml?.createdAt || doc?.updatedAt) : null,
                 concluida: xmlCompleto,
                 ativa: status === 'AGUARDANDO_XML_COMPLETO'
             },
             {
+                id: 'xml_baixado',
+                label: 'XML baixado',
+                detalhe: 'Arquivo persistido na Central',
+                icone: 'fa-download',
+                em: xmlCompleto ? (mirxXml?.createdAt || hXml?.createdAt) : null,
+                concluida: xmlCompleto,
+                ativa: false
+            },
+            {
+                id: 'xml_validado',
+                label: 'XML validado',
+                detalhe: 'Estrutura fiscal validada',
+                icone: 'fa-shield-alt',
+                em: xmlCompleto ? (hXml?.createdAt || doc?.updatedAt) : null,
+                concluida: xmlCompleto,
+                ativa: false
+            },
+            {
                 id: 'parser',
-                label: 'Parser',
-                detalhe: 'Extração estruturada da NF-e',
+                label: 'Parser concluído',
+                detalhe: 'Itens, valores e tributos extraídos',
                 icone: 'fa-cogs',
                 em: hParser?.createdAt || null,
-                concluida: Boolean(hParser) || ['AGUARDANDO_REVISAO', 'REVISADA', 'PRONTA_PARA_COMPRA', 'EM_COMPRA', 'GRAVADA'].includes(status),
+                concluida: Boolean(hParser) || posParser,
+                ativa: status === 'EM_PROCESSAMENTO'
+            },
+            {
+                id: 'produtos',
+                label: 'Produtos identificados',
+                detalhe: 'Itens da NF-e reconhecidos',
+                icone: 'fa-boxes',
+                em: hMiip?.createdAt || hParser?.createdAt || null,
+                concluida: posMiip,
                 ativa: status === 'EM_PROCESSAMENTO'
             },
             {
                 id: 'miip',
-                label: 'MIIP',
-                detalhe: 'Identificação de produtos',
+                label: 'MIIP executado',
+                detalhe: 'Associação inteligente de produtos',
                 icone: 'fa-brain',
                 em: hMiip?.createdAt || null,
-                concluida: ['AGUARDANDO_REVISAO', 'REVISADA', 'PRONTA_PARA_COMPRA', 'EM_COMPRA', 'GRAVADA'].includes(status),
+                concluida: posMiip,
                 ativa: status === 'AGUARDANDO_REVISAO'
             },
             {
-                id: 'compras',
-                label: 'Compras',
-                detalhe: 'Compra criada / gravada',
+                id: 'compra',
+                label: 'Compra criada',
+                detalhe: 'Lançamento em Compras',
                 icone: 'fa-shopping-cart',
                 em: hCompra?.createdAt || null,
-                concluida: ['GRAVADA', 'EM_COMPRA'].includes(status),
+                concluida: emCompra,
                 ativa: status === 'EM_COMPRA'
+            },
+            {
+                id: 'estoque',
+                label: 'Estoque atualizado',
+                detalhe: 'Saldos atualizados na gravação',
+                icone: 'fa-warehouse',
+                em: finalizado ? (hCompra?.createdAt || doc?.updatedAt) : null,
+                concluida: finalizado,
+                ativa: false
+            },
+            {
+                id: 'finalizado',
+                label: 'Documento finalizado',
+                detalhe: 'Fluxo documental concluído',
+                icone: 'fa-flag-checkered',
+                em: finalizado ? (doc?.updatedAt || hCompra?.createdAt) : null,
+                concluida: finalizado,
+                ativa: false
             }
         ];
 
-        // Tempos entre etapas
         for (let i = 0; i < etapas.length; i += 1) {
             const atual = etapas[i].em ? new Date(etapas[i].em).getTime() : null;
             const prev = i > 0 && etapas[i - 1].em ? new Date(etapas[i - 1].em).getTime() : null;
@@ -661,22 +1111,97 @@
         }
 
         const concluidas = etapas.filter((e) => e.concluida).length;
-        return { etapas, progresso: concluidas / etapas.length, concluidas, total: etapas.length };
+        const percentual = Math.round((concluidas / Math.max(etapas.length, 1)) * 100);
+        return {
+            etapas,
+            progresso: concluidas / etapas.length,
+            percentual,
+            concluidas,
+            total: etapas.length,
+            statusReal: resolverStatusRealCentral(doc, wait),
+            explicacao: explicarStatusCentral(doc, wait)
+        };
     }
 
     function renderBarraProgressoOperacionalCentral(modelo) {
-        const total = modelo?.total || 6;
+        const total = modelo?.total || 14;
         const ok = modelo?.concluidas || 0;
-        const blocos = Array.from({ length: total }, (_, i) => {
-            const filled = i < ok;
+        const percentual = modelo?.percentual != null
+            ? modelo.percentual
+            : Math.round((ok / Math.max(total, 1)) * 100);
+        const preenchidos = Math.round(percentual / 10);
+        const blocos = Array.from({ length: 10 }, (_, i) => {
+            const filled = i < preenchidos;
             return `<span class="central-rc75-progress-block ${filled ? 'is-on' : ''}" aria-hidden="true"></span>`;
         }).join('');
         return `
-            <div class="central-rc75-progress" role="progressbar" aria-valuemin="0" aria-valuemax="${total}"
-                 aria-valuenow="${ok}" aria-label="Progresso do documento ${ok} de ${total}">
+            <div class="central-rc75-progress central-rc343-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100"
+                 aria-valuenow="${percentual}" aria-label="Andamento do documento ${percentual}%">
+                <div class="central-rc75-progress-head">
+                    <span>Andamento do documento</span>
+                    <strong class="central-rc343-pct">${percentual}%</strong>
+                </div>
                 <div class="central-rc75-progress-track">${blocos}</div>
+                <div class="central-rc343-progress-text" aria-hidden="true">${'█'.repeat(Math.max(0, preenchidos))}${'░'.repeat(Math.max(0, 10 - preenchidos))} ${percentual}%</div>
                 <div class="central-rc75-progress-labels">
-                    ${(modelo?.etapas || []).map((e) => `<span class="${e.concluida ? 'is-on' : ''}" title="${escapeUx(e.label)}">${escapeUx(e.label)}</span>`).join('')}
+                    <span class="is-on">${escapeUx(modelo?.statusReal || '')}</span>
+                    <span>${ok}/${total} etapas</span>
+                </div>
+            </div>`;
+    }
+
+    function renderExplicacaoStatusCentral(doc, wait) {
+        const texto = explicarStatusCentral(doc, wait);
+        const statusReal = resolverStatusRealCentral(doc, wait);
+        return `
+            <div class="central-rc343-explica central-entradas-anim-in" title="${escapeUx(texto)}">
+                <div class="central-rc343-explica__title">
+                    <i class="fas fa-info-circle me-1" aria-hidden="true"></i>
+                    ${escapeUx(statusReal)}
+                </div>
+                <p class="central-rc343-explica__txt mb-0">${escapeUx(texto)}</p>
+            </div>`;
+    }
+
+    function renderEventosMirxCentral(eventosMirx) {
+        const lista = Array.isArray(eventosMirx) ? eventosMirx.slice(0, 12) : [];
+        if (!lista.length) {
+            return `
+                <div class="central-rc343-mirx">
+                    <label class="central-entradas-label">Eventos MIRX</label>
+                    <p class="small text-muted mb-0">Nenhum evento MIRX registrado ainda.</p>
+                </div>`;
+        }
+        return `
+            <div class="central-rc343-mirx">
+                <label class="central-entradas-label">Eventos MIRX</label>
+                <ul class="central-rc343-mirx-list">
+                    ${lista.map((e) => {
+                        const dt = formatarDataHoraSeparadoCentral(e.createdAt);
+                        return `<li>
+                            <span class="central-rc343-mirx-ico" style="color:${escapeUx(e.cor || '#64748b')}"><i class="fas ${escapeUx(e.icone || 'fa-robot')}"></i></span>
+                            <div>
+                                <strong>${escapeUx(e.label)}</strong>
+                                <small class="text-muted d-block">${escapeUx(dt.data)} ${escapeUx(dt.hora)}${e.motivo ? ` · ${escapeUx(e.motivo)}` : ''}</small>
+                            </div>
+                        </li>`;
+                    }).join('')}
+                </ul>
+            </div>`;
+    }
+
+    function renderAuditoriaDocumentalCentral(auditoria) {
+        const a = auditoria || {};
+        return `
+            <div class="central-rc343-audit">
+                <label class="central-entradas-label">Auditoria do documento</label>
+                <div class="central-rc343-audit-grid">
+                    <div><span class="central-rc75-k">Tempo total</span><span class="central-rc75-v">${escapeUx(a.tempoTotalLabel || '—')}</span></div>
+                    <div><span class="central-rc75-k">Tentativas</span><span class="central-rc75-v">${escapeUx(String(a.quantidadeTentativas ?? 0))}</span></div>
+                    <div><span class="central-rc75-k">Último método</span><span class="central-rc75-v">${escapeUx(a.ultimoMetodo || '—')}</span></div>
+                    <div><span class="central-rc75-k">Último retorno SEFAZ</span><span class="central-rc75-v">${escapeUx(a.ultimoRetornoSefaz || '—')}</span></div>
+                    <div><span class="central-rc75-k">Tempo até XML</span><span class="central-rc75-v">${escapeUx(a.tempoAteXmlLabel || '—')}</span></div>
+                    <div><span class="central-rc75-k">Dormindo</span><span class="central-rc75-v">${escapeUx(a.dormindo ? 'Sim' : 'Não')}</span></div>
                 </div>
             </div>`;
     }
@@ -685,15 +1210,16 @@
         const etapas = modelo?.etapas || [];
         if (!etapas.length) return '';
         return `
-            <div class="central-rc75-timeline" role="list" aria-label="Linha do tempo operacional">
+            <div class="central-rc75-timeline" role="list" aria-label="Linha do tempo do documento">
                 ${etapas.map((e, i) => `
-                    <div class="central-rc75-timeline-item central-rc75-timeline-item--${e.concluida ? 'ok' : (e.ativa ? 'ativo' : 'pendente')}" role="listitem">
+                    <div class="central-rc75-timeline-item central-rc75-timeline-item--${e.concluida ? 'ok' : (e.ativa ? 'ativo' : 'pendente')}" role="listitem"
+                         title="${escapeUx(e.detalhe || e.label)}">
                         ${i > 0 ? `<div class="central-rc75-timeline-gap" aria-hidden="true">
                             <span>↓</span>
                             ${e.duracaoLabel ? `<small>(${escapeUx(e.duracaoLabel)})</small>` : ''}
                         </div>` : ''}
                         <div class="central-rc75-timeline-card">
-                            <span class="central-rc75-timeline-icone"><i class="fas ${e.icone}"></i></span>
+                            <span class="central-rc75-timeline-icone">${e.concluida ? '✔' : (e.ativa ? '●' : '○')} <i class="fas ${e.icone}"></i></span>
                             <div class="central-rc75-timeline-body">
                                 <strong>${escapeUx(e.label)}</strong>
                                 <div class="central-rc75-timeline-meta">
@@ -726,40 +1252,56 @@
             : (w.iniciadoEm
                 ? formatarDuracaoHumanaCentral(agora - new Date(w.iniciadoEm).getTime())
                 : (w.tempoAguardandoLabel || '—'));
-        const backoff = w.bloqueio656?.intervaloMs
-            ? formatarDuracaoHumanaCentral(w.bloqueio656.intervaloMs)
-            : (opcoes.backoffLabel || '—');
+        const backoff = w.backoff?.label
+            || (w.bloqueio656?.intervaloMs
+                ? formatarDuracaoHumanaCentral(w.bloqueio656.intervaloMs)
+                : (opcoes.backoffLabel || '—'));
         const ultimoCstat = opcoes.ultimoCStat
+            || w.ultimoCStat
             || w.bloqueio656?.cStat
             || w.estado593?.cStat
             || null;
         const ultimoRetorno = ultimoCstat
             ? mensagemAmigavelCentral(String(ultimoCstat), `${ultimoCstat}`)
-            : 'Aguardando retorno da SEFAZ';
+            : (w.ultimoResultado || 'Aguardando retorno da SEFAZ');
+        const metodo = w.metodoProgramado || w.ultimoMetodo || opcoes.metodo || 'DistDFe → consChNFe';
+        const estadoMirx = w.estadoMirxLabel || w.estadoMirx || 'Recuperação MIRX';
+        const dormindo = w.dormindo === true || w.estadoMirx === 'SLEEP';
+        const statusGate = w.statusGate || (w.consultaBloqueada ? 'BLOCKED' : 'NORMAL');
+        const visual = w.labelVisual
+            ? `${w.indicadorVisual || ''} ${w.labelVisual}`.trim()
+            : null;
 
-        let statusMsg = mensagemAmigavelCentral('AGUARDANDO_XML_COMPLETO');
+        let statusMsg = visual || w.motivo || mensagemAmigavelCentral('AGUARDANDO_XML_COMPLETO');
         if (w.estado593?.ativo || w.configuracaoInvalida) {
             statusMsg = 'Configuração de certificado/CNPJ inválida. Consultas suspensas.';
-        } else if (w.bloqueio656?.ativo || w.consultaBloqueada) {
-            statusMsg = mensagemAmigavelCentral('CONSUMO_INDEVIDO');
+        } else if (dormindo || w.bloqueio656?.ativo || w.consultaBloqueada) {
+            statusMsg = '🔴 Consulta temporariamente bloqueada (656)';
+        } else {
+            statusMsg = visual || '🟡 Recuperação automática do XML agendada';
         }
 
         return `
             <div class="central-rc75-xml-card central-entradas-anim-in" id="centralRc75XmlCard" data-doc-id="${escapeUx(doc.id)}">
                 <div class="central-rc75-xml-card__title">
-                    <i class="fas fa-file-import me-1" aria-hidden="true"></i> XML Completo
+                    <i class="fas fa-file-import me-1" aria-hidden="true"></i> XML Completo — MIRX
                     ${renderChipEtapaCentral(resolverChipEtapaCentral(doc, w))}
                 </div>
                 <div class="central-rc75-xml-grid">
                     <div><span class="central-rc75-k">Status</span><span class="central-rc75-v" data-central-live="status-msg">${escapeUx(statusMsg)}</span></div>
-                    <div><span class="central-rc75-k">Última consulta</span><span class="central-rc75-v" data-central-live="ultima-consulta">${escapeUx(w.ultimaConsulta ? formatarDataHoraSeparadoCentral(w.ultimaConsulta).data + ' ' + formatarDataHoraSeparadoCentral(w.ultimaConsulta).hora : '—')}</span></div>
+                    <div><span class="central-rc75-k">Estado MIRX</span><span class="central-rc75-v">${escapeUx(estadoMirx)}</span></div>
+                    <div><span class="central-rc75-k">Dormindo</span><span class="central-rc75-v">${escapeUx(dormindo ? 'Sim' : (w.dormindoLabel || 'Não'))}</span></div>
+                    <div><span class="central-rc75-k">Status do Gate</span><span class="central-rc75-v">${escapeUx(statusGate)}</span></div>
+                    <div><span class="central-rc75-k">Motivo do bloqueio</span><span class="central-rc75-v">${escapeUx(w.motivoBloqueio || (dormindo ? (w.motivo || 'cStat 656') : '—'))}</span></div>
+                    <div><span class="central-rc75-k">Última tentativa</span><span class="central-rc75-v" data-central-live="ultima-consulta">${escapeUx(w.ultimaConsulta ? formatarDataHoraSeparadoCentral(w.ultimaConsulta).data + ' ' + formatarDataHoraSeparadoCentral(w.ultimaConsulta).hora : '—')}</span></div>
                     <div><span class="central-rc75-k">Próxima tentativa</span><span class="central-rc75-v" data-central-live="proxima-consulta" data-central-target="${escapeUx(proxima || '')}">${escapeUx(cd.dataHora || '—')}</span></div>
-                    <div><span class="central-rc75-k">Faltam</span><span class="central-rc75-v central-rc75-countdown" data-central-live="countdown" data-central-target="${escapeUx(proxima || '')}">${escapeUx(cd.faltam)}</span></div>
-                    <div><span class="central-rc75-k">Tempo aguardando</span><span class="central-rc75-v" data-central-live="tempo-aguardando" data-central-inicio="${escapeUx(w.iniciadoEm || '')}">${escapeUx(tempoAguardando)}</span></div>
-                    <div><span class="central-rc75-k">Tentativas realizadas</span><span class="central-rc75-v">${escapeUx(String(w.tentativas ?? 0))}</span></div>
+                    <div><span class="central-rc75-k">Tempo restante</span><span class="central-rc75-v central-rc75-countdown" data-central-live="countdown" data-central-target="${escapeUx(proxima || '')}">${escapeUx(cd.faltam || w.tempoRestanteLabel || '—')}</span></div>
                     <div><span class="central-rc75-k">Backoff atual</span><span class="central-rc75-v">${escapeUx(backoff)}</span></div>
-                    <div><span class="central-rc75-k">Último retorno SEFAZ</span><span class="central-rc75-v">${escapeUx(ultimoRetorno)}</span></div>
+                    <div><span class="central-rc75-k">Método programado</span><span class="central-rc75-v">${escapeUx(metodo)}</span></div>
+                    <div><span class="central-rc75-k">Nº tentativas</span><span class="central-rc75-v">${escapeUx(String(w.tentativas ?? 0))}</span></div>
+                    <div><span class="central-rc75-k">Resposta SEFAZ</span><span class="central-rc75-v">${escapeUx(ultimoRetorno)}</span></div>
                 </div>
+                <p class="small text-muted mt-2 mb-0">Próxima tentativa automática: <strong data-central-live="proxima-consulta" data-central-target="${escapeUx(proxima || '')}">${escapeUx(cd.dataHora || 'agendada pelo MIRX')}</strong></p>
             </div>`;
     }
 
@@ -791,13 +1333,33 @@
 
     function renderPainelSaudeSefazCentral(sefaz, statusBg = {}) {
         const est = sefaz?.estadoOperacional || { indicador: '🟢', label: 'Operando normalmente', codigo: 'NORMAL' };
-        const label = est.codigo === 'NORMAL' ? 'Operando normalmente' : (est.label || est.codigo);
+        const cooldown = resolverCooldownSefaz656Ux({
+            sefazOperacional: sefaz,
+            sincronizacaoNsu: statusBg.sincronizacaoNsu || statusBg.sincronizacao || null,
+            servicoStatus: statusBg
+        });
+        let label = est.codigo === 'NORMAL' ? 'Operando normalmente' : (est.label || est.codigo);
+        let indicador = est.indicador || '🟢';
+        // RC3.7.5.3 — BLOCKED/656 pós recovery não é "Erro"
+        if (cooldown.ativo) {
+            label = cooldown.label;
+            indicador = cooldown.indicador;
+        } else if (est.codigo === 'BLOCKED' && String(sefaz?.ultimoCStat || '') === '656') {
+            label = 'AGUARDANDO COOLDOWN DA SEFAZ';
+            indicador = '🟡';
+        }
         return `
             <div class="central-rc75-saude" id="centralRc75Saude" aria-label="SEFAZ Operacional">
                 <div class="central-rc75-saude__head">
                     <strong>SEFAZ OPERACIONAL</strong>
-                    <span>${escapeUx(est.indicador || '🟢')} ${escapeUx(label)}</span>
+                    <span>${escapeUx(indicador)} ${escapeUx(label)}</span>
                 </div>
+                ${cooldown.ativo ? `
+                <div class="central-rc75-saude__cooldown" role="status">
+                    <div><span class="central-rc75-k">Estado</span><span class="central-rc75-v">${escapeUx(cooldown.indicador)} ${escapeUx(cooldown.descricao)}</span></div>
+                    <div><span class="central-rc75-k">Próxima tentativa</span><span class="central-rc75-v">${escapeUx(cooldown.proximaLabel)}</span></div>
+                    <div><span class="central-rc75-k">Tempo restante</span><span class="central-rc75-v">${escapeUx(cooldown.restanteLabel)}</span></div>
+                </div>` : ''}
                 <div class="central-rc75-saude__grid">
                     <div><span class="central-rc75-k">Background</span><span class="central-rc75-v" data-central-live="bg-status">${escapeUx(statusBg.servicoAtivo ? 'ATIVO' : 'PARADO')}</span></div>
                     <div><span class="central-rc75-k">XML Wait</span><span class="central-rc75-v" data-central-live="xmlwait-status">${escapeUx(statusBg.xmlWait?.ativo ? 'ATIVO' : (statusBg.xmlWait?.telemetria?.schedulerAtivo ? 'ATIVO' : '—'))}</span></div>
@@ -806,6 +1368,170 @@
                     <div><span class="central-rc75-k">Consultas realizadas</span><span class="central-rc75-v">${escapeUx(String(sefaz?.consultasSOAP ?? sefaz?.consultasRealizadas ?? '—'))}</span></div>
                     <div><span class="central-rc75-k">Consultas evitadas</span><span class="central-rc75-v">${escapeUx(String(sefaz?.consultasEvitadas ?? sefaz?.economiaSOAP ?? '—'))}</span></div>
                 </div>
+            </div>`;
+    }
+
+    /** RC3.4.6 — Saúde documental da Central. */
+    function renderPainelSaudeDocumentalCentral(saude, opcoes = {}) {
+        // RC3.4.6.1 — null-safe: painel nunca lança se saúde ainda não calculada
+        if (!saude) {
+            return `
+            <div class="central-health-panel central-entradas-anim-in" aria-label="Saúde da Central">
+                <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+                    <strong>Saúde da Central</strong>
+                </div>
+                <div class="small text-muted">Saúde ainda não calculada</div>
+            </div>`;
+        }
+
+        const c = saude.contadores || {};
+        const est = saude.estatisticas || {};
+        const filtro = opcoes.filtroNivel || null;
+        let alertas = Array.isArray(saude.alertas) ? saude.alertas : [];
+        if (filtro) alertas = alertas.filter((a) => a?.nivel === filtro);
+
+        const chips = [
+            { nivel: 'SAUDAVEL', emoji: '🟢', label: 'Saudáveis', valor: c.saudaveis ?? 0, cor: '#198754' },
+            { nivel: 'ATENCAO', emoji: '🟡', label: 'Atenção', valor: c.atencao ?? 0, cor: '#f59e0b' },
+            { nivel: 'CRITICO', emoji: '🔴', label: 'Críticos', valor: c.criticos ?? 0, cor: '#dc3545' },
+            { nivel: 'BLOQUEADO', emoji: '⚫', label: 'Bloqueados', valor: c.bloqueados ?? 0, cor: '#6c757d' }
+        ];
+
+        const listaHtml = alertas.length
+            ? `<div class="central-health-alertas mt-2">
+                ${alertas.slice(0, 12).map((a) => {
+                    const linha = montarLinhaSaudeCompactaCentral(a || {});
+                    const tempo = a?.tempoParadoLabel || '';
+                    return `
+                    <button type="button" class="central-health-alerta" data-health-doc="${escapeUx(a?.documentoId ?? '')}"
+                        title="${escapeUx(a?.diagnostico || linha)}">
+                        <span>${escapeUx(a?.indicador || '🟡')}</span>
+                        <span class="flex-grow-1 text-start min-w-0">
+                            <strong class="central-health-alerta-fornecedor">${escapeUx(a?.fornecedor || a?.chave || (a?.documentoId != null ? `#${a.documentoId}` : 'Documento'))}</strong>
+                            <small class="d-block text-muted text-truncate central-health-alerta-linha">${escapeUx(linha)}</small>
+                        </span>
+                        <small class="text-muted central-health-alerta-tempo">${escapeUx(tempo)}</small>
+                    </button>`;
+                }).join('')}
+               </div>`
+            : (filtro
+                ? '<div class="small text-muted mt-2">Nenhum documento neste nível.</div>'
+                : '<div class="small text-muted mt-2">Nenhum alerta ativo.</div>');
+
+        const statsHtml = `
+            <div class="central-health-stats small text-muted mt-2">
+                <span title="Tempo médio até XML">XML: ${escapeUx(est.tempoMedioAteXmlMin != null ? `${est.tempoMedioAteXmlMin} min` : '—')}</span>
+                <span class="mx-1">·</span>
+                <span title="Tempo médio até Compra">Compra: ${escapeUx(est.tempoMedioAteCompraMin != null ? `${est.tempoMedioAteCompraMin} min` : '—')}</span>
+                <span class="mx-1">·</span>
+                <span title="Tempo médio MIIP">MIIP: ${escapeUx(est.tempoMedioMiipMin != null ? `${est.tempoMedioMiipMin} min` : '—')}</span>
+                <span class="mx-1">·</span>
+                <span title="Taxa sucesso MIRX">MIRX: ${escapeUx(est.taxaSucessoMirx != null ? `${est.taxaSucessoMirx}%` : '—')}</span>
+                <span class="mx-1">·</span>
+                <span>Auto: ${escapeUx(String(est.recuperadosAutomaticamente ?? 0))} / Manual: ${escapeUx(String(est.recuperadosManualmente ?? 0))}</span>
+            </div>`;
+
+        return `
+            <div class="central-health-panel central-entradas-anim-in" aria-label="Saúde da Central">
+                <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+                    <strong>Saúde da Central</strong>
+                    <small class="text-muted">${escapeUx(saude.geradoEm ? formatarDataHoraSeparadoCentral(saude.geradoEm).hora : '')}</small>
+                    <button type="button" class="btn btn-outline-secondary btn-sm ms-auto" id="centralBtnSaudeAnalisar" title="Analisar agora (sem SEFAZ)">
+                        <i class="fas fa-heartbeat me-1"></i> Analisar
+                    </button>
+                </div>
+                <div class="central-health-chips">
+                    ${chips.map((ch) => `
+                        <button type="button" class="central-health-chip ${filtro === ch.nivel ? 'ativa' : ''}"
+                            data-health-nivel="${ch.nivel}"
+                            style="--health-cor:${ch.cor}"
+                            title="Filtrar ${ch.label}">
+                            ${ch.emoji} ${escapeUx(ch.label)}: <strong>${escapeUx(ch.valor)}</strong>
+                        </button>
+                    `).join('')}
+                    ${filtro ? '<button type="button" class="btn btn-link btn-sm" data-health-nivel="">Limpar filtro</button>' : ''}
+                </div>
+                ${statsHtml}
+                ${listaHtml}
+            </div>`;
+    }
+
+    /**
+     * RC3.4.6 / RC3.4.6.1 — card de saúde no detalhe do documento.
+     * Null-safe: nunca lança se saude/campos forem null.
+     */
+    function renderCardSaudeDocumentoCentral(saude, doc = null) {
+        const encerrado = documentoEncerradoCentral(doc) || documentoEncerradoCentral(saude);
+
+        if (!saude || !saude.nivel) {
+            const msg = encerrado
+                ? 'Documento encerrado. Não existem próximas tentativas.'
+                : 'Saúde ainda não calculada. Documento sem diagnóstico disponível.';
+            return `
+            <div class="central-health-doc mb-3" style="border-left:3px solid #94a3b8; padding-left:.75rem">
+                <label class="central-entradas-label">Saúde do documento</label>
+                <div class="small text-muted">${escapeUx(msg)}</div>
+            </div>`;
+        }
+
+        const cor = saude.cor || '#64748b';
+        const diagnostico = saude.diagnostico
+            || (encerrado
+                ? 'Documento encerrado. Não existem próximas tentativas.'
+                : 'Documento sem diagnóstico disponível');
+        const regra = saude.regra || null;
+        const nivel = saude.nivelLabel || saude.nivel || '—';
+        const tempoParado = saude.tempoParadoLabel || null;
+        const ultimaAtualizacao = saude.ultimaAtualizacaoDoc || null;
+        const motivo = saude.motivo || saude.mirx?.motivo || null;
+        const proximaTentativa = saude.mirx?.proximaTentativa || null;
+
+        let metaLinha = '';
+        if (encerrado) {
+            const em = formatarDataHoraSeparadoCentral(saude.dataEmissao || doc?.dataEmissao);
+            const enc = formatarDataHoraSeparadoCentral(
+                saude.dataEncerramento || saude.ultimaAtualizacaoDoc || doc?.updatedAt
+            );
+            const partesEnc = ['Documento encerrado. Não existem próximas tentativas.'];
+            if (saude.dataEmissao || doc?.dataEmissao) {
+                partesEnc.push(`Emissão: ${escapeUx(em.data)}`);
+            }
+            if (saude.dataEncerramento || saude.ultimaAtualizacaoDoc || doc?.updatedAt) {
+                partesEnc.push(`Encerrado: ${escapeUx(enc.data)}${enc.hora ? ` ${escapeUx(enc.hora)}` : ''}`);
+            }
+            metaLinha = partesEnc.join(' · ');
+        } else {
+            const partes = [];
+            if (saude.dataEmissao || doc?.dataEmissao) {
+                const em = formatarDataHoraSeparadoCentral(saude.dataEmissao || doc?.dataEmissao);
+                partes.push(`Emissão: ${escapeUx(em.data)}`);
+            }
+            if (tempoParado) partes.push(`Tempo parado: ${escapeUx(tempoParado)}`);
+            if (saude.detectadoEm) {
+                partes.push(`Detecção: ${escapeUx(formatarDataHoraSeparadoCentral(saude.detectadoEm).hora)}`);
+            }
+            if (ultimaAtualizacao) {
+                partes.push(`Atualização: ${escapeUx(formatarDataHoraSeparadoCentral(ultimaAtualizacao).hora)}`);
+            }
+            if (proximaTentativa) {
+                const cd = formatarCountdownCentral(proximaTentativa);
+                partes.push(`Próxima tentativa: ${escapeUx(cd.dataHora || '—')}`);
+            }
+            if (motivo) partes.push(`Motivo: ${escapeUx(motivo)}`);
+            metaLinha = partes.join(' · ');
+        }
+
+        return `
+            <div class="central-health-doc mb-3" style="border-left:3px solid ${escapeUx(cor)}; padding-left:.75rem">
+                <label class="central-entradas-label">Saúde do documento</label>
+                <div class="d-flex align-items-center gap-2 mb-1">
+                    <span>${escapeUx(saude.indicador || '🟢')}</span>
+                    <strong>${escapeUx(nivel)}</strong>
+                    ${regra ? `<span class="badge bg-light text-dark">${escapeUx(regra)}</span>` : ''}
+                </div>
+                <div class="small">${escapeUx(diagnostico)}</div>
+                ${saude.recomendacao ? `<div class="small text-muted mt-1"><i class="fas fa-lightbulb me-1"></i>${escapeUx(saude.recomendacao)}</div>` : ''}
+                ${metaLinha ? `<div class="small text-muted mt-1">${metaLinha}</div>` : ''}
             </div>`;
     }
 
@@ -881,27 +1607,43 @@
         renderTendenciaKpiCentral,
         obterSnapshotKpisCentral,
         salvarSnapshotKpisCentral,
+        resolverCooldownSefaz656Ux,
         resolverEstadoServicoCentral,
         formatarDataHoraSeparadoCentral,
+        formatarDataEmissaoCurtaCentral,
+        resolverSituacaoSaudeCurtaCentral,
+        montarLinhaSaudeCompactaCentral,
         inferirOrigemTimelineCentral,
         extrairDadosExecutivoCentral,
         avatarFornecedorCentral,
         badgeStatusUx1,
+        setFeatureFlagsCentral,
+        recuperacaoPortalNacionalAtiva,
+        resolverProximaAcaoOperacional,
+        labelStatusOperacionalCentral,
         renderPipelineTimelineUx1,
         renderSkeletonListaDocumentosCentral,
         // RC7.5
         formatarDuracaoHumanaCentral,
         formatarCountdownCentral,
         mensagemAmigavelCentral,
+        resolverStatusRealCentral,
+        explicarStatusCentral,
+        documentoEncerradoCentral,
         resolverDataDocumentoCentral,
         resolverChipEtapaCentral,
         montarEtapasOperacionaisCentral,
         renderBarraProgressoOperacionalCentral,
         renderTimelineOperacionalCentral,
+        renderExplicacaoStatusCentral,
+        renderEventosMirxCentral,
+        renderAuditoriaDocumentalCentral,
         renderChipEtapaCentral,
         renderCardXmlWaitOperacionalCentral,
         renderInfoTecnicasRecolhivelCentral,
         renderPainelSaudeSefazCentral,
+        renderPainelSaudeDocumentalCentral,
+        renderCardSaudeDocumentoCentral,
         renderLoadingEtapasCentral,
         atualizarLiveRegionsCentral
     };

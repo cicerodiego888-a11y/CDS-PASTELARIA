@@ -171,6 +171,13 @@ function carregarAbaAtiva() {
         conteudo.innerHTML = '<div class="alert alert-warning">Contas a Pagar não disponível</div>';
       }
       break;
+    case 'condicoes':
+      if (typeof renderCondicoesPagamento === 'function') {
+        renderCondicoesPagamento();
+      } else {
+        conteudo.innerHTML = '<div class="alert alert-warning">Condições de Pagamento não disponível</div>';
+      }
+      break;
     case 'historico':
       if (typeof renderHistoricoFinanceiro === 'function') {
         renderHistoricoFinanceiro(obterPeriodoFinanceiro());

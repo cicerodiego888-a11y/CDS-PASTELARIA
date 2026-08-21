@@ -36,6 +36,7 @@ class ProdutoSnapshot {
     this.subcategoria_id = dados.subcategoria_id ?? dados.subcategoriaId ?? null;
     this.fornecedor = dados.fornecedor ?? '';
     this.ativo = dados.ativo ?? 1;
+    this.marcaNome = dados.marcaNome ?? dados.marca_nome ?? '';
     this.atributos = dados.atributos ?? {};
     this.metadata = dados.metadata ?? {};
   }
@@ -59,6 +60,7 @@ class ProdutoSnapshot {
       subcategoria_id: row.subcategoria_id,
       fornecedor: row.fornecedor,
       ativo: row.ativo,
+      marcaNome: row.marca_nome ?? row.marcaNome ?? '',
       atributos: {},
       metadata: { origem: 'produtos', carregadoEm: new Date().toISOString() }
     });
@@ -87,7 +89,9 @@ class ProdutoSnapshot {
       unidade: this.unidade,
       ncm: this.ncm,
       cest: this.cest,
-      ativo: this.ativo
+      ativo: this.ativo,
+      marca: this.marcaNome || null,
+      fornecedor: this.fornecedor || null
     };
   }
 
@@ -107,6 +111,7 @@ class ProdutoSnapshot {
       subcategoria_id: this.subcategoria_id,
       fornecedor: this.fornecedor,
       ativo: this.ativo,
+      marcaNome: this.marcaNome,
       atributos: this.atributos,
       metadata: this.metadata
     };

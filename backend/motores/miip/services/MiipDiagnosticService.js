@@ -25,6 +25,7 @@ const REPOSITORIES_OBRIGATORIOS = [
 const ENGINES_OBRIGATORIOS = [
   'engines/gtin/MotorGTIN.js',
   'engines/fornecedor/MotorAssociacaoFornecedor.js',
+  'engines/mubc/MotorUniversalBuscaCandidatos.js',
   'engines/canonical/MotorCanonical.js',
   'engines/attributes/MotorAttributeExtractor.js',
   'engines/synonyms/MotorSynonyms.js',

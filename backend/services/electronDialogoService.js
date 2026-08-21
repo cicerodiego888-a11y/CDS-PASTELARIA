@@ -62,7 +62,29 @@ function selecionarPastaBackup(event) {
   return { sucesso: true, caminho: result.filePaths[0] };
 }
 
+/**
+ * RC14.15.19 — ShellExecute via Electron (abre EXE/pasta com UAC do Windows).
+ * @param {string} caminhoAbs
+ * @returns {Promise<{ sucesso: boolean, erro?: string, caminho?: string }>}
+ */
+async function abrirCaminhoComShell(caminhoAbs) {
+  if (!isElectronRuntime()) {
+    return { sucesso: false, erro: 'NOT_ELECTRON' };
+  }
+  const { shell } = require('electron');
+  const caminho = String(caminhoAbs || '').trim();
+  if (!caminho) {
+    return { sucesso: false, erro: 'Caminho vazio' };
+  }
+  const erro = await shell.openPath(caminho);
+  if (erro) {
+    return { sucesso: false, erro: String(erro), caminho };
+  }
+  return { sucesso: true, caminho };
+}
+
 module.exports = {
   isElectronRuntime,
-  selecionarPastaBackup
+  selecionarPastaBackup,
+  abrirCaminhoComShell
 };

@@ -1,21 +1,14 @@
 /**
- * ToledoPrix4FrameBuilder — Construção centralizada de pacotes Toledo Prix 4 Uno.
+ * ToledoPrix4FrameBuilder — LEGADO / LABORATÓRIO (Sprint 11A)
  *
- * Sprint 11A: formato TEMPORÁRIO documentado — substituir na Sprint 11B
- * pelos frames oficiais 90AX após captura MGV.
+ * RC14.14.2: NÃO usar em produção.
+ * Produção → protocol/ToledoFrameBuilder.js (com checksum XOR).
  *
- * Formato temporário (infraestrutura):
+ * Formato temporário SEM CHK:
  *   [STX 0x02][CMD 2 ASCII][SEP 0x1C][PAYLOAD UTF-8 JSON opcional][ETX 0x03]
  *
- * Respostas simuladas aceitas pelo Parser:
- *   ACK → [STX][AK][SEP][JSON opcional][ETX]
- *   NAK → [STX][NK][SEP][mensagem][ETX]
- *   STATUS → [STX][RS][SEP][JSON][ETX]
- *   PESO → [STX][PW][SEP][JSON][ETX]
- *
- * IMPORTANTE: Nenhum outro arquivo deve montar pacotes — sempre usar este builder.
- *
  * @module ToledoPrix4FrameBuilder
+ * @deprecated Produção usa drivers/toledo/protocol/ToledoFrameBuilder
  */
 
 const { COMANDOS } = require('./ToledoPrix4Constants');

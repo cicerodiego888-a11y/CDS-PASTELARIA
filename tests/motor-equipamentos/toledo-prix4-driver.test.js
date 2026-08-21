@@ -124,7 +124,7 @@ async function main() {
     assert.strictEqual(ToledoPrix4Constants.FABRICANTE, 'Toledo');
     assert.strictEqual(ToledoPrix4Constants.MODELO, 'Prix 4 Uno');
     assert.ok(ToledoPrix4Constants.FIRMWARE_CONHECIDO.includes('90AX'));
-    assert.strictEqual(ToledoPrix4Constants.PORTAS_PADRAO.ethernet, 9100);
+    assert.strictEqual(ToledoPrix4Constants.PORTAS_PADRAO.ethernet, 9000);
     assert.ok(ToledoPrix4Constants.TIMEOUTS.conexao > 0);
     assert.ok(ToledoPrix4Constants.COMANDOS.HANDSHAKE);
   });

@@ -17,18 +17,62 @@ const {
   resolverCustoUnitarioCadastro,
   resolverPrecosCadastroAposCompra,
   obterTotalConvertidoItemCompra,
+  obterQuantidadeComercial,
+  obterQuantidadeConvertida,
+  validarConsistenciaQuantidadesItemCompra,
   validarDistribuicaoConversaoUnidadesItem,
   resolverQuantidadesEstoqueCompraItem,
   calcularSubtotalFinanceiroItemCompra,
   resolverQuantidadesCompraItem
 } = require('../lib/motorConversaoUnidades');
-const { emitirNFeDevolucaoCompra } = require('../services/fiscal/nfeDevolucaoCompra');
+const { obterMuc, resultadoParaJson } = require('../motores/muc');
+const {
+  emitirNFeDevolucaoCompra,
+  prepararNfeDevolucaoCompra,
+  obterNfeDevolucaoPorId,
+  listarHistoricoDevolucaoCompra,
+  cancelarNfeDevolucaoOficial,
+  consultarSituacaoDevolucao,
+  reenviarNfeDevolucao,
+  listarEventosDevolucao,
+  obterPainelStatus,
+  obterXmlVersionado
+} = require('../services/fiscal/nfeDevolucaoCompra');
 const { getMiipService } = require('../motores/miip/getMiipService');
 const centralOrchestrator = require('../motores/central-entradas/CentralEntradasOrchestrator');
 const { logCentralErro } = require('../motores/central-entradas/utils/centralLog');
 const EntradasProdutoIdentificacaoService = require('../motores/produto-identidade/services/EntradasProdutoIdentificacaoService');
 const { espelharIdentificadoresSafe } = require('../motores/produto-identidade');
 const { isProdutoIdentidadeEnabled } = require('../motores/produto-identidade/config/produtoIdentidadeFlags');
+const {
+  normalizarTipoEntrada,
+  TIPO_ENTRADA_PADRAO
+} = require('../services/compras/PoliticaEntradaCompra');
+const {
+  classificarFluxoCompra
+} = require('../services/compras/MotorPoliticaEntradaCompra');
+const {
+  enriquecerItemFiscalCompra,
+  resolverTratamentoFiscalItem
+} = require('../services/compras/TratamentoFiscalItemCompra');
+const configService = require('../services/configuracaoService');
+const { classificarEntrada } = require('../services/compras/ClassificadorEntradaCompra');
+const {
+  montarResumoFiscalEntrada,
+  normalizarEscrituracaoParaPersistencia
+} = require('../services/compras/EscrituracaoEntradaCompra');
+const {
+  gerarGradeParcelas,
+  validarSomaParcelas,
+  normalizarParcelasDetalhe,
+  moeda: moedaParcela
+} = require('../services/compras/MotorParcelamentoCompra');
+const {
+  creditarEstoqueItemCompra
+} = require('../services/compras/creditoEstoqueCompraViaPorta');
+const {
+  debitarEstoqueItemCompra
+} = require('../services/compras/debitoEstoqueCompraViaPorta');
 
 const itemCompraEhFracionado = itemCompraUsaConversaoUnidades;
 const obterTotalConvertidoItemCompraBackend = obterTotalConvertidoItemCompra;
@@ -89,6 +133,10 @@ function toDate(value, fallback = agoraLocalBrasil().slice(0, 10)) {
 
 function addMonths(date, months) {
   return moment(date).add(months, 'months').format('YYYY-MM-DD');
+}
+
+function addDays(date, days) {
+  return moment(date).add(Number(days) || 0, 'days').format('YYYY-MM-DD');
 }
 
 function digitsOnly(value) {
@@ -188,13 +236,22 @@ function criarFinanceiroCompra(compra, callback) {
     data_vencimento,
     parcelas,
     valor_entrada,
-    observacao
+    observacao,
+    numero_nf,
+    dias_entre_parcelas,
+    parcelas_detalhe,
+    parcelas_importadas_xml
   } = compra;
 
   const qtdParcelas = Math.max(1, Number(parcelas) || 1);
   const valorTotal = Number(total) || 0;
   const descricaoBase = `Compra ${id}${fornecedor ? ` - ${fornecedor}` : ''}`;
   const vencimentoBase = toDate(data_vencimento, data_compra);
+  const documentoNf = numero_nf ? String(numero_nf) : null;
+  const gradeCliente = normalizarParcelasDetalhe(parcelas_detalhe);
+  const parcelasImportadasXml = parcelas_importadas_xml === true
+    || parcelas_importadas_xml === 1
+    || String(parcelas_importadas_xml) === '1';
 
   db.run('DELETE FROM financeiro WHERE compra_id = ?', [id], (deleteErr) => {
     if (deleteErr) return callback(deleteErr);
@@ -217,7 +274,7 @@ function criarFinanceiroCompra(compra, callback) {
         'compra',
         payload.status,
         'compra',
-        null,
+        payload.documento || documentoNf,
         payload.vencimento,
         payload.numero_parcela,
         payload.total_parcelas,
@@ -228,6 +285,75 @@ function criarFinanceiroCompra(compra, callback) {
       ], done);
     };
 
+    const inserirGrade = (grade, statusResolver) => {
+      if (!grade.length) {
+        return callback(new Error('Grade de parcelas vazia.'));
+      }
+      const validacao = validarSomaParcelas(grade, valorTotal);
+      if (!validacao.ok) {
+        return callback(new Error(validacao.mensagem || 'Total das parcelas diverge do valor da nota.'));
+      }
+      let pendentes = grade.length;
+      grade.forEach((p) => {
+        const status = typeof statusResolver === 'function'
+          ? statusResolver(p)
+          : 'pendente';
+        const rotulo = p.tipo === 'entrada'
+          ? `${descricaoBase} - Entrada`
+          : `${descricaoBase} - Parcela ${p.numero}/${grade.length}`;
+        inserir({
+          descricao: rotulo,
+          valor: moedaParcela(p.valor),
+          vencimento: toDate(p.vencimento, vencimentoBase),
+          documento: p.documento || documentoNf,
+          numero_parcela: p.numero,
+          total_parcelas: grade.length,
+          status
+        }, (err) => {
+          if (err) return callback(err);
+          pendentes -= 1;
+          if (pendentes === 0) callback(null);
+        });
+      });
+    };
+
+    // RC4.31.14 / RC8.5.0 — grade explícita (XML ou cliente) tem prioridade absoluta
+    if (gradeCliente.length > 0) {
+      return inserirGrade(gradeCliente, (p) => (
+        p.tipo === 'entrada' || condicao_pagamento === 'avista' ? 'pago' : 'pendente'
+      ));
+    }
+
+    if (parcelasImportadasXml) {
+      return callback(new Error('Grade de parcelas importada do XML ausente ou inválida.'));
+    }
+
+    if (condicao_pagamento === 'parcelado' || condicao_pagamento === 'prazo') {
+      if (qtdParcelas > 1 || condicao_pagamento === 'prazo') {
+        const dias = Math.max(0, Number(dias_entre_parcelas) || 30);
+        const gerada = gerarGradeParcelas({
+          valorTotal,
+          quantidadeParcelas: qtdParcelas,
+          diasEntreParcelas: dias,
+          primeiroVencimento: vencimentoBase
+        });
+        return inserirGrade(gerada.parcelas);
+      }
+    }
+
+    if (condicao_pagamento === 'entrada_parcelado' && qtdParcelas > 0 && valor_entrada > 0) {
+      const dias = Math.max(0, Number(dias_entre_parcelas) || 30);
+      const gerada = gerarGradeParcelas({
+        valorTotal,
+        quantidadeParcelas: qtdParcelas,
+        diasEntreParcelas: dias,
+        primeiroVencimento: vencimentoBase,
+        valorEntrada: Number(valor_entrada) || 0
+      });
+      return inserirGrade(gerada.parcelas, (p) => (p.tipo === 'entrada' ? 'pago' : 'pendente'));
+    }
+
+    // legado parcelado sem dias (mensal)
     if (condicao_pagamento === 'parcelado' && qtdParcelas > 1) {
       const valorBase = Math.floor((valorTotal / qtdParcelas) * 100) / 100;
       const resto = Math.round((valorTotal - (valorBase * qtdParcelas)) * 100) / 100;
@@ -240,44 +366,6 @@ function criarFinanceiroCompra(compra, callback) {
           vencimento: addMonths(vencimentoBase, i - 1),
           numero_parcela: i,
           total_parcelas: qtdParcelas,
-          status: 'pendente'
-        }, (err) => {
-          if (err) return callback(err);
-          pendentes -= 1;
-          if (pendentes === 0) callback(null);
-        });
-      }
-      return;
-    }
-
-    if (condicao_pagamento === 'entrada_parcelado' && qtdParcelas > 0 && valor_entrada > 0) {
-      const totalParcelas = qtdParcelas + 1;
-      let pendentes = totalParcelas;
-      // Entrada
-      inserir({
-        descricao: `${descricaoBase} - Entrada`,
-        valor: valor_entrada,
-        vencimento: data_compra,
-        numero_parcela: 1,
-        total_parcelas: totalParcelas,
-        status: 'pago'
-      }, (err) => {
-        if (err) return callback(err);
-        pendentes -= 1;
-        if (pendentes === 0) callback(null);
-      });
-      // Parcelas restantes
-      const valorRestante = valorTotal - valor_entrada;
-      const valorBase = Math.floor((valorRestante / qtdParcelas) * 100) / 100;
-      const resto = Math.round((valorRestante - (valorBase * qtdParcelas)) * 100) / 100;
-      for (let i = 1; i <= qtdParcelas; i++) {
-        const valorParcela = Number((valorBase + (i === qtdParcelas ? resto : 0)).toFixed(2));
-        inserir({
-          descricao: `${descricaoBase} - Parcela ${i + 1}/${totalParcelas}`,
-          valor: valorParcela,
-          vencimento: addMonths(vencimentoBase, i - 1),
-          numero_parcela: i + 1,
-          total_parcelas: totalParcelas,
           status: 'pendente'
         }, (err) => {
           if (err) return callback(err);
@@ -436,34 +524,101 @@ function processarItensCompra(compraId, itens, fornecedor, opcoes, done) {
     }
 
     const item = itens[index++];
-    const qtdsEstoque = resolverQuantidadesEstoqueCompraItem(item);
-    const itemProcessado = {
-      ...item,
-      quantidade_fiscal: qtdsEstoque.quantidade_fiscal,
-      quantidade_nao_fiscal: qtdsEstoque.quantidade_nao_fiscal,
-      quantidade: qtdsEstoque.quantidade,
-      peso_total_compra: qtdsEstoque.quantidade_convertida
-    };
+
+    if (!Number(item.quantidade_embalagens) && Number(item.quantidade_comercial) > 0) {
+      item.quantidade_embalagens = Number(item.quantidade_comercial);
+    }
+    if (!Number(item.quantidade_convertida)) {
+      item.quantidade_convertida = obterQuantidadeConvertida(item);
+    }
+    item.peso_total_compra = obterQuantidadeConvertida(item);
 
     const itemComContexto = {
-      ...itemProcessado,
-      fornecedor: itemProcessado.fornecedor || fornecedor || null,
-      fornecedor_cnpj: itemProcessado.fornecedor_cnpj || fornecedorCnpj || null
+      ...item,
+      fornecedor: item.fornecedor || fornecedor || null,
+      fornecedor_cnpj: item.fornecedor_cnpj || fornecedorCnpj || null
     };
 
     ensureProductForItem(itemComContexto, (prodErr, produtoId) => {
       if (prodErr) return done(prodErr);
 
-      db.get('SELECT preco_compra, preco_venda, controlar_validade FROM produtos WHERE id = ?', [produtoId], (getErr, produto) => {
+      db.get('SELECT * FROM produtos WHERE id = ?', [produtoId], (getProdErr, produtoRow) => {
+        if (getProdErr) return done(getProdErr);
+
+        const itemComProduto = { ...itemComContexto, produto_id: produtoId };
+        const muc = obterMuc(db);
+
+        muc.processarItemCompra(
+          itemComProduto,
+          produtoRow,
+          {
+            fornecedorCnpj: fornecedorCnpj,
+            origem: item.origem_conversao || opcoes.origem || 'MANUAL',
+            registrarAprendizado: true
+          },
+          (mucErr, resultadoMuc) => {
+            if (mucErr) return done(mucErr);
+
+            const qtdsEstoque = {
+              quantidade_comercial: obterQuantidadeComercial(itemComProduto),
+              quantidade: resultadoMuc.quantidadeEstoque,
+              quantidade_fiscal: resultadoMuc.quantidadeFiscal,
+              quantidade_nao_fiscal: resultadoMuc.quantidadeNaoFiscal,
+              quantidade_convertida: resultadoMuc.quantidadeEstoque
+            };
+            const itemProcessado = {
+              ...itemComProduto,
+              quantidade_comercial: qtdsEstoque.quantidade_comercial,
+              quantidade_fiscal: qtdsEstoque.quantidade_fiscal,
+              quantidade_nao_fiscal: qtdsEstoque.quantidade_nao_fiscal,
+              quantidade: qtdsEstoque.quantidade,
+              quantidade_convertida: qtdsEstoque.quantidade_convertida,
+              peso_total_compra: qtdsEstoque.quantidade_convertida,
+              quantidade_embalagens: Number(itemComProduto.quantidade_embalagens || itemComProduto.quantidade_comercial || 0),
+              _muc_resultado: resultadoMuc
+            };
+
+            continuarItem(itemProcessado, qtdsEstoque, produtoId);
+          }
+        );
+      });
+    });
+  }
+
+  function continuarItem(itemProcessado, qtdsEstoque, produtoId) {
+    const fornecedorCnpjLocal = opcoes?.fornecedor_cnpj || null;
+    const resultadoMuc = itemProcessado._muc_resultado || null;
+
+    const itemComContexto = {
+      ...itemProcessado,
+      fornecedor: itemProcessado.fornecedor || fornecedor || null,
+      fornecedor_cnpj: itemProcessado.fornecedor_cnpj || fornecedorCnpjLocal || null
+    };
+
+    db.get('SELECT preco_compra, preco_venda, controlar_validade FROM produtos WHERE id = ?', [produtoId], (getErr, produto) => {
         if (getErr) return done(getErr);
 
         const antigo = { preco_compra: produto?.preco_compra, preco_venda: produto?.preco_venda };
         const controlarValidade = produto?.controlar_validade === 1;
         const qtdTotal = qtdsEstoque.quantidade;
-        const qtdFiscal = qtdsEstoque.quantidade_fiscal;
-        const qtdNaoFiscal = qtdsEstoque.quantidade_nao_fiscal;
+        let qtdFiscal = qtdsEstoque.quantidade_fiscal;
+        let qtdNaoFiscal = qtdsEstoque.quantidade_nao_fiscal;
         const fracionado = itemCompraEhFracionado(itemProcessado);
+        const padraoFiscal = configService.getPadraoFiscal();
+        const itemFiscal = enriquecerItemFiscalCompra(itemProcessado, {
+          tipoEntradaCompra: opcoes?.tipo_entrada,
+          configBonificacao: padraoFiscal
+        });
+        const tratamento = resolverTratamentoFiscalItem(itemFiscal, padraoFiscal);
+        if (!tratamento.gerarEstoque) {
+          qtdFiscal = 0;
+          qtdNaoFiscal = 0;
+        }
         const precosCadastro = resolverPrecosCadastroAposCompra(itemProcessado);
+        if (!tratamento.atualizarCusto) {
+          precosCadastro.precoCompra = Number(produto?.preco_compra || precosCadastro.precoCompra || 0);
+          precosCadastro.atualizarVenda = false;
+        }
         const precoUnitarioGravar = fracionado
           ? precosCadastro.precoCompra
           : moeda(itemProcessado.preco_unitario || precosCadastro.precoCompra || 0);
@@ -471,7 +626,13 @@ function processarItensCompra(compraId, itens, fornecedor, opcoes, done) {
         const precoVendaGravar = precosCadastro.atualizarVenda
           ? (precosCadastro.precoVenda ?? Number(itemProcessado.preco_venda_sugerido || 0))
           : Number(itemProcessado.preco_venda_sugerido || 0);
-        const subtotalGravar = calcularSubtotalFinanceiroItemCompra(itemProcessado);
+        const subtotalGravar = resultadoMuc
+          ? resultadoMuc.subtotal
+          : calcularSubtotalFinanceiroItemCompra(itemProcessado);
+        const apresentacaoId = resultadoMuc?.apresentacaoId
+          || itemProcessado.produto_apresentacao_id
+          || itemProcessado.embalagem_id
+          || null;
 
         db.run(`
           INSERT INTO compras_itens (
@@ -480,8 +641,11 @@ function processarItensCompra(compraId, itens, fornecedor, opcoes, done) {
             frete_rateado, desconto_rateado, outras_despesas_rateado, custo_unitario_final,
             vendido_por_peso, peso_total_compra, custo_por_kg, atualizar_preco_venda, item_fiscal,
             quantidade_fiscal, quantidade_nao_fiscal,
-            compra_em, quantidade_embalagens, quantidade_por_embalagem, valor_total_embalagem
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            compra_em, quantidade_embalagens, quantidade_por_embalagem, valor_total_embalagem,
+            embalagem_id, produto_apresentacao_id, resultado_conversao_json,
+            fator_conversao, tipo_conversao, origem_conversao, confianca_conversao, tipo_origem_compra,
+            cfop, tipo_fiscal_item, bonificacao
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `, [
           compraId,
           produtoId,
@@ -508,77 +672,95 @@ function processarItensCompra(compraId, itens, fornecedor, opcoes, done) {
           itemProcessado.compra_em || null,
           Number(itemProcessado.quantidade_embalagens || 0),
           Number(itemProcessado.quantidade_por_embalagem || 0),
-          Number(itemProcessado.valor_total_embalagem || itemProcessado.subtotal || 0)
+          Number(itemProcessado.valor_total_embalagem || itemProcessado.subtotal || 0),
+          apresentacaoId,
+          apresentacaoId,
+          resultadoMuc ? resultadoParaJson(resultadoMuc) : null,
+          resultadoMuc?.fatorConversao || Number(itemProcessado.quantidade_por_embalagem || 0),
+          resultadoMuc?.tipoConversao || null,
+          resultadoMuc?.origem || itemProcessado.origem_conversao || 'COMPRA',
+          resultadoMuc?.confianca || 0,
+          itemProcessado.tipo_origem_compra || resultadoMuc?.tipoOrigemCompra || null,
+          itemFiscal.cfop || null,
+          itemFiscal.tipo_fiscal_item || null,
+          Number(itemFiscal.bonificacao || 0)
         ], (insertErr) => {
           if (insertErr) return done(insertErr);
 
-          db.run(`
-            UPDATE produtos
-            SET
-              saldo_fiscal = COALESCE(saldo_fiscal, 0) + ?,
-              saldo_nao_fiscal = COALESCE(saldo_nao_fiscal, 0) + ?,
-              estoque_atual = (COALESCE(saldo_fiscal, 0) + ?) + (COALESCE(saldo_nao_fiscal, 0) + ?),
-              preco_compra = ?,
-              preco_venda = CASE WHEN ? = 1 THEN ? ELSE preco_venda END,
-              lucro_percentual = CASE WHEN ? = 1 THEN ? ELSE lucro_percentual END,
-              fornecedor = COALESCE(?, fornecedor),
-              ncm = COALESCE(?, ncm),
-              codigo_barras = COALESCE(?, codigo_barras),
-              unidade = COALESCE(?, unidade),
-              produto_fracionado = CASE WHEN ? = 1 THEN 1 ELSE COALESCE(produto_fracionado, 0) END,
-              vendido_por_peso = CASE WHEN ? = 1 THEN 1 ELSE COALESCE(vendido_por_peso, 0) END,
-              updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-          `, [
-            qtdFiscal,
-            qtdNaoFiscal,
-            qtdFiscal,
-            qtdNaoFiscal,
-            precosCadastro.precoCompra,
+          // Implementação 02.3: crédito F/NF pela porta pública (sem UPDATE de saldo aqui).
+          creditarEstoqueItemCompra(db, {
+            produtoId,
+            quantidadeFiscal: qtdFiscal,
+            quantidadeNaoFiscal: qtdNaoFiscal,
+            empresaId: opcoes?.empresaId ?? opcoes?.empresa_id,
+            usuarioId: opcoes?.usuarioId ?? opcoes?.usuario_id,
+            exigirEmpresa: opcoes?.exigirEmpresa === true,
+            motivoCompat: opcoes?.motivoCompat
+          }, (creditoErr) => {
+            if (creditoErr) return done(creditoErr);
 
-            precosCadastro.atualizarVenda ? 1 : 0,
-            precosCadastro.precoVenda ?? Number(itemProcessado.preco_venda_sugerido || 0),
+            // Metadados do produto (preço/cadastro) — NÃO altera saldos.
+            db.run(`
+              UPDATE produtos
+              SET
+                preco_compra = ?,
+                preco_venda = CASE WHEN ? = 1 THEN ? ELSE preco_venda END,
+                lucro_percentual = CASE WHEN ? = 1 THEN ? ELSE lucro_percentual END,
+                fornecedor = COALESCE(?, fornecedor),
+                ncm = COALESCE(?, ncm),
+                codigo_barras = COALESCE(?, codigo_barras),
+                unidade = COALESCE(?, unidade),
+                produto_fracionado = CASE WHEN ? = 1 THEN 1 ELSE COALESCE(produto_fracionado, 0) END,
+                vendido_por_peso = CASE WHEN ? = 1 THEN 1 ELSE COALESCE(vendido_por_peso, 0) END,
+                updated_at = CURRENT_TIMESTAMP
+              WHERE id = ?
+            `, [
+              precosCadastro.precoCompra,
 
-            precosCadastro.atualizarVenda ? 1 : 0,
-            precosCadastro.lucroPercentual,
+              precosCadastro.atualizarVenda ? 1 : 0,
+              precosCadastro.precoVenda ?? Number(itemProcessado.preco_venda_sugerido || 0),
 
-            fornecedor || null,
-            itemProcessado.ncm || null,
-            itemProcessado.codigo_barras || null,
-            itemProcessado.unidade || 'UN',
+              precosCadastro.atualizarVenda ? 1 : 0,
+              precosCadastro.lucroPercentual,
 
-            Number(itemProcessado.produto_fracionado ?? itemProcessado.vendido_por_peso ?? 0),
+              fornecedor || null,
+              itemProcessado.ncm || null,
+              itemProcessado.codigo_barras || null,
+              itemProcessado.unidade || 'UN',
 
-            Number(itemProcessado.produto_fracionado ?? itemProcessado.vendido_por_peso ?? 0),
+              Number(itemProcessado.produto_fracionado ?? itemProcessado.vendido_por_peso ?? 0),
 
-            produtoId
-          ], (upErr) => {
-            if (upErr) return done(upErr);
+              Number(itemProcessado.produto_fracionado ?? itemProcessado.vendido_por_peso ?? 0),
 
-            if (controlarValidade) {
-              if (!itemProcessado.data_validade) {
-                return done(new Error(`Produto "${itemProcessado.produto_nome || produtoId}" controla validade. Informe a data de validade.`));
-              }
+              produtoId
+            ], (upErr) => {
+              if (upErr) return done(upErr);
 
-              const hoje = new Date().toISOString().split('T')[0];
-
-              lotesService.criarLote({
-                produto_id: produtoId,
-                quantidade_inicial: qtdTotal,
-                data_validade: itemProcessado.data_validade,
-                data_entrada: hoje,
-                origem: 'COMPRA',
-                compra_id: compraId
-              }, (loteErr) => {
-                if (loteErr) {
-                  console.error('Erro ao criar lote para compra:', loteErr.message);
+              if (controlarValidade) {
+                if (!itemProcessado.data_validade) {
+                  return done(new Error(`Produto "${itemProcessado.produto_nome || produtoId}" controla validade. Informe a data de validade.`));
                 }
 
+                const hoje = new Date().toISOString().split('T')[0];
+
+                lotesService.criarLote({
+                  produto_id: produtoId,
+                  quantidade_inicial: qtdTotal,
+                  data_validade: itemProcessado.data_validade,
+                  data_entrada: hoje,
+                  origem: 'COMPRA',
+                  compra_id: compraId
+                }, (loteErr) => {
+                  if (loteErr) {
+                    console.error('Erro ao criar lote para compra:', loteErr.message);
+                  }
+
+                  continuarProcessamento();
+                });
+              } else {
                 continuarProcessamento();
-              });
-            } else {
-              continuarProcessamento();
-            }
+              }
+            });
           });
         });
 
@@ -598,7 +780,6 @@ function processarItensCompra(compraId, itens, fornecedor, opcoes, done) {
               next();
             }
           }
-      });
     });
   }
 
@@ -741,24 +922,26 @@ router.post('/:id/devolver', validarCaixaAberto, (req, res) => {
               const jaDevolvido = resolverJaDevolvidoCompraFiscalPrimeiro(item, qtdJaDevolvida);
               const splitDevolucao = calcularDevolucaoCompraFiscalPrimeiro(item, qtdDevolver, jaDevolvido);
 
-              db.run(`
-                UPDATE produtos
-                SET
-                  saldo_fiscal = saldo_fiscal - ?,
-                  saldo_nao_fiscal = saldo_nao_fiscal - ?,
-                  estoque_atual = (saldo_fiscal - ?) + (saldo_nao_fiscal - ?),
-                  updated_at = CURRENT_TIMESTAMP
-                WHERE id = ?
-              `, [
-                splitDevolucao.qtdFiscal,
-                splitDevolucao.qtdNaoFiscal,
-                splitDevolucao.qtdFiscal,
-                splitDevolucao.qtdNaoFiscal,
-                item.produto_id
-              ], (estoqueErr) => {
+              // Implementação 02.4: débito F/NF pela porta (sem UPDATE de saldo).
+              debitarEstoqueItemCompra(db, {
+                produtoId: item.produto_id,
+                quantidadeFiscal: splitDevolucao.qtdFiscal,
+                quantidadeNaoFiscal: splitDevolucao.qtdNaoFiscal,
+                empresaId: req.body?.empresa_id ?? req.body?.empresaId ?? req.user?.empresa_id ?? req.user?.empresaId,
+                usuarioId: req.operadorId || req.user?.id,
+                origem: 'devolucao_compra'
+              }, (estoqueErr) => {
                 if (estoqueErr) {
                   db.run('ROLLBACK');
-                  return res.status(500).json({ error: estoqueErr.message });
+                  const status = estoqueErr.code === 'SALDO_INSUFICIENTE'
+                    || estoqueErr.code === 'EMPRESA_OBRIGATORIA'
+                    || estoqueErr.code === 'EMPRESA_NAO_ENCONTRADA'
+                    ? 400
+                    : 500;
+                  return res.status(status).json({
+                    error: estoqueErr.message,
+                    code: estoqueErr.code || undefined
+                  });
                 }
 
                 processarProximo();
@@ -860,17 +1043,164 @@ router.post('/:id/devolver', validarCaixaAberto, (req, res) => {
   });
 });
 
-router.get('/', (req, res) => {
+router.get('/relatorio/uso-consumo', (req, res) => {
+  const { inicio, fim } = req.query;
+  let where = `WHERE COALESCE(c.tipo_entrada, '${TIPO_ENTRADA_PADRAO}') = 'USO_CONSUMO'`;
+  const params = [];
+
+  if (inicio) {
+    where += ' AND date(COALESCE(c.data_emissao, c.data_entrada, c.data_compra)) >= date(?)';
+    params.push(inicio);
+  }
+  if (fim) {
+    where += ' AND date(COALESCE(c.data_emissao, c.data_entrada, c.data_compra)) <= date(?)';
+    params.push(fim);
+  }
+
   db.all(`
-    SELECT c.*, 
-      (SELECT COUNT(*) FROM compras_itens WHERE compra_id = c.id) as total_itens,
-      (SELECT COUNT(*) FROM financeiro f WHERE f.compra_id = c.id AND f.status = 'pendente') as parcelas_pendentes
-    FROM compras c 
-    ORDER BY c.data_compra DESC, c.id DESC
-  `, (err, rows) => {
+    SELECT
+      c.*,
+      (SELECT COUNT(*) FROM financeiro f WHERE f.compra_id = c.id) AS total_financeiro,
+      (SELECT COUNT(*) FROM financeiro f WHERE f.compra_id = c.id AND f.status = 'pendente') AS parcelas_pendentes,
+      (SELECT GROUP_CONCAT(f.status || ':' || COALESCE(f.vencimento, ''), '|')
+         FROM financeiro f WHERE f.compra_id = c.id) AS financeiro_resumo,
+      d.id AS central_documento_id,
+      d.chave AS central_chave,
+      (SELECT usuario_nome FROM auditoria a
+         WHERE a.modulo = 'compras' AND a.referencia_tipo = 'compra' AND a.referencia_id = c.id
+         AND a.acao IN ('criar_compra', 'criar_uso_consumo', 'criar_nota_fiscal_avulsa')
+         ORDER BY a.id DESC LIMIT 1) AS usuario_nome
+    FROM compras c
+    LEFT JOIN central_entradas_documentos d ON d.compra_id = c.id
+    ${where}
+    ORDER BY COALESCE(c.data_emissao, c.data_entrada, c.data_compra) DESC, c.id DESC
+  `, params, (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
-    res.json(rows);
+    res.json({
+      success: true,
+      total: (rows || []).length,
+      itens: (rows || []).map((r) => ({
+        id: r.id,
+        data: r.data_emissao || r.data_entrada || r.data_compra,
+        fornecedor: r.fornecedor,
+        fornecedor_cnpj: r.fornecedor_cnpj,
+        numero_nf: r.numero_nf,
+        serie_nf: r.serie_nf,
+        valor: Number(r.valor_total_nota || r.total || 0),
+        situacao: r.status,
+        chave_acesso: r.chave_acesso,
+        central_documento_id: r.central_documento_id,
+        central_chave: r.central_chave,
+        xml_disponivel: Boolean(r.central_documento_id || r.chave_acesso),
+        financeiro: {
+          total: Number(r.total_financeiro || 0),
+          pendentes: Number(r.parcelas_pendentes || 0),
+          resumo: r.financeiro_resumo || null
+        },
+        usuario: r.usuario_nome || null,
+        tipo_entrada: r.tipo_entrada || TIPO_ENTRADA_PADRAO,
+        observacao: r.observacao || null
+      }))
+    });
   });
+});
+
+router.get('/politicas-entrada', (_req, res) => {
+  const { listarTiposEntrada } = require('../services/compras/PoliticaEntradaCompra');
+  res.json({ success: true, tipos: listarTiposEntrada() });
+});
+
+router.post('/classificar-entrada', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const resultado = await classificarEntrada({
+      xml: body.xml,
+      dadosCompra: body.dadosCompra || body.dados_compra || body,
+      fornecedor_cnpj: body.fornecedor_cnpj,
+      cfop: body.cfop,
+      natureza: body.natureza || body.natureza_operacao,
+      finalidade: body.finalidade || body.finNFe
+    });
+    return res.json({
+      success: true,
+      tipoEntrada: resultado.tipoEntrada,
+      confianca: resultado.confianca,
+      motivo: resultado.motivo,
+      label: resultado.label,
+      sinais: resultado.sinais
+    });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      error: err.message || String(err)
+    });
+  }
+});
+
+/** RC4.31.12 — Simulação MUC para compra manual (sem persistência). */
+router.post('/simular-conversao-muc', (req, res) => {
+  try {
+    const body = req.body || {};
+    const muc = obterMuc(db);
+    const resultado = muc.simular({
+      quantidadeCompra: Number(body.quantidadeCompra ?? body.quantidade_embalagens ?? 0),
+      quantidadePorApresentacao: Number(body.quantidadePorApresentacao ?? body.quantidade_por_embalagem ?? 0),
+      valorTotal: Number(body.valorTotal ?? body.valor_total_embalagem ?? 0)
+    });
+    return res.json({ success: true, resultado: { ...resultado } });
+  } catch (err) {
+    return res.status(400).json({ success: false, error: err.message || String(err) });
+  }
+});
+
+router.post('/resumo-fiscal-entrada', (req, res) => {
+  try {
+    const body = req.body || {};
+    const resumo = montarResumoFiscalEntrada({
+      xml: body.xml,
+      tipo_entrada: body.tipo_entrada || body.tipoEntrada,
+      dadosCompra: body.dadosCompra || body.dados_compra || body,
+      fornecedor: body.fornecedor,
+      valor_total_nota: body.valor_total_nota,
+      cfop: body.cfop,
+      csosn_cst: body.csosn_cst,
+      cst_pis: body.cst_pis,
+      cst_cofins: body.cst_cofins,
+      cst_ipi: body.cst_ipi,
+      natureza_operacao: body.natureza_operacao,
+      escrituracao_motivo: body.escrituracao_motivo
+    });
+    return res.json({ success: true, ...resumo });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message || String(err) });
+  }
+});
+
+router.get('/', (req, res) => {
+  const { garantirTabelas } = require('../services/fiscal/nfeDevolucaoCompra');
+  const { garantirTabelasSaldoDevolucao } = require('../services/fiscal/controleSaldoDevolucaoCompra');
+  Promise.resolve(garantirTabelas())
+    .then(() => garantirTabelasSaldoDevolucao())
+    .then(() => {
+    db.all(`
+      SELECT c.*, 
+        (SELECT COUNT(*) FROM compras_itens WHERE compra_id = c.id) as total_itens,
+        (SELECT COUNT(*) FROM financeiro f WHERE f.compra_id = c.id AND f.status = 'pendente') as parcelas_pendentes,
+        (SELECT d.id FROM nfe_devolucoes_compra d
+          WHERE d.compra_id = c.id AND d.status = 'autorizada'
+          ORDER BY d.id DESC LIMIT 1) as nfe_devolucao_autorizada_id,
+        (SELECT COALESCE(SUM(i.quantidade), 0)
+          FROM nfe_devolucao_compra_itens i
+          INNER JOIN nfe_devolucoes_compra n ON n.id = i.nfe_devolucao_id
+          WHERE i.compra_id = c.id AND n.status = 'autorizada') as qtd_devolvida_fiscal,
+        (SELECT COALESCE(SUM(ci.quantidade), 0) FROM compras_itens ci WHERE ci.compra_id = c.id) as qtd_comprada_total
+      FROM compras c 
+      ORDER BY c.data_compra DESC, c.id DESC
+    `, (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json(rows);
+    });
+  }).catch((err) => res.status(500).json({ error: err.message }));
 });
 
 router.get('/:id', (req, res) => {
@@ -929,6 +1259,8 @@ router.post('/', (req, res) => {
     valor_desconto,
     valor_frete,
     valor_outras_despesas,
+    valor_ipi,
+    valor_seguro,
     valor_total_nota,
     total,
     itens,
@@ -938,13 +1270,70 @@ router.post('/', (req, res) => {
     parcelas,
     valor_entrada,
     observacao,
+    dias_entre_parcelas,
+    parcelas_detalhe,
+    parcelas_importadas_xml,
     nota_fiscal_avulsa,
+    tipo_entrada,
+    tipo_entrada_sugerido,
+    tipo_entrada_confianca,
+    tipo_entrada_motivo,
+    cfop,
+    cfop_xml,
+    csosn_cst,
+    csosn_cst_xml,
+    cst_pis,
+    cst_pis_xml,
+    cst_cofins,
+    cst_cofins_xml,
+    cst_ipi,
+    cst_ipi_xml,
+    natureza_operacao,
+    natureza_operacao_xml,
+    escrituracao_motivo,
+    xml: xmlBody,
     central_documento_id: centralDocumentoId
   } = req.body;
 
-  const isNotaAvulsa = Number(nota_fiscal_avulsa) === 1;
+  const tipoEntrada = normalizarTipoEntrada(tipo_entrada);
+  const tipoSugerido = tipo_entrada_sugerido
+    ? normalizarTipoEntrada(tipo_entrada_sugerido)
+    : null;
+  const confiancaSugestao = tipo_entrada_confianca != null
+    ? Math.max(0, Math.min(100, Number(tipo_entrada_confianca) || 0))
+    : null;
+  const motivoSugestao = tipo_entrada_motivo
+    ? String(tipo_entrada_motivo).slice(0, 500)
+    : null;
+  const tipoAlterado = tipoSugerido && tipoSugerido !== tipoEntrada ? 1 : 0;
 
-  if (!isNotaAvulsa) {
+  const resumoEscrituracao = montarResumoFiscalEntrada({
+    xml: xmlBody || null,
+    tipo_entrada: tipoEntrada,
+    dadosCompra: { fornecedor, valor_total_nota, natureza_operacao },
+    fornecedor,
+    valor_total_nota,
+    cfop,
+    csosn_cst,
+    cst_pis,
+    cst_cofins,
+    cst_ipi,
+    natureza_operacao,
+    cfop_xml,
+    csosn_cst_xml,
+    cst_pis_xml,
+    cst_cofins_xml,
+    cst_ipi_xml,
+    natureza_xml: natureza_operacao_xml,
+    escrituracao_motivo
+  });
+  const escrituracao = normalizarEscrituracaoParaPersistencia(req.body, resumoEscrituracao);
+  const fluxo = classificarFluxoCompra({ tipo_entrada: tipoEntrada, nota_fiscal_avulsa, itens });
+  const isNotaAvulsa = fluxo.isNotaAvulsa;
+  const isUsoConsumo = fluxo.tipoEntrada === 'USO_CONSUMO';
+  const entradaSimplificada = fluxo.entradaSimplificada;
+
+  if (!entradaSimplificada) {
     if (!Array.isArray(itens) || itens.length === 0) {
       return res.status(400).json({ error: 'Informe ao menos um item para a compra.' });
     }
@@ -972,32 +1361,63 @@ router.post('/', (req, res) => {
   let diferencaTotal;
   let itensComRateio;
 
-  if (isNotaAvulsa) {
+  const { calcularTotalComponentes } = require('../services/compras/ImportacaoFinanceiraNfe');
+
+  if (entradaSimplificada) {
     totalItensCalculado = moeda(valor_total_nota || totalNum);
     totalCalculadoComAjustes = moeda(valor_total_nota || totalNum);
     diferencaTotal = 0;
     itensComRateio = [];
   } else {
+    const padraoFiscalBonif = configService.getPadraoFiscal();
+    const itensFiscais = (itens || []).map((item) => enriquecerItemFiscalCompra(item, {
+      tipoEntradaCompra: tipoEntrada,
+      configBonificacao: padraoFiscalBonif
+    }));
+
     totalItensCalculado = moeda(
-      itens.reduce((sum, item) => sum + moeda(item.subtotal), 0)
+      itensFiscais.reduce((sum, item) => sum + moeda(item.subtotal), 0)
     );
 
-    totalCalculadoComAjustes = moeda(
-      totalItensCalculado - Number(valor_desconto || 0) + Number(valor_frete || 0) + Number(valor_outras_despesas || 0)
-    );
+    // RC 5.4.1 — componentes incluem IPI e seguro; total oficial = XML (valor_total_nota)
+    totalCalculadoComAjustes = calcularTotalComponentes({
+      valor_produtos: totalItensCalculado,
+      valor_desconto,
+      valor_frete,
+      valor_seguro,
+      valor_outras_despesas,
+      valor_ipi
+    });
 
     const totalXml = moeda(valor_total_nota || totalNum);
     diferencaTotal = moeda(totalXml - totalCalculadoComAjustes);
 
-    itensComRateio = calcularRateioItens(itens, {
+    itensComRateio = calcularRateioItens(itensFiscais, {
       valor_frete,
       valor_desconto,
       valor_outras_despesas
     });
   }
 
+  // Total persistido = valor informado (XML), nunca um recálculo divergente
+  const totalOficial = moeda(valor_total_nota || totalNum || totalCalculadoComAjustes);
+
   const condicao = condicao_pagamento || 'avista';
-  const qtdParcelas = Math.max(1, Number(parcelas) || 1);
+  const gradeParcelasReq = normalizarParcelasDetalhe(parcelas_detalhe);
+  const parcelasImportadasXmlReq = parcelas_importadas_xml === true
+    || parcelas_importadas_xml === 1
+    || String(parcelas_importadas_xml) === '1';
+  const qtdParcelas = gradeParcelasReq.length > 0
+    ? gradeParcelasReq.length
+    : Math.max(1, Number(parcelas) || 1);
+  const diasEntre = Math.max(0, Number(dias_entre_parcelas) || 30);
+
+  if (condicao !== 'avista' && gradeParcelasReq.length > 0) {
+    const validacaoGrade = validarSomaParcelas(gradeParcelasReq, totalOficial);
+    if (!validacaoGrade.ok) {
+      return res.status(400).json({ error: validacaoGrade.mensagem || 'Total das parcelas diverge do valor da nota.' });
+    }
+  }
 
   const continuarGravacao = () => {
     db.serialize(() => {
@@ -1007,11 +1427,16 @@ router.post('/', (req, res) => {
         INSERT INTO compras (
           data_compra, data_emissao, data_entrada, fornecedor, fornecedor_cnpj,
           numero_nf, serie_nf, modelo_nf, chave_acesso,
-          valor_produtos, valor_desconto, valor_frete, valor_outras_despesas,
+          valor_produtos, valor_desconto, valor_frete, valor_seguro, valor_outras_despesas, valor_ipi,
           valor_total_nota, total, total_xml, total_itens_calculado, diferenca_total,
           status, condicao_pagamento, forma_pagamento, data_vencimento,
-          parcelas, valor_entrada, observacao, nota_fiscal_avulsa
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?)
+          parcelas, valor_entrada, dias_entre_parcelas, observacao, nota_fiscal_avulsa, tipo_entrada,
+          tipo_entrada_sugerido, tipo_entrada_confianca, tipo_entrada_motivo, tipo_entrada_alterado,
+          natureza_operacao, natureza_operacao_xml, cfop, cfop_xml,
+          csosn_cst, csosn_cst_xml, cst_pis, cst_pis_xml,
+          cst_cofins, cst_cofins_xml, cst_ipi, cst_ipi_xml,
+          escrituracao_alterada, escrituracao_motivo
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         data_compra,
         data_emissao || null,
@@ -1025,18 +1450,41 @@ router.post('/', (req, res) => {
         Number(valor_produtos) || 0,
         Number(valor_desconto) || 0,
         Number(valor_frete) || 0,
+        Number(valor_seguro) || 0,
         Number(valor_outras_despesas) || 0,
-        totalCalculadoComAjustes,
-        totalCalculadoComAjustes,
-        totalCalculadoComAjustes,
+        Number(valor_ipi) || 0,
+        totalOficial,
+        totalOficial,
+        totalOficial,
         totalItensCalculado,
         diferencaTotal,
+        condicao,
         forma_pagamento || null,
         data_vencimento || (condicao === 'avista' ? data_compra : null),
-        condicao === 'parcelado' || condicao === 'entrada_parcelado' ? qtdParcelas : 1,
+        condicao === 'avista' ? 1 : qtdParcelas,
         Number(valor_entrada) || 0,
+        diasEntre,
         observacao || null,
-        isNotaAvulsa ? 1 : 0
+        isNotaAvulsa ? 1 : 0,
+        tipoEntrada,
+        tipoSugerido,
+        confiancaSugestao,
+        motivoSugestao,
+        tipoAlterado,
+        escrituracao.natureza_operacao,
+        escrituracao.natureza_operacao_xml,
+        escrituracao.cfop,
+        escrituracao.cfop_xml,
+        escrituracao.csosn_cst,
+        escrituracao.csosn_cst_xml,
+        escrituracao.cst_pis,
+        escrituracao.cst_pis_xml,
+        escrituracao.cst_cofins,
+        escrituracao.cst_cofins_xml,
+        escrituracao.cst_ipi,
+        escrituracao.cst_ipi_xml,
+        escrituracao.escrituracao_alterada,
+        escrituracao.escrituracao_motivo
       ], function(err) {
         if (err) {
           db.run('ROLLBACK');
@@ -1050,18 +1498,21 @@ router.post('/', (req, res) => {
 
         const compraId = this.lastID;
 
-        if (isNotaAvulsa) {
-          // Nota Fiscal Avulsa: skip item processing, only create financial records
+        if (entradaSimplificada) {
           criarFinanceiroCompra({
             id: compraId,
             data_compra,
             fornecedor,
-            total: totalCalculadoComAjustes,
+            total: totalOficial,
             condicao_pagamento: condicao,
             forma_pagamento,
             data_vencimento: data_vencimento || (condicao === 'avista' ? data_compra : null),
-            parcelas: (condicao === 'parcelado' || condicao === 'entrada_parcelado') ? qtdParcelas : 1,
+            parcelas: condicao === 'avista' ? 1 : qtdParcelas,
             valor_entrada: Number(valor_entrada) || 0,
+            dias_entre_parcelas: diasEntre,
+            parcelas_detalhe: gradeParcelasReq,
+            parcelas_importadas_xml: parcelasImportadasXmlReq,
+            numero_nf,
             observacao
           }, (finErr) => {
             if (finErr) {
@@ -1071,21 +1522,44 @@ router.post('/', (req, res) => {
 
             db.run('COMMIT');
 
+            const acaoAuditoria = isUsoConsumo ? 'criar_uso_consumo' : 'criar_nota_fiscal_avulsa';
+            const mensagem = isUsoConsumo
+              ? 'Compra de Uso e Consumo registrada com sucesso.'
+              : 'Nota Fiscal Avulsa registrada com sucesso.';
+
             gravarAuditoria({
               usuario_id: req.user?.id || null,
               usuario_nome: req.user?.nome || req.user?.username || null,
               modulo: 'compras',
-              acao: 'criar_nota_fiscal_avulsa',
+              acao: acaoAuditoria,
               referencia_tipo: 'compra',
               referencia_id: compraId,
-              detalhes: { total: totalCalculadoComAjustes, fornecedor, nota_fiscal_avulsa: true },
+              detalhes: {
+                total: totalOficial,
+                fornecedor,
+                tipo_entrada: tipoEntrada,
+                tipo_entrada_sugerido: tipoSugerido,
+                tipo_entrada_confianca: confiancaSugestao,
+                tipo_entrada_motivo: motivoSugestao,
+                tipo_entrada_alterado: Boolean(tipoAlterado),
+                nota_fiscal_avulsa: isNotaAvulsa,
+                escrituracao: {
+                  original: resumoEscrituracao.original,
+                  utilizado: resumoEscrituracao.utilizado,
+                  alterada: Boolean(escrituracao.escrituracao_alterada),
+                  motivo: escrituracao.escrituracao_motivo,
+                  xml_imutavel: true
+                }
+              },
               ip_requisicao: req.ip || null
-            }).catch((auditErr) => console.error('Erro ao gravar auditoria de nota fiscal avulsa:', auditErr));
+            }).catch((auditErr) => console.error('Erro ao gravar auditoria de entrada simplificada:', auditErr));
 
             const payloadResposta = {
               id: compraId,
-              message: 'Nota Fiscal Avulsa registrada com sucesso.',
-              nota_fiscal_avulsa: true
+              message: mensagem,
+              tipo_entrada: tipoEntrada,
+              nota_fiscal_avulsa: isNotaAvulsa,
+              uso_consumo: isUsoConsumo
             };
 
             vincularDocumentoCentralAposCompra(centralDocumentoId, compraId, req.user?.id)
@@ -1094,7 +1568,12 @@ router.post('/', (req, res) => {
         } else {
           // Compra Normal: process items and create financial records
           console.log('Processando itens da compra:', compraId, itensComRateio);
-          processarItensCompra(compraId, itensComRateio, fornecedor, { fornecedor_cnpj }, (itensErr) => {
+          processarItensCompra(compraId, itensComRateio, fornecedor, {
+            fornecedor_cnpj,
+            tipo_entrada: tipoEntrada,
+            empresaId: req.body?.empresa_id ?? req.body?.empresaId ?? req.user?.empresa_id ?? req.user?.empresaId,
+            usuarioId: req.user?.id
+          }, (itensErr) => {
             if (itensErr) {
               console.error('Erro ao processar itens da compra:', itensErr);
               db.run('ROLLBACK');
@@ -1105,12 +1584,16 @@ router.post('/', (req, res) => {
               id: compraId,
               data_compra,
               fornecedor,
-              total: totalCalculadoComAjustes,
+              total: totalOficial,
               condicao_pagamento: condicao,
               forma_pagamento,
               data_vencimento: data_vencimento || (condicao === 'avista' ? data_compra : null),
-              parcelas: (condicao === 'parcelado' || condicao === 'entrada_parcelado') ? qtdParcelas : 1,
+              parcelas: condicao === 'avista' ? 1 : qtdParcelas,
               valor_entrada: Number(valor_entrada) || 0,
+              dias_entre_parcelas: diasEntre,
+              parcelas_detalhe: gradeParcelasReq,
+              parcelas_importadas_xml: parcelasImportadasXmlReq,
+              numero_nf,
               observacao
             }, (finErr) => {
               if (finErr) {
@@ -1127,13 +1610,29 @@ router.post('/', (req, res) => {
                 acao: 'criar_compra',
                 referencia_tipo: 'compra',
                 referencia_id: compraId,
-                detalhes: { total: totalCalculadoComAjustes, fornecedor },
+                detalhes: {
+                  total: totalOficial,
+                  fornecedor,
+                  tipo_entrada: tipoEntrada,
+                  tipo_entrada_sugerido: tipoSugerido,
+                  tipo_entrada_confianca: confiancaSugestao,
+                  tipo_entrada_motivo: motivoSugestao,
+                  tipo_entrada_alterado: Boolean(tipoAlterado),
+                  escrituracao: {
+                    original: resumoEscrituracao.original,
+                    utilizado: resumoEscrituracao.utilizado,
+                    alterada: Boolean(escrituracao.escrituracao_alterada),
+                    motivo: escrituracao.escrituracao_motivo,
+                    xml_imutavel: true
+                  }
+                },
                 ip_requisicao: req.ip || null
               }).catch((auditErr) => console.error('Erro ao gravar auditoria de criação de compra:', auditErr));
 
               const payloadResposta = {
                 id: compraId,
                 message: 'Compra registrada com sucesso e integrada ao estoque/financeiro.',
+                tipo_entrada: tipoEntrada,
                 conferencia: {
                   total_xml: totalCalculadoComAjustes,
                   total_itens_calculado: totalItensCalculado,
@@ -1220,8 +1719,13 @@ router.post('/:id/cancelar', (req, res) => {
           return res.status(500).json({ error: itensErr.message });
         }
 
+        const tipoEntrada = normalizarTipoEntrada(compra.tipo_entrada);
+        const pularEstoque = !itens.length
+          || Number(compra.nota_fiscal_avulsa) === 1
+          || tipoEntrada === 'USO_CONSUMO';
+
         const validarEstoque = (index = 0) => {
-          if (index >= itens.length) return baixarEstoque();
+          if (pularEstoque || index >= itens.length) return baixarEstoque();
 
           const item = itens[index];
 
@@ -1246,29 +1750,31 @@ router.post('/:id/cancelar', (req, res) => {
         };
 
         const baixarEstoque = (index = 0) => {
-          if (index >= itens.length) return finalizarCancelamento();
+          if (pularEstoque || index >= itens.length) return finalizarCancelamento();
 
           const item = itens[index];
           const qtds = resolverQuantidadesCompraItemPersistido(item);
 
-          db.run(`
-            UPDATE produtos
-            SET
-              saldo_fiscal = saldo_fiscal - ?,
-              saldo_nao_fiscal = saldo_nao_fiscal - ?,
-              estoque_atual = (saldo_fiscal - ?) + (saldo_nao_fiscal - ?),
-              updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-          `, [
-            qtds.quantidade_fiscal,
-            qtds.quantidade_nao_fiscal,
-            qtds.quantidade_fiscal,
-            qtds.quantidade_nao_fiscal,
-            item.produto_id
-          ], (upErr) => {
+          // Implementação 02.4: débito F/NF pela porta (sem UPDATE de saldo).
+          debitarEstoqueItemCompra(db, {
+            produtoId: item.produto_id,
+            quantidadeFiscal: qtds.quantidade_fiscal,
+            quantidadeNaoFiscal: qtds.quantidade_nao_fiscal,
+            empresaId: req.body?.empresa_id ?? req.body?.empresaId ?? req.user?.empresa_id ?? req.user?.empresaId,
+            usuarioId: req.user?.id,
+            origem: 'cancelamento_compra'
+          }, (upErr) => {
             if (upErr) {
               db.run('ROLLBACK');
-              return res.status(500).json({ error: upErr.message });
+              const status = upErr.code === 'SALDO_INSUFICIENTE'
+                || upErr.code === 'EMPRESA_OBRIGATORIA'
+                || upErr.code === 'EMPRESA_NAO_ENCONTRADA'
+                ? 400
+                : 500;
+              return res.status(status).json({
+                error: upErr.message,
+                code: upErr.code || undefined
+              });
             }
 
             baixarEstoque(index + 1);
@@ -1334,17 +1840,162 @@ router.post('/parse-xml', async (req, res) => {
   });
 });
 
+/** RC1 — pré-preenchimento Central NF-e modo DEVOLUÇÃO */
+router.get('/:id/nfe-devolucao/preparar', async (req, res) => {
+  try {
+    const prep = await prepararNfeDevolucaoCompra(Number(req.params.id));
+    res.json({ success: true, ...prep });
+  } catch (error) {
+    console.error('Erro ao preparar NF-e de devolução:', error);
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+      code: error.code || null
+    });
+  }
+});
+
+router.get('/:id/nfe-devolucao/historico', async (req, res) => {
+  try {
+    const historico = await listarHistoricoDevolucaoCompra(Number(req.params.id));
+    res.json({ success: true, ...historico });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+router.get('/nfe-devolucao/:notaId/xml', async (req, res) => {
+  try {
+    const tipo = String(req.query.tipo || 'assinado').toLowerCase();
+    const xml = await obterXmlVersionado(Number(req.params.notaId), tipo);
+    const nota = await obterNfeDevolucaoPorId(Number(req.params.notaId));
+    if (!nota) return res.status(404).json({ error: 'NF-e de devolução não encontrada.' });
+    if (!xml) return res.status(404).json({ error: `XML (${tipo}) não disponível.` });
+    res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="nfe-devolucao-${tipo}-${nota.chave_acesso || nota.id}.xml"`
+    );
+    res.send(xml);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.get('/nfe-devolucao/:notaId/danfe', async (req, res) => {
+  try {
+    const nota = await obterNfeDevolucaoPorId(Number(req.params.notaId));
+    if (!nota) return res.status(404).json({ error: 'NF-e de devolução não encontrada.' });
+    const cancelado = String(req.query.tipo || '').toLowerCase() === 'cancelado';
+    const html = cancelado ? nota.danfe_html_cancelado : nota.danfe_html;
+    if (!html) {
+      return res.status(404).json({
+        error: cancelado ? 'DANFE cancelado não disponível.' : 'DANFE não disponível.'
+      });
+    }
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.get('/nfe-devolucao/:notaId/status', async (req, res) => {
+  try {
+    const painel = await obterPainelStatus(Number(req.params.notaId));
+    if (!painel) return res.status(404).json({ success: false, error: 'NF-e de devolução não encontrada.' });
+    res.json({ success: true, ...painel });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+router.get('/nfe-devolucao/:notaId/eventos', async (req, res) => {
+  try {
+    const eventos = await listarEventosDevolucao(Number(req.params.notaId));
+    res.json({ success: true, eventos });
+  } catch (error) {
+    res.status(error.statusCode || 500).json({ success: false, error: error.message });
+  }
+});
+
+router.post('/nfe-devolucao/:notaId/consultar', async (req, res) => {
+  try {
+    const out = await consultarSituacaoDevolucao(Number(req.params.notaId), {
+      usuarioId: req.usuario?.id || req.user?.id || null,
+      usuarioNome: req.usuario?.nome || req.user?.nome || req.usuario?.username || null,
+      ip: req.ip || req.headers['x-forwarded-for'] || null,
+      computador: req.headers['x-computer-name'] || req.headers['x-client-host'] || null
+    });
+    res.json(out);
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+      code: error.code || null
+    });
+  }
+});
+
+router.post('/nfe-devolucao/:notaId/reenviar', async (req, res) => {
+  try {
+    const out = await reenviarNfeDevolucao(Number(req.params.notaId), {
+      usuarioId: req.usuario?.id || req.user?.id || null,
+      usuarioNome: req.usuario?.nome || req.user?.nome || req.usuario?.username || null,
+      ip: req.ip || req.headers['x-forwarded-for'] || null,
+      computador: req.headers['x-computer-name'] || req.headers['x-client-host'] || null
+    });
+    res.json(out);
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+      code: error.code || null
+    });
+  }
+});
+
+router.post('/nfe-devolucao/:notaId/cancelar', async (req, res) => {
+  try {
+    const out = await cancelarNfeDevolucaoOficial(Number(req.params.notaId), {
+      motivo: req.body?.motivo || req.body?.justificativa,
+      usuarioId: req.usuario?.id || req.user?.id || null,
+      usuarioNome: req.usuario?.nome || req.user?.nome || req.usuario?.username || null,
+      ip: req.ip || req.headers['x-forwarded-for'] || null,
+      computador: req.headers['x-computer-name'] || req.headers['x-client-host'] || null,
+      forcarPrazo: Boolean(req.body?.forcarPrazo)
+    });
+    res.status(out.success ? 200 : 422).json(out);
+  } catch (error) {
+    res.status(error.statusCode || 500).json({
+      success: false,
+      error: error.message,
+      code: error.code || error.codigo || null
+    });
+  }
+});
+
 router.post('/:id/emitir-nfe-devolucao', async (req, res) => {
   try {
     const compraId = Number(req.params.id);
+    const body = req.body || {};
 
-    const resultado = await emitirNFeDevolucaoCompra(compraId);
+    const resultado = await emitirNFeDevolucaoCompra(compraId, {
+      itens: body.itens,
+      observacoes: body.observacoes,
+      cfop: body.cfop,
+      refNFe: body.refNFe || body.chave_referenciada || body.chaveReferenciada,
+      usuarioId: req.usuario?.id || req.user?.id || body.usuarioId || null,
+      usuarioNome: req.usuario?.nome || req.user?.nome || req.usuario?.username || body.usuarioNome || null,
+      ip: req.ip || req.headers['x-forwarded-for'] || null,
+      computador: req.headers['x-computer-name'] || req.headers['x-client-host'] || null
+    });
 
     if (!resultado.success && resultado.status === 'rejeitada') {
       return res.status(400).json({
         sucesso: false,
         autorizado: false,
-        mensagem: 'NF-e de devolução rejeitada pela SEFAZ.',
+        mensagem: resultado.message || 'NF-e de devolução rejeitada pela SEFAZ.',
         cStat: resultado.cStat,
         xMotivo: resultado.xMotivo,
         retornoSefaz: resultado.retorno,
@@ -1352,15 +2003,36 @@ router.post('/:id/emitir-nfe-devolucao', async (req, res) => {
       });
     }
 
+    if (!resultado.success && ['erro_assinatura', 'erro_comunicacao', 'erro_validacao', 'modulo_desabilitado'].includes(resultado.status)) {
+      return res.status(400).json({
+        sucesso: false,
+        error: resultado.message,
+        code: resultado.code || resultado.status,
+        resultado
+      });
+    }
+
     res.json({
-      message: resultado.success
-        ? 'NF-e de devolução autorizada com sucesso.'
-        : 'NF-e de devolução enviada/processada.',
-      resultado
+      message: resultado.message
+        || (resultado.success
+          ? 'NF-e de devolução autorizada com sucesso.'
+          : 'NF-e de devolução enviada/processada.'),
+      resultado,
+      notaId: resultado.notaId || resultado.idNota,
+      status: resultado.status,
+      chaveAcesso: resultado.chaveAcesso || resultado.chave,
+      protocolo: resultado.protocolo,
+      recibo: resultado.recibo || null,
+      numero: resultado.numero,
+      serie: resultado.serie
     });
   } catch (error) {
     console.error('Erro ao emitir NF-e de devolução:', error);
-    res.status(500).json({ error: error.message });
+    res.status(error.statusCode || 500).json({
+      error: error.message,
+      code: error.code || null,
+      erros: error.erros || null
+    });
   }
 });
 

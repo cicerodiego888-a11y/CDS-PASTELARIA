@@ -139,3 +139,30 @@
 .miip-importacao-status i {
   font-size: 0.8rem;
 }
+
+/* RC4.31.26 — próximo produto a lançar (destaque temporário) */
+tr.compra-item-proximo {
+  background: rgba(13, 110, 253, 0.08) !important;
+  box-shadow: inset 3px 0 0 #0d6efd;
+  outline: 1px solid rgba(13, 110, 253, 0.35);
+  outline-offset: -1px;
+  animation: compra-item-proximo-pulse 1.1s ease-in-out 2;
+}
+
+tr.compra-item-proximo td {
+  position: relative;
+}
+
+.compra-item-proximo-badge {
+  background: #0d6efd;
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  vertical-align: middle;
+}
+
+@keyframes compra-item-proximo-pulse {
+  0%, 100% { background: rgba(13, 110, 253, 0.08); }
+  50% { background: rgba(13, 110, 253, 0.16); }
+}

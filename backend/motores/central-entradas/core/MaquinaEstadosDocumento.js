@@ -1,69 +1,116 @@
 /**
- * MaquinaEstadosDocumento — Validação de transições de estado do documento fiscal.
- *
- * RC3: transições alinhadas aos fluxos reais (persistência → processamento → compras).
- * RC6.2: AGUARDANDO_XML_COMPLETO para resumos DF-e (resNFe).
- *
- * Notas de consolidação:
- * - RECEBIDA: reservado (default de inserir); fluxo normal persiste como SINCRONIZADA/DUPLICADA/AGUARDANDO_XML_COMPLETO.
- * - EM_PROCESSAMENTO → REVISADA: removido (nunca usado pelo pipeline; usa AGUARDANDO_REVISAO).
- * - REVISADA → EM_COMPRA: permitido para alinhar com registrarAberturaCompra.
- * - AGUARDANDO_XML_COMPLETO: não entra no pipeline Parser/MIIP até haver XML completo (→ SINCRONIZADA).
- * - RC3.3.3: CIENCIA_PENDENTE / CIENCIA_ENVIADA / PROCESSADA são etapas observáveis (eventos),
- *   não status de documento — ver core/CicloDfeEstadosMap.js.
+ * MaquinaEstadosDocumento — Transições RC3.7.1.
  *
  * @module motores/central-entradas/core/MaquinaEstadosDocumento
  */
 
-const { DocumentoFiscalStatus, isTerminal } = require('./DocumentoFiscalStatus');
+'use strict';
+
+const {
+  DocumentoFiscalStatus,
+  isTerminal,
+  normalizarStatus
+} = require('./DocumentoFiscalStatus');
+
+const S = DocumentoFiscalStatus;
 
 const TRANSICOES_PERMITIDAS = Object.freeze({
-  [DocumentoFiscalStatus.RECEBIDA]: [
-    DocumentoFiscalStatus.SINCRONIZADA,
-    DocumentoFiscalStatus.AGUARDANDO_XML_COMPLETO,
-    DocumentoFiscalStatus.DUPLICADA,
-    DocumentoFiscalStatus.ERRO
+  [S.NOVA]: [S.RESUMO_RECEBIDO, S.XML_COMPLETO, S.IMPORTADA, S.ERRO, S.CANCELADA, S.DENEGADA],
+  [S.RESUMO_RECEBIDO]: [
+    S.XML_COMPLETO,
+    S.XML_INDISPONIVEL,
+    S.CANCELADA,
+    S.DENEGADA,
+    S.INUTILIZADA,
+    S.FINALIZADA
   ],
-  [DocumentoFiscalStatus.SINCRONIZADA]: [
-    DocumentoFiscalStatus.EM_PROCESSAMENTO,
-    DocumentoFiscalStatus.DESCARTADA,
-    DocumentoFiscalStatus.DUPLICADA,
-    DocumentoFiscalStatus.ERRO
+  [S.XML_INDISPONIVEL]: [
+    S.RESUMO_RECEBIDO,
+    S.XML_COMPLETO,
+    S.CANCELADA,
+    S.DENEGADA,
+    S.INUTILIZADA,
+    S.FINALIZADA
   ],
-  [DocumentoFiscalStatus.AGUARDANDO_XML_COMPLETO]: [
-    DocumentoFiscalStatus.SINCRONIZADA,
-    DocumentoFiscalStatus.DESCARTADA
+  [S.XML_COMPLETO]: [
+    S.EM_REVISAO,
+    S.PRONTA_IMPORTACAO,
+    S.ERRO,
+    S.CANCELADA,
+    S.DENEGADA,
+    S.FINALIZADA,
+    S.IMPORTADA
   ],
-  [DocumentoFiscalStatus.EM_PROCESSAMENTO]: [
-    DocumentoFiscalStatus.AGUARDANDO_REVISAO,
-    DocumentoFiscalStatus.PRONTA_PARA_COMPRA,
-    DocumentoFiscalStatus.ERRO
+  [S.EM_REVISAO]: [
+    S.PRONTA_IMPORTACAO,
+    S.ERRO,
+    S.CANCELADA,
+    S.DENEGADA,
+    S.FINALIZADA
   ],
-  [DocumentoFiscalStatus.AGUARDANDO_REVISAO]: [
-    DocumentoFiscalStatus.REVISADA,
-    DocumentoFiscalStatus.DESCARTADA,
-    DocumentoFiscalStatus.ERRO
+  [S.PRONTA_IMPORTACAO]: [
+    S.EM_IMPORTACAO,
+    S.CANCELADA,
+    S.DENEGADA,
+    S.FINALIZADA
   ],
-  [DocumentoFiscalStatus.REVISADA]: [
-    DocumentoFiscalStatus.PRONTA_PARA_COMPRA,
-    DocumentoFiscalStatus.EM_COMPRA,
-    DocumentoFiscalStatus.DESCARTADA
+  [S.EM_IMPORTACAO]: [
+    S.IMPORTADA,
+    S.PRONTA_IMPORTACAO,
+    S.ERRO,
+    S.CANCELADA
   ],
-  [DocumentoFiscalStatus.PRONTA_PARA_COMPRA]: [
-    DocumentoFiscalStatus.EM_COMPRA,
-    DocumentoFiscalStatus.DESCARTADA
-  ],
-  [DocumentoFiscalStatus.EM_COMPRA]: [
-    DocumentoFiscalStatus.GRAVADA,
-    DocumentoFiscalStatus.PRONTA_PARA_COMPRA
-  ],
-  [DocumentoFiscalStatus.ERRO]: [
-    DocumentoFiscalStatus.SINCRONIZADA
-  ],
-  [DocumentoFiscalStatus.GRAVADA]: [],
-  [DocumentoFiscalStatus.DESCARTADA]: [],
-  [DocumentoFiscalStatus.DUPLICADA]: []
+  [S.ERRO]: [S.XML_COMPLETO, S.RESUMO_RECEBIDO, S.CANCELADA, S.FINALIZADA],
+  [S.IMPORTADA]: [S.FINALIZADA, S.CANCELADA],
+  [S.FINALIZADA]: [],
+  [S.CANCELADA]: [],
+  [S.DENEGADA]: [],
+  [S.INUTILIZADA]: []
 });
+
+const PARALELOS_FISCAIS = Object.freeze([
+  S.CANCELADA,
+  S.DENEGADA,
+  S.INUTILIZADA
+]);
+
+/**
+ * Aplicação de XML completo sobre resumo / XML indisponível.
+ * @param {string} statusAtual
+ * @param {string} statusNovo
+ * @returns {boolean}
+ */
+function ehAplicacaoXmlCompleto(statusAtual, statusNovo) {
+  const a = normalizarStatus(statusAtual);
+  const n = normalizarStatus(statusNovo);
+  return n === S.XML_COMPLETO
+    && (a === S.RESUMO_RECEBIDO || a === S.XML_INDISPONIVEL);
+}
+
+/** @deprecated RC3.4.8 — use ehAplicacaoXmlCompleto / RESUMO_RECEBIDO */
+function ehReaberturaXmlLegado(statusAtual, statusNovo) {
+  const a = normalizarStatus(statusAtual);
+  const n = normalizarStatus(statusNovo);
+  return a === S.XML_INDISPONIVEL && n === S.RESUMO_RECEBIDO;
+}
+
+/** @deprecated RC3.4.9 — XML importado manualmente → XML_COMPLETO */
+function ehImportacaoXmlManual(statusAtual, statusNovo) {
+  return ehAplicacaoXmlCompleto(statusAtual, statusNovo);
+}
+
+function ehReaberturaTerminalXml(statusAtual, statusNovo) {
+  return ehReaberturaXmlLegado(statusAtual, statusNovo)
+    || ehAplicacaoXmlCompleto(statusAtual, statusNovo);
+}
+
+function ehTransicaoParalelaFiscal(statusAtual, statusNovo) {
+  const a = normalizarStatus(statusAtual);
+  const n = normalizarStatus(statusNovo);
+  if (!PARALELOS_FISCAIS.includes(n)) return false;
+  if (PARALELOS_FISCAIS.includes(a) || a === S.FINALIZADA) return false;
+  return true;
+}
 
 /**
  * @param {string} statusAtual
@@ -71,12 +118,18 @@ const TRANSICOES_PERMITIDAS = Object.freeze({
  * @returns {boolean}
  */
 function podeTransicionar(statusAtual, statusNovo) {
-  if (!statusAtual || !statusNovo) return false;
-  if (statusAtual === statusNovo) return true;
-  if (isTerminal(statusAtual)) return false;
+  const a = normalizarStatus(statusAtual);
+  const n = normalizarStatus(statusNovo);
+  if (!a || !n) return false;
+  if (a === n) return true;
+  if (ehTransicaoParalelaFiscal(a, n)) return true;
+  if (ehReaberturaTerminalXml(a, n)) return true;
+  if (isTerminal(a) && !ehReaberturaTerminalXml(a, n) && !ehTransicaoParalelaFiscal(a, n)) {
+    return false;
+  }
 
-  const permitidos = TRANSICOES_PERMITIDAS[statusAtual] || [];
-  return permitidos.includes(statusNovo);
+  const permitidos = TRANSICOES_PERMITIDAS[a] || [];
+  return permitidos.includes(n);
 }
 
 /**
@@ -85,23 +138,24 @@ function podeTransicionar(statusAtual, statusNovo) {
  * @returns {{ valido: boolean, erro?: string }}
  */
 function validarTransicao(statusAtual, statusNovo) {
-  if (!statusAtual || !statusNovo) {
+  const a = normalizarStatus(statusAtual);
+  const n = normalizarStatus(statusNovo);
+
+  if (!a || !n) {
     return { valido: false, erro: 'Status atual e novo são obrigatórios' };
   }
+  if (a === n) return { valido: true };
 
-  if (statusAtual === statusNovo) {
+  if (ehTransicaoParalelaFiscal(a, n) || ehReaberturaTerminalXml(a, n)) {
     return { valido: true };
   }
 
-  if (isTerminal(statusAtual)) {
-    return { valido: false, erro: `Status terminal não permite transição: ${statusAtual}` };
+  if (isTerminal(a)) {
+    return { valido: false, erro: `Status terminal não permite transição: ${a}` };
   }
 
-  if (!podeTransicionar(statusAtual, statusNovo)) {
-    return {
-      valido: false,
-      erro: `Transição inválida: ${statusAtual} → ${statusNovo}`
-    };
+  if (!podeTransicionar(a, n)) {
+    return { valido: false, erro: `Transição inválida: ${a} → ${n}` };
   }
 
   return { valido: true };
@@ -109,6 +163,11 @@ function validarTransicao(statusAtual, statusNovo) {
 
 module.exports = {
   TRANSICOES_PERMITIDAS,
+  ehAplicacaoXmlCompleto,
+  ehReaberturaXmlLegado,
+  ehImportacaoXmlManual,
+  ehReaberturaTerminalXml,
+  ehTransicaoParalelaFiscal,
   podeTransicionar,
   validarTransicao
 };

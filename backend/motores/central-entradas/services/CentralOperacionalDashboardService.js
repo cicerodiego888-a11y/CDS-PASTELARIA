@@ -34,12 +34,25 @@ class CentralOperacionalDashboardService {
     const alertasResultado = opcoes.alertasResultado
       ?? await this._alertasService.listarAlertas();
 
+    const filtrosPeriodo = {
+      ano: opcoes.ano,
+      mes: opcoes.mes,
+      competencia: opcoes.competencia,
+      dataEmissaoInicio: opcoes.dataEmissaoInicio || opcoes.data_emissao_inicio || null,
+      dataEmissaoFim: opcoes.dataEmissaoFim || opcoes.data_emissao_fim || null
+    };
+
+    const filtrosContagem = {
+      dataEmissaoInicio: filtrosPeriodo.dataEmissaoInicio,
+      dataEmissaoFim: filtrosPeriodo.dataEmissaoFim
+    };
+
     const [
       metricas,
       contadoresPorStatus
     ] = await Promise.all([
-      this._documentosRepository.obterMetricasOperacionais(),
-      this._documentosRepository.contarPorStatus({})
+      this._documentosRepository.obterMetricasOperacionais(filtrosPeriodo),
+      this._documentosRepository.contarPorStatus(filtrosContagem)
     ]);
 
     const pendenciasCriticas = (alertasResultado.alertas || []).filter(
@@ -50,6 +63,14 @@ class CentralOperacionalDashboardService {
 
     return {
       valorTotalMes: metricas.valorTotalMes,
+      valorMensal: metricas.valorMensal,
+      valorAnual: metricas.valorAnual,
+      quantidadeMensal: metricas.quantidadeMensal,
+      quantidadeAnual: metricas.quantidadeAnual,
+      competencia: metricas.competencia,
+      competenciaLabel: metricas.competenciaLabel,
+      ambiente: metricas.ambiente,
+      ambienteLabel: metricas.ambienteLabel,
       tempoMedioProcessamentoMinutos: metricas.tempoMedioProcessamentoMinutos,
       taxaIdentificacaoAutomatica: metricas.taxaIdentificacaoAutomatica,
       taxaRevisaoManual: metricas.taxaRevisaoManual,

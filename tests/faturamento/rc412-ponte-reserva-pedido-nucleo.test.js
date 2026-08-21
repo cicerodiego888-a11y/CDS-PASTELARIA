@@ -67,6 +67,7 @@ async function setupDb(opts = {}) {
       reservado_fiscal REAL DEFAULT 0,
       reservado_nao_fiscal REAL DEFAULT 0,
       estoque_atual REAL DEFAULT 0,
+      controla_estoque INTEGER DEFAULT 1,
       updated_at DATETIME
     )`
   );

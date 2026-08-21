@@ -68,12 +68,13 @@ async function main() {
     assert.strictEqual(eq.observacao, 'editado sprint9');
   });
 
-  await test('testarConexao abre e fecha TCP', async () => {
+  await test('testarConexao mantém sessão TCP persistente', async () => {
     const res = await equipamentosService.testarConexao(equipamentoTesteId);
     assert.strictEqual(res.comunicacao_real, true);
     assert.strictEqual(res.sucesso, true);
-    assert.ok(res.mensagem.includes('sucesso'));
-    assert.strictEqual(res.conexao.teste_abrir_fechar, true);
+    assert.ok(/persistente|reutilizada|estabelecida/i.test(res.mensagem));
+    assert.strictEqual(res.conexao.conectado, true);
+    assert.strictEqual(res.conexao.persistente, true);
   });
 
   await test('diagnosticarEquipamento retorna campos obrigatórios', async () => {

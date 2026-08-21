@@ -2,6 +2,7 @@
  * MiipResultadoImportacaoMapper — Mapeia decisão do Pipeline para importação XML.
  *
  * Sprint RC1: sem lógica de decisão — apenas traduz saída do DecisionEngine.
+ * RC9.3: propaga candidatos MUBC + diagnóstico de busca vazia.
  *
  * @module motores/miip/utils/MiipResultadoImportacaoMapper
  */
@@ -41,8 +42,32 @@ function montarProdutoEncontrado(melhor) {
     id: produtoId,
     nome: produto.nome || melhor.produtoNome || melhor.nome || '',
     codigo: produto.codigo || melhor.codigo || '',
-    codigoBarras: produto.codigoBarras || melhor.codigoBarras || null
+    codigoBarras: produto.codigoBarras || produto.codigo_barras || melhor.codigoBarras || null,
+    ncm: produto.ncm || null,
+    cest: produto.cest || null,
+    unidade: produto.unidade || null,
+    marca: produto.marca || produto.marcaNome || null,
+    fornecedor: produto.fornecedor || null,
+    categoria_id: produto.categoria_id || null
   };
+}
+
+/**
+ * @param {Object|null} resultado
+ * @returns {Object[]}
+ */
+function extrairCandidatos(resultado) {
+  const lista = Array.isArray(resultado?.candidatos) ? resultado.candidatos : [];
+  return lista.slice(0, 20).map((c, i) => ({
+    ranking: c.ranking || i + 1,
+    produtoId: c.produtoId,
+    score: Number(c.scoreTotal ?? c.score ?? 0),
+    confianca: c.confianca || null,
+    produto: c.produto || c.snapshot || null,
+    evidencias: c.evidencias || [],
+    motores: c.motoresQueVotaram || [],
+    motivos: (c.atributosExtraidos?.motivosRelevancia || []).map((m) => m.rotulo || m.tipo)
+  }));
 }
 
 /**
@@ -55,6 +80,19 @@ function mapearDecisaoPipelineParaImportacao(miipResp, resultado) {
   const melhor = decisao.melhorCandidato ?? resultado?.candidatos?.[0] ?? null;
   const produtoEncontrado = montarProdutoEncontrado(melhor);
   const acao = decisao.acao ?? MiipAction.CRIAR_NOVO;
+  const candidatos = extrairCandidatos(resultado);
+  const diagnosticoBusca = resultado?.meta?.mubcDiagnostico
+    ?? resultado?.mubcDiagnostico
+    ?? (candidatos.length === 0
+      ? {
+        motivos: [
+          'GTIN inexistente no cadastro ou não informado.',
+          'Associação fornecedor inexistente.',
+          'Descrição sem correspondência.',
+          'Nenhum produto compatível localizado.'
+        ]
+      }
+      : null);
 
   const motivos = Array.isArray(decisao.motivos) && decisao.motivos.length > 0
     ? [...decisao.motivos]
@@ -68,13 +106,15 @@ function mapearDecisaoPipelineParaImportacao(miipResp, resultado) {
     ? Boolean(decisao.precisaCadastro)
     : (acao === MiipAction.CRIAR_NOVO);
 
-  if (!miipResp?.encontrado || !melhor || !produtoEncontrado) {
+  if (!melhor || !produtoEncontrado) {
     return {
       produtoEncontrado: null,
       nivelCerteza: MiipConfidence.NENHUMA,
       acao: MiipAction.CRIAR_NOVO,
       motivos: motivos.length > 0 ? motivos : ['nenhum_candidato_confiavel'],
       candidatoSelecionado: null,
+      candidatos: [],
+      diagnosticoBusca,
       precisaConfirmacao: false,
       precisaCadastro: true,
       associadoAutomaticamente: false,
@@ -89,6 +129,8 @@ function mapearDecisaoPipelineParaImportacao(miipResp, resultado) {
     acao,
     motivos,
     candidatoSelecionado: melhor,
+    candidatos,
+    diagnosticoBusca: null,
     precisaConfirmacao,
     precisaCadastro,
     associadoAutomaticamente: acao === MiipAction.AUTO_VINCULAR,
@@ -101,5 +143,6 @@ module.exports = {
   MOTORES_AUTO_VINCULO,
   extrairMotor,
   montarProdutoEncontrado,
+  extrairCandidatos,
   mapearDecisaoPipelineParaImportacao
 };

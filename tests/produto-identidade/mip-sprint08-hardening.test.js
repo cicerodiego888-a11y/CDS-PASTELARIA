@@ -97,6 +97,16 @@ async function main() {
   await test('normalizarPlu compartilhado', () => {
     assert.strictEqual(normalizarPlu('00067'), '67');
     assert.strictEqual(normalizarPlu('0'), '0');
+    assert.strictEqual(normalizarPlu('00'), '0');
+    assert.strictEqual(normalizarPlu('0000'), '0');
+  });
+
+  await test('variantesPlu cobre 00 e 0000', () => {
+    const { variantesPlu } = require('../../backend/motores/produto-identidade/utils/normalizarPlu');
+    const v = variantesPlu('00');
+    assert.ok(v.includes('00'));
+    assert.ok(v.includes('0'));
+    assert.ok(v.includes('0000'));
   });
 
   await test('LayoutRegistry ainda registra 3 layouts', () => {

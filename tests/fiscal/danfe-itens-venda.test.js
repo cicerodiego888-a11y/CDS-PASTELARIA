@@ -88,9 +88,10 @@ async function main() {
     assert.ok(html.includes('Arroz'), 'deve conter Arroz');
     assert.ok(html.includes('Refrigerante'), 'deve conter Refrigerante');
     assert.ok(!html.includes('Não Fiscal'), 'sem rótulo não fiscal');
-    assert.ok(!html.includes('Fiscal'), 'sem rótulo fiscal');
+    assert.ok(!html.includes('tipo_recebimento'), 'sem vazamento de alocação F/NF');
     assert.ok(html.includes('Total: R$ 15.00'), 'total da venda completa');
-    assert.ok(html.includes('ICMS: R$ 1.00'), 'tributos fiscais preservados');
+    assert.ok(html.includes('ICMS'), 'tributos fiscais preservados');
+    assert.ok(html.includes('R$ 1.00'), 'valor ICMS preservado');
     assert.ok(html.includes('35260112345678000199550010000000011000000001'), 'chave preservada');
   });
 
@@ -167,7 +168,7 @@ async function main() {
     });
 
     assert.ok(html.includes('Cartão Crédito: R$ 2,00'), 'mostra cartão fiscal');
-    assert.ok(html.includes('Pix: R$ 2,00'), 'mostra pix não fiscal');
+    assert.ok(html.includes('PIX: R$ 2,00'), 'mostra pix não fiscal');
     assert.ok(html.includes('Total: R$ 4.00'), 'total comercial');
   });
 

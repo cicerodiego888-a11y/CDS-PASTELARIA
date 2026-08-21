@@ -301,9 +301,11 @@ function renderCaixaAberto(resumo) {
             Resumo Geral
           </div>
           <div class="card-body">
-            <p>Total Vendido: <strong>${dinheiro(resumo.total_vendido)}</strong></p>
+            <p>Total Recebido: <strong>${dinheiro(resumo.total_recebido != null ? resumo.total_recebido : resumo.total_vendido)}</strong></p>
             <p>Vendas a Prazo: <strong>${dinheiro(resumo.prazo)}</strong></p>
+            <p>TEF: <strong>${dinheiro(resumo.tef || 0)}</strong></p>
             <p>Outras Formas: <strong>${dinheiro(resumo.outras_formas)}</strong></p>
+            <p>Entregas pendentes: <strong>${dinheiro(resumo.entregas_pendentes || 0)}</strong></p>
             <hr>
             <h4>Saldo Geral: ${dinheiro(resumo.saldo_geral)}</h4>
           </div>
@@ -484,24 +486,45 @@ function registrarSuprimento() {
   });
 }
 
+function imprimirCupomFechamentoCaixa(html) {
+  if (!html) return;
+  try {
+    if (window.electronAPI && typeof window.electronAPI.abrirComprovante === 'function') {
+      window.electronAPI.abrirComprovante(html, { deviceName: 'cupom' });
+      return;
+    }
+  } catch (_) { /* fallback browser */ }
+
+  const w = window.open('', '_blank', 'width=340,height=720');
+  if (!w) return;
+  w.document.write(html);
+  w.document.close();
+  w.focus();
+  setTimeout(() => {
+    try { w.print(); } catch (_) { /* ignore */ }
+  }, 300);
+}
+
 function fecharCaixa() {
   const valorFechamento = pegarValorCampo('#valor-fechamento');
   const observacao = $('#observacao-fechamento').val();
 
   if (!confirm('Tem certeza que deseja fechar o caixa?')) return;
 
-  $.ajax({
-    url: `${API_URL}/caixa/fechar`,
-    method: 'POST',
-    contentType: 'application/json',
-    cache: false,
-    data: JSON.stringify(getTerminalRequestData({
-      valor_informado: valorFechamento,
-      observacao
-    })),
-    success: function(res) {
+  enviarOperacaoCaixa(PERMISSOES_CAIXA.FECHAR, '/caixa/fechar', {
+    valor_informado: valorFechamento,
+    observacao
+  }, {
+    global: false,
+    senha: {
+      titulo: 'Fechar caixa',
+      mensagem: 'Informe a senha do administrador para fechar o caixa.'
+    },
+    onSuccess: function(res) {
       showNotification(res?.message || 'Caixa fechado com sucesso.', 'success');
-      // Força a tela de fechado imediatamente; o GET só confirma/atualiza.
+      if (res?.cupom_html) {
+        imprimirCupomFechamentoCaixa(res.cupom_html);
+      }
       renderStatusCaixa(null);
       renderAbrirCaixa();
       if (typeof caixaAberto !== 'undefined') {
@@ -512,8 +535,8 @@ function fecharCaixa() {
       }
       carregarCaixaAberto();
     },
-    error: function(xhr) {
-      showNotification(xhr.responseJSON?.error || 'Erro ao fechar caixa.', 'danger');
+    onError: function(mensagem) {
+      showNotification(mensagem || 'Erro ao fechar caixa.', 'danger');
     }
   });
 }
@@ -767,9 +790,10 @@ function reimprimirFechamento(caixaId) {
     contentType: 'application/json',
     data: JSON.stringify({}),
     success: function(res) {
-      showNotification(res.message || 'Reimpressão registrada.', 'success');
-      fecharModalDetalhesFechamento();
-      abrirDetalhesFechamento(caixaId);
+      showNotification(res.message || 'Reimpressão gerada.', 'success');
+      if (res.cupom_html) {
+        imprimirCupomFechamentoCaixa(res.cupom_html);
+      }
     },
     error: function(xhr) {
       showNotification(xhr.responseJSON?.error || 'Erro ao reimprimir fechamento.', 'danger');

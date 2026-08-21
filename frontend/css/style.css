@@ -202,6 +202,29 @@ html, body {
     background: transparent;
 }
 
+.cds-empresa-seletor__label {
+    display: block;
+}
+
+.cds-empresa-seletor__select {
+    font-size: 0.75rem;
+    background: rgba(255, 255, 255, 0.08);
+    color: #fff;
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+.cds-empresa-seletor__select option {
+    color: #111;
+}
+
+.cds-empresa-seletor__vazio {
+    line-height: 1.3;
+}
+
+body.sidebar-collapsed .cds-empresa-seletor {
+    display: none;
+}
+
 .sidebar .nav-link {
     font-weight: 500;
     color: #ddd;

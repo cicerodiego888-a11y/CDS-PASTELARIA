@@ -1,64 +1,33 @@
 /**
  * FiscalProvider — indicadores fiscais e não fiscais de vendas/entradas.
- * Consulta somente leitura no banco. Não altera Plataforma Fiscal nem Central.
+ * RC8.3.2 — delega indicadores principais ao IndicadoresFiscaisService (competência mensal).
  */
 
 const db = require('../../database');
 const {
-  FILTRO_VENDA_VALIDA,
-  getExprValorVendaFiscal,
   getExprValorVendaNaoFiscal
 } = require('../../services/reportFiscalHelpers');
+const indicadoresFiscaisService = require('../../services/IndicadoresFiscaisService');
 const { criarMonitoringResult } = require('../MonitoringResult');
+const {
+  resolverCompetencia,
+  periodoHoje,
+  periodoAnoCompetencia,
+  num,
+  dbGetFactory
+} = require('../monitoringDateHelpers');
 
-function dbGet(sql, params = []) {
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || {})));
-  });
-}
+const dbGet = dbGetFactory(db);
 
-function num(v) {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function dataHojeBrasil() {
-  const agora = new Date();
-  const dataBrasil = new Date(agora.toLocaleString('en-US', { timeZone: 'America/Fortaleza' }));
-  const ano = dataBrasil.getFullYear();
-  const mes = String(dataBrasil.getMonth() + 1).padStart(2, '0');
-  const dia = String(dataBrasil.getDate()).padStart(2, '0');
-  return `${ano}-${mes}-${dia}`;
-}
-
-function periodoMes(hoje) {
-  return { inicio: `${hoje.slice(0, 7)}-01`, fim: hoje };
-}
-
-function periodoAno(hoje) {
-  return { inicio: `${hoje.slice(0, 4)}-01-01`, fim: hoje };
-}
-
-async function agregarVendas(exprValor, inicio, fim) {
+async function agregarVendasNaoFiscais(inicio, fim) {
+  const exprNaoFiscal = getExprValorVendaNaoFiscal();
   const row = await dbGet(
     `SELECT
-       COALESCE(SUM(${exprValor}), 0) AS valor,
-       COUNT(CASE WHEN COALESCE(${exprValor}, 0) > 0 THEN 1 END) AS quantidade
+       COALESCE(SUM(${exprNaoFiscal}), 0) AS valor,
+       COUNT(CASE WHEN COALESCE(${exprNaoFiscal}, 0) > 0 THEN 1 END) AS quantidade
      FROM vendas v
      WHERE date(v.data_venda) BETWEEN date(?) AND date(?)
-       AND ${FILTRO_VENDA_VALIDA}`,
-    [inicio, fim]
-  );
-  return { valor: num(row.valor), quantidade: num(row.quantidade) };
-}
-
-async function agregarEntradasFiscais(inicio, fim) {
-  const row = await dbGet(
-    `SELECT
-       COALESCE(SUM(valor_total), 0) AS valor,
-       COUNT(*) AS quantidade
-     FROM central_entradas_documentos
-     WHERE date(COALESCE(data_entrada, data_emissao, created_at)) BETWEEN date(?) AND date(?)`,
+       AND (v.status IS NULL OR v.status != 'cancelada')`,
     [inicio, fim]
   );
   return { valor: num(row.valor), quantidade: num(row.quantidade) };
@@ -124,8 +93,8 @@ async function ultimaEntradaNaoFiscal() {
 
 function montarBlocoPeriodo(hoje, mes, ano) {
   return {
-    valor: hoje.valor,
-    quantidade: hoje.quantidade,
+    valor: mes.valor,
+    quantidade: mes.quantidade,
     hoje,
     mes,
     ano
@@ -135,54 +104,65 @@ function montarBlocoPeriodo(hoje, mes, ano) {
 const FiscalProvider = {
   id: 'fiscal',
 
-  async collect(/* context */) {
+  async collect(context = {}) {
     const inicio = Date.now();
     const warnings = [];
     const errors = [];
 
     try {
-      const hojeStr = dataHojeBrasil();
-      const mes = periodoMes(hojeStr);
-      const ano = periodoAno(hojeStr);
-      const exprFiscal = getExprValorVendaFiscal();
-      const exprNaoFiscal = getExprValorVendaNaoFiscal();
+      const competenciaInput = context.competencia
+        ? context.competencia
+        : resolverCompetencia(context);
+      const periodoComp = competenciaInput.inicio && competenciaInput.fim
+        ? competenciaInput
+        : resolverCompetencia({
+          ano: context.ano,
+          mes: context.mes,
+          competencia: context.competencia?.competencia
+        });
+
+      const hoje = periodoHoje();
+      const ano = periodoAnoCompetencia(periodoComp.ano);
 
       const [
-        vendasFiscalHoje,
-        vendasFiscalMes,
-        vendasFiscalAno,
+        resumoFiscal,
         vendasNaoFiscalHoje,
         vendasNaoFiscalMes,
         vendasNaoFiscalAno,
-        entradasFiscalHoje,
-        entradasFiscalMes,
-        entradasFiscalAno,
         ultimaFiscal,
         entradasNaoFiscalHoje,
         entradasNaoFiscalMes,
         entradasNaoFiscalAno,
         ultimaNaoFiscal
       ] = await Promise.all([
-        agregarVendas(exprFiscal, hojeStr, hojeStr),
-        agregarVendas(exprFiscal, mes.inicio, mes.fim),
-        agregarVendas(exprFiscal, ano.inicio, ano.fim),
-        agregarVendas(exprNaoFiscal, hojeStr, hojeStr),
-        agregarVendas(exprNaoFiscal, mes.inicio, mes.fim),
-        agregarVendas(exprNaoFiscal, ano.inicio, ano.fim),
-        agregarEntradasFiscais(hojeStr, hojeStr),
-        agregarEntradasFiscais(mes.inicio, mes.fim),
-        agregarEntradasFiscais(ano.inicio, ano.fim),
+        indicadoresFiscaisService.obterResumo({
+          ano: periodoComp.ano,
+          mes: periodoComp.mes,
+          competencia: periodoComp.competencia
+        }),
+        agregarVendasNaoFiscais(hoje.inicio, hoje.fim),
+        agregarVendasNaoFiscais(periodoComp.inicio, periodoComp.fim),
+        agregarVendasNaoFiscais(ano.inicio, ano.fim),
         ultimaEntradaFiscal(),
-        agregarEntradasNaoFiscais(hojeStr, hojeStr),
-        agregarEntradasNaoFiscais(mes.inicio, mes.fim),
+        agregarEntradasNaoFiscais(hoje.inicio, hoje.fim),
+        agregarEntradasNaoFiscais(periodoComp.inicio, periodoComp.fim),
         agregarEntradasNaoFiscais(ano.inicio, ano.fim),
         ultimaEntradaNaoFiscal()
       ]);
 
       const data = {
-        vendas: montarBlocoPeriodo(vendasFiscalHoje, vendasFiscalMes, vendasFiscalAno),
+        indicadoresFiscais: {
+          competencia: resumoFiscal.competencia,
+          competenciaLabel: resumoFiscal.competenciaLabel,
+          valorTotalVendido: resumoFiscal.valorTotalVendido,
+          valorTotalComprado: resumoFiscal.valorTotalComprado,
+          quantidadeNfeEmitidas: resumoFiscal.quantidadeNfeEmitidas,
+          ambiente: resumoFiscal.ambiente,
+          ambienteLabel: resumoFiscal.ambienteLabel
+        },
+        vendas: montarBlocoPeriodo(resumoFiscal.vendas.hoje, resumoFiscal.vendas.mes, resumoFiscal.vendas.ano),
         entradas: {
-          ...montarBlocoPeriodo(entradasFiscalHoje, entradasFiscalMes, entradasFiscalAno),
+          ...montarBlocoPeriodo(resumoFiscal.entradas.hoje, resumoFiscal.entradas.mes, resumoFiscal.entradas.ano),
           ultimaNf: ultimaFiscal.ultimaNf,
           fornecedor: ultimaFiscal.fornecedor
         },
@@ -206,21 +186,31 @@ const FiscalProvider = {
       });
     } catch (err) {
       errors.push(err.message || String(err));
+      const vazio = { valor: 0, quantidade: 0 };
       return criarMonitoringResult({
         success: false,
         source: 'FiscalProvider',
         metrics: { tempoConsultaMs: Date.now() - inicio },
         data: {
-          vendas: montarBlocoPeriodo({ valor: 0, quantidade: 0 }, { valor: 0, quantidade: 0 }, { valor: 0, quantidade: 0 }),
+          indicadoresFiscais: {
+            competencia: null,
+            competenciaLabel: null,
+            valorTotalVendido: 0,
+            valorTotalComprado: 0,
+            quantidadeNfeEmitidas: 0,
+            ambiente: 2,
+            ambienteLabel: 'Homologação'
+          },
+          vendas: montarBlocoPeriodo(vazio, vazio, vazio),
           entradas: {
-            ...montarBlocoPeriodo({ valor: 0, quantidade: 0 }, { valor: 0, quantidade: 0 }, { valor: 0, quantidade: 0 }),
+            ...montarBlocoPeriodo(vazio, vazio, vazio),
             ultimaNf: null,
             fornecedor: null
           },
           naoFiscal: {
-            vendas: montarBlocoPeriodo({ valor: 0, quantidade: 0 }, { valor: 0, quantidade: 0 }, { valor: 0, quantidade: 0 }),
+            vendas: montarBlocoPeriodo(vazio, vazio, vazio),
             entradas: {
-              ...montarBlocoPeriodo({ valor: 0, quantidade: 0 }, { valor: 0, quantidade: 0 }, { valor: 0, quantidade: 0 }),
+              ...montarBlocoPeriodo(vazio, vazio, vazio),
               ultimaNf: null,
               fornecedor: null
             }

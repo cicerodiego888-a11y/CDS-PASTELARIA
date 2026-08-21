@@ -42,6 +42,11 @@ const DEFAULT = {
   entrega_alerta_horas_parado: 3,
   // Sprint 3.8A/B/C — MIDP V1 (política única PRESERVAR DINHEIRO quando ativar_midp=true)
   ativar_midp: false,
+  // RC8.2 — MPFC (política fiscal comercial; default FIXA = comportamento atual)
+  mpfc_modo: 'FIXA',
+  mpfc_percentual_dinheiro_fiscal: 0,
+  mpfc_margem_minima_sobre_custo: 20,
+  mpfc_nunca_vender_abaixo_margem: false,
   // Sprint 3.9 — Licenciamento CDS (aviso no login; sem bloqueio novo)
   licenca_dias_aviso: 3,
   licenca_chave_pix: '',
@@ -185,7 +190,24 @@ function normalizePadraoFiscal(obj) {
       : '',
     cest_padrao: obj?.cest_padrao !== undefined && obj?.cest_padrao !== null
       ? String(obj.cest_padrao).trim()
-      : ''
+      : '',
+    entrada_bonificacao_cfop_padrao: obj?.entrada_bonificacao_cfop_padrao !== undefined
+      ? String(obj.entrada_bonificacao_cfop_padrao || '5910').trim()
+      : '5910',
+    entrada_bonificacao_csosn_padrao: obj?.entrada_bonificacao_csosn_padrao !== undefined
+      ? String(obj.entrada_bonificacao_csosn_padrao || '').trim()
+      : '',
+    entrada_bonificacao_natureza: obj?.entrada_bonificacao_natureza !== undefined
+      ? String(obj.entrada_bonificacao_natureza || 'Bonificação recebida').trim()
+      : 'Bonificação recebida',
+    entrada_bonificacao_atualizar_custo: normalizeBoolFlag(
+      obj?.entrada_bonificacao_atualizar_custo,
+      false
+    ),
+    entrada_bonificacao_gerar_estoque: normalizeBoolFlag(
+      obj?.entrada_bonificacao_gerar_estoque,
+      true
+    )
   };
 }
 
@@ -287,6 +309,21 @@ function normalizeConfig(obj) {
       Number(obj?.entrega_alerta_horas_parado ?? DEFAULT.entrega_alerta_horas_parado) || 3
     ),
     ativar_midp: normalizeBoolFlag(obj?.ativar_midp, DEFAULT.ativar_midp),
+    mpfc_modo: String(obj?.mpfc_modo || DEFAULT.mpfc_modo).toUpperCase() === 'FLEXIVEL'
+      ? 'FLEXIVEL'
+      : 'FIXA',
+    mpfc_percentual_dinheiro_fiscal: Math.min(
+      100,
+      Math.max(0, Number(obj?.mpfc_percentual_dinheiro_fiscal ?? DEFAULT.mpfc_percentual_dinheiro_fiscal) || 0)
+    ),
+    mpfc_margem_minima_sobre_custo: Math.max(
+      0,
+      Number(obj?.mpfc_margem_minima_sobre_custo ?? DEFAULT.mpfc_margem_minima_sobre_custo) || 0
+    ),
+    mpfc_nunca_vender_abaixo_margem: normalizeBoolFlag(
+      obj?.mpfc_nunca_vender_abaixo_margem,
+      DEFAULT.mpfc_nunca_vender_abaixo_margem
+    ),
     licenca_dias_aviso: Math.min(30, Math.max(1, Number(obj?.licenca_dias_aviso ?? DEFAULT.licenca_dias_aviso) || 3)),
     licenca_chave_pix: String(obj?.licenca_chave_pix || '').trim(),
     licenca_whatsapp_url: String(obj?.licenca_whatsapp_url || '').trim(),
@@ -579,6 +616,20 @@ function saveConfig(obj) {
       ? validation.config.habilitar_expedicao === true
       : resolverExpedicaoComercial(current) === true,
     ativar_midp: pickBool(obj, 'ativar_midp', validation.config, current),
+    mpfc_modo: Object.prototype.hasOwnProperty.call(obj || {}, 'mpfc_modo')
+      ? validation.config.mpfc_modo
+      : (current.mpfc_modo || DEFAULT.mpfc_modo),
+    mpfc_percentual_dinheiro_fiscal: Object.prototype.hasOwnProperty.call(obj || {}, 'mpfc_percentual_dinheiro_fiscal')
+      ? validation.config.mpfc_percentual_dinheiro_fiscal
+      : (current.mpfc_percentual_dinheiro_fiscal != null
+        ? current.mpfc_percentual_dinheiro_fiscal
+        : DEFAULT.mpfc_percentual_dinheiro_fiscal),
+    mpfc_margem_minima_sobre_custo: Object.prototype.hasOwnProperty.call(obj || {}, 'mpfc_margem_minima_sobre_custo')
+      ? validation.config.mpfc_margem_minima_sobre_custo
+      : (current.mpfc_margem_minima_sobre_custo != null
+        ? current.mpfc_margem_minima_sobre_custo
+        : DEFAULT.mpfc_margem_minima_sobre_custo),
+    mpfc_nunca_vender_abaixo_margem: pickBool(obj, 'mpfc_nunca_vender_abaixo_margem', validation.config, current),
     modulo_pdv: Object.prototype.hasOwnProperty.call(obj || {}, 'modulo_pdv')
       ? validation.config.modulo_pdv === true
       : current.modulo_pdv !== false,

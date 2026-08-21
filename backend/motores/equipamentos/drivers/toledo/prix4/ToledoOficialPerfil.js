@@ -52,7 +52,7 @@ module.exports = {
       codigo: 'OFFLINE',
       alerta: 'Toledo sem comunicação TCP',
       problema: 'Host/porta inacessíveis',
-      solucao: 'Validar IP, porta 9100 e firewall',
+      solucao: 'Validar IP, porta 9000 e firewall',
       recomendacao: 'Rodar discovery Ethernet e teste de conexão',
       severidade: 'erro'
     },
@@ -93,7 +93,7 @@ module.exports = {
     versao: '1.0',
     campos: [
       { chave: 'host', tipo: 'string', padrao: '' },
-      { chave: 'porta_tcp', tipo: 'number', padrao: 9100 },
+      { chave: 'porta_tcp', tipo: 'number', padrao: 9000 },
       { chave: 'timeout_ms', tipo: 'number', padrao: 5000 },
       { chave: 'departamento_padrao', tipo: 'number', padrao: 1 },
       { chave: 'unidade', tipo: 'string', padrao: 'kg' },

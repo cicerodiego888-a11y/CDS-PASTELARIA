@@ -24,10 +24,13 @@ function getConfiguracoes(chaves) {
 async function getFiscalConfig({ validarUrls = true } = {}) {
   const cfg = await getConfiguracoes([
     'nome_empresa',
+    'nome_fantasia',
+    'razao_social',
     'cnpj',
     'telefone',
     'email',
     'endereco',
+    'fiscal_danfe_largura_mm',
     'fiscal_ambiente',
     'fiscal_uf',
     'fiscal_codigo_uf',
@@ -119,6 +122,8 @@ async function getFiscalConfig({ validarUrls = true } = {}) {
     im: cfg.fiscal_im || '',
     cnae: cfg.fiscal_cnae || '',
     nomeEmpresa: cfg.nome_empresa || '',
+    nomeFantasia: cfg.nome_fantasia || cfg.nome_empresa || '',
+    razaoSocial: cfg.razao_social || cfg.nome_empresa || '',
     cnpj: cfg.cnpj || '',
     telefone: cfg.telefone || '',
     email: cfg.email || '',
@@ -129,6 +134,7 @@ async function getFiscalConfig({ validarUrls = true } = {}) {
     logradouro: cfg.fiscal_emitente_logradouro || '',
     numeroEndereco: cfg.fiscal_emitente_numero || 'S/N',
     bairro: cfg.fiscal_emitente_bairro || '',
+    danfeLarguraMm: Number(cfg.fiscal_danfe_largura_mm || 80) === 58 ? 58 : 80,
     tpImp: Number(cfg.fiscal_tp_imp || 4),
 
     urls: urlsSelecionadas,

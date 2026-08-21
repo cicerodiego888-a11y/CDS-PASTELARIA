@@ -94,6 +94,8 @@ async function main() {
     assert.strictEqual(pkg.scripts['manifest:electron'], 'node build/electron/gerar-manifest.js');
     const builder = JSON.parse(fs.readFileSync(path.join(root, 'electron-builder-erp.json'), 'utf8'));
     assert.strictEqual(builder.afterPack, './build/electron/afterPack.js');
+    const builderPdv = JSON.parse(fs.readFileSync(path.join(root, 'electron-builder-pdv.json'), 'utf8'));
+    assert.strictEqual(builderPdv.afterPack, './build/electron/afterPack.js');
   });
 
   await test('arquivos obrigatórios + refs do index estão no disco', () => {

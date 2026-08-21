@@ -44,19 +44,29 @@ O **verdadeiro núcleo transacional** do CDS Sistemas não é o PDV. É o pipeli
 POST /api/vendas
   → VendaApplicationService.criarVenda
     → VendaPagamentoService.criarVenda
-      → DistribuidorEstoqueVenda (Motor F×NF)
+      → MPFC (obterPolitica → PoliticaFiscalComercialV1 + snapshot)
+      → DistribuidorEstoqueVenda (Motor F×NF consome política)
       → FiscalNaoFiscalService
-      → OrquestradorPagamento
-        → MIDP (distribuição de meios)
+      → OrquestradorPagamento (recebe midpAtivo da política; não decide)
+        → MIDP (recebe midpAtivo; não lê config)
       → Financeiro (financeiro + contas_receber + venda_recebimentos)
       → VendaFiscalService
         → Documento Fiscal (NFC-e modelo 65)
 ```
 
+**Fluxo oficial de política (RC8.2.2):**
+
+```
+Configuração → MPFC → PoliticaFiscalComercialV1 → motores consumidores
+```
+
+Pós-venda (cancelamento / estorno / reprocessamento): sempre `mpfc_politica_snapshot` da venda — **nunca** a configuração atual.
+
 | Papel | Quem é |
 |---|---|
 | **Porta de aplicação** | `VendaApplicationService.criarVenda` / `criarVendaComContexto` (oficial) |
 | **Núcleo** | `VendaPagamentoService.criarVenda` operando sobre o agregado **Venda** |
+| **Política fiscal-comercial** | **MPFC** (`MotorPoliticaFiscalComercial`) — contrato `PoliticaFiscalComercialV1` **CONGELADO** |
 | **Cliente atual** | PDV (`frontend/pdv/js/pdv.js`) — origem padrão `PDV` |
 | **Porta HTTP** | `backend/rotas/vendas.js` + `validarCaixaSeOrigemPdv` (caixa só se origem = PDV) |
 | **Documento atual** | NFC-e (modelo **65**) via `fiscal/emissor.js` |
@@ -595,13 +605,16 @@ flowchart TB
   APP -->|origem PDV| NUCLEO[VendaPagamentoService.criarVenda]
   APP -->|origem ≠ PDV| ACK[Reconhece / não conclui]
 
-  NUCLEO --> ESTQ[DistribuidorEstoqueVenda]
+  NUCLEO --> MPFC[MPFC → PoliticaFiscalComercialV1]
+  MPFC --> ESTQ[DistribuidorEstoqueVenda / F×NF]
+  NUCLEO --> ESTQ
   NUCLEO --> FXNF[FiscalNaoFiscalService]
   FXNF --> MIDP[MIDP]
   NUCLEO --> ORQ[OrquestradorPagamento]
   ORQ --> MIDP
   NUCLEO --> FIN[Financeiro / Contas a Receber]
   NUCLEO --> DOC[VendaFiscalService → NFC-e 65]
+  SNAP[mpfc_politica_snapshot] -.->|cancel / estorno / reprocess| MPFC
 ```
 
 Versão textual oficial:
@@ -614,12 +627,22 @@ Controller (POST /api/vendas + validarCaixaSeOrigemPdv)
 VendaApplicationService(VendaContract, VendaContext)
 │
 ├─ PDV → VendaPagamentoService
-│         → Motor F×NF (totais)
+│         → MPFC (política) → Motor F×NF (totais)
 │         → OrquestradorPagamento → MIDP → TEF/status
 │         → Financeiro / Documento fiscal
+│         → snapshot mpfc_politica_snapshot na venda
 └─ ≠ PDV → reconhecimento sem conclusão (Sprint 2.2)
 ```
 
+### 11.1 MPFC V1 — contrato congelado (RC8.2.2)
+
+| Item | Status |
+|---|---|
+| `PoliticaFiscalComercialV1` | **CONTRATO CONGELADO** |
+| MPFC V1 | **HOMOLOGADO / CONGELADO** |
+| Evolução futura | Criar `PoliticaFiscalComercialV2` — **nunca** alterar V1 |
+| Pós-venda | Snapshot obrigatório; sem leitura de config atual |
+| MIDP / Orquestrador | Recebem resultado da política; **não** decidem política |
 ---
 
 ## 12. Relatório final da Sprint

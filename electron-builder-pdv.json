@@ -25,12 +25,14 @@
     "**/node_modules/sqlite3/**",
     "**/node_modules/usb/**"
   ],
+  "afterPack": "./build/electron/afterPack.js",
   "extraMetadata": {
     "main": "electron-pdv.js"
   },
   "win": {
     "target": "nsis",
     "icon": "assets/branding/icon.ico",
+    "signAndEditExecutable": false,
     "signtoolOptions": {
       "publisherName": "CDS Sistemas"
     }

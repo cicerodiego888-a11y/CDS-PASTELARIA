@@ -4,27 +4,34 @@
  * Regras:
  * - nunca persistir ultNSU/maxNSU inválidos ou zerados após já haver progresso;
  * - nunca regredir ultNSU;
- * - cStat 656 não altera NSU — apenas abre janela de cooldown;
- * - somente atualiza NSU após resposta DistDFe válida (137/138) com tags presentes.
+ * - cStat 656: preserva NSU + cooldown; RC3.7.5.1 pode avançar NSU via NsuRecoveryService
+ *   somente quando SEFAZ informar ultNSU/maxNSU maiores que o cursor local;
+ * - somente atualiza NSU após resposta DistDFe válida (137/138) com tags presentes
+ *   (exceto recuperação automática 656 acima).
  *
  * @module motores/central-entradas/services/CentralNsuService
  */
 
 const CentralNsuRepository = require('../repositories/CentralNsuRepository');
-const { NSU_ZERADO, normalizarNsu } = require('../../../services/fiscal/dfeRetornoParser');
+const NsuRecoveryService = require('./NsuRecoveryService');
+const {
+  NSU_ZERADO,
+  normalizarNsu,
+  normalizarNsuOuZero,
+  extrairNsuTagDoXml
+} = require('../../../services/fiscal/dfeRetornoParser');
 const { logOperacaoCentral } = require('../utils/centralOperacaoLog');
 
 const INTERVALO_COOLDOWN_MS = 60 * 60 * 1000;
 const CSTAT_COM_NSU = new Set(['137', '138']);
 
 function nsuNumerico(valor) {
-  const normalizado = normalizarNsu(valor);
+  const normalizado = normalizarNsuOuZero(valor);
   return BigInt(normalizado.replace(/^0+(?=\d)/, '') || '0');
 }
 
 function nsuPresenteNoXml(xml, tag) {
-  const regex = new RegExp(`<(?:[\\w.-]+:)?${tag}(?:\\s[^>]*)?>\\s*(\\d+)\\s*<\\/(?:[\\w.-]+:)?${tag}>`, 'i');
-  return regex.test(String(xml || ''));
+  return extrairNsuTagDoXml(xml, tag) != null;
 }
 
 class CentralNsuService {
@@ -35,6 +42,12 @@ class CentralNsuService {
     this._repository = deps.nsuRepository
       ?? new CentralNsuRepository({ db: deps.db ?? null });
     this._agora = deps.agora || (() => new Date());
+    this._recovery = deps.nsuRecovery
+      ?? new NsuRecoveryService({
+        nsuRepository: this._repository,
+        agora: this._agora,
+        emitirEvento: deps.emitirEvento
+      });
   }
 
   /** Expõe o repositório para callers que só leem. */
@@ -79,41 +92,74 @@ class CentralNsuService {
 
     if (cStat === '656') {
       const cooldownAte = new Date(agora.getTime() + INTERVALO_COOLDOWN_MS);
-      const atualizado = await this._repository.atualizarSincronizacaoSegura(controle.id, {
+      const cooldownIso = cooldownAte.toISOString();
+
+      // RC3.7.5.1 — recuperação automática se SEFAZ > local (banco restaurado).
+      const recuperacao = await this._recovery.tentarRecuperar({
+        controle,
+        cStat: '656',
+        xmlRetorno: xml,
+        ultNsu: params.ultNsu,
+        maxNsu: params.maxNsu,
+        correlationId,
+        empresa: params.empresa || params.cnpj || controle.cnpj || null
+      });
+
+      const controleBase = recuperacao.controle || controle;
+      const atualizado = await this._repository.atualizarSincronizacaoSegura(controleBase.id, {
         preservarNsu: true,
         ultimoCstat: '656',
-        cooldownAte: cooldownAte.toISOString(),
+        cooldownAte: cooldownIso,
         dataSincronizacao: agora.toISOString()
+      });
+
+      this._recovery.logCooldown({
+        correlationId,
+        nsuLocal: recuperacao.nsuLocal || (atualizado || controleBase).ultNsu,
+        nsuRemoto: recuperacao.nsuRemoto,
+        atualizado: recuperacao.atualizou,
+        motivo: recuperacao.atualizou
+          ? '656 Consumo Indevido'
+          : (recuperacao.motivo || '656 Consumo Indevido'),
+        origem: recuperacao.origemUltNsu,
+        cooldownAte: cooldownIso
       });
 
       logOperacaoCentral({
         correlationId,
-        operacao: 'NSU_PRESERVAR_656',
-        nsu: atualizado?.ultNsu,
+        operacao: recuperacao.atualizou ? 'NSU_RECUPERAR_656' : 'NSU_PRESERVAR_656',
+        nsu: (atualizado || controleBase).ultNsu,
         cStat: '656',
-        resultado: 'PRESERVADO',
-        origem: 'CentralNsuService'
+        resultado: recuperacao.atualizou ? 'RECUPERADO' : 'PRESERVADO',
+        origem: 'CentralNsuService',
+        detalhe: {
+          nsuLocal: recuperacao.nsuLocal,
+          nsuRemoto: recuperacao.nsuRemoto,
+          motivo: recuperacao.motivo,
+          cooldownAte: cooldownIso
+        }
       });
 
       return {
-        controle: atualizado || controle,
-        atualizouNsu: false,
-        preservado: true,
+        controle: atualizado || controleBase,
+        atualizouNsu: Boolean(recuperacao.atualizou),
+        preservado: !recuperacao.atualizou,
+        recuperacaoNsu: recuperacao,
         cooldownAtivo: true,
-        proximaConsultaEm: cooldownAte.toISOString(),
-        ultNsu: (atualizado || controle).ultNsu,
-        maxNsu: (atualizado || controle).maxNsu
+        proximaConsultaEm: cooldownIso,
+        ultNsu: (atualizado || controleBase).ultNsu,
+        maxNsu: (atualizado || controleBase).maxNsu
       };
     }
 
-    const temUlt = nsuPresenteNoXml(xml, 'ultNSU') || Boolean(params.ultNsuRaw);
-    const temMax = nsuPresenteNoXml(xml, 'maxNSU') || Boolean(params.maxNsuRaw);
-    const candidataUlt = normalizarNsu(params.ultNsu);
-    const candidataMax = normalizarNsu(params.maxNsu);
-    const atualUlt = normalizarNsu(controle.ultNsu);
-    const atualMax = normalizarNsu(controle.maxNsu || NSU_ZERADO);
+    const temUlt = nsuPresenteNoXml(xml, 'ultNSU') || Boolean(params.ultNsuRaw) || params.ultNsu != null;
+    const temMax = nsuPresenteNoXml(xml, 'maxNSU') || Boolean(params.maxNsuRaw) || params.maxNsu != null;
+    const candidataUlt = normalizarNsu(params.ultNsu) || extrairNsuTagDoXml(xml, 'ultNSU');
+    const candidataMax = normalizarNsu(params.maxNsu) || extrairNsuTagDoXml(xml, 'maxNSU');
+    const atualUlt = normalizarNsuOuZero(controle.ultNsu);
+    const atualMax = normalizarNsuOuZero(controle.maxNsu);
 
-    if (!CSTAT_COM_NSU.has(cStat) || !temUlt || !temMax) {
+    if (!CSTAT_COM_NSU.has(cStat) || !temUlt || !temMax || !candidataUlt || !candidataMax) {
       const atualizado = await this._repository.atualizarSincronizacaoSegura(controle.id, {
         preservarNsu: true,
         ultimoCstat: cStat || null,

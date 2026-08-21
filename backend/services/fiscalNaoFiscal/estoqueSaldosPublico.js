@@ -4,6 +4,10 @@
  * Única porta autorizada para consultar / debitar / creditar
  * saldo_fiscal e saldo_nao_fiscal de produtos.
  *
+ * Fase 1 / Implementação 01: contrato passa a exigir empresaId/contexto
+ * (ou modoLegadoSemEmpresa explícito). Storage físico permanece em `produtos`
+ * até a Sprint de estoque_empresa — a regra F×NF não muda.
+ *
  * Outros Motores (ex.: MTS) DEVEM usar apenas estas funções.
  * Não exporta SQL nem acesso cru a tabelas.
  *
@@ -13,6 +17,13 @@
 
 const { TipoSaldo, normalizarTipoSaldo } = require('./constants');
 const { recalcularEstoqueConsolidado } = require('../estoqueFiscalService');
+const { calcularEstoqueProduto } = require('../estoque/EstoqueDisponivelService');
+const {
+  resolverEmpresaId,
+  resolverContextoEmpresa,
+  logOperacaoSaldo,
+  COMPAT_CERTIFICADA_PRE_MULTIEMPRESA
+} = require('./empresaContexto');
 
 function round3(n) {
   return Math.round(Number(n || 0) * 1000) / 1000;
@@ -39,22 +50,57 @@ function dbRun(db, sql, params = []) {
 }
 
 /**
- * Consulta saldos públicos de um produto.
- * @param {number} produtoId
- * @param {{ db?: object }} [opts]
+ * Normaliza assinatura:
+ *   consultarSaldo(produtoId, opts)
+ *   consultarSaldo({ produtoId, empresaId, ... }, opts)
  */
-async function consultarSaldo(produtoId, opts = {}) {
-  const id = Number(produtoId);
+function normalizarArgsProduto(produtoIdOrParams, opts = {}) {
+  if (
+    produtoIdOrParams
+    && typeof produtoIdOrParams === 'object'
+    && !Array.isArray(produtoIdOrParams)
+  ) {
+    const p = produtoIdOrParams;
+    const produtoId = p.produtoId != null ? p.produtoId : p.produto_id;
+    const merged = {
+      ...opts,
+      ...p,
+      empresaId: resolverEmpresaId(p) ?? resolverEmpresaId(opts),
+      db: opts.db != null ? opts.db : p.db
+    };
+    return { produtoId, opts: merged };
+  }
+  return { produtoId: produtoIdOrParams, opts };
+}
+
+/**
+ * Consulta saldos públicos de um produto no contexto de empresa.
+ * Storage transitório: ainda lê de `produtos` (sem estoque_empresa).
+ *
+ * @param {number|object} produtoIdOrParams
+ * @param {{ db?: object, empresaId?: number, empresa_id?: number, modoLegadoSemEmpresa?: boolean, validarEmpresa?: Function, usuarioId?: number }} [opts]
+ */
+async function consultarSaldo(produtoIdOrParams, opts = {}) {
+  const normalized = normalizarArgsProduto(produtoIdOrParams, opts);
+  const id = Number(normalized.produtoId);
+  const callOpts = normalized.opts;
+
   if (!Number.isInteger(id) || id <= 0) {
     const err = new Error('Produto inválido.');
     err.code = 'PRODUTO_INVALIDO';
     throw err;
   }
 
-  const db = getDb(opts.db);
+  const ctx = await resolverContextoEmpresa(callOpts);
+  const db = getDb(callOpts.db);
   const row = await dbGet(
     db,
-    `SELECT id, saldo_fiscal, saldo_nao_fiscal, estoque_atual
+    `SELECT id,
+            COALESCE(saldo_fiscal, 0) AS saldo_fiscal,
+            COALESCE(saldo_nao_fiscal, 0) AS saldo_nao_fiscal,
+            COALESCE(reservado_fiscal, 0) AS reservado_fiscal,
+            COALESCE(reservado_nao_fiscal, 0) AS reservado_nao_fiscal,
+            estoque_atual
      FROM produtos WHERE id = ?`,
     [id]
   );
@@ -67,17 +113,44 @@ async function consultarSaldo(produtoId, opts = {}) {
 
   const saldoFiscal = round3(row.saldo_fiscal);
   const saldoNaoFiscal = round3(row.saldo_nao_fiscal);
+  const estoqueAtual = round3(
+    row.estoque_atual != null
+      ? row.estoque_atual
+      : recalcularEstoqueConsolidado({
+        saldo_fiscal: saldoFiscal,
+        saldo_nao_fiscal: saldoNaoFiscal
+      })
+  );
+  const calc = calcularEstoqueProduto({
+    saldo_fiscal: saldoFiscal,
+    saldo_nao_fiscal: saldoNaoFiscal,
+    reservado_fiscal: row.reservado_fiscal,
+    reservado_nao_fiscal: row.reservado_nao_fiscal,
+    estoque_atual: estoqueAtual
+  });
+
+  logOperacaoSaldo({
+    operacao: 'consultarSaldo',
+    produtoId: id,
+    empresaId: ctx.empresaId,
+    legado: ctx.legado,
+    usuarioId: callOpts.usuarioId
+  });
 
   return Object.freeze({
     produto_id: id,
+    empresa_id: ctx.empresaId,
+    legado: ctx.legado,
     existe: true,
     saldo_fiscal: saldoFiscal,
     saldo_nao_fiscal: saldoNaoFiscal,
-    estoque_total: round3(
-      row.estoque_atual != null
-        ? row.estoque_atual
-        : recalcularEstoqueConsolidado({ saldo_fiscal: saldoFiscal, saldo_nao_fiscal: saldoNaoFiscal })
-    )
+    estoque_atual: estoqueAtual,
+    estoque_total: estoqueAtual,
+    reservado_fiscal: calc.reservado_fiscal,
+    reservado_nao_fiscal: calc.reservado_nao_fiscal,
+    disponivel_fiscal: calc.disponivel_fiscal,
+    disponivel_nao_fiscal: calc.disponivel_nao_fiscal,
+    disponivel_total: calc.disponivel_total
   });
 }
 
@@ -90,8 +163,9 @@ async function _ajustarSaldo(produtoId, tipo, delta, opts = {}) {
     throw err;
   }
 
+  const ctx = await resolverContextoEmpresa(opts);
   const db = getDb(opts.db);
-  const saldos = await consultarSaldo(produtoId, { db });
+  const saldos = await consultarSaldo(produtoId, { ...opts, db });
 
   let saldoFiscal = saldos.saldo_fiscal;
   let saldoNaoFiscal = saldos.saldo_nao_fiscal;
@@ -115,6 +189,7 @@ async function _ajustarSaldo(produtoId, tipo, delta, opts = {}) {
     throw err;
   }
 
+  // Invariante: estoque_atual = saldo_fiscal + saldo_nao_fiscal
   const estoqueTotal = round3(saldoFiscal + saldoNaoFiscal);
 
   await dbRun(
@@ -128,20 +203,37 @@ async function _ajustarSaldo(produtoId, tipo, delta, opts = {}) {
     [saldoFiscal, saldoNaoFiscal, estoqueTotal, saldos.produto_id]
   );
 
+  logOperacaoSaldo({
+    operacao: q < 0 ? 'debitarSaldo' : 'creditarSaldo',
+    produtoId: saldos.produto_id,
+    empresaId: ctx.empresaId,
+    tipo: tipoN,
+    quantidade: Math.abs(q),
+    legado: ctx.legado,
+    usuarioId: opts.usuarioId
+  });
+
   return Object.freeze({
     produto_id: saldos.produto_id,
+    empresa_id: ctx.empresaId,
+    legado: ctx.legado,
     tipo: tipoN,
     delta: q,
     saldo_fiscal_antes: saldos.saldo_fiscal,
     saldo_nao_fiscal_antes: saldos.saldo_nao_fiscal,
     saldo_fiscal_depois: saldoFiscal,
     saldo_nao_fiscal_depois: saldoNaoFiscal,
+    estoque_atual_depois: estoqueTotal,
     estoque_total_depois: estoqueTotal
   });
 }
 
 /**
  * Debita quantidade do tipo informado (saldo não pode ficar negativo).
+ * @param {number} produtoId
+ * @param {string} tipo
+ * @param {number} quantidade
+ * @param {{ empresaId?: number, empresa_id?: number, db?: object, modoLegadoSemEmpresa?: boolean }} [opts]
  */
 async function debitarSaldo(produtoId, tipo, quantidade, opts = {}) {
   const q = round3(quantidade);
@@ -167,14 +259,26 @@ async function creditarSaldo(produtoId, tipo, quantidade, opts = {}) {
 }
 
 /**
- * Executa transferência F↔NF de forma atômica no Motor (débito + crédito).
- * Preferível quando o chamador não gerencia a transação.
+ * Transferência Fiscal ↔ Não Fiscal do MESMO produto + mesma empresa.
+ * NÃO é transferência entre CNPJs/empresas.
+ *
+ * @param {{ produtoId?: number, produto_id?: number, empresaId?: number, empresa_id?: number, origem: string, destino: string, quantidade: number }} params
  */
 async function transferirSaldoEntreTipos(params = {}, opts = {}) {
   const produtoId = Number(params.produtoId || params.produto_id);
   const origem = normalizarTipoSaldo(params.origem);
   const destino = normalizarTipoSaldo(params.destino);
   const quantidade = round3(params.quantidade);
+  const callOpts = {
+    ...opts,
+    empresaId: resolverEmpresaId(params) ?? resolverEmpresaId(opts),
+    modoLegadoSemEmpresa: opts.modoLegadoSemEmpresa === true
+      || params.modoLegadoSemEmpresa === true,
+    motivoCompat: opts.motivoCompat || params.motivoCompat,
+    validarEmpresa: opts.validarEmpresa || params.validarEmpresa,
+    usuarioId: opts.usuarioId != null ? opts.usuarioId : params.usuarioId,
+    db: opts.db != null ? opts.db : params.db
+  };
 
   if (origem === destino) {
     const err = new Error('Origem e destino devem ser diferentes.');
@@ -187,8 +291,9 @@ async function transferirSaldoEntreTipos(params = {}, opts = {}) {
     throw err;
   }
 
-  const db = getDb(opts.db);
-  const antes = await consultarSaldo(produtoId, { db });
+  const ctx = await resolverContextoEmpresa(callOpts);
+  const db = getDb(callOpts.db);
+  const antes = await consultarSaldo(produtoId, { ...callOpts, db });
   const disponivel = origem === TipoSaldo.FISCAL
     ? antes.saldo_fiscal
     : antes.saldo_nao_fiscal;
@@ -204,12 +309,24 @@ async function transferirSaldoEntreTipos(params = {}, opts = {}) {
     throw err;
   }
 
-  const debito = await debitarSaldo(produtoId, origem, quantidade, { db });
-  const credito = await creditarSaldo(produtoId, destino, quantidade, { db });
-  const depois = await consultarSaldo(produtoId, { db });
+  const debito = await debitarSaldo(produtoId, origem, quantidade, { ...callOpts, db });
+  const credito = await creditarSaldo(produtoId, destino, quantidade, { ...callOpts, db });
+  const depois = await consultarSaldo(produtoId, { ...callOpts, db });
+
+  logOperacaoSaldo({
+    operacao: 'transferirSaldoEntreTipos',
+    produtoId,
+    empresaId: ctx.empresaId,
+    tipo: `${origem}->${destino}`,
+    quantidade,
+    legado: ctx.legado,
+    usuarioId: callOpts.usuarioId
+  });
 
   return Object.freeze({
     produto_id: produtoId,
+    empresa_id: ctx.empresaId,
+    legado: ctx.legado,
     origem,
     destino,
     quantidade,
@@ -258,5 +375,6 @@ module.exports = {
   debitarSaldo,
   creditarSaldo,
   transferirSaldoEntreTipos,
-  executarEmTransacao
+  executarEmTransacao,
+  COMPAT_CERTIFICADA_PRE_MULTIEMPRESA
 };

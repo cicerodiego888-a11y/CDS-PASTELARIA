@@ -185,6 +185,512 @@ function inicializarVendaUnidadeCadastro(produto, isEdit) {
     aplicarModoVendaUnidadeCadastro();
 }
 
+/** RC15.3 — produto elegível para envio individual à balança (UI do modal). */
+function produtoCadastroElegivelEnvioBalanca(produtoHint = null) {
+    const id = Number($('#produtoId').val() || produtoHint?.id || 0);
+    if (!Number.isFinite(id) || id <= 0) return false;
+
+    const pesavel = $('#produto_fracionado').length
+        ? $('#produto_fracionado').is(':checked')
+        : Number(produtoHint?.produto_fracionado ?? produtoHint?.vendido_por_peso ?? 0) === 1;
+    if (!pesavel) return false;
+
+    const plu = String($('#plu').val() || produtoHint?.plu || '').replace(/\D/g, '');
+    if (!plu || plu.length > 10) return false;
+
+    const $painel = $('#painelEnvioBalancaProduto');
+    const ativoFlag = $painel.attr('data-produto-ativo');
+    const ativo = ativoFlag != null
+        ? ativoFlag !== '0'
+        : !(produtoHint && (produtoHint.ativo === 0 || produtoHint.ativo === false || produtoHint.ativo === '0'));
+    if (!ativo) return false;
+
+    const tipo = String(produtoHint?.tipo || produtoHint?.tipo_produto || '').toUpperCase();
+    if (tipo.includes('SERVICO') || tipo.includes('SERVIÇO') || tipo.includes('COMBO') || tipo.includes('KIT')) {
+        return false;
+    }
+    if (produtoHint?.servico === 1 || produtoHint?.combo === 1 || produtoHint?.is_combo === 1) {
+        return false;
+    }
+    return true;
+}
+
+/**
+ * RC15.3.1 — elegível para a pergunta pós-salvar (usa dados do produto, sem depender do modal aberto).
+ */
+function produtoSalvoElegivelPerguntaBalanca(produto) {
+    if (!produto || !produto.id) return false;
+    if (Number(produto.ativo ?? 1) !== 1) return false;
+    if (Number(produto.produto_fracionado ?? produto.vendido_por_peso ?? 0) !== 1) return false;
+    const plu = String(produto.plu || '').replace(/\D/g, '');
+    if (!plu || plu.length > 10) return false;
+    const tipo = String(produto.tipo || produto.tipo_produto || '').toUpperCase();
+    if (tipo.includes('SERVICO') || tipo.includes('SERVIÇO') || tipo.includes('COMBO') || tipo.includes('KIT')) {
+        return false;
+    }
+    if (produto.servico === 1 || produto.combo === 1 || produto.is_combo === 1) return false;
+    return true;
+}
+
+async function resolverEquipamentoBalancaPadrao(preferidoId = null) {
+    const pref = Number(preferidoId || 0);
+    if (Number.isFinite(pref) && pref > 0) return pref;
+    try {
+        const token = localStorage.getItem('token') || '';
+        const resp = await fetch(`${API_URL}/equipamentos?todos=1`, {
+            headers: { Authorization: `Bearer ${token}` }
+        });
+        const body = await resp.json().catch(() => ([]));
+        const lista = Array.isArray(body) ? body : (body.equipamentos || body.data || []);
+        let eqs = lista.filter((e) => {
+            const driver = String(e.driver_codigo || e.driver || '').toUpperCase();
+            const fab = String(e.fabricante || '').toLowerCase();
+            const modelo = String(e.modelo || '').toLowerCase();
+            return driver.includes('TOLEDO') || fab.includes('toledo') || modelo.includes('prix');
+        });
+        if (!eqs.length) eqs = lista.filter((e) => e.ip || e.host);
+        return eqs.length ? Number(eqs[0].id) : 0;
+    } catch (_) {
+        return 0;
+    }
+}
+
+/**
+ * RC15.3.1 — envio por id (após salvar / modal já fechado).
+ * RC14.15.3 — respeita modo_envio (TCP → upload-produto | MGV6 → /mgv6/export).
+ */
+/** RC15.5 — monta mensagem legível a partir do ValidationReport. */
+function formatarMotivosValidacaoBalanca(body) {
+    const motivos = Array.isArray(body?.motivos) && body.motivos.length
+        ? body.motivos
+        : (Array.isArray(body?.errors)
+            ? body.errors.map((e) => (typeof e === 'string' ? e : e.motivo)).filter(Boolean)
+            : []);
+    if (motivos.length) {
+        return `Produto não enviado\nMotivo:\n${motivos.map((m) => `• ${m}`).join('\n')}`;
+    }
+    const msg = body?.error || body?.mensagem || 'Falha ao enviar produto.';
+    if (String(msg).toUpperCase() === 'VALIDATION_ERROR') {
+        return 'Produto não enviado\nMotivo:\n• Validação falhou (detalhes indisponíveis).';
+    }
+    return msg;
+}
+
+async function obterModoEnvioEquipamentoProduto(equipamentoId) {
+    const eid = Number(equipamentoId);
+    if (!Number.isFinite(eid) || eid <= 0) return 'TCP';
+    try {
+        const token = localStorage.getItem('token') || '';
+        const resp = await fetch(`${API_URL}/equipamentos/mgv6/config/${eid}`, {
+            headers: { Authorization: `Bearer ${token}` }
+        });
+        const body = await resp.json().catch(() => ({}));
+        const modo = String(body.modo_envio || body.config?.modo_envio || 'TCP').toUpperCase();
+        return modo === 'MGV6' ? 'MGV6' : 'TCP';
+    } catch (_) {
+        return 'TCP';
+    }
+}
+
+async function enviarProdutoParaBalancaPorId(produtoId, equipamentoId) {
+    const pid = Number(produtoId);
+    const eid = Number(equipamentoId);
+    if (!Number.isFinite(pid) || pid <= 0 || !Number.isFinite(eid) || eid <= 0) {
+        throw new Error('Produto ou equipamento inválido para envio.');
+    }
+    const token = localStorage.getItem('token') || '';
+    const modo = await obterModoEnvioEquipamentoProduto(eid);
+
+    if (modo === 'MGV6') {
+        const resp = await fetch(`${API_URL}/equipamentos/mgv6/export`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${token}`
+            },
+            body: JSON.stringify({ equipamentoId: eid, produtoIds: [pid], autoLaunch: false })
+        });
+        const body = await resp.json().catch(() => ({}));
+        if (!resp.ok || body.sucesso === false) {
+            const err = new Error(body.mensagem || body.error || 'Falha na exportação MGV6.');
+            err.code = body.codigo || body.code;
+            throw err;
+        }
+
+        let mgv6Iniciado = false;
+        if (body.mgv6?.encontrado) {
+            const deseja = typeof epbPerguntarIniciarSoftwareBalanca === 'function'
+                ? await epbPerguntarIniciarSoftwareBalanca()
+                : window.confirm('Deseja iniciar o software da balança?');
+            if (deseja) {
+                const launchResp = await fetch(`${API_URL}/equipamentos/mgv6/launch`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        Authorization: `Bearer ${token}`
+                    },
+                    body: JSON.stringify({ equipamentoId: eid })
+                });
+                const launchBody = await launchResp.json().catch(() => ({}));
+                mgv6Iniciado = Boolean(launchResp.ok && launchBody.iniciado);
+            }
+        } else if (typeof showNotification === 'function') {
+            showNotification('Software MGV6 não encontrado neste computador.', 'warning');
+        }
+
+        return {
+            success: true,
+            sucesso: true,
+            modo_envio: 'MGV6',
+            arquivo: body.arquivo,
+            quantidade: body.quantidade,
+            caminho: body.caminho,
+            mgv6Iniciado,
+            transmitidoBalanca: false
+        };
+    }
+
+    const resp = await fetch(`${API_URL}/equipamentos/${eid}/upload-produto`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ produtoId: pid })
+    });
+    const body = await resp.json().catch(() => ({}));
+    if (!resp.ok || body.success === false) {
+        const err = new Error(formatarMotivosValidacaoBalanca(body));
+        err.validationReport = body.validationReport || null;
+        err.motivos = body.motivos || null;
+        throw err;
+    }
+    return body;
+}
+
+function fecharDialogoEnviarBalancaAposSalvar() {
+    const el = document.getElementById('modalEnviarBalancaAposSalvar');
+    if (!el) return;
+    if (typeof bootstrap !== 'undefined' && bootstrap.Modal) {
+        const inst = bootstrap.Modal.getInstance(el);
+        if (inst) inst.hide();
+        else bootstrap.Modal.getOrCreateInstance(el).hide();
+    } else {
+        $(el).modal('hide');
+    }
+    setTimeout(() => $(el).remove(), 400);
+}
+
+/**
+ * RC15.3.1 — diálogo opcional após salvar produto pesável.
+ */
+function perguntarEnvioBalancaAposSalvar(produto, equipamentoIdPreferido = null) {
+    if (!produtoSalvoElegivelPerguntaBalanca(produto)) return;
+
+    $('#modalEnviarBalancaAposSalvar').remove();
+    const nome = escapeHtml(produto.nome || 'este produto');
+    const html = `
+        <div class="modal fade" id="modalEnviarBalancaAposSalvar" tabindex="-1" aria-hidden="true" data-bs-backdrop="static">
+            <div class="modal-dialog modal-dialog-centered">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">Produto salvo com sucesso.</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
+                    </div>
+                    <div class="modal-body">
+                        <p class="mb-0">Deseja enviar este produto para a balança agora?</p>
+                        <p class="text-muted small mt-2 mb-0">${nome}</p>
+                        <div class="small text-muted mt-2 d-none" id="envioBalancaAposSalvarStatus" aria-live="polite"></div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-outline-secondary" id="btnBalancaAposSalvarDepois">Depois</button>
+                        <button type="button" class="btn btn-primary" id="btnBalancaAposSalvarAgora">Enviar Agora</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    `;
+    $('body').append(html);
+
+    const el = document.getElementById('modalEnviarBalancaAposSalvar');
+    const mostrar = () => {
+        if (el && typeof bootstrap !== 'undefined' && bootstrap.Modal) {
+            bootstrap.Modal.getOrCreateInstance(el).show();
+        } else {
+            $('#modalEnviarBalancaAposSalvar').modal('show');
+        }
+    };
+    // Aguarda o modal de produto fechar para não empilhar backdrop
+    setTimeout(mostrar, 350);
+
+    $('#btnBalancaAposSalvarDepois').on('click', () => {
+        fecharDialogoEnviarBalancaAposSalvar();
+    });
+
+    $('#btnBalancaAposSalvarAgora').on('click', async function onEnviarAgora() {
+        const $btn = $(this);
+        const $st = $('#envioBalancaAposSalvarStatus');
+        $btn.prop('disabled', true);
+        $('#btnBalancaAposSalvarDepois').prop('disabled', true);
+        $st.removeClass('d-none text-danger text-success').addClass('text-muted').text('⏳ Enviando produto...');
+        try {
+            const eqId = await resolverEquipamentoBalancaPadrao(
+                equipamentoIdPreferido || Number($('#balancaProdutoEquipamento').val() || 0)
+            );
+            if (!eqId) {
+                throw new Error('Nenhum equipamento Toledo cadastrado.');
+            }
+            const modoEq = await obterModoEnvioEquipamentoProduto(eqId);
+            const result = await enviarProdutoParaBalancaPorId(produto.id, eqId);
+            fecharDialogoEnviarBalancaAposSalvar();
+            if (modoEq === 'MGV6' || result?.modo_envio === 'MGV6') {
+                showNotification(
+                    'Produtos preparados para o MGV6. ' +
+                    'TXITENS.TXT gravado e MGV6 iniciado (se configurado). ' +
+                    'Para transmitir à balança: Carga → Solicitar Carga das Balanças → Enviar.',
+                    'success'
+                );
+            } else {
+                showNotification('Produto enviado para a balança.', 'success');
+            }
+        } catch (err) {
+            $st.removeClass('text-muted text-success').addClass('text-danger').text(`❌ ${err.message || 'Falha ao enviar produto.'}`);
+            $btn.prop('disabled', false);
+            $('#btnBalancaAposSalvarDepois').prop('disabled', false);
+            showNotification(err.message || 'Falha ao enviar produto.', 'danger');
+        }
+    });
+}
+
+function formatarDataHoraBalancaProduto(iso) {
+    if (!iso) return 'Nunca';
+    try {
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return String(iso);
+        return d.toLocaleString('pt-BR', {
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit'
+        });
+    } catch (_) {
+        return String(iso);
+    }
+}
+
+function balancaProdutoLogLinha(msg) {
+    const el = document.getElementById('balancaProdutoLog');
+    if (!el) return;
+    el.classList.remove('d-none');
+    const hora = new Date().toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    el.textContent = `${el.textContent ? `${el.textContent}\n` : ''}${hora}\n${msg}`.trim();
+    el.scrollTop = el.scrollHeight;
+}
+
+function atualizarVisibilidadePainelEnvioBalancaProduto(produtoHint = null) {
+    const $painel = $('#painelEnvioBalancaProduto');
+    if (!$painel.length) return;
+    const elegivel = produtoCadastroElegivelEnvioBalanca(produtoHint);
+    $painel.toggleClass('d-none', !elegivel);
+    const $btn = $('#btnEnviarProdutoBalanca');
+    const temEq = Boolean(Number($('#balancaProdutoEquipamento').val() || 0));
+    $btn.prop('disabled', !elegivel || !temEq || $btn.data('enviando') === true);
+    if (elegivel) {
+        $('#balancaProdutoStatusApto').text('🟢 Produto apto para balança');
+    }
+}
+
+async function carregarEquipamentosPainelBalancaProduto() {
+    const sel = document.getElementById('balancaProdutoEquipamento');
+    if (!sel) return;
+    const token = localStorage.getItem('token') || '';
+    const headers = { Authorization: `Bearer ${token}` };
+    try {
+        const resp = await fetch(`${API_URL}/equipamentos?todos=1`, { headers });
+        const body = await resp.json().catch(() => ([]));
+        const lista = Array.isArray(body) ? body : (body.equipamentos || body.data || []);
+        let eqs = lista.filter((e) => {
+            const driver = String(e.driver_codigo || e.driver || '').toUpperCase();
+            const fab = String(e.fabricante || '').toLowerCase();
+            const modelo = String(e.modelo || '').toLowerCase();
+            return driver.includes('TOLEDO') || fab.includes('toledo') || modelo.includes('prix');
+        });
+        if (!eqs.length) {
+            eqs = lista.filter((e) => e.ip || e.host);
+        }
+        sel.innerHTML = eqs.length
+            ? eqs.map((e) => {
+                const label = `${e.nome || e.modelo || 'Equipamento'} — ${e.ip || e.host || '?'}:${e.porta_tcp || e.porta || 9000}`;
+                return `<option value="${e.id}">${String(label).replace(/</g, '&lt;')}</option>`;
+            }).join('')
+            : '<option value="">Nenhum equipamento Toledo cadastrado</option>';
+    } catch (_) {
+        sel.innerHTML = '<option value="">Erro ao carregar equipamentos</option>';
+    }
+}
+
+async function carregarUltimaSyncBalancaProduto(produtoId) {
+    const id = Number(produtoId || $('#produtoId').val() || 0);
+    const $sync = $('#balancaProdutoUltimaSync');
+    const $res = $('#balancaProdutoResultado');
+    if (!$sync.length || !id) {
+        if ($sync.length) $sync.text('Nunca');
+        if ($res.length) $res.text('—').removeClass('text-success text-danger').addClass('text-muted');
+        return;
+    }
+    try {
+        const token = localStorage.getItem('token') || '';
+        const resp = await fetch(`${API_URL}/equipamentos/plu/ultima-sync?produto_id=${id}`, {
+            headers: { Authorization: `Bearer ${token}` }
+        });
+        const body = await resp.json().catch(() => ({}));
+        if (body.sincronizado_em) {
+            $sync.text(formatarDataHoraBalancaProduto(body.sincronizado_em));
+            $res.text('🟢 Sincronizado').removeClass('text-muted text-danger').addClass('text-success');
+        } else {
+            $sync.text('Nunca');
+            $res.text('—').removeClass('text-success text-danger').addClass('text-muted');
+        }
+    } catch (_) {
+        $sync.text('Nunca');
+    }
+}
+
+async function enviarProdutoParaBalancaCadastro() {
+    const $btn = $('#btnEnviarProdutoBalanca');
+    const $fb = $('#balancaProdutoFeedback');
+    const produtoId = Number($('#produtoId').val() || 0);
+    const equipamentoId = Number($('#balancaProdutoEquipamento').val() || 0);
+    if (!produtoCadastroElegivelEnvioBalanca() || !equipamentoId || !produtoId) {
+        showNotification('Salve o produto pesável com PLU válido antes de enviar.', 'warning');
+        return;
+    }
+
+    $btn.data('enviando', true).prop('disabled', true);
+    $fb.removeClass('text-success text-danger').addClass('text-muted').text('⏳ Enviando produto...');
+
+    const nome = String($('#nome').val() || 'Produto').trim();
+    const plu = String($('#plu').val() || '').replace(/\D/g, '');
+    const inicio = Date.now();
+
+    try {
+        const body = await enviarProdutoParaBalancaPorId(produtoId, equipamentoId);
+        const tempo = body.tempo_ms != null ? body.tempo_ms : (Date.now() - inicio);
+
+        $fb.removeClass('text-muted text-danger').addClass('text-success').text('✅ Produto enviado com sucesso.');
+        $('#balancaProdutoUltimaSync').text(formatarDataHoraBalancaProduto(body.sincronizado_em || new Date().toISOString()));
+        $('#balancaProdutoResultado').text('🟢 Sincronizado').removeClass('text-muted text-danger').addClass('text-success');
+        balancaProdutoLogLinha(
+            `Produto:\n${nome}\nPLU:\n${plu}\nEquipamento:\n${body.equipamento || equipamentoId}\nResultado:\n${body.resultado || 'ACK recebido'}\nTempo:\n${tempo} ms`
+        );
+        if (!$('#balancaProdutoHistoricoBox').hasClass('d-none')) {
+            carregarHistoricoBalancaProduto(produtoId, false);
+        }
+        showNotification('Produto enviado com sucesso.', 'success');
+    } catch (err) {
+        $fb.removeClass('text-muted text-success').addClass('text-danger').text('❌ Falha ao enviar produto.');
+        balancaProdutoLogLinha(`Produto:\n${nome}\nPLU:\n${plu}\nResultado:\n${err.message || 'Erro'}`);
+        if (!$('#balancaProdutoHistoricoBox').hasClass('d-none')) {
+            carregarHistoricoBalancaProduto(produtoId, false);
+        }
+        showNotification(err.message || 'Falha ao enviar produto.', 'danger');
+    } finally {
+        $btn.data('enviando', false);
+        atualizarVisibilidadePainelEnvioBalancaProduto();
+    }
+}
+
+function formatarItemHistoricoBalancaProduto(item) {
+    const dt = formatarDataHoraBalancaProduto(item.created_at);
+    const ok = String(item.resultado || '').toUpperCase() === 'SUCESSO';
+    const titulo = ok ? 'Sucesso' : 'Erro';
+    const eq = item.equipamento_nome || item.equipamento_modelo || (item.equipamento_id ? `#${item.equipamento_id}` : '');
+    const tempo = item.tempo_ms != null ? `${item.tempo_ms} ms` : '';
+    const msg = !ok && item.mensagem ? String(item.mensagem) : '';
+    const linhas = [
+        `<div class="fw-semibold">${escapeHtml(dt)}</div>`,
+        `<div class="${ok ? 'text-success' : 'text-danger'}">${escapeHtml(titulo)}</div>`
+    ];
+    if (eq) linhas.push(`<div class="text-muted">Equipamento<br>${escapeHtml(eq)}</div>`);
+    if (tempo && ok) linhas.push(`<div>${escapeHtml(tempo)}</div>`);
+    if (msg) linhas.push(`<div class="text-danger">${escapeHtml(msg)}</div>`);
+    return `<div class="border-bottom py-2 mb-1">${linhas.join('')}</div>`;
+}
+
+async function carregarHistoricoBalancaProduto(produtoId, forcarAbrir = false) {
+    const id = Number(produtoId || $('#produtoId').val() || 0);
+    const $box = $('#balancaProdutoHistoricoBox');
+    const $lista = $('#balancaProdutoHistoricoLista');
+    if (!$box.length || !$lista.length) return;
+    if (forcarAbrir) $box.toggleClass('d-none');
+    if ($box.hasClass('d-none')) return;
+    if (!id) {
+        $lista.html('<div class="text-muted">Salve o produto para ver o histórico.</div>');
+        return;
+    }
+    $lista.html('<div class="text-muted">Carregando…</div>');
+    try {
+        const token = localStorage.getItem('token') || '';
+        const resp = await fetch(`${API_URL}/equipamentos/plu/sync-log?produto_id=${id}&limite=30`, {
+            headers: { Authorization: `Bearer ${token}` }
+        });
+        const body = await resp.json().catch(() => ({}));
+        const hist = Array.isArray(body.historico) ? body.historico : [];
+        if (!hist.length) {
+            $lista.html('<div class="text-muted">Nenhuma sincronização registrada.</div>');
+            return;
+        }
+        $lista.html(hist.map(formatarItemHistoricoBalancaProduto).join(''));
+    } catch (err) {
+        $lista.html(`<div class="text-danger">Erro ao carregar histórico.</div>`);
+    }
+}
+
+function inicializarPainelEnvioBalancaProduto(produto, isEdit) {
+    const $modal = $('#produtoModal');
+    if (!$modal.length) return;
+
+    const ativo = !isEdit || Number(produto?.ativo ?? 1) === 1;
+    $('#painelEnvioBalancaProduto').attr('data-produto-ativo', ativo ? '1' : '0');
+    $('#balancaProdutoFeedback').text('').removeClass('text-success text-danger text-muted');
+    $('#balancaProdutoLog').addClass('d-none').text('');
+    $('#balancaProdutoHistoricoBox').addClass('d-none');
+    $('#balancaProdutoHistoricoLista').empty();
+    $('#balancaProdutoResultado').text('—').removeClass('text-success text-danger').addClass('text-muted');
+    $('#balancaProdutoUltimaSync').text('Nunca');
+
+    $modal
+        .off('change.envioBalancaProduto input.envioBalancaProduto click.envioBalancaProduto')
+        .on('change.envioBalancaProduto', '#integrar_balanca', () => {
+            $('#integrar_balanca').data('userTouched', true);
+        })
+        .on('change.envioBalancaProduto input.envioBalancaProduto', '#produto_fracionado, #plu, #integrar_balanca', () => {
+            if ($('#produto_fracionado').is(':checked') && !$('#integrar_balanca').data('userTouched')) {
+                $('#integrar_balanca').prop('checked', true);
+            }
+            atualizarVisibilidadePainelEnvioBalancaProduto(produto);
+        })
+        .on('change.envioBalancaProduto', '#balancaProdutoEquipamento', () => {
+            atualizarVisibilidadePainelEnvioBalancaProduto(produto);
+        })
+        .on('click.envioBalancaProduto', '#btnEnviarProdutoBalanca', (ev) => {
+            ev.preventDefault();
+            enviarProdutoParaBalancaCadastro();
+        })
+        .on('click.envioBalancaProduto', '#btnHistoricoBalancaProduto', (ev) => {
+            ev.preventDefault();
+            carregarHistoricoBalancaProduto(produto?.id, true);
+        });
+
+    carregarEquipamentosPainelBalancaProduto().then(() => {
+        atualizarVisibilidadePainelEnvioBalancaProduto(produto);
+        if (isEdit && produto?.id) {
+            carregarUltimaSyncBalancaProduto(produto.id);
+        }
+    });
+}
+
 function inicializarMotorConversaoUnidadesCadastro() {
     const $modal = $('#produtoModal');
     if (!$modal.length) return;
@@ -215,7 +721,7 @@ function inicializarMotorConversaoUnidadesCadastro() {
 function loadProdutos() {
     const modoFiscal = typeof modoFiscalQueryParam === 'function' ? modoFiscalQueryParam() : '0';
 
-    $.ajax({
+    return $.ajax({
         url: `${API_URL}/produtos?modo_fiscal=${modoFiscal}`,
         method: 'GET',
         success: function (produtos) {
@@ -366,8 +872,9 @@ function obterSaldosIniciaisDoFormulario() {
 }
 
 function montarHtmlCamposEstoqueProduto(produto, isEdit, opcoes = {}) {
-    const temMovimentacoes = Boolean(opcoes.temMovimentacoes ?? produto?.tem_movimentacoes);
-    const permiteEditarSaldos = !isEdit || !temMovimentacoes;
+    // Bloqueia edição do Estoque Inicial somente após a 1ª venda
+    const temVendas = Boolean(opcoes.temVendas ?? produto?.tem_vendas);
+    const permiteEditarSaldos = !isEdit || !temVendas;
     const modoFiscal = typeof isModoFiscalVisualizacaoAtivo === 'function' && isModoFiscalVisualizacaoAtivo();
     const saldoFiscal = Number(produto?.saldo_fiscal ?? 0);
     const saldoNaoFiscal = Number(produto?.saldo_nao_fiscal ?? 0);
@@ -430,9 +937,11 @@ function montarHtmlCamposEstoqueProduto(produto, isEdit, opcoes = {}) {
         `;
     }
 
-    const avisoAjuste = temMovimentacoes && podeAjustarEstoque()
-        ? '<small class="text-muted d-block mt-1">Use o botão <strong>Ajustar Estoque</strong> na lista para alterar saldos.</small>'
-        : '';
+    const avisoAjuste = temVendas && podeAjustarEstoque()
+        ? '<small class="text-muted d-block mt-1">Produto já vendido. Use o botão <strong>Ajustar Estoque</strong> na lista para alterar saldos.</small>'
+        : (temVendas
+            ? '<small class="text-muted d-block mt-1">Produto já vendido — saldos iniciais não podem ser alterados.</small>'
+            : '');
 
     if (modoFiscal) {
         return `
@@ -494,26 +1003,26 @@ function atualizarCamposEstoqueModalProduto() {
 
     const saldosForm = obterSaldosIniciaisDoFormulario();
     const isEdit = Boolean($('#produtoId').val());
-    const temMovimentacoes = $modal.data('temMovimentacoes') === true;
+    const temVendas = $modal.data('temVendas') === true;
     const saldosArmazenados = $modal.data('produtoSaldos') || {};
 
     const produto = {
         unidade: $('#unidade').val() || '',
-        tem_movimentacoes: temMovimentacoes,
-        saldo_fiscal: temMovimentacoes && isEdit
+        tem_vendas: temVendas,
+        saldo_fiscal: temVendas && isEdit
             ? Number(saldosArmazenados.saldo_fiscal ?? 0)
             : saldosForm.saldo_fiscal_inicial,
-        saldo_nao_fiscal: temMovimentacoes && isEdit
+        saldo_nao_fiscal: temVendas && isEdit
             ? Number(saldosArmazenados.saldo_nao_fiscal ?? 0)
             : saldosForm.saldo_nao_fiscal_inicial,
-        estoque_atual: temMovimentacoes && isEdit
+        estoque_atual: temVendas && isEdit
             ? Number(saldosArmazenados.estoque_atual ?? 0)
             : saldosForm.estoque_total
     };
 
-    $area.html(montarHtmlCamposEstoqueProduto(produto, isEdit, { temMovimentacoes }));
+    $area.html(montarHtmlCamposEstoqueProduto(produto, isEdit, { temVendas }));
 
-    const permiteEditarSaldos = !isEdit || !temMovimentacoes;
+    const permiteEditarSaldos = !isEdit || !temVendas;
     if (permiteEditarSaldos) {
         $('#saldo_fiscal_inicial').val(saldosForm.saldo_fiscal_inicial);
         const $naoFiscal = $('#saldo_nao_fiscal_inicial');
@@ -1036,6 +1545,8 @@ function filtrarListaProdutosUI(produtos) {
     const categoriaId = String($('#filtroCategoriaProduto').val() || '');
 
     return (produtos || []).filter(p => {
+        // HOTFIX MIB-4.0.1 — com texto, a busca tipada vem do MIB; aqui só aplica categoria
+        // (e fallback local quando SearchSDK indisponível).
         const bateBusca = !termo || produtoCorrespondeBuscaInteligente(p, termo, termoDigits);
 
         const bateCategoria =
@@ -1045,11 +1556,17 @@ function filtrarListaProdutosUI(produtos) {
     });
 }
 
+/** Fallback legado — somente se SearchService/SDK falhar. */
+function filtrarListaProdutosFallbackLocal(produtos) {
+    return filtrarListaProdutosUI(produtos);
+}
+
 function produtoCorrespondeBuscaInteligente(produto, termoNormalizado, termoDigits) {
     if (!termoNormalizado) return true;
 
     const camposTexto = [
         produto.nome,
+        produto.nome_busca,
         produto.descricao,
         produto.observacoes,
         produto.codigo,
@@ -1057,6 +1574,7 @@ function produtoCorrespondeBuscaInteligente(produto, termoNormalizado, termoDigi
         produto.plu,
         produto.categoria,
         produto.categoria_nome,
+        produto.marca,
         produto.fornecedor
     ];
 
@@ -1098,10 +1616,32 @@ function expandirNosArvoreParaLista(produtos) {
     });
 }
 
-function aplicarFiltrosProdutos(produtos) {
-    const termo = normalizarTexto($('#buscaProduto').val()).trim();
+function aplicarFiltrosProdutos(produtos, opcoes = {}) {
+    const termo = String($('#buscaProduto').val() || '').trim();
     const categoriaId = String($('#filtroCategoriaProduto').val() || '');
-    const filtrados = filtrarListaProdutosUI(produtos);
+    const origemMib = opcoes.origem === 'mib';
+    const fallbackLocal = opcoes.fallbackLocal === true;
+
+    let filtrados;
+    if (!termo) {
+        // Restaura árvore original (apenas filtro de categoria, se houver)
+        filtrados = (produtos || []).filter((p) =>
+            !categoriaId || String(p.categoria_id || '') === categoriaId
+        );
+    } else if (origemMib) {
+        // Hits já vieram do MIB — só categoria
+        filtrados = (produtos || []).filter((p) =>
+            !categoriaId || String(p.categoria_id || '') === categoriaId
+        );
+    } else if (fallbackLocal) {
+        filtrados = filtrarListaProdutosFallbackLocal(produtos);
+    } else {
+        // Sem termo tratado acima; categoria-only
+        filtrados = (produtos || []).filter((p) =>
+            !categoriaId || String(p.categoria_id || '') === categoriaId
+        );
+    }
+
     const filtroAtivo = !!(termo || categoriaId);
 
     // Com busca/filtro ativo, abre os nós do resultado para o usuário ver os produtos.
@@ -1112,6 +1652,138 @@ function aplicarFiltrosProdutos(produtos) {
     $('#tabela-produtos-container').hide();
     $('#categorias-container').show();
     renderizarArvoreListagemProdutos(filtrados);
+}
+
+/** HOTFIX MIB-4.0.1 — estado da busca tipada via SearchSDK */
+const CDS_PRODUTOS_BUSCA_MIB = {
+    debounceMs: 300,
+    timer: null,
+    abort: null,
+    seq: 0,
+    ultimaMeta: null
+};
+
+function obterSdkBuscaProdutos() {
+    return window.CdsSearchSDK || window.SearchSDK || null;
+}
+
+function setIndicadorBuscaProdutos(ativo) {
+    const $icon = $('.cds-prod-lista-header__busca-icon');
+    if (!$icon.length) return;
+    if (ativo) {
+        $icon.removeClass('fa-search').addClass('fa-spinner fa-spin');
+        $icon.attr('title', 'Pesquisando…');
+    } else {
+        $icon.removeClass('fa-spinner fa-spin').addClass('fa-search');
+        $icon.removeAttr('title');
+    }
+}
+
+function enriquecerHitsBuscaProdutos(itens) {
+    const cache = window.produtosCache || window.produtosList || [];
+    const byId = new Map(cache.map((p) => [Number(p.id), p]));
+    return (itens || []).map((hit) => {
+        const full = byId.get(Number(hit.id));
+        if (full) {
+            return { ...full, mib_score: hit.mib_score, _fonteBusca: hit._fonte || 'mib' };
+        }
+        return {
+            ...hit,
+            categoria: hit.categoria || hit.categoria_nome || '',
+            categoria_nome: hit.categoria_nome || hit.categoria || '',
+            subcategoria: hit.subcategoria || hit.subcategoria_nome || '',
+            _fonteBusca: hit._fonte || 'mib'
+        };
+    });
+}
+
+function cancelarBuscaProdutosMib() {
+    if (CDS_PRODUTOS_BUSCA_MIB.timer) {
+        clearTimeout(CDS_PRODUTOS_BUSCA_MIB.timer);
+        CDS_PRODUTOS_BUSCA_MIB.timer = null;
+    }
+    if (CDS_PRODUTOS_BUSCA_MIB.abort) {
+        try { CDS_PRODUTOS_BUSCA_MIB.abort.abort(); } catch (_) { /* ignore */ }
+        CDS_PRODUTOS_BUSCA_MIB.abort = null;
+    }
+}
+
+function restaurarArvoreProdutosOriginal() {
+    setIndicadorBuscaProdutos(false);
+    CDS_PRODUTOS_BUSCA_MIB.ultimaMeta = null;
+    const base = window.produtosCache || window.produtosList || [];
+    aplicarFiltrosProdutos(base, { origem: 'arvore' });
+}
+
+async function executarBuscaProdutosViaMib(termo) {
+    const sdk = obterSdkBuscaProdutos();
+    const base = window.produtosCache || window.produtosList || [];
+    const seq = ++CDS_PRODUTOS_BUSCA_MIB.seq;
+
+    if (!sdk || typeof sdk.search !== 'function') {
+        console.warn('[MIB-4.0.1] SearchSDK indisponível — fallback filtro local');
+        aplicarFiltrosProdutos(base, { fallbackLocal: true });
+        return;
+    }
+
+    if (CDS_PRODUTOS_BUSCA_MIB.abort) {
+        try { CDS_PRODUTOS_BUSCA_MIB.abort.abort(); } catch (_) { /* ignore */ }
+    }
+    const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    CDS_PRODUTOS_BUSCA_MIB.abort = controller;
+    setIndicadorBuscaProdutos(true);
+
+    try {
+        const modoFiscal = typeof modoFiscalQueryParam === 'function' ? modoFiscalQueryParam() : '0';
+        const resultado = await sdk.search({
+            entity: 'produto',
+            query: termo,
+            limite: 50,
+            modo_fiscal: modoFiscal,
+            origem: 'erp-cadastro-produtos'
+        }, { signal: controller ? controller.signal : undefined });
+
+        if (seq !== CDS_PRODUTOS_BUSCA_MIB.seq) return;
+
+        const itens = enriquecerHitsBuscaProdutos(resultado.itens || []);
+        CDS_PRODUTOS_BUSCA_MIB.ultimaMeta = resultado.meta || null;
+        aplicarFiltrosProdutos(itens, { origem: 'mib' });
+    } catch (err) {
+        if (err && (err.name === 'AbortError' || err.code === 'ABORT_ERR')) return;
+        console.warn('[MIB-4.0.1] SearchService falhou — fallback filtro local:', err && err.message ? err.message : err);
+        if (seq !== CDS_PRODUTOS_BUSCA_MIB.seq) return;
+        aplicarFiltrosProdutos(base, { fallbackLocal: true });
+    } finally {
+        if (seq === CDS_PRODUTOS_BUSCA_MIB.seq) {
+            setIndicadorBuscaProdutos(false);
+            CDS_PRODUTOS_BUSCA_MIB.abort = null;
+        }
+    }
+}
+
+function agendarBuscaProdutosMib() {
+    const termo = String($('#buscaProduto').val() || '').trim();
+    cancelarBuscaProdutosMib();
+
+    if (!termo) {
+        restaurarArvoreProdutosOriginal();
+        return;
+    }
+
+    CDS_PRODUTOS_BUSCA_MIB.timer = setTimeout(() => {
+        CDS_PRODUTOS_BUSCA_MIB.timer = null;
+        executarBuscaProdutosViaMib(termo);
+    }, CDS_PRODUTOS_BUSCA_MIB.debounceMs);
+}
+
+function onFiltroCategoriaProdutosChange() {
+    const termo = String($('#buscaProduto').val() || '').trim();
+    if (!termo) {
+        restaurarArvoreProdutosOriginal();
+        return;
+    }
+    // Rebusca MIB para aplicar o filtro de categoria sobre hits atualizados
+    agendarBuscaProdutosMib();
 }
 
 function produtoComEstoqueBaixo(p) {
@@ -1541,7 +2213,7 @@ function renderProdutos(produtos) {
                 </div>
             </div>
         </div>
-        <div class="card">
+        <div class="card cds-prod-lista" id="cdsProdLista" data-cds-prod-visualizacao="default">
             <div class="card-header cds-prod-lista-header">
                 <div class="cds-prod-lista-header__top">
                     <div class="cds-prod-lista-header__title">
@@ -1565,6 +2237,7 @@ function renderProdutos(produtos) {
                             id="buscaProduto"
                             placeholder="Buscar por nome, PLU, código ou código de barras..."
                             aria-label="Buscar produtos"
+                            autocomplete="off"
                         >
                     </div>
                     <select
@@ -1575,6 +2248,11 @@ function renderProdutos(produtos) {
                         <option value="">Todas as categorias</option>
                         ${montarOptionsFiltroCategorias(produtos)}
                     </select>
+                    <div class="cds-prod-lista-header__zoom" role="group" aria-label="Tamanho da visualização">
+                        <button type="button" class="btn btn-outline-secondary btn-sm" id="btnProdutosZoomPadrao" title="Tamanho padrão" aria-label="Tamanho padrão">A Padrão</button>
+                        <button type="button" class="btn btn-outline-secondary btn-sm" id="btnProdutosZoomMais" title="Aumentar visualização" aria-label="Aumentar visualização">A+</button>
+                        <button type="button" class="btn btn-outline-secondary btn-sm" id="btnProdutosZoomMenos" title="Diminuir visualização" aria-label="Diminuir visualização">A−</button>
+                    </div>
                 </div>
             </div>
 
@@ -1612,9 +2290,14 @@ function renderProdutos(produtos) {
 
     $('#page-content').html(html);
 
-    $('#buscaProduto, #filtroCategoriaProduto').on('input change', function () {
-        aplicarFiltrosProdutos(produtos);
+    $('#buscaProduto').on('input', function () {
+        agendarBuscaProdutosMib();
     });
+    $('#filtroCategoriaProduto').on('change', function () {
+        onFiltroCategoriaProdutosChange();
+    });
+
+    inicializarZoomListagemProdutos();
 
     carregarCategoriasProdutos();
     inicializarCardEstoqueBaixo();
@@ -1623,12 +2306,72 @@ function renderProdutos(produtos) {
     carregarDashboardPromocoes();
 }
 
+/** Sprint UX-01 — densidade visual da listagem (somente CSS + localStorage). */
+const CDS_PRODUTOS_VISUALIZACAO_KEY = 'cds_produtos_visualizacao';
+const CDS_PRODUTOS_VISUALIZACAO_MODOS = ['default', 'medium', 'large'];
+
+function lerPreferenciaVisualizacaoProdutos() {
+    try {
+        const raw = String(localStorage.getItem(CDS_PRODUTOS_VISUALIZACAO_KEY) || 'default').toLowerCase();
+        return CDS_PRODUTOS_VISUALIZACAO_MODOS.includes(raw) ? raw : 'default';
+    } catch (_) {
+        return 'default';
+    }
+}
+
+function salvarPreferenciaVisualizacaoProdutos(modo) {
+    try {
+        localStorage.setItem(CDS_PRODUTOS_VISUALIZACAO_KEY, modo);
+    } catch (_) { /* ignore */ }
+}
+
+function aplicarVisualizacaoProdutos(modo) {
+    const normalizado = CDS_PRODUTOS_VISUALIZACAO_MODOS.includes(modo) ? modo : 'default';
+    const $root = $('#cdsProdLista');
+    if (!$root.length) return normalizado;
+
+    $root.attr('data-cds-prod-visualizacao', normalizado);
+
+    const idx = CDS_PRODUTOS_VISUALIZACAO_MODOS.indexOf(normalizado);
+    $('#btnProdutosZoomPadrao').toggleClass('is-active', normalizado === 'default');
+    $('#btnProdutosZoomMais').prop('disabled', idx >= CDS_PRODUTOS_VISUALIZACAO_MODOS.length - 1);
+    $('#btnProdutosZoomMenos').prop('disabled', idx <= 0);
+
+    return normalizado;
+}
+
+function inicializarZoomListagemProdutos() {
+    const atual = aplicarVisualizacaoProdutos(lerPreferenciaVisualizacaoProdutos());
+    salvarPreferenciaVisualizacaoProdutos(atual);
+
+    $('#btnProdutosZoomPadrao').off('click.prodZoom').on('click.prodZoom', function () {
+        const modo = aplicarVisualizacaoProdutos('default');
+        salvarPreferenciaVisualizacaoProdutos(modo);
+    });
+
+    $('#btnProdutosZoomMais').off('click.prodZoom').on('click.prodZoom', function () {
+        const atualIdx = CDS_PRODUTOS_VISUALIZACAO_MODOS.indexOf(lerPreferenciaVisualizacaoProdutos());
+        const proximo = CDS_PRODUTOS_VISUALIZACAO_MODOS[Math.min(atualIdx + 1, CDS_PRODUTOS_VISUALIZACAO_MODOS.length - 1)];
+        const modo = aplicarVisualizacaoProdutos(proximo);
+        salvarPreferenciaVisualizacaoProdutos(modo);
+    });
+
+    $('#btnProdutosZoomMenos').off('click.prodZoom').on('click.prodZoom', function () {
+        const atualIdx = CDS_PRODUTOS_VISUALIZACAO_MODOS.indexOf(lerPreferenciaVisualizacaoProdutos());
+        const anterior = CDS_PRODUTOS_VISUALIZACAO_MODOS[Math.max(atualIdx - 1, 0)];
+        const modo = aplicarVisualizacaoProdutos(anterior);
+        salvarPreferenciaVisualizacaoProdutos(modo);
+    });
+}
+
 function renderCategoriasProdutos(produtos) {
     return renderHtmlArvoreListagemProdutos(produtos || []);
 }
 
 function carregarCategoriasProdutos() {
-    aplicarFiltrosProdutos(window.produtosCache || []);
+    const termo = String($('#buscaProduto').val() || '').trim();
+    if (termo) agendarBuscaProdutosMib();
+    else restaurarArvoreProdutosOriginal();
 }
 
 function toggleProdutosCategoriaMenu(categoriaId) {
@@ -1652,7 +2395,10 @@ function renderProdutosRows(produtos) {
 
 
 // Abre modal de produto
-function showProdutoModal(produto = null) {
+// RC4.31.27 — opcoes.origem === 'COMPRA' NÃO substitui #modal-container (preserva Lançamento de Compra)
+function showProdutoModal(produto = null, opcoes = {}) {
+    const origemCadastro = opcoes && typeof opcoes === 'object' ? (opcoes.origem || null) : null;
+    const preservarOutrosModais = origemCadastro === 'COMPRA' || opcoes?.preservarOutrosModais === true;
     const isEdit = produto !== null;
     const title = isEdit ? 'Editar Produto' : 'Novo Produto';
     const lucro = (() => {
@@ -1687,7 +2433,7 @@ function showProdutoModal(produto = null) {
     $('#produtoModal').remove();
     $('#viewProdutoModal').remove();
     const modalHtml = `
-        <div class="modal fade cds-prod-cadastro" id="produtoModal" tabindex="-1" aria-hidden="true">
+        <div class="modal fade cds-prod-cadastro" id="produtoModal" tabindex="-1" aria-hidden="true"${origemCadastro ? ` data-origem-cadastro="${origemCadastro}"` : ''}>
             <div class="modal-dialog modal-xl modal-dialog-scrollable">
                 <div class="modal-content">
                     <div class="modal-header d-flex align-items-center justify-content-between">
@@ -1715,20 +2461,22 @@ function showProdutoModal(produto = null) {
                                         <div class="row g-3">
                                             <div class="col-md-3">
                                                 <label for="codigo" class="form-label">Código Interno</label>
-                                                <input type="text" class="form-control" id="codigo" value="${isEdit ? escapeHtml(produto.codigo || '') : ''}" placeholder="Automático se vazio" autocomplete="off">
-                                                <div class="form-text">Se não informar, o sistema gera automaticamente. Você pode alterar.</div>
+                                                <input type="text" class="form-control" id="codigo" value="${isEdit ? escapeHtml(produto.codigo || '') : ''}" placeholder="Gerado ao salvar" autocomplete="off">
+                                                <div class="form-text">Se não informar, o sistema gera ao salvar. Informe primeiro o código de barras, se houver.</div>
                                             </div>
-                                            <div class="col-md-2">
-                                                <label for="plu" class="form-label">PLU</label>
+                                            <div class="col-md-3">
+                                                <label for="plu" class="form-label">PLU / Código do item da balança</label>
                                                 <input
                                                     type="text"
                                                     class="form-control cds-prod-cadastro__plu"
                                                     id="plu"
                                                     inputmode="numeric"
                                                     maxlength="10"
-                                                    placeholder="Ex.: 67"
+                                                    placeholder="Ex.: 39"
                                                     value="${isEdit ? escapeHtml(produto.plu || '') : ''}"
+                                                    title="Código do item na balança / MGV6 (não é EAN/GTIN). Usado no TXITENS."
                                                 >
+                                                <div class="form-text">Código do item na balança (MGV6). Não é EAN.</div>
                                             </div>
                                             <div class="col-md-3">
                                                 <label for="codigo_barras" class="form-label">Código de Barras</label>
@@ -1757,15 +2505,25 @@ function showProdutoModal(produto = null) {
                                         <div class="row g-3">
                                             <div class="col-md-6">
                                                 <label for="categoria_id" class="form-label">Categoria</label>
-                                                <select class="form-control" id="categoria_id">
-                                                    <option value="">Carregando...</option>
-                                                </select>
+                                                <div class="input-group">
+                                                    <select class="form-control" id="categoria_id">
+                                                        <option value="">Carregando...</option>
+                                                    </select>
+                                                    <button type="button" class="btn btn-outline-success" id="btnCriarCategoriaRapida" title="Criar categoria rapidamente">
+                                                        <i class="fas fa-plus"></i>
+                                                    </button>
+                                                </div>
                                             </div>
                                             <div class="col-md-6">
                                                 <label for="subcategoria_id" class="form-label">Subcategoria</label>
-                                                <select class="form-control" id="subcategoria_id">
-                                                    <option value="">Selecione uma categoria</option>
-                                                </select>
+                                                <div class="input-group">
+                                                    <select class="form-control" id="subcategoria_id">
+                                                        <option value="">Selecione uma categoria</option>
+                                                    </select>
+                                                    <button type="button" class="btn btn-outline-success" id="btnCriarSubcategoriaRapida" title="Criar subcategoria rapidamente" disabled>
+                                                        <i class="fas fa-plus"></i>
+                                                    </button>
+                                                </div>
                                             </div>
                                             <div class="col-md-6">
                                                 <label for="marca_smart_input" class="form-label">Marca</label>
@@ -1795,7 +2553,7 @@ function showProdutoModal(produto = null) {
                                                     <option value="g" ${isEdit && produto.unidade === 'g' ? 'selected' : ''}>Grama</option>
                                                     <option value="l" ${isEdit && produto.unidade === 'l' ? 'selected' : ''}>Litro</option>
                                                     <option value="ml" ${isEdit && produto.unidade === 'ml' ? 'selected' : ''}>Mililitro</option>
-                                                    <option value="mt" ${isEdit && produto.unidade === 'mt' ? 'selected' : ''}>Metro</option>
+                                                    <option value="mt" ${isEdit && (produto.unidade === 'mt' || produto.unidade === 'm') ? 'selected' : ''}>Metro</option>
                                                     <option value="m2" ${isEdit && produto.unidade === 'm2' ? 'selected' : ''}>Metro Quadrado</option>
                                                     <option value="m3" ${isEdit && produto.unidade === 'm3' ? 'selected' : ''}>Metro Cúbico</option>
                                                 </select>
@@ -1803,6 +2561,9 @@ function showProdutoModal(produto = null) {
                                                     Selecione uma unidade fracionável (KG, MT, LT, M², M³, etc.).
                                                 </small>
                                             </div>
+                                            ${typeof ProdutoEmbalagensUI !== 'undefined'
+                                                ? ProdutoEmbalagensUI.montarHtmlPainelApresentacoes()
+                                                : ''}
                                         </div>
                                     </div>
                                 </div>
@@ -1815,7 +2576,7 @@ function showProdutoModal(produto = null) {
                                     <div class="cds-prod-cadastro__card-body">
                                         <div class="row g-3" id="areaCamposEstoqueProduto">
                                             ${montarHtmlCamposEstoqueProduto(produto, isEdit, {
-                                                temMovimentacoes: produto?.tem_movimentacoes
+                                                temVendas: Boolean(produto?.tem_vendas)
                                             })}
                                         </div>
                                         <div class="row g-3 mt-1">
@@ -1865,18 +2626,25 @@ function showProdutoModal(produto = null) {
                                                 <small class="text-muted">Quantidade Total × Custo Unitário</small>
                                             </div>
                                             <div class="col-md-3">
-                                                <label for="lucro_percentual" class="form-label">Lucro (%)</label>
-                                                <input
-                                                    type="number"
-                                                    step="0.01"
-                                                    class="form-control"
-                                                    id="lucro_percentual"
-                                                    placeholder="%"
-                                                    value="${lucro}"
-                                                >
+                                                <label for="lucro_percentual" class="form-label">
+                                                    Markup (%)
+                                                    <span class="cds-prod-cadastro__badge-oficial" title="Percentual aplicado sobre o custo.">OFICIAL</span>
+                                                </label>
+                                                <div class="input-group">
+                                                    <input
+                                                        type="number"
+                                                        step="0.01"
+                                                        class="form-control"
+                                                        id="lucro_percentual"
+                                                        placeholder="%"
+                                                        value="${lucro}"
+                                                        title="Percentual aplicado sobre o custo."
+                                                    >
+                                                    <span class="input-group-text">%</span>
+                                                </div>
                                             </div>
                                             <div class="col-md-3">
-                                                <label for="preco_venda" class="form-label">Preço de Venda *</label>
+                                                <label for="preco_venda" class="form-label">Preço Unitário *</label>
                                                 <input
                                                     type="number"
                                                     step="0.01"
@@ -1885,6 +2653,11 @@ function showProdutoModal(produto = null) {
                                                     required
                                                     value="${isEdit ? Number(produto.preco_venda || 0) : 0}"
                                                 >
+                                            </div>
+                                            <div class="col-md-3 d-none" id="wrap_valor_embalagem_venda">
+                                                <label for="valor_embalagem_venda" class="form-label">Valor de Venda da Embalagem</label>
+                                                <input type="text" class="form-control bg-light fw-semibold" id="valor_embalagem_venda" readonly value="R$ 0,00">
+                                                <small class="text-muted">Preço unitário × quantidade por embalagem</small>
                                             </div>
                                             <div class="col-md-4">
                                                 <label for="valor_total_venda_preview" class="form-label">Valor Total Venda</label>
@@ -1896,6 +2669,47 @@ function showProdutoModal(produto = null) {
                                                     value="${formatCurrency((estoqueTotalInicial || 0) * (Number(isEdit ? produto.preco_venda : 0) || 0))}"
                                                 >
                                                 <small class="text-muted">Quantidade Total × Preço de Venda</small>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="cds-prod-cadastro__card cds-prod-cadastro__card--tempo-real" id="area_info_margem_bruta_real">
+                                    <div class="cds-prod-cadastro__card-header cds-prod-cadastro__card-header--tempo-real">
+                                        <h6 class="cds-prod-cadastro__card-title cds-prod-cadastro__card-title--tempo-real">
+                                            Informações em tempo real (não salvas)
+                                            <span
+                                                class="cds-prod-cadastro__info-icon"
+                                                title="Valores calculados automaticamente. Não são gravados no cadastro do produto."
+                                                aria-label="Valores calculados automaticamente. Não são gravados no cadastro do produto."
+                                            >ⓘ</span>
+                                        </h6>
+                                    </div>
+                                    <div class="cds-prod-cadastro__card-body cds-prod-cadastro__tempo-real-body">
+                                        <div class="cds-prod-cadastro__tempo-real-grid cds-prod-cadastro__tempo-real-grid--3">
+                                            <div class="cds-prod-cadastro__tempo-real-item cds-prod-cadastro__tempo-real-item--destaque">
+                                                <div class="cds-prod-cadastro__tempo-real-label">
+                                                    Margem Bruta
+                                                    <span class="cds-prod-cadastro__info-icon" title="Percentual do preço de venda que representa o lucro bruto.">ⓘ</span>
+                                                </div>
+                                                <div class="cds-prod-cadastro__tempo-real-valor cds-prod-cadastro__tempo-real-valor--margem" id="margem_bruta_real_preview">—</div>
+                                                <small class="cds-prod-cadastro__tempo-real-hint">Margem calculada sobre o preço atual</small>
+                                            </div>
+                                            <div class="cds-prod-cadastro__tempo-real-item">
+                                                <div class="cds-prod-cadastro__tempo-real-label">
+                                                    Lucro Bruto
+                                                    <span class="cds-prod-cadastro__info-icon" title="Preço de venda − custo unitário.">ⓘ</span>
+                                                </div>
+                                                <div class="cds-prod-cadastro__tempo-real-pill cds-prod-cadastro__tempo-real-pill--lucro" id="lucro_bruto_real_preview">—</div>
+                                                <small class="cds-prod-cadastro__tempo-real-hint">Lucro por unidade (Preço − Custo)</small>
+                                            </div>
+                                            <div class="cds-prod-cadastro__tempo-real-item">
+                                                <div class="cds-prod-cadastro__tempo-real-label">
+                                                    Valor Total Venda
+                                                    <span class="cds-prod-cadastro__info-icon" title="Quantidade total × preço de venda.">ⓘ</span>
+                                                </div>
+                                                <div class="cds-prod-cadastro__tempo-real-pill cds-prod-cadastro__tempo-real-pill--preco" id="valor_total_venda_info_preview">—</div>
+                                                <small class="cds-prod-cadastro__tempo-real-hint">Quantidade × Preço de venda</small>
                                             </div>
                                         </div>
                                     </div>
@@ -1994,6 +2808,59 @@ function showProdutoModal(produto = null) {
                                                     </label>
                                                 </div>
                                                 <div class="form-text">Mesmo flag operacional já usado pelo PDV e balanças (produto_fracionado).</div>
+                                                <div class="form-check form-switch mt-2">
+                                                    <input
+                                                        class="form-check-input"
+                                                        type="checkbox"
+                                                        id="integrar_balanca"
+                                                        ${isEdit
+                                                          ? (produto.integrar_balanca == null
+                                                              ? (produtoEhFracionado(produto) ? 'checked' : '')
+                                                              : (Number(produto.integrar_balanca) === 1 ? 'checked' : ''))
+                                                          : ''}
+                                                    >
+                                                    <label class="form-check-label" for="integrar_balanca">
+                                                        Integrar com Balança
+                                                    </label>
+                                                </div>
+                                                <div class="form-text">Equivalente ao legado: se marcado, o produto pode ir ao MGV6 (exige PLU).</div>
+
+                                                <!-- RC15.3 — Envio individual para balança (Motor Universal) -->
+                                                <div class="border rounded p-3 mt-3 bg-light d-none" id="painelEnvioBalancaProduto" data-produto-ativo="${isEdit && Number(produto.ativo ?? 1) === 1 ? '1' : (isEdit ? '0' : '1')}">
+                                                    <div class="d-flex flex-wrap align-items-start justify-content-between gap-2">
+                                                        <div>
+                                                            <strong class="d-block mb-1">Balança Toledo</strong>
+                                                            <div class="small mb-1">
+                                                                Status:
+                                                                <span id="balancaProdutoStatusApto">🟢 Produto apto para balança</span>
+                                                            </div>
+                                                            <div class="small mb-1">
+                                                                Última sincronização:
+                                                                <span id="balancaProdutoUltimaSync">Nunca</span>
+                                                            </div>
+                                                            <div class="small mb-2">
+                                                                Resultado:
+                                                                <span id="balancaProdutoResultado" class="text-muted">—</span>
+                                                            </div>
+                                                            <label for="balancaProdutoEquipamento" class="form-label small mb-1">Equipamento</label>
+                                                            <select id="balancaProdutoEquipamento" class="form-select form-select-sm" style="max-width: 360px;"></select>
+                                                        </div>
+                                                        <div class="text-end">
+                                                            <button type="button" class="btn btn-primary btn-sm" id="btnEnviarProdutoBalanca" disabled>
+                                                                Enviar para Balança
+                                                            </button>
+                                                            <button type="button" class="btn btn-outline-secondary btn-sm ms-1" id="btnHistoricoBalancaProduto">
+                                                                Histórico
+                                                            </button>
+                                                            <div class="small mt-2" id="balancaProdutoFeedback" aria-live="polite"></div>
+                                                        </div>
+                                                    </div>
+                                                    <div class="mt-2 d-none" id="balancaProdutoHistoricoBox">
+                                                        <div class="small text-muted mb-1">Histórico de sincronização</div>
+                                                        <div id="balancaProdutoHistoricoLista" class="small"></div>
+                                                    </div>
+                                                    <pre class="small bg-dark text-light rounded p-2 mt-2 mb-0 d-none" id="balancaProdutoLog" style="max-height: 140px; overflow: auto; white-space: pre-wrap;"></pre>
+                                                </div>
 
                                                 <div class="ms-1 mt-2 d-none" id="painelVendaUnidadeCadastro">
                                                     <div class="form-check form-switch mb-2">
@@ -2153,13 +3020,31 @@ function showProdutoModal(produto = null) {
         </div>
     `;
 
-    $('#modal-container').html(modalHtml);
+    // RC4.31.27 — a partir de Compras, anexa ao body e preserva #modal-container (compra aberta)
+    if (preservarOutrosModais) {
+        $('body').append(modalHtml);
+    } else {
+        $('#modal-container').html(modalHtml);
+    }
 
-    $('#produtoModal').modal('show');
+    const produtoModalEl = document.getElementById('produtoModal');
+    if (produtoModalEl && typeof bootstrap !== 'undefined' && bootstrap.Modal) {
+        bootstrap.Modal.getOrCreateInstance(produtoModalEl).show();
+    } else {
+        $('#produtoModal').modal('show');
+    }
     // inicializar armazenamento temporário de faixas (para produto novo)
     const faixasInit = (produto && Array.isArray(produto.atacado_faixas)) ? produto.atacado_faixas : [];
     $('#produtoModal').data('faixasTemp', faixasInit);
     $('#produtoModal').data('temMovimentacoes', Boolean(produto?.tem_movimentacoes));
+    $('#produtoModal').data('temVendas', Boolean(produto?.tem_vendas));
+    $('#produtoModal').removeData('produtoRecemSalvo');
+    $('#produtoModal').removeData('produtoSalvoComSucesso');
+    if (origemCadastro) {
+        $('#produtoModal').data('origemCadastroProduto', origemCadastro);
+    } else {
+        $('#produtoModal').removeData('origemCadastroProduto');
+    }
     if (isEdit && produto) {
         $('#produtoModal').data('produtoSaldos', {
             saldo_fiscal: produto.saldo_fiscal,
@@ -2171,9 +3056,13 @@ function showProdutoModal(produto = null) {
     $('#btn-restaurar-produtoModal').remove();
 
     inicializarCategoriasESubcategorias(produto, isEdit);
+    inicializarBotoesCriacaoRapidaCategoriaSubcategoria();
     inicializarMarcasProdutoCadastro(produto, isEdit);
     inicializarAutocompleteFornecedor();
     inicializarCalculoPreco(produto, isEdit);
+    if (typeof ProdutoEmbalagensUI !== 'undefined') {
+        ProdutoEmbalagensUI.inicializarApresentacoes(produto);
+    }
     inicializarMotorConversaoUnidadesCadastro();
     inicializarVendaUnidadeCadastro(produto, isEdit);
     inicializarVendaAtacado(produto, isEdit);
@@ -2193,41 +3082,14 @@ function showProdutoModal(produto = null) {
     inicializarControleLoteInicial();
     inicializarPreviewEstoqueTotalInicial();
     inicializarEspelhoCodigoBarras(produto, isEdit);
+    inicializarPainelEnvioBalancaProduto(produto, isEdit);
 
     if (!isEdit) {
         aplicarPadraoFiscalNovoProduto();
-        sugerirCodigoInternoNovoProduto();
     }
 
     // ...
 }
-
-async function sugerirCodigoInternoNovoProduto() {
-    if ($('#produtoId').val()) return;
-    const $codigo = $('#codigo');
-    if (!$codigo.length) return;
-    if (String($codigo.val() || '').trim()) return;
-
-    try {
-        const token = localStorage.getItem('token') || '';
-        const response = await fetch(`${API_URL}/produtos/proximo-codigo`, {
-            headers: { Authorization: `Bearer ${token}` }
-        });
-        if (!response.ok) return;
-        const data = await response.json().catch(() => ({}));
-        const sugerido = String(data.codigo || '').trim();
-        if (!sugerido) return;
-        // Só preenche se o usuário ainda não digitou
-        if (String($codigo.val() || '').trim()) return;
-        $codigo.val(sugerido);
-        $('#produtoModal').data('codigoAutoSugerido', sugerido);
-        // Espelha barras se ainda vazias / sincronizadas
-        $codigo.trigger('input.espelhoCodigo');
-    } catch (err) {
-        console.warn('Não foi possível sugerir código interno:', err);
-    }
-}
-window.sugerirCodigoInternoNovoProduto = sugerirCodigoInternoNovoProduto;
 
 async function aplicarPadraoFiscalNovoProduto() {
     if ($('#produtoId').val()) {
@@ -2565,6 +3427,70 @@ function inicializarControleLoteInicial() {
 
 
 // Inicializa categorias e subcategorias
+function inicializarBotoesCriacaoRapidaCategoriaSubcategoria() {
+    const $btnCategoria = $('#btnCriarCategoriaRapida');
+    const $btnSubcategoria = $('#btnCriarSubcategoriaRapida');
+    if (!$btnCategoria.length && !$btnSubcategoria.length) return;
+
+    $btnCategoria.off('click.miipQuickCreate').on('click.miipQuickCreate', async function () {
+        const nome = window.prompt('Nome da categoria', '');
+        if (!nome || !nome.trim()) return;
+        try {
+            const criada = await window.categoriasAPI.criar({ nome: nome.trim(), tipo: 'produto' });
+            await window.categoriasAPI.listar('produto').done(function (categorias) {
+                const categoriasComSubs = (categorias || []).map((cat) => ({
+                    ...cat,
+                    subcategorias: (window.categoriasSistema || []).find((item) => String(item.id) === String(cat.id))?.subcategorias || []
+                }));
+                window.categoriasSistema = categoriasComSubs;
+                const catId = String(criada?.id || '');
+                const $cat = $('#categoria_id');
+                let options = '<option value="">Selecione</option>';
+                categoriasComSubs.forEach((cat) => {
+                    options += `<option value="${cat.id}"${String(cat.id) === catId ? ' selected' : ''}>${escapeHtml(cat.nome || '')}</option>`;
+                });
+                $cat.html(options);
+                $cat.val(catId);
+                $cat.trigger('change');
+                showNotification('Categoria criada com sucesso.', 'success');
+            });
+        } catch (err) {
+            showNotification(err?.responseJSON?.erro || 'Erro ao criar categoria.', 'danger');
+        }
+    });
+
+    $btnSubcategoria.off('click.miipQuickCreate').on('click.miipQuickCreate', async function () {
+        const categoriaId = $('#categoria_id').val();
+        if (!categoriaId) {
+            showNotification('Selecione uma categoria antes de criar uma subcategoria.', 'warning');
+            return;
+        }
+        const nome = window.prompt('Nome da subcategoria', '');
+        if (!nome || !nome.trim()) return;
+        try {
+            const criada = await window.subcategoriasAPI.criar({ nome: nome.trim(), categoria_id: categoriaId });
+            const subs = await window.subcategoriasAPI.listarPorCategoria(categoriaId).catch(() => []);
+            const $select = $('#subcategoria_id');
+            let options = '<option value="">Nenhuma</option>';
+            (subs || []).forEach((sub) => {
+                options += `<option value="${sub.id}"${String(sub.id) === String(criada?.id || '') ? ' selected' : ''}>${escapeHtml(sub.nome || '')}</option>`;
+            });
+            $select.html(options);
+            $select.val(String(criada?.id || ''));
+            showNotification('Subcategoria criada com sucesso.', 'success');
+        } catch (err) {
+            showNotification(err?.responseJSON?.erro || 'Erro ao criar subcategoria.', 'danger');
+        }
+    });
+
+    $('#categoria_id').off('change.miipQuickCreate').on('change.miipQuickCreate', function () {
+        const temCategoria = Boolean(String($(this).val() || '').trim());
+        $btnSubcategoria.prop('disabled', !temCategoria);
+    });
+}
+
+window.inicializarBotoesCriacaoRapidaCategoriaSubcategoria = inicializarBotoesCriacaoRapidaCategoriaSubcategoria;
+
 function inicializarCategoriasESubcategorias(produto, isEdit) {
     if (!(window.categoriasAPI && window.subcategoriasAPI)) {
         $('#categoria_id').html('<option value="">Categorias indisponíveis</option>');
@@ -2586,6 +3512,7 @@ function inicializarCategoriasESubcategorias(produto, isEdit) {
         function carregarSubs(catId, selectedSubId) {
             if (!catId) {
                 $('#subcategoria_id').html('<option value="">Selecione uma categoria</option>');
+                $('#btnCriarSubcategoriaRapida').prop('disabled', true);
                 return;
             }
             const cat = categoriasComSubs.find(c => String(c.id) === String(catId));
@@ -2594,6 +3521,7 @@ function inicializarCategoriasESubcategorias(produto, isEdit) {
                 subOptions += `<option value="${sub.id}">${escapeHtml(sub.nome || '')}</option>`;
             });
             $('#subcategoria_id').html(subOptions);
+            $('#btnCriarSubcategoriaRapida').prop('disabled', false);
             if (typeof selectedSubId !== 'undefined' && selectedSubId !== null) {
                 $('#subcategoria_id').val(String(selectedSubId));
             }
@@ -2611,6 +3539,7 @@ function inicializarCategoriasESubcategorias(produto, isEdit) {
             carregarSubs(produto.categoria_id, subId);
         } else {
             $('#subcategoria_id').html('<option value="">Selecione uma categoria</option>');
+            $('#btnCriarSubcategoriaRapida').prop('disabled', true);
         }
     }
 
@@ -3027,10 +3956,19 @@ function formatarPercentualPorPrecoAtacado(precoAtacado) {
     return `${percentual.toFixed(2)}%`;
 }
 
+function arredondarPrecoInternoAtacado(valor) {
+    if (typeof MotorPrecoAtacado !== 'undefined') {
+        return MotorPrecoAtacado.arredondarInterno(valor);
+    }
+    const n = Number(valor || 0);
+    if (!Number.isFinite(n)) return 0;
+    return Math.round(n * 1e6) / 1e6;
+}
+
 function obterPrecoPorPercentual(percentual) {
     const precoVenda = parseNumero($('#preco_venda').val());
     if (precoVenda <= 0) return 0;
-    return precoVenda * (1 - (parseNumero(percentual) / 100));
+    return arredondarPrecoInternoAtacado(precoVenda * (1 - (parseNumero(percentual) / 100)));
 }
 
 function extrairDadosFaixaLinha($tr) {
@@ -3050,7 +3988,7 @@ function extrairDadosFaixaLinha($tr) {
 
     return {
         quantidade_minima: q,
-        preco_atacado: Number(preco.toFixed(2))
+        preco_atacado: arredondarPrecoInternoAtacado(preco)
     };
 }
 
@@ -3125,13 +4063,90 @@ function fixarEventosFaixaRow($row) {
 
 
 // Inicializa cálculo automático do preço de venda
+function produtoCadastroUsaCompraPorEmbalagem() {
+    if (typeof ProdutoEmbalagensUI !== 'undefined' && ProdutoEmbalagensUI.obterCompraPorEmbalagemAtiva) {
+        return ProdutoEmbalagensUI.obterCompraPorEmbalagemAtiva();
+    }
+    return false;
+}
+
+/**
+ * FORMACAO-PRECO-MARGEM-06 — margem/lucro reais do preço atual (não persistidos).
+ */
+function atualizarFormacaoPrecoMargemInfo() {
+    const F = window.FormacaoPrecoMargem;
+    const $margem = $('#margem_bruta_real_preview');
+    const $lucro = $('#lucro_bruto_real_preview');
+    const $totalInfo = $('#valor_total_venda_info_preview');
+    if (!$margem.length || !F) return;
+
+    const setTexto = ($el, texto) => {
+        if ($el.is('input, textarea, select')) {
+            $el.val(texto);
+        } else {
+            $el.text(texto);
+        }
+    };
+
+    const numero = (valor) => {
+        const n = parseFloat(String(valor ?? '').replace(',', '.'));
+        return Number.isFinite(n) ? n : NaN;
+    };
+    const moeda = (valor) => {
+        if (valor === null || valor === undefined || !Number.isFinite(Number(valor))) {
+            return F.PLACEHOLDER;
+        }
+        return typeof formatCurrency === 'function'
+            ? formatCurrency(valor)
+            : `R$ ${Number(valor).toFixed(2).replace('.', ',')}`;
+    };
+
+    const custo = numero($('#preco_compra').val());
+    const preco = numero($('#preco_venda').val());
+    const custoOk = Number.isFinite(custo) && custo >= 0;
+    const precoOk = Number.isFinite(preco) && preco >= 0;
+
+    let margem = null;
+    let lucro = null;
+    if (custoOk && precoOk) {
+        margem = F.calcularMargemBruta(custo, preco);
+        lucro = F.calcularLucroBruto(custo, preco);
+    }
+
+    setTexto($margem, F.formatarPercentualPreview(margem));
+    setTexto($lucro, lucro === null ? F.PLACEHOLDER : moeda(lucro));
+
+    const totalOficial = String($('#valor_total_venda_preview').val() || '').trim();
+    setTexto($totalInfo, totalOficial || F.PLACEHOLDER);
+
+    $lucro.toggleClass('is-negativo', Number.isFinite(lucro) && lucro < 0);
+    $margem.toggleClass('is-negativo', Number.isFinite(margem) && margem < 0);
+}
+window.atualizarFormacaoPrecoMargemInfo = atualizarFormacaoPrecoMargemInfo;
+
 function sincronizarFormacaoPrecoProduto(origem = 'init') {
+    if (typeof ProdutoEmbalagensUI !== 'undefined'
+        && ProdutoEmbalagensUI.sincronizarFormacaoPrecoApresentacaoPrincipal(origem)) {
+        atualizarFormacaoPrecoMargemInfo();
+        return;
+    }
+
     const $precoCompra = $('#preco_compra');
     const $lucro = $('#lucro_percentual');
     const $precoVenda = $('#preco_venda');
     if (!$precoCompra.length || !$lucro.length || !$precoVenda.length) return;
 
     const numero = (valor) => parseFloat(String(valor ?? '').replace(',', '.')) || 0;
+    const compraPorEmbalagem = produtoCadastroUsaCompraPorEmbalagem();
+    const motor = window.MotorUnidadesMedidaCliente;
+
+    if (compraPorEmbalagem && motor) {
+        atualizarFormacaoPrecoMargemInfo();
+        return;
+    }
+
+    $precoCompra.prop('readonly', false).removeClass('bg-light');
+
     const precoCompra = numero($precoCompra.val());
     const precoVenda = numero($precoVenda.val());
     const lucroInformado = String($lucro.val() ?? '').trim() !== '';
@@ -3142,6 +4157,7 @@ function sincronizarFormacaoPrecoProduto(origem = 'init') {
             $lucro.val(lucro.toFixed(2));
         }
         atualizarPreviewValorTotalEstoqueCadastro();
+        atualizarFormacaoPrecoMargemInfo();
         return;
     }
 
@@ -3149,6 +4165,7 @@ function sincronizarFormacaoPrecoProduto(origem = 'init') {
         const lucro = ((precoVenda - precoCompra) / precoCompra) * 100;
         $lucro.val(lucro.toFixed(2));
         atualizarPreviewValorTotalEstoqueCadastro();
+        atualizarFormacaoPrecoMargemInfo();
         return;
     }
 
@@ -3159,7 +4176,19 @@ function sincronizarFormacaoPrecoProduto(origem = 'init') {
     }
 
     atualizarPreviewValorTotalEstoqueCadastro();
+    atualizarFormacaoPrecoMargemInfo();
 }
+
+function atualizarVisibilidadeEmbalagemComercialCadastro() {
+    const usaApresentacao = produtoCadastroUsaCompraPorEmbalagem();
+    $('#wrap_valor_embalagem_venda').toggleClass('d-none', !usaApresentacao);
+    if (!usaApresentacao) {
+        $('#valor_embalagem_venda').val('R$ 0,00');
+        $('#preco_compra').prop('readonly', false).removeClass('bg-light');
+    }
+    sincronizarFormacaoPrecoProduto(usaApresentacao ? 'embalagem' : 'init');
+}
+window.atualizarVisibilidadeEmbalagemComercialCadastro = atualizarVisibilidadeEmbalagemComercialCadastro;
 
 function inicializarCalculoPreco(produto, isEdit) {
     const $precoCompra = $('#preco_compra');
@@ -3178,6 +4207,16 @@ function inicializarCalculoPreco(produto, isEdit) {
         .off('input.precoMotor change.precoMotor')
         .on('input.precoMotor change.precoMotor', () => sincronizarFormacaoPrecoProduto('venda'));
 
+    $('#unidade')
+        .off('change.apresentacoesUnidade')
+        .on('change.apresentacoesUnidade', () => {
+            if (typeof ProdutoEmbalagensUI !== 'undefined') {
+                ProdutoEmbalagensUI.sincronizarFormacaoPrecoApresentacaoPrincipal('init');
+            }
+            atualizarFormacaoPrecoMargemInfo();
+        });
+
+    atualizarVisibilidadeEmbalagemComercialCadastro();
     setTimeout(() => sincronizarFormacaoPrecoProduto('init'), 0);
 }
 
@@ -3257,6 +4296,21 @@ async function saveProduto() {
     const saldosIniciais = obterSaldosIniciaisDoFormulario();
 
     sincronizarFormacaoPrecoProduto('init');
+
+    if (typeof ProdutoEmbalagensUI !== 'undefined') {
+        const apresentacoes = ProdutoEmbalagensUI.coletarApresentacoesDoFormulario();
+        for (let i = 0; i < apresentacoes.length; i += 1) {
+            const ap = apresentacoes[i];
+            if (String(ap.tipo || 'UN').toUpperCase() !== 'UN' && Number(ap.quantidade || 0) <= 0) {
+                showNotification(`Apresentação ${i + 1}: informe a quantidade de conversão.`, 'warning');
+                return;
+            }
+            if (Number(ap.compra) === 1 && String(ap.tipo || 'UN').toUpperCase() !== 'UN' && Number(ap.valor_compra || 0) <= 0) {
+                showNotification(`Apresentação ${i + 1}: informe o valor de compra da embalagem.`, 'warning');
+                return;
+            }
+        }
+    }
 
     if ($('#produto_fracionado').is(':checked') && !unidadeVendaSuportaConversao($('#unidade').val())) {
         showNotification(
@@ -3348,10 +4402,12 @@ async function saveProduto() {
         produto_fracionado: fracionadoAtivo ? 1 : 0,
         vendido_por_peso: fracionadoAtivo ? 1 : 0,
         produto_pesavel: fracionadoAtivo ? 1 : 0,
+        integrar_balanca: $('#integrar_balanca').is(':checked') ? 1 : 0,
         permite_venda_unidade: permiteVendaUnidade ? 1 : 0,
         peso_medio_unidade: permiteVendaUnidade ? pesoMedioUnidade : 0,
         preco_unidade: permiteVendaUnidade ? precoUnidadeVenda : 0,
         venda_atacado: $('#venda_atacado').is(':checked') ? 1 : 0,
+        compra_por_embalagem: produtoCadastroUsaCompraPorEmbalagem() ? 1 : 0,
         // Campos para lote inicial (apenas para novos produtos)
         data_validade_inicial: ($('#data_validade_inicial').val() || '').trim() || null
     };
@@ -3431,6 +4487,26 @@ async function saveProduto() {
         data.atacado_faixas = faixasTemp;
     }
 
+    if (typeof ProdutoEmbalagensUI !== 'undefined') {
+        const precoVendaUnit = parseFloat($('#preco_venda').val()) || 0;
+        data.embalagens = ProdutoEmbalagensUI.coletarApresentacoesDoFormulario().map((ap) => ({
+            ...ap,
+            preco_venda: Number((precoVendaUnit * Number(ap.quantidade || 1)).toFixed(2))
+        }));
+        if (data.compra_por_embalagem === 1) {
+            const temEmbComercial = data.embalagens.some(
+                (ap) => String(ap.tipo || 'UN').toUpperCase() !== 'UN'
+                    && Number(ap.ativa ?? 1) === 1
+                    && Number(ap.compra ?? 0) === 1
+                    && Number(ap.quantidade || 0) > 0
+            );
+            if (!temEmbComercial) {
+                showNotification('Ative "Compra por Embalagem" somente após cadastrar ao menos uma embalagem comercial habilitada para compra.', 'warning');
+                return;
+            }
+        }
+    }
+
     $.ajax({
         url: url,
         method: method,
@@ -3440,11 +4516,52 @@ async function saveProduto() {
         },
         data: JSON.stringify(data),
         success: function (produtoSalvo) {
-            $('#produtoModal').modal('hide');
+            const $modal = $('#produtoModal');
+            $modal.data('produtoRecemSalvo', produtoSalvo || null);
+            $modal.data('produtoSalvoComSucesso', true);
+
+            const produtoNormalizado = normalizarProduto(produtoSalvo || {}, window.categoriasSistema || []);
+            // Completa flags/PLU do formulário (fonte do que acabou de ser salvo)
+            if (!produtoNormalizado.plu) {
+                produtoNormalizado.plu = String($('#plu').val() || '').replace(/\D/g, '');
+            }
+            if (Number(produtoNormalizado.produto_fracionado ?? 0) !== 1 && $('#produto_fracionado').is(':checked')) {
+                produtoNormalizado.produto_fracionado = 1;
+                produtoNormalizado.vendido_por_peso = 1;
+            }
+            if (produtoNormalizado.ativo == null) {
+                produtoNormalizado.ativo = 1;
+            }
+
+            const eqPreferido = Number($('#balancaProdutoEquipamento').val() || 0) || null;
+            const perguntarBalanca = typeof produtoSalvoElegivelPerguntaBalanca === 'function'
+                && produtoSalvoElegivelPerguntaBalanca(produtoNormalizado);
+
+            // RC15.3.1 — sempre fecha o modal (fluxo padrão do ERP)
+            const modalEl = document.getElementById('produtoModal');
+            if (modalEl && typeof bootstrap !== 'undefined' && bootstrap.Modal) {
+                const inst = bootstrap.Modal.getInstance(modalEl) || bootstrap.Modal.getOrCreateInstance(modalEl);
+                inst.hide();
+            } else {
+                $modal.modal('hide');
+            }
+
+            // Notificações ficam atrás do modal empilhado sobre a MIIP (z-index 22000).
+            const notif = document.getElementById('notification-container');
+            if (notif) {
+                notif.dataset.zIndexAnterior = notif.style.zIndex || '';
+                notif.style.zIndex = '23000';
+            }
             showNotification('Produto salvo com sucesso!', 'success');
+            setTimeout(() => {
+                if (notif) {
+                    notif.style.zIndex = notif.dataset.zIndexAnterior || '9999';
+                    delete notif.dataset.zIndexAnterior;
+                }
+            }, 3500);
+
             // Atualiza lista local se necessário
             if (window.produtosList && Array.isArray(window.produtosList)) {
-                const produtoNormalizado = normalizarProduto(produtoSalvo, window.categoriasSistema || []);
                 const indexExistente = window.produtosList.findIndex(p => String(p.id) === String(produtoNormalizado.id));
 
                 if (indexExistente >= 0) {
@@ -3456,12 +4573,20 @@ async function saveProduto() {
                 if (typeof renderProdutos === 'function') {
                     renderProdutos(window.produtosList);
                 }
-            } else {
+            } else if (typeof loadProdutos === 'function') {
                 loadProdutos();
+            }
+
+            if (perguntarBalanca) {
+                perguntarEnvioBalancaAposSalvar(produtoNormalizado, eqPreferido);
             }
         },
         error: function (xhr) {
             const erro = xhr.responseJSON?.error || 'Erro desconhecido';
+            const notif = document.getElementById('notification-container');
+            if (notif) {
+                notif.style.zIndex = '23000';
+            }
             showNotification('Erro ao salvar produto: ' + erro, 'danger');
         }
     });
@@ -3991,28 +5116,44 @@ async function abrirModalPromocoesProdutos() {
                         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
                     </div>
                     <div class="modal-body">
-                        <ul class="nav nav-tabs" id="abas-promocoes" role="tablist">
-                            <li class="nav-item" role="presentation">
-                                <button class="nav-link active" id="aba-sugestoes" data-bs-toggle="tab" data-bs-target="#painel-sugestoes" type="button" role="tab" aria-controls="painel-sugestoes" aria-selected="true">
-                                    Sugestões
+                        <div class="d-flex flex-wrap align-items-end justify-content-between gap-2">
+                            <ul class="nav nav-tabs flex-grow-1" id="abas-promocoes" role="tablist">
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link active" id="aba-sugestoes" data-bs-toggle="tab" data-bs-target="#painel-sugestoes" type="button" role="tab" aria-controls="painel-sugestoes" aria-selected="true">
+                                        Sugestões
+                                    </button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="aba-ativas" data-bs-toggle="tab" data-bs-target="#painel-ativas" type="button" role="tab" aria-controls="painel-ativas" aria-selected="false">
+                                        Ativas
+                                    </button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="aba-encerradas" data-bs-toggle="tab" data-bs-target="#painel-encerradas" type="button" role="tab" aria-controls="painel-encerradas" aria-selected="false">
+                                        Encerradas
+                                    </button>
+                                </li>
+                                <li class="nav-item" role="presentation">
+                                    <button class="nav-link" id="aba-estatisticas" data-bs-toggle="tab" data-bs-target="#painel-estatisticas" type="button" role="tab" aria-controls="painel-estatisticas" aria-selected="false">
+                                        Estatísticas
+                                    </button>
+                                </li>
+                            </ul>
+                            <div class="input-group input-group-sm mb-1" id="busca-promocoes-wrap" style="max-width: 280px; min-width: 200px;">
+                                <span class="input-group-text"><i class="fas fa-search" aria-hidden="true"></i></span>
+                                <input
+                                    type="search"
+                                    class="form-control"
+                                    id="buscaPromocoesInteligentes"
+                                    placeholder="Buscar produto..."
+                                    aria-label="Buscar produto nas promoções"
+                                    autocomplete="off"
+                                >
+                                <button type="button" class="btn btn-outline-secondary" id="btnLimparBuscaPromocoes" title="Limpar busca" aria-label="Limpar busca">
+                                    <i class="fas fa-times" aria-hidden="true"></i>
                                 </button>
-                            </li>
-                            <li class="nav-item" role="presentation">
-                                <button class="nav-link" id="aba-ativas" data-bs-toggle="tab" data-bs-target="#painel-ativas" type="button" role="tab" aria-controls="painel-ativas" aria-selected="false">
-                                    Ativas
-                                </button>
-                            </li>
-                            <li class="nav-item" role="presentation">
-                                <button class="nav-link" id="aba-encerradas" data-bs-toggle="tab" data-bs-target="#painel-encerradas" type="button" role="tab" aria-controls="painel-encerradas" aria-selected="false">
-                                    Encerradas
-                                </button>
-                            </li>
-                            <li class="nav-item" role="presentation">
-                                <button class="nav-link" id="aba-estatisticas" data-bs-toggle="tab" data-bs-target="#painel-estatisticas" type="button" role="tab" aria-controls="painel-estatisticas" aria-selected="false">
-                                    Estatísticas
-                                </button>
-                            </li>
-                        </ul>
+                            </div>
+                        </div>
 
                         <div class="tab-content mt-3" id="conteudo-abas-promocoes">
                             <!-- ABA SUGESTÕES -->
@@ -4109,12 +5250,87 @@ async function abrirModalPromocoesProdutos() {
     const modal = new bootstrap.Modal(document.getElementById('modalPromocoesProdutos'));
     modal.show();
 
+    configurarBuscaPromocoesInteligentes();
+
     // Carregar dados das três abas e as estatísticas da promoção inteligente
     carregarEstatisticasPromocoes();
     carregarSugestoesPromocoes(true);
     carregarPromocoes('ativas');
     carregarPromocoes('encerradas');
 }
+
+/**
+ * Configura busca por produto nas abas Sugestões / Ativas / Encerradas.
+ */
+function configurarBuscaPromocoesInteligentes() {
+    const input = document.getElementById('buscaPromocoesInteligentes');
+    const btnLimpar = document.getElementById('btnLimparBuscaPromocoes');
+    const wrap = document.getElementById('busca-promocoes-wrap');
+    if (!input || !wrap) return;
+
+    const aplicar = () => filtrarListasPromocoesInteligentes(input.value);
+
+    input.addEventListener('input', aplicar);
+    if (btnLimpar) {
+        btnLimpar.addEventListener('click', () => {
+            input.value = '';
+            aplicar();
+            input.focus();
+        });
+    }
+
+    const abas = document.getElementById('abas-promocoes');
+    if (abas) {
+        abas.addEventListener('shown.bs.tab', (ev) => {
+            const alvo = ev.target?.getAttribute('data-bs-target') || '';
+            const esconder = alvo === '#painel-estatisticas';
+            wrap.classList.toggle('d-none', esconder);
+            if (!esconder) aplicar();
+        });
+    }
+}
+
+/**
+ * Filtra as tabelas de promoções pelo termo digitado (nome do produto / texto da linha).
+ */
+function filtrarListasPromocoesInteligentes(termo) {
+    const query = String(termo || '').trim().toLowerCase();
+    const paineis = ['#lista-sugestoes', '#lista-promocoes-ativas', '#lista-promocoes-encerradas'];
+
+    paineis.forEach((seletor) => {
+        const container = document.querySelector(seletor);
+        if (!container) return;
+
+        const rows = container.querySelectorAll('table tbody tr');
+        if (!rows.length) {
+            const vazioBusca = container.querySelector('.alerta-busca-promocoes-vazia');
+            if (vazioBusca) vazioBusca.remove();
+            return;
+        }
+
+        let visiveis = 0;
+        rows.forEach((tr) => {
+            const texto = (tr.textContent || '').toLowerCase();
+            const match = !query || texto.includes(query);
+            tr.style.display = match ? '' : 'none';
+            if (match) visiveis += 1;
+        });
+
+        let alerta = container.querySelector('.alerta-busca-promocoes-vazia');
+        if (query && visiveis === 0) {
+            if (!alerta) {
+                alerta = document.createElement('div');
+                alerta.className = 'alert alert-secondary mt-2 mb-0 alerta-busca-promocoes-vazia';
+                alerta.innerHTML = '<i class="fas fa-search"></i> Nenhum produto encontrado para esta busca.';
+                container.appendChild(alerta);
+            }
+        } else if (alerta) {
+            alerta.remove();
+        }
+    });
+}
+
+window.filtrarListasPromocoesInteligentes = filtrarListasPromocoesInteligentes;
 
 window.abrirModalPromocoesProdutos = abrirModalPromocoesProdutos;
 
@@ -4535,6 +5751,8 @@ async function carregarSugestoesPromocoes(autoGerar = false) {
 
         html += '</tbody></table></div>';
         container.html(html);
+        const termoBusca = document.getElementById('buscaPromocoesInteligentes')?.value || '';
+        if (termoBusca) filtrarListasPromocoesInteligentes(termoBusca);
     } catch (error) {
         console.error('Erro ao carregar sugestões:', error);
         container.html(`
@@ -4650,6 +5868,8 @@ async function carregarPromocoes(tipo) {
 
         html += '</tbody></table></div>';
         container.html(html);
+        const termoBusca = document.getElementById('buscaPromocoesInteligentes')?.value || '';
+        if (termoBusca) filtrarListasPromocoesInteligentes(termoBusca);
     } catch (error) {
         console.error('Erro ao carregar promoções:', error);
         container.html(`

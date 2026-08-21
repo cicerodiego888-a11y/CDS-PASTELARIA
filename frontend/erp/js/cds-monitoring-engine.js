@@ -25,8 +25,33 @@
     summary: null,
     abaAtiva: 'geral',
     carregando: false,
-    erro: null
+    erro: null,
+    competenciaAno: null,
+    competenciaMes: null
   };
+
+  function competenciaAtualPadrao() {
+    const agora = new Date();
+    const br = new Date(agora.toLocaleString('en-US', { timeZone: 'America/Fortaleza' }));
+    return { ano: br.getFullYear(), mes: br.getMonth() + 1 };
+  }
+
+  function obterCompetenciaUi() {
+    const padrao = competenciaAtualPadrao();
+    return {
+      ano: estado.competenciaAno || padrao.ano,
+      mes: estado.competenciaMes || padrao.mes
+    };
+  }
+
+  function labelCompetencia(ano, mes) {
+    return `${String(mes).padStart(2, '0')}/${ano}`;
+  }
+
+  function montarQueryCompetencia() {
+    const { ano, mes } = obterCompetenciaUi();
+    return `ano=${encodeURIComponent(ano)}&mes=${encodeURIComponent(mes)}`;
+  }
 
   function escapeHtml(value) {
     if (typeof global.escapeHtml === 'function') return global.escapeHtml(String(value ?? ''));
@@ -471,17 +496,68 @@
       </div>`;
   }
 
+  function renderSeletorCompetencia(summary) {
+    const { ano, mes } = obterCompetenciaUi();
+    const ind = summary?.indicadoresFiscais || {};
+    const label = ind.competenciaLabel || labelCompetencia(ano, mes);
+    const monthValue = `${ano}-${String(mes).padStart(2, '0')}`;
+    return `
+      <div class="cds-cfg-card" id="cdsMonCompetencia" style="margin-bottom:0.75rem;">
+        <div class="cds-cfg-card__title" style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+          <i class="fas fa-calendar-alt"></i>
+          <span>Competência fiscal</span>
+          ${badge(label, 'info')}
+          ${ind.ambienteLabel ? badge(ind.ambienteLabel, ind.ambiente === 1 ? 'ok' : 'warn') : ''}
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:0.5rem;align-items:flex-end;">
+          <label class="cds-cfg-hint" style="margin:0;">
+            Mês/Ano
+            <input type="month" id="cdsMonCompMesAno" class="form-control form-control-sm"
+              value="${escapeHtml(monthValue)}" style="min-width:160px;margin-top:0.2rem;">
+          </label>
+          <button type="button" class="btn btn-sm btn-primary" id="cdsMonCompAplicar">
+            <i class="fas fa-filter"></i> Aplicar competência
+          </button>
+        </div>
+      </div>`;
+  }
+
+  function renderIndicadoresFiscaisCards(summary) {
+    const ind = summary?.indicadoresFiscais || {};
+    const label = ind.competenciaLabel || labelCompetencia(obterCompetenciaUi().ano, obterCompetenciaUi().mes);
+    const cards = [
+      { titulo: 'Competência', valor: label, detalhe: ind.competencia || '—', icone: 'fa-calendar-check' },
+      { titulo: 'Valor Vendido', valor: formatMoney(ind.valorTotalVendido), detalhe: 'Vendas fiscais · data_venda', icone: 'fa-credit-card' },
+      { titulo: 'Valor Comprado', valor: formatMoney(ind.valorTotalComprado), detalhe: 'Entradas DF-e · data_emissao', icone: 'fa-download' },
+      { titulo: 'NF-e Emitidas', valor: formatQty(ind.quantidadeNfeEmitidas), detalhe: `Autorizadas · ${ind.ambienteLabel || '—'}`, icone: 'fa-file-invoice' }
+    ];
+    return `
+      <div class="cds-ui-grid cds-ui-grid--kpi" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;margin-bottom:0.75rem;">
+        ${cards.map((c) => `
+          <div class="cds-cfg-card">
+            <div class="cds-cfg-card__title"><i class="fas ${c.icone}"></i> ${escapeHtml(c.titulo)}</div>
+            <div style="font-size:1.35rem;font-weight:700;">${escapeHtml(c.valor)}</div>
+            <p class="cds-cfg-hint" style="margin:0.35rem 0 0;">${escapeHtml(c.detalhe)}</p>
+          </div>`).join('')}
+      </div>`;
+  }
+
   function renderPainelExecutivo(summary) {
+    const ind = summary?.indicadoresFiscais || {};
     const widgets = summary?.widgets || [];
     const vendas = widgets.find((w) => w.id === 'fiscal.vendas') || {};
     const receber = widgets.find((w) => w.id === 'financeiro.receber_fiscal') || {};
     const caixa = widgets.find((w) => w.id === 'caixa.fiscal') || {};
     const saude = summary?.cop?.saudeGeral || summary?.intelligence?.health?.geral || '—';
     const saudeTone = saude === 'CRITICO' ? 'error' : (saude === 'ATENCAO' ? 'warn' : 'ok');
+    const vendasValor = ind.valorTotalVendido != null ? ind.valorTotalVendido : vendas.value;
+    const vendasDetalhe = ind.competenciaLabel
+      ? `Competência ${ind.competenciaLabel} · vendas fiscais`
+      : sanitizeText(vendas.subtitle || getDescription('vendas') || '—');
     const KPI = UI().CDSKPI;
     const kpiHtml = KPI?.render
       ? [
-          KPI.render({ labelDomain: 'vendas', label: getLabel('vendas'), value: formatMoney(vendas.value), detail: sanitizeText(vendas.subtitle || getDescription('vendas') || '—'), tone: 'ok' }),
+          KPI.render({ labelDomain: 'vendas', label: getLabel('vendas'), value: formatMoney(vendasValor), detail: vendasDetalhe, tone: 'ok' }),
           KPI.render({ labelDomain: 'receber', label: getLabel('receber'), value: formatMoney(receber.value), detail: sanitizeText(receber.subtitle || '—'), tone: 'info' }),
           KPI.render({ labelDomain: 'caixa', label: getLabel('caixa'), value: formatMoney(caixa.value), detail: sanitizeText(caixa.subtitle || '—'), tone: 'ok' }),
           KPI.render({ label: getLabel('saude_operacional'), valueHtml: badge(String(saude), saudeTone), detail: getLabel('cop'), tone: saudeTone })
@@ -495,8 +571,8 @@
       <div class="cds-cfg-exec" aria-label="KPIs do Monitoring Engine">
         <div class="cds-cfg-kpi">
           <div class="cds-cfg-kpi__head"><p class="cds-cfg-kpi__label">${escapeHtml(getLabel('vendas'))}</p><span class="cds-cfg-dot" data-tone="ok"></span></div>
-          <p class="cds-cfg-kpi__value">${formatMoney(vendas.value)}</p>
-          <p class="cds-cfg-kpi__detail">${escapeHtml(sanitizeText(vendas.subtitle || getDescription('vendas') || '—'))}</p>
+          <p class="cds-cfg-kpi__value">${formatMoney(vendasValor)}</p>
+          <p class="cds-cfg-kpi__detail">${escapeHtml(vendasDetalhe)}</p>
         </div>
         <div class="cds-cfg-kpi">
           <div class="cds-cfg-kpi__head"><p class="cds-cfg-kpi__label">${escapeHtml(getLabel('receber'))}</p><span class="cds-cfg-dot" data-tone="info"></span></div>
@@ -579,7 +655,8 @@
         </div>
       </div>
       <div class="cds-cfg-pane${ativa('indicadores')}" data-mon-pane="indicadores">
-        ${paneStub(getLabel('indicadores'), getDescription('indicadores') || 'Painel consolidado de KPIs cross-domain.')}
+        ${renderIndicadoresFiscaisCards(summary)}
+        <p class="cds-cfg-hint">Indicadores consolidados via IndicadoresFiscaisService · competência mensal.</p>
       </div>`;
   }
 
@@ -632,6 +709,24 @@
           return;
         }
 
+        const compBtn = ev.target.closest('#cdsMonCompAplicar');
+        if (compBtn && host.contains(compBtn)) {
+          ev.preventDefault();
+          const mesAnoEl = document.getElementById('cdsMonCompMesAno');
+          const raw = String(mesAnoEl?.value || '');
+          const match = raw.match(/^(\d{4})-(\d{2})$/);
+          if (match) {
+            estado.competenciaAno = Number(match[1]);
+            estado.competenciaMes = Number(match[2]);
+          } else {
+            const padrao = competenciaAtualPadrao();
+            estado.competenciaAno = padrao.ano;
+            estado.competenciaMes = padrao.mes;
+          }
+          carregarSummary(true);
+          return;
+        }
+
         const actionBtn = ev.target.closest('.cds-mon-action');
         if (actionBtn && host.contains(actionBtn)) {
           ev.preventDefault();
@@ -673,6 +768,7 @@
     const html = `
       <div class="cds-ui cds-cfg" id="cdsMonitoringEngine">
         ${heroHtml}
+        ${renderSeletorCompetencia(summary)}
         ${renderExecutiveInsights(summary)}
         <div id="cdsMonExecWrap">${renderPainelExecutivo(summary)}</div>
         <div class="cds-ui-shell cds-cfg-shell">
@@ -692,13 +788,15 @@
     estado.erro = null;
     try {
       const token = localStorage.getItem('token');
-      const resp = await fetch(`${global.API_URL}/monitoring/summary`, {
+      const resp = await fetch(`${global.API_URL}/monitoring/summary?${montarQueryCompetencia()}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       const json = await resp.json();
       if (!resp.ok && resp.status !== 207) {
         throw new Error(json.message || json.error || 'Falha ao carregar monitoramento');
       }
+      if (json.competencia?.ano) estado.competenciaAno = json.competencia.ano;
+      if (json.competencia?.mes) estado.competenciaMes = json.competencia.mes;
       estado.summary = json;
       renderShell(json);
     } catch (err) {
@@ -719,7 +817,10 @@
   }
 
   function loadMonitoringEngine() {
+    const padrao = competenciaAtualPadrao();
     estado.abaAtiva = 'geral';
+    estado.competenciaAno = padrao.ano;
+    estado.competenciaMes = padrao.mes;
     $('#page-content').html(`
       <div class="cds-cfg">
         <div class="cds-cfg-hero">

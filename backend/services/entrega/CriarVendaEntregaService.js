@@ -11,6 +11,7 @@
 const db = require('../../database');
 const configService = require('../configuracaoService');
 const { parseVendaFiscalFlag, distribuirItensVendaComValorFiscalEfetivo } = require('../distribuidorEstoqueVenda');
+const mpfc = require('../mpfc');
 const { calcularEstoqueProduto } = require('../estoque/EstoqueDisponivelService');
 const { saldosParaDistribuicaoVenda } = require('../estoque/produtoControlaEstoque');
 const { reservarItem } = require('../estoque/EstoqueReservaService');
@@ -22,6 +23,7 @@ const {
 const { gravarAuditoria, contextoAuditoriaRequisicao } = require('../auditoria');
 const { normalizarTipoVendaItem } = require('../vendaUnidadeHelpers');
 const VendaFinanceiroService = require('../vendas/VendaFinanceiroService');
+const { obterCaixaTurnoId } = require('../../utils/caixaSessaoHelpers');
 
 const { agoraLocalBrasil } = VendaFinanceiroService;
 
@@ -123,7 +125,12 @@ function criarVendaEntrega(req, res) {
   }
 
   const caixaSessaoId = req.caixaSessao?.id || null;
-  const caixaId = req.caixaSessao?.caixa_id || req.caixaAtual?.id || null;
+  // vendas.caixa_id → caixa(id) [turno], NÃO caixas(id) [cadastro admin]
+  const caixaId =
+    req.caixaId ||
+    obterCaixaTurnoId(req.caixaSessao) ||
+    req.caixaAtual?.id ||
+    null;
   const terminalId = req.terminalId || req.terminal?.id || null;
   const operadorId = req.user?.id || req.operadorId || null;
 
@@ -175,7 +182,10 @@ function criarVendaEntrega(req, res) {
         });
       }
 
-      const midpAtivo = Boolean(configService.isMidpAtivado && configService.isMidpAtivado());
+      const politicaMpfc = mpfc.obterPolitica();
+      const midpAtivo = Boolean(politicaMpfc.preservarDinheiro);
+      mpfc.receberPoliticaMotorComercial(politicaMpfc);
+      mpfc.receberPoliticaMotorFiscalNaoFiscal(politicaMpfc);
       const pagamentosEntrega = Array.isArray(body.pagamentos) ? body.pagamentos : [];
       const resultadoMotor = distribuirItensVendaComValorFiscalEfetivo(
         entradasMotor,
@@ -184,7 +194,8 @@ function criarVendaEntrega(req, res) {
           pagamentos: pagamentosEntrega,
           midpAtivo,
           desconto: Number(body.desconto || 0),
-          acrescimo: Number(body.acrescimo || 0)
+          acrescimo: Number(body.acrescimo || 0),
+          politicaFiscalComercial: politicaMpfc
         }
       );
 
@@ -278,7 +289,14 @@ function criarVendaEntrega(req, res) {
             function onInsertVenda(errIns) {
               if (errIns) {
                 db.run('ROLLBACK');
-                return res.status(500).json({ error: errIns.message });
+                const fk = /FOREIGN KEY/i.test(String(errIns.message || ''));
+                return res.status(500).json({
+                  error: fk
+                    ? `Integridade do banco ao criar venda de entrega (FOREIGN KEY). Refs: caixa_id=${caixaId}, caixa_sessao_id=${caixaSessaoId}, terminal_id=${terminalId}, operador_id=${operadorId}. Use o turno (caixa), não o cadastro (caixas).`
+                    : errIns.message,
+                  codigo: fk ? 'FK_CONSTRAINT' : undefined,
+                  etapa: 'insert_vendas_entrega'
+                });
               }
 
               const vendaId = this.lastID;
@@ -330,7 +348,10 @@ function criarVendaEntrega(req, res) {
                         vendaItemId: this.lastID,
                         produtoId: item.produto_id,
                         quantidadeFiscal: item.quantidade_fiscal,
-                        quantidadeNaoFiscal: item.quantidade_nao_fiscal
+                        quantidadeNaoFiscal: item.quantidade_nao_fiscal,
+                        empresaId: req.body?.empresa_id ?? req.body?.empresaId ?? req.user?.empresa_id ?? req.user?.empresaId,
+                        usuarioId: req.operadorId || req.user?.id,
+                        db
                       },
                       (errRes) => {
                         if (errRes) {

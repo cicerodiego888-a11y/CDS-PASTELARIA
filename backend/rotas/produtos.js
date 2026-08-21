@@ -8,8 +8,10 @@ const lotesService = require('../services/lotesService');
 const { recalcularEstoqueConsolidado, recalcularSaldosProduto } = require('../services/estoqueFiscalService');
 const {
   produtoTemMovimentacoes,
+  produtoTemVendas,
   aplicarAjusteEstoqueProduto,
-  definirSaldosIniciaisProduto
+  definirSaldosIniciaisProduto,
+  aplicarSaldosIniciaisViaPorta
 } = require('../services/ajusteEstoqueService');
 const { sqlRankingProdutos, isModoFiscalRelatorio } = require('../services/reportFiscalHelpers');
 const { espelharIdentificadoresSafe } = require('../motores/produto-identidade');
@@ -29,8 +31,14 @@ const {
   handleMulterProdutoImagemError
 } = require('../services/produtoImagemUpload');
 const { obterProdutoImagemService } = require('../services/ProdutoImagemService');
+const { obterProdutoEmbalagemService } = require('../services/produto-embalagem/ProdutoEmbalagemService');
+const { obterMib, normalizarNomeBusca } = require('../motores/mib');
 
 let _pdvIdentificacaoService = null;
+
+function obterMibService() {
+  return obterMib(db);
+}
 
 function obterPdvIdentificacaoService() {
   if (!_pdvIdentificacaoService) {
@@ -143,6 +151,10 @@ function normalizarProdutoResposta(produto, modoFiscal) {
     ? String(produto.plu).trim()
     : null;
 
+  const codigoMgv6Valor = produto.codigo_mgv6 != null && String(produto.codigo_mgv6).trim() !== ''
+    ? String(produto.codigo_mgv6).trim()
+    : null;
+
   const base = {
     ...produto,
     ...aplicarCamposVendaUnidadeResposta(produto),
@@ -151,6 +163,8 @@ function normalizarProdutoResposta(produto, modoFiscal) {
     /** Alias oficial Sprint 06 — mesmo valor de produto_fracionado */
     produto_pesavel: flagFracionado,
     plu: pluValor,
+    codigo_mgv6: codigoMgv6Valor,
+    codigoMgv6: codigoMgv6Valor,
     controla_estoque: normalizarFlagControlaEstoque(produto.controla_estoque),
     preco_compra: precoCompra,
     saldo_fiscal: saldoFiscal,
@@ -218,6 +232,7 @@ const CAMPOS_PRODUTO_IGNORADOS = new Set([
   'data_fabricacao_inicial',
   'data_validade_inicial',
   'atacado_faixas',
+  'embalagens',
   'categoria',
   'subcategoria',
   'categoria_nome',
@@ -240,6 +255,8 @@ const CAMPOS_PRODUTO_IGNORADOS = new Set([
   'saldo_nao_fiscal_inicial',
   // Sprint 06 — não são colunas de produtos; tratados via MIP / alias
   'plu',
+  'codigo_mgv6',
+  'codigoMgv6',
   'produto_pesavel',
   'identificadores'
 ]);
@@ -274,6 +291,16 @@ const SQL_PLU_SUBQUERY = `(
   ORDER BY pi.id DESC
   LIMIT 1
 ) AS plu`;
+
+/** @deprecated RC14.15.9 — dados históricos tipo=MGV6; não usados na UI nem no export */
+const SQL_MGV6_SUBQUERY = `(
+  SELECT pi.codigo FROM produto_identificadores pi
+  WHERE pi.produto_id = p.id
+    AND UPPER(pi.tipo) = 'MGV6'
+    AND COALESCE(pi.ativo, 1) = 1
+  ORDER BY COALESCE(pi.principal, 0) DESC, pi.id DESC
+  LIMIT 1
+) AS codigo_mgv6`;
 
 function obterEstoqueTotalProduto(produto = {}) {
   const fiscal = Number(produto.saldo_fiscal ?? 0);
@@ -410,11 +437,25 @@ function inserirFaixasAtacadoProduto(produtoId, faixas, callback) {
   inserirProxima();
 }
 
+function salvarEmbalagensProduto(produtoId, embalagens, unidadeProduto, usuario, callback) {
+  if (!Array.isArray(embalagens)) {
+    return callback(null, []);
+  }
+  obterProdutoEmbalagemService(db).sincronizarEmbalagensProduto(
+    produtoId,
+    embalagens,
+    unidadeProduto,
+    usuario,
+    callback
+  );
+}
+
 function buscarProdutoCompleto(produtoId, callback) {
   db.get(`
     SELECT 
       p.*, 
       ${SQL_PLU_SUBQUERY},
+      ${SQL_MGV6_SUBQUERY},
       (SELECT preco_atacado FROM produto_atacado WHERE produto_id = p.id ORDER BY quantidade_minima ASC LIMIT 1) AS preco_atacado,
       (SELECT quantidade_minima FROM produto_atacado WHERE produto_id = p.id ORDER BY quantidade_minima ASC LIMIT 1) AS quantidade_minima_atacado,
       c.nome AS categoria_nome,
@@ -442,13 +483,20 @@ function buscarProdutoCompleto(produtoId, callback) {
           return callback(faixaErr);
         }
 
-        callback(null, normalizarProdutoResposta({
-          ...row,
-          categoria: row.categoria_nome || '',
-          subcategoria: row.subcategoria_nome || '',
-          marca: row.marca_nome || '',
-          atacado_faixas: faixas || []
-        }, false));
+        obterProdutoEmbalagemService(db).listarPorProduto(produtoId, (embErr, embalagens) => {
+          if (embErr) {
+            return callback(embErr);
+          }
+
+          callback(null, normalizarProdutoResposta({
+            ...row,
+            categoria: row.categoria_nome || '',
+            subcategoria: row.subcategoria_nome || '',
+            marca: row.marca_nome || '',
+            atacado_faixas: faixas || [],
+            embalagens: embalagens || []
+          }, false));
+        });
       }
     );
   });
@@ -532,6 +580,7 @@ router.get('/', (req, res) => {
     SELECT 
       p.*, 
       ${SQL_PLU_SUBQUERY},
+      ${SQL_MGV6_SUBQUERY},
       (SELECT preco_atacado FROM produto_atacado WHERE produto_id = p.id ORDER BY quantidade_minima ASC LIMIT 1) AS preco_atacado,
       (SELECT quantidade_minima FROM produto_atacado WHERE produto_id = p.id ORDER BY quantidade_minima ASC LIMIT 1) AS quantidade_minima_atacado,
       c.nome AS categoria_nome,
@@ -601,6 +650,51 @@ router.get('/:id/historico-precos', (req, res) => {
       return;
     }
     res.json(rows);
+  });
+});
+
+// RC3.7.6.4 — Últimas compras do produto (READ-ONLY; não altera payload/MIIP/compras)
+router.get('/:id/ultimas-compras', (req, res) => {
+  const produtoId = Number(req.params.id);
+  if (!Number.isFinite(produtoId) || produtoId <= 0) {
+    return res.status(400).json({ error: 'produto_id inválido' });
+  }
+  const limiteRaw = Number(req.query.limite);
+  const limite = Number.isFinite(limiteRaw) && limiteRaw > 0
+    ? Math.min(Math.floor(limiteRaw), 20)
+    : 5;
+
+  db.all(`
+    SELECT
+      c.id AS compra_id,
+      COALESCE(c.data_compra, c.data_entrada, c.data_emissao, c.created_at) AS data,
+      c.fornecedor AS fornecedor,
+      COALESCE(
+        NULLIF(ci.custo_unitario_final, 0),
+        NULLIF(ci.preco_unitario, 0),
+        ci.preco_unitario
+      ) AS custo,
+      ci.preco_unitario AS preco_unitario,
+      ci.custo_unitario_final AS custo_unitario_final,
+      ci.margem_lucro AS margem_lucro,
+      ci.preco_venda_sugerido AS preco_venda_sugerido,
+      ci.atualizar_preco_venda AS atualizar_preco_venda,
+      ci.quantidade AS quantidade,
+      COALESCE(c.numero_nf, '') AS nfe
+    FROM compras_itens ci
+    INNER JOIN compras c ON c.id = ci.compra_id
+    WHERE ci.produto_id = ?
+      AND (c.cancelada_em IS NULL OR TRIM(COALESCE(c.cancelada_em, '')) = '')
+    ORDER BY
+      COALESCE(c.data_compra, c.data_entrada, c.data_emissao, c.created_at) DESC,
+      c.id DESC,
+      ci.id DESC
+    LIMIT ?
+  `, [produtoId, limite], (err, rows) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    return res.json(rows || []);
   });
 });
 
@@ -710,142 +804,239 @@ router.get('/relatorio-estoque', (req, res) => {
   });
 });
 
-// CONSULTA DE PRODUTOS NO PDV - F1
-router.get('/consulta-pdv/buscar', (req, res) => {
+// MIB-RC1.1 — health / diagnóstico / benchmark / catálogo
+router.get('/mib/health', (req, res) => {
+  try {
+    return res.json(obterMibService().health());
+  } catch (err) {
+    return res.status(500).json({ error: err.message || 'Falha no health MIB' });
+  }
+});
+
+router.get('/mib/diagnostico', (req, res) => {
+  try {
+    return res.json(obterMibService().diagnostico());
+  } catch (err) {
+    return res.status(500).json({ error: err.message || 'Falha no diagnóstico MIB' });
+  }
+});
+
+router.get('/mib/statistics', async (req, res) => {
+  try {
+    return res.json(await obterMibService().statistics());
+  } catch (err) {
+    return res.status(500).json({ error: err.message || 'Falha nas estatísticas MIB' });
+  }
+});
+
+router.get('/mib/catalog', (req, res) => {
+  try {
+    return res.json(obterMibService().catalogInfo());
+  } catch (err) {
+    return res.status(500).json({ error: err.message || 'Falha ao ler catálogo MIB' });
+  }
+});
+
+router.get('/mib/config', async (req, res) => {
+  try {
+    return res.json(await obterMibService().getConfig());
+  } catch (err) {
+    return res.status(500).json({ error: err.message || 'Falha ao ler config MIB' });
+  }
+});
+
+router.put('/mib/config', async (req, res) => {
+  try {
+    return res.json(await obterMibService().setConfig(req.body || {}));
+  } catch (err) {
+    return res.status(500).json({ error: err.message || 'Falha ao salvar config MIB' });
+  }
+});
+
+router.post('/mib/refresh', async (req, res) => {
+  try {
+    const info = await obterMibService().refresh(req.body || {});
+    return res.json({ ok: true, ...info });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || 'Falha no refresh MIB' });
+  }
+});
+
+router.post('/mib/rebuild', async (req, res) => {
+  try {
+    const info = await obterMibService().rebuild();
+    return res.json({ ok: true, ...info });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || 'Falha no rebuild MIB' });
+  }
+});
+
+router.post('/mib/hotcache/rebuild', async (req, res) => {
+  try {
+    const info = await obterMibService().rebuildHotCache();
+    return res.json({ ok: true, ...info });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || 'Falha no HotCache MIB' });
+  }
+});
+
+router.post('/mib/benchmark', async (req, res) => {
+  try {
+    const resultado = await obterMibService().executarBenchmark(req.body || {});
+    return res.json(resultado);
+  } catch (err) {
+    return res.status(500).json({ error: err.message || 'Falha no benchmark MIB' });
+  }
+});
+
+router.post('/mib/recarregar-catalogo', async (req, res) => {
+  try {
+    const info = await obterMibService().recarregarCatalogo();
+    return res.json({ ok: true, ...info });
+  } catch (err) {
+    return res.status(500).json({ error: err.message || 'Falha ao recarregar catálogo MIB' });
+  }
+});
+
+router.post('/mib/backfill-nome-busca', (req, res) => {
+  const limite = Number(req.body?.limite) || 5000;
+  obterMibService().backfill({ limite, apenasVazios: req.body?.apenasVazios !== false }, (err, resultado) => {
+    if (err) return res.status(500).json({ error: err.message });
+    obterMibService().refresh({ motivo: 'backfill' }).catch(() => {});
+    return res.json({ ok: true, ...resultado });
+  });
+});
+
+router.post('/mib/selecao', async (req, res) => {
+  const produtoId = Number(req.body?.produto_id || req.body?.id);
+  if (!produtoId) return res.status(400).json({ error: 'produto_id obrigatório' });
+  try {
+    obterMibService().registrarSelecao(produtoId);
+    const aprendizado = await obterMibService().registrarAprendizado({
+      produto_id: produtoId,
+      texto: req.body?.texto || req.body?.termo || '',
+      posicao: req.body?.posicao,
+      tempo_ms: req.body?.tempo_ms,
+      operador_id: req.user?.id || req.body?.operador_id || null,
+      filial_id: req.user?.filial_id || req.body?.filial_id || null,
+      caixa_id: req.body?.caixa_id || null
+    });
+    return res.json({ ok: true, aprendizado });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// MIB-RC2.0 — analytics / learning / sinônimos
+router.get('/mib/analytics', async (req, res) => {
+  try {
+    return res.json(await obterMibService().analytics());
+  } catch (err) {
+    return res.status(500).json({ error: err.message || 'Falha analytics MIB' });
+  }
+});
+
+router.get('/mib/top-searches', async (req, res) => {
+  try {
+    return res.json(await obterMibService().topSearches(Number(req.query.limite) || 20));
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/mib/not-found', async (req, res) => {
+  try {
+    return res.json(await obterMibService().notFound(Number(req.query.limite) || 20));
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/mib/learning', async (req, res) => {
+  try {
+    return res.json(await obterMibService().learningList(Number(req.query.limite) || 50));
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/mib/synonym', async (req, res) => {
+  try {
+    return res.json(await obterMibService().listarSinonimos());
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/mib/synonym', async (req, res) => {
+  try {
+    const { termo, sinonimo, origem } = req.body || {};
+    const row = await obterMibService().cadastrarSinonimo(termo, sinonimo, origem);
+    return res.json({ ok: true, ...row });
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+});
+
+router.post('/mib/retrain', async (req, res) => {
+  try {
+    return res.json(await obterMibService().retrain());
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/mib/reset-learning', async (req, res) => {
+  try {
+    return res.json(await obterMibService().resetLearning());
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// CONSULTA DE PRODUTOS NO PDV — via SearchService (MIB-RC3.0)
+router.get('/consulta-pdv/buscar', async (req, res) => {
   const termo = String(req.query.q || '').trim();
   const modoFiscal = isModoFiscalQuery(req.query.modo_fiscal);
-  const filtroFiscal = filtroSqlModoFiscalProduto(modoFiscal, 'p');
+  const limite = Math.min(Math.max(parseInt(req.query.limite, 10) || 20, 1), 20);
 
   if (!termo) {
     return res.json([]);
   }
-  // Normalizar termo (remover acentos) para busca sem acento
-  function removeDiacritics(str) {
-    if (!str) return '';
-    return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-  }
 
-  const termoNormalized = removeDiacritics(termo.toLowerCase());
-  const buscaLike = `%${termo}%`;
-  const buscaLikeNormalized = `%${termoNormalized}%`;
-  const buscaNumero = termo.replace(/\D/g, '') || termo;
-  const termoLower = termo.toLowerCase();
-  const limite = Math.min(Math.max(parseInt(req.query.limite, 10) || 20, 1), 20);
-  const hoje = new Date().toISOString().split('T')[0];
-  // Construir cadeia de REPLACE para remover acentos no campo p.nome dentro do SQL
-  const replacements = {
-    'á':'a','à':'a','â':'a','ã':'a','ä':'a',
-    'é':'e','è':'e','ê':'e','ë':'e',
-    'í':'i','ì':'i','î':'i','ï':'i',
-    'ó':'o','ò':'o','ô':'o','õ':'o','ö':'o',
-    'ú':'u','ù':'u','û':'u','ü':'u',
-    'ç':'c','ñ':'n'
-  };
-
-  const replaceChain = Object.keys(replacements).reduce((acc, ch) => {
-    const to = replacements[ch];
-    return `REPLACE(${acc}, '${ch}', '${to}')`;
-  }, 'LOWER(p.nome)');
-
-  db.all(`
-    SELECT
-      p.id,
-      p.codigo,
-      p.codigo_barras,
-      p.nome,
-      p.unidade,
-      p.preco_compra,
-      p.preco_venda,
-      ${SQL_PLU_SUBQUERY},
-      (SELECT preco_atacado FROM produto_atacado WHERE produto_id = p.id ORDER BY quantidade_minima ASC LIMIT 1) AS preco_atacado,
-      (SELECT quantidade_minima FROM produto_atacado WHERE produto_id = p.id ORDER BY quantidade_minima ASC LIMIT 1) AS quantidade_minima_atacado,
-      p.estoque_atual,
-      COALESCE(p.saldo_fiscal, 0) AS saldo_fiscal,
-      COALESCE(p.saldo_nao_fiscal, 0) AS saldo_nao_fiscal,
-      COALESCE(p.item_fiscal, 1) AS item_fiscal,
-      COALESCE(p.controla_estoque, 1) AS controla_estoque,
-      p.estoque_minimo,
-      p.vendido_por_peso,
-      COALESCE(p.produto_fracionado, p.vendido_por_peso, 0) AS produto_fracionado,
-      COALESCE(p.permite_venda_unidade, 0) AS permite_venda_unidade,
-      COALESCE(p.peso_medio_unidade, 0) AS peso_medio_unidade,
-      COALESCE(p.preco_unidade, 0) AS preco_unidade,
-      CASE 
-        WHEN promo.id IS NOT NULL THEN 1 
-        ELSE 0 
-      END AS tem_promocao,
-      CASE 
-        WHEN promo.id IS NOT NULL THEN promo.preco_promocional 
-        ELSE NULL 
-      END AS preco_promocional,
-      CASE 
-        WHEN promo.id IS NOT NULL THEN promo.desconto_percentual 
-        ELSE NULL 
-      END AS desconto_percentual,
-      CASE
-        WHEN LOWER(TRIM(COALESCE(p.codigo_barras, ''))) = ?
-          OR LOWER(TRIM(COALESCE(p.codigo, ''))) = ?
-          OR CAST(p.id AS TEXT) = ?
-          OR TRIM(COALESCE(p.codigo_barras, '')) = ?
-          OR TRIM(COALESCE(p.codigo, '')) = ?
-          OR EXISTS (
-            SELECT 1 FROM produto_identificadores pi
-            WHERE pi.produto_id = p.id
-              AND pi.tipo = 'PLU'
-              AND COALESCE(pi.ativo, 1) = 1
-              AND TRIM(pi.codigo) = ?
-          )
-        THEN 1
-        ELSE 0
-      END AS match_exato
-    FROM produtos p
-    LEFT JOIN promocoes promo ON promo.produto_id = p.id 
-      AND promo.status = 'ativa'
-      AND date(promo.data_inicio) <= date(?)
-      AND date(promo.data_fim) >= date(?)
-    WHERE
-      (
-        CAST(p.id AS TEXT) = ?
-        OR LOWER(COALESCE(p.codigo, '')) LIKE LOWER(?)
-        OR LOWER(COALESCE(p.codigo_barras, '')) LIKE LOWER(?)
-        OR (${replaceChain}) LIKE ?
-        OR EXISTS (
-          SELECT 1 FROM produto_identificadores pi
-          WHERE pi.produto_id = p.id
-            AND pi.tipo = 'PLU'
-            AND COALESCE(pi.ativo, 1) = 1
-            AND (
-              TRIM(pi.codigo) = ?
-              OR LOWER(pi.codigo) LIKE LOWER(?)
-            )
-          )
-      )
-      ${filtroFiscal}
-    ORDER BY match_exato DESC, p.nome ASC
-    LIMIT ${limite}
-  `, [
-    termoLower,
-    termoLower,
-    buscaNumero,
-    termo,
-    termo,
-    buscaNumero,
-    hoje,
-    hoje,
-    buscaNumero,
-    buscaLike,
-    buscaLike,
-    buscaLikeNormalized,
-    buscaNumero,
-    buscaLike
-  ], (err, rows) => {
-    if (err) {
-      console.error('Erro na consulta de produtos PDV:', err.message);
-      return res.status(500).json({ error: err.message });
+  try {
+    const { obterSearchService } = require('../motores/mib');
+    const user = req.user || {};
+    const resultado = await obterSearchService(db).search({
+      entity: 'produto',
+      query: termo,
+      limite,
+      modoFiscal,
+      operador_id: user.id || req.operadorId || null,
+      filial_id: user.filial_id || null,
+      caixa_id: req.caixaId || null,
+      permissoes: user.permissoes || ['produtos', 'pdv'],
+      perfil: user.perfil,
+      role: user.role || 'admin',
+      origem: 'pdv',
+      user,
+      skipAuth: true
+    });
+    const itens = (resultado.itens || []).map((row) => normalizarProdutoResposta(row, modoFiscal));
+    if (req.query.debug === '1') {
+      return res.json({ itens, meta: resultado.meta });
     }
-
-    res.json((rows || []).map((row) => normalizarProdutoResposta(row, modoFiscal)));
-  });
+    if (resultado.meta?.sugestao?.mensagem && itens.length === 0) {
+      res.setHeader('X-MIB-Sugestao', encodeURIComponent(JSON.stringify(resultado.meta.sugestao)));
+    }
+    return res.json(itens);
+  } catch (err) {
+    if (err && err.code === 'MIB_CANCELLED') {
+      return res.status(499).json({ error: 'Busca cancelada', code: 'MIB_CANCELLED' });
+    }
+    console.error('Erro na consulta SearchService PDV:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 router.get('/ranking-vendas', (req, res) => {
@@ -1680,7 +1871,11 @@ router.get('/promocoes/produtos-elegiveis', (req, res) => {
 // Recalcular saldos fiscal/não fiscal a partir do histórico de compras e vendas
 router.post('/recalcular-saldos', verificarPermissaoEspecifica('produtos', 'editar'), (req, res) => {
   const { recalcularSaldosTodosProdutos } = require('../services/estoqueFiscalService');
-  recalcularSaldosTodosProdutos(db, (err, result) => {
+  const opcoes = {
+    empresaId: req.body?.empresa_id ?? req.body?.empresaId ?? req.user?.empresa_id ?? req.user?.empresaId,
+    usuarioId: req.user?.id
+  };
+  recalcularSaldosTodosProdutos(db, opcoes, (err, result) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
@@ -1693,9 +1888,16 @@ router.post('/recalcular-saldos', verificarPermissaoEspecifica('produtos', 'edit
 });
 
 router.post('/:id/recalcular-saldos', verificarPermissaoEspecifica('produtos', 'editar'), (req, res) => {
-  recalcularSaldosProduto(db, req.params.id, (err, result) => {
+  const opcoes = {
+    empresaId: req.body?.empresa_id ?? req.body?.empresaId ?? req.user?.empresa_id ?? req.user?.empresaId,
+    usuarioId: req.user?.id
+  };
+  recalcularSaldosProduto(db, req.params.id, opcoes, (err, result) => {
     if (err) {
-      return res.status(500).json({ error: err.message });
+      const status = err.code === 'EMPRESA_OBRIGATORIA' || err.code === 'EMPRESA_NAO_ENCONTRADA'
+        ? 400
+        : (String(err.message || '').includes('não encontrado') ? 404 : 500);
+      return res.status(status).json({ error: err.message, code: err.code || undefined });
     }
     res.json({
       message: 'Saldos recalculados com sucesso',
@@ -1737,14 +1939,17 @@ function executarAjusteEstoque(req, res) {
     motivo,
     usuarioId: req.user?.id,
     usuarioNome: req.user?.username || req.user?.nome,
+    empresaId: req.body?.empresa_id ?? req.body?.empresaId ?? req.user?.empresa_id ?? req.user?.empresaId,
     lote,
     dataFabricacao: data_fabricacao,
     dataValidade: data_validade,
     lotesService
   }, (err, resultado) => {
     if (err) {
-      const status = err.message.includes('não encontrado') ? 404 : 400;
-      return res.status(status).json({ error: err.message });
+      const status = err.code === 'EMPRESA_OBRIGATORIA' || err.code === 'EMPRESA_NAO_ENCONTRADA'
+        ? 400
+        : (err.message.includes('não encontrado') ? 404 : 400);
+      return res.status(status).json({ error: err.message, code: err.code || undefined });
     }
 
     gravarAuditoria({
@@ -1902,6 +2107,7 @@ router.get('/:id', (req, res) => {
     SELECT 
       p.*, 
       ${SQL_PLU_SUBQUERY},
+      ${SQL_MGV6_SUBQUERY},
       (SELECT preco_atacado FROM produto_atacado WHERE produto_id = p.id ORDER BY quantidade_minima ASC LIMIT 1) AS preco_atacado,
       (SELECT quantidade_minima FROM produto_atacado WHERE produto_id = p.id ORDER BY quantidade_minima ASC LIMIT 1) AS quantidade_minima_atacado,
       c.nome AS categoria_nome,
@@ -1927,24 +2133,39 @@ router.get('/:id', (req, res) => {
           return res.status(500).json({ error: faixaErr.message });
         }
 
-        produtoTemMovimentacoes(db, req.params.id, (movErr, temMovimentacoes) => {
-          if (movErr) {
-            return res.status(500).json({ error: movErr.message });
+        obterProdutoEmbalagemService(db).listarPorProduto(req.params.id, (embErr, embalagens) => {
+          if (embErr) {
+            return res.status(500).json({ error: embErr.message });
           }
 
-          const produtoBase = normalizarProdutoResposta({
-            ...row,
-            categoria: row.categoria_nome || '',
-            subcategoria: row.subcategoria_nome || '',
-            atacado_faixas: faixas || [],
-            tem_movimentacoes: temMovimentacoes
-          }, modoFiscal);
-
-          enriquecerProdutoComValidade(req.params.id, produtoBase, (validadeErr, produto) => {
-            if (validadeErr) {
-              return res.status(500).json({ error: validadeErr.message });
+          produtoTemMovimentacoes(db, req.params.id, (movErr, temMovimentacoes) => {
+            if (movErr) {
+              return res.status(500).json({ error: movErr.message });
             }
-            res.json(produto);
+
+            produtoTemVendas(db, req.params.id, (vendErr, temVendas) => {
+              if (vendErr) {
+                return res.status(500).json({ error: vendErr.message });
+              }
+
+              const produtoBase = normalizarProdutoResposta({
+                ...row,
+                categoria: row.categoria_nome || '',
+                subcategoria: row.subcategoria_nome || '',
+                atacado_faixas: faixas || [],
+                embalagens: embalagens || [],
+                tem_movimentacoes: temMovimentacoes,
+                // Estoque Inicial bloqueia só após a 1ª venda
+                tem_vendas: temVendas
+              }, modoFiscal);
+
+              enriquecerProdutoComValidade(req.params.id, produtoBase, (validadeErr, produto) => {
+                if (validadeErr) {
+                  return res.status(500).json({ error: validadeErr.message });
+                }
+                res.json(produto);
+              });
+            });
           });
         });
       }
@@ -1965,6 +2186,7 @@ router.post('/', (req, res) => {
     peso_total_compra, valor_total_compra, custo_por_kg,
     venda_atacado,
     atacado_faixas,
+    embalagens,
     saldo_fiscal_inicial,
     saldo_nao_fiscal_inicial,
     item_fiscal,
@@ -1985,6 +2207,24 @@ router.post('/', (req, res) => {
   const pluValidacao = validarPluOpcional(plu);
   if (!pluValidacao.ok) {
     return res.status(400).json({ error: pluValidacao.erro });
+  }
+
+  const codigoMgv6Body = Object.prototype.hasOwnProperty.call(req.body, 'codigo_mgv6')
+    ? req.body.codigo_mgv6
+    : (Object.prototype.hasOwnProperty.call(req.body, 'codigoMgv6') ? req.body.codigoMgv6 : undefined);
+  const codigoMgv6Informado = codigoMgv6Body !== undefined;
+  let codigoMgv6Valor = null;
+  if (codigoMgv6Informado) {
+    const bruto = codigoMgv6Body == null ? '' : String(codigoMgv6Body).trim();
+    if (bruto) {
+      if (!/^\d+$/.test(bruto)) {
+        return res.status(400).json({ error: 'Código MGV6 inválido: informe apenas dígitos.' });
+      }
+      if (bruto.length > 9) {
+        return res.status(400).json({ error: 'Código MGV6 inválido: máximo 9 dígitos.', code: 'MGV6_CODE_OVERFLOW' });
+      }
+      codigoMgv6Valor = bruto;
+    }
   }
 
   const marcaIdGravar = normalizarMarcaIdOpcional(
@@ -2093,10 +2333,47 @@ router.post('/', (req, res) => {
       }
 
       const produtoId = this.lastID;
+      try {
+        obterMibService().sincronizarNomeBusca(produtoId, nome, () => {
+          obterMibService().notificarProdutoCriado({
+            id: produtoId,
+            nome,
+            nome_busca: normalizarNomeBusca(nome),
+            codigo: codigoFinal,
+            codigo_barras,
+            preco_venda
+          });
+        });
+      } catch (mibErr) {
+        console.warn('[MIB] nome_busca no POST:', mibErr.message);
+      }
+      try {
+        const MotorUM = require('../services/unidades/MotorUnidadesMedida');
+        const compraPorEmb = Number(req.body.compra_por_embalagem || 0) === 1 ? 1 : 0;
+        const uc = compraPorEmb
+          ? MotorUM.normalizarUnidadeComercial(req.body.unidade_comercial)
+          : 'UN';
+        const qpe = compraPorEmb ? Number(req.body.quantidade_por_embalagem || 0) : 0;
+        const valorEmb = compraPorEmb ? Number(req.body.valor_compra_embalagem || 0) : 0;
+        db.run(
+          `UPDATE produtos SET
+             unidade_comercial = ?,
+             quantidade_por_embalagem = ?,
+             compra_por_embalagem = ?,
+             valor_compra_embalagem = ?
+           WHERE id = ?`,
+          [uc, qpe > 0 ? qpe : 0, compraPorEmb, valorEmb > 0 ? valorEmb : 0, produtoId]
+        );
+      } catch (umErr) {
+        console.warn('[RC8.4.2] unidade comercial no POST:', umErr.message);
+      }
       // MIP — dual-write codigo/barras/PLU (aguardar antes da resposta para o GET/editar ver o PLU)
       const camposEspelho = { codigo: codigoFinal, codigo_barras };
       if (pluValidacao.informado) {
         camposEspelho.plu = pluValidacao.valor;
+      }
+      if (codigoMgv6Informado) {
+        camposEspelho.codigo_mgv6 = codigoMgv6Valor;
       }
 
       const aposDualWrite = () => {
@@ -2153,36 +2430,50 @@ router.post('/', (req, res) => {
             return res.status(500).json({ error: 'Produto criado, mas houve erro ao salvar faixas de atacado.' });
           }
 
-          buscarProdutoCompleto(produtoId, (err2, row) => {
-            if (err2 || !row) {
-              return res.status(500).json({ error: err2?.message || 'Erro ao buscar produto criado' });
+          salvarEmbalagensProduto(
+            produtoId,
+            embalagens,
+            unidade,
+            req.user,
+            (embErr) => {
+              if (embErr) {
+                console.error('Erro ao salvar apresentações do produto:', embErr.message);
+                return res.status(500).json({ error: `Produto criado, mas houve erro ao salvar apresentações: ${embErr.message}` });
+              }
+
+              buscarProdutoCompleto(produtoId, (err2, row) => {
+                if (err2 || !row) {
+                  return res.status(500).json({ error: err2?.message || 'Erro ao buscar produto criado' });
+                }
+
+                res.json({
+                  ...row,
+                  message: 'Produto criado com sucesso'
+                });
+
+                gravarAuditoria({
+                  usuario_id: req.user?.id || null,
+                  usuario_nome: req.user?.username || req.user?.nome || null,
+                  modulo: 'produtos',
+                  acao: 'criar_produto',
+                  referencia_tipo: 'produto',
+                  referencia_id: produtoId,
+                  detalhes: {
+                    nome,
+                    codigo: codigoFinal,
+                    codigo_gerado_automaticamente: Boolean(resolvido.gerado),
+                    categoria_id,
+                    estoque_atual,
+                    preco_venda,
+                    controlar_validade,
+                    faixas_atacado: (atacado_faixas || []).length,
+                    apresentacoes: Array.isArray(embalagens) ? embalagens.length : 0
+                  },
+                  ip_requisicao: req.ip || null
+                }).catch((auditErr) => console.error('Erro ao gravar auditoria de criação de produto:', auditErr));
+              });
             }
-
-            res.json({
-              ...row,
-              message: 'Produto criado com sucesso'
-            });
-
-            gravarAuditoria({
-              usuario_id: req.user?.id || null,
-              usuario_nome: req.user?.username || req.user?.nome || null,
-              modulo: 'produtos',
-              acao: 'criar_produto',
-              referencia_tipo: 'produto',
-              referencia_id: produtoId,
-              detalhes: {
-                nome,
-                codigo: codigoFinal,
-                codigo_gerado_automaticamente: Boolean(resolvido.gerado),
-                categoria_id,
-                estoque_atual,
-                preco_venda,
-                controlar_validade,
-                faixas_atacado: (atacado_faixas || []).length
-              },
-              ip_requisicao: req.ip || null
-            }).catch((auditErr) => console.error('Erro ao gravar auditoria de criação de produto:', auditErr));
-          });
+          );
         });
       }
     });
@@ -2231,11 +2522,117 @@ router.put('/validade/configuracoes', (req, res) => {
 // Ajustar estoque — legado PUT (use POST preferencialmente)
 router.put('/:id/ajustar-estoque', exigirPerfilAjusteEstoque(), executarAjusteEstoque);
 
+// Apresentações comerciais (ProdutoEmbalagem)
+router.get('/:id/embalagens', (req, res) => {
+  const { id } = req.params;
+  db.get('SELECT id FROM produtos WHERE id = ?', [id], (err, produto) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!produto) return res.status(404).json({ error: 'Produto não encontrado' });
+    obterProdutoEmbalagemService(db).listarPorProduto(id, (listErr, rows) => {
+      if (listErr) return res.status(500).json({ error: listErr.message });
+      res.json(rows || []);
+    });
+  });
+});
+
+router.get('/:produtoId/embalagens/:embId/historico', (req, res) => {
+  const { produtoId, embId } = req.params;
+  db.get(
+    'SELECT id FROM produto_embalagens WHERE id = ? AND produto_id = ?',
+    [embId, produtoId],
+    (err, row) => {
+      if (err) return res.status(500).json({ error: err.message });
+      if (!row) return res.status(404).json({ error: 'Apresentação não encontrada' });
+      obterProdutoEmbalagemService(db).listarHistorico(embId, (histErr, historico) => {
+        if (histErr) return res.status(500).json({ error: histErr.message });
+        res.json(historico || []);
+      });
+    }
+  );
+});
+
+/** RC4.31.12.9 — aprendizagem de UC durante compra (persistência + auditoria). */
+router.post('/:id/embalagens/aprendizagem-compra', (req, res) => {
+  const { id } = req.params;
+  const {
+    descricao,
+    quantidade,
+    unidade,
+    compra,
+    venda,
+    tipo
+  } = req.body || {};
+
+  db.get('SELECT id, unidade, compra_por_embalagem FROM produtos WHERE id = ?', [id], (err, produto) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!produto) return res.status(404).json({ error: 'Produto não encontrado' });
+
+    const svc = obterProdutoEmbalagemService(db);
+    svc.adicionarApresentacaoAprendizagemCompra(
+      id,
+      {
+        descricao,
+        quantidade,
+        unidade: unidade || produto.unidade,
+        compra: compra === undefined || compra === null ? 1 : (Number(compra) === 1 ? 1 : 0),
+        venda: Number(venda) === 1 ? 1 : 0,
+        tipo: tipo || 'ROLO'
+      },
+      produto.unidade,
+      req.user,
+      (addErr, embalagem) => {
+        if (addErr) {
+          return res.status(400).json({ error: addErr.message });
+        }
+
+        gravarAuditoria({
+          usuario_id: req.user?.id || null,
+          usuario_nome: req.user?.username || req.user?.nome || null,
+          modulo: 'compras',
+          acao: 'aprendizagem_unidade_comercial',
+          referencia_tipo: 'produto',
+          referencia_id: id,
+          detalhes: {
+            produto_id: Number(id),
+            embalagem_id: embalagem?.id || null,
+            descricao: embalagem?.descricao || descricao,
+            quantidade: embalagem?.quantidade || quantidade,
+            unidade: embalagem?.unidade || unidade || produto.unidade,
+            compra: embalagem?.compra,
+            venda: embalagem?.venda,
+            origem: 'COMPRA_APRENDIZAGEM'
+          },
+          ip_requisicao: req.ip || null
+        }).catch((auditErr) => {
+          console.error('[AUDIT] aprendizagem UC compra:', auditErr.message);
+        });
+
+        db.run(
+          `UPDATE produtos SET compra_por_embalagem = 1, updated_at = datetime('now', 'localtime') WHERE id = ?`,
+          [id],
+          () => {
+            buscarProdutoCompleto(id, (loadErr, completo) => {
+              if (loadErr) {
+                return res.status(500).json({ error: loadErr.message });
+              }
+              res.status(201).json({
+                embalagem,
+                produto: completo
+              });
+            });
+          }
+        );
+      }
+    );
+  });
+});
+
 // Atualizar produto
 router.put('/:id', (req, res) => {
   const { id } = req.params;
   const {
     atacado_faixas,
+    embalagens,
     saldo_fiscal_inicial,
     saldo_nao_fiscal_inicial,
     data_validade_inicial,
@@ -2250,6 +2647,25 @@ router.put('/:id', (req, res) => {
   const pluValidacao = pluInformado ? validarPluOpcional(plu) : { ok: true, valor: null, informado: false };
   if (!pluValidacao.ok) {
     return res.status(400).json({ error: pluValidacao.erro });
+  }
+
+  const codigoMgv6Informado = Object.prototype.hasOwnProperty.call(req.body, 'codigo_mgv6')
+    || Object.prototype.hasOwnProperty.call(req.body, 'codigoMgv6');
+  let codigoMgv6Valor = null;
+  if (codigoMgv6Informado) {
+    const brutoRaw = Object.prototype.hasOwnProperty.call(req.body, 'codigo_mgv6')
+      ? req.body.codigo_mgv6
+      : req.body.codigoMgv6;
+    const bruto = brutoRaw == null ? '' : String(brutoRaw).trim();
+    if (bruto) {
+      if (!/^\d+$/.test(bruto)) {
+        return res.status(400).json({ error: 'Código MGV6 inválido: informe apenas dígitos.' });
+      }
+      if (bruto.length > 9) {
+        return res.status(400).json({ error: 'Código MGV6 inválido: máximo 9 dígitos.', code: 'MGV6_CODE_OVERFLOW' });
+      }
+      codigoMgv6Valor = bruto;
+    }
   }
 
   const dataValidadeInformada = data_validade_inicial || data_validade || null;
@@ -2281,28 +2697,19 @@ router.put('/:id', (req, res) => {
         return callback(null);
       }
 
-      produtoTemMovimentacoes(db, id, (movErr, tem) => {
+      produtoTemVendas(db, id, (movErr, temVendas) => {
         if (movErr) return callback(movErr);
-        if (tem) {
-          return callback(new Error('Produto com movimentações não permite alterar saldos iniciais.'));
+        if (temVendas) {
+          return callback(new Error('Produto já vendido não permite alterar saldos iniciais. Use Ajustar Estoque.'));
         }
 
-        try {
-          const saldos = definirSaldosIniciaisProduto(
-            saldo_fiscal_inicial ?? old.saldo_fiscal,
-            saldo_nao_fiscal_inicial ?? old.saldo_nao_fiscal
-          );
-          db.run(`
-            UPDATE produtos
-            SET saldo_fiscal = ?,
-                saldo_nao_fiscal = ?,
-                estoque_atual = ?,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-          `, [saldos.saldo_fiscal, saldos.saldo_nao_fiscal, saldos.estoque_atual, id], callback);
-        } catch (saldosErr) {
-          callback(saldosErr);
-        }
+        aplicarSaldosIniciaisViaPorta(db, {
+          produtoId: id,
+          saldoFiscal: saldo_fiscal_inicial ?? old.saldo_fiscal,
+          saldoNaoFiscal: saldo_nao_fiscal_inicial ?? old.saldo_nao_fiscal,
+          empresaId: req.body?.empresa_id ?? req.body?.empresaId ?? req.user?.empresa_id ?? req.user?.empresaId,
+          usuarioId: req.user?.id
+        }, callback);
       });
     };
 
@@ -2327,6 +2734,52 @@ router.put('/:id', (req, res) => {
       bodyUpdates.imagem_principal = normalizarImagemPrincipalOpcional(bodyUpdates.imagem_principal);
     }
 
+    // MIB — nome_busca gerado na gravação (nunca na consulta)
+    if (Object.prototype.hasOwnProperty.call(bodyUpdates, 'nome')) {
+      bodyUpdates.nome_busca = normalizarNomeBusca(bodyUpdates.nome);
+    }
+
+    // RC8.4.2 — normalizar modo compra por embalagem (opt-in)
+    if (
+      Object.prototype.hasOwnProperty.call(bodyUpdates, 'compra_por_embalagem')
+      || Object.prototype.hasOwnProperty.call(bodyUpdates, 'unidade_comercial')
+      || Object.prototype.hasOwnProperty.call(bodyUpdates, 'quantidade_por_embalagem')
+      || Object.prototype.hasOwnProperty.call(bodyUpdates, 'valor_compra_embalagem')
+    ) {
+      try {
+        const MotorUM = require('../services/unidades/MotorUnidadesMedida');
+        const compraPorEmb = Number(
+          bodyUpdates.compra_por_embalagem !== undefined
+            ? bodyUpdates.compra_por_embalagem
+            : old.compra_por_embalagem
+        ) === 1 ? 1 : 0;
+        bodyUpdates.compra_por_embalagem = compraPorEmb;
+        if (!compraPorEmb) {
+          bodyUpdates.unidade_comercial = 'UN';
+          bodyUpdates.quantidade_por_embalagem = 0;
+          bodyUpdates.valor_compra_embalagem = 0;
+        } else {
+          bodyUpdates.unidade_comercial = MotorUM.normalizarUnidadeComercial(
+            bodyUpdates.unidade_comercial !== undefined
+              ? bodyUpdates.unidade_comercial
+              : old.unidade_comercial
+          );
+          bodyUpdates.quantidade_por_embalagem = Number(
+            bodyUpdates.quantidade_por_embalagem !== undefined
+              ? bodyUpdates.quantidade_por_embalagem
+              : old.quantidade_por_embalagem
+          ) || 0;
+          bodyUpdates.valor_compra_embalagem = Number(
+            bodyUpdates.valor_compra_embalagem !== undefined
+              ? bodyUpdates.valor_compra_embalagem
+              : old.valor_compra_embalagem
+          ) || 0;
+        }
+      } catch (umErr) {
+        console.warn('[RC8.4.2] normalização embalagem no PUT:', umErr.message);
+      }
+    }
+
     const imagemAnterior = old.imagem_principal;
     const imagemNovaInformada = Object.prototype.hasOwnProperty.call(bodyUpdates, 'imagem_principal');
 
@@ -2338,7 +2791,8 @@ router.put('/:id', (req, res) => {
     });
 
     const temSaldosIniciais = saldo_fiscal_inicial !== undefined || saldo_nao_fiscal_inicial !== undefined;
-    if (fields.length === 0 && !Array.isArray(atacado_faixas) && !temSaldosIniciais && !pluInformado) {
+    const temEmbalagens = Array.isArray(embalagens);
+    if (fields.length === 0 && !Array.isArray(atacado_faixas) && !temSaldosIniciais && !pluInformado && !codigoMgv6Informado && !temEmbalagens) {
       return res.status(400).json({ error: 'Nenhum campo válido para atualizar.' });
     }
 
@@ -2352,7 +2806,8 @@ router.put('/:id', (req, res) => {
       const cb = typeof done === 'function' ? done : () => {};
       const deveEspelhar = bodyUpdates.codigo !== undefined
         || bodyUpdates.codigo_barras !== undefined
-        || pluInformado;
+        || pluInformado
+        || codigoMgv6Informado;
       if (!deveEspelhar) {
         return cb();
       }
@@ -2365,6 +2820,9 @@ router.put('/:id', (req, res) => {
       };
       if (pluInformado) {
         camposEspelho.plu = pluValidacao.valor;
+      }
+      if (codigoMgv6Informado) {
+        camposEspelho.codigo_mgv6 = codigoMgv6Valor;
       }
       espelharIdentificadoresSafe(id, camposEspelho, { db }, () => cb());
     };
@@ -2432,37 +2890,49 @@ router.put('/:id', (req, res) => {
       });
     };
 
-    const concluirAtualizacao = (callback) => {
+    const concluirAtualizacao = (done) => {
       salvarFaixasTemporarias((faixaErr) => {
-        if (faixaErr) return callback(faixaErr);
-        aplicarSaldosIniciaisSePermitido((saldosErr) => {
-          if (saldosErr) return callback(saldosErr);
+        if (faixaErr) return done(faixaErr);
 
-          const deveSincronizarValidade =
-            controlarValidadeInformado !== undefined ||
-            dataValidadeInformada ||
-            diasAlertaInformado !== undefined;
+        const unidadeAtual = bodyUpdates.unidade !== undefined ? bodyUpdates.unidade : old.unidade;
+        salvarEmbalagensProduto(
+          id,
+          temEmbalagens ? embalagens : undefined,
+          unidadeAtual,
+          req.user,
+          (embErr) => {
+            if (embErr) return done(embErr);
 
-          if (!deveSincronizarValidade) {
-            return callback(null);
+            aplicarSaldosIniciaisSePermitido((saldosErr) => {
+              if (saldosErr) return done(saldosErr);
+
+              const deveSincronizarValidade =
+                controlarValidadeInformado !== undefined ||
+                dataValidadeInformada ||
+                diasAlertaInformado !== undefined;
+
+              if (!deveSincronizarValidade) {
+                return done(null);
+              }
+
+              db.get('SELECT * FROM produtos WHERE id = ?', [id], (getErr, atual) => {
+                if (getErr) return done(getErr);
+                if (!atual) return done(new Error('Produto não encontrado após atualização.'));
+
+                sincronizarValidadeELoteProduto(id, {
+                  controlarValidade: controlarValidadeInformado !== undefined
+                    ? (controlarValidadeInformado ? 1 : 0)
+                    : atual.controlar_validade,
+                  dataValidade: dataValidadeInformada,
+                  diasAlerta: diasAlertaInformado !== undefined
+                    ? diasAlertaInformado
+                    : atual.dias_alerta_validade,
+                  estoqueTotal: obterEstoqueTotalProduto(atual)
+                }, done);
+              });
+            });
           }
-
-          db.get('SELECT * FROM produtos WHERE id = ?', [id], (getErr, atual) => {
-            if (getErr) return callback(getErr);
-            if (!atual) return callback(new Error('Produto não encontrado após atualização.'));
-
-            sincronizarValidadeELoteProduto(id, {
-              controlarValidade: controlarValidadeInformado !== undefined
-                ? (controlarValidadeInformado ? 1 : 0)
-                : atual.controlar_validade,
-              dataValidade: dataValidadeInformada,
-              diasAlerta: diasAlertaInformado !== undefined
-                ? diasAlertaInformado
-                : atual.dias_alerta_validade,
-              estoqueTotal: obterEstoqueTotalProduto(atual)
-            }, callback);
-          });
-        });
+        );
       });
     };
 
@@ -2483,6 +2953,13 @@ router.put('/:id', (req, res) => {
       if (updateErr) {
         res.status(500).json({ error: updateErr.message });
         return;
+      }
+
+      try {
+        const nomeSync = bodyUpdates.nome !== undefined ? bodyUpdates.nome : old.nome;
+        obterMibService().sincronizarNomeBusca(id, nomeSync);
+      } catch (mibErr) {
+        console.warn('[MIB] nome_busca no PUT:', mibErr.message);
       }
 
       db.get(
@@ -2513,6 +2990,9 @@ router.delete('/:id', (req, res) => {
       res.status(500).json({ error: err.message });
       return;
     }
+    try {
+      obterMibService().notificarProdutoRemovido(id);
+    } catch (_) { /* ignore */ }
     gravarAuditoria({
       usuario_id: req.user?.id || null,
       usuario_nome: req.user?.username || req.user?.nome || null,

@@ -1,4 +1,22 @@
-const { recalcularEstoqueConsolidado } = require('./estoqueFiscalService');
+/**
+ * Ajuste de Estoque — gravação de saldo via Porta Pública F×NF.
+ *
+ * Fase 1 / Implementação 02.1:
+ *   ajuste → estoqueSaldosPublico → produtos
+ * Storage ainda em `produtos` (sem estoque_empresa).
+ *
+ * @module services/ajusteEstoqueService
+ */
+'use strict';
+
+const estoqueSaldosPublico = require('./fiscalNaoFiscal/estoqueSaldosPublico');
+const { TipoSaldo } = require('./fiscalNaoFiscal/constants');
+const {
+  resolverEmpresaId
+} = require('./fiscalNaoFiscal/empresaContexto');
+
+/** Compat explícita: endpoints ERP / importação ainda sem empresa no JWT. */
+const MOTIVO_COMPAT_AJUSTE = 'COMPAT_AJUSTE_ESTOQUE_PRE_MULTIEMPRESA';
 
 function produtoTemMovimentacoes(db, produtoId, callback) {
   db.get(`
@@ -22,6 +40,18 @@ function produtoTemMovimentacoes(db, produtoId, callback) {
 
     callback(null, tem);
   });
+}
+
+/** Estoque Inicial só bloqueia após a primeira venda do produto. */
+function produtoTemVendas(db, produtoId, callback) {
+  db.get(
+    `SELECT COUNT(*) AS vendas FROM vendas_itens WHERE produto_id = ?`,
+    [produtoId],
+    (err, row) => {
+      if (err) return callback(err);
+      callback(null, Number(row?.vendas || 0) > 0);
+    }
+  );
 }
 
 function registrarAjusteEstoque(db, dados, callback) {
@@ -49,6 +79,83 @@ function registrarAjusteEstoque(db, dados, callback) {
   ], callback);
 }
 
+/**
+ * Monta opts da porta: empresaId explícito ou COMPAT de ajuste (legado ERP).
+ * Nunca inventa empresa 1 / CNPJ de configurações.
+ *
+ * Se opcoes.exigirEmpresa === true, ausência de empresaId → EMPRESA_OBRIGATORIA
+ * (sem COMPAT). Usado em testes/contrato multiempresa.
+ */
+function montarOptsPortaAjuste(db, opcoes = {}) {
+  const empresaId = resolverEmpresaId(opcoes)
+    ?? resolverEmpresaId(opcoes.contexto)
+    ?? resolverEmpresaId(opcoes.ctx);
+
+  const base = {
+    db,
+    usuarioId: opcoes.usuarioId,
+    validarEmpresa: opcoes.validarEmpresa
+  };
+
+  if (empresaId != null) {
+    return { ...base, empresaId, legado: false, motivoCompat: null };
+  }
+
+  if (opcoes.exigirEmpresa === true) {
+    const err = new Error(
+      'empresaId é obrigatório para operações de saldo/reserva. Informe empresa_id/empresaId no contexto.'
+    );
+    err.code = 'EMPRESA_OBRIGATORIA';
+    throw err;
+  }
+
+  // Fluxos ERP/importação pré-multiempresa (JWT sem empresa): COMPAT explícito do ajuste.
+  return {
+    ...base,
+    modoLegadoSemEmpresa: true,
+    motivoCompat: opcoes.motivoCompat || MOTIVO_COMPAT_AJUSTE,
+    legado: true
+  };
+}
+
+function mapearErroPorta(err) {
+  if (!err) return err;
+  if (err.code === 'SALDO_INSUFICIENTE') {
+    const msg = /não fiscal/i.test(String(err.message || ''))
+      ? 'Ajuste não fiscal resultaria em saldo não fiscal negativo.'
+      : 'Ajuste fiscal resultaria em saldo fiscal negativo.';
+    const e = new Error(msg);
+    e.code = err.code;
+    e.cause = err;
+    return e;
+  }
+  if (err.code === 'PRODUTO_NAO_ENCONTRADO') {
+    const e = new Error('Produto não encontrado.');
+    e.code = err.code;
+    return e;
+  }
+  if (err.code === 'EMPRESA_OBRIGATORIA' || err.code === 'EMPRESA_NAO_ENCONTRADA') {
+    return err;
+  }
+  return err;
+}
+
+async function aplicarDeltasSaldoViaPorta(produtoId, ajusteF, ajusteNF, optsPorta) {
+  if (ajusteF > 0) {
+    await estoqueSaldosPublico.creditarSaldo(produtoId, TipoSaldo.FISCAL, ajusteF, optsPorta);
+  } else if (ajusteF < 0) {
+    await estoqueSaldosPublico.debitarSaldo(produtoId, TipoSaldo.FISCAL, Math.abs(ajusteF), optsPorta);
+  }
+
+  if (ajusteNF > 0) {
+    await estoqueSaldosPublico.creditarSaldo(produtoId, TipoSaldo.NAO_FISCAL, ajusteNF, optsPorta);
+  } else if (ajusteNF < 0) {
+    await estoqueSaldosPublico.debitarSaldo(produtoId, TipoSaldo.NAO_FISCAL, Math.abs(ajusteNF), optsPorta);
+  }
+
+  return estoqueSaldosPublico.consultarSaldo(produtoId, optsPorta);
+}
+
 function aplicarAjusteEstoqueProduto(db, opcoes, callback) {
   const {
     produtoId,
@@ -66,6 +173,13 @@ function aplicarAjusteEstoqueProduto(db, opcoes, callback) {
   const ajusteF = Number(ajusteFiscal || 0);
   const ajusteNF = Number(ajusteNaoFiscal || 0);
 
+  let optsPorta;
+  try {
+    optsPorta = montarOptsPortaAjuste(db, opcoes);
+  } catch (e) {
+    return callback(e);
+  }
+
   if (ajusteF === 0 && ajusteNF === 0) {
     return callback(new Error('Informe ao menos um ajuste fiscal ou não fiscal diferente de zero.'));
   }
@@ -74,98 +188,111 @@ function aplicarAjusteEstoqueProduto(db, opcoes, callback) {
     return callback(new Error('Motivo do ajuste é obrigatório.'));
   }
 
-  db.get('SELECT saldo_fiscal, saldo_nao_fiscal, controlar_validade FROM produtos WHERE id = ?', [produtoId], (getErr, produto) => {
-    if (getErr) return callback(getErr);
-    if (!produto) return callback(new Error('Produto não encontrado.'));
+  db.get(
+    'SELECT controlar_validade FROM produtos WHERE id = ?',
+    [produtoId],
+    (getErr, produtoMeta) => {
+      if (getErr) return callback(getErr);
+      if (!produtoMeta) return callback(new Error('Produto não encontrado.'));
 
-    const saldoFiscalAntes = Number(produto.saldo_fiscal || 0);
-    const saldoNaoFiscalAntes = Number(produto.saldo_nao_fiscal || 0);
-    const estoqueTotalAntes = saldoFiscalAntes + saldoNaoFiscalAntes;
+      (async () => {
+        const antes = await estoqueSaldosPublico.consultarSaldo(produtoId, optsPorta);
+        const saldoFiscalAntes = Number(antes.saldo_fiscal || 0);
+        const saldoNaoFiscalAntes = Number(antes.saldo_nao_fiscal || 0);
+        const estoqueTotalAntes = Number(
+          (antes.estoque_atual != null
+            ? antes.estoque_atual
+            : (saldoFiscalAntes + saldoNaoFiscalAntes)).toFixed(3)
+        );
 
-    const saldoFiscalDepois = Number((saldoFiscalAntes + ajusteF).toFixed(3));
-    const saldoNaoFiscalDepois = Number((saldoNaoFiscalAntes + ajusteNF).toFixed(3));
-    const estoqueTotalDepois = Number((saldoFiscalDepois + saldoNaoFiscalDepois).toFixed(3));
+        const saldoFiscalDepois = Number((saldoFiscalAntes + ajusteF).toFixed(3));
+        const saldoNaoFiscalDepois = Number((saldoNaoFiscalAntes + ajusteNF).toFixed(3));
+        const estoqueTotalDepois = Number((saldoFiscalDepois + saldoNaoFiscalDepois).toFixed(3));
 
-    if (saldoFiscalDepois < 0) {
-      return callback(new Error('Ajuste fiscal resultaria em saldo fiscal negativo.'));
-    }
-    if (saldoNaoFiscalDepois < 0) {
-      return callback(new Error('Ajuste não fiscal resultaria em saldo não fiscal negativo.'));
-    }
+        if (saldoFiscalDepois < 0) {
+          throw new Error('Ajuste fiscal resultaria em saldo fiscal negativo.');
+        }
+        if (saldoNaoFiscalDepois < 0) {
+          throw new Error('Ajuste não fiscal resultaria em saldo não fiscal negativo.');
+        }
 
-    const controlaValidade = produto.controlar_validade === 1;
-    const ajusteTotalPositivo = Math.max(0, ajusteF) + Math.max(0, ajusteNF);
-    const ajusteTotalNegativo = Math.abs(Math.min(0, ajusteF)) + Math.abs(Math.min(0, ajusteNF));
+        const controlaValidade = produtoMeta.controlar_validade === 1;
+        const ajusteTotalPositivo = Math.max(0, ajusteF) + Math.max(0, ajusteNF);
+        const ajusteTotalNegativo = Math.abs(Math.min(0, ajusteF)) + Math.abs(Math.min(0, ajusteNF));
 
-    const finalizarComSaldos = () => {
-      db.run(`
-        UPDATE produtos
-        SET saldo_fiscal = ?,
-            saldo_nao_fiscal = ?,
-            estoque_atual = ?,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `, [saldoFiscalDepois, saldoNaoFiscalDepois, estoqueTotalDepois, produtoId], (upErr) => {
-        if (upErr) return callback(upErr);
+        const finalizarComSaldos = async () => {
+          // Mutação de saldo exclusivamente via porta pública (mesmo `db` / TX externa).
+          const depois = await aplicarDeltasSaldoViaPorta(produtoId, ajusteF, ajusteNF, optsPorta);
 
-        registrarAjusteEstoque(db, {
-          produto_id: produtoId,
-          usuario_id: usuarioId,
-          usuario_nome: usuarioNome,
-          motivo: String(motivo).trim(),
-          ajuste_fiscal: ajusteF,
-          ajuste_nao_fiscal: ajusteNF,
-          saldo_fiscal_antes: saldoFiscalAntes,
-          saldo_fiscal_depois: saldoFiscalDepois,
-          saldo_nao_fiscal_antes: saldoNaoFiscalAntes,
-          saldo_nao_fiscal_depois: saldoNaoFiscalDepois,
-          estoque_total_antes: estoqueTotalAntes,
-          estoque_total_depois: estoqueTotalDepois
-        }, (histErr) => {
-          if (histErr) return callback(histErr);
-          callback(null, {
-            saldo_fiscal: saldoFiscalDepois,
-            saldo_nao_fiscal: saldoNaoFiscalDepois,
-            estoque_atual: estoqueTotalDepois
+          await new Promise((resolve, reject) => {
+            registrarAjusteEstoque(db, {
+              produto_id: produtoId,
+              usuario_id: usuarioId,
+              usuario_nome: usuarioNome,
+              motivo: String(motivo).trim(),
+              ajuste_fiscal: ajusteF,
+              ajuste_nao_fiscal: ajusteNF,
+              saldo_fiscal_antes: saldoFiscalAntes,
+              saldo_fiscal_depois: Number(depois.saldo_fiscal),
+              saldo_nao_fiscal_antes: saldoNaoFiscalAntes,
+              saldo_nao_fiscal_depois: Number(depois.saldo_nao_fiscal),
+              estoque_total_antes: estoqueTotalAntes,
+              estoque_total_depois: Number(
+                depois.estoque_atual != null
+                  ? depois.estoque_atual
+                  : (depois.saldo_fiscal + depois.saldo_nao_fiscal)
+              )
+            }, (histErr) => (histErr ? reject(histErr) : resolve()));
           });
-        });
-      });
-    };
 
-    if (!controlaValidade) {
-      return finalizarComSaldos();
+          return {
+            saldo_fiscal: Number(depois.saldo_fiscal),
+            saldo_nao_fiscal: Number(depois.saldo_nao_fiscal),
+            estoque_atual: Number(
+              depois.estoque_atual != null
+                ? depois.estoque_atual
+                : (depois.saldo_fiscal + depois.saldo_nao_fiscal)
+            ),
+            empresa_id: depois.empresa_id != null ? depois.empresa_id : null,
+            legado: optsPorta.legado === true,
+            motivo_compat: optsPorta.legado ? (optsPorta.motivoCompat || MOTIVO_COMPAT_AJUSTE) : null
+          };
+        };
+
+        if (controlaValidade) {
+          if (ajusteTotalPositivo > 0) {
+            if (!dataValidade) {
+              throw new Error('Para produtos com controle de validade, informe a data de validade no ajuste positivo.');
+            }
+            const hoje = new Date().toISOString().split('T')[0];
+            await new Promise((resolve, reject) => {
+              lotesService.criarLote({
+                produto_id: produtoId,
+                lote: lote || undefined,
+                quantidade_inicial: ajusteTotalPositivo,
+                data_fabricacao: dataFabricacao || null,
+                data_validade: dataValidade,
+                data_entrada: hoje,
+                origem: 'AJUSTE_ESTOQUE',
+                compra_id: null
+              }, (loteErr) => (loteErr ? reject(loteErr) : resolve()));
+            });
+          } else if (ajusteTotalNegativo > 0) {
+            await new Promise((resolve, reject) => {
+              lotesService.consumirLotesFEFO(produtoId, ajusteTotalNegativo, (consumoErr) => (
+                consumoErr ? reject(consumoErr) : resolve()
+              ));
+            });
+          }
+        }
+
+        return finalizarComSaldos();
+      })().then(
+        (result) => callback(null, result),
+        (err) => callback(mapearErroPorta(err))
+      );
     }
-
-    if (ajusteTotalPositivo > 0) {
-      if (!dataValidade) {
-        return callback(new Error('Para produtos com controle de validade, informe a data de validade no ajuste positivo.'));
-      }
-
-      const hoje = new Date().toISOString().split('T')[0];
-      return lotesService.criarLote({
-        produto_id: produtoId,
-        lote: lote || undefined,
-        quantidade_inicial: ajusteTotalPositivo,
-        data_fabricacao: dataFabricacao || null,
-        data_validade: dataValidade,
-        data_entrada: hoje,
-        origem: 'AJUSTE_ESTOQUE',
-        compra_id: null
-      }, (loteErr) => {
-        if (loteErr) return callback(loteErr);
-        finalizarComSaldos();
-      });
-    }
-
-    if (ajusteTotalNegativo > 0) {
-      return lotesService.consumirLotesFEFO(produtoId, ajusteTotalNegativo, (consumoErr) => {
-        if (consumoErr) return callback(consumoErr);
-        finalizarComSaldos();
-      });
-    }
-
-    finalizarComSaldos();
-  });
+  );
 }
 
 function definirSaldosIniciaisProduto(saldoFiscal, saldoNaoFiscal) {
@@ -182,9 +309,64 @@ function definirSaldosIniciaisProduto(saldoFiscal, saldoNaoFiscal) {
   };
 }
 
+/**
+ * Aplica saldos iniciais (absolutos) via porta pública — deltas a partir do saldo atual.
+ * Não grava histórico de ajuste (comportamento do PUT legado preservado).
+ */
+function aplicarSaldosIniciaisViaPorta(db, opcoes, callback) {
+  const produtoId = Number(opcoes.produtoId || opcoes.produto_id);
+  let alvo;
+  try {
+    alvo = definirSaldosIniciaisProduto(opcoes.saldoFiscal, opcoes.saldoNaoFiscal);
+  } catch (e) {
+    return callback(e);
+  }
+
+  let optsPorta;
+  try {
+    optsPorta = montarOptsPortaAjuste(db, opcoes);
+  } catch (e) {
+    return callback(e);
+  }
+
+  (async () => {
+    const atual = await estoqueSaldosPublico.consultarSaldo(produtoId, optsPorta);
+    const ajusteF = Number((alvo.saldo_fiscal - Number(atual.saldo_fiscal || 0)).toFixed(3));
+    const ajusteNF = Number((alvo.saldo_nao_fiscal - Number(atual.saldo_nao_fiscal || 0)).toFixed(3));
+
+    if (ajusteF === 0 && ajusteNF === 0) {
+      return {
+        saldo_fiscal: Number(atual.saldo_fiscal),
+        saldo_nao_fiscal: Number(atual.saldo_nao_fiscal),
+        estoque_atual: Number(atual.estoque_atual),
+        empresa_id: atual.empresa_id != null ? atual.empresa_id : null,
+        legado: optsPorta.legado === true,
+        motivo_compat: optsPorta.legado ? (optsPorta.motivoCompat || MOTIVO_COMPAT_AJUSTE) : null
+      };
+    }
+
+    const depois = await aplicarDeltasSaldoViaPorta(produtoId, ajusteF, ajusteNF, optsPorta);
+    return {
+      saldo_fiscal: Number(depois.saldo_fiscal),
+      saldo_nao_fiscal: Number(depois.saldo_nao_fiscal),
+      estoque_atual: Number(depois.estoque_atual),
+      empresa_id: depois.empresa_id != null ? depois.empresa_id : null,
+      legado: optsPorta.legado === true,
+      motivo_compat: optsPorta.legado ? (optsPorta.motivoCompat || MOTIVO_COMPAT_AJUSTE) : null
+    };
+  })().then(
+    (result) => callback(null, result),
+    (err) => callback(mapearErroPorta(err))
+  );
+}
+
 module.exports = {
   produtoTemMovimentacoes,
+  produtoTemVendas,
   registrarAjusteEstoque,
   aplicarAjusteEstoqueProduto,
-  definirSaldosIniciaisProduto
+  definirSaldosIniciaisProduto,
+  aplicarSaldosIniciaisViaPorta,
+  montarOptsPortaAjuste,
+  MOTIVO_COMPAT_AJUSTE
 };

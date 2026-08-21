@@ -111,7 +111,7 @@ function main() {
   }
 
   console.log(TAG, 'validando asar:', asarPath);
-  const cmp = compararRepoComAsar(root, asarPath, { manifesto });
+  const cmp = compararRepoComAsar(root, asarPath, { manifesto, modulo: manifesto.modulo || 'erp' });
   cmp.logs.slice(0, 60).forEach((l) => console.log(' ', l));
   if (cmp.logs.length > 60) console.log(`  ... +${cmp.logs.length - 60} logs`);
 

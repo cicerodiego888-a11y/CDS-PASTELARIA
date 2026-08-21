@@ -33,7 +33,7 @@ class EquipamentosManager {
       equipamento_id: equipamento.id,
       host: equipamento.ip,
       ip: equipamento.ip,
-      porta: equipamento.porta_tcp || 9100,
+      porta: equipamento.porta_tcp || require('../drivers/toledo/ToledoProtocol').PORTA_PADRAO,
       timeout: equipamento.timeout_ms ?? 5000,
       timeout_ms: equipamento.timeout_ms ?? 5000,
       reconnect_auto: equipamento.reconnect_auto,

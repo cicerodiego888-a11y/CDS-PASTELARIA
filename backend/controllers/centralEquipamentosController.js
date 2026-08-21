@@ -122,10 +122,11 @@ async function diagnostico(req, res) {
   try {
     const id = req.params.equipamentoId || req.body?.equipamento_id;
     if (!id) return res.status(400).json({ success: false, error: 'equipamento_id obrigatório' });
+    // RC14.12.1 — apenas valida e delega ao Driver Toledo (sem lógica própria)
     const resultado = await central.diagnosticar(id);
-    res.json({ success: true, diagnostico: resultado });
+    res.json({ success: true, ...resultado, diagnostico: resultado });
   } catch (error) {
-    responderErro(res, error, 'Erro ao diagnosticar.');
+    responderErro(res, error, 'Erro ao diagnosticar.', error.statusCode || 500);
   }
 }
 

@@ -33,8 +33,14 @@
     'laboratorio-equipamentos': { grupo: 'Administração', titulo: 'Laboratório de Equipamentos', subtitulo: 'Testes e diagnóstico de periféricos' },
     'central-equipamentos': { grupo: 'Administração', titulo: 'Central de Equipamentos', subtitulo: 'Painel de equipamentos cadastrados e descobertos' },
     'central-diagnostico': { grupo: 'Administração', titulo: 'Saúde da Central', subtitulo: 'Diagnóstico técnico da Central de Entradas' },
+    'dfe-auditoria': { grupo: 'Administração', titulo: 'Motor DF-e — Auditoria', subtitulo: 'Trilha DistDFe para suporte (somente leitura)' },
     'configuracoes-avancadas': { grupo: 'Administração', titulo: 'Centro de Configurações', subtitulo: 'Configurações oficiais da plataforma (SUPER_ADMIN)' },
     observabilidade: { grupo: 'Administração', titulo: 'Observabilidade', subtitulo: 'Dashboard oficial READ-ONLY da plataforma (SUPER_ADMIN)' },
+    'mib-analytics': { grupo: 'Administração', titulo: 'MIB Analytics', subtitulo: 'Motor Cognitivo de Busca — métricas e aprendizado (SUPER_ADMIN)' },
+    'enterprise-search': { grupo: 'Administração', titulo: 'Enterprise Search', subtitulo: 'Plataforma corporativa de pesquisa — MIB-RC3.0 (SUPER_ADMIN)' },
+    'knowledge-center': { grupo: 'Administração', titulo: 'Knowledge Center', subtitulo: 'Grafo de conhecimento e recomendações — MIB-RC4.0 (SUPER_ADMIN)' },
+    'cip-insights': { grupo: 'Administração', titulo: 'CIP Insights', subtitulo: 'CDS Intelligence Platform — decisões e previsões (SUPER_ADMIN)' },
+    'cds-copiloto': { grupo: 'Administração', titulo: 'CDS Copiloto', subtitulo: 'CIA — copiloto oficial do ERP (SUPER_ADMIN)' },
     equipamentos: { grupo: 'Administração', titulo: 'Equipamentos', subtitulo: 'Cadastro de balanças e periféricos' }
   };
 

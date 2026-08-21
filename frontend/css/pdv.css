@@ -44,8 +44,10 @@
   display: flex;
   gap: 8px;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   justify-content: flex-end;
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 #operadorPdv {
@@ -109,12 +111,14 @@
 .pdv-layout-principal,
 .pdv-corpo {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(260px, 320px);
+  /* Resumo fluido: confortável em 1920, utilizável em 1280/1366 */
+  grid-template-columns: minmax(0, 1fr) clamp(250px, 22vw, 320px);
   gap: 6px;
   max-width: 100%;
   align-items: stretch;
   flex: 1;
   min-height: 0;
+  overflow: hidden;
 }
 
 .pdv-col-esquerda {
@@ -229,6 +233,9 @@
   margin-top: 6px;
   max-height: 280px;
   overflow-y: auto;
+  position: relative;
+  z-index: 40;
+  pointer-events: auto;
 }
 
 .lista-produtos-dropdown.aberta {
@@ -236,6 +243,7 @@
   border-radius: 10px;
   background: #fff;
   padding: 4px;
+  pointer-events: auto;
 }
 
 .pdv-autocomplete-item {
@@ -251,6 +259,7 @@
   padding: 10px 12px;
   margin-bottom: 4px;
   cursor: pointer;
+  pointer-events: auto;
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 
@@ -317,35 +326,81 @@
 .pdv-itens {
   display: flex;
   flex-direction: column;
-  flex: 1;
+  flex: 1 1 0;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
 }
 
+/* Carrinho vazio: card compacto (sem área vertical exagerada) */
+.pdv-itens:has(td.vazio) {
+  flex: 0 0 auto;
+}
+
 .pdv-itens-scroll {
-  flex: 1;
+  flex: 1 1 auto;
   overflow: auto;
   min-height: 0;
 }
 
-.pdv-itens .col-qtd { width: 88px; }
-.pdv-itens .col-un { width: 44px; text-align: center; }
-.pdv-itens .col-unit { width: 96px; }
-.pdv-itens .col-desc { width: 68px; }
+.pdv-itens:has(td.vazio) .pdv-itens-scroll {
+  flex: 0 0 auto;
+  overflow: hidden;
+}
+
+.pdv-itens:has(td.vazio) td.vazio {
+  padding: 28px 12px;
+}
+
+.pdv-itens .col-qtd { width: 72px; text-align: center; }
+.pdv-itens .col-un { width: 52px; text-align: center; }
+.pdv-itens .col-unit {
+  width: 96px;
+  text-align: right;
+}
+.pdv-itens .col-desc-pct,
+.pdv-itens .col-desc-rs {
+  width: 88px;
+  text-align: center;
+  padding-left: 8px !important;
+  padding-right: 8px !important;
+}
 .pdv-itens .col-total {
-  width: 148px;
+  width: 120px;
   text-align: right;
   white-space: nowrap;
-  padding-right: 20px !important;
+  padding-right: 12px !important;
   padding-left: 10px !important;
   vertical-align: middle;
 }
 .pdv-itens .col-acao {
-  width: 56px;
-  padding-left: 8px !important;
+  width: 48px;
+  text-align: center;
 }
-.pdv-itens .col-produto { min-width: 220px; font-size: 15px; }
+.pdv-itens .col-produto {
+  width: auto;
+  min-width: 0;
+  text-align: left;
+  padding-left: 12px !important;
+  padding-right: 12px !important;
+}
+
+.pdv-itens thead th.col-qtd,
+.pdv-itens thead th.col-un,
+.pdv-itens thead th.col-desc-pct,
+.pdv-itens thead th.col-desc-rs,
+.pdv-itens thead th.col-acao {
+  text-align: center;
+}
+
+.pdv-itens thead th.col-unit,
+.pdv-itens thead th.col-total {
+  text-align: right;
+}
+
+.pdv-itens thead th.col-produto {
+  text-align: left;
+}
 
 .pdv-itens tbody tr {
   transition: background-color 0.15s ease;
@@ -358,21 +413,183 @@
   background: #e8f1ff !important;
 }
 
+.pdv-itens tbody td {
+  vertical-align: middle;
+}
+
 .pdv-unidade-badge {
   display: inline-block;
   background: #f1f5f9;
   color: #475569;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
-  padding: 4px 6px;
+  padding: 6px 8px;
   border-radius: 6px;
 }
 
+.pdv-produto-cell {
+  display: flex;
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.pdv-produto-texto {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.pdv-produto-miniatura {
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid #e2e8f0;
+  background: #f8fafc;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+
+.pdv-produto-miniatura:hover {
+  transform: scale(1.05);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.18);
+}
+
 .pdv-produto-nome {
-  font-weight: 600;
+  font-weight: 700;
   color: #1e293b;
+  font-size: 17px;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  margin: 0;
+}
+
+.pdv-produto-extras {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
+.pdv-produto-extras:empty {
+  display: none;
+}
+
+.pdv-produto-extras .badge {
+  margin: 0 !important;
+  font-size: 12px;
+  padding: 4px 8px;
+  line-height: 1.2;
+}
+
+.pdv-produto-meta {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.pdv-produto-extras .text-muted,
+.pdv-produto-extras .text-success {
+  margin: 0;
+  line-height: 1.3;
+}
+
+/* Lightbox foto do produto (somente visual) */
+.pdv-foto-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10050;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(15, 23, 42, 0.72);
+  cursor: zoom-out;
+}
+
+.pdv-foto-overlay[hidden] {
+  display: none !important;
+}
+
+.pdv-foto-dialog {
+  max-width: 90vw;
+  max-height: 90vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: default;
+}
+
+.pdv-foto-grande {
+  display: block;
+  max-width: 90vw;
+  max-height: 90vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  background: #0f172a;
+  cursor: default;
+}
+
+.pdv-foto-fechar {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 1;
+  width: 42px;
+  height: 42px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #0f172a;
+  font-size: 18px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+.pdv-foto-fechar:hover {
+  background: #fff;
+}
+
+/* Unitário somente leitura (não editável no carrinho) */
+.pdv-unitario-valor {
+  display: inline-block;
+  font-weight: 700;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  color: #0f172a;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.pdv-itens .quantidade-item,
+.pdv-itens .percentual-item,
+.pdv-itens .desconto-valor-item {
+  min-height: 38px;
+  height: 38px;
+  padding: 6px 8px;
   font-size: 15px;
-  line-height: 1.35;
+  font-weight: 700;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  text-align: center;
+  margin: 0 auto;
 }
 
 /* Total da linha — alinhado ao Total Geral (escuro, bold, 20–22px) */
@@ -683,6 +900,9 @@
   justify-content: center;
   align-items: center;
   box-shadow: 0 2px 8px rgba(0,0,0,.05);
+  /* Preferir 1 linha; no máximo ~2 linhas controladas */
+  max-height: 4.6rem;
+  overflow: hidden;
 }
 
 /* Cards na mesma barra dos atalhos (inline, sem linha extra) */
@@ -898,20 +1118,26 @@
 .pdv-itens table {
   width: 100%;
   border-collapse: collapse;
+  table-layout: fixed;
   min-width: 0;
 }
 
 .pdv-itens th {
   background: #f1f5f9;
-  padding: 8px 10px;
+  padding: 12px 10px;
   text-align: left;
-  font-size: 13px;
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  color: #1e293b;
+  border-bottom: 1px solid #e2e8f0;
+  white-space: nowrap;
 }
 
 .pdv-itens td {
-  padding: 8px 10px;
+  padding: 12px 10px;
   border-bottom: 1px solid #e5e7eb;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .vazio {
@@ -976,40 +1202,7 @@
   color: #111827;
 }
 
-@media (max-width: 1100px) {
-  .pdv-grid,
-  .pdv-layout-principal,
-  .pdv-corpo {
-    grid-template-columns: 1fr;
-    min-height: auto;
-  }
-
-  .pdv-profissional {
-    height: auto;
-    min-height: 100vh;
-    overflow: auto;
-  }
-
-  .pdv-resumo {
-    position: static;
-    max-height: none;
-  }
-
-  .pdv-busca-linha {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .pdv-busca-linha button {
-    width: 100%;
-  }
-
-  .pdv-topo {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 10px;
-  }
-}
+/* Breakpoint legado 1100px removido — ver bloco PDV-RESPONSIVE-01 no final do arquivo */
 
 /* Troco destacado */
 #trocoPDV {
@@ -1021,10 +1214,11 @@
 /* Garantir que o card de resumo não estoure */
 .pdv-resumo {
   box-sizing: border-box;
+  min-width: 0;
 }
 
-/* PDV Fullscreen Mode */
-.pdv-fullscreen {
+/* PDV Fullscreen Mode — base (breakpoints sobrescrevem com especificidade maior) */
+.pdv-profissional.pdv-fullscreen {
   height: 100%;
   min-height: 0;
   padding: 0;
@@ -1245,33 +1439,39 @@ body:not(.pdv-mode)::before {
 
 
 /* =====================================================
-   MODO FISCAL F12 - FAIXA VISUAL E FINALIZAÇÃO NFC-e
+   MODO FISCAL F12 - LINHA VISUAL E FINALIZAÇÃO NFC-e
+   Verde = fiscal ON | Vermelho = fiscal OFF
    ===================================================== */
 .faixa-sistema-fiscal {
-  background: #16a34a;
-  color: #ffffff;
-  text-align: center;
-  padding: 5px 12px;
-  font-size: 11px;
-  font-weight: 900;
-  letter-spacing: 0.5px;
+  height: 8px;
+  min-height: 8px;
+  padding: 0;
+  border: 0;
   border-radius: 10px 10px 0 0;
-  box-shadow: 0 2px 8px rgba(0,0,0,.1);
-  border: 2px solid #16a34a;
-  border-bottom: 0;
+  box-shadow: none;
   flex-shrink: 0;
+  font-size: 0;
+  line-height: 0;
+  overflow: hidden;
 }
 
-.faixa-sistema-fiscal span {
-  color: #dc2626;
-  background: #ffffff;
-  padding: 3px 16px;
-  border-radius: 999px;
-  font-weight: 900;
+.faixa-sistema-fiscal--ativo {
+  background: #16a34a;
+}
+
+.faixa-sistema-fiscal--off {
+  background: #dc2626;
 }
 
 body.modo-fiscal-ativo .pdv-topo {
   border: 2px solid #16a34a;
+  border-top: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+body.pdv-mode:not(.modo-fiscal-ativo):not(.implantacao-sem-fiscal) .pdv-topo {
+  border: 2px solid #dc2626;
   border-top: 0;
   border-top-left-radius: 0;
   border-top-right-radius: 0;
@@ -1373,4 +1573,853 @@ body.modo-fiscal-ativo #btnFinalizarVendaPdv {
     animation: none !important;
     transition: none !important;
   }
+}
+
+/* =====================================================
+   PDV-RESPONSIVE-01 — densidade e adaptação progressiva
+   Precedência sobre .pdv-fullscreen via seletor composto.
+   Breakpoints:
+     >= 1400  NORMAL (base)
+     1100–1399 COMPACTO (2 colunas)
+     900–1099  LOW-RES (2 colunas densas)
+     < 900     EXTREMO (stack)
+   ===================================================== */
+
+/* —— COMPACTO horizontal —— */
+@media (max-width: 1399px) {
+  .pdv-grid,
+  .pdv-layout-principal,
+  .pdv-corpo {
+    grid-template-columns: minmax(0, 1fr) clamp(240px, 24vw, 300px);
+    gap: 5px;
+  }
+
+  .pdv-topo {
+    padding: 6px 10px;
+    margin-bottom: 3px;
+  }
+
+  .pdv-topo h1 {
+    font-size: 18px;
+  }
+
+  .pdv-header-left {
+    gap: 10px;
+    flex-shrink: 0;
+  }
+
+  .pdv-status {
+    gap: 5px;
+  }
+
+  .btn-menu-pdv {
+    width: 40px;
+    height: 40px;
+    font-size: 18px;
+  }
+
+  .btn-calc-topo,
+  .btn-fechamento-caixa,
+  .btn-aparencia-pdv {
+    padding: 6px 10px;
+    font-size: 12px;
+    gap: 4px;
+  }
+
+  .caixa-aberto,
+  .caixa-fechado {
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+
+  #operadorPdv {
+    max-width: 160px;
+  }
+
+  .pdv-card {
+    padding: 6px 8px;
+  }
+
+  .pdv-col-esquerda {
+    gap: 5px;
+  }
+
+  .pdv-busca-label {
+    font-size: 12px;
+    margin-bottom: 4px;
+  }
+
+  .pdv-busca-linha {
+    gap: 6px;
+    flex-direction: row;
+    align-items: center;
+  }
+
+  .pdv-busca-linha input {
+    height: 38px;
+    min-height: 38px;
+    font-size: 14px;
+    padding: 8px 10px;
+  }
+
+  .pdv-busca-linha button {
+    min-width: 96px;
+    height: 38px;
+    font-size: 13px;
+    padding: 0 12px;
+    width: auto;
+  }
+
+  .pdv-itens th,
+  .pdv-itens td {
+    padding: 12px 10px;
+    font-size: 12px;
+  }
+
+  .pdv-itens .col-qtd { width: 64px; }
+  .pdv-itens .col-un { width: 44px; }
+  .pdv-itens .col-unit { width: 88px; }
+  .pdv-itens .col-desc-pct,
+  .pdv-itens .col-desc-rs { width: 78px; }
+  .pdv-itens .col-total { width: 108px; padding-right: 10px !important; }
+  .pdv-itens .col-acao { width: 44px; }
+
+  .pdv-produto-nome,
+  .pdv-itens .col-produto {
+    font-size: 16px;
+  }
+
+  .pdv-produto-cell {
+    gap: 4px;
+  }
+
+  .pdv-unitario-valor {
+    font-size: 15px;
+  }
+
+  .pdv-itens .quantidade-item,
+  .pdv-itens .percentual-item,
+  .pdv-itens .desconto-valor-item {
+    min-height: 36px;
+    height: 36px;
+    font-size: 14px;
+  }
+
+  .pdv-total-linha {
+    font-size: 18px;
+  }
+
+  .linha-resumo {
+    font-size: 12px;
+    min-height: 24px;
+    gap: 6px;
+  }
+
+  .total-pdv {
+    padding: 6px 10px;
+    margin: 4px 0;
+  }
+
+  .total-pdv strong {
+    font-size: 1.55rem;
+  }
+
+  .btn-finalizar,
+  .btn-cancelar,
+  .btn-venda-entrega {
+    min-height: 36px;
+    padding: 6px 10px;
+  }
+
+  .pdv-atalhos {
+    padding: 4px 6px;
+    gap: 3px;
+    max-height: 4.2rem;
+  }
+
+  .pdv-atalho-chip {
+    padding: 4px 8px;
+    font-size: 11px;
+  }
+
+  .pdv-footer-widget--card {
+    min-width: 100px;
+    max-width: 130px;
+    padding: 3px 8px;
+  }
+}
+
+/* —— LOW-RES: manter 2 colunas —— */
+@media (max-width: 1099px) {
+  .pdv-grid,
+  .pdv-layout-principal,
+  .pdv-corpo {
+    grid-template-columns: minmax(0, 1fr) clamp(220px, 28vw, 270px);
+    gap: 4px;
+  }
+
+  .pdv-topo {
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: nowrap;
+    gap: 6px;
+    padding: 5px 8px;
+  }
+
+  .pdv-topo h1 {
+    font-size: 16px;
+  }
+
+  .pdv-topo > .pdv-header-left > div > span {
+    display: none;
+  }
+
+  .pdv-status {
+    gap: 4px;
+    flex-wrap: nowrap;
+  }
+
+  .btn-calc-topo {
+    padding: 5px 8px;
+    font-size: 11px;
+  }
+
+  /* Em low-res o texto "Calculadora" pode encolher; ícone permanece */
+  .btn-fechamento-caixa {
+    padding: 5px 8px;
+    font-size: 11px;
+  }
+
+  #operadorPdv {
+    max-width: 120px;
+    font-size: 11px;
+  }
+
+  .pdv-busca-linha {
+    flex-direction: row;
+    align-items: center;
+  }
+
+  .pdv-busca-linha button {
+    min-width: 84px;
+    width: auto;
+  }
+
+  .pdv-resumo {
+    overflow-y: auto;
+    min-height: 0;
+  }
+
+  .pdv-resumo-titulo {
+    font-size: 13px;
+  }
+
+  .linha-resumo--destaque {
+    padding: 4px 0;
+  }
+
+  .total-pdv strong {
+    font-size: 1.4rem;
+  }
+
+  .btn-finalizar-titulo,
+  .btn-cancelar-titulo,
+  .btn-venda-entrega-titulo {
+    font-size: 0.78rem;
+  }
+
+  .pdv-atalhos {
+    max-height: 3.9rem;
+  }
+
+  .pdv-atalho-chip {
+    padding: 3px 7px;
+    font-size: 10px;
+  }
+}
+
+/* —— EXTREMO: NÃO empilhar só por width < 900 ——
+   720–899: manter 2 colunas compactas (caso Windows 150% ~898×475)
+   < 720: stack real
+*/
+@media (max-width: 899px) and (min-width: 720px) {
+  .pdv-grid,
+  .pdv-layout-principal,
+  .pdv-corpo {
+    grid-template-columns: minmax(0, 1fr) clamp(200px, 32vw, 240px);
+    gap: 4px;
+    overflow: hidden;
+    flex: 1 1 0;
+    min-height: 0;
+  }
+
+  /* Viewport travado: ações críticas na tela; scroll só interno */
+  .pdv-profissional.pdv-fullscreen {
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  body.pdv-mode #page-content {
+    height: calc(100vh - 28px);
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  body.pdv-mode {
+    overflow: hidden;
+  }
+
+  .pdv-topo {
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 6px;
+    margin-bottom: 2px;
+  }
+
+  .pdv-topo h1 {
+    font-size: 14px;
+  }
+
+  .pdv-topo > .pdv-header-left > div > span {
+    display: none;
+  }
+
+  .pdv-header-left {
+    gap: 6px;
+  }
+
+  .btn-menu-pdv {
+    width: 32px;
+    height: 32px;
+    font-size: 14px;
+  }
+
+  .pdv-status {
+    gap: 3px;
+    flex-wrap: nowrap;
+    width: auto;
+  }
+
+  .btn-calc-topo,
+  .btn-fechamento-caixa,
+  .btn-aparencia-pdv,
+  .caixa-aberto,
+  .caixa-fechado {
+    padding: 3px 6px;
+    font-size: 10px;
+  }
+
+  #operadorPdv {
+    max-width: 90px;
+    font-size: 10px;
+  }
+
+  .faixa-sistema-fiscal {
+    height: 6px;
+    min-height: 6px;
+  }
+
+  .pdv-col-esquerda {
+    gap: 3px;
+    min-height: 0;
+  }
+
+  .pdv-card {
+    padding: 4px 6px;
+    border-radius: 8px;
+  }
+
+  .pdv-busca-label {
+    font-size: 11px;
+    margin-bottom: 2px;
+  }
+
+  .pdv-busca-linha {
+    flex-direction: row;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .pdv-busca-linha input,
+  .pdv-busca-linha button {
+    height: 30px;
+    min-height: 30px;
+    font-size: 12px;
+  }
+
+  .pdv-busca-linha button {
+    width: auto;
+    min-width: 72px;
+    padding: 0 8px;
+  }
+
+  .lista-produtos-dropdown {
+    max-height: 120px;
+  }
+
+  .pdv-itens {
+    flex: 1 1 0;
+    min-height: 0;
+  }
+
+  .pdv-itens:has(td.vazio) {
+    flex: 0 1 auto;
+  }
+
+  .pdv-itens:has(td.vazio) td.vazio {
+    padding: 10px 6px;
+  }
+
+  .pdv-itens th,
+  .pdv-itens td {
+    padding: 8px 6px;
+    font-size: 11px;
+  }
+
+  .pdv-itens .col-qtd { width: 50px; }
+  .pdv-itens .col-un { width: 34px; }
+  .pdv-itens .col-unit { width: 64px; }
+  .pdv-itens .col-desc-pct,
+  .pdv-itens .col-desc-rs { width: 62px; }
+  .pdv-itens .col-total { width: 80px; padding-right: 6px !important; }
+  .pdv-itens .col-acao { width: 34px; }
+
+  .pdv-itens .quantidade-item,
+  .pdv-itens .percentual-item,
+  .pdv-itens .desconto-valor-item {
+    min-height: 32px;
+    height: 32px;
+    padding: 4px 4px;
+    font-size: 12px;
+  }
+
+  .pdv-produto-nome,
+  .pdv-itens .col-produto {
+    font-size: 14px;
+  }
+
+  .pdv-total-linha {
+    font-size: 14px;
+  }
+
+  .pdv-resumo {
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    align-content: start;
+    gap: 2px 4px;
+  }
+
+  .pdv-resumo > *:not(.btn-finalizar):not(.btn-cancelar):not(.btn-venda-entrega) {
+    grid-column: 1 / -1;
+  }
+
+  .pdv-resumo > * {
+    margin-bottom: 0;
+  }
+
+  .pdv-resumo-titulo {
+    font-size: 11px;
+    margin-bottom: 0;
+  }
+
+  .linha-resumo {
+    min-height: 18px;
+    font-size: 11px;
+    gap: 4px;
+    margin-bottom: 0;
+  }
+
+  .linha-resumo--destaque {
+    padding: 2px 0;
+  }
+
+  .linha-resumo-input input {
+    max-width: 72px;
+    height: 28px;
+    min-height: 28px;
+    padding: 2px 6px;
+    font-size: 12px;
+  }
+
+  .total-pdv {
+    padding: 4px 8px;
+    margin: 2px 0;
+  }
+
+  .total-pdv span {
+    font-size: 10px;
+  }
+
+  .total-pdv strong {
+    font-size: 1.15rem;
+    margin-top: 0;
+  }
+
+  .btn-finalizar,
+  .btn-cancelar,
+  .btn-venda-entrega {
+    min-height: 30px;
+    padding: 4px 6px;
+    margin-top: 2px;
+    font-size: 11px;
+  }
+
+  .btn-finalizar {
+    grid-column: 1;
+    margin-top: 4px;
+  }
+
+  .btn-cancelar {
+    grid-column: 2;
+    margin-top: 4px;
+  }
+
+  .btn-venda-entrega {
+    grid-column: 1 / -1;
+  }
+
+  .btn-finalizar-titulo,
+  .btn-cancelar-titulo,
+  .btn-venda-entrega-titulo {
+    font-size: 0.7rem;
+  }
+
+  .btn-finalizar-sub {
+    font-size: 0.58rem;
+  }
+
+  .pdv-atalhos {
+    margin-top: 2px;
+    padding: 2px 4px;
+    gap: 2px;
+    max-height: 1.9rem;
+    overflow: hidden;
+  }
+
+  .pdv-atalho-chip {
+    padding: 2px 5px;
+    font-size: 9px;
+  }
+
+  .pdv-footer-widget--card {
+    min-width: 84px;
+    max-width: 110px;
+    padding: 2px 6px;
+  }
+}
+
+/* Altura crítica no EXTREMO (ex.: 898×475 / Windows 150%) */
+@media (max-width: 899px) and (min-width: 720px) and (max-height: 560px) {
+  .pdv-topo {
+    padding: 2px 5px;
+  }
+
+  .pdv-topo h1 {
+    font-size: 13px;
+  }
+
+  .pdv-busca-label {
+    display: none;
+  }
+
+  .pdv-busca-linha input,
+  .pdv-busca-linha button {
+    height: 28px;
+    min-height: 28px;
+  }
+
+  .lista-produtos:not(.aberta),
+  .lista-produtos-dropdown:not(.aberta) {
+    display: none;
+  }
+
+  .lista-produtos.aberta,
+  .lista-produtos-dropdown.aberta {
+    max-height: 90px;
+  }
+
+  .pdv-card-header h2 {
+    font-size: 12px;
+    margin: 0;
+  }
+
+  .linha-resumo--destaque strong {
+    font-size: 0.95rem;
+  }
+
+  .total-pdv strong {
+    font-size: 1.05rem;
+  }
+
+  .btn-finalizar,
+  .btn-cancelar {
+    min-height: 28px;
+    padding: 3px 4px;
+  }
+}
+
+/* Stack real: somente viewports muito estreitos */
+@media (max-width: 719px) {
+  .pdv-grid,
+  .pdv-layout-principal,
+  .pdv-corpo {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr) auto;
+    gap: 4px;
+    overflow: hidden;
+    flex: 1 1 0;
+    min-height: 0;
+  }
+
+  .pdv-profissional.pdv-fullscreen {
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  body.pdv-mode #page-content {
+    height: calc(100vh - 28px);
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  body.pdv-mode {
+    overflow: hidden;
+  }
+
+  .pdv-col-esquerda {
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .pdv-itens:not(:has(td.vazio)) {
+    flex: 1 1 0;
+    max-height: none;
+    min-height: 0;
+  }
+
+  .pdv-resumo {
+    position: relative;
+    max-height: none;
+    overflow: visible;
+    flex-shrink: 0;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2px 4px;
+  }
+
+  .pdv-resumo > *:not(.btn-finalizar):not(.btn-cancelar):not(.btn-venda-entrega) {
+    grid-column: 1 / -1;
+  }
+
+  .btn-finalizar {
+    grid-column: 1;
+    margin-top: 4px;
+  }
+
+  .btn-cancelar {
+    grid-column: 2;
+    margin-top: 4px;
+  }
+
+  .btn-venda-entrega {
+    grid-column: 1 / -1;
+  }
+
+  .pdv-topo {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 4px 6px;
+  }
+
+  .pdv-status {
+    flex-wrap: wrap;
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .pdv-busca-linha {
+    flex-direction: row;
+    align-items: center;
+  }
+
+  .pdv-busca-linha button {
+    width: auto;
+    min-width: 72px;
+  }
+
+  .pdv-atalhos {
+    max-height: 2.2rem;
+  }
+}
+
+/* Empilhar busca só em viewports muito estreitas */
+@media (max-width: 520px) {
+  .pdv-busca-linha {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .pdv-busca-linha button {
+    width: 100%;
+  }
+}
+
+/* —— Densidade vertical (altura) — não sobrescreve EXTREMO <900 —— */
+@media (max-height: 800px) and (min-width: 900px) {
+  .pdv-topo {
+    padding: 5px 10px;
+    margin-bottom: 2px;
+  }
+
+  .pdv-topo h1 {
+    font-size: 17px;
+  }
+
+  .pdv-card {
+    padding: 5px 8px;
+  }
+
+  .pdv-col-esquerda,
+  .pdv-corpo {
+    gap: 4px;
+  }
+
+  .pdv-busca-label {
+    margin-bottom: 3px;
+    font-size: 12px;
+  }
+
+  .pdv-busca-linha input,
+  .pdv-busca-linha button {
+    height: 36px;
+    min-height: 36px;
+  }
+
+  .pdv-itens th,
+  .pdv-itens td {
+    padding: 5px 6px;
+  }
+
+  .linha-resumo {
+    min-height: 22px;
+    margin-bottom: 2px;
+  }
+
+  .pdv-resumo > * {
+    margin-bottom: 2px;
+  }
+
+  .total-pdv {
+    padding: 5px 10px;
+    margin: 3px 0;
+  }
+
+  .total-pdv strong {
+    font-size: 1.45rem;
+    margin-top: 2px;
+  }
+
+  .btn-finalizar,
+  .btn-cancelar,
+  .btn-venda-entrega {
+    min-height: 34px;
+    padding: 5px 10px;
+    margin-top: 4px;
+  }
+
+  .btn-finalizar {
+    margin-top: auto;
+  }
+
+  .pdv-atalhos {
+    margin-top: 2px;
+    padding: 3px 6px;
+    max-height: 3.8rem;
+  }
+
+  .pdv-itens:has(td.vazio) td.vazio {
+    padding: 16px 10px;
+  }
+}
+
+@media (max-height: 700px) and (min-width: 900px) {
+  .pdv-topo {
+    padding: 4px 8px;
+  }
+
+  .btn-menu-pdv {
+    width: 36px;
+    height: 36px;
+    font-size: 16px;
+  }
+
+  .pdv-busca-linha input,
+  .pdv-busca-linha button {
+    height: 34px;
+    min-height: 34px;
+    font-size: 13px;
+  }
+
+  .pdv-card h2,
+  .pdv-resumo-titulo {
+    font-size: 13px;
+    margin-bottom: 2px;
+  }
+
+  .total-pdv strong {
+    font-size: 1.3rem;
+  }
+
+  .pdv-atalho-chip {
+    padding: 2px 6px;
+    font-size: 10px;
+  }
+
+  .pdv-atalhos {
+    max-height: 3.5rem;
+  }
+
+  .pdv-resumo {
+    overflow-y: auto;
+    min-height: 0;
+  }
+
+  .pdv-profissional.pdv-fullscreen {
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
+  body.pdv-mode #page-content {
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+}
+
+/* —— Escala Aparência (zoom) sem clipping —— */
+html[data-pdv-scale="110"] body.pdv-mode #page-content,
+html[data-pdv-scale="125"] body.pdv-mode #page-content,
+html[data-pdv-scale="140"] body.pdv-mode #page-content {
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+html[data-pdv-scale="110"] .pdv-profissional.pdv-fullscreen,
+html[data-pdv-scale="125"] .pdv-profissional.pdv-fullscreen,
+html[data-pdv-scale="140"] .pdv-profissional.pdv-fullscreen {
+  height: auto;
+  min-height: 100%;
+  overflow: visible;
+}
+
+html[data-pdv-scale="125"] .pdv-atalhos,
+html[data-pdv-scale="140"] .pdv-atalhos {
+  max-height: 4.8rem;
 }

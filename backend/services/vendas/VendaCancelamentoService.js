@@ -7,12 +7,26 @@ const { cancelarFiscal } = require('../tef/ReversaoFiscal');
 const VendaDevolucaoService = require('./VendaDevolucaoService');
 const VendaFiscalService = require('./VendaFiscalService');
 const { cancelarFinanceiroVenda } = require('./VendaFinanceiroService');
+const mpfc = require('../mpfc');
+const { montarOpcoesRetornoEstoqueVenda } = require('./creditoEstoqueVendaViaPorta');
 
 const { devolverEstoqueItensVenda } = VendaDevolucaoService;
 const {
   buscarNfceAutorizadaVenda,
   cancelarNfceAutorizadaVenda
 } = VendaFiscalService;
+
+/**
+ * RC8.2.2 — política operacional da venda via snapshot (nunca configuração atual).
+ */
+function anexarPoliticaSnapshotAuditoria(venda, contexto) {
+  const resolvido = mpfc.resolverPoliticaOperacionalDaVenda(venda, contexto);
+  return {
+    mpfc_snapshot_presente: resolvido.snapshotPresente,
+    mpfc_fonte: resolvido.fonte,
+    mpfc_politica: resolvido.payload
+  };
+}
 
 function cancelarRecebimentosVenda(vendaId, callback) {
   db.run(`
@@ -56,7 +70,12 @@ db.get('SELECT * FROM vendas WHERE id = ?', [id], (err, venda) => {
         acao: 'cancelar_venda',
         referencia_tipo: 'venda',
         referencia_id: id,
-        detalhes: { motivo_cancelamento: req.body.motivo || null, ip: req.ip, sessao_id: req.caixaSessaoId || null },
+        detalhes: {
+          motivo_cancelamento: req.body.motivo || null,
+          ip: req.ip,
+          sessao_id: req.caixaSessaoId || null,
+          ...anexarPoliticaSnapshotAuditoria(venda, 'cancelamento')
+        },
         ip_requisicao: req.ip || null
       }).catch((auditErr) => console.error('Erro ao gravar auditoria de cancelamento de venda:', auditErr));
 
@@ -154,7 +173,7 @@ db.get('SELECT * FROM vendas WHERE id = ?', [id], (err, venda) => {
           return;
         }
         finalizarCancelamento();
-      });
+      }, montarOpcoesRetornoEstoqueVenda(req, 'cancelamento_venda', db));
     });
   });
   };
@@ -291,7 +310,8 @@ db.get(
                               detalhes: {
                                 motivo: motivo || null,
                                 ip: req.ip || null,
-                                sessao_id: req.caixaSessaoId || null
+                                sessao_id: req.caixaSessaoId || null,
+                                ...anexarPoliticaSnapshotAuditoria(venda, 'cancelamento')
                               },
                               ip_requisicao: req.ip || null
                             }).catch((auditErr) => console.error('Erro ao gravar auditoria de cancelamento de venda:', auditErr));
@@ -310,7 +330,7 @@ db.get(
                       }
                     );
                   });
-                });
+                }, montarOpcoesRetornoEstoqueVenda(req, 'cancelamento_venda', db));
               }
             );
           });
@@ -366,5 +386,6 @@ db.get(
 module.exports = {
   cancelarRecebimentosVenda,
   cancelarVendaPut,
-  cancelarVendaPost
+  cancelarVendaPost,
+  anexarPoliticaSnapshotAuditoria
 };

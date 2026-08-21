@@ -314,7 +314,31 @@ html[data-pdv-theme] .pdv-itens th,
 html[data-pdv-theme] .pdv-itens td {
   color: var(--pdv-text);
   border-color: var(--pdv-border);
-  font-size: calc(13px * var(--pdv-font-mult));
+  font-size: calc(15px * var(--pdv-font-mult));
+}
+
+html[data-pdv-theme] .pdv-itens .pdv-produto-nome {
+  font-size: calc(19px * var(--pdv-font-mult));
+  font-weight: 700;
+  color: var(--pdv-text);
+}
+
+html[data-pdv-theme] .pdv-itens .pdv-unitario-valor {
+  font-size: calc(18px * var(--pdv-font-mult));
+  font-weight: 800;
+  color: var(--pdv-text);
+}
+
+html[data-pdv-theme] .pdv-itens .quantidade-item,
+html[data-pdv-theme] .pdv-itens .percentual-item,
+html[data-pdv-theme] .pdv-itens .desconto-valor-item {
+  font-size: calc(15px * var(--pdv-font-mult));
+  font-weight: 700;
+}
+
+html[data-pdv-theme] .pdv-itens th {
+  font-size: calc(14px * var(--pdv-font-mult));
+  font-weight: 800;
 }
 
 html[data-pdv-theme] .pdv-itens thead th {

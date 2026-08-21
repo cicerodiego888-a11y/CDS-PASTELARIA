@@ -9,10 +9,13 @@
 const MiipImportacaoResultado = require('../core/MiipImportacaoResultado');
 const { mapearDecisaoPipelineParaImportacao } = require('../utils/MiipResultadoImportacaoMapper');
 const { mapearItemCompraParaIdentificavel } = require('../utils/mapearItemCompra');
+const Mie = require('../../../services/embalagens');
 
 const MOTOR_LABELS = Object.freeze({
   motor_gtin: 'GTIN / Código de Barras',
-  motor_associacao_fornecedor: 'Associação Fornecedor'
+  motor_associacao_fornecedor: 'Associação Fornecedor',
+  motor_mubc: 'Busca Universal (MUBC)',
+  motor_similarity: 'Similaridade'
 });
 
 class MiipImportacaoXmlService {
@@ -20,12 +23,15 @@ class MiipImportacaoXmlService {
    * @param {Object} [deps]
    * @param {import('../MiipService')} [deps.miipService]
    * @param {import('../logs/MiipIntegracaoLogService')} [deps.integracaoLog]
+   * @param {*} [deps.db]
    */
   constructor(deps = {}) {
     /** @private */
     this._miipService = deps.miipService ?? null;
     /** @private */
     this._integracaoLog = deps.integracaoLog ?? null;
+    /** @private */
+    this._db = deps.db ?? null;
     /** @private @type {Object|null} */
     this._sessaoAtual = null;
   }
@@ -55,21 +61,30 @@ class MiipImportacaoXmlService {
    * @param {string} operacaoId
    * @returns {MiipImportacaoResultado}
    */
-  _montarResultado(indice, itemXml, classificacao, operacaoId) {
+  _montarResultado(indice, itemXml, classificacao, operacaoId, mieSugestao = null) {
+    const produtoXML = { ...itemXml };
+    if (mieSugestao) {
+      produtoXML.mie = mieSugestao;
+      produtoXML.mie_rotulo = mieSugestao.rotulo;
+      produtoXML.mie_confianca = mieSugestao.confianca;
+    }
     return MiipImportacaoResultado.create({
       indice,
-      produtoXML: { ...itemXml },
+      produtoXML,
       produtoEncontrado: classificacao.produtoEncontrado,
       nivelCerteza: classificacao.nivelCerteza,
       acao: classificacao.acao,
       motivos: classificacao.motivos,
       candidatoSelecionado: classificacao.candidatoSelecionado,
+      candidatos: classificacao.candidatos || [],
+      diagnosticoBusca: classificacao.diagnosticoBusca || null,
       precisaConfirmacao: classificacao.precisaConfirmacao,
       precisaCadastro: classificacao.precisaCadastro,
       associadoAutomaticamente: classificacao.associadoAutomaticamente,
       score: classificacao.score,
       motor: classificacao.motor,
-      operacaoId
+      operacaoId,
+      mie: mieSugestao
     });
   }
 
@@ -110,7 +125,19 @@ class MiipImportacaoXmlService {
       const operacaoId = resultado?.requestId || `${operacaoBase}-${indice}`;
 
       const classificacao = mapearDecisaoPipelineParaImportacao(miipResp, resultado);
-      resultados.push(this._montarResultado(indice, itemXml, classificacao, operacaoId));
+
+      let mieSugestao = null;
+      try {
+        const db = this._db || this._miipService?.db || this._miipService?._db || null;
+        mieSugestao = await Mie.analisarItemXml(itemXml, {
+          db,
+          fornecedorCnpj
+        });
+      } catch (mieErr) {
+        console.warn('[MIE] análise item', indice, mieErr.message);
+      }
+
+      resultados.push(this._montarResultado(indice, itemXml, classificacao, operacaoId, mieSugestao));
     }
 
     const tempoProcessamento = Date.now() - inicio;

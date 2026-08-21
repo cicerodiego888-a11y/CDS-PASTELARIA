@@ -82,6 +82,34 @@ class ToledoPrix4Protocol {
   }
 
   /**
+   * RC14.14.10 — normaliza RX: Buffer | {dados|buffer} | null → Buffer|null
+   * @param {*} raw
+   * @returns {Buffer|null}
+   * @private
+   */
+  _extrairBufferRx(raw) {
+    if (raw == null) return null;
+    if (Buffer.isBuffer(raw)) return raw.length ? raw : null;
+    if (typeof raw === 'string') {
+      const b = Buffer.from(raw);
+      return b.length ? b : null;
+    }
+    if (typeof raw === 'object') {
+      if (Buffer.isBuffer(raw.dados)) return raw.dados.length ? raw.dados : null;
+      if (Buffer.isBuffer(raw.buffer)) return raw.buffer.length ? raw.buffer : null;
+      if (raw.dados != null) {
+        try {
+          const b = Buffer.from(raw.dados);
+          return b.length ? b : null;
+        } catch (_) {
+          return null;
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
    * @param {Object} meta
    * @private
    */
@@ -148,7 +176,24 @@ class ToledoPrix4Protocol {
         throw err;
       }
 
-      const dados = rawRes.dados || rawRes.buffer || Buffer.alloc(0);
+      // RC14.14.10 — receber() pode devolver Buffer|null (timeout sem RX)
+      const dados = this._extrairBufferRx(rawRes);
+      if (!dados || !dados.length) {
+        const tempo = Date.now() - inicio;
+        await this._registrarComando({
+          comando,
+          operacao,
+          resultado: 'TIMEOUT',
+          tempo_ms: tempo,
+          hex_enviado: hexEnviado,
+          timeout: true
+        });
+        const err = new Error('Nenhuma resposta recebida da balança.');
+        err.code = 'RX_TIMEOUT';
+        err.statusCode = 408;
+        err.hex_enviado = hexEnviado;
+        throw err;
+      }
       const historico = packetLogger.listar(this._chave);
       hexRecebido = historico.length ? historico[historico.length - 1].hex : null;
 
@@ -557,8 +602,10 @@ class ToledoPrix4Protocol {
   async read(opcoes = {}) {
     try {
       const res = await this._transport().read(opcoes);
-      if (res.dados && res.dados.length) {
-        packetLogger.log('RX', res.dados, {
+      // RC14.14.10 — nunca acessar .dados em null (CM.receive → Buffer|null)
+      const dados = this._extrairBufferRx(res);
+      if (dados && dados.length) {
+        packetLogger.log('RX', dados, {
           chave: this._chave,
           equipamento_id: this.config.equipamento_id,
           host: this.config.host,
@@ -571,10 +618,24 @@ class ToledoPrix4Protocol {
           tempo_ms: opcoes.tempo_ms ?? null,
           tentativa: opcoes.tentativa ?? opcoes.retry ?? null
         });
+      } else {
+        await loggerService.warn('Timeout de leitura — nenhuma resposta da balança', {
+          operacao: 'protocol.timeout',
+          equipamento_id: this.config.equipamento_id,
+          contexto: { chave: this._chave, operacao: 'read' }
+        });
+        return this._resposta({
+          metodo: 'read',
+          sucesso: false,
+          timeout: true,
+          dados: null,
+          mensagem: 'Nenhuma resposta recebida da balança.'
+        });
       }
-      return this._resposta({ metodo: 'read', ...res });
+      const base = (res && typeof res === 'object' && !Buffer.isBuffer(res)) ? res : {};
+      return this._resposta({ metodo: 'read', dados, ...base });
     } catch (err) {
-      if (/timeout/i.test(err.message)) {
+      if (/timeout|Nenhuma resposta/i.test(err.message)) {
         await loggerService.warn('Timeout de leitura', {
           operacao: 'protocol.timeout',
           equipamento_id: this.config.equipamento_id,
@@ -609,7 +670,9 @@ class ToledoPrix4Protocol {
     });
 
     const res = await this._transport().write(buf);
-    return this._resposta({ metodo: 'write', hex: entry.hex, ...res });
+    const bytes = typeof res === 'number' ? res : (res?.bytes ?? buf.length);
+    const extras = (res && typeof res === 'object') ? res : {};
+    return this._resposta({ metodo: 'write', hex: entry.hex, bytes, ...extras });
   }
 
   /**

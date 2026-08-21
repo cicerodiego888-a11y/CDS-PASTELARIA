@@ -94,17 +94,25 @@ app.get(['/erp', '/erp/'], verificarToken, (req, res) => {
 
 // Rotas protegidas (API)
 const produtosRoutes = require('./rotas/produtos');
+const importacaoInicialProdutosRoutes = require('./rotas/importacao-inicial-produtos');
+const searchRoutes = require('./rotas/search');
+const intelligenceRoutes = require('./rotas/intelligence');
+const agentRoutes = require('./rotas/agent');
+const pluginsRoutes = require('./rotas/plugins');
+const businessMonitorRoutes = require('./rotas/business-monitor');
 const clientesRoutes = require('./rotas/clientes');
 const comprasRoutes = require('./rotas/compras');
 const categoriasRoutes = require('./rotas/categorias');
 const subcategoriasRoutes = require('./rotas/subcategorias');
 const marcasRoutes = require('./rotas/marcas');
+const empresasRoutes = require('./rotas/empresas');
 const vendasRoutes = require('./rotas/vendas');
 const entregasRoutes = require('./rotas/entregas');
 const faturamentoRoutes = require('./rotas/faturamento');
 const centralFaturamentoRoutes = require('./rotas/centralFaturamento');
 const pedidosRoutes = require('./rotas/pedidos');
 const financeiroRoutes = require('./rotas/financeiro');
+const condicoesPagamentoRoutes = require('./rotas/condicoes-pagamento');
 const configuracoesRoutes = require('./rotas/configuracoes');
 const configuracaoRedeRoutes = require('./rotas/configuracao_rede');
 const fiscalRoutes = require('./rotas/fiscal');
@@ -121,6 +129,7 @@ const contasReceberRoutes = require('./rotas/contas_receber');
 const alertasRoutes = require('./rotas/alertas');
 const licencaRoutes = require('./rotas/licenca');
 const dfeRoutes = require('./rotas/dfe');
+const dfeAuditoriaRoutes = require('./rotas/dfe-auditoria');
 const centralEntradasRoutes = require('./rotas/central-entradas');
 const monitoringRoutes = require('./monitoring/MonitoringRouter');
 const equipamentosRoutes = require('./rotas/equipamentos');
@@ -157,13 +166,20 @@ app.use('/api', apiAuthLicencaGate);
 // Rotas de licença (públicas — gate libera /api/licenca)
 app.use('/api/licenca', licencaRoutes);
 
+app.use('/api/produtos/importacao-inicial', verificarToken, importacaoInicialProdutosRoutes);
 app.use('/api/produtos', verificarToken, produtosRoutes);
+app.use('/api/search', verificarToken, searchRoutes);
+app.use('/api/intelligence', verificarToken, intelligenceRoutes);
+app.use('/api/agent', verificarToken, agentRoutes);
+app.use('/api/plugins', verificarToken, pluginsRoutes);
+app.use('/api/business-monitor', verificarToken, businessMonitorRoutes);
 app.use('/api/clientes', verificarToken, clientesRoutes);
 app.use('/api/compras', verificarToken, comprasRoutes);
 app.use('/api/miip', verificarToken, miipRoutes);
 app.use('/api/categorias', verificarToken, categoriasRoutes);
 app.use('/api/subcategorias', verificarToken, subcategoriasRoutes);
 app.use('/api/marcas', verificarToken, marcasRoutes);
+app.use('/api/empresas', verificarToken, empresasRoutes);
 // Sprint 1 — rotas de entrega montadas antes das rotas genéricas de vendas
 app.use('/api/vendas', verificarToken, entregasRoutes);
 app.use('/api/vendas', verificarToken, vendasRoutes);
@@ -181,6 +197,8 @@ app.get(['/pdv', '/pdv/'], verificarToken, (req, res) => {
 });
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/financeiro', verificarToken, financeiroRoutes);
+app.use('/api/condicoes-pagamento', verificarToken, condicoesPagamentoRoutes);
+app.use('/api/mie', verificarToken, require('./rotas/mie'));
 app.use('/api/contas-receber', verificarToken, contasReceberRoutes);
 app.use('/api/configuracoes', verificarToken, configuracoesRoutes);
 app.use('/api/configuracao-rede', verificarToken, configuracaoRedeRoutes);
@@ -215,6 +233,7 @@ app.use('/api/pix', verificarToken, pixRoutes);
 app.use('/api/alertas', verificarToken, alertasRoutes);
 app.use('/api/auditoria', verificarToken, auditoriaRoutes);
 app.use('/api/dfe', verificarToken, exigirRecurso('fiscal'), dfeRoutes);
+app.use('/api/dfe-auditoria', verificarToken, exigirRecurso('fiscal'), dfeAuditoriaRoutes);
 app.use('/api/central-entradas', verificarToken, exigirRecurso('fiscal'), centralEntradasRoutes);
 app.use('/api/monitoring', verificarToken, monitoringRoutes);
 app.use('/api/equipamentos', verificarToken, equipamentosRoutes);
@@ -314,6 +333,11 @@ async function inicializarCentralSync() {
     await centralSyncBackground.iniciar();
 }
 
+async function inicializarCentralHealth() {
+    const health = require('./motores/central-entradas/health');
+    await health.iniciar();
+}
+
 async function inicializarNfeRetoma() {
     const nfeOperacional = require('./services/fiscal/nfeOperacionalService');
     await nfeOperacional.garantirSchemaOperacional();
@@ -348,19 +372,31 @@ async function iniciarServicosBackgroundGrupoB() {
     await executarPassoBackground('financeiro-sync', inicializarFinanceiroVendas);
     await executarPassoBackground('equipamentos-monitor', inicializarMotorEquipamentos);
     await executarPassoBackground('central-sync', inicializarCentralSync);
+    await executarPassoBackground('central-health', inicializarCentralHealth);
     await executarPassoBackground('nfe-retoma', inicializarNfeRetoma);
     bootLog('BACKGROUND READY', { backgroundMs: Date.now() - tBg });
 }
 
 function registrarEncerramentoBackground() {
-    const encerrarSyncCentral = () => {
+    const encerrarBackground = () => {
         try {
             const centralSyncBackground = require('./motores/central-entradas/services/CentralSyncBackgroundService');
             centralSyncBackground.parar();
         } catch { /* ignore */ }
+        try {
+            const health = require('./motores/central-entradas/health');
+            health.parar();
+        } catch { /* ignore */ }
+        // RC14.14.8 — fecha sockets de equipamentos ao encerrar ERP/servidor
+        try {
+            const cm = require('./motores/equipamentos/connection/ConnectionManager');
+            if (cm && typeof cm.closeAll === 'function') {
+                cm.closeAll().catch(() => {});
+            }
+        } catch { /* ignore */ }
     };
-    process.on('SIGTERM', encerrarSyncCentral);
-    process.on('SIGINT', encerrarSyncCentral);
+    process.on('SIGTERM', encerrarBackground);
+    process.on('SIGINT', encerrarBackground);
 }
 
 db.whenReady(async (readyErr) => {
@@ -397,6 +433,14 @@ db.whenReady(async (readyErr) => {
             // RC12.1 — Observability Bus adapters (observe-only)
             try {
                 require('./observabilidade').iniciar();
+            } catch (_) { /* ignore */ }
+            // CIA-APPS — plugins opcionais (falha nunca derruba boot)
+            try {
+                const { bootstrapPlugins } = require('./plugins');
+                void bootstrapPlugins({ db }).then((r) => {
+                    if (r && r.ok) bootLog('CIA-APPS READY', { plugins: (r.results || []).length });
+                    else bootLog('CIA-APPS SKIP', { erro: r && r.error });
+                }).catch(() => { /* ignore */ });
             } catch (_) { /* ignore */ }
             void iniciarServicosBackgroundGrupoB();
         });

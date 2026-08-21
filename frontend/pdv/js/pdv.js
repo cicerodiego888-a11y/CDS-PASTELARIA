@@ -27,13 +27,107 @@ window.obterCarrinhoPdv = function obterCarrinhoPdv() {
 };
 sincronizarCarrinhoGlobalPdv();
 
+function motorPrecoAtacadoDisponivel() {
+    return typeof MotorPrecoAtacado !== 'undefined';
+}
+
+function obterPrecoBaseItemPdv(item, produto) {
+    const vendaUnidade = item && itemVendaPorUnidade(item);
+    if (vendaUnidade) {
+        return Number(item?.preco_base || produto?.preco_unidade || item?.preco_unitario || 0);
+    }
+    return Number(item?.preco_base || produto?.preco_venda || item?.preco_unitario || 0);
+}
+
+function aplicarCalculoMotorItemPdv(item, opcoes = {}) {
+    if (!motorPrecoAtacadoDisponivel()) {
+        throw new Error('MotorPrecoAtacado indisponível');
+    }
+    const produto = produtosDisponiveis.find((p) => Number(p.id) === Number(item.id));
+    const precoBase = Number(opcoes.precoOriginal ?? obterPrecoBaseItemPdv(item, produto));
+    const qtd = Number(opcoes.quantidade ?? item.quantidade ?? 0);
+    let calc;
+
+    if (opcoes.precoUnitarioInformado != null && Number.isFinite(Number(opcoes.precoUnitarioInformado))) {
+        calc = MotorPrecoAtacado.calcularLinhaPrecoUnitarioInformado({
+            precoOriginal: precoBase,
+            quantidade: qtd,
+            precoUnitarioInformado: Number(opcoes.precoUnitarioInformado)
+        });
+    } else {
+        calc = MotorPrecoAtacado.calcularLinhaDescontoPercentual({
+            precoOriginal: precoBase,
+            quantidade: qtd,
+            percentualDesconto: Number(opcoes.percentualDesconto ?? item.desconto_percentual ?? 0)
+        });
+    }
+
+    item.preco_base = precoBase;
+    item.preco_unitario = calc.precoUnitarioInterno;
+    item.desconto_percentual = calc.percentualDesconto;
+    item.desconto_valor = Number(MotorPrecoAtacado.arredondarMoeda(calc.valorDesconto || 0));
+    item.subtotal = calc.totalInterno;
+    item.subtotal_exibicao = calc.total;
+    return calc;
+}
+
+function operadorPodeAplicarDescontoSemSenha() {
+    if (typeof usuarioEhSupervisor === 'function') {
+        return usuarioEhSupervisor();
+    }
+    try {
+        const u = JSON.parse(localStorage.getItem('user') || '{}');
+        const perfil = String(u.perfil || u.nivel || '').trim().toUpperCase();
+        return u.role === 'admin' || ['SUPER_ADMIN', 'ADMIN', 'SUPERVISOR'].includes(perfil);
+    } catch (_) {
+        return false;
+    }
+}
+
+function vendaTemDescontoManualPdv() {
+    const descontoVenda = Math.max(0, Number($('#descontoPdv').val()) || 0);
+    if (descontoVenda > 0) return true;
+    return (carrinho || []).some((item) => Number(item.desconto_manual || 0) === 1
+        && Number(item.desconto_valor || item.desconto_percentual || 0) > 0);
+}
+
+/**
+ * Descontos manuais: ADMIN/SUPERVISOR/SUPER_ADMIN aplicam direto;
+ * demais operadores precisam de senha de administrador/supervisor.
+ */
+function garantirAutorizacaoDesconto(onAuthorized, onCancel) {
+    if (operadorPodeAplicarDescontoSemSenha() || supervisorAuthToken) {
+        if (typeof onAuthorized === 'function') onAuthorized();
+        return;
+    }
+    mostrarModalAutorizacaoSupervisor(onAuthorized, onCancel);
+}
+
+function obterDescontoValorItemPdv(item, produto) {
+    if (item == null) return 0;
+    if (item.desconto_valor != null && Number.isFinite(Number(item.desconto_valor))) {
+        return Math.max(0, Math.round(Number(item.desconto_valor) * 100) / 100);
+    }
+    const precoBase = obterPrecoBaseItemPdv(item, produto);
+    const qtd = Number(item.quantidade || 0);
+    const pct = Number(item.desconto_percentual || 0);
+    const bruto = precoBase * qtd;
+    const valor = bruto > 0 ? (bruto * pct) / 100 : 0;
+    return Math.max(0, Math.round(valor * 100) / 100);
+}
+
+function precoUnitarioExibicaoItemPdv(item) {
+    if (motorPrecoAtacadoDisponivel()) {
+        return MotorPrecoAtacado.formatarPrecoExibicao(item.preco_unitario).toFixed(2);
+    }
+    return Number(item.preco_unitario || 0).toFixed(2);
+}
+
 function sincronizarTerminalGlobalsPdv() {
     window.terminalId = terminalId;
     window.terminalHostname = terminalHostname;
     window.terminalNome = terminalNome;
 }
-const DESCONTO_MANUAL_LIMITE = 50;
-
 function obterTerminalIdPdv() {
     if (Number.isInteger(terminalId) && terminalId > 0) {
         return terminalId;
@@ -555,17 +649,17 @@ function nomePerfilUsuario(usuario) {
     return perfil || 'USUÁRIO';
 }
 
-function mostrarModalAutorizacaoSupervisor(onAuthorized) {
+function mostrarModalAutorizacaoSupervisor(onAuthorized, onCancel) {
     $('#modal-container').html(`
         <div class="modal fade" id="supervisorAuthModal" tabindex="-1" aria-hidden="true">
             <div class="modal-dialog modal-sm modal-dialog-centered">
                 <div class="modal-content border-0 shadow">
                     <div class="modal-header bg-primary">
-                        <h5 class="modal-title text-white mb-0">Autorização de Supervisor</h5>
+                        <h5 class="modal-title text-white mb-0">Autorização de Desconto</h5>
                         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
                     </div>
                     <div class="modal-body">
-                        <p>Desconto manual acima de R$ ${DESCONTO_MANUAL_LIMITE.toFixed(2)} exige autorização de supervisor.</p>
+                        <p class="mb-3">Somente administrador ou supervisor pode aplicar desconto. Informe a senha de autorização.</p>
                         <div class="mb-3">
                             <label for="supervisorUsername" class="form-label">Usuário</label>
                             <input type="text" class="form-control" id="supervisorUsername" autocomplete="username">
@@ -577,7 +671,7 @@ function mostrarModalAutorizacaoSupervisor(onAuthorized) {
                         <div id="supervisorAuthError" class="text-danger small mb-2" style="display:none;"></div>
                         <div class="d-grid gap-2">
                             <button type="button" class="btn btn-primary" id="supervisorAuthSubmit">Autorizar</button>
-                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" id="supervisorAuthCancel">Cancelar</button>
                         </div>
                     </div>
                 </div>
@@ -587,7 +681,15 @@ function mostrarModalAutorizacaoSupervisor(onAuthorized) {
 
     const modalEl = document.getElementById('supervisorAuthModal');
     const modal = new bootstrap.Modal(modalEl, { backdrop: 'static' });
+    let autorizado = false;
     modal.show();
+
+    modalEl.addEventListener('hidden.bs.modal', function onHidden() {
+        modalEl.removeEventListener('hidden.bs.modal', onHidden);
+        if (!autorizado && typeof onCancel === 'function') {
+            onCancel();
+        }
+    });
 
     $('#supervisorAuthSubmit').off('click').on('click', async function() {
         const username = $('#supervisorUsername').val().trim();
@@ -618,6 +720,7 @@ function mostrarModalAutorizacaoSupervisor(onAuthorized) {
             }
 
             supervisorAuthToken = data.token;
+            autorizado = true;
             modal.hide();
 
             if (typeof onAuthorized === 'function') {
@@ -1805,7 +1908,13 @@ function aplicarModoFiscalPdv() {
     document.body.classList.toggle('modo-fiscal-ativo', ativo);
 
     const faixa = document.getElementById('faixaSistemaFiscalPdv');
-    if (faixa) faixa.style.display = ativo ? 'block' : 'none';
+    if (faixa) {
+        const permiteFiscal = typeof implantacaoPermiteFiscal !== 'function' || implantacaoPermiteFiscal();
+        faixa.style.display = permiteFiscal ? 'block' : 'none';
+        faixa.classList.toggle('faixa-sistema-fiscal--ativo', !!ativo);
+        faixa.classList.toggle('faixa-sistema-fiscal--off', !ativo);
+        faixa.setAttribute('aria-label', ativo ? 'Sistema fiscal ativo' : 'Sistema fiscal inativo');
+    }
 
     const btnFinalizar = document.getElementById('btnFinalizarVendaPdv');
     if (btnFinalizar) {
@@ -1843,6 +1952,9 @@ function focarCampoCodigo(opcoes) {
     const limpar = opts.limpar !== false;
 
     setTimeout(() => {
+        // Não roubar o foco enquanto um modal estiver aberto (ex.: quantidade)
+        if (document.querySelector('.modal.show')) return;
+
         const input = $('#buscaProdutoPdv');
         if (!input.length) return;
 
@@ -1919,7 +2031,10 @@ function bindEventosPDV() {
         if (e.key === 'F8') {
             e.preventDefault();
             e.stopPropagation();
-            $('#descontoPdv').trigger('focus');
+            garantirAutorizacaoDesconto(
+                () => $('#descontoPdv').trigger('focus'),
+                () => showNotification('Desconto exige autorização de administrador ou supervisor.', 'warning')
+            );
         }
         if (e.key === 'F9') {
             e.preventDefault();
@@ -2138,10 +2253,46 @@ function bindEventosPDV() {
         }
     });
 
-    $('#descontoPdv, #acrescimoPdv').off('input').on('input', function() {
+    $('#acrescimoPdv').off('input').on('input', function() {
         calcularTotal();
         calcularTrocoPDV();
     });
+
+    $('#descontoPdv')
+        .off('input.descontoPdv change.descontoPdv focus.descontoPdv')
+        .on('focus.descontoPdv', function() {
+            $(this).data('valor-antes', $(this).val());
+        })
+        .on('change.descontoPdv', function() {
+            const $input = $(this);
+            const valorAntes = parseFloat($input.data('valor-antes')) || 0;
+            let valor = parseFloat($input.val()) || 0;
+            if (valor < 0) valor = 0;
+            if (valor <= 0) {
+                $input.val(0);
+                calcularTotal();
+                calcularTrocoPDV();
+                return;
+            }
+            garantirAutorizacaoDesconto(
+                () => {
+                    $input.val(valor);
+                    calcularTotal();
+                    calcularTrocoPDV();
+                },
+                () => {
+                    $input.val(valorAntes);
+                    calcularTotal();
+                    calcularTrocoPDV();
+                    showNotification('Desconto não autorizado.', 'warning');
+                }
+            );
+        })
+        .on('input.descontoPdv', function() {
+            // Recalcula só visualmente; a autorização ocorre no change.
+            calcularTotal();
+            calcularTrocoPDV();
+        });
 
     $('#valorRecebidoPDV').off('input').on('input', calcularTrocoPDV);
 
@@ -2250,9 +2401,107 @@ function abrirCadastroCliente() {
     }
 }
 
+/** URL segura da foto do produto (somente visual; sem data: / javascript:). */
+function urlImagemProdutoPdv(path) {
+    const valor = String(path || '').trim();
+    if (!valor) return '';
+    if (/^(javascript|vbscript|data):/i.test(valor)) return '';
+    if (/^https?:\/\//i.test(valor)) return valor;
+    return valor.startsWith('/') ? valor : `/${valor}`;
+}
+
+function htmlMiniaturaProdutoPdv(produto, nomeProduto) {
+    const src = urlImagemProdutoPdv(produto?.imagem_principal);
+    if (!src) return '';
+    const alt = escapeHtml(nomeProduto || produto?.nome || 'Produto');
+    const srcSafe = escapeHtml(src);
+    return `<img
+        class="pdv-produto-miniatura"
+        src="${srcSafe}"
+        alt="${alt}"
+        title="Ampliar foto"
+        loading="lazy"
+        decoding="async"
+        data-imagem-src="${srcSafe}"
+      >`;
+}
+
+function garantirOverlayFotoProdutoPdv() {
+    let overlay = document.getElementById('pdvFotoProdutoOverlay');
+    if (overlay) return overlay;
+
+    overlay = document.createElement('div');
+    overlay.id = 'pdvFotoProdutoOverlay';
+    overlay.className = 'pdv-foto-overlay';
+    overlay.hidden = true;
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-label', 'Foto do produto');
+    overlay.innerHTML = `
+      <button type="button" class="pdv-foto-fechar" aria-label="Fechar">
+        <i class="fas fa-times" aria-hidden="true"></i>
+      </button>
+      <div class="pdv-foto-dialog">
+        <img class="pdv-foto-grande" alt="Foto do produto" draggable="false">
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    overlay.addEventListener('click', (ev) => {
+        if (ev.target === overlay || ev.target.closest('.pdv-foto-fechar')) {
+            fecharFotoProdutoPdv();
+        }
+    });
+
+    const imgGrande = overlay.querySelector('.pdv-foto-grande');
+    if (imgGrande) {
+        imgGrande.addEventListener('click', (ev) => ev.stopPropagation());
+    }
+
+    return overlay;
+}
+
+function fecharFotoProdutoPdv() {
+    const overlay = document.getElementById('pdvFotoProdutoOverlay');
+    if (!overlay) return;
+    overlay.hidden = true;
+    overlay.classList.remove('is-open');
+    const img = overlay.querySelector('.pdv-foto-grande');
+    if (img) {
+        img.removeAttribute('src');
+        img.alt = 'Foto do produto';
+    }
+    document.removeEventListener('keydown', pdvFotoProdutoEscHandler, true);
+}
+
+function pdvFotoProdutoEscHandler(ev) {
+    if (ev.key === 'Escape' || ev.key === 'Esc') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        fecharFotoProdutoPdv();
+    }
+}
+
+function abrirFotoProdutoPdv(src, altTexto) {
+    const url = urlImagemProdutoPdv(src);
+    if (!url) return;
+
+    const overlay = garantirOverlayFotoProdutoPdv();
+    const img = overlay.querySelector('.pdv-foto-grande');
+    if (img) {
+        img.src = url;
+        img.alt = String(altTexto || 'Foto do produto');
+    }
+    overlay.hidden = false;
+    overlay.classList.add('is-open');
+    document.addEventListener('keydown', pdvFotoProdutoEscHandler, true);
+    const btnFechar = overlay.querySelector('.pdv-foto-fechar');
+    if (btnFechar) btnFechar.focus({ preventScroll: true });
+}
+
 function renderCarrinhoItens() {
     if (!Array.isArray(carrinho) || carrinho.length === 0) {
-        return '<tr><td colspan="7" class="text-center vazio">Nenhum item no carrinho</td></tr>';
+        return '<tr><td colspan="8" class="text-center vazio">Nenhum item no carrinho</td></tr>';
     }
 
     return carrinho.map((item, index) => {
@@ -2260,19 +2509,22 @@ function renderCarrinhoItens() {
         const vendaUnidade = itemVendaPorUnidade(item);
         const decimal = vendaUnidade ? false : produtoUsaConversaoUnidadesPdv(produto);
         const unidade = vendaUnidade ? 'UN' : String(produto?.unidade || item.unidade || 'UN').toUpperCase();
-        const temDesconto = Number(item.desconto_percentual || 0) > 0;
+        const descontoValorItem = obterDescontoValorItemPdv(item, produto);
+        const descontoPctItem = Number(item.desconto_percentual || 0);
+        const temDesconto = descontoValorItem > 0 || descontoPctItem > 0;
         const classesLinha = [];
         if (temDesconto) classesLinha.push('table-warning');
         if (typeof pdvLinhaDestaqueIndex === 'number' && index === pdvLinhaDestaqueIndex) {
             classesLinha.push('pdv-item-recem');
         }
         const classe = classesLinha.join(' ');
-        const badgeDesconto = temDesconto ? `<small class="badge bg-danger">-${Number(item.desconto_percentual).toFixed(2)}%</small>` : '';
         const descontoAtacadoValor = Number(item.desconto_atacado || 0);
-        const badgeDescontoAtacado = descontoAtacadoValor > 0 ? `<div><small class="text-success">Atacado: -${formatCurrency(descontoAtacadoValor)}</small></div>` : '';
-        const modoAtacadoBadge = item.tipo_preco === 'atacado' ? `<div><small class="badge bg-secondary">ATACADO</small></div>` : '';
+        const badgeDescontoAtacado = descontoAtacadoValor > 0
+            ? `<div class="pdv-produto-meta text-success">Atacado: -${formatCurrency(descontoAtacadoValor)}</div>`
+            : '';
+        const modoAtacadoBadge = item.tipo_preco === 'atacado' ? `<span class="badge bg-secondary">ATACADO</span>` : '';
         const infoVendaUnidade = vendaUnidade && produto
-            ? `<div class="text-muted small mt-1">
+            ? `<div class="pdv-produto-meta text-muted">
                     ${renderTextoPreviewEstoqueKg(produto, item.quantidade)}<br>
                     ${renderTextoPreviewValorUnidade(produto, item.quantidade)}
                </div>`
@@ -2280,6 +2532,11 @@ function renderCarrinhoItens() {
         const classeTotal = (typeof pdvTotalAnimIndex === 'number' && index === pdvTotalAnimIndex)
             ? 'col-total pdv-total-linha pdv-total-flash'
             : 'col-total pdv-total-linha';
+
+        const extrasHtml = [badgeDescontoAtacado, modoAtacadoBadge, infoVendaUnidade]
+            .filter(Boolean)
+            .join('');
+        const miniaturaHtml = htmlMiniaturaProdutoPdv(produto, item.nome);
 
         return `
             <tr ${classe ? `class="${classe}"` : ''} data-item-index="${index}">
@@ -2294,30 +2551,40 @@ function renderCarrinhoItens() {
                 </td>
                 <td class="col-un"><span class="pdv-unidade-badge">${escapeHtml(unidade)}</span></td>
                 <td class="col-produto">
-                    <span class="pdv-produto-nome">${escapeHtml(item.nome)}</span>
-                    ${badgeDesconto}
-                    ${badgeDescontoAtacado}
-                    ${modoAtacadoBadge}
-                    ${infoVendaUnidade}
+                    <div class="pdv-produto-cell">
+                      ${miniaturaHtml}
+                      <div class="pdv-produto-texto">
+                        <span class="pdv-produto-nome">${escapeHtml(item.nome)}</span>
+                        ${extrasHtml ? `<div class="pdv-produto-extras">${extrasHtml}</div>` : ''}
+                      </div>
+                    </div>
                 </td>
                 <td class="col-unit">
-                    <input type="number"
-                           class="form-control form-control-sm valor-item text-end"
-                           value="${Number(item.preco_unitario).toFixed(2)}"
-                           min="0.01"
-                           step="0.01"
-                           data-index="${index}">
+                    <span class="pdv-unitario-valor">${String(precoUnitarioExibicaoItemPdv(item)).replace('.', ',')}</span>
                 </td>
-                <td class="col-desc">
+                <td class="col-desc-pct">
                     <input type="number"
                            class="form-control form-control-sm percentual-item"
-                           value="${Number(item.desconto_percentual || 0).toFixed(2)}"
-                           min="-100"
+                           value="${descontoPctItem.toFixed(2)}"
+                           min="0"
+                           max="100"
                            step="0.01"
+                           inputmode="decimal"
+                           title="Desconto em %"
                            data-index="${index}">
                 </td>
-                <td class="${classeTotal}"><span class="pdv-total-valor">${formatCurrency(item.subtotal)}</span></td>
-                <td class="col-acao text-center">
+                <td class="col-desc-rs">
+                    <input type="number"
+                           class="form-control form-control-sm desconto-valor-item"
+                           value="${Number(descontoValorItem || 0).toFixed(2)}"
+                           min="0"
+                           step="0.01"
+                           inputmode="decimal"
+                           title="Desconto em R$"
+                           data-index="${index}">
+                </td>
+                <td class="${classeTotal}"><span class="pdv-total-valor">${formatCurrency(item.subtotal_exibicao ?? item.subtotal)}</span></td>
+                <td class="col-acao">
                     <button type="button" class="btn btn-sm btn-outline-danger item-remover" data-index="${index}" title="Remover">
                         <i class="fas fa-trash"></i>
                     </button>
@@ -2505,6 +2772,61 @@ function normalizarCodigoProduto(codigo) {
     return String(codigo || '').replace(/\D/g, '').replace(/^0+/, '') || String(codigo || '').trim();
 }
 
+/**
+ * Variantes de PLU para lookup local no PDV (00 / 000039 / 39…).
+ * Espelha a lógica do backend (variantesPlu) sem depender do MIP.
+ */
+function variantesCodigoPluPdv(pluRaw) {
+    const digits = String(pluRaw ?? '').replace(/\D/g, '');
+    if (!digits) return [];
+    const stripped = digits.replace(/^0+/, '') || '0';
+    const out = new Set([digits, stripped]);
+    for (let len = 1; len <= 10; len += 1) {
+        out.add(stripped.padStart(len, '0'));
+    }
+    return [...out];
+}
+
+/**
+ * Localiza produto pesável no cache do PDV pelo PLU da etiqueta (inclui zeros à esquerda).
+ * Ex.: etiqueta 2000039005708 → pluRaw 000039 → produto codigo/PLU 000039.
+ */
+function encontrarProdutoPorPluBalanca(plu, pluRaw) {
+    if (!Array.isArray(produtosDisponiveis) || !produtosDisponiveis.length) return null;
+
+    const candidatos = new Set();
+    if (pluRaw != null && String(pluRaw).trim() !== '') {
+        variantesCodigoPluPdv(pluRaw).forEach((v) => candidatos.add(v));
+    }
+    if (plu != null && String(plu).trim() !== '') {
+        variantesCodigoPluPdv(plu).forEach((v) => candidatos.add(v));
+    }
+    if (!candidatos.size) return null;
+
+    const canonico = (valor) => {
+        const digits = String(valor ?? '').replace(/\D/g, '');
+        if (!digits) return '';
+        return digits.replace(/^0+/, '') || '0';
+    };
+
+    return produtosDisponiveis.find((p) => {
+        const campos = [p.plu, p.codigo, p.codigo_barras];
+        for (const campo of campos) {
+            if (campo == null || String(campo).trim() === '') continue;
+            const raw = String(campo).trim();
+            const digits = raw.replace(/\D/g, '');
+            const strip = canonico(raw);
+            if (candidatos.has(raw) || (digits && candidatos.has(digits)) || (strip && candidatos.has(strip))) {
+                return true;
+            }
+            for (const cand of candidatos) {
+                if (strip && strip === canonico(cand)) return true;
+            }
+        }
+        return false;
+    }) || null;
+}
+
 function encontrarProdutoPorCodigoExato(termo) {
     const busca = normalizarTexto(termo);
     const buscaNumerica = normalizarCodigoProduto(termo);
@@ -2597,9 +2919,10 @@ function adicionarItemNoCarrinho(produto, quantidade, precoUnitario, mensagemExt
             let faixas = [];
             $.ajax({ url: `${API_URL}/produtos/${produtoId}/atacado`, method: 'GET', async: false, headers: { Authorization: 'Bearer ' + (localStorage.getItem('token') || '') }, success: function(res) { faixas = res || []; } });
 
-            if (!Array.isArray(faixas) || faixas.length === 0) return { preco: precoBase, descontoAtacado: 0 };
+            if (!Array.isArray(faixas) || faixas.length === 0) {
+                return { preco: precoBase, descontoAtacado: 0, isAtacado: false };
+            }
 
-            // escolher maior faixa com quantidade_minima <= quantidadeTotal
             let escolhida = null;
             faixas.forEach(f => {
                 const qmin = Number(f.quantidade_minima || 0);
@@ -2608,15 +2931,33 @@ function adicionarItemNoCarrinho(produto, quantidade, precoUnitario, mensagemExt
                 }
             });
 
-            if (!escolhida) return { preco: precoBase, descontoAtacado: 0 };
+            if (!escolhida) return { preco: precoBase, descontoAtacado: 0, isAtacado: false };
 
             const precoAtacado = Number(escolhida.preco_atacado || 0);
-            if (precoAtacado <= 0) return { preco: precoBase, descontoAtacado: 0 };
+            if (precoAtacado <= 0) return { preco: precoBase, descontoAtacado: 0, isAtacado: false };
 
-            const descontoAtacadoTotal = Math.max(0, (Number(produto.preco_venda || precoBase) - precoAtacado) * quantidadeTotal);
-            // Aplicar atacado somente se for menor que o preço já calculado (promoções permanecem se forem menores)
-            const precoAplicado = Math.min(precoBase, precoAtacado);
-            return { preco: precoAplicado, descontoAtacado: Number(descontoAtacadoTotal.toFixed(2)), isAtacado: true };
+            if (!motorPrecoAtacadoDisponivel()) {
+                return { preco: precoBase, descontoAtacado: 0, isAtacado: false };
+            }
+
+            const calc = MotorPrecoAtacado.calcularLinhaAtacadoFaixa({
+                precoVenda: Number(produto.preco_venda || precoBase),
+                precoAtacado,
+                quantidade: quantidadeTotal
+            });
+            const precoAplicado = Math.min(Number(precoBase), calc.precoUnitarioInterno);
+            const linha = MotorPrecoAtacado.calcularLinhaPrecoUnitarioInformado({
+                precoOriginal: Number(produto.preco_venda || precoBase),
+                quantidade: quantidadeTotal,
+                precoUnitarioInformado: precoAplicado
+            });
+
+            return {
+                preco: precoAplicado,
+                descontoAtacado: calc.descontoAtacado,
+                isAtacado: precoAplicado < Number(precoBase),
+                subtotal: linha.total
+            };
         } catch (err) {
             return { preco: precoBase, descontoAtacado: 0, isAtacado: false };
         }
@@ -2654,18 +2995,24 @@ function adicionarItemNoCarrinho(produto, quantidade, precoUnitario, mensagemExt
         const precoBase = tipoVendaEhUnidade(tipoVenda)
             ? Number(produto.preco_unidade || precoFinal)
             : Number(produto.preco_venda || precoFinal);
-        const descontoPercentual = precoBase > 0 ? Number(((1 - precoFinal / precoBase) * 100).toFixed(2)) : 0;
+        if (motorPrecoAtacadoDisponivel()) {
+            aplicarCalculoMotorItemPdv(itemExistente, {
+                precoOriginal: precoBase,
+                quantidade: novaQuantidade,
+                precoUnitarioInformado: precoFinal
+            });
+        } else {
+            itemExistente.preco_unitario = precoFinal;
+            itemExistente.desconto_percentual = precoBase > 0 ? Number(((1 - precoFinal / precoBase) * 100).toFixed(2)) : 0;
+            itemExistente.subtotal = Number((novaQuantidade * precoFinal).toFixed(2));
+        }
 
         itemExistente.quantidade = novaQuantidade;
-        itemExistente.preco_unitario = precoFinal;
-        itemExistente.desconto_percentual = descontoPercentual;
         itemExistente.promocao_id = promocao?.id || null;
         itemExistente.desconto_atacado = descontoAtacadoItem;
         itemExistente.tipo_venda = tipoVenda;
         if (subtotalEtiquetaFixo != null && Number.isFinite(subtotalEtiquetaFixo)) {
             itemExistente.subtotal = Number((Number(itemExistente.subtotal || 0) + subtotalEtiquetaFixo).toFixed(2));
-        } else {
-            itemExistente.subtotal = Number((itemExistente.quantidade * precoFinal).toFixed(2));
         }
     } else {
         // avaliar atacado para quantidade inicial (nunca em etiqueta de balança)
@@ -2678,29 +3025,41 @@ function adicionarItemNoCarrinho(produto, quantidade, precoUnitario, mensagemExt
             const precoBase = tipoVendaEhUnidade(tipoVenda)
                 ? Number(produto.preco_unidade || precoFinal)
                 : Number(produto.preco_venda || precoFinal);
-            const descontoPercentual = precoBase > 0 ? Number(((1 - precoFinal / precoBase) * 100).toFixed(2)) : 0;
 
             const qtdCarrinho = tipoVendaEhUnidade(tipoVenda)
                 ? quantidade
                 : (etiquetaBalanca ? normalizarQuantidadeEtiquetaPdv(quantidade) : Number(quantidade.toFixed(2)));
-            const subtotalCarrinho = (subtotalEtiquetaFixo != null && Number.isFinite(subtotalEtiquetaFixo))
-                ? Number(subtotalEtiquetaFixo.toFixed(2))
-                : Number((quantidade * precoFinal).toFixed(2));
 
-            carrinho.push({
-            id: produto.id,
-            nome: produto.nome,
-            quantidade: qtdCarrinho,
-            preco_unitario: precoFinal,
-            preco_base: precoBase,
-            desconto_percentual: descontoPercentual,
-            promocao_id: promocao?.id || null,
-            desconto_atacado: descontoAtacadoItem,
+            const novoItem = {
+                id: produto.id,
+                nome: produto.nome,
+                quantidade: qtdCarrinho,
+                preco_unitario: precoFinal,
+                preco_base: precoBase,
+                desconto_percentual: 0,
+                desconto_valor: 0,
+                desconto_manual: 0,
+                promocao_id: promocao?.id || null,
+                desconto_atacado: descontoAtacadoItem,
                 tipo_preco: (Number(produto.venda_atacado || 0) === 1 && descontoAtacadoItem > 0) ? 'atacado' : 'varejo',
-            subtotal: subtotalCarrinho,
-            item_fiscal: Number(produto.item_fiscal || 0),
-            tipo_venda: tipoVenda
-        });
+                subtotal: 0,
+                item_fiscal: Number(produto.item_fiscal || 0),
+                tipo_venda: tipoVenda
+            };
+
+            if (subtotalEtiquetaFixo != null && Number.isFinite(subtotalEtiquetaFixo)) {
+                novoItem.subtotal = Number(subtotalEtiquetaFixo.toFixed(2));
+            } else if (motorPrecoAtacadoDisponivel()) {
+                aplicarCalculoMotorItemPdv(novoItem, {
+                    precoOriginal: precoBase,
+                    quantidade: qtdCarrinho,
+                    precoUnitarioInformado: precoFinal
+                });
+            } else {
+                novoItem.subtotal = Number((qtdCarrinho * precoFinal).toFixed(2));
+            }
+
+            carrinho.push(novoItem);
     }
 
     const idxDestaque = carrinho.findIndex((item) =>
@@ -2756,10 +3115,12 @@ function abrirModalModoVendaProduto(produto, callback) {
 
     const modalEl = document.getElementById('modalModoVendaProduto');
     const modal = new bootstrap.Modal(modalEl);
+    let continuando = false;
     modal.show();
 
     const confirmar = () => {
         const modo = $('input[name="modoVendaProduto"]:checked').val() || TIPO_VENDA_PESO;
+        continuando = true;
         modal.hide();
         callback(modo);
     };
@@ -2768,7 +3129,10 @@ function abrirModalModoVendaProduto(produto, callback) {
     modalEl.addEventListener('hidden.bs.modal', function onHidden() {
         modalEl.removeEventListener('hidden.bs.modal', onHidden);
         $('#modalModoVendaProduto').remove();
-        focarCampoCodigo({ limpar: true });
+        // Ao continuar, o próximo modal (quantidade) assume o foco
+        if (!continuando) {
+            focarCampoCodigo({ limpar: true });
+        }
     }, { once: true });
 }
 
@@ -2927,7 +3291,13 @@ async function adicionarProdutoPorCodigoViaMip(codigoDigitado) {
                 return;
             }
 
-            if (!parseMotor.sucesso || !parseMotor.resultado || !parseMotor.resultado.plu) {
+            // PLU "0" / "00" / "0000" são válidos — não usar truthiness frouxa
+            const pluMotor = parseMotor.resultado && parseMotor.resultado.plu;
+            const pluRawMotor = parseMotor.resultado && parseMotor.resultado.pluRaw;
+            const pluOk = pluMotor === 0
+                || (pluMotor != null && String(pluMotor).replace(/\D/g, '').length > 0)
+                || (pluRawMotor != null && String(pluRawMotor).replace(/\D/g, '').length > 0);
+            if (!parseMotor.sucesso || !parseMotor.resultado || !pluOk) {
                 pdvAuditoriaEquipamentos('parser_falhou', {
                     codigo: codigoParaMip,
                     resultado: 'FALHA_PARSER',
@@ -2949,7 +3319,12 @@ async function adicionarProdutoPorCodigoViaMip(codigoDigitado) {
                 return;
             }
 
-            codigoParaMip = String(parseMotor.resultado.plu);
+            // Preferir pluRaw (com zeros) para achar cadastro 00 / 0000
+            codigoParaMip = String(
+                (pluRawMotor != null && String(pluRawMotor).trim() !== '')
+                    ? pluRawMotor
+                    : pluMotor
+            );
             consultas += 1;
             const t0Mip = nowMs();
             resultado = await identificarProdutoViaMip(codigoParaMip, { aposMotorEquipamentos: true });
@@ -2988,23 +3363,56 @@ async function adicionarProdutoPorCodigoViaMip(codigoDigitado) {
         || (parseMotor && parseMotor.resultado && parseMotor.resultado.layoutId)
         || null;
     const pluExtraido = parseMotor && parseMotor.resultado ? parseMotor.resultado.plu : null;
+    const pluRawExtraido = parseMotor && parseMotor.resultado ? parseMotor.resultado.pluRaw : null;
+
+    /** Fallback local quando MIP off/não acha — etiqueta já interpretada pelo Motor */
+    const resolverEtiquetaNoCacheLocal = () => {
+        if (!ehEtiqueta || !parseMotor || !parseMotor.resultado) return null;
+        return encontrarProdutoPorPluBalanca(parseMotor.resultado.plu, parseMotor.resultado.pluRaw);
+    };
 
     if (resultado && resultado.habilitado === false) {
         if (ehEtiqueta) {
-            showNotification(`Produto não encontrado: PLU ${codigoParaMip}`, 'danger');
-            pdvAuditoriaEquipamentos('mip_desabilitado', {
-                codigo: String(codigoDigitado || ''),
-                resultado: 'MIP_OFF',
-                tempoMotorMs, tempoParserMs, tempoMipMs,
-                tempoTotalMs: Number((nowMs() - t0Total).toFixed(3)),
-                quantidadeConsultas: consultas,
-                layoutUtilizado: layoutId,
-                pluExtraido
-            });
+            const local = resolverEtiquetaNoCacheLocal();
+            if (local && local.id) {
+                resultado = {
+                    encontrado: true,
+                    habilitado: false,
+                    produtoId: local.id,
+                    produto: local,
+                    fallbackLegado: true,
+                    strategy: 'CACHE_PLU_PDV'
+                };
+                pdvAuditoriaEquipamentos('fallback_plu_local_mip_off', {
+                    codigo: String(codigoDigitado || ''),
+                    resultado: 'OK_CACHE',
+                    produtoId: local.id,
+                    pluExtraido,
+                    pluRaw: pluRawExtraido,
+                    tempoMotorMs,
+                    tempoParserMs,
+                    tempoMipMs,
+                    tempoTotalMs: Number((nowMs() - t0Total).toFixed(3)),
+                    quantidadeConsultas: consultas,
+                    layoutUtilizado: layoutId
+                });
+            } else {
+                showNotification(`Produto não encontrado: PLU ${codigoParaMip}`, 'danger');
+                pdvAuditoriaEquipamentos('mip_desabilitado', {
+                    codigo: String(codigoDigitado || ''),
+                    resultado: 'MIP_OFF',
+                    tempoMotorMs, tempoParserMs, tempoMipMs,
+                    tempoTotalMs: Number((nowMs() - t0Total).toFixed(3)),
+                    quantidadeConsultas: consultas,
+                    layoutUtilizado: layoutId,
+                    pluExtraido
+                });
+                return;
+            }
+        } else {
+            adicionarProdutoPorCodigoLegado(codigoDigitado);
             return;
         }
-        adicionarProdutoPorCodigoLegado(codigoDigitado);
-        return;
     }
 
     if (!resultado || !resultado.encontrado) {
@@ -3018,11 +3426,30 @@ async function adicionarProdutoPorCodigoViaMip(codigoDigitado) {
             pluExtraido
         });
         if (ehEtiqueta) {
-            showNotification(`Produto não encontrado: PLU ${codigoParaMip}`, 'danger');
+            const local = resolverEtiquetaNoCacheLocal();
+            if (local && local.id) {
+                resultado = {
+                    encontrado: true,
+                    produtoId: local.id,
+                    produto: local,
+                    fallbackLegado: true,
+                    strategy: 'CACHE_PLU_PDV'
+                };
+                pdvAuditoriaEquipamentos('fallback_plu_local', {
+                    codigo: String(codigoDigitado || ''),
+                    resultado: 'OK_CACHE',
+                    produtoId: local.id,
+                    pluExtraido,
+                    pluRaw: pluRawExtraido
+                });
+            } else {
+                showNotification(`Produto não encontrado: PLU ${codigoParaMip}`, 'danger');
+                return;
+            }
+        } else {
+            adicionarProdutoPorCodigoLegado(codigoDigitado);
             return;
         }
-        adicionarProdutoPorCodigoLegado(codigoDigitado);
-        return;
     }
 
     const noCache = encontrarProdutoPorIdPdv(resultado.produtoId);
@@ -3034,6 +3461,26 @@ async function adicionarProdutoPorCodigoViaMip(codigoDigitado) {
 
     if (!produto || !produto.id) {
         if (ehEtiqueta) {
+            const local = resolverEtiquetaNoCacheLocal();
+            if (local && local.id) {
+                // usa local abaixo
+                Object.assign(resultado, { produtoId: local.id, produto: local });
+            } else {
+                showNotification(`Produto não encontrado: PLU ${codigoParaMip}`, 'danger');
+                return;
+            }
+        } else {
+            adicionarProdutoPorCodigoLegado(codigoDigitado);
+            return;
+        }
+    }
+
+    const produtoFinal = (produto && produto.id)
+        ? produto
+        : (resultado.produto && resultado.produto.id ? resultado.produto : null);
+
+    if (!produtoFinal || !produtoFinal.id) {
+        if (ehEtiqueta) {
             showNotification(`Produto não encontrado: PLU ${codigoParaMip}`, 'danger');
             return;
         }
@@ -3044,12 +3491,12 @@ async function adicionarProdutoPorCodigoViaMip(codigoDigitado) {
     const veioDoMotor = Boolean(parseMotor && parseMotor.resultado);
 
     if (veioDoMotor) {
-        if (!unidadeEhKg(produto)) {
-            showNotification(`O produto ${produto.nome} não está cadastrado como KG.`, 'warning');
+        if (!unidadeEhKg(produtoFinal)) {
+            showNotification(`O produto ${produtoFinal.nome} não está cadastrado como KG.`, 'warning');
             return;
         }
 
-        const calc = calcularItemEtiquetaBalancaPdv(produto, parseMotor.resultado || {});
+        const calc = calcularItemEtiquetaBalancaPdv(produtoFinal, parseMotor.resultado || {});
         if (!calc.ok) {
             showNotification(calc.mensagem, 'danger');
             return;
@@ -3058,8 +3505,8 @@ async function adicionarProdutoPorCodigoViaMip(codigoDigitado) {
         pdvAuditoriaEquipamentos('carrinho_etiqueta', {
             codigo: String(codigoDigitado || ''),
             resultado: 'OK',
-            produtoId: produto.id,
-            produtoNome: produto.nome,
+            produtoId: produtoFinal.id,
+            produtoNome: produtoFinal.nome,
             tipoPayload: calc.tipoPayload,
             quantidade: calc.quantidade,
             valorTotal: calc.subtotal,
@@ -3075,7 +3522,7 @@ async function adicionarProdutoPorCodigoViaMip(codigoDigitado) {
 
         // Sem promoção/atacado: total da etiqueta (VALOR) ou peso × preço (PESO)
         adicionarItemNoCarrinho(
-            produto,
+            produtoFinal,
             calc.quantidade,
             calc.precoUnitario,
             calc.mensagemExtra,
@@ -3090,7 +3537,7 @@ async function adicionarProdutoPorCodigoViaMip(codigoDigitado) {
         return;
     }
 
-    const validacaoMinima = pdvValidarEstoqueVenda(produto, 1);
+    const validacaoMinima = pdvValidarEstoqueVenda(produtoFinal, 1);
     if (!validacaoMinima.sucesso) {
         showNotification(validacaoMinima.mensagem, 'danger');
         return;
@@ -3099,7 +3546,7 @@ async function adicionarProdutoPorCodigoViaMip(codigoDigitado) {
     pdvAuditoriaEquipamentos('carrinho_normal', {
         codigo: String(codigoDigitado || ''),
         resultado: 'OK',
-        produtoId: produto.id,
+        produtoId: produtoFinal.id,
         tempoMipMs,
         tempoTotalMs: Number((nowMs() - t0Total).toFixed(3)),
         quantidadeConsultas: consultas,
@@ -3107,8 +3554,8 @@ async function adicionarProdutoPorCodigoViaMip(codigoDigitado) {
         pluExtraido: null
     });
 
-    buscarPromocaoAtivaProduto(produto.id).then(function(promocao) {
-        iniciarFluxoAdicionarProdutoPdv(produto, promocao);
+    buscarPromocaoAtivaProduto(produtoFinal.id).then(function(promocao) {
+        iniciarFluxoAdicionarProdutoPdv(produtoFinal, promocao);
     });
 }
 
@@ -3152,38 +3599,27 @@ function atualizarQuantidade(index, quantidade) {
     let precoAplicado = Number(item.preco_unitario || 0);
     let descontoAtacadoItem = Number(item.desconto_atacado || 0);
     if (!vendaUnidade && Number(produto.venda_atacado || 0) === 1) {
-        try {
-            let faixas = [];
-            $.ajax({ url: `${API_URL}/produtos/${produto.id}/atacado`, method: 'GET', async: false, headers: { Authorization: 'Bearer ' + (localStorage.getItem('token') || '') }, success: function(res) { faixas = res || []; } });
-            if (Array.isArray(faixas) && faixas.length > 0) {
-                let escolhida = null;
-                faixas.forEach(f => {
-                    const qmin = Number(f.quantidade_minima || 0);
-                    if (novaQuantidade >= qmin) {
-                        if (!escolhida || qmin > Number(escolhida.quantidade_minima || 0)) escolhida = f;
-                    }
-                });
-                if (escolhida) {
-                    const precoAtacado = Number(escolhida.preco_atacado || 0);
-                    const precoBase = Number(produto.preco_venda || precoAplicado);
-                    const novoPreco = Math.min(precoAplicado, precoAtacado, precoBase);
-                    precoAplicado = novoPreco;
-                    descontoAtacadoItem = Math.max(0, (Number(produto.preco_venda || precoBase) - novoPreco) * novaQuantidade);
-                }
-            }
-        } catch (err) {
-            // ignore
-        }
+        const atac = obterPrecoAtacado(produto.id, novaQuantidade, precoAplicado);
+        precoAplicado = atac.preco;
+        descontoAtacadoItem = atac.descontoAtacado;
     }
 
     item.quantidade = novaQuantidade;
-    item.preco_unitario = precoAplicado;
     item.desconto_atacado = Number((descontoAtacadoItem || 0).toFixed(2));
-    const precoBase = vendaUnidade
-        ? Number(produto.preco_unidade || item.preco_base || item.preco_unitario || 0)
-        : Number(item.preco_base || produto?.preco_venda || item.preco_unitario || 0);
-    item.desconto_percentual = precoBase > 0 ? Number(((1 - precoAplicado / precoBase) * 100).toFixed(2)) : 0;
-    item.subtotal = Number((item.preco_unitario * novaQuantidade).toFixed(2));
+    const precoBase = obterPrecoBaseItemPdv(item, produto);
+
+    if (motorPrecoAtacadoDisponivel()) {
+        aplicarCalculoMotorItemPdv(item, {
+            precoOriginal: precoBase,
+            quantidade: novaQuantidade,
+            precoUnitarioInformado: precoAplicado
+        });
+    } else {
+        item.preco_unitario = precoAplicado;
+        item.desconto_percentual = precoBase > 0 ? Number(((1 - precoAplicado / precoBase) * 100).toFixed(2)) : 0;
+        item.desconto_valor = Number(((precoBase * novaQuantidade * Number(item.desconto_percentual || 0)) / 100).toFixed(2));
+        item.subtotal = Number((item.preco_unitario * novaQuantidade).toFixed(2));
+    }
     animarTotalLinhaCarrinho(index);
     atualizarCarrinho();
     focarCampoCodigo({ limpar: true });
@@ -3194,17 +3630,92 @@ function atualizarPercentual(index, percentual) {
     if (!item) return;
 
     const produto = produtosDisponiveis.find(p => Number(p.id) === Number(item.id));
-    const precoBase = Number(item.preco_base || produto?.preco_venda || item.preco_unitario || 0);
+    const precoBase = obterPrecoBaseItemPdv(item, produto);
     if (precoBase <= 0) return;
 
-    const precoAplicado = Number((precoBase * (1 - Number(percentual || 0) / 100)).toFixed(2));
-    item.desconto_percentual = Number(percentual.toFixed(2));
-    item.preco_unitario = precoAplicado > 0 ? precoAplicado : 0.01;
-    item.preco_base = precoBase;
-    item.subtotal = Number((item.preco_unitario * Number(item.quantidade || 0)).toFixed(2));
+    if (motorPrecoAtacadoDisponivel()) {
+        aplicarCalculoMotorItemPdv(item, {
+            precoOriginal: precoBase,
+            quantidade: item.quantidade,
+            percentualDesconto: Number(percentual || 0)
+        });
+    } else {
+        const pct = Number(percentual || 0);
+        const qtd = Number(item.quantidade || 0);
+        const bruto = Number((precoBase * qtd).toFixed(2));
+        const valorDesc = Number(((bruto * pct) / 100).toFixed(2));
+        const precoAplicado = Number((precoBase * (1 - pct / 100)).toFixed(2));
+        item.desconto_percentual = Number(pct.toFixed(2));
+        item.desconto_valor = valorDesc;
+        item.preco_unitario = precoAplicado > 0 ? precoAplicado : 0.01;
+        item.preco_base = precoBase;
+        item.subtotal = Number((item.preco_unitario * qtd).toFixed(2));
+    }
+
     animarTotalLinhaCarrinho(index);
     atualizarCarrinho();
     focarCampoCodigo({ limpar: true });
+}
+
+function atualizarDescontoValor(index, valorDesconto) {
+    const item = carrinho[index];
+    if (!item) return;
+
+    const produto = produtosDisponiveis.find(p => Number(p.id) === Number(item.id));
+    const precoBase = obterPrecoBaseItemPdv(item, produto);
+    if (precoBase <= 0) return;
+
+    const qtd = Number(item.quantidade || 0);
+    const bruto = precoBase * qtd;
+    const desc = Math.min(Math.max(0, Number(valorDesconto || 0)), bruto);
+
+    if (motorPrecoAtacadoDisponivel() && typeof MotorPrecoAtacado.calcularLinhaDescontoValor === 'function') {
+        const calc = MotorPrecoAtacado.calcularLinhaDescontoValor({
+            precoOriginal: precoBase,
+            quantidade: qtd,
+            valorDesconto: desc
+        });
+        item.preco_base = precoBase;
+        item.preco_unitario = calc.precoUnitarioInterno;
+        item.desconto_percentual = calc.percentualDesconto;
+        item.desconto_valor = Number(MotorPrecoAtacado.arredondarMoeda(calc.valorDesconto || 0));
+        item.subtotal = calc.totalInterno;
+        item.subtotal_exibicao = calc.total;
+    } else {
+        const pct = bruto > 0 ? Number(((desc / bruto) * 100).toFixed(4)) : 0;
+        const totalLiq = Number((bruto - desc).toFixed(2));
+        item.preco_base = precoBase;
+        item.desconto_percentual = pct;
+        item.desconto_valor = Number(desc.toFixed(2));
+        item.preco_unitario = qtd > 0 ? Number((totalLiq / qtd).toFixed(6)) : precoBase;
+        item.subtotal = totalLiq;
+    }
+
+    item.desconto_manual = desc > 0 ? 1 : 0;
+    animarTotalLinhaCarrinho(index);
+    atualizarCarrinho();
+    focarCampoCodigo({ limpar: true });
+}
+
+function aplicarDescontoPercentualComAuth(index, percentual, $input, valorAnterior) {
+    const pct = Math.max(0, Math.min(100, Number(percentual || 0)));
+    if (pct <= 0) {
+        const item = carrinho[index];
+        if (item) item.desconto_manual = 0;
+        atualizarPercentual(index, 0);
+        return;
+    }
+    garantirAutorizacaoDesconto(
+        () => {
+            const item = carrinho[index];
+            if (item) item.desconto_manual = 1;
+            atualizarPercentual(index, pct);
+        },
+        () => {
+            if ($input && $input.length) $input.val(Number(valorAnterior || 0).toFixed(2));
+            showNotification('Desconto não autorizado.', 'warning');
+        }
+    );
 }
 
 function atualizarPrecoUnitario(index, valor) {
@@ -3212,17 +3723,26 @@ function atualizarPrecoUnitario(index, valor) {
     if (!item) return;
 
     const produto = produtosDisponiveis.find(p => Number(p.id) === Number(item.id));
-    const precoBase = Number(item.preco_base || produto?.preco_venda || item.preco_unitario || 0);
+    const precoBase = obterPrecoBaseItemPdv(item, produto);
     if (precoBase <= 0) return;
 
     const precoUnitario = Number(valor || 0);
     if (precoUnitario <= 0) return;
 
-    const percentual = Number(((1 - precoUnitario / precoBase) * 100).toFixed(2));
-    item.desconto_percentual = percentual;
-    item.preco_unitario = precoUnitario;
-    item.preco_base = precoBase;
-    item.subtotal = Number((precoUnitario * Number(item.quantidade || 0)).toFixed(2));
+    if (motorPrecoAtacadoDisponivel()) {
+        aplicarCalculoMotorItemPdv(item, {
+            precoOriginal: precoBase,
+            quantidade: item.quantidade,
+            precoUnitarioInformado: precoUnitario
+        });
+    } else {
+        const percentual = Number(((1 - precoUnitario / precoBase) * 100).toFixed(2));
+        item.desconto_percentual = percentual;
+        item.preco_unitario = precoUnitario;
+        item.preco_base = precoBase;
+        item.subtotal = Number((precoUnitario * Number(item.quantidade || 0)).toFixed(2));
+    }
+
     animarTotalLinhaCarrinho(index);
     atualizarCarrinho();
     focarCampoCodigo({ limpar: true });
@@ -3281,9 +3801,21 @@ function atualizarCarrinho() {
     if (tbody.length) {
         tbody.html(renderCarrinhoItens());
 
-        tbody.off('click').on('click', '.item-remover', function() {
+        tbody.off('click', '.item-remover').on('click', '.item-remover', function() {
             const index = $(this).data('index');
             removerItemCarrinho(index);
+        });
+
+        tbody.off('click', '.pdv-produto-miniatura').on('click', '.pdv-produto-miniatura', function(ev) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            if (typeof ev.stopImmediatePropagation === 'function') {
+                ev.stopImmediatePropagation();
+            }
+            const src = this.getAttribute('data-imagem-src') || this.getAttribute('src');
+            const alt = this.getAttribute('alt') || 'Foto do produto';
+            abrirFotoProdutoPdv(src, alt);
+            return false;
         });
 
         tbody.off('change').on('change', '.quantidade-item', function() {
@@ -3300,12 +3832,37 @@ function atualizarCarrinho() {
 
         tbody.on('change', '.percentual-item', function() {
             const index = $(this).data('index');
-            const percentual = parseFloat($(this).val());
-            if (isNaN(percentual)) {
+            const $input = $(this);
+            const valorAnterior = Number(carrinho[index]?.desconto_percentual || 0);
+            let percentual = parseFloat($input.val());
+            if (isNaN(percentual) || percentual < 0) {
                 atualizarCarrinho();
                 return;
             }
-            atualizarPercentual(index, percentual);
+            aplicarDescontoPercentualComAuth(index, percentual, $input, valorAnterior);
+        });
+
+        tbody.on('change', '.desconto-valor-item', function() {
+            const index = $(this).data('index');
+            const $input = $(this);
+            const valorAnterior = obterDescontoValorItemPdv(carrinho[index]);
+            let valor = parseFloat($input.val());
+            if (isNaN(valor) || valor < 0) {
+                atualizarCarrinho();
+                return;
+            }
+            valor = Math.round(valor * 100) / 100;
+            if (valor <= 0) {
+                atualizarDescontoValor(index, 0);
+                return;
+            }
+            garantirAutorizacaoDesconto(
+                () => atualizarDescontoValor(index, valor),
+                () => {
+                    $input.val(Number(valorAnterior || 0).toFixed(2));
+                    showNotification('Desconto não autorizado.', 'warning');
+                }
+            );
         });
 
         tbody.on('change', '.valor-item', function() {
@@ -3331,7 +3888,8 @@ function atualizarCarrinho() {
 }
 
 function calcularSubtotal() {
-    return carrinho.reduce((acc, item) => acc + Number(item.subtotal || 0), 0);
+    const soma = carrinho.reduce((acc, item) => acc + Number(item.subtotal || 0), 0);
+    return motorPrecoAtacadoDisponivel() ? MotorPrecoAtacado.arredondarMoeda(soma) : soma;
 }
 
 function calcularTotalValor() {
@@ -4066,7 +4624,7 @@ function mostrarModalCpfCnpjNota() {
     });
 }
 
-function mostrarModalAvisoDebitoCliente(aviso, totalEmAberto, parcelasVencidas, onConfirm) {
+function mostrarModalAvisoDebitoCliente(aviso, totalEmAberto, parcelasVencidas, onConfirm, onCancel) {
     const detalhes = [];
     if (totalEmAberto > 0) {
         detalhes.push(`Valor em aberto: <strong>${formatCurrency(totalEmAberto)}</strong>`);
@@ -4098,6 +4656,7 @@ function mostrarModalAvisoDebitoCliente(aviso, totalEmAberto, parcelasVencidas, 
 
     const modalEl = document.getElementById('debitoAvisoModal');
     const modal = new bootstrap.Modal(modalEl);
+    let confirmado = false;
     modal.show();
 
     $('#confirmar-continuar-debito').off('click').on('click', function() {
@@ -4105,9 +4664,16 @@ function mostrarModalAvisoDebitoCliente(aviso, totalEmAberto, parcelasVencidas, 
             document.activeElement.blur();
         }
 
+        confirmado = true;
         modal.hide();
         if (typeof onConfirm === 'function') {
             onConfirm();
+        }
+    });
+
+    $(modalEl).off('hidden.bs.modal.avisoDebito').on('hidden.bs.modal.avisoDebito', function() {
+        if (!confirmado && typeof onCancel === 'function') {
+            onCancel();
         }
     });
 }
@@ -4116,6 +4682,24 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
     if (vendaEmProcessamento) {
         showNotification('A venda já está sendo processada.', 'warning');
         return;
+    }
+
+    if (vendaTemDescontoManualPdv()
+        && !operadorPodeAplicarDescontoSemSenha()
+        && !supervisorAuthToken) {
+        return new Promise((resolve) => {
+            garantirAutorizacaoDesconto(
+                () => {
+                    executarFinalizacaoVenda(emitirFiscal, cpfCnpjNota, formaPagamentoDireta)
+                        .then(resolve)
+                        .catch(resolve);
+                },
+                () => {
+                    showNotification('Desconto exige autorização de administrador ou supervisor.', 'warning');
+                    resolve();
+                }
+            );
+        });
     }
 
     if (!Array.isArray(carrinho) || carrinho.length === 0) {
@@ -4186,15 +4770,27 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
             const quantidade = tipoVendaEhUnidade(tipoVenda)
                 ? Math.max(0, Math.round(Number(item.quantidade || 0)))
                 : normalizarQuantidadePdv(item.quantidade, produto);
+            const subtotalFiscal = motorPrecoAtacadoDisponivel()
+                ? Number(item.subtotal_exibicao ?? MotorPrecoAtacado.arredondarMoeda(Number(item.subtotal || 0)))
+                : Math.round(Number(item.preco_unitario) * Number(quantidade) * 100) / 100;
             const itemPayload = {
             produto_id: Number(item.id),
             quantidade,
-            preco_unitario: Number(item.preco_unitario),
+            preco_unitario: motorPrecoAtacadoDisponivel()
+                ? MotorPrecoAtacado.formatarPrecoExibicao(Number(item.preco_unitario))
+                : Number(item.preco_unitario),
+            preco_unitario_interno: motorPrecoAtacadoDisponivel()
+                ? Number(item.preco_unitario)
+                : null,
             desconto_percentual: Number(item.desconto_percentual || 0),
+            desconto_valor: Number(item.desconto_valor != null
+                ? item.desconto_valor
+                : obterDescontoValorItemPdv(item, produto)),
+            desconto_manual: Number(item.desconto_manual || 0) === 1 ? 1 : 0,
             promocao_id: item.promocao_id || null,
             desconto_atacado: Number(item.desconto_atacado || 0),
             tipo_preco: item.tipo_preco || 'varejo',
-            subtotal: Math.round(Number(item.preco_unitario) * Number(item.quantidade) * 100) / 100,
+            subtotal: subtotalFiscal,
             item_fiscal: Number(item.item_fiscal || 0),
             tipo_venda: tipoVenda
         };
@@ -4461,63 +5057,80 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
 
     function enviarVenda(payload) {
         payload = getTerminalRequestData(payload);
+        let handoffNaoFiscal = false;
 
         $.ajax({
             url: `${API_URL}/vendas`,
             method: 'POST',
             contentType: 'application/json',
             data: JSON.stringify(payload),
+            timeout: 120000,
             success: function(response) {
-                const vendaId = response.venda_id || response.id || response.vendaId || response.venda?.id;
-                const statusPagamento = response.status_pagamento;
-
-                if (!vendaId) {
-                    vendaEmProcessamento = false;
-                    console.error('Resposta da venda sem ID:', response);
-                    showNotification('Venda finalizada, mas não foi possível localizar o ID da venda.', 'danger');
-                    return;
-                }
-
-                if (statusPagamento === 'aguardando_nao_fiscal') {
-                    if (Number(dados.valor_fiscal || 0) > 0) {
-                        iniciarFluxoPosVendaComNaoFiscal(vendaId, {
-                            emitirFiscal: Boolean(dados.emitir_fiscal)
-                        });
+                try {
+                    if (!response || typeof response !== 'object') {
+                        vendaEmProcessamento = false;
+                        showNotification('Resposta inválida ao finalizar a venda.', 'danger');
                         return;
                     }
 
+                    const vendaId = response.venda_id || response.id || response.vendaId || response.venda?.id;
+                    const statusPagamento = response.status_pagamento;
+
+                    if (!vendaId) {
+                        vendaEmProcessamento = false;
+                        console.error('Resposta da venda sem ID:', response);
+                        showNotification('Venda finalizada, mas não foi possível localizar o ID da venda.', 'danger');
+                        return;
+                    }
+
+                    if (statusPagamento === 'aguardando_nao_fiscal') {
+                        // 2ª etapa legítima: fiscal confirmado, não fiscal ainda pendente
+                        if (Number(dados.valor_fiscal || 0) > 0) {
+                            handoffNaoFiscal = true;
+                            iniciarFluxoPosVendaComNaoFiscal(vendaId, {
+                                emitirFiscal: Boolean(dados.emitir_fiscal)
+                            });
+                            return;
+                        }
+
+                        vendaEmProcessamento = false;
+                        pagamentoFiscalAtual = null;
+                        imprimirCupomNaoFiscal(vendaId, {
+                            ...payload,
+                            itens: itensParaCupom
+                        }, total, desconto);
+                        finalizarPosVenda();
+                        showNotification('Venda não fiscal finalizada com sucesso.', 'success');
+                        return;
+                    }
+
+                    // status quitada (ou outro): NÃO abre modal de não fiscal
                     vendaEmProcessamento = false;
                     pagamentoFiscalAtual = null;
-                    imprimirCupomNaoFiscal(vendaId, {
-                        ...payload,
-                        itens: itensParaCupom
-                    }, total, desconto);
+
+                    const vendaQuitadaCompletamente = !vendaPrazoInfo && statusPagamento === 'quitada';
+
+                    if (vendaQuitadaCompletamente && dados.emitir_fiscal) {
+                        processarFiscalPosPagamentoPosVenda(vendaId, response);
+                    } else if (vendaQuitadaCompletamente || vendaPrazoInfo) {
+                        imprimirCupomNaoFiscal(vendaId, {
+                            ...payload,
+                            itens: itensParaCupom
+                        }, total, desconto);
+                    }
+
                     finalizarPosVenda();
-                    showNotification('Venda não fiscal finalizada com sucesso.', 'success');
-                    return;
+                    showNotification('Venda finalizada com sucesso.', 'success');
+                } catch (erroSucesso) {
+                    console.error('Erro ao processar resposta da venda:', erroSucesso);
+                    if (!handoffNaoFiscal) {
+                        vendaEmProcessamento = false;
+                    }
+                    showNotification(erroSucesso.message || 'Erro ao processar finalização da venda.', 'danger');
                 }
-
-                vendaEmProcessamento = false;
-                pagamentoFiscalAtual = null;
-
-                const vendaQuitadaCompletamente = !vendaPrazoInfo && statusPagamento === 'quitada';
-
-                if (vendaQuitadaCompletamente && dados.emitir_fiscal) {
-                    processarFiscalPosPagamentoPosVenda(vendaId, response);
-                } else if (vendaQuitadaCompletamente || vendaPrazoInfo) {
-                    imprimirCupomNaoFiscal(vendaId, {
-                        ...payload,
-                        itens: itensParaCupom
-                    }, total, desconto);
-                }
-
-                finalizarPosVenda();
-                showNotification('Venda finalizada com sucesso.', 'success');
             },
-            error: function(xhr) {
-                vendaEmProcessamento = false;
-
-                if (xhr.status === 409 && xhr.responseJSON?.pode_continuar) {
+            error: function(xhr, textStatus) {
+                if (xhr && xhr.status === 409 && xhr.responseJSON?.pode_continuar) {
                     const aviso = xhr.responseJSON.aviso || 'Cliente possui débitos em aberto.';
                     const totalEmAberto = Number(xhr.responseJSON.total_em_aberto || 0);
                     const parcelasVencidas = Number(xhr.responseJSON.parcelas_vencidas || 0);
@@ -4525,7 +5138,29 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
                     mostrarModalAvisoDebitoCliente(aviso, totalEmAberto, parcelasVencidas, function() {
                         payload.forcar = true;
                         enviarVenda(payload);
+                    }, function() {
+                        vendaEmProcessamento = false;
                     });
+                    return;
+                }
+
+                vendaEmProcessamento = false;
+
+                if (textStatus === 'timeout') {
+                    showNotification(
+                        'Tempo esgotado ao finalizar a venda. Verifique no histórico se a venda foi registrada antes de tentar novamente.',
+                        'danger'
+                    );
+                    return;
+                }
+
+                if (textStatus === 'abort') {
+                    showNotification('Requisição de finalização cancelada.', 'warning');
+                    return;
+                }
+
+                if (!xhr || xhr.status === 0) {
+                    showNotification('Falha de rede ao finalizar a venda. Tente novamente.', 'danger');
                     return;
                 }
 
@@ -4919,6 +5554,7 @@ function abrirModalQuantidadeProduto(produto, callback, opcoes = {}) {
                             inputmode="${fracionado ? 'decimal' : 'numeric'}"
                             value="${fracionado ? '1,000' : '1'}"
                             placeholder="${vendaPorUnidade ? 'Ex: 5' : (fracionado ? 'Ex: 7,25' : 'Ex: 1')}"
+                            autofocus
                         >
 
                         <small class="text-muted">
@@ -4957,10 +5593,19 @@ function abrirModalQuantidadeProduto(produto, callback, opcoes = {}) {
 
     modal.show();
 
-    modalEl.addEventListener('shown.bs.modal', function () {
+    const focarInputQuantidade = () => {
         const input = document.getElementById('inputQuantidadeProduto');
-        input.focus();
-        input.select();
+        if (!input) return;
+        input.focus({ preventScroll: true });
+        try { input.select(); } catch (_) { /* ignore */ }
+    };
+
+    modalEl.addEventListener('shown.bs.modal', function onShown() {
+        modalEl.removeEventListener('shown.bs.modal', onShown);
+        // Após o focus trap do Bootstrap (que prioriza o btn-close)
+        focarInputQuantidade();
+        setTimeout(focarInputQuantidade, 50);
+        setTimeout(focarInputQuantidade, 120);
         if (vendaPorUnidade) {
             atualizarPreviewVendaUnidadeModal(produto);
         }

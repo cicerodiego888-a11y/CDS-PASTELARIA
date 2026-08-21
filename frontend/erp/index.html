@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CDS ERP — Retaguarda</title>
+    <title>CDS Sistemas - Plataforma Inteligente de Gestão</title>
     <link rel="icon" type="image/x-icon" href="/branding/favicon.ico">
     <link href="/vendor/bootstrap/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="/vendor/fontawesome/css/all.min.css">
@@ -14,6 +14,7 @@
     <link rel="stylesheet" href="/css/central-entradas.css">
     <link rel="stylesheet" href="/css/central-entradas-ux1.css">
     <link rel="stylesheet" href="/css/central-diagnostico.css">
+    <link rel="stylesheet" href="/css/diagnostics-panel-v1.css">
     <link rel="stylesheet" href="/css/central-configuracao.css">
     <link rel="stylesheet" href="/css/central-homologacao.css">
     <link rel="stylesheet" href="/css/dashboard-command.css">
@@ -38,7 +39,7 @@
                             <img src="/branding/logo-oficial.png" alt="CDS Sistemas" class="img-fluid brand-sidebar-logo" style="max-height:88px;object-fit:contain;margin:0 auto 0.35rem;display:block;">
                             <small class="text-muted brand-sidebar-slogan" style="display:block;line-height:1.25;max-width:11.5rem;margin:0.15rem auto 0;">Inteligência para gerir, Tecnologia para crescer</small>
                         </div>
-                        <div id="sidebar-modo-fiscal-bar" class="sidebar-modo-fiscal-bar sidebar-modo-fiscal-bar--off" title="Modo completo"></div>
+                        <div id="sidebar-modo-fiscal-bar" class="sidebar-modo-fiscal-bar sidebar-modo-fiscal-bar--on" title="Modo fiscal ativo"></div>
                     </div>
 
                     <ul class="nav flex-column sidebar-nav">
@@ -245,6 +246,31 @@
                                         <i class="fas fa-chart-line" aria-hidden="true"></i><span>Observabilidade</span>
                                     </a>
                                 </li>
+                                <li class="nav-item" id="nav-mib-analytics">
+                                    <a class="nav-link text-white" href="#" data-page="mib-analytics" title="MIB Analytics">
+                                        <i class="fas fa-brain" aria-hidden="true"></i><span>MIB Analytics</span>
+                                    </a>
+                                </li>
+                                <li class="nav-item" id="nav-enterprise-search">
+                                    <a class="nav-link text-white" href="#" data-page="enterprise-search" title="Enterprise Search">
+                                        <i class="fas fa-globe" aria-hidden="true"></i><span>Enterprise Search</span>
+                                    </a>
+                                </li>
+                                <li class="nav-item" id="nav-knowledge-center">
+                                    <a class="nav-link text-white" href="#" data-page="knowledge-center" title="Knowledge Center">
+                                        <i class="fas fa-project-diagram" aria-hidden="true"></i><span>Knowledge Center</span>
+                                    </a>
+                                </li>
+                                <li class="nav-item" id="nav-cip-insights">
+                                    <a class="nav-link text-white" href="#" data-page="cip-insights" title="CIP Insights">
+                                        <i class="fas fa-lightbulb" aria-hidden="true"></i><span>CIP Insights</span>
+                                    </a>
+                                </li>
+                                <li class="nav-item" id="nav-cds-copiloto">
+                                    <a class="nav-link text-white" href="#" data-page="cds-copiloto" title="CDS Copiloto">
+                                        <i class="fas fa-robot" aria-hidden="true"></i><span>CDS Copiloto</span>
+                                    </a>
+                                </li>
                                 <li class="nav-item">
                                     <a class="nav-link text-white" href="#" data-page="central-equipamentos" title="Central de Equipamentos">
                                         <i class="fas fa-network-wired" aria-hidden="true"></i><span>Central Equipamentos</span>
@@ -255,9 +281,25 @@
                                         <i class="fas fa-flask" aria-hidden="true"></i><span>Lab. Equipamentos</span>
                                     </a>
                                 </li>
+                                <!-- RC15.1 — Equipamentos › Toledo Prix IV › Enviar Produtos -->
+                                <li class="nav-item">
+                                    <div class="nav-link text-white-50 small py-1 pe-none" aria-hidden="true">
+                                        <i class="fas fa-weight-scale" aria-hidden="true"></i><span>Toledo Prix IV</span>
+                                    </div>
+                                </li>
+                                <li class="nav-item">
+                                    <a class="nav-link text-white ps-4" href="#" data-page="enviar-produtos-balanca" title="Enviar Produtos para Balança Toledo Prix IV">
+                                        <i class="fas fa-paper-plane" aria-hidden="true"></i><span>Enviar Produtos</span>
+                                    </a>
+                                </li>
                                 <li class="nav-item" data-recurso="fiscal" id="nav-central-diagnostico">
                                     <a class="nav-link text-white" href="#" data-page="central-diagnostico" title="Saúde da Central">
                                         <i class="fas fa-heartbeat" aria-hidden="true"></i><span>Saúde da Central</span>
+                                    </a>
+                                </li>
+                                <li class="nav-item" data-recurso="fiscal" id="nav-dfe-auditoria">
+                                    <a class="nav-link text-white" href="#" data-page="dfe-auditoria" title="Auditoria Motor DF-e">
+                                        <i class="fas fa-search-location" aria-hidden="true"></i><span>Auditoria DF-e</span>
                                     </a>
                                 </li>
                                 <li class="nav-item" id="nav-config-avancadas">
@@ -270,6 +312,7 @@
                     </ul>
 
                     <div class="sidebar-footer">
+                        <div id="cds-empresa-seletor" class="cds-empresa-seletor mb-2" hidden></div>
                         <div class="text-white mb-2 small sidebar-user-block">
                             <i class="fas fa-user"></i> <span id="user-nome">Carregando...</span>
                             <br>
@@ -308,6 +351,7 @@
     <script src="/shared/js/access-control.js"></script>
     <script src="/shared/js/caixaPermissoes.js"></script>
     <script src="/shared/js/cds-page-shell.js"></script>
+    <script src="/shared/js/cds-empresa-contexto.js"></script>
     <script src="/shared/js/cds-smart-select.js"></script>
     <script src="/shared/js/core.js"></script>
     <script src="/shared/js/cds-nomenclatura.js"></script>
@@ -322,16 +366,20 @@
     <script type="application/cds-lazy" src="/shared/js/vendasHistoricoUi.js"></script>
     <script type="application/cds-lazy" src="/erp/js/dashboard-command.js"></script>
     <script type="application/cds-lazy" src="/erp/js/dashboard.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/motor-unidades-medida.js"></script>
     <script type="application/cds-lazy" src="/erp/js/produtos.js"></script>
     <script type="application/cds-lazy" src="/erp/js/subcategorias.js"></script>
     <script type="application/cds-lazy" src="/erp/js/clientes.js"></script>
     <script type="application/cds-lazy" src="/erp/js/fornecedores.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/miip-central-revisao-inteligente.js"></script>
     <script type="application/cds-lazy" src="/erp/js/miip-central-revisao.js"></script>
     <script type="application/cds-lazy" src="/erp/js/compras.js"></script>
     <script type="application/cds-lazy" src="/erp/js/central-entradas-ux.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/central-recuperacao-xml.js"></script>
     <script type="application/cds-lazy" src="/erp/js/central-entradas.js"></script>
     <script type="application/cds-lazy" src="/erp/js/central-homologacao.js"></script>
     <script type="application/cds-lazy" src="/erp/js/central-diagnostico.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/dfe-auditoria.js"></script>
     <script type="application/cds-lazy" src="/erp/js/vendas.js"></script>
     <script type="application/cds-lazy" src="/pdv/js/entregas.js"></script>
     <script type="application/cds-lazy" src="/erp/js/faturamento.js"></script>
@@ -340,6 +388,7 @@
     <script type="application/cds-lazy" src="/erp/js/financeiro-dashboard.js"></script>
     <script type="application/cds-lazy" src="/erp/js/financeiro-receber.js"></script>
     <script type="application/cds-lazy" src="/erp/js/financeiro-pagar.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/financeiro-condicoes.js"></script>
     <script type="application/cds-lazy" src="/erp/js/financeiro-historico.js"></script>
     <script type="application/cds-lazy" src="/erp/js/financeiro-relatorios.js"></script>
     <script type="application/cds-lazy" src="/erp/js/financeiro.js"></script>
@@ -351,6 +400,7 @@
     <script type="application/cds-lazy" src="/erp/js/equipamentos.js"></script>
     <script type="application/cds-lazy" src="/erp/js/central-equipamentos.js"></script>
     <script type="application/cds-lazy" src="/erp/js/laboratorio-equipamentos.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/enviar-produtos-balanca.js"></script>
     <script type="application/cds-lazy" src="/erp/js/configuracao_tef.js"></script>
     <script type="application/cds-lazy" src="/erp/js/categorias.js"></script>
     <script type="application/cds-lazy" src="/erp/js/fiscal.js"></script>
@@ -362,6 +412,13 @@
     <script type="application/cds-lazy" src="/erp/js/licenca.js"></script>
     <script type="application/cds-lazy" src="/erp/js/auditoria.js"></script>
     <script type="application/cds-lazy" src="/erp/js/observabilidade.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/mib-analytics.js"></script>
+    <script type="application/cds-lazy" src="/shared/js/SearchSDK.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/enterprise-search.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/knowledge-center.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/cip-insights.js"></script>
+    <script type="application/cds-lazy" src="/shared/js/AgentSDK.js"></script>
+    <script type="application/cds-lazy" src="/erp/js/cds-copiloto.js"></script>
     <script type="application/cds-lazy" src="/erp/js/caixas.js"></script>
     <script src="/shared/js/cds-obs-rum.js"></script>
     <script src="/erp/js/app.js"></script>

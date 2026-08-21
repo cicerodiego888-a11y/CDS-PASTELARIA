@@ -61,7 +61,7 @@ setInterval(() => {
     }
 }, 3000);
 
-const MODO_FISCAL_PADRAO = '1';
+const MODO_FISCAL_PADRAO = '1'; // sistema sempre inicia com modo fiscal aberto
 
 /** Estado de implantação — fail-closed até /recursos responder. */
 let CONFIG_IMPLANTACAO = { recursos: {} };
@@ -94,6 +94,7 @@ const PAGINAS_MODULO_FISCAL = Object.freeze([
     'central-contabil',
     'central-entradas',
     'central-diagnostico',
+    'dfe-auditoria',
     'monitoring'
 ]);
 
@@ -123,11 +124,17 @@ const CATALOGO_PESQUISA_PAGINAS = Object.freeze([
     { page: 'central-contabil', titulo: 'Central Contábil', keywords: 'contabilidade exportação zip xml contador escritório', fiscal: true },
     { page: 'central-equipamentos', titulo: 'Central de Equipamentos', keywords: 'balança discovery identidade equipamentos central saúde', fiscal: false },
     { page: 'central-diagnostico', titulo: 'Saúde da Central', keywords: 'diagnóstico central fiscal', fiscal: true },
+    { page: 'dfe-auditoria', titulo: 'Auditoria DF-e', keywords: 'dfe auditoria nsu sync dist sefaz suporte', fiscal: true },
     { page: 'configuracoes', titulo: 'Configurações', keywords: 'empresa configuração' },
     { page: 'usuarios', titulo: 'Usuários', keywords: 'usuário permissão' },
     { page: 'licenca', titulo: 'Assinatura CDS', keywords: 'licença assinatura' },
     { page: 'auditoria', titulo: 'Auditoria', keywords: 'auditoria log' },
-    { page: 'configuracoes-avancadas', titulo: 'Centro de Configurações', keywords: 'avançadas certificado csc sefaz' }
+    { page: 'configuracoes-avancadas', titulo: 'Centro de Configurações', keywords: 'avançadas certificado csc sefaz' },
+    { page: 'mib-analytics', titulo: 'MIB Analytics', keywords: 'mib busca aprendizado fuzzy sinônimos analytics' },
+    { page: 'enterprise-search', titulo: 'Enterprise Search', keywords: 'enterprise search mib providers sdk telemetria' },
+    { page: 'knowledge-center', titulo: 'Knowledge Center', keywords: 'knowledge graph recomendações similaridade duplicados clusters mib' },
+    { page: 'cip-insights', titulo: 'CIP Insights', keywords: 'cip intelligence insights forecast automação recomendações' },
+    { page: 'cds-copiloto', titulo: 'CDS Copiloto', keywords: 'cia agent copiloto chat inteligência assistente' }
 ]);
 
 const FAVORITOS_STORAGE_KEY = 'cds_favoritos_paginas';
@@ -302,7 +309,7 @@ function paginaPermitidaPorImplantacao(page) {
     if (p === 'nfe-central' || p === 'nfe-avulsa' || p === 'nfe-monitor' || p === 'nfe-fila' || p === 'nfe-diagnostico') {
         return possuiRecurso('nfe');
     }
-    if (p === 'central-entradas' || p === 'central-diagnostico' || p === 'monitoring' || p === 'central-contabil') {
+    if (p === 'central-entradas' || p === 'central-diagnostico' || p === 'dfe-auditoria' || p === 'monitoring' || p === 'central-contabil') {
         return fiscalHabilitado();
     }
     if (p === 'caixas' && !implantacaoPermiteMultiCaixa()) return false;
@@ -410,7 +417,11 @@ function aplicarModoFiscalGlobal() {
 
     const faixa = document.getElementById('faixaSistemaFiscalPdv');
     if (faixa) {
-        faixa.style.display = ativo ? 'block' : 'none';
+        const permiteFiscal = typeof implantacaoPermiteFiscal !== 'function' || implantacaoPermiteFiscal();
+        faixa.style.display = permiteFiscal ? 'block' : 'none';
+        faixa.classList.toggle('faixa-sistema-fiscal--ativo', !!ativo);
+        faixa.classList.toggle('faixa-sistema-fiscal--off', !ativo);
+        faixa.setAttribute('aria-label', ativo ? 'Sistema fiscal ativo' : 'Sistema fiscal inativo');
     }
 
     const tituloPdv = document.querySelector('.pdv-header-left span');
@@ -514,21 +525,15 @@ function aplicarModoFiscalLocal(valor, opcoes = {}) {
 }
 
 async function carregarModoFiscalInicial() {
-    const remoto = await obterModoFiscalServidor();
-
-    if (remoto !== null) {
-        aplicarModoFiscalLocal(remoto, { recarregar: false });
+    if (!implantacaoPermiteFiscal()) {
+        aplicarModoFiscalLocal('0', { recarregar: false, forcar: true });
         return;
     }
 
-    if (localStorage.getItem('pdv_modo_fiscal_ativo') === null) {
-        aplicarModoFiscalLocal(MODO_FISCAL_PADRAO, { recarregar: false });
-        if (remoto === null && implantacaoPermiteFiscal()) {
-            salvarModoFiscalServidor(MODO_FISCAL_PADRAO);
-        }
-    } else {
-        aplicarModoFiscalGlobal();
-    }
+    // Política do sistema: sempre abre com modo fiscal ativo.
+    // F12 pode desligar na sessão; na próxima abertura volta ao padrão (aberto).
+    aplicarModoFiscalLocal(MODO_FISCAL_PADRAO, { recarregar: false, forcar: true });
+    await salvarModoFiscalServidor(MODO_FISCAL_PADRAO);
 }
 
 async function sincronizarModoFiscalServidor(opcoes = {}) {
@@ -861,6 +866,11 @@ function filtrarMenuPorPermissoes() {
 
     $('#nav-config-avancadas').toggle(isSuperAdminUser());
     $('#nav-observabilidade').toggle(isSuperAdminUser());
+    $('#nav-mib-analytics').toggle(isSuperAdminUser());
+    $('#nav-enterprise-search').toggle(isSuperAdminUser());
+    $('#nav-knowledge-center').toggle(isSuperAdminUser());
+    $('#nav-cip-insights').toggle(isSuperAdminUser());
+    $('#nav-cds-copiloto').toggle(isSuperAdminUser());
     const pdvLicenciado = possuiRecurso('pdv') || obterRecursosImplantacao().pdv !== false;
     $('#nav-abrir-pdv').toggle(window.CDS_MODULE === 'erp' && podeAbrirPDV() && pdvLicenciado);
     $('#nav-config-rede-pdv').toggle(window.CDS_MODULE === 'pdv' && isSuperAdminUser());
@@ -1053,6 +1063,12 @@ function logout() {
     if (confirm('Tem certeza que deseja sair?')) {
         localStorage.removeItem('token');
         localStorage.removeItem('user');
+        if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.limpar === 'function') {
+            CdsEmpresaContexto.limpar();
+        } else {
+            localStorage.removeItem('cds_empresa_id');
+            localStorage.removeItem('cds_empresa');
+        }
         window.location.href = '/login';
     }
 }
@@ -1114,6 +1130,9 @@ function inicializarShellModulo(options = {}) {
             if (token) {
                 xhr.setRequestHeader('Authorization', `Bearer ${token}`);
             }
+            if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.anexarHeaderXhr === 'function') {
+                CdsEmpresaContexto.anexarHeaderXhr(xhr);
+            }
         }
     });
 
@@ -1141,6 +1160,9 @@ function inicializarShellModulo(options = {}) {
                 ligarNavegacaoSidebar();
                 if (typeof inicializarSidebarToggle === 'function') {
                     inicializarSidebarToggle();
+                }
+                if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.inicializar === 'function') {
+                    CdsEmpresaContexto.inicializar();
                 }
 
                 currentPage = defaultPage;

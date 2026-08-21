@@ -9,6 +9,7 @@ const { resolverLayoutConfig } = require('../config/etiquetaBalancaConfig');
 const { parseEtiquetaComLayout } = require('../../equipamentos/layouts/ConfiguravelEtiquetaParser');
 const { TIPOS_IDENTIFICADOR } = require('../constants/tiposIdentificador');
 const { normalizarCodigoIdentificador } = require('../normalizers/normalizarCodigoIdentificador');
+const { variantesPlu, pluInformado } = require('../utils/normalizarPlu');
 
 function ehEtiquetaBalanca(codigo) {
   return /^2\d{12}$/.test(String(codigo || '').replace(/\D/g, ''));
@@ -48,32 +49,43 @@ class EtiquetaBalancaStrategy extends IdentidadeStrategyBase {
   }
 
   /**
+   * Localiza produto por PLU (inclui 0 / 00 / 0000 e paddings da etiqueta).
    * @private
+   * @param {string|number} plu
+   * @param {string} [pluRaw] campo bruto da etiqueta (com zeros)
    */
-  async _localizarPorPlu(plu) {
-    if (!this._catalogo || !plu) return null;
+  async _localizarPorPlu(plu, pluRaw) {
+    if (!this._catalogo) return null;
+    if (!pluInformado(plu) && !pluInformado(pluRaw)) return null;
 
-    const pluNorm = normalizarCodigoIdentificador(plu, TIPOS_IDENTIFICADOR.PLU);
+    const seeds = [];
+    if (pluInformado(pluRaw)) seeds.push(String(pluRaw).replace(/\D/g, ''));
+    if (pluInformado(plu)) seeds.push(normalizarCodigoIdentificador(plu, TIPOS_IDENTIFICADOR.PLU));
 
-    const viaPlu = await this._catalogo.resolverPorIdentificador(
-      TIPOS_IDENTIFICADOR.PLU,
-      pluNorm
-    );
-    if (viaPlu?.produto) return viaPlu.produto;
+    const tentados = new Set();
+    for (const seed of seeds) {
+      if (!seed || tentados.has(seed)) continue;
+      tentados.add(seed);
 
-    const viaInterno = await this._catalogo.resolverPorIdentificador(
-      TIPOS_IDENTIFICADOR.INTERNO,
-      pluNorm
-    );
-    if (viaInterno?.produto) return viaInterno.produto;
+      const viaPlu = await this._catalogo.resolverPorIdentificador(
+        TIPOS_IDENTIFICADOR.PLU,
+        seed
+      );
+      if (viaPlu?.produto) return viaPlu.produto;
 
-    const legado = await this._catalogo.buscarProdutoPorCodigoInterno(pluNorm);
-    if (legado) return legado;
+      for (const cand of variantesPlu(seed)) {
+        if (tentados.has(`i:${cand}`)) continue;
+        tentados.add(`i:${cand}`);
 
-    const padded = pluNorm.padStart(5, '0');
-    if (padded !== pluNorm) {
-      const legadoPad = await this._catalogo.buscarProdutoPorCodigoInterno(padded);
-      if (legadoPad) return legadoPad;
+        const viaInterno = await this._catalogo.resolverPorIdentificador(
+          TIPOS_IDENTIFICADOR.INTERNO,
+          cand
+        );
+        if (viaInterno?.produto) return viaInterno.produto;
+
+        const legado = await this._catalogo.buscarProdutoPorCodigoInterno(cand);
+        if (legado) return legado;
+      }
     }
 
     return null;
@@ -103,7 +115,7 @@ class EtiquetaBalancaStrategy extends IdentidadeStrategyBase {
       || contexto.layoutStrategy
       || parsed.layoutId;
 
-    const produto = await this._localizarPorPlu(parsed.plu);
+    const produto = await this._localizarPorPlu(parsed.plu, parsed.pluRaw);
     if (!produto) {
       return IdentidadeResultadoDTO.naoEncontrado({
         codigoOriginal: limpo,

@@ -87,10 +87,11 @@ async function main() {
     assert.ok(health.modulos.explainService);
   });
 
-  await test('MiipHealthCheck lista 10 módulos', () => {
+  await test('MiipHealthCheck lista 11 módulos', () => {
     const health = new MiipHealthCheck().executar();
-    assert.strictEqual(health.modulosTotal, 10);
-    assert.ok(health.modulosAtivos >= 9);
+    assert.strictEqual(health.modulosTotal, 11);
+    assert.ok(health.modulosAtivos >= 10);
+    assert.strictEqual(health.modulos.mubcEngine, true);
   });
 
   await test('MiipDecisionBuilder delega ao DecisionEngine', () => {

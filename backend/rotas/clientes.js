@@ -3,14 +3,7 @@ const router = express.Router();
 const db = require('../database');
 const { verificarToken: autenticarToken } = require('../middleware/auth');
 const { gravarAuditoria } = require('../services/auditoria');
-
-function normalizarTexto(texto) {
-  return String(texto || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .normalize('NFC')
-    .toLowerCase();
-}
+const { obterSearchService } = require('../motores/mib');
 
 // Listar todos os clientes
 router.get('/', (req, res) => {
@@ -23,37 +16,37 @@ router.get('/', (req, res) => {
   });
 });
 
-// Buscar clientes por termo (nome, CPF ou telefone)
-router.get('/buscar', autenticarToken, (req, res) => {
+// Buscar clientes por termo — via SearchService (MIB-RC3.0)
+router.get('/buscar', autenticarToken, async (req, res) => {
   const termo = (req.query.termo || '').trim();
   if (!termo) {
     return res.json([]);
   }
 
-  const termoNormalizado = normalizarTexto(termo);
-  const termoNumeros = termo.replace(/\D/g, '');
-  const sql = `
-    SELECT id, nome, cpf_cnpj, telefone
-    FROM clientes
-    ORDER BY nome ASC
-  `;
-
-  db.all(sql, [], (err, rows) => {
-    if (err) {
-      console.error('Erro ao buscar clientes:', err);
-      return res.status(500).json({ error: 'Erro ao buscar clientes' });
-    }
-
-    const filtrados = (rows || []).filter(cliente => {
-      const nome = normalizarTexto(cliente.nome);
-      const cpf = String(cliente.cpf_cnpj || '');
-      const telefone = String(cliente.telefone || '');
-      const cpfTelefoneMatch = termoNumeros && (cpf.replace(/\D/g, '').includes(termoNumeros) || telefone.replace(/\D/g, '').includes(termoNumeros));
-      return nome.includes(termoNormalizado) || cpfTelefoneMatch;
-    }).slice(0, 20);
-
-    res.json(filtrados);
-  });
+  try {
+    const user = req.user || {};
+    const resultado = await obterSearchService(db).search({
+      entity: 'cliente',
+      query: termo,
+      limite: 20,
+      operador_id: user.id,
+      permissoes: user.permissoes || ['clientes'],
+      perfil: user.perfil,
+      role: user.role || 'admin',
+      origem: 'api.clientes.buscar',
+      user
+    });
+    const itens = (resultado.itens || []).map((c) => ({
+      id: c.id,
+      nome: c.nome,
+      cpf_cnpj: c.cpf_cnpj,
+      telefone: c.telefone
+    }));
+    return res.json(itens);
+  } catch (err) {
+    console.error('Erro ao buscar clientes (SearchService):', err);
+    return res.status(500).json({ error: 'Erro ao buscar clientes' });
+  }
 });
 
 // Vendas do cliente (histórico de compras)

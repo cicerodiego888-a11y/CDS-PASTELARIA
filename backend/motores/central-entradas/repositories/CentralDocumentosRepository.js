@@ -18,6 +18,11 @@ const {
 const { DocumentoFiscalStatus } = require('../core/DocumentoFiscalStatus');
 const { CAMPOS_ORDENACAO } = require('../utils/paginacaoCentral');
 const { obterPreset } = require('../utils/filtrosRapidosCentral');
+const {
+  montarClausulaBuscaInteligente,
+  apenasDigitos,
+  sqlExprCnpjDigitos
+} = require('../utils/normalizarBuscaCentral');
 const { calcularPrecisaoImportacao } = require('../../miip/utils/miipCentralRevisaoUtils');
 
 const MAPA_CAMPOS = {
@@ -107,6 +112,13 @@ class CentralDocumentosRepository extends IRepository {
       miipSessaoId: row.miip_sessao_id,
       miipResumoJson: deserializarJson(row.miip_resumo_json),
       compraId: row.compra_id,
+      compraTipoEntrada: row.compra_tipo_entrada || null,
+      compraTipoEntradaSugerido: row.compra_tipo_entrada_sugerido || null,
+      compraTipoEntradaConfianca: row.compra_tipo_entrada_confianca != null
+        ? Number(row.compra_tipo_entrada_confianca)
+        : null,
+      compraTipoEntradaMotivo: row.compra_tipo_entrada_motivo || null,
+      compraTipoEntradaAlterado: Number(row.compra_tipo_entrada_alterado) === 1,
       usuarioId: row.usuario_id,
       processadoEm: row.processado_em,
       createdAt: row.created_at,
@@ -136,7 +148,15 @@ class CentralDocumentosRepository extends IRepository {
     await sql.whenReady();
 
     const row = await sql.get(
-      `SELECT * FROM ${CentralDocumentosRepository.TABELA} WHERE id = ?`,
+      `SELECT d.*,
+              c.tipo_entrada AS compra_tipo_entrada,
+              c.tipo_entrada_sugerido AS compra_tipo_entrada_sugerido,
+              c.tipo_entrada_confianca AS compra_tipo_entrada_confianca,
+              c.tipo_entrada_motivo AS compra_tipo_entrada_motivo,
+              c.tipo_entrada_alterado AS compra_tipo_entrada_alterado
+       FROM ${CentralDocumentosRepository.TABELA} d
+       LEFT JOIN compras c ON c.id = d.compra_id
+       WHERE d.id = ?`,
       [id]
     );
     return this._mapearRow(row);
@@ -172,8 +192,9 @@ class CentralDocumentosRepository extends IRepository {
     }
 
     if (filtros.cnpjFornecedor || filtros.cnpj_fornecedor) {
-      where.push('cnpj_fornecedor = ?');
-      params.push(filtros.cnpjFornecedor || filtros.cnpj_fornecedor);
+      const cnpj = apenasDigitos(filtros.cnpjFornecedor || filtros.cnpj_fornecedor);
+      where.push(`${sqlExprCnpjDigitos('cnpj_fornecedor')} = ?`);
+      params.push(cnpj);
     }
 
     if (filtros.origem) {
@@ -181,19 +202,22 @@ class CentralDocumentosRepository extends IRepository {
       params.push(filtros.origem);
     }
 
+    // RC3.6.C — busca inteligente (CNPJ máscara, zeros NF, &amp;, acentos)
     if (filtros.busca) {
-      const termo = `%${String(filtros.busca).trim()}%`;
-      where.push('(chave LIKE ? OR numero LIKE ? OR fornecedor LIKE ? OR cnpj_fornecedor LIKE ?)');
-      params.push(termo, termo, termo, termo);
+      const clausulaBusca = montarClausulaBuscaInteligente(filtros.busca);
+      if (clausulaBusca) {
+        where.push(clausulaBusca.sql);
+        params.push(...clausulaBusca.params);
+      }
     }
 
     if (filtros.dataEmissaoInicio || filtros.data_emissao_inicio) {
-      where.push('data_emissao >= ?');
+      where.push("data_emissao IS NOT NULL AND TRIM(data_emissao) != '' AND date(data_emissao) >= date(?)");
       params.push(filtros.dataEmissaoInicio || filtros.data_emissao_inicio);
     }
 
     if (filtros.dataEmissaoFim || filtros.data_emissao_fim) {
-      where.push('data_emissao <= ?');
+      where.push("data_emissao IS NOT NULL AND TRIM(data_emissao) != '' AND date(data_emissao) <= date(?)");
       params.push(filtros.dataEmissaoFim || filtros.data_emissao_fim);
     }
 
@@ -271,7 +295,13 @@ class CentralDocumentosRepository extends IRepository {
   static get COLUNAS_LISTAGEM() {
     return `id, chave, numero, serie, modelo, fornecedor, cnpj_fornecedor,
       data_emissao, data_entrada, valor_total, nsu, origem, status, status_detalhe, tipo_documento,
-      miip_sessao_id, miip_resumo_json, compra_id, usuario_id, processado_em, created_at, updated_at`;
+      miip_sessao_id, miip_resumo_json, compra_id, usuario_id, processado_em, created_at, updated_at,
+      CASE WHEN tipo_documento IN ('PROC_NFE', 'NFE') THEN 1 ELSE 0 END AS xml_completo_flag,
+      CASE
+        WHEN parse_json IS NOT NULL AND TRIM(parse_json) != '' THEN 1
+        WHEN tipo_documento IN ('PROC_NFE', 'NFE') THEN 1
+        ELSE 0
+      END AS parse_disponivel_flag`;
   }
 
   /**
@@ -292,6 +322,24 @@ class CentralDocumentosRepository extends IRepository {
       [...params, ...pag.params]
     );
 
+    if (filtros.busca) {
+      const metaBusca = montarClausulaBuscaInteligente(filtros.busca);
+      console.log('[Central Entradas][BUSCA]', JSON.stringify({
+        pesquisa: String(filtros.busca || '').trim(),
+        normalizado: metaBusca?.meta || null,
+        filtros: {
+          status: filtros.status || null,
+          origem: filtros.origem || null,
+          filtroRapido: filtros.filtroRapido || filtros.filtro_rapido || null,
+          dataEmissaoInicio: filtros.dataEmissaoInicio || filtros.data_emissao_inicio || null,
+          dataEmissaoFim: filtros.dataEmissaoFim || filtros.data_emissao_fim || null
+        },
+        where: clausulaWhere,
+        params,
+        quantidadeRetornada: rows.length
+      }));
+    }
+
     return rows.map((row) => this._mapearRowListagem(row));
   }
 
@@ -302,6 +350,10 @@ class CentralDocumentosRepository extends IRepository {
    */
   _mapearRowListagem(row) {
     if (!row) return null;
+
+    const xmlCompleto = Number(row.xml_completo_flag) === 1
+      || ['PROC_NFE', 'NFE'].includes(String(row.tipo_documento || '').toUpperCase());
+    const parseDisponivel = Number(row.parse_disponivel_flag) === 1 || xmlCompleto;
 
     return {
       id: row.id,
@@ -327,7 +379,11 @@ class CentralDocumentosRepository extends IRepository {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       parseJson: null,
-      xml: null
+      xml: null,
+      xmlDisponivel: xmlCompleto,
+      parseDisponivel,
+      /** Sentinel RC3.7.1 — listagem não carrega parse_json; flag indica XML completo / parseável */
+      _parseDisponivelListagem: parseDisponivel
     };
   }
 
@@ -363,8 +419,14 @@ class CentralDocumentosRepository extends IRepository {
     const row = await sql.get(
       `SELECT
          COUNT(*) AS total_documentos,
-         COALESCE(SUM(CASE WHEN date(created_at) = date('now', 'localtime') THEN valor_total ELSE 0 END), 0) AS valor_total_dia,
-         COALESCE(SUM(CASE WHEN date(created_at) = date('now', 'localtime') THEN 1 ELSE 0 END), 0) AS documentos_hoje
+         COALESCE(SUM(CASE
+           WHEN data_emissao IS NOT NULL AND TRIM(data_emissao) != ''
+            AND date(data_emissao) = date('now', 'localtime')
+           THEN valor_total ELSE 0 END), 0) AS valor_total_dia,
+         COALESCE(SUM(CASE
+           WHEN data_emissao IS NOT NULL AND TRIM(data_emissao) != ''
+            AND date(data_emissao) = date('now', 'localtime')
+           THEN 1 ELSE 0 END), 0) AS documentos_hoje
        FROM ${CentralDocumentosRepository.TABELA}`
     );
 
@@ -680,17 +742,18 @@ class CentralDocumentosRepository extends IRepository {
   /**
    * Métricas operacionais agregadas (somente leitura).
    *
+   * @param {Object} [opcoes] — { ano, mes, competencia }
    * @returns {Promise<Object>}
    */
-  async obterMetricasOperacionais() {
+  async obterMetricasOperacionais(opcoes = {}) {
     const sql = this._obterSql();
     await sql.whenReady();
 
+    const indicadoresFiscaisService = require('../../../services/IndicadoresFiscaisService');
+    const indicadores = await indicadoresFiscaisService.obterIndicadoresCentral(opcoes);
+
     const row = await sql.get(
       `SELECT
-         COALESCE(SUM(CASE
-           WHEN strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now', 'localtime')
-           THEN valor_total ELSE 0 END), 0) AS valor_total_mes,
          AVG(CASE
            WHEN processado_em IS NOT NULL AND created_at IS NOT NULL
            THEN (julianday(processado_em) - julianday(created_at)) * 24 * 60
@@ -732,7 +795,15 @@ class CentralDocumentosRepository extends IRepository {
     });
 
     return {
-      valorTotalMes: Number(row?.valor_total_mes || 0),
+      valorTotalMes: Number(indicadores.valorMensal || 0),
+      valorMensal: Number(indicadores.valorMensal || 0),
+      valorAnual: Number(indicadores.valorAnual || 0),
+      quantidadeMensal: Number(indicadores.quantidadeMensal || 0),
+      quantidadeAnual: Number(indicadores.quantidadeAnual || 0),
+      competencia: indicadores.competencia,
+      competenciaLabel: indicadores.competenciaLabel,
+      ambiente: indicadores.ambiente,
+      ambienteLabel: indicadores.ambienteLabel,
       tempoMedioProcessamentoMinutos: row?.tempo_medio_minutos != null
         ? Math.round(Number(row.tempo_medio_minutos))
         : null,

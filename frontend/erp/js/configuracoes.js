@@ -1230,7 +1230,29 @@ function carregarConfigFiscalAvancadas() {
 
     if (typeof carregarFiscalConfig === 'function') {
         carregarFiscalConfig('#fiscal-config-form-area-avancadas');
+        return;
     }
+
+    const carregarFiscalLazy = async () => {
+        try {
+            if (window.CdsErpLazyLoader?.loadFeatureScript) {
+                await window.CdsErpLazyLoader.loadFeatureScript('/erp/js/fiscal.js');
+            }
+            if (typeof carregarFiscalConfig === 'function') {
+                carregarFiscalConfig('#fiscal-config-form-area-avancadas');
+                return;
+            }
+        } catch (err) {
+            console.error('[Config] Falha ao carregar módulo fiscal:', err);
+        }
+        $form.html(`
+            <div class="alert alert-warning mb-0">
+                Não foi possível carregar o módulo fiscal. Recarregue a página ou acesse novamente Configurações.
+            </div>
+        `);
+    };
+
+    void carregarFiscalLazy();
 }
 
 function configurarFormConfigAvancadas() {
@@ -1458,7 +1480,12 @@ async function salvarPadraoFiscalEmpresa() {
         cfop_padrao: ($('#padraoCfop').val() || '').trim(),
         csosn_padrao: ($('#padraoCsosn').val() || '').trim(),
         origem_padrao: ($('#padraoOrigem').val() || '').trim(),
-        cest_padrao: ($('#padraoCest').val() || '').trim()
+        cest_padrao: ($('#padraoCest').val() || '').trim(),
+        entrada_bonificacao_cfop_padrao: ($('#bonifCfopPadrao').val() || '5910').trim(),
+        entrada_bonificacao_csosn_padrao: ($('#bonifCsosnPadrao').val() || '').trim(),
+        entrada_bonificacao_natureza: ($('#bonifNatureza').val() || 'Bonificação recebida').trim(),
+        entrada_bonificacao_atualizar_custo: $('#bonifAtualizarCusto').is(':checked'),
+        entrada_bonificacao_gerar_estoque: $('#bonifGerarEstoque').is(':checked')
     };
 
     try {
@@ -1484,6 +1511,13 @@ async function salvarPadraoFiscalEmpresa() {
         $('#padraoCsosn').val(padrao.csosn_padrao || '');
         $('#padraoOrigem').val(padrao.origem_padrao || '');
         $('#padraoCest').val(padrao.cest_padrao || '');
+        if ($('#bonifCfopPadrao').length) {
+            $('#bonifCfopPadrao').val(padrao.entrada_bonificacao_cfop_padrao || '5910');
+            $('#bonifCsosnPadrao').val(padrao.entrada_bonificacao_csosn_padrao || '');
+            $('#bonifNatureza').val(padrao.entrada_bonificacao_natureza || 'Bonificação recebida');
+            $('#bonifGerarEstoque').prop('checked', padrao.entrada_bonificacao_gerar_estoque !== false);
+            $('#bonifAtualizarCusto').prop('checked', padrao.entrada_bonificacao_atualizar_custo === true);
+        }
     } catch (err) {
         console.error(err);
         showNotification(err.message || 'Erro ao salvar padrão fiscal.', 'danger');

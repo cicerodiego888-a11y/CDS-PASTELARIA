@@ -12,11 +12,35 @@ const { normalizarTipoVendaItem } = require('../vendaUnidadeHelpers');
 const { separarItensDistribuidos } = require('../fiscalNaoFiscalService');
 const OrquestradorPagamento = require('../OrquestradorPagamento');
 const { parseVendaFiscalFlag, distribuirItensVendaComValorFiscalEfetivo } = require('../distribuidorEstoqueVenda');
+const mpfc = require('../mpfc');
 const {
   obterCreditoReservaPedidoCb,
   creditarDisponibilidadeComReservaPedido,
   consumirReservasPedidoNaVendaCb
 } = require('../estoque/pedidoReservaPonteNucleo');
+const {
+  debitarEstoqueItemVenda,
+  montarOpcoesBaixaEstoqueVenda
+} = require('./debitoEstoqueVendaViaPorta');
+
+/**
+ * RC8.2 — carrega MPFC e entrega política aos consumidores.
+ * midpAtivo / preservarDinheiro vêm exclusivamente da política (não de leitura direta no F×NF).
+ */
+function carregarPoliticaFiscalComercialPassiva(opcoes = {}) {
+  const politica = mpfc.obterPolitica(opcoes);
+  const comercial = mpfc.receberPoliticaMotorComercial(politica);
+  const fiscalNaoFiscal = mpfc.receberPoliticaMotorFiscalNaoFiscal(politica);
+  const snapshot = mpfc.prepararSnapshot(politica);
+  return { politica, comercial, fiscalNaoFiscal, snapshot };
+}
+
+/**
+ * RC8.2 — validação comercial de margem (domínio comercial exclusivo).
+ */
+function validarMargemPoliticaComercial(itens, produtoMap, politica) {
+  return mpfc.validarMargemMinimaComercial(itens, produtoMap, politica);
+}
 
 /**
  * RC3.15.11 — prioridade fiscal do estoque ≠ emissão de NFC-e.
@@ -30,64 +54,104 @@ function resolverVendaFiscalParaMotor(body = {}) {
   }
   return parseVendaFiscalFlag(body.emitir_fiscal);
 }
+
+/**
+ * HOTFIX FISCAL-4.0.2 — totais oficiais para validação de pagamento.
+ * Prefere valorFiscalLiquido / valorNaoFiscalLiquido do Motor; espelha itens se ausente.
+ */
+function resolverTotaisFiscaisLiquidosMotor(resultadoMotor, distribuicaoItens) {
+  const espelho = separarItensDistribuidos(distribuicaoItens || []);
+  const totalFiscal = Number(
+    resultadoMotor && resultadoMotor.valorFiscalLiquido != null
+      ? resultadoMotor.valorFiscalLiquido
+      : (resultadoMotor && resultadoMotor.valorFiscalEfetivo != null
+        ? resultadoMotor.valorFiscalEfetivo
+        : espelho.totalFiscal)
+  );
+  const totalNaoFiscal = Number(
+    resultadoMotor && resultadoMotor.valorNaoFiscalLiquido != null
+      ? resultadoMotor.valorNaoFiscalLiquido
+      : (resultadoMotor && resultadoMotor.valorNaoFiscal != null
+        ? resultadoMotor.valorNaoFiscal
+        : espelho.totalNaoFiscal)
+  );
+  return {
+    totalFiscal: Math.round((totalFiscal || 0) * 100) / 100,
+    totalNaoFiscal: Math.round((totalNaoFiscal || 0) * 100) / 100
+  };
+}
+
 const VendaFinanceiroService = require('./VendaFinanceiroService');
 const VendaFiscalService = require('./VendaFiscalService');
 
 const { agoraLocalBrasil, validarSomaPagamentosVenda } = VendaFinanceiroService;
 const { emitirFiscalSeSolicitado, responderVendaComFiscal } = VendaFiscalService;
 
-function reduzirEstoqueComFEFO(vendaItemId, produtoId, quantidade, itemFiscal, callback) {
+/**
+ * Enriquece SQLITE FOREIGN KEY com a etapa e IDs relevantes (diagnóstico PDV).
+ */
+function erroPersistenciaVenda(err, etapa, ctx = {}) {
+  const msg = String((err && err.message) || err || 'Erro ao gravar venda');
+  if (/FOREIGN KEY/i.test(msg)) {
+    const detalhe = Object.entries(ctx || {})
+      .filter(([, v]) => v !== undefined && v !== null && v !== '')
+      .map(([k, v]) => `${k}=${v}`)
+      .join(', ');
+    return {
+      error:
+        `Integridade do banco na etapa "${etapa}" (FOREIGN KEY).` +
+        (detalhe ? ` Refs: ${detalhe}.` : '') +
+        ' Confira caixa/turno, terminal, operador, cliente e produto.',
+      codigo: 'FK_CONSTRAINT',
+      etapa
+    };
+  }
+  return { error: msg, etapa };
+}
+
+function atualizarSaldoProdutoAposBaixa(produtoId, quantidade, itemFiscal, callback, opcoes = {}) {
+  const qtd = Number(quantidade || 0);
+  const fiscal = Number(itemFiscal) === 1;
+  debitarEstoqueItemVenda(opcoes.db || db, {
+    produtoId,
+    quantidadeFiscal: fiscal ? qtd : 0,
+    quantidadeNaoFiscal: fiscal ? 0 : qtd,
+    empresaId: opcoes.empresaId ?? opcoes.empresa_id,
+    usuarioId: opcoes.usuarioId,
+    exigirEmpresa: opcoes.exigirEmpresa,
+    origem: opcoes.origem || 'baixa_venda',
+    contexto: opcoes.contexto,
+    ctx: opcoes.ctx,
+    validarEmpresa: opcoes.validarEmpresa
+  }, callback);
+}
+
+function reduzirEstoqueComFEFO(vendaItemId, produtoId, quantidade, itemFiscal, callback, opcoes = {}) {
   lotesService.produtoControlaValidade(produtoId, (err, controlaValidade) => {
     if (err) return callback(err);
 
     if (!controlaValidade) {
-      // Produto não controla validade - usar estoque consolidado normal
-      if (Number(itemFiscal) === 1) {
-        db.run(`
-          UPDATE produtos
-          SET
-            saldo_fiscal = saldo_fiscal - ?,
-            estoque_atual = (saldo_fiscal - ?) + saldo_nao_fiscal
-          WHERE id = ?
-        `, [quantidade, quantidade, produtoId], callback);
-      } else {
-        db.run(`
-          UPDATE produtos
-          SET
-            saldo_nao_fiscal = saldo_nao_fiscal - ?,
-            estoque_atual = saldo_fiscal + (saldo_nao_fiscal - ?)
-          WHERE id = ?
-        `, [quantidade, quantidade, produtoId], callback);
-      }
-      return;
+      return atualizarSaldoProdutoAposBaixa(produtoId, quantidade, itemFiscal, callback, opcoes);
     }
 
     // Produto controla validade - usar FEFO
     lotesService.consumirLotesFEFO(produtoId, quantidade, (consumoErr, consumoLotes) => {
       if (consumoErr) return callback(consumoErr);
 
-      // Registrar quais lotes foram consumidos
-      lotesService.registrarConsumoVenda(vendaItemId, consumoLotes, (registroErr) => {
+      const aposRegistro = (registroErr) => {
         if (registroErr) return callback(registroErr);
+        atualizarSaldoProdutoAposBaixa(produtoId, quantidade, itemFiscal, callback, opcoes);
+      };
 
-        // Atualizar estoque consolidado e saldos fiscal/não fiscal
-        if (Number(itemFiscal) === 1) {
-          db.run(`
-            UPDATE produtos
-            SET
-              saldo_fiscal = saldo_fiscal - ?,
-              estoque_atual = (saldo_fiscal - ?) + saldo_nao_fiscal
-            WHERE id = ?
-          `, [quantidade, quantidade, produtoId], callback);
-        } else {
-          db.run(`
-            UPDATE produtos
-            SET
-              saldo_nao_fiscal = saldo_nao_fiscal - ?,
-              estoque_atual = saldo_fiscal + (saldo_nao_fiscal - ?)
-            WHERE id = ?
-          `, [quantidade, quantidade, produtoId], callback);
-        }
+      // Sem item válido não grava venda_lotes (evita FK órfã); baixa de lote já ocorreu
+      if (vendaItemId == null || Number(vendaItemId) <= 0) {
+        return aposRegistro(null);
+      }
+
+      db.get('SELECT id FROM vendas_itens WHERE id = ?', [vendaItemId], (itemLookupErr, itemRow) => {
+        if (itemLookupErr) return callback(itemLookupErr);
+        if (!itemRow) return aposRegistro(null);
+        lotesService.registrarConsumoVenda(vendaItemId, consumoLotes, aposRegistro);
       });
     });
   });
@@ -98,11 +162,13 @@ function reduzirEstoqueDistribuido(
   produtoId,
   quantidadeFiscal,
   quantidadeNaoFiscal,
-  callback
+  callback,
+  opcoes = {}
 ) {
   const { produtoControlaEstoque } = require('../estoque/produtoControlaEstoque');
+  const dbConn = opcoes.db || db;
 
-  db.get(
+  dbConn.get(
     `SELECT COALESCE(controla_estoque, 1) AS controla_estoque FROM produtos WHERE id = ?`,
     [produtoId],
     (errFlag, rowFlag) => {
@@ -122,7 +188,8 @@ function reduzirEstoqueDistribuido(
           produtoId,
           quantidadeNaoFiscal,
           0,
-          callback
+          callback,
+          opcoes
         );
 
       };
@@ -144,7 +211,8 @@ function reduzirEstoqueDistribuido(
 
           executarNaoFiscal();
 
-        }
+        },
+        opcoes
       );
     }
   );
@@ -516,7 +584,8 @@ db.all(`
     });
   }
 
-  const midpAtivo = Boolean(configService.isMidpAtivado && configService.isMidpAtivado());
+  const { politica: politicaMpfc } = carregarPoliticaFiscalComercialPassiva();
+  const midpAtivo = Boolean(politicaMpfc.preservarDinheiro);
   const pagamentosPre = Array.isArray(req.body?.pagamentos) ? req.body.pagamentos : [];
   const resultadoMotor = distribuirItensVendaComValorFiscalEfetivo(
     entradasMotor,
@@ -525,7 +594,8 @@ db.all(`
       pagamentos: pagamentosPre,
       midpAtivo,
       desconto: Number(desconto || 0),
-      acrescimo: Number(acrescimo || 0)
+      acrescimo: Number(acrescimo || 0),
+      politicaFiscalComercial: politicaMpfc
     }
   );
 
@@ -553,6 +623,7 @@ db.all(`
 
   res.json({
     sucesso: true,
+    liquido_aplicado_backend: true,
     valor_fiscal: resultadoMotor.valorFiscalEfetivo,
     valor_nao_fiscal: resultadoMotor.valorNaoFiscal,
     valor_fiscal_maximo: resultadoMotor.valorFiscalMaximo,
@@ -567,11 +638,38 @@ db.all(`
 });
 }
 
+function vendaExigeAutorizacaoDescontoManual(body = {}) {
+  if (Number(body.desconto || 0) > 0) return true;
+  const itens = Array.isArray(body.itens) ? body.itens : [];
+  return itens.some((item) => (
+    Number(item.desconto_manual || 0) === 1
+    && (Number(item.desconto_valor || 0) > 0 || Number(item.desconto_percentual || 0) > 0)
+  ));
+}
+
 function criarVenda(req, res) {
+const opcoesBaixaEstoque = montarOpcoesBaixaEstoqueVenda(req, 'baixa_venda', db);
 const tipoVendaCanal = String(req.body?.tipo_venda || 'BALCAO').toUpperCase();
 if (tipoVendaCanal === 'ENTREGA') {
   const { criarVendaEntrega } = require('../entrega/CriarVendaEntregaService');
   return criarVendaEntrega(req, res);
+}
+
+if (!req.__descontoAuthOk && vendaExigeAutorizacaoDescontoManual(req.body)) {
+  const { verificarSupervisorToken, isSupervisorPerfil } = require('../../rotas/auth');
+  if (!isSupervisorPerfil(req.user || {})) {
+    return verificarSupervisorToken(req.body.supervisor_token || null)
+      .then((supervisorUser) => {
+        req.__descontoAuthOk = true;
+        req.supervisorAutorizacao = supervisorUser;
+        return criarVenda(req, res);
+      })
+      .catch((err) => res.status(403).json({
+        error: err.message || 'Desconto exige autorização de administrador ou supervisor.',
+        codigo: err.code || 'DESCONTO_NAO_AUTORIZADO'
+      }));
+  }
+  req.__descontoAuthOk = true;
 }
 
 const {
@@ -686,6 +784,7 @@ db.all(`
   SELECT
     id,
     nome,
+    preco_compra,
     saldo_fiscal,
     saldo_nao_fiscal,
     estoque_atual,
@@ -754,7 +853,20 @@ db.all(`
     });
   }
 
-  const midpAtivo = Boolean(configService.isMidpAtivado && configService.isMidpAtivado());
+  const { politica: politicaMpfc, snapshot: snapshotMpfc } = carregarPoliticaFiscalComercialPassiva();
+  const midpAtivo = Boolean(politicaMpfc.preservarDinheiro);
+  const snapshotJson = mpfc.snapshotParaJson(politicaMpfc);
+  mpfc.registrarSnapshotGravado(politicaMpfc, { fonte: 'criar_venda' });
+
+  const validacaoMargem = validarMargemPoliticaComercial(itens, produtoMap, politicaMpfc);
+  if (!validacaoMargem.sucesso) {
+    return res.status(400).json({
+      error: validacaoMargem.error,
+      codigo: 'MARGEM_MINIMA_COMERCIAL',
+      itens: validacaoMargem.itensViolados
+    });
+  }
+
   const pagamentosParaMotor = Array.isArray(pagamentosVenda) && pagamentosVenda.length
     ? pagamentosVenda
     : (forma_pagamento
@@ -768,7 +880,8 @@ db.all(`
       pagamentos: pagamentosParaMotor,
       midpAtivo,
       desconto: Number(desconto || 0),
-      acrescimo: Number(acrescimo || 0)
+      acrescimo: Number(acrescimo || 0),
+      politicaFiscalComercial: politicaMpfc
     }
   );
 
@@ -798,6 +911,10 @@ db.all(`
     if (!pedidoIdVenda) return next();
     consumirReservasPedidoNaVendaCb(pedidoIdVenda, vendaId, db, () => {
       next();
+    }, {
+      empresaId: opcoesBaixaEstoque.empresaId,
+      usuarioId: opcoesBaixaEstoque.usuarioId,
+      contexto: req
     });
   }
 
@@ -843,8 +960,13 @@ db.all(`
     const codigo = `VND-${agoraLocalBrasil().replace(/[- :]/g, '').slice(0, 14)}`;
     const data_venda = agoraLocalBrasil().slice(0, 10);
 
-    // Calcular valores fiscal e não fiscal (Motor — única fonte de verdade)
-    const { totalFiscal, totalNaoFiscal } = separarItensDistribuidos(distribuicaoItens);
+    // HOTFIX FISCAL-4.0.2 — validação sempre sobre Valor Fiscal Líquido do Motor
+    const totaisLiquidosPrazo = resolverTotaisFiscaisLiquidosMotor(
+      resultadoMotor,
+      distribuicaoItens
+    );
+    const totalFiscal = totaisLiquidosPrazo.totalFiscal;
+    const totalNaoFiscal = totaisLiquidosPrazo.totalNaoFiscal;
 
     const erroSomaPagamentosMotor = validarSomaPagamentosVenda(pagamentosVenda, total, {
       valor_fiscal: totalFiscal,
@@ -876,7 +998,12 @@ db.all(`
       tefHabilitado,
       modoConfirmacaoFiscal,
       valorFiscalMaximo: resultadoMotor.valorFiscalMaximo,
-      preservacaoAplicada: resultadoMotor.preservacaoAplicada
+      preservacaoAplicada: resultadoMotor.preservacaoAplicada,
+      midpAtivo,
+      desconto: Number(desconto || 0),
+      acrescimo: Number(acrescimo || 0),
+      subtotalBruto: Number(resultadoMotor.totalVendaBruto || 0),
+      debugDescontoFiscal: process.env.CDS_DEBUG_DESCONTO_FISCAL === '1'
     });
 
     if (!resultadoPagamento.sucesso) {
@@ -898,12 +1025,18 @@ db.all(`
     db.serialize(() => {
       db.run('BEGIN IMMEDIATE');
       db.run(`
-        INSERT INTO vendas (codigo, data_venda, cliente_id, total, desconto, forma_pagamento, status, caixa_sessao_id, caixa_id, terminal_id, operador_id, valor_fiscal, valor_nao_fiscal, status_pagamento, tef_transacao_id)
-          VALUES (?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?)
-        `, [codigo, data_venda, cliente_id, totalNum, desconto || 0, formaPagamentoFinal, req.caixaSessaoId || null, req.caixaId, req.terminalId || null, req.operadorId, totalFiscal, totalNaoFiscal, statusPagamento, resultadoFiscal?.transacoes?.[0] || null], function(err) {
+        INSERT INTO vendas (codigo, data_venda, cliente_id, total, desconto, forma_pagamento, status, caixa_sessao_id, caixa_id, terminal_id, operador_id, valor_fiscal, valor_nao_fiscal, status_pagamento, tef_transacao_id, mpfc_politica_snapshot)
+          VALUES (?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `, [codigo, data_venda, cliente_id || null, totalNum, desconto || 0, formaPagamentoFinal, req.caixaSessaoId || null, req.caixaId || null, req.terminalId || null, req.operadorId || null, totalFiscal, totalNaoFiscal, statusPagamento, resultadoFiscal?.transacoes?.[0] || null, snapshotJson], function(err) {
         if (err) {
           db.run('ROLLBACK');
-          res.status(500).json({ error: err.message });
+          res.status(500).json(erroPersistenciaVenda(err, 'insert_vendas_prazo', {
+            caixa_sessao_id: req.caixaSessaoId,
+            caixa_id: req.caixaId,
+            terminal_id: req.terminalId,
+            operador_id: req.operadorId,
+            cliente_id
+          }));
           return;
         }
         const vendaId = this.lastID;
@@ -983,20 +1116,28 @@ db.all(`
           const tipoVenda = normalizarTipoVendaItem(item);
 
           db.run(`
-            INSERT INTO vendas_itens (venda_id, produto_id, quantidade, preco_unitario, desconto_percentual, promocao_id, desconto_atacado, tipo_preco, subtotal, item_fiscal, quantidade_fiscal, quantidade_nao_fiscal, valor_fiscal, valor_nao_fiscal, tipo_venda)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `, [vendaId, item.produto_id, item.quantidade, item.preco_unitario, item.desconto_percentual || 0, item.promocao_id || null, item.desconto_atacado || 0, item.tipo_preco || 'varejo', item.subtotal, itemFiscal, quantidadeFiscal, quantidadeNaoFiscal, valorFiscal, valorNaoFiscal, tipoVenda], (itemErr) => {
+            INSERT INTO vendas_itens (venda_id, produto_id, quantidade, preco_unitario, preco_unitario_interno, desconto_percentual, desconto_valor, desconto_manual, promocao_id, desconto_atacado, tipo_preco, subtotal, item_fiscal, quantidade_fiscal, quantidade_nao_fiscal, valor_fiscal, valor_nao_fiscal, tipo_venda)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `, [vendaId, item.produto_id, item.quantidade, item.preco_unitario, item.preco_unitario_interno ?? item.preco_unitario, item.desconto_percentual || 0, item.desconto_valor || 0, Number(item.desconto_manual || 0) === 1 ? 1 : 0, item.promocao_id || null, item.desconto_atacado || 0, item.tipo_preco || 'varejo', item.subtotal, itemFiscal, quantidadeFiscal, quantidadeNaoFiscal, valorFiscal, valorNaoFiscal, tipoVenda], (itemErr) => {
             if (itemErr) {
               db.run('ROLLBACK');
-              res.status(500).json({ error: itemErr.message });
+              res.status(500).json(erroPersistenciaVenda(itemErr, 'insert_vendas_itens_prazo', {
+                venda_id: vendaId,
+                produto_id: item.produto_id
+              }));
               return;
             }
 
+            const vendaItemIdPrazo = this.lastID;
             // Usar FEFO para reduzir estoque
-            reduzirEstoqueDistribuido(this.lastID, item.produto_id, item.quantidade_fiscal, item.quantidade_nao_fiscal, (estErr) => {
+            reduzirEstoqueDistribuido(vendaItemIdPrazo, item.produto_id, item.quantidade_fiscal, item.quantidade_nao_fiscal, (estErr) => {
               if (estErr) {
                 db.run('ROLLBACK');
-                res.status(500).json({ error: estErr.message });
+                res.status(500).json(erroPersistenciaVenda(estErr, 'baixa_estoque_fefo_prazo', {
+                  venda_id: vendaId,
+                  venda_item_id: vendaItemIdPrazo,
+                  produto_id: item.produto_id
+                }));
                 return;
               }
               itensProcessados++;
@@ -1126,7 +1267,7 @@ db.all(`
                 });
               });
               }
-            });
+            }, opcoesBaixaEstoque);
           });
         });
       });
@@ -1140,8 +1281,13 @@ const executarVenda = async () => {
   const codigo = `VND-${agoraLocalBrasil().replace(/[- :]/g, '').slice(0, 14)}`;
   const data_venda = agoraLocalBrasil().slice(0, 10);
 
-  // Calcular valores fiscal e não fiscal (Motor — única fonte de verdade)
-  const { totalFiscal, totalNaoFiscal } = separarItensDistribuidos(distribuicaoItens);
+  // HOTFIX FISCAL-4.0.2 — validação sempre sobre Valor Fiscal Líquido do Motor
+  const totaisLiquidos = resolverTotaisFiscaisLiquidosMotor(
+    resultadoMotor,
+    distribuicaoItens
+  );
+  const totalFiscal = totaisLiquidos.totalFiscal;
+  const totalNaoFiscal = totaisLiquidos.totalNaoFiscal;
 
   const erroSomaPagamentosMotor = validarSomaPagamentosVenda(pagamentosVenda, total, {
     valor_fiscal: totalFiscal,
@@ -1173,7 +1319,12 @@ const executarVenda = async () => {
     tefHabilitado,
     modoConfirmacaoFiscal,
     valorFiscalMaximo: resultadoMotor.valorFiscalMaximo,
-    preservacaoAplicada: resultadoMotor.preservacaoAplicada
+    preservacaoAplicada: resultadoMotor.preservacaoAplicada,
+    midpAtivo,
+    desconto: Number(desconto || 0),
+    acrescimo: Number(acrescimo || 0),
+    subtotalBruto: Number(resultadoMotor.totalVendaBruto || 0),
+    debugDescontoFiscal: process.env.CDS_DEBUG_DESCONTO_FISCAL === '1'
   });
 
   if (!resultadoPagamento.sucesso) {
@@ -1212,9 +1363,10 @@ const executarVenda = async () => {
         valor_fiscal,
         valor_nao_fiscal,
         status_pagamento,
-        tef_transacao_id
+        tef_transacao_id,
+        mpfc_politica_snapshot
       )
-      VALUES (?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       codigo,
       data_venda,
@@ -1231,11 +1383,18 @@ const executarVenda = async () => {
       totalFiscal,
       totalNaoFiscal,
       statusPagamento,
-      resultadoFiscal?.transacoes?.[0] || null
+      resultadoFiscal?.transacoes?.[0] || null,
+      snapshotJson
     ], function(err) {
       if (err) {
         db.run('ROLLBACK');
-        res.status(500).json({ error: err.message });
+        res.status(500).json(erroPersistenciaVenda(err, 'insert_vendas', {
+          caixa_sessao_id: req.caixaSessaoId,
+          caixa_id: req.caixaId,
+          terminal_id: req.terminalId,
+          operador_id: req.operadorId,
+          cliente_id
+        }));
         return;
       }
       const vendaId = this.lastID;
@@ -1246,7 +1405,7 @@ const executarVenda = async () => {
         (err) => {
           if (err) {
             db.run('ROLLBACK');
-            res.status(500).json({ error: err.message });
+            res.status(500).json(erroPersistenciaVenda(err, 'insert_venda_recebimentos', { venda_id: vendaId }));
             return;
           }
         }
@@ -1315,20 +1474,28 @@ const executarVenda = async () => {
         const tipoVenda = normalizarTipoVendaItem(item);
 
         db.run(`
-          INSERT INTO vendas_itens (venda_id, produto_id, quantidade, preco_unitario, desconto_percentual, promocao_id, desconto_atacado, tipo_preco, subtotal, item_fiscal, quantidade_fiscal, quantidade_nao_fiscal, valor_fiscal, valor_nao_fiscal, tipo_venda)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `, [vendaId, item.produto_id, item.quantidade, item.preco_unitario, item.desconto_percentual || 0, item.promocao_id || null, item.desconto_atacado || 0, item.tipo_preco || 'varejo', item.subtotal, itemFiscal, quantidadeFiscal, quantidadeNaoFiscal, valorFiscal, valorNaoFiscal, tipoVenda], (itemErr) => {
+          INSERT INTO vendas_itens (venda_id, produto_id, quantidade, preco_unitario, preco_unitario_interno, desconto_percentual, desconto_valor, desconto_manual, promocao_id, desconto_atacado, tipo_preco, subtotal, item_fiscal, quantidade_fiscal, quantidade_nao_fiscal, valor_fiscal, valor_nao_fiscal, tipo_venda)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `, [vendaId, item.produto_id, item.quantidade, item.preco_unitario, item.preco_unitario_interno ?? item.preco_unitario, item.desconto_percentual || 0, item.desconto_valor || 0, Number(item.desconto_manual || 0) === 1 ? 1 : 0, item.promocao_id || null, item.desconto_atacado || 0, item.tipo_preco || 'varejo', item.subtotal, itemFiscal, quantidadeFiscal, quantidadeNaoFiscal, valorFiscal, valorNaoFiscal, tipoVenda], (itemErr) => {
           if (itemErr) {
             db.run('ROLLBACK');
-            res.status(500).json({ error: itemErr.message });
+            res.status(500).json(erroPersistenciaVenda(itemErr, 'insert_vendas_itens', {
+              venda_id: vendaId,
+              produto_id: item.produto_id
+            }));
             return;
           }
 
+          const vendaItemId = this.lastID;
           // Usar FEFO para reduzir estoque
-          reduzirEstoqueDistribuido(this.lastID, item.produto_id, item.quantidade_fiscal, item.quantidade_nao_fiscal, (estErr) => {
+          reduzirEstoqueDistribuido(vendaItemId, item.produto_id, item.quantidade_fiscal, item.quantidade_nao_fiscal, (estErr) => {
             if (estErr) {
               db.run('ROLLBACK');
-              res.status(500).json({ error: estErr.message });
+              res.status(500).json(erroPersistenciaVenda(estErr, 'baixa_estoque_fefo', {
+                venda_id: vendaId,
+                venda_item_id: vendaItemId,
+                produto_id: item.produto_id
+              }));
               return;
             }
             itensProcessados++;
@@ -1480,7 +1647,7 @@ const executarVenda = async () => {
               });
               });
             }
-          });
+          }, opcoesBaixaEstoque);
         });
       });
     });
@@ -1608,71 +1775,115 @@ db.get('SELECT * FROM vendas WHERE id = ?', [id], (err, venda) => {
         status_pagamento: 'quitada',
         message: 'Venda não fiscal já finalizada.',
         saldo_pendente: 0,
-        fiscal: null
+        fiscal: null,
+        idempotente: true
       });
       return;
     }
 
-    const totalInformado = pagamentosInformados.reduce(
-      (acc, p) => acc + Number(p.valor || 0),
-      0
-    );
-    const totalEsperado = Number(venda.total || valorNaoFiscalVenda || 0);
+    db.all(`
+      SELECT *
+      FROM venda_recebimentos
+      WHERE venda_id = ? AND tipo_recebimento = 'nao_fiscal'
+    `, [id], (recExistErr, recebimentosExistentes) => {
+      if (recExistErr) {
+        res.status(500).json({ error: recExistErr.message });
+        return;
+      }
 
-    if (Math.abs(totalInformado - totalEsperado) > 0.01) {
-      res.status(400).json({
-        error: 'Valor informado não confere com o total da venda não fiscal.',
-        saldo_pendente: totalEsperado
-      });
-      return;
-    }
-
-    const recebimentos = pagamentosInformados.map((pagamento) => ({
-      tipo_recebimento: 'nao_fiscal',
-      forma_pagamento: String(pagamento.forma_pagamento).toLowerCase().trim(),
-      valor: Number(pagamento.valor || 0),
-      tef_transacao_id: pagamento.tef_transacao_id || null,
-      nsu: pagamento.nsu || null,
-      autorizacao: pagamento.autorizacao || null
-    }));
-
-    db.serialize(() => {
-      db.run('BEGIN IMMEDIATE');
-
-      gravarRecebimentos(id, recebimentos, (gravarErr) => {
-        if (gravarErr) {
-          db.run('ROLLBACK');
-          res.status(500).json({ error: gravarErr.message });
-          return;
-        }
-
+      const saldoExistente = calcularSaldoNaoFiscal(venda, recebimentosExistentes);
+      if (saldoExistente.saldoPendente <= 0 && saldoExistente.valorRecebido > 0) {
         db.run(
           `UPDATE vendas SET status_pagamento = 'quitada' WHERE id = ?`,
           [id],
-          (updateErr) => {
-            if (updateErr) {
-              db.run('ROLLBACK');
-              res.status(500).json({ error: updateErr.message });
+          (updErr) => {
+            if (updErr) {
+              res.status(500).json({ error: updErr.message });
               return;
             }
-
-            db.run('COMMIT', async (commitErr) => {
-              if (commitErr) {
-                res.status(500).json({ error: commitErr.message });
-                return;
-              }
-
-              res.json({
-                id: Number(id),
-                codigo: venda.codigo,
-                status_pagamento: 'quitada',
-                message: 'Venda não fiscal finalizada com sucesso.',
-                saldo_pendente: 0,
-                fiscal: null
-              });
+            res.json({
+              id: Number(id),
+              codigo: venda.codigo,
+              status_pagamento: 'quitada',
+              message: 'Venda não fiscal já finalizada.',
+              saldo_pendente: 0,
+              fiscal: null,
+              idempotente: true
             });
           }
         );
+        return;
+      }
+
+      const totalInformado = pagamentosInformados.reduce(
+        (acc, p) => acc + Number(p.valor || 0),
+        0
+      );
+      const totalEsperado = Number(venda.total || valorNaoFiscalVenda || 0);
+
+      if (Math.abs(totalInformado - totalEsperado) > 0.01) {
+        res.status(400).json({
+          error: 'Valor informado não confere com o total da venda não fiscal.',
+          saldo_pendente: totalEsperado
+        });
+        return;
+      }
+
+      if (totalInformado - totalEsperado > 0.01) {
+        res.status(400).json({
+          error: 'Valor recebido maior que o total da venda não fiscal.',
+          saldo_pendente: totalEsperado
+        });
+        return;
+      }
+
+      const recebimentos = pagamentosInformados.map((pagamento) => ({
+        tipo_recebimento: 'nao_fiscal',
+        forma_pagamento: String(pagamento.forma_pagamento).toLowerCase().trim(),
+        valor: Number(pagamento.valor || 0),
+        tef_transacao_id: pagamento.tef_transacao_id || null,
+        nsu: pagamento.nsu || null,
+        autorizacao: pagamento.autorizacao || null
+      }));
+
+      db.serialize(() => {
+        db.run('BEGIN IMMEDIATE');
+
+        gravarRecebimentos(id, recebimentos, (gravarErr) => {
+          if (gravarErr) {
+            db.run('ROLLBACK');
+            res.status(500).json({ error: gravarErr.message });
+            return;
+          }
+
+          db.run(
+            `UPDATE vendas SET status_pagamento = 'quitada' WHERE id = ?`,
+            [id],
+            (updateErr) => {
+              if (updateErr) {
+                db.run('ROLLBACK');
+                res.status(500).json({ error: updateErr.message });
+                return;
+              }
+
+              db.run('COMMIT', async (commitErr) => {
+                if (commitErr) {
+                  res.status(500).json({ error: commitErr.message });
+                  return;
+                }
+
+                res.json({
+                  id: Number(id),
+                  codigo: venda.codigo,
+                  status_pagamento: 'quitada',
+                  message: 'Venda não fiscal finalizada com sucesso.',
+                  saldo_pendente: 0,
+                  fiscal: null
+                });
+              });
+            }
+          );
+        });
       });
     });
     return;
@@ -1702,6 +1913,19 @@ db.get('SELECT * FROM vendas WHERE id = ?', [id], (err, venda) => {
     return;
   }
 
+  if (venda.status_pagamento === 'quitada') {
+    res.json({
+      id: Number(id),
+      codigo: venda.codigo,
+      status_pagamento: 'quitada',
+      message: 'Pagamento não fiscal já registrado.',
+      saldo_pendente: 0,
+      fiscal: null,
+      idempotente: true
+    });
+    return;
+  }
+
   if (venda.status_pagamento !== 'aguardando_nao_fiscal') {
     res.status(400).json({
       error: 'Venda não está aguardando pagamento não fiscal.',
@@ -1723,7 +1947,25 @@ db.get('SELECT * FROM vendas WHERE id = ?', [id], (err, venda) => {
     const saldo = calcularSaldoNaoFiscal(venda, recebimentosAtuais);
 
     if (saldo.saldoPendente <= 0) {
-      res.status(400).json({ error: 'Não há saldo não fiscal pendente nesta venda.' });
+      db.run(
+        `UPDATE vendas SET status_pagamento = 'quitada' WHERE id = ? AND status_pagamento = 'aguardando_nao_fiscal'`,
+        [id],
+        (updErr) => {
+          if (updErr) {
+            res.status(500).json({ error: updErr.message });
+            return;
+          }
+          res.json({
+            id: Number(id),
+            codigo: venda.codigo,
+            status_pagamento: 'quitada',
+            message: 'Pagamento não fiscal já registrado.',
+            saldo_pendente: 0,
+            fiscal: null,
+            idempotente: true
+          });
+        }
+      );
       return;
     }
 
@@ -1731,6 +1973,14 @@ db.get('SELECT * FROM vendas WHERE id = ?', [id], (err, venda) => {
       (acc, p) => acc + Number(p.valor || 0),
       0
     );
+
+    if (totalInformado - saldo.saldoPendente > 0.01) {
+      res.status(400).json({
+        error: 'Valor recebido maior que o saldo não fiscal pendente.',
+        saldo_pendente: saldo.saldoPendente
+      });
+      return;
+    }
 
     if (Math.abs(totalInformado - saldo.saldoPendente) > 0.01) {
       res.status(400).json({
@@ -1766,8 +2016,19 @@ db.get('SELECT * FROM vendas WHERE id = ?', [id], (err, venda) => {
         const statusFinal = resolverStatusPagamentoVenda(
           venda.valor_nao_fiscal,
           recebimentosNaoFiscalRegistrados,
-          'quitada'
+          'quitada',
+          { valorFiscal: valorFiscalVenda }
         );
+
+        if (statusFinal !== 'quitada') {
+          db.run('ROLLBACK');
+          res.status(400).json({
+            error: 'Recebimento insuficiente para quitar a venda.',
+            status_pagamento: statusFinal,
+            saldo_pendente: calcularSaldoNaoFiscal(venda, recebimentosNaoFiscalRegistrados).saldoPendente
+          });
+          return;
+        }
 
         db.run(
           `UPDATE vendas SET status_pagamento = ? WHERE id = ?`,
@@ -1816,6 +2077,7 @@ module.exports = {
   resolverStatusPagamentoVenda,
   aplicarRegraStatusPagamentoVenda,
   normalizarPagamentosNaoFiscal,
+  carregarPoliticaFiscalComercialPassiva,
   validarPagamentosNaoFiscal,
   obterTerminalId,
   preCalcularDistribuicao,

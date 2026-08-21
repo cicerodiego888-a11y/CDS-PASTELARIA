@@ -12,6 +12,7 @@ const MotorAttributeExtractor = require('./engines/attributes/MotorAttributeExtr
 const MotorSynonyms = require('./engines/synonyms/MotorSynonyms');
 const MotorGTIN = require('./engines/gtin/MotorGTIN');
 const MotorAssociacaoFornecedor = require('./engines/fornecedor/MotorAssociacaoFornecedor');
+const MotorUniversalBuscaCandidatos = require('./engines/mubc/MotorUniversalBuscaCandidatos');
 const MotorSimilarity = require('./engines/similarity/MotorSimilarity');
 
 let inicializado = false;
@@ -22,6 +23,7 @@ const MOTORES_PADRAO = Object.freeze([
   { codigo: 'motor_synonyms', Classe: MotorSynonyms, prioridade: 30 },
   { codigo: 'motor_gtin', Classe: MotorGTIN, prioridade: 40 },
   { codigo: 'motor_associacao_fornecedor', Classe: MotorAssociacaoFornecedor, prioridade: 50 },
+  { codigo: 'motor_mubc', Classe: MotorUniversalBuscaCandidatos, prioridade: 55 },
   { codigo: 'motor_similarity', Classe: MotorSimilarity, prioridade: 60 }
 ]);
 

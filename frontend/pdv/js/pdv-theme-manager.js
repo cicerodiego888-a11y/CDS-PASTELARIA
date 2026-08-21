@@ -121,10 +121,13 @@
     el.setAttribute('data-pdv-scale', clean.scale);
     el.setAttribute('data-pdv-intensity', clean.intensity);
 
-    // Escala só no shell do PDV (não altera zoom global do Electron)
+    // Escala só no shell do PDV (não altera zoom global do Electron).
+    // Em escalas >100%, o CSS (data-pdv-scale) libera overflow-y no page-content
+    // para evitar clipping — preferências e API do painel permanecem iguais.
     var shells = document.querySelectorAll('.pdv-profissional');
+    var zoomVal = (Number(clean.scale) / 100) || 1;
     for (var i = 0; i < shells.length; i++) {
-      shells[i].style.zoom = (Number(clean.scale) / 100) || 1;
+      shells[i].style.zoom = zoomVal;
     }
 
     return clean;

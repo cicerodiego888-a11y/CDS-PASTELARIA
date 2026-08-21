@@ -41,6 +41,7 @@ class MiipHealthCheck {
       synonymEngine: fs.existsSync(path.join(MIIP_ROOT, 'engines/synonyms/MotorSynonyms.js')),
       gtinEngine: fs.existsSync(path.join(MIIP_ROOT, 'engines/gtin/MotorGTIN.js')),
       fornecedorEngine: fs.existsSync(path.join(MIIP_ROOT, 'engines/fornecedor/MotorAssociacaoFornecedor.js')),
+      mubcEngine: fs.existsSync(path.join(MIIP_ROOT, 'engines/mubc/MotorUniversalBuscaCandidatos.js')),
       pipeline: fs.existsSync(path.join(MIIP_ROOT, 'core/MiipPipeline.js')),
       auditService: fs.existsSync(path.join(MIIP_ROOT, 'audit/MiipAuditService.js'))
     };

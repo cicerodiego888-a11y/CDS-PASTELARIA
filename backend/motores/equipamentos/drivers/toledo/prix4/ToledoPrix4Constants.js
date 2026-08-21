@@ -23,7 +23,7 @@ const TRANSPORTES = ['ethernet'];
 
 /** Portas padrão para comunicação Ethernet TCP */
 const PORTAS_PADRAO = {
-  ethernet: 9100,
+  ethernet: 9000,
   alternativa: 4001
 };
 

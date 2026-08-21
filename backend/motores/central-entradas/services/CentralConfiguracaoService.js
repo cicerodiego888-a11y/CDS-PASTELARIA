@@ -40,7 +40,12 @@ const CHAVES = Object.freeze({
   PROXY_HAB: 'proxy_habilitado',
   PROXY_URL: 'proxy_url',
   LOG_DETALHADO: 'log_detalhado',
-  MODO_DEBUG: 'modo_debug'
+  MODO_DEBUG: 'modo_debug',
+  RECUP_XML_ATIVA: 'recuperacao_xml_ativa',
+  RECUP_XML_INTERVALO: 'recuperacao_xml_intervalo_minutos',
+  RECUP_XML_MAX_TENT: 'recuperacao_xml_max_tentativas',
+  RECUP_XML_MAX_DIAS: 'recuperacao_xml_max_dias_monitoramento',
+  RECUP_XML_LOTE: 'recuperacao_xml_lote_por_ciclo'
 });
 
 const POLITICAS_MANIFESTACAO = Object.freeze([
@@ -178,6 +183,14 @@ class CentralConfiguracaoService {
       sincronizacao: {
         ...sync,
         reprocessamentoAutomatico: mapa[CHAVES.REPROCESSAMENTO] !== false
+      },
+      recuperacaoXml: {
+        ativa: mapa[CHAVES.RECUP_XML_ATIVA] !== false,
+        intervaloMinutos: Number(mapa[CHAVES.RECUP_XML_INTERVALO]) || 60,
+        maxTentativas: Number(mapa[CHAVES.RECUP_XML_MAX_TENT]) || 48,
+        maxDiasMonitoramento: Number(mapa[CHAVES.RECUP_XML_MAX_DIAS]) || 30,
+        lotePorCiclo: Number(mapa[CHAVES.RECUP_XML_LOTE]) || 5,
+        intervalosPermitidos: [30, 60, 120, 360, 1440]
       },
       diagnostico: await this._obterResumoDiagnostico(),
       avancado: {
@@ -324,14 +337,28 @@ class CentralConfiguracaoService {
       proxyHabilitado: [CHAVES.PROXY_HAB, 'boolean'],
       proxyUrl: [CHAVES.PROXY_URL, 'string'],
       logDetalhado: [CHAVES.LOG_DETALHADO, 'boolean'],
-      modoDebug: [CHAVES.MODO_DEBUG, 'boolean']
+      modoDebug: [CHAVES.MODO_DEBUG, 'boolean'],
+      recuperacaoXmlAtiva: [CHAVES.RECUP_XML_ATIVA, 'boolean'],
+      recuperacaoXmlIntervaloMinutos: [CHAVES.RECUP_XML_INTERVALO, 'number'],
+      recuperacaoXmlMaxTentativas: [CHAVES.RECUP_XML_MAX_TENT, 'number'],
+      recuperacaoXmlMaxDias: [CHAVES.RECUP_XML_MAX_DIAS, 'number'],
+      recuperacaoXmlLotePorCiclo: [CHAVES.RECUP_XML_LOTE, 'number']
     };
 
     const flat = {
       ...alteracoes,
       ...(alteracoes.sefaz || {}),
       ...(alteracoes.avancado || {}),
-      ...(alteracoes.sincronizacao || {})
+      ...(alteracoes.sincronizacao || {}),
+      ...(alteracoes.recuperacaoXml
+        ? {
+          recuperacaoXmlAtiva: alteracoes.recuperacaoXml.ativa,
+          recuperacaoXmlIntervaloMinutos: alteracoes.recuperacaoXml.intervaloMinutos,
+          recuperacaoXmlMaxTentativas: alteracoes.recuperacaoXml.maxTentativas,
+          recuperacaoXmlMaxDias: alteracoes.recuperacaoXml.maxDiasMonitoramento,
+          recuperacaoXmlLotePorCiclo: alteracoes.recuperacaoXml.lotePorCiclo
+        }
+        : {})
     };
     // RC3.1 — bloco ambiente não é persistido (fonte oficial: getFiscalConfig)
     delete flat.ambiente;
@@ -365,6 +392,15 @@ class CentralConfiguracaoService {
 
     await this._syncConfig.hidratarFlags();
     logCentral('CONFIG', { fase: 'atualizado', unificacaoFiscal: 'RC3.1' });
+
+    // RC3.7.5 — reinicia motor se config de recuperação mudou
+    try {
+      const { obterMotorRecuperacaoXml } = require('../recuperacao-xml');
+      const motor = obterMotorRecuperacaoXml();
+      motor.parar({ silencioso: true });
+      await motor.iniciar({ delayMs: 5000 });
+    } catch { /* ignore */ }
+
     return this.obterPainelCompleto();
   }
 

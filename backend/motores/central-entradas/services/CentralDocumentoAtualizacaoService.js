@@ -1,13 +1,13 @@
 /**
- * CentralDocumentoAtualizacaoService — Atualiza documento existente com XML completo (RC6.3).
+ * CentralDocumentoAtualizacaoService — Aplica XML completo no mesmo registro (RC6.3 / RC3.7.1).
  *
- * Responsabilidade única: aplicar XML completo + metadados + status SINCRONIZADA
- * sobre um registro AGUARDANDO_XML_COMPLETO. Não executa Parser, MIIP, Compras nem SOAP.
- *
- * @module motores/central-entradas/services/CentralDocumentoAtualizacaoService
+ * Origens: RESUMO_RECEBIDO, XML_INDISPONIVEL (e aliases legados).
+ * Destino: XML_COMPLETO. Nunca cria outro registro.
  */
 
-const { DocumentoFiscalStatus } = require('../core/DocumentoFiscalStatus');
+'use strict';
+
+const { DocumentoFiscalStatus, normalizarStatus } = require('../core/DocumentoFiscalStatus');
 const DocumentoTransitionService = require('./DocumentoTransitionService');
 const CentralDocumentosRepository = require('../repositories/CentralDocumentosRepository');
 const CentralHistoricoRepository = require('../repositories/CentralHistoricoRepository');
@@ -16,18 +16,19 @@ const { logCentral } = require('../utils/centralLog');
 const DETALHE_XML_COMPLETO = 'XML completo recebido.';
 const DETALHE_DOCUMENTO_ATUALIZADO = 'Documento atualizado.';
 
+const STATUS_ORIGEM_XML_COMPLETO = Object.freeze([
+  DocumentoFiscalStatus.RESUMO_RECEBIDO,
+  DocumentoFiscalStatus.XML_INDISPONIVEL,
+  DocumentoFiscalStatus.AGUARDANDO_XML_COMPLETO,
+  DocumentoFiscalStatus.XML_IMPORTADO_MANUALMENTE
+]);
+
 class CentralDocumentoAtualizacaoService {
-  /**
-   * @param {Object} [deps]
-   */
   constructor(deps = {}) {
-    /** @private */
     this._documentosRepository = deps.documentosRepository
       ?? new CentralDocumentosRepository({ db: deps.db ?? null });
-    /** @private */
     this._historicoRepository = deps.historicoRepository
       ?? new CentralHistoricoRepository({ db: deps.db ?? null });
-    /** @private */
     this._transitionService = deps.transitionService
       ?? new DocumentoTransitionService({
         documentosRepository: this._documentosRepository,
@@ -35,19 +36,6 @@ class CentralDocumentoAtualizacaoService {
       });
   }
 
-  /**
-   * Atualiza documento AGUARDANDO_XML_COMPLETO com XML completo (PROC_NFE/NFE).
-   * Preserva id, histórico anterior, created_at e vínculos.
-   *
-   * @param {Object} params
-   * @param {Object} params.documento Documento existente
-   * @param {string} params.xml XML completo
-   * @param {Object} params.metadados Metadados extraídos do XML
-   * @param {string} params.tipoDfe DocumentoDfeTipo
-   * @param {string} [params.nsu]
-   * @param {string} [params.origem]
-   * @returns {Promise<{ documento: Object, atualizado: boolean }>}
-   */
   async atualizarComXmlCompleto(params = {}) {
     const documento = params.documento;
     if (!documento?.id) {
@@ -56,9 +44,11 @@ class CentralDocumentoAtualizacaoService {
       throw erro;
     }
 
-    if (documento.status !== DocumentoFiscalStatus.AGUARDANDO_XML_COMPLETO) {
+    const statusOrigem = normalizarStatus(documento.status);
+    const origemOk = STATUS_ORIGEM_XML_COMPLETO.map(normalizarStatus).includes(statusOrigem);
+    if (!origemOk) {
       const erro = new Error(
-        `Atualização com XML completo só é permitida em AGUARDANDO_XML_COMPLETO (atual: ${documento.status})`
+        `Atualização com XML completo só é permitida em RESUMO_RECEBIDO ou XML_INDISPONIVEL (atual: ${statusOrigem})`
       );
       erro.statusCode = 400;
       throw erro;
@@ -74,20 +64,18 @@ class CentralDocumentoAtualizacaoService {
     const metadados = params.metadados || {};
     const tipoDfe = params.tipoDfe || null;
 
-    // 1) Conteúdo + metadados (preserva id / created_at / compra_id)
     await this._documentosRepository.atualizar(documento.id, {
       xml,
       nsu: params.nsu != null ? params.nsu : documento.nsu,
-      numero: metadados.numero ?? documento.numero,
-      serie: metadados.serie ?? documento.serie,
+      numero: metadados.numero || documento.numero,
+      serie: metadados.serie || documento.serie,
       modelo: metadados.modelo ?? documento.modelo,
-      fornecedor: metadados.fornecedor ?? documento.fornecedor,
-      cnpjFornecedor: metadados.cnpjFornecedor ?? documento.cnpjFornecedor,
-      dataEmissao: metadados.dataEmissao ?? documento.dataEmissao,
-      dataEntrada: metadados.dataEntrada ?? documento.dataEntrada,
-      valorTotal: metadados.valorTotal ?? documento.valorTotal,
+      fornecedor: metadados.fornecedor || documento.fornecedor,
+      cnpjFornecedor: metadados.cnpjFornecedor || documento.cnpjFornecedor,
+      dataEmissao: metadados.dataEmissao || documento.dataEmissao,
+      dataEntrada: metadados.dataEntrada || documento.dataEntrada,
+      valorTotal: metadados.valorTotal != null ? metadados.valorTotal : documento.valorTotal,
       tipoDocumento: tipoDfe,
-      // limpa processamento anterior (resumo não tinha parse)
       parseJson: null,
       miipSessaoId: null,
       miipResumoJson: null,
@@ -95,22 +83,20 @@ class CentralDocumentoAtualizacaoService {
       statusDetalhe: DETALHE_XML_COMPLETO
     });
 
-    // 2) Status → SINCRONIZADA (histórico: XML completo recebido.)
     await this._transitionService.transicionar(
       documento.id,
-      DocumentoFiscalStatus.AGUARDANDO_XML_COMPLETO,
-      DocumentoFiscalStatus.SINCRONIZADA,
+      statusOrigem,
+      DocumentoFiscalStatus.XML_COMPLETO,
       {
         detalhe: DETALHE_XML_COMPLETO,
         origem: params.origem || null
       }
     );
 
-    // 3) Timeline: Documento atualizado.
     await this._historicoRepository.inserir({
       documentoId: documento.id,
-      statusAnterior: DocumentoFiscalStatus.SINCRONIZADA,
-      statusNovo: DocumentoFiscalStatus.SINCRONIZADA,
+      statusAnterior: DocumentoFiscalStatus.XML_COMPLETO,
+      statusNovo: DocumentoFiscalStatus.XML_COMPLETO,
       detalhe: DETALHE_DOCUMENTO_ATUALIZADO
     });
 
@@ -120,7 +106,7 @@ class CentralDocumentoAtualizacaoService {
       mensagem: 'Documento atualizado com XML completo',
       documentoId: documento.id,
       Tipo: tipoDfe,
-      Status: DocumentoFiscalStatus.SINCRONIZADA
+      Status: DocumentoFiscalStatus.XML_COMPLETO
     });
 
     try {
@@ -131,14 +117,12 @@ class CentralDocumentoAtualizacaoService {
       });
     } catch { /* ignore */ }
 
-    return {
-      documento: atualizado,
-      atualizado: true
-    };
+    return { documento: atualizado, atualizado: true };
   }
 }
 
 CentralDocumentoAtualizacaoService.DETALHE_XML_COMPLETO = DETALHE_XML_COMPLETO;
 CentralDocumentoAtualizacaoService.DETALHE_DOCUMENTO_ATUALIZADO = DETALHE_DOCUMENTO_ATUALIZADO;
+CentralDocumentoAtualizacaoService.STATUS_ORIGEM_XML_COMPLETO = STATUS_ORIGEM_XML_COMPLETO;
 
 module.exports = CentralDocumentoAtualizacaoService;
