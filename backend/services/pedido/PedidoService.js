@@ -11,6 +11,7 @@ const { PedidoStatus } = require('./enums');
 const repo = require('./PedidoRepository');
 const VendaFinanceiroService = require('../vendas/VendaFinanceiroService');
 const MotorComercial = require('../../motores/comercial');
+const { empresaIdDoReqPedido } = require('./empresaIdDoReqPedido');
 
 const { agoraLocalBrasil } = VendaFinanceiroService;
 
@@ -81,8 +82,9 @@ async function obterPedido(pedidoId) {
   return { success: true, pedido };
 }
 
-async function criarPedido(body = {}, operadorId = null) {
+async function criarPedido(body = {}, operadorId = null, opcoes = {}) {
   assertModuloHabilitado();
+  const empresaId = empresaIdDoReqPedido({ empresaId: opcoes.empresaId });
   const itens = normalizarItens(body.itens);
   const totalCalculado = Number(itens.reduce((s, i) => s + Number(i.subtotal || 0), 0).toFixed(2));
   const total = body.total != null ? Number(body.total) : totalCalculado;
@@ -95,7 +97,8 @@ async function criarPedido(body = {}, operadorId = null) {
   const supervisorToken = body.supervisor_token || body.supervisorToken || null;
 
   const analise = await MotorComercial.analisarDisponibilidadeFiscal(itens, {
-    usuarioId: operadorId
+    usuarioId: operadorId,
+    empresaId
   });
   if (analise.bloqueado) {
     const err = new Error('Saldo insuficiente para atender o pedido.');
@@ -144,11 +147,12 @@ async function criarPedido(body = {}, operadorId = null) {
       itens: pedido.itens || itens,
       supervisorToken,
       usuarioId: operadorId,
-      motivo: `Confirmação fiscal fila Expedição ${codigo}`
+      motivo: `Confirmação fiscal fila Expedição ${codigo}`,
+      empresaId
     });
   } catch (err) {
     try {
-      await MotorComercial.liberarReservasDoPedido(pedidoId);
+      await MotorComercial.liberarReservasDoPedido(pedidoId, { empresaId });
     } catch (_) { /* ignore */ }
     try {
       await repo.atualizarStatus(pedidoId, PedidoStatus.CANCELADO, [
@@ -168,5 +172,6 @@ module.exports = {
   listarFilaFaturamento,
   obterPedido,
   criarPedido,
-  assertModuloHabilitado
+  assertModuloHabilitado,
+  empresaIdDoReqPedido
 };

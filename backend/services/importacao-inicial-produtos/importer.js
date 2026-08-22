@@ -146,7 +146,8 @@ async function registrarEstoqueInicial(db, {
   importId,
   usuarioId,
   usuarioNome,
-  forcarFalhaEstoque
+  forcarFalhaEstoque,
+  empresaId
 }) {
   const estoque = linha.estoque || {};
   const qtd = Number(estoque.estoque_inicial || 0);
@@ -188,7 +189,8 @@ async function registrarEstoqueInicial(db, {
     ajusteNaoFiscal: itemFiscal === 0 ? qtd : 0,
     motivo,
     usuarioId: usuarioId || null,
-    usuarioNome: usuarioNome || 'Importação Inicial'
+    usuarioNome: usuarioNome || 'Importação Inicial',
+    empresaId
   });
 
   return { lancado: qtd, movimentado: true };
@@ -292,7 +294,8 @@ async function enriquecerProdutoExistente(db, linha, {
   usuarioNome,
   importId,
   forcarFalhaEstoque,
-  forcarFalhaApresentacao
+  forcarFalhaApresentacao,
+  empresaId
 } = {}) {
   const produtoId = linha.existente_id;
   if (!produtoId) {
@@ -386,7 +389,8 @@ async function enriquecerProdutoExistente(db, linha, {
     importId,
     usuarioId,
     usuarioNome,
-    forcarFalhaEstoque
+    forcarFalhaEstoque,
+    empresaId
   });
 
   return {
@@ -413,7 +417,8 @@ async function executarImportacao(db, validacao, {
   pastaBackup,
   importId,
   forcarFalhaEstoque,
-  forcarFalhaApresentacao
+  forcarFalhaApresentacao,
+  empresaId
 } = {}) {
   const linhasNovas = (validacao.linhas || []).filter((l) => l.status === STATUS.PRONTO);
   const linhasEnriquecer = (validacao.linhas || []).filter(
@@ -485,7 +490,8 @@ async function executarImportacao(db, validacao, {
         importId: refImportacao,
         usuarioId,
         usuarioNome,
-        forcarFalhaEstoque
+        forcarFalhaEstoque,
+        empresaId
       });
       estoqueLancado += Number(mov.lancado || 0);
       if (mov.movimentado) movimentacoes += 1;
@@ -497,7 +503,8 @@ async function executarImportacao(db, validacao, {
         usuarioNome,
         importId: refImportacao,
         forcarFalhaEstoque,
-        forcarFalhaApresentacao
+        forcarFalhaApresentacao,
+        empresaId
       });
       enriquecidos.push(r.produtoId);
       apresentacoesNovas += Number(r.apresentacoes_novas || 0);

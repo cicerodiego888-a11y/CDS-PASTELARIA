@@ -84,7 +84,7 @@ async function validarArquivoBuffer(db, buffer, {
   };
 }
 
-async function importarSessao(db, sessaoId, { usuarioId, usuarioNome, dbPath, pastaBackup } = {}) {
+async function importarSessao(db, sessaoId, { usuarioId, usuarioNome, dbPath, pastaBackup, empresaId } = {}) {
   const sessao = obterSessao(sessaoId);
   if (!sessao || !sessao.validacao) {
     const err = new Error('Sessão de importação não encontrada ou expirada. Valide o arquivo novamente.');
@@ -112,7 +112,8 @@ async function importarSessao(db, sessaoId, { usuarioId, usuarioNome, dbPath, pa
       usuarioNome,
       dbPath,
       pastaBackup,
-      importId: importIdEstavel
+      importId: importIdEstavel,
+      empresaId
     });
   } else {
     resultado = await executarImportacao(db, sessao.validacao, {
@@ -120,7 +121,8 @@ async function importarSessao(db, sessaoId, { usuarioId, usuarioNome, dbPath, pa
       usuarioNome,
       dbPath,
       pastaBackup,
-      importId: sessaoId
+      importId: sessaoId,
+      empresaId
     });
   }
 

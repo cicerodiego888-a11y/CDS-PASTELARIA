@@ -11,7 +11,9 @@ const {
   produtoTemVendas,
   aplicarAjusteEstoqueProduto,
   definirSaldosIniciaisProduto,
-  aplicarSaldosIniciaisViaPorta
+  aplicarSaldosIniciaisViaPorta,
+  aplicarSaldoInicialCreateProduto,
+  empresaIdDoReqAjuste
 } = require('../services/ajusteEstoqueService');
 const { sqlRankingProdutos, isModoFiscalRelatorio } = require('../services/reportFiscalHelpers');
 const { espelharIdentificadoresSafe } = require('../motores/produto-identidade');
@@ -33,6 +35,14 @@ const {
 const { obterProdutoImagemService } = require('../services/ProdutoImagemService');
 const { obterProdutoEmbalagemService } = require('../services/produto-embalagem/ProdutoEmbalagemService');
 const { obterMib, normalizarNomeBusca } = require('../motores/mib');
+const { criarMiddlewareContextoEmpresa } = require('../services/fiscalNaoFiscal/empresaContexto');
+const {
+  resolverSaldosProdutoParaResposta,
+  fragmentoEstoqueEmpresaListagem,
+  aplicarSaldosIdentificacaoPdv
+} = require('../services/estoque/leituraEstoqueEmpresaProduto');
+
+router.use(criarMiddlewareContextoEmpresa(db));
 
 let _pdvIdentificacaoService = null;
 
@@ -524,17 +534,22 @@ router.post('/identificar', async (req, res) => {
 
     const service = obterPdvIdentificacaoService();
     const payload = await service.identificar(codigo, contexto);
+    const { payload: payloadEstoque } = await aplicarSaldosIdentificacaoPdv({
+      payload,
+      empresaId: req.empresaId,
+      db
+    });
 
     console.log('[MIP DEBUG] POST /produtos/identificar Response:', {
       statusHttp: 200,
-      encontrado: payload?.encontrado,
-      produtoId: payload?.produtoId,
-      strategy: payload?.strategy,
-      nome: payload?.produto?.nome,
-      fallbackLegado: payload?.fallbackLegado
+      encontrado: payloadEstoque?.encontrado,
+      produtoId: payloadEstoque?.produtoId,
+      strategy: payloadEstoque?.strategy,
+      nome: payloadEstoque?.produto?.nome,
+      fallbackLegado: payloadEstoque?.fallbackLegado
     });
 
-    return res.json(payload);
+    return res.json(payloadEstoque);
   } catch (err) {
     console.error('[MIP] identificar falhou:', err.message);
     console.log('[MIP DEBUG] POST /produtos/identificar Response ERRO:', {
@@ -559,7 +574,12 @@ router.get('/identificar', async (req, res) => {
 
     const service = obterPdvIdentificacaoService();
     const payload = await service.identificar(codigo, contexto);
-    return res.json(payload);
+    const { payload: payloadEstoque } = await aplicarSaldosIdentificacaoPdv({
+      payload,
+      empresaId: req.empresaId,
+      db
+    });
+    return res.json(payloadEstoque);
   } catch (err) {
     console.error('[MIP] identificar GET falhou:', err.message);
     return res.status(500).json({
@@ -575,6 +595,7 @@ router.get('/identificar', async (req, res) => {
 router.get('/', (req, res) => {
   const modoFiscal = isModoFiscalQuery(req.query.modo_fiscal);
   const filtroFiscal = filtroSqlModoFiscalProduto(modoFiscal, 'p');
+  const ee = fragmentoEstoqueEmpresaListagem(req.empresaId);
 
   db.all(`
     SELECT 
@@ -592,13 +613,15 @@ router.get('/', (req, res) => {
         WHEN date(p.data_validade) <= date('now', 'localtime', '+' || COALESCE(p.dias_alerta_validade, 30) || ' days') THEN 'proximo'
         ELSE 'ok'
       END AS status_validade
+      ${ee.extraSelect}
     FROM produtos p
     LEFT JOIN categorias c ON c.id = p.categoria_id
     LEFT JOIN subcategorias s ON s.id = p.subcategoria_id
+    ${ee.joinSql}
     WHERE 1=1
       ${filtroFiscal}
     ORDER BY p.id DESC
-  `, [], (err, rows) => {
+  `, ee.params, (err, rows) => {
     if (err) {
       console.error('Erro ao listar produtos:', err.message);
       return res.status(500).json({ error: err.message });
@@ -1872,7 +1895,7 @@ router.get('/promocoes/produtos-elegiveis', (req, res) => {
 router.post('/recalcular-saldos', verificarPermissaoEspecifica('produtos', 'editar'), (req, res) => {
   const { recalcularSaldosTodosProdutos } = require('../services/estoqueFiscalService');
   const opcoes = {
-    empresaId: req.body?.empresa_id ?? req.body?.empresaId ?? req.user?.empresa_id ?? req.user?.empresaId,
+    empresaId: empresaIdDoReqAjuste(req),
     usuarioId: req.user?.id
   };
   recalcularSaldosTodosProdutos(db, opcoes, (err, result) => {
@@ -1889,7 +1912,7 @@ router.post('/recalcular-saldos', verificarPermissaoEspecifica('produtos', 'edit
 
 router.post('/:id/recalcular-saldos', verificarPermissaoEspecifica('produtos', 'editar'), (req, res) => {
   const opcoes = {
-    empresaId: req.body?.empresa_id ?? req.body?.empresaId ?? req.user?.empresa_id ?? req.user?.empresaId,
+    empresaId: empresaIdDoReqAjuste(req),
     usuarioId: req.user?.id
   };
   recalcularSaldosProduto(db, req.params.id, opcoes, (err, result) => {
@@ -1939,7 +1962,7 @@ function executarAjusteEstoque(req, res) {
     motivo,
     usuarioId: req.user?.id,
     usuarioNome: req.user?.username || req.user?.nome,
-    empresaId: req.body?.empresa_id ?? req.body?.empresaId ?? req.user?.empresa_id ?? req.user?.empresaId,
+    empresaId: empresaIdDoReqAjuste(req),
     lote,
     dataFabricacao: data_fabricacao,
     dataValidade: data_validade,
@@ -2148,22 +2171,39 @@ router.get('/:id', (req, res) => {
                 return res.status(500).json({ error: vendErr.message });
               }
 
-              const produtoBase = normalizarProdutoResposta({
-                ...row,
-                categoria: row.categoria_nome || '',
-                subcategoria: row.subcategoria_nome || '',
-                atacado_faixas: faixas || [],
-                embalagens: embalagens || [],
-                tem_movimentacoes: temMovimentacoes,
-                // Estoque Inicial bloqueia só após a 1ª venda
-                tem_vendas: temVendas
-              }, modoFiscal);
+              Promise.resolve(resolverSaldosProdutoParaResposta({
+                row,
+                produtoId: Number(req.params.id),
+                empresaId: req.empresaId,
+                db
+              })).then(({ row: rowEstoque, isolado, encontrado }) => {
+                const produtoBase = normalizarProdutoResposta({
+                  ...rowEstoque,
+                  categoria: rowEstoque.categoria_nome || row.categoria_nome || '',
+                  subcategoria: rowEstoque.subcategoria_nome || row.subcategoria_nome || '',
+                  atacado_faixas: faixas || [],
+                  embalagens: embalagens || [],
+                  tem_movimentacoes: temMovimentacoes,
+                  tem_vendas: temVendas
+                }, modoFiscal);
 
-              enriquecerProdutoComValidade(req.params.id, produtoBase, (validadeErr, produto) => {
-                if (validadeErr) {
-                  return res.status(500).json({ error: validadeErr.message });
+                if (isolado) {
+                  produtoBase.estoque_empresa_isolado = true;
+                  produtoBase.estoque_empresa_encontrado = encontrado === true;
+                  produtoBase.empresa_id = req.empresaId;
                 }
-                res.json(produto);
+
+                enriquecerProdutoComValidade(req.params.id, produtoBase, (validadeErr, produto) => {
+                  if (validadeErr) {
+                    return res.status(500).json({ error: validadeErr.message });
+                  }
+                  res.json(produto);
+                });
+              }).catch((isoErr) => {
+                return res.status(500).json({
+                  error: isoErr && isoErr.message ? isoErr.message : 'Erro ao consultar estoque da empresa.',
+                  code: isoErr && isoErr.code ? isoErr.code : undefined
+                });
               });
             });
           });
@@ -2174,6 +2214,7 @@ router.get('/:id', (req, res) => {
 });
 
 // Criar produto
+// 03.8 — INSERT nasce com saldo 0; crédito inicial operacional via estoqueSaldosPublico.
 router.post('/', (req, res) => {
   const {
     codigo, nome, categoria_id, subcategoria_id, unidade, preco_compra,
@@ -2300,7 +2341,7 @@ router.post('/', (req, res) => {
   `, [
     codigoFinal, nome, categoria_id, subcategoria_id, unidade,
     preco_compra, lucro_percentual, preco_venda,
-    estoqueInicial, estoque_minimo || 0, fornecedor,
+    0, estoque_minimo || 0, fornecedor,
     ncm, cfop, csosn, origem, cest, codigo_barras,
     aliquota_icms, aliquota_pis, aliquota_cofins,
     controlarValidade,
@@ -2311,8 +2352,8 @@ router.post('/', (req, res) => {
     valor_total_compra || 0,
     custo_por_kg || 0,
     venda_atacado ? 1 : 0,
-    saldoFiscalInicial,
-    saldoNaoFiscalInicial,
+    0,
+    0,
     itemFiscalGravar,
     permiteVendaUnidade,
     pesoMedioUnidade,
@@ -2333,6 +2374,22 @@ router.post('/', (req, res) => {
       }
 
       const produtoId = this.lastID;
+
+      aplicarSaldoInicialCreateProduto(db, {
+        produtoId,
+        saldoFiscal: saldoFiscalInicial,
+        saldoNaoFiscal: saldoNaoFiscalInicial,
+        usuarioId: req.user?.id,
+        empresaId: empresaIdDoReqAjuste(req)
+      }, (saldoErr) => {
+        if (saldoErr) {
+          console.error('Erro ao aplicar saldo inicial do produto:', saldoErr.message);
+          return res.status(500).json({
+            error: `Produto criado, mas falhou ao aplicar saldo inicial: ${saldoErr.message}`,
+            code: saldoErr.code || undefined
+          });
+        }
+
       try {
         obterMibService().sincronizarNomeBusca(produtoId, nome, () => {
           obterMibService().notificarProdutoCriado({
@@ -2476,6 +2533,7 @@ router.post('/', (req, res) => {
           );
         });
       }
+      });
     });
   });
 });
@@ -2707,7 +2765,7 @@ router.put('/:id', (req, res) => {
           produtoId: id,
           saldoFiscal: saldo_fiscal_inicial ?? old.saldo_fiscal,
           saldoNaoFiscal: saldo_nao_fiscal_inicial ?? old.saldo_nao_fiscal,
-          empresaId: req.body?.empresa_id ?? req.body?.empresaId ?? req.user?.empresa_id ?? req.user?.empresaId,
+          empresaId: empresaIdDoReqAjuste(req),
           usuarioId: req.user?.id
         }, callback);
       });

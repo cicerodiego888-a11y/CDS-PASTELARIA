@@ -1,5 +1,9 @@
 const fs = require('fs');
 const path = require('path');
+const {
+  validarModoOperacaoVenda,
+  DEFAULT_MODO_OPERACAO_VENDA
+} = require('../motores/muv/contratos');
 
 const LEGACY_CONFIG_PATH = path.join(__dirname, '..', '..', 'config', 'configuracoes.json');
 const LEGACY_ELECTRON_PATHS = [
@@ -53,7 +57,9 @@ const DEFAULT = {
   licenca_whatsapp_url: '',
   licenca_mensagem_renovacao: MENSAGEM_RENOVACAO_PADRAO,
   // Hotfix RC1.3 — plano exibido na Barra de Status (opcional; senão deriva do tipo)
-  licenca_plano: ''
+  licenca_plano: '',
+  // Sprint 04.02 — Motor Universal de Vendas (default = PDV atual)
+  modo_operacao_venda: DEFAULT_MODO_OPERACAO_VENDA
 };
 
 const TIPOS = ['ERP_SEM_FISCAL', 'ERP_FISCAL', 'ERP_MULTICAIXA'];
@@ -174,6 +180,76 @@ function ensureConfigFile() {
     fs.writeFileSync(configPath, JSON.stringify(DEFAULT, null, 2), 'utf8');
     syncElectronConfig(DEFAULT);
   }
+  bootstrapModoOperacaoVenda();
+}
+
+/**
+ * Sprint 04.02 — idempotente. Insere modo_operacao_venda = EMPRESA_UNICA
+ * somente se a chave estiver ausente ou vazia. Nunca sobrescreve MULTIEMPRESA
+ * nem um valor já persistido (inclusive inválido — a leitura oficial denuncia).
+ */
+function bootstrapModoOperacaoVenda() {
+  const configPath = getConfigPath();
+  if (!fs.existsSync(configPath)) {
+    const dir = path.dirname(configPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(configPath, JSON.stringify(DEFAULT, null, 2), 'utf8');
+    return DEFAULT.modo_operacao_venda;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(configPath, 'utf8') || '{}');
+  } catch (e) {
+    console.warn('bootstrapModoOperacaoVenda: arquivo ilegível, não sobrescreve:', e.message);
+    return DEFAULT.modo_operacao_venda;
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return DEFAULT.modo_operacao_venda;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(parsed, 'modo_operacao_venda')) {
+    const raw = parsed.modo_operacao_venda;
+    if (raw !== null && raw !== undefined && String(raw).trim() !== '') {
+      return raw;
+    }
+  }
+
+  parsed.modo_operacao_venda = DEFAULT.modo_operacao_venda;
+  fs.writeFileSync(configPath, JSON.stringify(parsed, null, 2), 'utf8');
+  return DEFAULT.modo_operacao_venda;
+}
+
+function lerModoOperacaoVendaPersistido() {
+  bootstrapModoOperacaoVenda();
+  const parsed = readJsonFile(getConfigPath()) || {};
+  if (!Object.prototype.hasOwnProperty.call(parsed, 'modo_operacao_venda')
+      || parsed.modo_operacao_venda == null
+      || String(parsed.modo_operacao_venda).trim() === '') {
+    return DEFAULT.modo_operacao_venda;
+  }
+  return validarModoOperacaoVenda(parsed.modo_operacao_venda);
+}
+
+/**
+ * Leitura oficial do modo. Valor ausente → EMPRESA_UNICA (após bootstrap).
+ * Valor inválido persistido → MODO_OPERACAO_VENDA_INVALIDO (não escolhe MULTIEMPRESA
+ * nem mascara a corrupção como EMPRESA_UNICA operacional).
+ */
+function obterModoOperacaoVenda(cfg) {
+  if (cfg != null && typeof cfg === 'object'
+      && Object.prototype.hasOwnProperty.call(cfg, 'modo_operacao_venda')) {
+    return validarModoOperacaoVenda(cfg.modo_operacao_venda);
+  }
+  return lerModoOperacaoVendaPersistido();
+}
+
+function normalizeModoOperacaoVendaCampo(valor) {
+  if (valor === undefined || valor === null || valor === '') {
+    return DEFAULT.modo_operacao_venda;
+  }
+  return String(valor).toUpperCase().trim();
 }
 
 function normalizePadraoFiscal(obj) {
@@ -329,6 +405,7 @@ function normalizeConfig(obj) {
     licenca_whatsapp_url: String(obj?.licenca_whatsapp_url || '').trim(),
     licenca_mensagem_renovacao: normalizeLicencaMensagem(obj?.licenca_mensagem_renovacao),
     licenca_plano: String(obj?.licenca_plano || '').trim(),
+    modo_operacao_venda: normalizeModoOperacaoVendaCampo(obj?.modo_operacao_venda),
     ...normalizePadraoFiscal(obj)
   };
 }
@@ -473,6 +550,14 @@ function validateConfig(obj) {
 
   if (!MODOS_CONFIRMACAO_FISCAL.includes(config.modo_confirmacao_fiscal)) {
     errors.push('modo_confirmacao_fiscal inválido');
+  }
+
+  if (Object.prototype.hasOwnProperty.call(obj || {}, 'modo_operacao_venda')) {
+    try {
+      validarModoOperacaoVenda(obj.modo_operacao_venda);
+    } catch (e) {
+      errors.push('modo_operacao_venda inválido');
+    }
   }
 
   return { valid: errors.length === 0, errors, config };
@@ -669,7 +754,10 @@ function saveConfig(obj) {
     imprimir_cupom_nao_fiscal_entrega: pickBool(obj, 'imprimir_cupom_nao_fiscal_entrega', validation.config, current),
     entrega_alerta_horas_aguardando: pickNum(obj, 'entrega_alerta_horas_aguardando', validation.config, current, 2),
     entrega_alerta_horas_reserva: pickNum(obj, 'entrega_alerta_horas_reserva', validation.config, current, 4),
-    entrega_alerta_horas_parado: pickNum(obj, 'entrega_alerta_horas_parado', validation.config, current, 3)
+    entrega_alerta_horas_parado: pickNum(obj, 'entrega_alerta_horas_parado', validation.config, current, 3),
+    modo_operacao_venda: Object.prototype.hasOwnProperty.call(obj || {}, 'modo_operacao_venda')
+      ? validarModoOperacaoVenda(obj.modo_operacao_venda)
+      : (current.modo_operacao_venda || DEFAULT.modo_operacao_venda)
   };
 
   ensureConfigFile();
@@ -771,6 +859,8 @@ module.exports = {
   normalizePadraoFiscal,
   validateConfig,
   ensureConfigFile,
+  bootstrapModoOperacaoVenda,
+  obterModoOperacaoVenda,
   getRecursos,
   getLicenciamentoCds,
   resolveModuloFlag,

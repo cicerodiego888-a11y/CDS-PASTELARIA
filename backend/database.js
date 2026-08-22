@@ -1491,7 +1491,7 @@ function criarTabelas() {
       else console.log('Tabela marcas criada/verificada');
     });
 
-    // Fase 2 / 03.1 — cadastro oficial de empresas (sem estoque_empresa)
+    // Fase 2 / 03.1 — cadastro oficial de empresas (estoque_empresa = 03.11, schema separado)
     try {
       const { garantirSchemaEmpresas } = require('./services/empresas/empresasSchema');
       garantirSchemaEmpresas(db, (schemaErr) => {
@@ -1547,6 +1547,30 @@ function criarTabelas() {
       if (err) console.error('Erro ao criar tabela produtos:', err);
       else console.log('Tabela produtos criada/verificada');
     });
+
+    // Fase 2 / 03.11 — fundação schema estoque_empresa (sem backfill; porta continua em produtos)
+    try {
+      const { garantirSchemaEstoqueEmpresa } = require('./services/estoque/estoqueEmpresaSchema');
+      garantirSchemaEstoqueEmpresa(db, (schemaErr) => {
+        if (schemaErr) {
+          console.error('Erro ao garantir schema estoque_empresa:', schemaErr.message);
+        }
+      });
+    } catch (requireErr) {
+      console.error('Erro ao carregar schema estoque_empresa:', requireErr.message);
+    }
+
+    // Sprint 04.03 — ATENDIMENTO multiempresa (não substitui vendas)
+    try {
+      const { garantirSchemaAtendimento } = require('./motores/muv/atendimentoSchema');
+      garantirSchemaAtendimento(db, (schemaErr) => {
+        if (schemaErr) {
+          console.error('Erro ao garantir schema atendimentos:', schemaErr.message);
+        }
+      });
+    } catch (requireErr) {
+      console.error('Erro ao carregar schema atendimentos:', requireErr.message);
+    }
 
       // Tabela de faixas de atacado por produto
       db.run(`

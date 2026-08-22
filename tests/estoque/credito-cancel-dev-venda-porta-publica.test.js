@@ -27,6 +27,7 @@ const SRC_CANCELAMENTO = path.resolve(
   __dirname,
   '../../backend/services/vendas/VendaCancelamentoService.js'
 );
+const { garantirSchemaEstoqueEmpresaAsync } = require('../../backend/services/estoque/estoqueEmpresaSchema');
 
 function openDb() {
   return new Promise((resolve, reject) => {
@@ -96,11 +97,19 @@ async function setup(sf = 100, snf = 50) {
   `);
   await run(db, `CREATE TABLE empresas (id INTEGER PRIMARY KEY, razao TEXT)`);
   await run(db, `INSERT INTO empresas (id, razao) VALUES (1, 'A')`);
+  await garantirSchemaEstoqueEmpresaAsync(db);
   const p = await run(
     db,
     `INSERT INTO produtos (nome, saldo_fiscal, saldo_nao_fiscal, estoque_atual)
      VALUES ('Global', ?, ?, ?)`,
     [sf, snf, sf + snf]
+  );
+  await run(
+    db,
+    `INSERT INTO estoque_empresa (
+       produto_id, empresa_id, saldo_fiscal, saldo_nao_fiscal, estoque_atual
+     ) VALUES (?, 1, ?, ?, ?)`,
+    [p.lastID, sf, snf, sf + snf]
   );
   return { db, produtoId: p.lastID, empresaId: 1 };
 }
@@ -200,15 +209,17 @@ async function test07EmpresaPropagada() {
   assert.strictEqual(r.legado, false);
 
   const viaBody = extrairEmpresaIdDeReq({ body: { empresa_id: 7 } });
-  assert.strictEqual(viaBody, 7);
+  assert.strictEqual(viaBody, null);
   const viaUser = extrairEmpresaIdDeReq({ user: { empresaId: 3 } });
-  assert.strictEqual(viaUser, 3);
+  assert.strictEqual(viaUser, null);
+  const viaReq = extrairEmpresaIdDeReq({ empresaId, body: { empresaId: 9 } });
+  assert.strictEqual(viaReq, empresaId);
   const opts = montarOpcoesRetornoEstoqueVenda(
-    { body: { empresaId: 9 }, user: { id: 4 } },
+    { empresaId, body: { empresaId: 9 }, user: { id: 4 } },
     'cancelamento_venda',
     db
   );
-  assert.strictEqual(opts.empresaId, 9);
+  assert.strictEqual(opts.empresaId, empresaId);
   assert.strictEqual(opts.usuarioId, 4);
   assert.strictEqual(opts.origem, 'cancelamento_venda');
   await closeDb(db);

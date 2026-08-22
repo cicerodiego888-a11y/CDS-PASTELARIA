@@ -23,9 +23,7 @@ function getDb() {
 }
 
 function montarOptsPortaRevertDevolucaoVenda(db, opcoes = {}) {
-  const empresaId = resolverEmpresaId(opcoes)
-    ?? resolverEmpresaId(opcoes.contexto)
-    ?? resolverEmpresaId(opcoes.ctx);
+  const empresaId = resolverEmpresaId(opcoes.empresaId);
 
   const base = {
     db,
@@ -101,8 +99,15 @@ function dbRun(db, sql, params = []) {
 /**
  * Ao autorizar: devolve quantidade ao estoque físico/fiscal.
  */
-async function retornarEstoqueNfeDevolucaoVenda(nfeDevolucaoId) {
-  const db = getDb();
+async function retornarEstoqueNfeDevolucaoVenda(nfeDevolucaoId, opcoes = {}) {
+  const db = opcoes.db || getDb();
+  const empresaId = resolverEmpresaId(opcoes.empresaId);
+  const optsCredito = {
+    db,
+    empresaId,
+    usuarioId: opcoes.usuarioId,
+    origem: opcoes.origem || 'nfe_devolucao_venda'
+  };
   const nota = await dbGet(db, `SELECT * FROM nfe_devolucoes_venda WHERE id = ?`, [Number(nfeDevolucaoId)]);
   if (!nota || Number(nota.estoque_retornado) === 1) return { ok: true, reused: true };
 
@@ -128,7 +133,7 @@ async function retornarEstoqueNfeDevolucaoVenda(nfeDevolucaoId) {
           devolverSaldosDistribuidos(produtoId, qtdFiscal, qtdNaoFiscal, (saldoErr) => {
             if (saldoErr) return reject(saldoErr);
             resolve();
-          });
+          }, optsCredito);
         };
         if (controla) {
           // restauração parcial de lotes quando possível

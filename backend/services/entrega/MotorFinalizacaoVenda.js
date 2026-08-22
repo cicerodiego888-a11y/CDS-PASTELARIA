@@ -401,7 +401,12 @@ async function _finalizarPrestacaoInterno({ vendaId, body = {}, req = {}, contex
     }
 
     // 1–4: converter reserva → baixa
-    const optsReserva = montarOptsPortaReservaPdv({ req, ...req, body, contexto: contextoAuditoria }, db);
+    const optsReserva = montarOptsPortaReservaPdv({
+      req,
+      empresaId: req.empresaId,
+      usuarioId: req.operadorId || req.user?.id,
+      db
+    }, db);
     const consumo = await consumirReservasDaVenda(vendaId, optsReserva);
     await audit(EntregaAuditoriaEventos.RESERVA_CONVERTIDA, vendaId, consumo, contextoAuditoria);
     await audit(EntregaAuditoriaEventos.ESTOQUE_BAIXADO, vendaId, consumo, contextoAuditoria);
@@ -591,7 +596,7 @@ async function _finalizarPrestacaoInterno({ vendaId, body = {}, req = {}, contex
 /**
  * Cancela entrega: libera reserva, sem financeiro/NFC-e/caixa.
  */
-async function cancelarEntregaMotor({ vendaId, motivo = null, contextoAuditoria = {} }) {
+async function cancelarEntregaMotor({ vendaId, motivo = null, contextoAuditoria = {}, req = {} }) {
   if (!configService.recursoHabilitado('vendasEntrega')) {
     const err = new Error('Módulo Vendas para Entrega desabilitado.');
     err.status = 404;
@@ -647,7 +652,12 @@ async function cancelarEntregaMotor({ vendaId, motivo = null, contextoAuditoria 
       throw err;
     }
 
-    await liberarReservasDaVenda(vendaId, montarOptsPortaReservaPdv(contextoAuditoria, db));
+    await liberarReservasDaVenda(vendaId, montarOptsPortaReservaPdv({
+      req,
+      empresaId: req.empresaId,
+      usuarioId: req.operadorId || req.user?.id,
+      db
+    }, db));
     const cancelResult = await run(
       `
         UPDATE vendas SET

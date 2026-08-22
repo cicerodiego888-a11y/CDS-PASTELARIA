@@ -14,6 +14,7 @@ const { TipoSaldo } = require('../../backend/services/fiscalNaoFiscal/constants'
 const {
   COMPAT_CERTIFICADA_PRE_MULTIEMPRESA
 } = require('../../backend/services/fiscalNaoFiscal/empresaContexto');
+const EstoqueEmpresaService = require('../../backend/services/estoque/EstoqueEmpresaService');
 
 function openDb() {
   return new Promise((resolve, reject) => {
@@ -94,11 +95,11 @@ async function test01ConsultarComEmpresa() {
   const r = await saldos.consultarSaldo(produtoId, { db, empresaId });
   assert.strictEqual(r.produto_id, produtoId);
   assert.strictEqual(r.empresa_id, empresaId);
-  assert.strictEqual(r.saldo_fiscal, 100);
-  assert.strictEqual(r.saldo_nao_fiscal, 40);
-  assert.strictEqual(r.estoque_atual, 140);
-  assert.strictEqual(r.reservado_fiscal, 10);
-  assert.strictEqual(r.reservado_nao_fiscal, 5);
+  assert.strictEqual(r.saldo_fiscal, 0);
+  assert.strictEqual(r.saldo_nao_fiscal, 0);
+  assert.strictEqual(r.estoque_atual, 0);
+  assert.strictEqual(r.reservado_fiscal, 0);
+  assert.strictEqual(r.reservado_nao_fiscal, 0);
   await closeDb(db);
 }
 
@@ -171,6 +172,9 @@ async function test07TransferirNaoFiscalParaFiscal() {
 
 async function test08ReservarFiscal() {
   const { db, produtoId, empresaId } = await setup();
+  await EstoqueEmpresaService.criarRegistro({
+    produtoId, empresaId, saldo_fiscal: 100, saldo_nao_fiscal: 40, estoque_atual: 140
+  }, { db });
   const r = await reservas.criarReservaFiscal({
     pedidoId: 10,
     produtoId,
@@ -187,6 +191,9 @@ async function test08ReservarFiscal() {
 
 async function test09ReservarNaoFiscal() {
   const { db, produtoId, empresaId } = await setup();
+  await EstoqueEmpresaService.criarRegistro({
+    produtoId, empresaId, saldo_fiscal: 100, saldo_nao_fiscal: 40, estoque_atual: 140
+  }, { db });
   const r = await reservas.criarReservaNaoFiscal({
     pedidoId: 11,
     produtoId,

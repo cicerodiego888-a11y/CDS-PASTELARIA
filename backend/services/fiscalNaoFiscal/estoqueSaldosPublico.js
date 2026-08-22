@@ -5,8 +5,12 @@
  * saldo_fiscal e saldo_nao_fiscal de produtos.
  *
  * Fase 1 / Implementação 01: contrato passa a exigir empresaId/contexto
- * (ou modoLegadoSemEmpresa explícito). Storage físico permanece em `produtos`
- * até a Sprint de estoque_empresa — a regra F×NF não muda.
+ * (ou modoLegadoSemEmpresa explícito).
+ * Fase 2 / 03.19: escrita em `produtos` + dual-write em `estoque_empresa`
+ * quando há empresaId.
+ * Fase 2 / 03.35: consultarSaldo com empresaId lê `estoque_empresa`
+ * (sem registro → zero). Sem empresaId permanece em `produtos`.
+ * Writers (_ajustarSaldo / transferir) continuam lendo `produtos`.
  *
  * Outros Motores (ex.: MTS) DEVEM usar apenas estas funções.
  * Não exporta SQL nem acesso cru a tabelas.
@@ -65,7 +69,7 @@ function normalizarArgsProduto(produtoIdOrParams, opts = {}) {
     const merged = {
       ...opts,
       ...p,
-      empresaId: resolverEmpresaId(p) ?? resolverEmpresaId(opts),
+      empresaId: p.empresaId != null && p.empresaId !== '' ? p.empresaId : opts.empresaId,
       db: opts.db != null ? opts.db : p.db
     };
     return { produtoId, opts: merged };
@@ -73,49 +77,17 @@ function normalizarArgsProduto(produtoIdOrParams, opts = {}) {
   return { produtoId: produtoIdOrParams, opts };
 }
 
-/**
- * Consulta saldos públicos de um produto no contexto de empresa.
- * Storage transitório: ainda lê de `produtos` (sem estoque_empresa).
- *
- * @param {number|object} produtoIdOrParams
- * @param {{ db?: object, empresaId?: number, empresa_id?: number, modoLegadoSemEmpresa?: boolean, validarEmpresa?: Function, usuarioId?: number }} [opts]
- */
-async function consultarSaldo(produtoIdOrParams, opts = {}) {
-  const normalized = normalizarArgsProduto(produtoIdOrParams, opts);
-  const id = Number(normalized.produtoId);
-  const callOpts = normalized.opts;
+/** 03.35 — leitura isolada usa somente opts.empresaId (não body/query/contexto/empresa_id). */
+function empresaIdExplicitoConsulta(opts) {
+  return resolverEmpresaId(opts && opts.empresaId);
+}
 
-  if (!Number.isInteger(id) || id <= 0) {
-    const err = new Error('Produto inválido.');
-    err.code = 'PRODUTO_INVALIDO';
-    throw err;
-  }
-
-  const ctx = await resolverContextoEmpresa(callOpts);
-  const db = getDb(callOpts.db);
-  const row = await dbGet(
-    db,
-    `SELECT id,
-            COALESCE(saldo_fiscal, 0) AS saldo_fiscal,
-            COALESCE(saldo_nao_fiscal, 0) AS saldo_nao_fiscal,
-            COALESCE(reservado_fiscal, 0) AS reservado_fiscal,
-            COALESCE(reservado_nao_fiscal, 0) AS reservado_nao_fiscal,
-            estoque_atual
-     FROM produtos WHERE id = ?`,
-    [id]
-  );
-
-  if (!row) {
-    const err = new Error('Produto não encontrado.');
-    err.code = 'PRODUTO_NAO_ENCONTRADO';
-    throw err;
-  }
-
-  const saldoFiscal = round3(row.saldo_fiscal);
-  const saldoNaoFiscal = round3(row.saldo_nao_fiscal);
+function montarRetornoConsultarSaldo(id, ctx, campos) {
+  const saldoFiscal = round3(campos.saldoFiscal);
+  const saldoNaoFiscal = round3(campos.saldoNaoFiscal);
   const estoqueAtual = round3(
-    row.estoque_atual != null
-      ? row.estoque_atual
+    campos.estoqueAtual != null
+      ? campos.estoqueAtual
       : recalcularEstoqueConsolidado({
         saldo_fiscal: saldoFiscal,
         saldo_nao_fiscal: saldoNaoFiscal
@@ -124,19 +96,10 @@ async function consultarSaldo(produtoIdOrParams, opts = {}) {
   const calc = calcularEstoqueProduto({
     saldo_fiscal: saldoFiscal,
     saldo_nao_fiscal: saldoNaoFiscal,
-    reservado_fiscal: row.reservado_fiscal,
-    reservado_nao_fiscal: row.reservado_nao_fiscal,
+    reservado_fiscal: campos.reservadoFiscal,
+    reservado_nao_fiscal: campos.reservadoNaoFiscal,
     estoque_atual: estoqueAtual
   });
-
-  logOperacaoSaldo({
-    operacao: 'consultarSaldo',
-    produtoId: id,
-    empresaId: ctx.empresaId,
-    legado: ctx.legado,
-    usuarioId: callOpts.usuarioId
-  });
-
   return Object.freeze({
     produto_id: id,
     empresa_id: ctx.empresaId,
@@ -154,6 +117,150 @@ async function consultarSaldo(produtoIdOrParams, opts = {}) {
   });
 }
 
+function camposDeLinhaProdutos(row) {
+  return {
+    saldoFiscal: row.saldo_fiscal,
+    saldoNaoFiscal: row.saldo_nao_fiscal,
+    estoqueAtual: row.estoque_atual,
+    reservadoFiscal: row.reservado_fiscal,
+    reservadoNaoFiscal: row.reservado_nao_fiscal
+  };
+}
+
+async function lerLinhaProdutos(db, id) {
+  return dbGet(
+    db,
+    `SELECT id,
+            COALESCE(saldo_fiscal, 0) AS saldo_fiscal,
+            COALESCE(saldo_nao_fiscal, 0) AS saldo_nao_fiscal,
+            COALESCE(reservado_fiscal, 0) AS reservado_fiscal,
+            COALESCE(reservado_nao_fiscal, 0) AS reservado_nao_fiscal,
+            estoque_atual
+     FROM produtos WHERE id = ?`,
+    [id]
+  );
+}
+
+/**
+ * Leitura de writers: sempre `produtos` (dual-write 03.19).
+ * Não usa estoque_empresa — senão o UPDATE absoluto corromperia o saldo global.
+ */
+async function consultarSaldoEmProdutos(produtoId, opts = {}) {
+  const id = Number(produtoId);
+  if (!Number.isInteger(id) || id <= 0) {
+    const err = new Error('Produto inválido.');
+    err.code = 'PRODUTO_INVALIDO';
+    throw err;
+  }
+  const ctx = await resolverContextoEmpresa(opts);
+  const db = getDb(opts.db);
+  const row = await lerLinhaProdutos(db, id);
+  if (!row) {
+    const err = new Error('Produto não encontrado.');
+    err.code = 'PRODUTO_NAO_ENCONTRADO';
+    throw err;
+  }
+  return montarRetornoConsultarSaldo(id, ctx, camposDeLinhaProdutos(row));
+}
+
+/**
+ * Consulta saldos públicos de um produto.
+ * Sem empresaId: `produtos` (COMPAT / legado).
+ * Com empresaId: `estoque_empresa`. Sem registro → zero. Sem fallback para produtos.
+ *
+ * @param {number|object} produtoIdOrParams
+ * @param {{ db?: object, empresaId?: number, modoLegadoSemEmpresa?: boolean, validarEmpresa?: Function, usuarioId?: number }} [opts]
+ */
+async function consultarSaldo(produtoIdOrParams, opts = {}) {
+  const normalized = normalizarArgsProduto(produtoIdOrParams, opts);
+  const id = Number(normalized.produtoId);
+  const callOpts = normalized.opts;
+
+  if (!Number.isInteger(id) || id <= 0) {
+    const err = new Error('Produto inválido.');
+    err.code = 'PRODUTO_INVALIDO';
+    throw err;
+  }
+
+  const empresaId = empresaIdExplicitoConsulta(callOpts);
+  const ctx = await resolverContextoEmpresa({
+    db: callOpts.db,
+    empresaId,
+    modoLegadoSemEmpresa: callOpts.modoLegadoSemEmpresa === true,
+    motivoCompat: callOpts.motivoCompat,
+    validarEmpresa: callOpts.validarEmpresa,
+    usuarioId: callOpts.usuarioId
+  });
+  const db = getDb(callOpts.db);
+  const row = await lerLinhaProdutos(db, id);
+
+  if (!row) {
+    const err = new Error('Produto não encontrado.');
+    err.code = 'PRODUTO_NAO_ENCONTRADO';
+    throw err;
+  }
+
+  let campos = camposDeLinhaProdutos(row);
+
+  const temEmpresas = ctx.empresaId != null && ctx.legado !== true
+    ? await dbGet(db, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'empresas'`)
+    : null;
+
+  if (temEmpresas) {
+    const EstoqueEmpresaService = require('../estoque/EstoqueEmpresaService');
+    const iso = await EstoqueEmpresaService.consultarSaldoParaEmpresa({
+      produtoId: id,
+      empresaId: ctx.empresaId,
+      db
+    });
+    campos = iso
+      ? {
+        saldoFiscal: iso.saldoFiscal,
+        saldoNaoFiscal: iso.saldoNaoFiscal,
+        estoqueAtual: iso.estoqueAtual,
+        reservadoFiscal: iso.reservadoFiscal,
+        reservadoNaoFiscal: iso.reservadoNaoFiscal
+      }
+      : {
+        saldoFiscal: 0,
+        saldoNaoFiscal: 0,
+        estoqueAtual: 0,
+        reservadoFiscal: 0,
+        reservadoNaoFiscal: 0
+      };
+  }
+
+  logOperacaoSaldo({
+    operacao: 'consultarSaldo',
+    produtoId: id,
+    empresaId: ctx.empresaId,
+    legado: ctx.legado,
+    usuarioId: callOpts.usuarioId
+  });
+
+  return montarRetornoConsultarSaldo(id, ctx, campos);
+}
+
+/**
+ * 03.19 — mesmo delta da porta em estoque_empresa.
+ * Registro inexistente nasce zerado + efeito atual. Sem copiar produtos. Sem BEGIN.
+ */
+async function espelharEfeitoEmEstoqueEmpresa(db, produtoId, empresaId, tipoN, delta) {
+  const temEmpresas = await dbGet(
+    db,
+    `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'empresas'`
+  );
+  if (!temEmpresas) return;
+
+  const EstoqueEmpresaService = require('../estoque/EstoqueEmpresaService');
+  await EstoqueEmpresaService.aplicarEfeitoSaldo({
+    produtoId,
+    empresaId,
+    deltaSaldoFiscal: tipoN === TipoSaldo.FISCAL ? delta : 0,
+    deltaSaldoNaoFiscal: tipoN === TipoSaldo.NAO_FISCAL ? delta : 0
+  }, { db });
+}
+
 async function _ajustarSaldo(produtoId, tipo, delta, opts = {}) {
   const tipoN = normalizarTipoSaldo(tipo);
   const q = round3(delta);
@@ -165,7 +272,7 @@ async function _ajustarSaldo(produtoId, tipo, delta, opts = {}) {
 
   const ctx = await resolverContextoEmpresa(opts);
   const db = getDb(opts.db);
-  const saldos = await consultarSaldo(produtoId, { ...opts, db });
+  const saldos = await consultarSaldoEmProdutos(produtoId, { ...opts, db });
 
   let saldoFiscal = saldos.saldo_fiscal;
   let saldoNaoFiscal = saldos.saldo_nao_fiscal;
@@ -202,6 +309,10 @@ async function _ajustarSaldo(produtoId, tipo, delta, opts = {}) {
      WHERE id = ?`,
     [saldoFiscal, saldoNaoFiscal, estoqueTotal, saldos.produto_id]
   );
+
+  if (ctx.empresaId != null && ctx.legado !== true) {
+    await espelharEfeitoEmEstoqueEmpresa(db, saldos.produto_id, ctx.empresaId, tipoN, q);
+  }
 
   logOperacaoSaldo({
     operacao: q < 0 ? 'debitarSaldo' : 'creditarSaldo',
@@ -293,7 +404,7 @@ async function transferirSaldoEntreTipos(params = {}, opts = {}) {
 
   const ctx = await resolverContextoEmpresa(callOpts);
   const db = getDb(callOpts.db);
-  const antes = await consultarSaldo(produtoId, { ...callOpts, db });
+  const antes = await consultarSaldoEmProdutos(produtoId, { ...callOpts, db });
   const disponivel = origem === TipoSaldo.FISCAL
     ? antes.saldo_fiscal
     : antes.saldo_nao_fiscal;
@@ -311,7 +422,7 @@ async function transferirSaldoEntreTipos(params = {}, opts = {}) {
 
   const debito = await debitarSaldo(produtoId, origem, quantidade, { ...callOpts, db });
   const credito = await creditarSaldo(produtoId, destino, quantidade, { ...callOpts, db });
-  const depois = await consultarSaldo(produtoId, { ...callOpts, db });
+  const depois = await consultarSaldoEmProdutos(produtoId, { ...callOpts, db });
 
   logOperacaoSaldo({
     operacao: 'transferirSaldoEntreTipos',

@@ -211,12 +211,13 @@ class EntregaService {
     });
   }
 
-  async cancelarEntrega(vendaId, payload = {}, contexto = {}) {
+  async cancelarEntrega(vendaId, payload = {}, contexto = {}, req = {}) {
     const { cancelarEntregaMotor } = require('./MotorFinalizacaoVenda');
     return cancelarEntregaMotor({
       vendaId,
       motivo: payload.motivo || null,
-      contextoAuditoria: contexto
+      contextoAuditoria: contexto,
+      req
     });
   }
 

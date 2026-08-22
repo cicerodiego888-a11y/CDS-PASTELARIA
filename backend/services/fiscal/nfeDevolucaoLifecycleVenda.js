@@ -710,7 +710,8 @@ async function cancelarNfeDevolucaoOficial(notaId, {
   usuarioNome,
   ip,
   computador,
-  forcarPrazo = false
+  forcarPrazo = false,
+  empresaId
 } = {}) {
   await garantirSchemaLifecycle();
   const started = Date.now();
@@ -853,7 +854,8 @@ async function cancelarNfeDevolucaoOficial(notaId, {
     const local = await cancelarNfeDevolucaoVenda(notaId, {
       motivo: justificativa,
       usuarioId,
-      usuarioNome
+      usuarioNome,
+      empresaId
     });
     await atualizarNota(notaId, {
       protocolo_cancelamento: protEvento,

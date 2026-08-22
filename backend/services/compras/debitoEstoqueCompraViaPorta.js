@@ -20,9 +20,7 @@ const { resolverEmpresaId } = require('../fiscalNaoFiscal/empresaContexto');
 const MOTIVO_COMPAT_DEBITO_COMPRA = 'COMPAT_DEBITO_COMPRA_PRE_MULTIEMPRESA';
 
 function montarOptsPortaDebitoCompra(db, opcoes = {}) {
-  const empresaId = resolverEmpresaId(opcoes)
-    ?? resolverEmpresaId(opcoes.contexto)
-    ?? resolverEmpresaId(opcoes.ctx);
+  const empresaId = resolverEmpresaId(opcoes.empresaId);
 
   const base = {
     db,

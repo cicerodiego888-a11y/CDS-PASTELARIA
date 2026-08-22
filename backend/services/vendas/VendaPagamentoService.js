@@ -22,6 +22,7 @@ const {
   debitarEstoqueItemVenda,
   montarOpcoesBaixaEstoqueVenda
 } = require('./debitoEstoqueVendaViaPorta');
+const { aplicarSaldosDisponibilidadeVenda } = require('../estoque/leituraEstoqueEmpresaProduto');
 
 /**
  * RC8.2 — carrega MPFC e entrega política aos consumidores.
@@ -120,8 +121,6 @@ function atualizarSaldoProdutoAposBaixa(produtoId, quantidade, itemFiscal, callb
     usuarioId: opcoes.usuarioId,
     exigirEmpresa: opcoes.exigirEmpresa,
     origem: opcoes.origem || 'baixa_venda',
-    contexto: opcoes.contexto,
-    ctx: opcoes.ctx,
     validarEmpresa: opcoes.validarEmpresa
   }, callback);
 }
@@ -542,14 +541,29 @@ db.all(`
     COALESCE(controla_estoque, 1) AS controla_estoque
   FROM produtos
   WHERE id IN (${produtoIds.map(() => '?').join(',')})
-`, produtoIds, (err, produtos) => {
+`, produtoIds, async (err, produtos) => {
   if (err) {
     return res.status(500).json({ sucesso: false, error: err.message });
   }
 
+  let produtosEstoque = produtos || [];
+  try {
+    produtosEstoque = await aplicarSaldosDisponibilidadeVenda({
+      produtos: produtosEstoque,
+      empresaId: req.empresaId,
+      db
+    });
+  } catch (isoErr) {
+    return res.status(500).json({
+      sucesso: false,
+      error: isoErr && isoErr.message ? isoErr.message : 'Erro ao consultar estoque da empresa.',
+      code: isoErr && isoErr.code ? isoErr.code : undefined
+    });
+  }
+
   const { saldosParaDistribuicaoVenda } = require('../estoque/produtoControlaEstoque');
 
-  const produtoMap = produtos.reduce((map, produto) => {
+  const produtoMap = produtosEstoque.reduce((map, produto) => {
     map[produto.id] = produto;
     return map;
   }, {});
@@ -793,16 +807,30 @@ db.all(`
     COALESCE(controla_estoque, 1) AS controla_estoque
   FROM produtos
   WHERE id IN (${produtoIds.map(() => '?').join(',')})
-`, produtoIds, (err, produtos) => {
+`, produtoIds, async (err, produtos) => {
   if (err) {
     res.status(500).json({ error: err.message });
     return;
   }
 
+  let produtosEstoque = produtos || [];
+  try {
+    produtosEstoque = await aplicarSaldosDisponibilidadeVenda({
+      produtos: produtosEstoque,
+      empresaId: req.empresaId,
+      db
+    });
+  } catch (isoErr) {
+    return res.status(500).json({
+      error: isoErr && isoErr.message ? isoErr.message : 'Erro ao consultar estoque da empresa.',
+      code: isoErr && isoErr.code ? isoErr.code : undefined
+    });
+  }
+
   const { calcularEstoqueProduto } = require('../estoque/EstoqueDisponivelService');
   const { saldosParaDistribuicaoVenda } = require('../estoque/produtoControlaEstoque');
 
-  const produtoMap = produtos.reduce((map, produto) => {
+  const produtoMap = produtosEstoque.reduce((map, produto) => {
     map[produto.id] = produto;
     return map;
   }, {});

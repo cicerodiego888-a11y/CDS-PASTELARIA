@@ -76,6 +76,17 @@ function exigirEmpresaId(fonte) {
  * Ordem: req.empresaId (já anexado) → header X-Empresa-Id → body → query.
  * Não lê configuracoes.cnpj. Não assume empresa 1. Não lê JWT (token sem claim).
  */
+/**
+ * 03.19 — empresa do contexto validado prevalece.
+ * Body/user só entram se req.empresaId ainda não foi anexado.
+ */
+function empresaIdDoReqOperacional(req) {
+  if (!req || typeof req !== 'object') return null;
+  const validado = resolverEmpresaId(req.empresaId);
+  if (validado != null) return validado;
+  return resolverEmpresaId(req.body) ?? resolverEmpresaId(req.user);
+}
+
 function resolverEmpresaIdDaRequisicao(req) {
   if (!req || typeof req !== 'object') return null;
 
@@ -309,6 +320,7 @@ function logOperacaoSaldo(evento) {
 module.exports = {
   COMPAT_CERTIFICADA_PRE_MULTIEMPRESA,
   resolverEmpresaId,
+  empresaIdDoReqOperacional,
   resolverEmpresaIdDaRequisicao,
   exigirEmpresaId,
   validarEmpresaId,

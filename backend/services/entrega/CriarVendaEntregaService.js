@@ -4,6 +4,9 @@
  * - status_entrega = AGUARDANDO_ENTREGA
  * - Reserva estoque (sem baixa definitiva)
  * - Sem financeiro, sem caixa, sem NFC-e
+ *
+ * 03.32 — disponibilidade lê estoque_empresa quando há req.empresaId
+ * (mesmo overlay da 03.24). Sem empresa: legado produtos.
  */
 
 'use strict';
@@ -14,7 +17,8 @@ const { parseVendaFiscalFlag, distribuirItensVendaComValorFiscalEfetivo } = requ
 const mpfc = require('../mpfc');
 const { calcularEstoqueProduto } = require('../estoque/EstoqueDisponivelService');
 const { saldosParaDistribuicaoVenda } = require('../estoque/produtoControlaEstoque');
-const { reservarItem } = require('../estoque/EstoqueReservaService');
+const { aplicarSaldosDisponibilidadeVenda } = require('../estoque/leituraEstoqueEmpresaProduto');
+const { reservarItem, empresaIdDoReqReservaPdv } = require('../estoque/EstoqueReservaService');
 const { TipoVenda, StatusEntrega, StatusVenda, PagamentoPrevisto } = require('./enums');
 const {
   EntregaAuditoriaEventos,
@@ -147,12 +151,26 @@ function criarVendaEntrega(req, res) {
       WHERE id IN (${produtoIds.map(() => '?').join(',')})
     `,
     produtoIds,
-    (errProd, produtos) => {
+    async (errProd, produtos) => {
       if (errProd) {
         return res.status(500).json({ error: errProd.message });
       }
 
-      const produtoMap = (produtos || []).reduce((map, p) => {
+      let produtosEstoque = produtos || [];
+      try {
+        produtosEstoque = await aplicarSaldosDisponibilidadeVenda({
+          produtos: produtosEstoque,
+          empresaId: req.empresaId,
+          db
+        });
+      } catch (isoErr) {
+        return res.status(500).json({
+          error: isoErr && isoErr.message ? isoErr.message : 'Erro ao consultar estoque da empresa.',
+          code: isoErr && isoErr.code ? isoErr.code : undefined
+        });
+      }
+
+      const produtoMap = produtosEstoque.reduce((map, p) => {
         map[p.id] = p;
         return map;
       }, {});
@@ -349,7 +367,7 @@ function criarVendaEntrega(req, res) {
                         produtoId: item.produto_id,
                         quantidadeFiscal: item.quantidade_fiscal,
                         quantidadeNaoFiscal: item.quantidade_nao_fiscal,
-                        empresaId: req.body?.empresa_id ?? req.body?.empresaId ?? req.user?.empresa_id ?? req.user?.empresaId,
+                        empresaId: empresaIdDoReqReservaPdv(req),
                         usuarioId: req.operadorId || req.user?.id,
                         db
                       },

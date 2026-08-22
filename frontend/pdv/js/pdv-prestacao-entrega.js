@@ -136,13 +136,18 @@
   }
 
   async function api(path, opts = {}) {
+    const headers = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${localStorage.getItem('token')}`,
+      ...(opts.headers || {})
+    };
+    if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.headersJson === 'function') {
+      const extra = CdsEmpresaContexto.headersJson();
+      if (extra['X-Empresa-Id']) headers['X-Empresa-Id'] = extra['X-Empresa-Id'];
+    }
     const resp = await fetch(`${API_URL}${path}`, {
       ...opts,
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${localStorage.getItem('token')}`,
-        ...(opts.headers || {})
-      }
+      headers
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(data.error || 'Falha na requisição.');

@@ -104,8 +104,8 @@ async function test01Fiscal() {
     quantidadeNaoFiscal: 0,
     empresaId
   });
-  assert.strictEqual(r.saldo_fiscal, 30);
-  assert.strictEqual(r.saldo_nao_fiscal, 5);
+  assert.strictEqual(r.saldo_fiscal, 20);
+  assert.strictEqual(r.saldo_nao_fiscal, 0);
   assert.strictEqual(r.creditado, true);
   await closeDb(db);
 }
@@ -118,8 +118,8 @@ async function test02NaoFiscal() {
     quantidadeNaoFiscal: 15,
     empresaId
   });
-  assert.strictEqual(r.saldo_fiscal, 10);
-  assert.strictEqual(r.saldo_nao_fiscal, 20);
+  assert.strictEqual(r.saldo_fiscal, 0);
+  assert.strictEqual(r.saldo_nao_fiscal, 15);
   await closeDb(db);
 }
 
@@ -181,7 +181,7 @@ async function test06EstoqueAtual() {
     empresaId
   });
   assert.strictEqual(r.estoque_atual, r.saldo_fiscal + r.saldo_nao_fiscal);
-  assert.strictEqual(r.estoque_atual, 165);
+  assert.strictEqual(r.estoque_atual, 15);
   await closeDb(db);
 }
 

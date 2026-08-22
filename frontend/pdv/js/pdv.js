@@ -332,6 +332,23 @@ function atualizarPreviewVendaUnidadeModal(produto) {
     }
 }
 
+function aplicarSaldosIdentificacaoNoProdutoPdv(produto, resultado) {
+    const src = resultado && resultado.produto;
+    if (!produto || !src) return produto;
+    if (!Object.prototype.hasOwnProperty.call(src, 'saldo_fiscal')
+        && !Object.prototype.hasOwnProperty.call(src, 'estoque_atual')) {
+        return produto;
+    }
+    return {
+        ...produto,
+        saldo_fiscal: Number(src.saldo_fiscal ?? 0),
+        saldo_nao_fiscal: Number(src.saldo_nao_fiscal ?? 0),
+        estoque_atual: Number(src.estoque_atual ?? 0),
+        reservado_fiscal: Number(src.reservado_fiscal ?? 0),
+        reservado_nao_fiscal: Number(src.reservado_nao_fiscal ?? 0)
+    };
+}
+
 function urlProdutosPdv() {
     const modoFiscal = typeof modoFiscalQueryParam === 'function' ? modoFiscalQueryParam() : '0';
     return `${API_URL}/produtos?modo_fiscal=${modoFiscal}`;
@@ -398,13 +415,18 @@ async function identificarProdutoViaMip(codigo, opcoes = {}) {
 
     const url = `${API_URL}/produtos/identificar`;
     const payloadEnviado = { codigo: String(codigo || '').trim(), contexto };
+    const headers = {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer ' + token
+    };
+    if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.headersJson === 'function') {
+        const extra = CdsEmpresaContexto.headersJson();
+        if (extra['X-Empresa-Id']) headers['X-Empresa-Id'] = extra['X-Empresa-Id'];
+    }
 
     const response = await fetch(url, {
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            Authorization: 'Bearer ' + token
-        },
+        headers,
         body: JSON.stringify(payloadEnviado)
     });
 
@@ -1252,12 +1274,17 @@ async function precalcularDistribuicaoFiscalVenda(
 ) {
     const pagamentosPayload = Array.isArray(pagamentos) ? pagamentos : [];
     try {
+        const headers = {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${localStorage.getItem('token') || ''}`
+        };
+        if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.headersJson === 'function') {
+            const extra = CdsEmpresaContexto.headersJson();
+            if (extra['X-Empresa-Id']) headers['X-Empresa-Id'] = extra['X-Empresa-Id'];
+        }
         const response = await fetch(`${API_URL}/vendas/pre-calcular-distribuicao`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${localStorage.getItem('token') || ''}`
-            },
+            headers,
             body: JSON.stringify(getTerminalRequestData({
                 itens,
                 emitir_fiscal: vendaFiscal,
@@ -3475,11 +3502,11 @@ async function adicionarProdutoPorCodigoViaMip(codigoDigitado) {
         }
     }
 
-    const produtoFinal = (produto && produto.id)
+    const produtoFinalBase = (produto && produto.id)
         ? produto
         : (resultado.produto && resultado.produto.id ? resultado.produto : null);
 
-    if (!produtoFinal || !produtoFinal.id) {
+    if (!produtoFinalBase || !produtoFinalBase.id) {
         if (ehEtiqueta) {
             showNotification(`Produto não encontrado: PLU ${codigoParaMip}`, 'danger');
             return;
@@ -3487,6 +3514,8 @@ async function adicionarProdutoPorCodigoViaMip(codigoDigitado) {
         adicionarProdutoPorCodigoLegado(codigoDigitado);
         return;
     }
+
+    const produtoFinal = aplicarSaldosIdentificacaoNoProdutoPdv(produtoFinalBase, resultado);
 
     const veioDoMotor = Boolean(parseMotor && parseMotor.resultado);
 
@@ -5065,6 +5094,11 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
             contentType: 'application/json',
             data: JSON.stringify(payload),
             timeout: 120000,
+            beforeSend: function (xhr) {
+                if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.anexarHeaderXhr === 'function') {
+                    CdsEmpresaContexto.anexarHeaderXhr(xhr);
+                }
+            },
             success: function(response) {
                 try {
                     if (!response || typeof response !== 'object') {

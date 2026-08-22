@@ -212,12 +212,19 @@ async function test07EmpresaPropagada() {
   assert.strictEqual(r.legado, false);
 
   const opts = montarOpcoesBaixaEstoqueVenda(
-    { body: { empresa_id: 4 }, user: { id: 9 } },
+    { empresaId: 4, body: { empresa_id: 9 }, user: { id: 9 } },
     'baixa_venda',
     db
   );
   assert.strictEqual(opts.empresaId, 4);
   assert.strictEqual(opts.usuarioId, 9);
+
+  const soBody = montarOpcoesBaixaEstoqueVenda(
+    { body: { empresa_id: 4 }, user: { id: 9 } },
+    'baixa_venda',
+    db
+  );
+  assert.strictEqual(soBody.empresaId, null);
   await closeDb(db);
 }
 

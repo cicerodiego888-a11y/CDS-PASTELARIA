@@ -17,6 +17,9 @@ const configService = require('../services/configuracaoService');
 const PedidoService = require('../services/pedido/PedidoService');
 const FaturamentoService = require('../services/faturamento/FaturamentoService');
 const { responderModuloNaoLicenciado } = require('../middleware/errosLicenciamento');
+const db = require('../database');
+const { criarMiddlewareContextoEmpresa } = require('../services/fiscalNaoFiscal/empresaContexto');
+const { empresaIdDoReqPedido } = require('../services/pedido/empresaIdDoReqPedido');
 
 function exigirModuloFaturamento(req, res, next) {
   if (!configService.recursoHabilitado('faturamento')) {
@@ -37,6 +40,7 @@ function responderErro(res, err) {
 }
 
 router.use(exigirModuloFaturamento);
+router.use(criarMiddlewareContextoEmpresa(db));
 
 /** Fila de pedidos aguardando faturamento */
 router.get('/pedidos/aguardando-faturamento', async (req, res) => {
@@ -61,7 +65,11 @@ router.get('/pedidos/:id', async (req, res) => {
 router.post('/pedidos', async (req, res) => {
   try {
     const operadorId = req.user?.id || null;
-    const out = await PedidoService.criarPedido(req.body || {}, operadorId);
+    const out = await PedidoService.criarPedido(
+      req.body || {},
+      operadorId,
+      { empresaId: empresaIdDoReqPedido(req) }
+    );
     res.status(201).json(out);
   } catch (err) {
     responderErro(res, err);

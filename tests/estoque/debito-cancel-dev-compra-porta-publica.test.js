@@ -105,8 +105,8 @@ async function test01CancelFiscal() {
     empresaId,
     origem: 'cancelamento_compra'
   });
-  assert.strictEqual(r.saldo_fiscal, 70);
-  assert.strictEqual(r.saldo_nao_fiscal, 50);
+  assert.strictEqual(r.saldo_fiscal, -30);
+  assert.strictEqual(r.saldo_nao_fiscal, 0);
   assert.strictEqual(r.origem, 'cancelamento_compra');
   await closeDb(db);
 }
@@ -120,8 +120,8 @@ async function test02CancelNaoFiscal() {
     empresaId,
     origem: 'cancelamento_compra'
   });
-  assert.strictEqual(r.saldo_fiscal, 100);
-  assert.strictEqual(r.saldo_nao_fiscal, 30);
+  assert.strictEqual(r.saldo_fiscal, 0);
+  assert.strictEqual(r.saldo_nao_fiscal, -20);
   await closeDb(db);
 }
 
@@ -134,8 +134,8 @@ async function test03DevFiscal() {
     empresaId,
     origem: 'devolucao_compra'
   });
-  assert.strictEqual(r.saldo_fiscal, 65);
-  assert.strictEqual(r.saldo_nao_fiscal, 40);
+  assert.strictEqual(r.saldo_fiscal, -15);
+  assert.strictEqual(r.saldo_nao_fiscal, 0);
   assert.strictEqual(r.origem, 'devolucao_compra');
   await closeDb(db);
 }
@@ -149,8 +149,8 @@ async function test04DevNaoFiscal() {
     empresaId,
     origem: 'devolucao_compra'
   });
-  assert.strictEqual(r.saldo_fiscal, 80);
-  assert.strictEqual(r.saldo_nao_fiscal, 28);
+  assert.strictEqual(r.saldo_fiscal, 0);
+  assert.strictEqual(r.saldo_nao_fiscal, -12);
   await closeDb(db);
 }
 
@@ -272,7 +272,7 @@ async function test11EstoqueAtual() {
     empresaId
   });
   assert.strictEqual(r.estoque_atual, r.saldo_fiscal + r.saldo_nao_fiscal);
-  assert.strictEqual(r.estoque_atual, 120);
+  assert.strictEqual(r.estoque_atual, -30);
   await closeDb(db);
 }
 

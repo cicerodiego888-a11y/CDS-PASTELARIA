@@ -9,9 +9,13 @@
 
 const express = require('express');
 const router = express.Router();
+const db = require('../database');
 const configService = require('../services/configuracaoService');
 const EntregaController = require('../controllers/EntregaController');
 const { responderModuloNaoLicenciado } = require('../middleware/errosLicenciamento');
+const { criarMiddlewareContextoEmpresa } = require('../services/fiscalNaoFiscal/empresaContexto');
+
+const anexarContextoEmpresa = criarMiddlewareContextoEmpresa(db);
 
 function exigirModuloVendasEntrega(req, res, next) {
   try {
@@ -43,8 +47,8 @@ router.get('/entregas/:id/timeline', EntregaController.timeline);
 router.get('/entregas/:id', EntregaController.buscarPorId);
 router.post('/entregas/:id/iniciar', EntregaController.iniciarEntrega);
 
-router.post('/:id/prestacao', exigirModuloVendasEntrega, EntregaController.prestacao);
+router.post('/:id/prestacao', exigirModuloVendasEntrega, anexarContextoEmpresa, EntregaController.prestacao);
 router.put('/:id/entrega', exigirModuloVendasEntrega, EntregaController.atualizarEntrega);
-router.delete('/:id/entrega', exigirModuloVendasEntrega, EntregaController.cancelarEntrega);
+router.delete('/:id/entrega', exigirModuloVendasEntrega, anexarContextoEmpresa, EntregaController.cancelarEntrega);
 
 module.exports = router;

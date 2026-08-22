@@ -7,10 +7,14 @@
 
 const express = require('express');
 const router = express.Router();
+const db = require('../database');
 const { exigirRecurso } = require('../middleware/validarRecursoImplantacao');
+const { criarMiddlewareContextoEmpresa } = require('../services/fiscalNaoFiscal/empresaContexto');
 const PedidoOperacional = require('../services/pedido/PedidoOperacionalService');
+const { empresaIdDoReqPedido } = require('../services/pedido/empresaIdDoReqPedido');
 
 router.use(exigirRecurso('pedidos'));
+router.use(criarMiddlewareContextoEmpresa(db));
 
 function responderErro(res, err) {
   const status = err.statusCode || 500;
@@ -58,7 +62,11 @@ router.get('/:id', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const out = await PedidoOperacional.criar(req.body || {}, req.user?.id || null);
+    const out = await PedidoOperacional.criar(
+      req.body || {},
+      req.user?.id || null,
+      { empresaId: empresaIdDoReqPedido(req) }
+    );
     res.status(201).json(out);
   } catch (err) {
     responderErro(res, err);
@@ -67,7 +75,11 @@ router.post('/', async (req, res) => {
 
 router.put('/:id', async (req, res) => {
   try {
-    const out = await PedidoOperacional.atualizar(req.params.id, req.body || {});
+    const out = await PedidoOperacional.atualizar(
+      req.params.id,
+      req.body || {},
+      { empresaId: empresaIdDoReqPedido(req) }
+    );
     res.json(out);
   } catch (err) {
     responderErro(res, err);
@@ -76,7 +88,9 @@ router.put('/:id', async (req, res) => {
 
 router.post('/:id/cancelar', async (req, res) => {
   try {
-    const out = await PedidoOperacional.cancelar(req.params.id);
+    const out = await PedidoOperacional.cancelar(req.params.id, {
+      empresaId: empresaIdDoReqPedido(req)
+    });
     res.json(out);
   } catch (err) {
     responderErro(res, err);
@@ -94,7 +108,11 @@ router.delete('/:id', async (req, res) => {
 
 router.post('/:id/duplicar', async (req, res) => {
   try {
-    const out = await PedidoOperacional.duplicar(req.params.id, req.user?.id || null);
+    const out = await PedidoOperacional.duplicar(
+      req.params.id,
+      req.user?.id || null,
+      { empresaId: empresaIdDoReqPedido(req) }
+    );
     res.status(201).json(out);
   } catch (err) {
     responderErro(res, err);
@@ -106,7 +124,8 @@ router.post('/:id/converter', async (req, res) => {
     const out = await PedidoOperacional.converterParaPedido(
       req.params.id,
       req.body || {},
-      req.user?.id || null
+      req.user?.id || null,
+      { empresaId: empresaIdDoReqPedido(req) }
     );
     res.json(out);
   } catch (err) {
@@ -119,7 +138,8 @@ router.post('/:id/enviar-faturamento', async (req, res) => {
     const out = await PedidoOperacional.enviarParaFaturamento(
       req.params.id,
       req.body || {},
-      req.user?.id || null
+      req.user?.id || null,
+      { empresaId: empresaIdDoReqPedido(req) }
     );
     res.json(out);
   } catch (err) {

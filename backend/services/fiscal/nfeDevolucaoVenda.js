@@ -865,7 +865,12 @@ async function emitirNFeDevolucaoVenda(vendaId, opcoes = {}) {
       usuarioNome: opcoes.usuarioNome || null
     });
     try {
-      await retornarEstoqueNfeDevolucaoVenda(notaId);
+      await retornarEstoqueNfeDevolucaoVenda(notaId, {
+        empresaId: opcoes.empresaId,
+        usuarioId: opcoes.usuarioId,
+        db,
+        origem: 'nfe_devolucao_venda'
+      });
     } catch (estErr) {
       console.warn('[rc5] falha ao retornar estoque na autorização:', estErr.message);
     }

@@ -20,13 +20,19 @@ const { resolverEmpresaId } = require('../fiscalNaoFiscal/empresaContexto');
 const MOTIVO_COMPAT_CREDITO_COMPRA = 'COMPAT_CREDITO_COMPRA_PRE_MULTIEMPRESA';
 
 /**
+ * 03.27 — req.empresaId (contexto validado) é a única autoridade HTTP.
+ * body / query / contexto / ctx / CNPJ não substituem.
+ */
+function empresaIdDoReqCompra(req) {
+  return resolverEmpresaId(req && req.empresaId);
+}
+
+/**
  * Monta opts da porta: empresaId explícito ou COMPAT de crédito de compra.
  * Nunca inventa empresa 1 / CNPJ de configurações.
  */
 function montarOptsPortaCreditoCompra(db, opcoes = {}) {
-  const empresaId = resolverEmpresaId(opcoes)
-    ?? resolverEmpresaId(opcoes.contexto)
-    ?? resolverEmpresaId(opcoes.ctx);
+  const empresaId = resolverEmpresaId(opcoes.empresaId);
 
   const base = {
     db,
@@ -142,6 +148,7 @@ function creditarEstoqueItemCompra(db, dados, callback) {
 
 module.exports = {
   MOTIVO_COMPAT_CREDITO_COMPRA,
+  empresaIdDoReqCompra,
   montarOptsPortaCreditoCompra,
   creditarEstoqueItemCompra
 };

@@ -19,6 +19,7 @@ const {
 const repo = require('./PedidoRepository');
 const VendaFinanceiroService = require('../vendas/VendaFinanceiroService');
 const MotorComercial = require('../../motores/comercial');
+const { empresaIdDoReqPedido } = require('./empresaIdDoReqPedido');
 
 const { agoraLocalBrasil } = VendaFinanceiroService;
 
@@ -125,16 +126,18 @@ async function confirmarEstoqueViaMotorComercial({
   itens,
   supervisorToken,
   usuarioId,
-  motivo
-}) {
+  motivo,
+  empresaId
+}, deps = {}) {
   try {
     return await MotorComercial.confirmarPedidoFiscal({
       pedidoId,
       itens,
       supervisorToken,
       usuarioId,
-      motivo
-    });
+      motivo,
+      empresaId
+    }, deps);
   } catch (err) {
     if (!err.statusCode) err.statusCode = 409;
     if (!err.codigo && err.code) err.codigo = err.code;
@@ -165,8 +168,9 @@ async function obter(pedidoId) {
   return { success: true, pedido };
 }
 
-async function criar(body = {}, operadorId = null) {
+async function criar(body = {}, operadorId = null, opcoes = {}) {
   assertModuloHabilitado();
+  const empresaId = empresaIdDoReqPedido({ empresaId: opcoes.empresaId });
   const cab = montarCabecalho(body);
   const status = resolverStatusInicial(body);
   if ([PedidoStatus.FATURADO, PedidoStatus.CANCELADO].includes(status)) {
@@ -201,7 +205,8 @@ async function criar(body = {}, operadorId = null) {
   // Pré-análise: se exige supervisor e não há token, não cria o pedido
   if (statusExigeConfirmacaoFiscal(status)) {
     const analise = await MotorComercial.analisarDisponibilidadeFiscal(cab.itens, {
-      usuarioId: operadorId
+      usuarioId: operadorId,
+      empresaId
     });
     if (analise.bloqueado) {
       const err = new Error('Saldo insuficiente para atender o pedido.');
@@ -247,12 +252,13 @@ async function criar(body = {}, operadorId = null) {
         itens: pedido.itens || cab.itens,
         supervisorToken: cab.supervisorToken,
         usuarioId: operadorId,
-        motivo: `Confirmação fiscal pedido ${codigo}`
+        motivo: `Confirmação fiscal pedido ${codigo}`,
+        empresaId
       });
     }
   } catch (err) {
     try {
-      await MotorComercial.liberarReservasDoPedido(pedidoId);
+      await MotorComercial.liberarReservasDoPedido(pedidoId, { empresaId });
     } catch (_) { /* ignore */ }
     try {
       await repo.atualizarStatus(pedidoId, PedidoStatus.CANCELADO, [status]);
@@ -263,8 +269,9 @@ async function criar(body = {}, operadorId = null) {
   return obter(pedidoId);
 }
 
-async function atualizar(pedidoId, body = {}) {
+async function atualizar(pedidoId, body = {}, opcoes = {}) {
   assertModuloHabilitado();
+  const empresaId = empresaIdDoReqPedido({ empresaId: opcoes.empresaId });
   const id = Number(pedidoId);
   const existente = await repo.obterPorId(id);
   if (!existente) {
@@ -281,7 +288,8 @@ async function atualizar(pedidoId, body = {}) {
 
   if (statusExigeConfirmacaoFiscal(existente.status)) {
     const analise = await MotorComercial.analisarDisponibilidadeFiscal(cab.itens, {
-      pedidoId: id
+      pedidoId: id,
+      empresaId
     });
     if (analise.bloqueado) {
       const err = new Error('Saldo insuficiente para atender o pedido.');
@@ -323,15 +331,17 @@ async function atualizar(pedidoId, body = {}) {
       itens: pedido.itens || cab.itens,
       supervisorToken: cab.supervisorToken,
       usuarioId: null,
-      motivo: `Reconfirmação fiscal pedido ${existente.codigo}`
+      motivo: `Reconfirmação fiscal pedido ${existente.codigo}`,
+      empresaId
     });
   }
 
   return obter(id);
 }
 
-async function cancelar(pedidoId) {
+async function cancelar(pedidoId, opcoes = {}) {
   assertModuloHabilitado();
+  const empresaId = empresaIdDoReqPedido({ empresaId: opcoes.empresaId });
   const id = Number(pedidoId);
   const existente = await repo.obterPorId(id);
   if (!existente) {
@@ -348,7 +358,7 @@ async function cancelar(pedidoId) {
     return { success: true, pedido: existente };
   }
 
-  await MotorComercial.liberarReservasDoPedido(id);
+  await MotorComercial.liberarReservasDoPedido(id, { empresaId });
 
   const ok = await repo.atualizarStatus(id, PedidoStatus.CANCELADO, [
     PedidoStatus.ORCAMENTO,
@@ -378,7 +388,7 @@ async function excluir(pedidoId) {
   return { success: true, excluido: true, id };
 }
 
-async function duplicar(pedidoId, operadorId = null) {
+async function duplicar(pedidoId, operadorId = null, opcoes = {}) {
   assertModuloHabilitado();
   const { pedido } = await obter(pedidoId);
   const statusCopia = pedido.status === PedidoStatus.ORCAMENTO
@@ -400,14 +410,15 @@ async function duplicar(pedidoId, operadorId = null) {
       subtotal: i.subtotal,
       tipo_venda: i.tipo_venda
     }))
-  }, operadorId);
+  }, operadorId, opcoes);
 }
 
 /**
  * Converte Orçamento em Pedido — confirma estoque fiscal via Motor Comercial.
  */
-async function converterParaPedido(pedidoId, body = {}, operadorId = null) {
+async function converterParaPedido(pedidoId, body = {}, operadorId = null, opcoes = {}) {
   assertModuloHabilitado();
+  const empresaId = empresaIdDoReqPedido({ empresaId: opcoes.empresaId });
   const id = Number(pedidoId);
   const existente = await repo.obterPorId(id);
   if (!existente) {
@@ -430,12 +441,13 @@ async function converterParaPedido(pedidoId, body = {}, operadorId = null) {
     itens: existente.itens || [],
     supervisorToken,
     usuarioId: operadorId,
-    motivo: `Conversão orçamento→pedido ${existente.codigo}`
+    motivo: `Conversão orçamento→pedido ${existente.codigo}`,
+    empresaId
   });
 
   const ok = await repo.atualizarStatus(id, PedidoStatus.PEDIDO, [PedidoStatus.ORCAMENTO]);
   if (!ok) {
-    await MotorComercial.liberarReservasDoPedido(id);
+    await MotorComercial.liberarReservasDoPedido(id, { empresaId });
     const err = new Error('Falha ao converter orçamento em pedido.');
     err.statusCode = 400;
     throw err;
@@ -444,8 +456,9 @@ async function converterParaPedido(pedidoId, body = {}, operadorId = null) {
 }
 
 /** Envia para a fila do Faturamento (não fatura). Orçamento nunca entra na fila. */
-async function enviarParaFaturamento(pedidoId, body = {}, operadorId = null) {
+async function enviarParaFaturamento(pedidoId, body = {}, operadorId = null, opcoes = {}) {
   assertModuloHabilitado();
+  const empresaId = empresaIdDoReqPedido({ empresaId: opcoes.empresaId });
   const id = Number(pedidoId);
   const existente = await repo.obterPorId(id);
   if (!existente) {
@@ -480,7 +493,8 @@ async function enviarParaFaturamento(pedidoId, body = {}, operadorId = null) {
     itens: existente.itens,
     supervisorToken,
     usuarioId: operadorId,
-    motivo: `Envio Expedição pedido ${existente.codigo}`
+    motivo: `Envio Expedição pedido ${existente.codigo}`,
+    empresaId
   });
 
   const ok = await repo.atualizarStatus(
@@ -505,5 +519,7 @@ module.exports = {
   excluir,
   duplicar,
   converterParaPedido,
-  enviarParaFaturamento
+  enviarParaFaturamento,
+  empresaIdDoReqPedido,
+  confirmarEstoqueViaMotorComercial
 };

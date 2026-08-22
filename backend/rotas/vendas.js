@@ -42,6 +42,9 @@ const {
   obterPainelStatus,
   obterXmlVersionado
 } = require('../services/fiscal/nfeDevolucaoVenda');
+const { criarMiddlewareContextoEmpresa, resolverEmpresaId } = require('../services/fiscalNaoFiscal/empresaContexto');
+
+router.use(criarMiddlewareContextoEmpresa(db));
 
 // Listar vendas com busca
 router.get('/', (req, res) => {
@@ -549,7 +552,8 @@ router.post('/nfe-devolucao/:notaId/cancelar', async (req, res) => {
       usuarioId: req.usuario?.id || req.user?.id || null,
       usuarioNome: req.usuario?.nome || req.user?.nome || null,
       ip: req.ip || null,
-      forcarPrazo: Boolean(req.body?.forcarPrazo)
+      forcarPrazo: Boolean(req.body?.forcarPrazo),
+      empresaId: resolverEmpresaId(req.empresaId)
     });
     res.status(out.success ? 200 : 422).json(out);
   } catch (error) {
@@ -570,7 +574,8 @@ router.post('/:id/emitir-nfe-devolucao', async (req, res) => {
       cfop: body.cfop,
       usuarioId: req.usuario?.id || req.user?.id || null,
       usuarioNome: req.usuario?.nome || req.user?.nome || null,
-      ip: req.ip || null
+      ip: req.ip || null,
+      empresaId: resolverEmpresaId(req.empresaId)
     });
 
     if (!resultado.success && resultado.status === 'rejeitada') {

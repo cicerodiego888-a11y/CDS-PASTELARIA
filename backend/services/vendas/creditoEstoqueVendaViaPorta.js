@@ -21,30 +21,33 @@ const { resolverEmpresaId } = require('../fiscalNaoFiscal/empresaContexto');
 /** Compat explícita: ERP cancel/devolução venda ainda sem empresa no JWT. */
 const MOTIVO_COMPAT_CREDITO_VENDA = 'COMPAT_CREDITO_VENDA_CANCEL_DEV_PRE_MULTIEMPRESA';
 
+/**
+ * 03.31 — req.empresaId (contexto validado) é a única autoridade HTTP.
+ * body / query / user / contexto / ctx / CNPJ não substituem.
+ */
+function empresaIdDoReqCreditoVenda(req) {
+  return resolverEmpresaId(req && req.empresaId);
+}
+
 function extrairEmpresaIdDeReq(req) {
-  if (!req || typeof req !== 'object') return null;
-  return resolverEmpresaId(req.body)
-    ?? resolverEmpresaId(req.user)
-    ?? resolverEmpresaId(req);
+  return empresaIdDoReqCreditoVenda(req);
 }
 
 /**
- * Monta opções de retorno a partir do request HTTP (body / req.user / req).
- * Não inventa empresa: ausência segue COMPAT no adaptador.
+ * Monta opções de retorno a partir de req.empresaId.
+ * Sem empresa: COMPAT 02.5 (não inventa empresa 1).
  */
 function montarOpcoesRetornoEstoqueVenda(req, origem, dbConn) {
   return {
     db: dbConn,
-    empresaId: extrairEmpresaIdDeReq(req),
+    empresaId: empresaIdDoReqCreditoVenda(req),
     usuarioId: req?.operadorId || req?.user?.id || req?.user?.usuarioId || null,
     origem: origem || null
   };
 }
 
 function montarOptsPortaCreditoVenda(db, opcoes = {}) {
-  const empresaId = resolverEmpresaId(opcoes)
-    ?? resolverEmpresaId(opcoes.contexto)
-    ?? resolverEmpresaId(opcoes.ctx);
+  const empresaId = resolverEmpresaId(opcoes.empresaId);
 
   const base = {
     db,
@@ -162,6 +165,7 @@ function creditarEstoqueItemVenda(db, dados, callback) {
 
 module.exports = {
   MOTIVO_COMPAT_CREDITO_VENDA,
+  empresaIdDoReqCreditoVenda,
   extrairEmpresaIdDeReq,
   montarOpcoesRetornoEstoqueVenda,
   montarOptsPortaCreditoVenda,

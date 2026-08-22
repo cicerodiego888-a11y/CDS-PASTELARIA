@@ -10,8 +10,11 @@ const express = require('express');
 const multer = require('multer');
 const db = require('../database');
 const importacao = require('../services/importacao-inicial-produtos');
+const { criarMiddlewareContextoEmpresa } = require('../services/fiscalNaoFiscal/empresaContexto');
+const { empresaIdDoReqAjuste } = require('../services/ajusteEstoqueService');
 
 const router = express.Router();
+router.use(criarMiddlewareContextoEmpresa(db));
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -71,7 +74,8 @@ router.post('/importar', express.json(), async (req, res) => {
     }
     const resultado = await importacao.importarSessao(db, sessaoId, {
       usuarioId: req.user?.id || null,
-      usuarioNome: req.user?.nome || null
+      usuarioNome: req.user?.nome || null,
+      empresaId: empresaIdDoReqAjuste(req)
     });
     const modoQtd = resultado.modo === 'ATUALIZAR_QUANTIDADES';
     return res.json({

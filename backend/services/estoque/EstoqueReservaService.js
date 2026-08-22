@@ -12,7 +12,6 @@ const { produtoControlaEstoque } = require('./produtoControlaEstoque');
 const reservasPublico = require('../fiscalNaoFiscal/reservasPublico');
 const { TipoSaldo } = require('../fiscalNaoFiscal/constants');
 const { resolverEmpresaId } = require('../fiscalNaoFiscal/empresaContexto');
-const { extrairEmpresaIdDeReq } = require('../vendas/creditoEstoqueVendaViaPorta');
 
 /** Compat explícita: PDV/entrega ainda sem empresa no JWT. */
 const MOTIVO_COMPAT_RESERVA_PDV = 'COMPAT_RESERVA_PDV_PRE_MULTIEMPRESA';
@@ -21,12 +20,18 @@ function dbDeOpcoes(opcoes) {
   return (opcoes && opcoes.db) || db;
 }
 
+/**
+ * 03.26 — req.empresaId (contexto validado) é a única autoridade.
+ * body / query / contexto / ctx / CNPJ não substituem.
+ */
+function empresaIdDoReqReservaPdv(req) {
+  return resolverEmpresaId(req && req.empresaId);
+}
+
 function montarOptsPortaReservaPdv(fonte = {}, dbConn) {
-  const empresaId = resolverEmpresaId(fonte)
-    ?? resolverEmpresaId(fonte.contexto)
-    ?? resolverEmpresaId(fonte.ctx)
-    ?? extrairEmpresaIdDeReq(fonte)
-    ?? extrairEmpresaIdDeReq(fonte.req);
+  const empresaId = empresaIdDoReqReservaPdv(fonte.req)
+    ?? empresaIdDoReqReservaPdv(fonte)
+    ?? resolverEmpresaId(fonte.empresaId);
 
   const base = {
     db: dbConn || dbDeOpcoes(fonte),
@@ -195,6 +200,7 @@ function obterProdutoComReserva(produtoId, callback, opcoes = {}) {
 
 module.exports = {
   MOTIVO_COMPAT_RESERVA_PDV,
+  empresaIdDoReqReservaPdv,
   montarOptsPortaReservaPdv,
   reservarItem,
   liberarReservasDaVenda,

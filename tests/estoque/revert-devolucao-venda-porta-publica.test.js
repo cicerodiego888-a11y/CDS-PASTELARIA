@@ -21,6 +21,7 @@ const {
 
 const estoqueSaldosPublico = require('../../backend/services/fiscalNaoFiscal/estoqueSaldosPublico');
 const { TipoSaldo } = require('../../backend/services/fiscalNaoFiscal/constants');
+const { garantirSchemaEstoqueEmpresaAsync } = require('../../backend/services/estoque/estoqueEmpresaSchema');
 
 const ROOT = path.resolve(__dirname, '../..');
 const SRC_REVERT = path.join(ROOT, 'backend/services/fiscal/estoqueNfeDevolucaoVenda.js');
@@ -92,6 +93,7 @@ async function setup(sf = 100, snf = 50) {
   `);
   await run(db, `CREATE TABLE empresas (id INTEGER PRIMARY KEY, razao TEXT)`);
   await run(db, `INSERT INTO empresas (id, razao) VALUES (1, 'A')`);
+  await garantirSchemaEstoqueEmpresaAsync(db);
   await run(db, `
     CREATE TABLE vendas_itens (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -129,6 +131,14 @@ async function setup(sf = 100, snf = 50) {
        (nome, saldo_fiscal, saldo_nao_fiscal, reservado_fiscal, reservado_nao_fiscal, estoque_atual)
      VALUES ('Global', ?, ?, 3, 2, ?)`,
     [sf, snf, sf + snf]
+  );
+  await run(
+    db,
+    `INSERT INTO estoque_empresa (
+       produto_id, empresa_id, saldo_fiscal, saldo_nao_fiscal, estoque_atual,
+       reservado_fiscal, reservado_nao_fiscal
+     ) VALUES (?, 1, ?, ?, ?, 3, 2)`,
+    [p.lastID, sf, snf, sf + snf]
   );
 
   return { db, produtoId: p.lastID, empresaId: 1 };
@@ -326,7 +336,10 @@ async function test06EmpresaIdPropagado() {
   assert.strictEqual(viaOpcoes.legado, false);
 
   const viaContexto = montarOptsPortaRevertDevolucaoVenda(db, { contexto: { empresa_id: 1 } });
-  assert.strictEqual(viaContexto.empresaId, 1);
+  assert.strictEqual(viaContexto.empresaId, undefined);
+  assert.strictEqual(viaContexto.legado, true);
+  const viaBody = montarOptsPortaRevertDevolucaoVenda(db, { body: { empresaId: 9 } });
+  assert.strictEqual(viaBody.empresaId, undefined);
   await closeDb(db);
 }
 

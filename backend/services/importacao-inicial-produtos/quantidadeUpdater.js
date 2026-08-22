@@ -337,7 +337,8 @@ async function executarAtualizacaoQuantidades(db, validacao, {
   dbPath,
   pastaBackup,
   importId,
-  forcarFalhaEstoque
+  forcarFalhaEstoque,
+  empresaId
 } = {}) {
   if (validacao.modo && validacao.modo !== MODOS.ATUALIZAR_QUANTIDADES) {
     const err = new Error('Sessão inválida para atualização de quantidades.');
@@ -447,7 +448,8 @@ async function executarAtualizacaoQuantidades(db, validacao, {
         ajusteNaoFiscal: itemFiscal === 0 ? qtd : 0,
         motivo,
         usuarioId: usuarioId || null,
-        usuarioNome: usuarioNome || 'Atualização de Quantidades'
+        usuarioNome: usuarioNome || 'Atualização de Quantidades',
+        empresaId
       });
 
       const depois = await dbGet(db, `

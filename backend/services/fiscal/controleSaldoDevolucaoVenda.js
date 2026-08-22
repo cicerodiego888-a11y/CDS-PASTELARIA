@@ -307,7 +307,7 @@ async function persistirItensNfeDevolucaoVenda({
 }
 
 async function cancelarNfeDevolucaoVenda(notaId, {
-  motivo, usuarioId, usuarioNome, empresaId, db, exigirEmpresa, contexto, ctx
+  motivo, usuarioId, usuarioNome, empresaId, db, exigirEmpresa
 } = {}) {
   await garantirTabelasSaldoDevolucaoVenda();
   const nota = await dbGet(`SELECT * FROM nfe_devolucoes_venda WHERE id = ?`, [Number(notaId)]);
@@ -342,9 +342,7 @@ async function cancelarNfeDevolucaoVenda(notaId, {
         empresaId,
         db,
         usuarioId,
-        exigirEmpresa,
-        contexto,
-        ctx
+        exigirEmpresa
       });
     } catch (err) {
       console.warn('[rc5] falha ao reverter estoque no cancelamento:', err.message);

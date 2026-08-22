@@ -144,7 +144,8 @@ async function cancelarEntrega(req, res) {
     const data = await entregaService.cancelarEntrega(
       req.params.id,
       req.body || {},
-      contextoAuditoriaRequisicao(req)
+      contextoAuditoriaRequisicao(req),
+      req
     );
     res.json(data);
   } catch (err) {

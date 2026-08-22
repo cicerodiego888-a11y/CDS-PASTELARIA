@@ -16,7 +16,6 @@
 const estoqueSaldosPublico = require('../fiscalNaoFiscal/estoqueSaldosPublico');
 const { TipoSaldo } = require('../fiscalNaoFiscal/constants');
 const { resolverEmpresaId } = require('../fiscalNaoFiscal/empresaContexto');
-const { extrairEmpresaIdDeReq } = require('./creditoEstoqueVendaViaPorta');
 
 /** Compat explícita: ERP/PDV ainda sem empresa no JWT. */
 const MOTIVO_COMPAT_DEBITO_VENDA = 'COMPAT_DEBITO_VENDA_PRE_MULTIEMPRESA';
@@ -24,7 +23,7 @@ const MOTIVO_COMPAT_DEBITO_VENDA = 'COMPAT_DEBITO_VENDA_PRE_MULTIEMPRESA';
 function montarOpcoesBaixaEstoqueVenda(req, origem, dbConn) {
   return {
     db: dbConn,
-    empresaId: extrairEmpresaIdDeReq(req),
+    empresaId: resolverEmpresaId(req && req.empresaId),
     usuarioId: req?.operadorId || req?.user?.id || req?.user?.usuarioId || null,
     origem: origem || 'baixa_venda'
   };

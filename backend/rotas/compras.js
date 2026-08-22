@@ -68,11 +68,18 @@ const {
   moeda: moedaParcela
 } = require('../services/compras/MotorParcelamentoCompra');
 const {
-  creditarEstoqueItemCompra
+  creditarEstoqueItemCompra,
+  empresaIdDoReqCompra
 } = require('../services/compras/creditoEstoqueCompraViaPorta');
 const {
   debitarEstoqueItemCompra
 } = require('../services/compras/debitoEstoqueCompraViaPorta');
+const {
+  estoqueAtualParaValidacaoCompra
+} = require('../services/compras/estoqueAtualValidacaoCompra');
+const { criarMiddlewareContextoEmpresa } = require('../services/fiscalNaoFiscal/empresaContexto');
+
+router.use(criarMiddlewareContextoEmpresa(db));
 
 const itemCompraEhFracionado = itemCompraUsaConversaoUnidades;
 const obterTotalConvertidoItemCompraBackend = obterTotalConvertidoItemCompra;
@@ -692,7 +699,7 @@ function processarItensCompra(compraId, itens, fornecedor, opcoes, done) {
             produtoId,
             quantidadeFiscal: qtdFiscal,
             quantidadeNaoFiscal: qtdNaoFiscal,
-            empresaId: opcoes?.empresaId ?? opcoes?.empresa_id,
+            empresaId: empresaIdDoReqCompra({ empresaId: opcoes?.empresaId }),
             usuarioId: opcoes?.usuarioId ?? opcoes?.usuario_id,
             exigirEmpresa: opcoes?.exigirEmpresa === true,
             motivoCompat: opcoes?.motivoCompat
@@ -865,7 +872,7 @@ router.post('/:id/devolver', validarCaixaAberto, (req, res) => {
             FROM compras_itens ci
             LEFT JOIN produtos p ON p.id = ci.produto_id
             WHERE ci.id = ? AND ci.compra_id = ?
-          `, [itemReq.compra_item_id, compraId], (itemErr, item) => {
+          `, [itemReq.compra_item_id, compraId], async (itemErr, item) => {
             if (itemErr) {
               db.run('ROLLBACK');
               return res.status(500).json({ error: itemErr.message });
@@ -880,7 +887,20 @@ router.post('/:id/devolver', validarCaixaAberto, (req, res) => {
             const qtdJaDevolvida = Number(item.quantidade_ja_devolvida || 0);
             const qtdDisponivel = qtdComprada - qtdJaDevolvida;
             const qtdDevolver = Number(itemReq.quantidade || 0);
-            const estoqueAtual = Number(item.estoque_atual || 0);
+            let estoqueAtual;
+            try {
+              estoqueAtual = await estoqueAtualParaValidacaoCompra({
+                produto: item,
+                produtoId: item.produto_id,
+                req,
+                db
+              });
+            } catch (isoErr) {
+              db.run('ROLLBACK');
+              return res.status(500).json({
+                error: isoErr && isoErr.message ? isoErr.message : 'Erro ao consultar estoque da empresa.'
+              });
+            }
 
             if (qtdDevolver > qtdDisponivel) {
               db.run('ROLLBACK');
@@ -927,7 +947,7 @@ router.post('/:id/devolver', validarCaixaAberto, (req, res) => {
                 produtoId: item.produto_id,
                 quantidadeFiscal: splitDevolucao.qtdFiscal,
                 quantidadeNaoFiscal: splitDevolucao.qtdNaoFiscal,
-                empresaId: req.body?.empresa_id ?? req.body?.empresaId ?? req.user?.empresa_id ?? req.user?.empresaId,
+                empresaId: empresaIdDoReqCompra(req),
                 usuarioId: req.operadorId || req.user?.id,
                 origem: 'devolucao_compra'
               }, (estoqueErr) => {
@@ -1571,7 +1591,7 @@ router.post('/', (req, res) => {
           processarItensCompra(compraId, itensComRateio, fornecedor, {
             fornecedor_cnpj,
             tipo_entrada: tipoEntrada,
-            empresaId: req.body?.empresa_id ?? req.body?.empresaId ?? req.user?.empresa_id ?? req.user?.empresaId,
+            empresaId: empresaIdDoReqCompra(req),
             usuarioId: req.user?.id
           }, (itensErr) => {
             if (itensErr) {
@@ -1729,13 +1749,26 @@ router.post('/:id/cancelar', (req, res) => {
 
           const item = itens[index];
 
-          db.get('SELECT nome, estoque_atual FROM produtos WHERE id = ?', [item.produto_id], (prodErr, produto) => {
+          db.get('SELECT nome, estoque_atual FROM produtos WHERE id = ?', [item.produto_id], async (prodErr, produto) => {
             if (prodErr) {
               db.run('ROLLBACK');
               return res.status(500).json({ error: prodErr.message });
             }
 
-            const estoqueAtual = Number(produto?.estoque_atual || 0);
+            let estoqueAtual;
+            try {
+              estoqueAtual = await estoqueAtualParaValidacaoCompra({
+                produto,
+                produtoId: item.produto_id,
+                req,
+                db
+              });
+            } catch (isoErr) {
+              db.run('ROLLBACK');
+              return res.status(500).json({
+                error: isoErr && isoErr.message ? isoErr.message : 'Erro ao consultar estoque da empresa.'
+              });
+            }
             const quantidadeBaixar = Number(item.quantidade || 0);
 
             if (estoqueAtual < quantidadeBaixar) {
@@ -1760,7 +1793,7 @@ router.post('/:id/cancelar', (req, res) => {
             produtoId: item.produto_id,
             quantidadeFiscal: qtds.quantidade_fiscal,
             quantidadeNaoFiscal: qtds.quantidade_nao_fiscal,
-            empresaId: req.body?.empresa_id ?? req.body?.empresaId ?? req.user?.empresa_id ?? req.user?.empresaId,
+            empresaId: empresaIdDoReqCompra(req),
             usuarioId: req.user?.id,
             origem: 'cancelamento_compra'
           }, (upErr) => {

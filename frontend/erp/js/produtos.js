@@ -4955,13 +4955,18 @@ function salvarAjusteEstoque() {
         payload.data_validade = ($('#ajuste_data_validade').val() || '').trim() || undefined;
     }
 
+    const headers = {
+      Authorization: 'Bearer ' + (localStorage.getItem('token') || '')
+    };
+    if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.headersJson === 'function') {
+      const extra = CdsEmpresaContexto.headersJson();
+      if (extra['X-Empresa-Id']) headers['X-Empresa-Id'] = extra['X-Empresa-Id'];
+    }
     $.ajax({
         url: `${API_URL}/produtos/${produtoId}/ajustar-estoque`,
         method: 'POST',
         contentType: 'application/json',
-        headers: {
-            Authorization: 'Bearer ' + (localStorage.getItem('token') || '')
-        },
+        headers,
         data: JSON.stringify(payload),
         success: function () {
             $('#ajustarEstoqueModal').modal('hide');

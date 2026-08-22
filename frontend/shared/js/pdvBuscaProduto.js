@@ -204,12 +204,18 @@
       contexto.equipamentoId = Number(global.PDV_BALANCA_EQUIPAMENTO_ID);
     }
 
+    const headers = {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${localStorage.getItem('token') || ''}`
+    };
+    if (global.CdsEmpresaContexto && typeof CdsEmpresaContexto.headersJson === 'function') {
+      const extra = CdsEmpresaContexto.headersJson();
+      if (extra['X-Empresa-Id']) headers['X-Empresa-Id'] = extra['X-Empresa-Id'];
+    }
+
     const response = await fetch(`${obterApiUrl()}/produtos/identificar`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${localStorage.getItem('token') || ''}`
-      },
+      headers,
       body: JSON.stringify({ codigo, contexto })
     });
 

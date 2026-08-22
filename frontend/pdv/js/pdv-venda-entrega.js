@@ -517,12 +517,17 @@
 
     const $btn = $('#btnConfirmarEntregaPdv').prop('disabled', true);
     try {
+      const headers = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${localStorage.getItem('token')}`
+      };
+      if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.headersJson === 'function') {
+        const extra = CdsEmpresaContexto.headersJson();
+        if (extra['X-Empresa-Id']) headers['X-Empresa-Id'] = extra['X-Empresa-Id'];
+      }
       const resp = await fetch(`${API_URL}/vendas`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${localStorage.getItem('token')}`
-        },
+        headers,
         body: JSON.stringify(payload)
       });
       const data = await resp.json().catch(() => ({}));

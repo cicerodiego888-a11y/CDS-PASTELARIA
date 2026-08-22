@@ -3,7 +3,10 @@
  * RC3.16.1: reservas fiscais de Pedido. MTS NÃO cria reservas.
  *
  * Fase 1 / Implementação 01: contrato preparado para produtoId + empresaId.
- * Storage de reservado_* permanece em `produtos` (sem nova estrutura).
+ * Fase 2 / 03.20: escrita em `produtos` + dual-write de reservado_* em
+ * `estoque_empresa` quando há empresaId.
+ * Fase 2 / 03.36: consultarDisponibilidade com empresaId lê `estoque_empresa`
+ * (sem registro → zero). Sem empresaId permanece em `produtos`.
  *
  * @module services/fiscalNaoFiscal/reservasPublico
  */
@@ -128,8 +131,16 @@ function mesclarOptsEmpresa(produtoIdOrParams, opts = {}) {
   return { produtoId: produtoIdOrParams, opts };
 }
 
+/** 03.36 — leitura isolada usa somente opts.empresaId. */
+function empresaIdExplicitoConsulta(opts) {
+  return resolverEmpresaId(opts && opts.empresaId);
+}
+
 /**
- * Consulta disponibilidade líquida (saldo − reservado) no contexto de empresa.
+ * Consulta disponibilidade líquida (saldo − reservado).
+ * Sem empresaId: `produtos` (COMPAT).
+ * Com empresaId: `estoque_empresa`. Sem registro → zero. Sem fallback.
+ * Fórmula: calcularEstoqueProduto (disponivel = max(0, saldo − reservado)).
  */
 async function consultarDisponibilidade(produtoIdOrParams, opts = {}) {
   const normalized = mesclarOptsEmpresa(produtoIdOrParams, opts);
@@ -142,7 +153,15 @@ async function consultarDisponibilidade(produtoIdOrParams, opts = {}) {
     throw err;
   }
 
-  const ctx = await resolverContextoEmpresa(callOpts);
+  const empresaId = empresaIdExplicitoConsulta(callOpts);
+  const ctx = await resolverContextoEmpresa({
+    db: callOpts.db,
+    empresaId,
+    modoLegadoSemEmpresa: callOpts.modoLegadoSemEmpresa === true,
+    motivoCompat: callOpts.motivoCompat,
+    validarEmpresa: callOpts.validarEmpresa,
+    usuarioId: callOpts.usuarioId
+  });
   const db = getDb(callOpts.db);
   await garantirSchemaReservas(db);
 
@@ -184,7 +203,43 @@ async function consultarDisponibilidade(produtoIdOrParams, opts = {}) {
     });
   }
 
-  const calc = calcularEstoqueProduto(row);
+  let campos = {
+    saldo_fiscal: row.saldo_fiscal,
+    saldo_nao_fiscal: row.saldo_nao_fiscal,
+    reservado_fiscal: row.reservado_fiscal,
+    reservado_nao_fiscal: row.reservado_nao_fiscal,
+    estoque_atual: row.estoque_atual
+  };
+
+  const temEmpresas = ctx.empresaId != null && ctx.legado !== true
+    ? await dbGet(db, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'empresas'`)
+    : null;
+
+  if (temEmpresas) {
+    const EstoqueEmpresaService = require('../estoque/EstoqueEmpresaService');
+    const iso = await EstoqueEmpresaService.consultarSaldoParaEmpresa({
+      produtoId: id,
+      empresaId: ctx.empresaId,
+      db
+    });
+    campos = iso
+      ? {
+        saldo_fiscal: iso.saldoFiscal,
+        saldo_nao_fiscal: iso.saldoNaoFiscal,
+        reservado_fiscal: iso.reservadoFiscal,
+        reservado_nao_fiscal: iso.reservadoNaoFiscal,
+        estoque_atual: iso.estoqueAtual
+      }
+      : {
+        saldo_fiscal: 0,
+        saldo_nao_fiscal: 0,
+        reservado_fiscal: 0,
+        reservado_nao_fiscal: 0,
+        estoque_atual: 0
+      };
+  }
+
+  const calc = calcularEstoqueProduto(campos);
   return Object.freeze({
     produto_id: id,
     empresa_id: ctx.empresaId,
@@ -428,6 +483,26 @@ async function _aplicarDeltaReservado(db, produtoId, tipo, delta) {
 }
 
 /**
+ * 03.20 — mesmo delta de reserva em estoque_empresa.
+ * Registro inexistente nasce zerado + efeito atual. Sem copiar produtos. Sem BEGIN.
+ */
+async function espelharReservadoEmEstoqueEmpresa(db, produtoId, empresaId, tipoN, delta) {
+  const temEmpresas = await dbGet(
+    db,
+    `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'empresas'`
+  );
+  if (!temEmpresas) return;
+
+  const EstoqueEmpresaService = require('../estoque/EstoqueEmpresaService');
+  await EstoqueEmpresaService.aplicarEfeitoReservado({
+    produtoId,
+    empresaId,
+    deltaReservadoFiscal: tipoN === TipoSaldo.FISCAL ? delta : 0,
+    deltaReservadoNaoFiscal: tipoN === TipoSaldo.NAO_FISCAL ? delta : 0
+  }, { db });
+}
+
+/**
  * Incrementa ou decrementa reservado_* no contexto de empresa.
  * Não exige pedidoId (reservas PDV / venda_estoque_reservas).
  * Não altera saldo_fiscal / saldo_nao_fiscal / estoque_atual.
@@ -437,16 +512,21 @@ async function ajustarReservado(produtoIdOrParams, tipo, delta, opts = {}) {
   const produtoId = Number(normalized.produtoId);
   const callOpts = normalized.opts;
   const d = round3(delta);
+  const tipoN = normalizarTipoSaldo(tipo);
 
   const ctx = await resolverContextoEmpresa(callOpts);
   const db = getDb(callOpts.db);
-  await _aplicarDeltaReservado(db, produtoId, tipo, d);
+  await _aplicarDeltaReservado(db, produtoId, tipoN, d);
+
+  if (ctx.empresaId != null && ctx.legado !== true) {
+    await espelharReservadoEmEstoqueEmpresa(db, produtoId, ctx.empresaId, tipoN, d);
+  }
 
   logOperacaoSaldo({
     operacao: d >= 0 ? 'reservarQuantidade' : 'liberarQuantidadeReservada',
     produtoId,
     empresaId: ctx.empresaId,
-    tipo: normalizarTipoSaldo(tipo),
+    tipo: tipoN,
     quantidade: Math.abs(d),
     legado: ctx.legado,
     usuarioId: callOpts.usuarioId

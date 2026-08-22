@@ -33,12 +33,10 @@ function devolverSaldosDistribuidos(produtoId, quantidadeFiscal, quantidadeNaoFi
     produtoId,
     quantidadeFiscal: qtdFiscal,
     quantidadeNaoFiscal: qtdNaoFiscal,
-    empresaId: opcoes.empresaId ?? opcoes.empresa_id,
+    empresaId: opcoes.empresaId,
     usuarioId: opcoes.usuarioId,
     exigirEmpresa: opcoes.exigirEmpresa,
     origem: opcoes.origem,
-    contexto: opcoes.contexto,
-    ctx: opcoes.ctx,
     validarEmpresa: opcoes.validarEmpresa
   }, callback);
 }

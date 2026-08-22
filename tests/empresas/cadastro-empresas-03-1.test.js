@@ -271,7 +271,7 @@ async function test13ContextoEmpresaExistente() {
   assert.strictEqual(ctx.legado, false);
   const r = await saldos.consultarSaldo(produtoId, { db, empresaId: criada.id });
   assert.strictEqual(r.empresa_id, criada.id);
-  assert.strictEqual(r.saldo_fiscal, 10);
+  assert.strictEqual(r.saldo_fiscal, 0);
   await closeDb(db);
 }
 

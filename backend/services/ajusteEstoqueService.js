@@ -3,7 +3,11 @@
  *
  * Fase 1 / Implementação 02.1:
  *   ajuste → estoqueSaldosPublico → produtos
- * Storage ainda em `produtos` (sem estoque_empresa).
+ * Fase 2 / Implementação 03.8:
+ *   CREATE produto → INSERT zerado → aplicarSaldoInicialCreateProduto → porta
+ * Fase 2 / Implementação 03.13:
+ *   o mesmo CREATE espelha o crédito em estoque_empresa (dual-write).
+ *   Leitura operacional e storage oficial permanecem em `produtos`.
  *
  * @module services/ajusteEstoqueService
  */
@@ -11,12 +15,13 @@
 
 const estoqueSaldosPublico = require('./fiscalNaoFiscal/estoqueSaldosPublico');
 const { TipoSaldo } = require('./fiscalNaoFiscal/constants');
-const {
-  resolverEmpresaId
-} = require('./fiscalNaoFiscal/empresaContexto');
+const { resolverEmpresaId } = require('./fiscalNaoFiscal/empresaContexto');
 
 /** Compat explícita: endpoints ERP / importação ainda sem empresa no JWT. */
 const MOTIVO_COMPAT_AJUSTE = 'COMPAT_AJUSTE_ESTOQUE_PRE_MULTIEMPRESA';
+
+/** Compat explícita: CREATE de produto ainda sem empresa no JWT. */
+const MOTIVO_COMPAT_CREATE_PRODUTO_SALDO_INICIAL = 'COMPAT_CREATE_PRODUTO_SALDO_INICIAL_PRE_MULTIEMPRESA';
 
 function produtoTemMovimentacoes(db, produtoId, callback) {
   db.get(`
@@ -80,6 +85,14 @@ function registrarAjusteEstoque(db, dados, callback) {
 }
 
 /**
+ * 03.28 — req.empresaId (contexto validado) é a única autoridade HTTP.
+ * body / query / contexto / ctx / CNPJ não substituem.
+ */
+function empresaIdDoReqAjuste(req) {
+  return resolverEmpresaId(req && req.empresaId);
+}
+
+/**
  * Monta opts da porta: empresaId explícito ou COMPAT de ajuste (legado ERP).
  * Nunca inventa empresa 1 / CNPJ de configurações.
  *
@@ -87,9 +100,7 @@ function registrarAjusteEstoque(db, dados, callback) {
  * (sem COMPAT). Usado em testes/contrato multiempresa.
  */
 function montarOptsPortaAjuste(db, opcoes = {}) {
-  const empresaId = resolverEmpresaId(opcoes)
-    ?? resolverEmpresaId(opcoes.contexto)
-    ?? resolverEmpresaId(opcoes.ctx);
+  const empresaId = resolverEmpresaId(opcoes.empresaId);
 
   const base = {
     db,
@@ -360,6 +371,53 @@ function aplicarSaldosIniciaisViaPorta(db, opcoes, callback) {
   );
 }
 
+/**
+ * 03.13 — espelho do crédito de CREATE em estoque_empresa.
+ * 03.19 — dual-write passou para a porta pública (creditarSaldo).
+ * Mantido no fluxo CREATE para o contrato 03.13; não reaplicar o delta.
+ * Só grava quando há empresaId real. COMPAT sem empresa não inventa id.
+ */
+async function espelharSaldoInicialEmEstoqueEmpresa(db, opcoes) {
+  void db;
+  void opcoes;
+  return null;
+}
+
+/**
+ * 03.8 — crédito de saldo inicial após o CREATE do produto.
+ * 03.13 — dual-write do mesmo efeito em estoque_empresa quando há empresaId.
+ * Não chama a porta para gravar zero. Mesmo db do caller (sem BEGIN próprio).
+ */
+function aplicarSaldoInicialCreateProduto(db, opcoes, callback) {
+  const sf = Number(opcoes.saldoFiscal || 0);
+  const snf = Number(opcoes.saldoNaoFiscal || 0);
+
+  if (!(sf > 0) && !(snf > 0)) {
+    return callback(null, {
+      aplicado: false,
+      saldo_fiscal: 0,
+      saldo_nao_fiscal: 0,
+      estoque_atual: 0,
+      empresa_id: null,
+      legado: false,
+      motivo_compat: null
+    });
+  }
+
+  aplicarSaldosIniciaisViaPorta(db, {
+    ...opcoes,
+    saldoFiscal: sf,
+    saldoNaoFiscal: snf,
+    motivoCompat: opcoes.motivoCompat || MOTIVO_COMPAT_CREATE_PRODUTO_SALDO_INICIAL
+  }, (err, result) => {
+    if (err) return callback(err);
+    Promise.resolve(espelharSaldoInicialEmEstoqueEmpresa(db, opcoes)).then(
+      () => callback(null, { aplicado: true, ...result }),
+      (espelhoErr) => callback(espelhoErr)
+    );
+  });
+}
+
 module.exports = {
   produtoTemMovimentacoes,
   produtoTemVendas,
@@ -367,6 +425,9 @@ module.exports = {
   aplicarAjusteEstoqueProduto,
   definirSaldosIniciaisProduto,
   aplicarSaldosIniciaisViaPorta,
+  aplicarSaldoInicialCreateProduto,
+  empresaIdDoReqAjuste,
   montarOptsPortaAjuste,
-  MOTIVO_COMPAT_AJUSTE
+  MOTIVO_COMPAT_AJUSTE,
+  MOTIVO_COMPAT_CREATE_PRODUTO_SALDO_INICIAL
 };
