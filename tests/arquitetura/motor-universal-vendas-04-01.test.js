@@ -94,10 +94,20 @@ function test08SomaDistribuicao() {
 function test09SemMtsParalelo() {
   assert.strictEqual(PROIBICOES_MUV.naoCriarMtsParalelo, true);
   const muvDir = path.join(ROOT, 'backend/motores/muv');
-  for (const nome of fs.readdirSync(muvDir)) {
-    const src = fs.readFileSync(path.join(muvDir, nome), 'utf8');
-    assert.ok(!/transferirSaldo/.test(src), `${nome} não deve reimplementar MTS`);
-    assert.ok(!/debitarSaldo/.test(src), `${nome} não deve reimplementar porta de saldos`);
+  function arquivosJs(dir, prefix = '') {
+    const out = [];
+    for (const nome of fs.readdirSync(dir)) {
+      const full = path.join(dir, nome);
+      const rel = prefix ? `${prefix}/${nome}` : nome;
+      if (fs.statSync(full).isDirectory()) out.push(...arquivosJs(full, rel));
+      else if (nome.endsWith('.js')) out.push({ rel, full });
+    }
+    return out;
+  }
+  for (const arq of arquivosJs(muvDir)) {
+    const src = fs.readFileSync(arq.full, 'utf8');
+    assert.ok(!/transferirSaldo/.test(src), `${arq.rel} não deve reimplementar MTS`);
+    assert.ok(!/debitarSaldo/.test(src), `${arq.rel} não deve reimplementar porta de saldos`);
   }
 }
 

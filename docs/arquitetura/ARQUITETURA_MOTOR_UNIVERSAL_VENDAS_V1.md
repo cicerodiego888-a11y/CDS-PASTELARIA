@@ -317,9 +317,29 @@ consumo reserva (pedidoReservaPonteNucleo) + baixa
 3. **04.04** — EMPRESA_UNICA: atendimento 1:1 com a venda atual (compatível, feature flag).
 4. **04.05** — Agrupar itens por `empresaId` e chamar o núcleo N vezes **dentro da mesma TX**.
 5. **04.06** — Distribuição de pagamento `POR_ITEM` (contrato já definido).
-6. **04.07+** — `empresa_id` em `vendas` (não em massa retroativa), caixa, fiscal por operação, TEF do atendimento.
+6. **04.07** — documentos fiscais por operação (reuso do emissor NFC-e) + contrato do Comprovante Unificado.
+7. **04.08** — configuração/numeração fiscal por empresa + materialização de `quantidade_fiscal`/`valor_fiscal`.
+8. **04.09** — gestão backend da configuração fiscal por empresa (rotas, status, segredos).
+9. **04.10** — comprovante unificado (DTO + GET, sem impressão física).
+10. **04.11** — renderização TEXT/HTML do comprovante (sem ESC/POS).
+11. **04.12** — adaptador de impressão (PREVIEW / BROWSER / THERMAL preparado; sem impressão física real).
+12. **04.13** — UI do comprovante unificado no PDV (consome GET comprovante / POST imprimir BROWSER).
+13. **04.14** — auditoria de prontidão: Fase 05 apta (decisão B). Sem nova UI.
+14. **05.01** — fundação do PDV Universal (contexto, capabilities, adaptadores). Sem UI completa.
+15. **05.02** — contexto operacional e seleção de empresa (sem tela principal).
+16. **05.03** — tela principal do PDV Universal (contexto visual; sem carrinho).
+17. **05.04** — carrinho universal + identificação operacional por empresa.
+18. **05.05** — checkout EMPRESA_UNICA (VendaApplicationService).
+19. **05.06** — checkout MULTIEMPRESA (Atendimento MUV VALIDADO; sem pagamento).
+20. **05.07** — pagamento unificado visual + reserva (para em PAGO).
+21. **05.08** — materialização + fiscalização + comprovante no fluxo visual.
+22. **05.09** — preview e preparação de impressão (BROWSER/HTML) no PDV Universal.
+23. **05.10** — estabilização operacional (sessão visual, locks, recuperação, reset). Fecha a Fase 05.
+24. **05.11** — gestão visual de empresas + configuração fiscal por CNPJ (APIs 04.08/04.09).
+25. **05.12** — ativação visual: menu oficial abre o PDV Universal existente.
+26. **05.13** — auditoria visual e correção de conexão UI do PDV Universal.
 
-Não iniciar 04.02 automaticamente nesta Sprint.
+Não iniciar recursos de nicho automaticamente nesta Sprint.
 
 ---
 

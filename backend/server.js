@@ -180,6 +180,8 @@ app.use('/api/categorias', verificarToken, categoriasRoutes);
 app.use('/api/subcategorias', verificarToken, subcategoriasRoutes);
 app.use('/api/marcas', verificarToken, marcasRoutes);
 app.use('/api/empresas', verificarToken, empresasRoutes);
+app.use('/api/atendimentos', verificarToken, require('./rotas/atendimentos'));
+app.use('/api/pdv-universal', verificarToken, require('./rotas/pdv-universal'));
 app.use('/api/estoque', verificarToken, require('./rotas/estoque'));
 // Sprint 1 — rotas de entrega montadas antes das rotas genéricas de vendas
 app.use('/api/vendas', verificarToken, entregasRoutes);
@@ -195,6 +197,12 @@ app.get(['/pdv', '/pdv/'], verificarToken, (req, res) => {
     return responderModuloNaoLicenciado(res, 'pdv');
   }
   res.sendFile(path.join(frontendRoot, 'pdv/index.html'));
+});
+app.get(['/pdv-universal', '/pdv-universal/'], verificarToken, (req, res) => {
+  if (!configService.recursoHabilitado('pdv')) {
+    return responderModuloNaoLicenciado(res, 'pdv');
+  }
+  res.sendFile(path.join(frontendRoot, 'pdv-universal/index.html'));
 });
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/financeiro', verificarToken, financeiroRoutes);

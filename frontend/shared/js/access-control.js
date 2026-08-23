@@ -204,6 +204,14 @@ function obterDestinoPosLogin(user) {
         return localStorage.getItem('cds_app_modulo') || window.CDS_APP_MODULO || '';
     })();
 
+    try {
+        const nextRaw = new URLSearchParams(window.location.search).get('next');
+        const next = typeof destinoNavegacaoSeguro === 'function'
+            ? destinoNavegacaoSeguro(nextRaw)
+            : null;
+        if (next) return next;
+    } catch (_e) { /* ignore */ }
+
     if (moduloPreferido === 'pdv' && podeAbrirPDV(user)) return '/pdv';
     if (moduloPreferido === 'erp' && podeAbrirERP(user)) return '/erp';
 

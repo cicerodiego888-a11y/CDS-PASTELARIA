@@ -1,0 +1,186 @@
+.pdvu-page {
+    min-height: 100vh;
+    background: #f3f5f7;
+    color: #1f2937;
+    display: flex;
+    flex-direction: column;
+    font-family: inherit;
+}
+.pdvu-topo {
+    background: #111827;
+    color: #fff;
+    padding: 10px 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+    flex-shrink: 0;
+}
+.pdvu-topo h1 {
+    margin: 0;
+    font-size: 1.15rem;
+}
+.pdvu-marca {
+    margin: 0;
+    font-size: 0.7rem;
+    letter-spacing: 0.08em;
+    color: #9ca3af;
+}
+.pdvu-link-erp {
+    color: #93c5fd;
+    text-decoration: none;
+}
+.pdvu-link-erp:hover {
+    text-decoration: underline;
+}
+.pdvu-modo {
+    display: inline-block;
+    background: #0f766e;
+    color: #fff;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-weight: 700;
+    font-size: 0.85rem;
+    letter-spacing: 0.02em;
+}
+.pdvu-empresa {
+    font-weight: 600;
+}
+.pdvu-body {
+    display: grid;
+    grid-template-columns: 1fr 280px;
+    gap: 12px;
+    padding: 12px;
+    flex: 1;
+    min-height: 0;
+}
+@media (max-width: 1100px) {
+    .pdvu-body { grid-template-columns: 1fr; }
+}
+.pdvu-card {
+    background: #fff;
+    border-radius: 10px;
+    box-shadow: 0 4px 14px rgba(0,0,0,.08);
+    padding: 16px;
+}
+.pdvu-atendimento {
+    min-height: 280px;
+    display: flex;
+    flex-direction: column;
+}
+.pdvu-busca input {
+    width: 100%;
+    padding: 12px 14px;
+    border: 1px solid #d1d5db;
+    border-radius: 8px;
+    font-size: 1rem;
+}
+.pdvu-vazio {
+    margin-top: 24px;
+    color: #6b7280;
+    text-align: center;
+}
+.pdvu-resumo .pdvu-total {
+    font-size: 2rem;
+    font-weight: 800;
+    color: #111827;
+}
+.pdvu-finalizar {
+    width: 100%;
+    margin-top: 16px;
+    padding: 12px;
+    border: 0;
+    border-radius: 8px;
+    background: #0f766e;
+    color: #fff;
+    font-weight: 700;
+    cursor: pointer;
+}
+.pdvu-finalizar:disabled {
+    background: #9ca3af;
+    cursor: not-allowed;
+    opacity: 0.75;
+}
+.pdvu-atalhos {
+    font-size: 0.78rem;
+    color: #6b7280;
+    margin-top: 12px;
+}
+.pdvu-center {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 40vh;
+    flex-direction: column;
+    gap: 12px;
+}
+.pdvu-empresas-box {
+    margin-top: 16px;
+    padding: 10px;
+    background: #f8fafc;
+    border-radius: 8px;
+    text-align: left;
+}
+#pdvu-acoes-pos {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 12px;
+}
+#pdvu-acoes-pos[hidden] { display: none !important; }
+.pdvu-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(17, 24, 39, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 2000;
+}
+.pdvu-overlay[hidden] { display: none !important; }
+.pdvu-dialog-pgto { width: min(480px, 94vw); }
+.pdvu-pgto-add { display: flex; gap: 8px; margin: 10px 0; }
+.pdvu-pgto-add input { flex: 1; }
+.pdvu-dialog {
+    background: #fff;
+    border-radius: 10px;
+    width: min(420px, 92vw);
+    padding: 16px;
+}
+.pdvu-empresa-opcao {
+    display: block;
+    width: 100%;
+    text-align: left;
+    margin: 6px 0;
+    padding: 10px 12px;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    background: #fff;
+    cursor: pointer;
+}
+.pdvu-btn {
+    border: 0;
+    border-radius: 6px;
+    padding: 8px 12px;
+    background: #0f766e;
+    color: #fff;
+    cursor: pointer;
+}
+#pdvu-loading[hidden], #pdvu-error[hidden], #pdvu-ready[hidden] { display: none !important; }
+.pdvu-resultados { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.pdvu-resultado {
+    text-align: left;
+    border: 1px solid #e5e7eb;
+    background: #fff;
+    border-radius: 6px;
+    padding: 8px 10px;
+    cursor: pointer;
+}
+.pdvu-linha {
+    border-bottom: 1px solid #f3f4f6;
+    padding: 8px 0;
+    font-size: 0.9rem;
+}
+.pdvu-linha small { display: block; color: #0f766e; }
+.pdvu-emp-discreta { color: #9ca3af !important; font-size: 0.75rem; }
+.pdvu-aviso { color: #b45309; min-height: 1.2em; }

@@ -1,0 +1,96 @@
+.muv-comp-barra {
+    position: fixed;
+    right: 16px;
+    bottom: 48px;
+    z-index: 1040;
+}
+.muv-comp-barra[hidden] { display: none !important; }
+.muv-comp-barra-btn {
+    background: #0f766e;
+    color: #fff;
+    border: 0;
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.muv-comp-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.55);
+    z-index: 1050;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+}
+.muv-comp-overlay[hidden] { display: none !important; }
+.muv-comp-dialog {
+    background: #fff;
+    color: #111827;
+    width: min(520px, 100%);
+    max-height: 92vh;
+    display: flex;
+    flex-direction: column;
+    border-radius: 8px;
+    overflow: hidden;
+}
+.muv-comp-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 16px;
+    border-bottom: 1px solid #e5e7eb;
+}
+.muv-comp-header h2 { margin: 0; font-size: 1.05rem; }
+.muv-comp-x {
+    border: 0;
+    background: transparent;
+    font-size: 1.5rem;
+    line-height: 1;
+    cursor: pointer;
+}
+.muv-comp-banner {
+    padding: 8px 16px;
+    font-size: 0.85rem;
+    background: #eff6ff;
+}
+.muv-comp-banner--fiscal_parcial,
+.muv-comp-banner--fiscal_erro { background: #fef3c7; }
+.muv-comp-banner--atendimento_cancelado { background: #fee2e2; }
+.muv-comp-banner--erro_carregamento { background: #fecaca; }
+.muv-comp-body {
+    padding: 8px;
+    overflow: auto;
+    min-height: 220px;
+    background: #f8fafc;
+}
+.muv-comp-iframe {
+    width: 100%;
+    min-height: 360px;
+    border: 1px solid #e5e7eb;
+    background: #fff;
+}
+.muv-comp-acoes {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    padding: 12px 16px;
+    border-top: 1px solid #e5e7eb;
+}
+.muv-comp-acoes button {
+    border: 1px solid #d1d5db;
+    background: #fff;
+    border-radius: 4px;
+    padding: 8px 12px;
+    cursor: pointer;
+}
+.muv-comp-acoes [data-muv-acao="imprimir"] {
+    background: #0f766e;
+    color: #fff;
+    border-color: #0f766e;
+}
+.muv-comp-loading, .muv-comp-erro, .muv-comp-prep {
+    margin: 12px;
+    font-size: 0.9rem;
+}

@@ -2,6 +2,11 @@ const fs = require('fs');
 const path = require('path');
 const db = require('../../database');
 const { getFiscalConfig, incrementaNumeroFiscal, setConfiguracao } = require('./configService');
+const {
+  normalizarEmpresaId,
+  garantirSchemaFiscalEmpresaAsync,
+  atualizarNumeroAtualEmpresa
+} = require('./empresasConfiguracaoFiscal');
 const { carregarCertificadoPfx } = require('./certificateService');
 const {
   buildNfceXml
@@ -177,8 +182,9 @@ function salvarNota(payload) {
         INSERT INTO nfce_notas (
           venda_id, numero, serie, chave_acesso, ambiente, status,
           xml_enviado, xml_retorno, protocolo, recibo, qr_code_url, danfe_html,
+          empresa_id,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'), datetime('now', 'localtime'))
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'), datetime('now', 'localtime'))
       `, [
         payload.venda_id,
         payload.numero,
@@ -191,7 +197,8 @@ function salvarNota(payload) {
         payload.protocolo || null,
         payload.recibo || null,
         payload.qr_code_url || null,
-        payload.danfe_html || null
+        payload.danfe_html || null,
+        payload.empresa_id || null
       ], function(err) {
         if (err) return reject(err);
         resolve(this.lastID);
@@ -200,9 +207,15 @@ function salvarNota(payload) {
   });
 }
 
-async function emitirPorVendaId(vendaId) {
+async function emitirPorVendaId(vendaId, opcoes = {}) {
   console.log('ENTROU NO EMISSOR FISCAL');
+  const empresaId = normalizarEmpresaId(opcoes && opcoes.empresaId);
+  const fiscalOpts = empresaId ? { empresaId, db: opcoes.db } : { db: opcoes.db };
+  try {
+    await garantirSchemaFiscalEmpresaAsync(opcoes.db || db);
+  } catch (_) { /* schema auxiliar; emissão legado segue */ }
   const { venda, itens } = await carregarVenda(vendaId);
+  const persistirNota = (payload) => salvarNota({ ...payload, empresa_id: empresaId || null });
 
   if (
     venda.status_pagamento &&
@@ -266,7 +279,7 @@ async function emitirPorVendaId(vendaId) {
     });
   });
 
-  const config = await getFiscalConfig();
+  const config = await getFiscalConfig(fiscalOpts);
 
   let numero;
 
@@ -274,12 +287,12 @@ async function emitirPorVendaId(vendaId) {
     numero = notaPendenteAnterior.numero;
     console.log(`REUTILIZANDO NÚMERO FISCAL DA TENTATIVA ANTERIOR: ${numero}`);
   } else {
-    numero = await incrementaNumeroFiscal();
+    numero = await incrementaNumeroFiscal(fiscalOpts);
     console.log(`NÚMERO FISCAL GERADO: ${numero} (MAX no banco + 1)`);
   }
 
   if (!config.nomeEmpresa || !config.cnpj || !config.ie) {
-    const notaId = await salvarNota({
+    const notaId = await persistirNota({
       venda_id: vendaId,
       numero,
       serie: config.serie,
@@ -300,7 +313,7 @@ async function emitirPorVendaId(vendaId) {
   if (!config.certificadoPath || !fs.existsSync(config.certificadoPath)) {
     const caminhoInfo = config.certificadoPath || '(não informado)';
 
-    const notaId = await salvarNota({
+    const notaId = await persistirNota({
       venda_id: vendaId,
       numero,
       serie: config.serie,
@@ -366,7 +379,7 @@ async function emitirPorVendaId(vendaId) {
       validarXsd: false
     });
   } catch (validErr) {
-    const notaId = await salvarNota({
+    const notaId = await persistirNota({
       venda_id: vendaId,
       numero,
       serie: config.serie,
@@ -587,7 +600,11 @@ async function emitirPorVendaId(vendaId) {
         const numeroDuplicado = Number(chave.substring(25, 34));
         const proximo = numeroDuplicado + 1;
 
-        await setConfiguracao('fiscal_numero_atual', String(proximo));
+        if (empresaId) {
+          await atualizarNumeroAtualEmpresa(empresaId, proximo, opcoes.db || db);
+        } else {
+          await setConfiguracao('fiscal_numero_atual', String(proximo));
+        }
 
         console.warn(`Corrigido automaticamente para número ${proximo}`);
       }
@@ -600,7 +617,7 @@ async function emitirPorVendaId(vendaId) {
     xmlRetorno = raw || null;
   }
 
-  const notaId = await salvarNota({
+  const notaId = await persistirNota({
     venda_id: vendaId,
     numero,
     serie: config.serie,

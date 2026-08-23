@@ -1,13 +1,15 @@
 {
-  "digestValue": "pHfMWPKsYHcwkA63q4ZPrVT+Yos=",
+  "digestValue": "dXsKHpT3ZbOvXMPwuuR5gMMKpN0=",
   "temSignatureValue": true,
   "temC14N": true,
   "temReference": true,
   "temTransform": true,
   "xsd": {
-    "ok": true,
-    "status": "XSD_OK",
-    "erros": []
+    "ok": false,
+    "status": "XSD_FERRAMENTA_INDISPONIVEL",
+    "erros": [
+      "Traceback (most recent call last):\r\n  File \"<string>\", line 2, in <module>\r\n    from lxml import etree\r\nModuleNotFoundError: No module named 'lxml'\r\n"
+    ]
   },
   "vTroco": 22,
   "modelo": "MODELO_LIQUIDO"

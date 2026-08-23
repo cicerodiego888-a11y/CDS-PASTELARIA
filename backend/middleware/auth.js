@@ -68,17 +68,19 @@ function verificarToken(req, res, next) {
 
   if (!token) {
     if (!api && req.accepts('html')) {
-      return res.redirect('/login');
+      const next = encodeURIComponent(req.originalUrl || '/');
+      return res.redirect(`/login?next=${next}`);
     }
-    return res.status(401).json({ error: 'Acesso negado' });
+    return res.status(401).json({ error: 'Acesso negado', code: 'SESSAO_INVALIDA' });
   }
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
     if (err) {
       if (!api && req.accepts('html')) {
-        return res.redirect('/login');
+        const next = encodeURIComponent(req.originalUrl || '/');
+        return res.redirect(`/login?next=${next}`);
       }
-      return res.status(403).json({ error: 'Token inválido ou expirado' });
+      return res.status(403).json({ error: 'Token inválido ou expirado', code: 'SESSAO_INVALIDA' });
     }
 
     req.user = user;

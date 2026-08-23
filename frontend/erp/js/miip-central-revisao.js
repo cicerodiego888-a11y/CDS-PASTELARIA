@@ -1606,17 +1606,54 @@
     renderTelaRevisao();
   }
 
+  function incluirProdutoNoCatalogoRevisao(produto) {
+    if (!produto?.id || !estado?.opcoes) return;
+    if (!Array.isArray(estado.opcoes.produtos)) estado.opcoes.produtos = [];
+    const id = Number(produto.id);
+    const item = {
+      ...produto,
+      id,
+      nome: String(produto.nome || '').trim(),
+      codigo: String(produto.codigo || produto.codigo_interno || id),
+      codigo_barras: String(produto.codigo_barras || produto.ean || '').trim(),
+      ean: String(produto.ean || produto.codigo_barras || '').trim()
+    };
+    const idx = estado.opcoes.produtos.findIndex((p) => Number(p.id) === id);
+    if (idx >= 0) estado.opcoes.produtos[idx] = { ...estado.opcoes.produtos[idx], ...item };
+    else estado.opcoes.produtos.unshift(item);
+  }
+
+  async function recarregarCatalogoRevisao() {
+    if (!estado?.opcoes) return estado?.opcoes?.produtos || [];
+    try {
+      const token = localStorage.getItem('token') || '';
+      const resp = await fetch(`${estado.opcoes.apiUrl}/produtos`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!resp.ok) {
+        incluirProdutoNoCatalogoRevisao(window.__ultimoProdutoCadastrado);
+        return estado.opcoes.produtos || [];
+      }
+      const json = await resp.json().catch(() => []);
+      const lista = Array.isArray(json) ? json : (json?.data || json?.produtos || []);
+      if (Array.isArray(lista) && lista.length) estado.opcoes.produtos = lista;
+    } catch (_) { /* mantém snapshot local */ }
+    incluirProdutoNoCatalogoRevisao(window.__ultimoProdutoCadastrado);
+    return estado.opcoes.produtos || [];
+  }
+
   function abrirBuscaProduto() {
-    const produtos = estado.opcoes.produtos || [];
     const modalEl = document.getElementById('miipCentralBuscaModal');
     if (!modalEl) return;
     const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
     elevarModalSobreMiip(modalEl);
-    const renderBusca = (termo) => {
+
+    const renderBusca = (termo, produtos) => {
+      const lista = produtos || estado.opcoes.produtos || [];
       const I = intel();
       const filtrados = I?.filtrarProdutosBuscaManual
-        ? I.filtrarProdutosBuscaManual(produtos, termo)
-        : produtos.filter((p) => {
+        ? I.filtrarProdutosBuscaManual(lista, termo)
+        : lista.filter((p) => {
           const lower = String(termo || '').toLowerCase().trim();
           if (!lower) return true;
           return String(p.nome || '').toLowerCase().includes(lower)
@@ -1634,11 +1671,11 @@
     };
 
     $('#miipCentralBuscaInput').val('').off('input.miip').on('input.miip', function onBusca() {
-      renderBusca(this.value);
+      renderBusca(this.value, estado.opcoes.produtos);
     });
     $('#miipCentralBuscaResultados').off('click.miip').on('click.miip', '.miip-central-busca-item', function onSelect() {
       const produtoId = Number($(this).data('produto-id'));
-      const produto = produtos.find((p) => Number(p.id) === produtoId);
+      const produto = (estado.opcoes.produtos || []).find((p) => Number(p.id) === produtoId);
       const pendencia = estado.sessao.pendencias[estado.sessao.indiceAtual];
       modal.hide();
       if (produto && pendencia) {
@@ -1646,16 +1683,20 @@
       }
     });
 
-    renderBusca('');
+    $('#miipCentralBuscaResultados').html('<p class="text-muted p-2">Atualizando catálogo…</p>');
     modal.show();
-    setTimeout(() => $('#miipCentralBuscaInput').trigger('focus'), 200);
+    recarregarCatalogoRevisao().then((lista) => {
+      renderBusca($('#miipCentralBuscaInput').val(), lista);
+      setTimeout(() => $('#miipCentralBuscaInput').trigger('focus'), 50);
+    });
   }
 
   function elevarModalSobreMiip(modalEl) {
     if (!modalEl) return;
 
-    // Garante que o modal não fique preso em stacking context da página.
-    if (modalEl.parentElement !== document.body) {
+    // Não mover modal já visível: appendChild dispara hidden.bs.modal e cancela o vínculo.
+    const jaVisivel = modalEl.classList.contains('show') || modalEl.classList.contains('showing');
+    if (!jaVisivel && modalEl.parentElement !== document.body) {
       document.body.appendChild(modalEl);
     }
 
@@ -2344,7 +2385,8 @@
       await encerrarModalTemporarioCompleto(document.getElementById('miipMieSugestaoModal'));
       await encerrarModalTemporarioCompleto(document.getElementById('miipPerguntaEmbalagemModal'));
 
-      showProdutoModal(null);
+      // Anexa ao body (não ao #modal-container) e já abre — não mover depois do show.
+      showProdutoModal(null, { origem: 'MIIP', preservarOutrosModais: true });
 
       const el = document.getElementById('produtoModal');
       if (!el) {
@@ -2355,11 +2397,21 @@
 
       elevarModalSobreMiip(el);
 
-      try {
-        bootstrap.Modal.getOrCreateInstance(el, { backdrop: true, keyboard: true, focus: true }).show();
-      } catch (_) {
-        try { $(el).modal('show'); } catch (__) { /* ignore */ }
-      }
+      let vinculado = false;
+      const finalizarVinculo = (produto) => {
+        if (vinculado) return;
+        vinculado = true;
+        $(document).off('cds:produto-salvo.miipCadastro');
+        incluirProdutoNoCatalogoRevisao(produto);
+        if (typeof callback === 'function') callback(produto || null);
+        if (produto?.id) {
+          notificar('Produto cadastrado e vinculado ao item da NF.', 'success');
+        }
+      };
+
+      $(document).off('cds:produto-salvo.miipCadastro').on('cds:produto-salvo.miipCadastro', (_evt, produtoSalvo) => {
+        finalizarVinculo(produtoSalvo);
+      });
 
       const aplicarPrefill = () => {
         elevarModalSobreMiip(el);
@@ -2398,6 +2450,9 @@
         document.querySelectorAll('.produto-modal-sobre-miip-backdrop').forEach((b) => {
           b.classList.remove('produto-modal-sobre-miip-backdrop');
         });
+        $(document).off('cds:produto-salvo.miipCadastro');
+
+        if (vinculado) return;
 
         const $modal = $('#produtoModal');
         const salvoDireto = $modal.data('produtoRecemSalvo') || null;
@@ -2405,7 +2460,6 @@
         $modal.removeData('produtoRecemSalvo');
         $modal.removeData('produtoSalvoComSucesso');
 
-        // Cancelou sem salvar → não confirma pendência.
         if (!salvouOk && !salvoDireto?.id) {
           if (typeof callback === 'function') callback(null);
           return;
@@ -2417,16 +2471,9 @@
           produto = await resolverProdutoRecemCadastrado(nomeHint);
         }
 
-        if (produto?.id && Array.isArray(estado?.opcoes?.produtos)) {
-          const ja = estado.opcoes.produtos.some((p) => Number(p.id) === Number(produto.id));
-          if (!ja) estado.opcoes.produtos.unshift(produto);
-        }
-
-        if (typeof callback === 'function') callback(produto || null);
-        if (!produto) {
+        finalizarVinculo(produto);
+        if (!produto?.id) {
           notificar('Produto salvo, mas não foi possível vinculá-lo automaticamente. Use F2 para selecioná-lo.', 'warning');
-        } else {
-          notificar('Produto cadastrado e vinculado ao item da NF.', 'success');
         }
       }, { once: true });
     } finally {

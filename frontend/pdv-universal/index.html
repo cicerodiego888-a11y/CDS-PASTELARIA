@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CDS Sistemas — PDV Universal</title>
+    <link rel="icon" type="image/x-icon" href="/branding/favicon.ico">
+    <link href="/vendor/bootstrap/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="/vendor/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="/css/style.css">
+    <link rel="stylesheet" href="/pdv-universal/pdv-universal.css">
+</head>
+<body>
+    <div id="pdvu-root" class="pdvu-page" data-estado="LOADING">
+        <header class="pdvu-topo">
+            <div>
+                <p class="pdvu-marca">CDS SISTEMAS</p>
+                <h1>PDV UNIVERSAL</h1>
+                <small>Operador: <span id="pdvu-operador">—</span></small>
+                <small>
+                    <a href="/erp" class="pdvu-link-erp">Voltar ao ERP</a>
+                    ·
+                    <a href="/pdv" class="pdvu-link-erp">PDV legado</a>
+                </small>
+            </div>
+            <div>
+                <span>Modo:</span>
+                <span id="pdvu-modo" class="pdvu-modo">—</span>
+            </div>
+            <div>
+                <span>Empresa:</span>
+                <span id="pdvu-empresa" class="pdvu-empresa">—</span>
+                <button type="button" id="pdvu-btn-selecionar" class="pdvu-btn" hidden>SELECIONAR EMPRESA</button>
+            </div>
+        </header>
+
+        <div id="pdvu-loading" class="pdvu-center">
+            <p>Carregando contexto operacional…</p>
+        </div>
+
+        <div id="pdvu-error" class="pdvu-center" hidden>
+            <p id="pdvu-error-msg">Não foi possível carregar o PDV agora.</p>
+            <p id="pdvu-error-code" class="pdvu-aviso"></p>
+            <button type="button" id="pdvu-retry" class="pdvu-btn">TENTAR NOVAMENTE</button>
+            <button type="button" id="pdvu-ir-empresas" class="pdvu-btn" hidden>CADASTRAR EMPRESA</button>
+            <button type="button" id="pdvu-voltar-login" class="pdvu-btn" hidden>VOLTAR PARA LOGIN</button>
+            <button type="button" id="pdvu-erro-selecionar" class="pdvu-btn" hidden>SELECIONAR EMPRESA</button>
+        </div>
+
+        <div id="pdvu-ready" hidden>
+            <div class="pdvu-body">
+                <section class="pdvu-card pdvu-atendimento">
+                    <div class="pdvu-busca">
+                        <input id="pdvu-busca-input" type="text" placeholder="Buscar produto, código ou código de barras…">
+                    </div>
+                    <div id="pdvu-resultados" class="pdvu-resultados"></div>
+                    <p id="pdvu-aviso" class="pdvu-aviso"></p>
+                    <div id="pdvu-empresas-atendimento" class="pdvu-empresas-box" hidden>
+                        <strong>EMPRESAS NO ATENDIMENTO</strong>
+                        <p id="pdvu-empresas-atendimento-lista">Nenhuma empresa adicionada</p>
+                    </div>
+                    <div id="pdvu-atendimento-vazio" class="pdvu-vazio">
+                        <h2>ATENDIMENTO</h2>
+                        <p>Nenhum item adicionado</p>
+                        <p>Use a busca ou leitor para adicionar produtos.</p>
+                    </div>
+                </section>
+                <aside class="pdvu-card pdvu-resumo">
+                    <div>ITENS<br><strong id="pdvu-qtd-itens">0</strong></div>
+                    <div>TOTAL<br><span id="pdvu-total" class="pdvu-total">R$ 0,00</span></div>
+                    <div id="pdvu-linhas-carrinho"></div>
+                    <div>PAGAMENTO<br>
+                        <select id="pdvu-forma">
+                            <option value="dinheiro">Dinheiro</option>
+                            <option value="pix">PIX</option>
+                            <option value="debito">Débito</option>
+                            <option value="credito">Crédito</option>
+                        </select>
+                    </div>
+                    <button type="button" id="pdvu-finalizar" class="pdvu-finalizar" disabled>FINALIZAR ATENDIMENTO</button>
+                    <div id="pdvu-atendimento-criado" class="pdvu-atendimento-criado" hidden>
+                        <h3>ATENDIMENTO CRIADO</h3>
+                        <p id="pdvu-atd-codigo">—</p>
+                        <p id="pdvu-atd-empresas">Empresas envolvidas: 0</p>
+                        <p>Status: <strong>AGUARDANDO PAGAMENTO</strong></p>
+                        <p id="pdvu-atd-status">VALIDADO</p>
+                        <button type="button" id="pdvu-continuar-pagamento" class="pdvu-btn">CONTINUAR PARA PAGAMENTO</button>
+                    </div>
+                    <div id="pdvu-acoes-pos" hidden>
+                        <button type="button" id="pdvu-materializar-main" class="pdvu-btn">MATERIALIZAR VENDAS</button>
+                        <button type="button" id="pdvu-fiscalizar-main" class="pdvu-btn" hidden>FISCALIZAR ATENDIMENTO</button>
+                        <button type="button" id="pdvu-ver-comprovante-main" class="pdvu-btn" hidden>VER COMPROVANTE</button>
+                        <button type="button" id="pdvu-novo-main" class="pdvu-btn">NOVO ATENDIMENTO</button>
+                    </div>
+                    <p class="pdvu-atalhos">F1 — Buscar produto. ESC fecha modal sem cancelar pagamento.</p>
+                </aside>
+            </div>
+        </div>
+    </div>
+
+    <div id="pdvu-modal-empresa" class="pdvu-overlay" hidden>
+        <div class="pdvu-dialog" role="dialog" aria-labelledby="pdvu-modal-titulo">
+            <h2 id="pdvu-modal-titulo">SELECIONAR EMPRESA</h2>
+            <div id="pdvu-lista-empresas"></div>
+            <button type="button" id="pdvu-modal-fechar" class="pdvu-btn">Fechar</button>
+        </div>
+    </div>
+
+    <div id="pdvu-modal-empresa-item" class="pdvu-overlay" hidden>
+        <div class="pdvu-dialog" role="dialog">
+            <h2>ESTE PRODUTO POSSUI ESTOQUE EM:</h2>
+            <div id="pdvu-lista-empresa-item"></div>
+        </div>
+    </div>
+
+    <div id="pdvu-modal-pagamento" class="pdvu-overlay" hidden>
+        <div class="pdvu-dialog pdvu-dialog-pgto" role="dialog">
+            <h2>PAGAMENTO UNIFICADO</h2>
+            <p id="pdvu-pgto-codigo">ATENDIMENTO —</p>
+            <p>TOTAL DO ATENDIMENTO: <strong id="pdvu-pgto-total">R$ 0,00</strong></p>
+            <p>Valor informado: <span id="pdvu-pgto-informado">R$ 0,00</span></p>
+            <p>Diferença: <span id="pdvu-pgto-diff">R$ 0,00</span></p>
+            <div id="pdvu-pgto-linhas"></div>
+            <div class="pdvu-pgto-add">
+                <select id="pdvu-pgto-forma">
+                    <option value="DINHEIRO">Dinheiro</option>
+                    <option value="PIX">PIX</option>
+                    <option value="DEBITO">Débito</option>
+                    <option value="CREDITO">Crédito</option>
+                </select>
+                <input id="pdvu-pgto-valor" type="number" min="0" step="0.01" placeholder="Valor">
+                <button type="button" id="pdvu-pgto-adicionar" class="pdvu-btn">Adicionar</button>
+            </div>
+            <p id="pdvu-pgto-status" class="pdvu-aviso"></p>
+            <button type="button" id="pdvu-pgto-confirmar" class="pdvu-finalizar">CONFIRMAR PAGAMENTO</button>
+            <button type="button" id="pdvu-pgto-retry" class="pdvu-btn" hidden>TENTAR NOVAMENTE</button>
+            <button type="button" id="pdvu-pgto-fechar" class="pdvu-btn">FECHAR</button>
+            <button type="button" id="pdvu-pgto-cancelar" class="pdvu-btn">CANCELAR ATENDIMENTO</button>
+            <p id="pdvu-pgto-proximo" hidden>PAGAMENTO CONFIRMADO</p>
+            <button type="button" id="pdvu-materializar" class="pdvu-btn" hidden>MATERIALIZAR VENDAS</button>
+            <button type="button" id="pdvu-fiscalizar" class="pdvu-btn" hidden>FISCALIZAR ATENDIMENTO</button>
+            <button type="button" id="pdvu-ver-comprovante" class="pdvu-btn" hidden>VER COMPROVANTE</button>
+        </div>
+    </div>
+
+    <div id="pdvu-modal-comprovante" class="pdvu-overlay" hidden>
+        <div class="pdvu-dialog pdvu-dialog-pgto" role="dialog" data-estado="LOADING">
+            <h2>COMPROVANTE UNIFICADO</h2>
+            <p id="pdvu-comp-banner" class="pdvu-aviso"></p>
+            <iframe id="pdvu-comprovante-frame" title="Preview oficial do comprovante" style="width:100%;min-height:360px;border:0"></iframe>
+            <button type="button" id="pdvu-comp-preview" class="pdvu-btn">PREVIEW</button>
+            <button type="button" id="pdvu-comp-imprimir" class="pdvu-btn">PREPARAR IMPRESSÃO</button>
+            <button type="button" id="pdvu-comp-novo" class="pdvu-btn">NOVO ATENDIMENTO</button>
+            <button type="button" id="pdvu-fechar-comprovante" class="pdvu-btn">FECHAR</button>
+        </div>
+    </div>
+
+    <script>
+        window.API_URL = window.API_URL || (window.location.origin + '/api');
+    </script>
+    <script src="/shared/js/muv-comprovante-client.js"></script>
+    <script src="/pdv-universal/pdv-universal-cart.js"></script>
+    <script src="/pdv-universal/pdv-universal-checkout.js"></script>
+    <script src="/pdv-universal/pdv-universal-pagamento.js"></script>
+    <script src="/pdv-universal/pdv-universal-pos-pagamento.js"></script>
+    <script src="/pdv-universal/pdv-universal-comprovante-modal.js"></script>
+    <script src="/pdv-universal/pdv-universal-session.js"></script>
+    <script src="/pdv-universal/pdv-universal.js"></script>
+    <script>
+        if (window.PdvUniversalTela) {
+            window.PdvUniversalTela.bindUi(document, window.PdvUniversalTela);
+        }
+    </script>
+</body>
+</html>

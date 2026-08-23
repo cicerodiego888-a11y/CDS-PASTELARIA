@@ -56,7 +56,7 @@ const storage = multer.diskStorage({
     cb(null, pastaCertificados);
   },
   filename: (req, file, cb) => {
-    cb(null, 'certificado.pfx');
+    cb(null, `upload-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.pfx`);
   }
 });
 
@@ -79,7 +79,59 @@ router.post('/certificado/upload', upload.single('certificado'), async (req, res
       return res.status(400).json({ error: 'Nenhum certificado enviado.' });
     }
 
+    const fiscalEmpresa = require('../services/fiscal/empresasConfiguracaoFiscal');
+    const empresaId = fiscalEmpresa.normalizarEmpresaId(
+      req.body && (req.body.empresa_id != null ? req.body.empresa_id : req.body.empresaId)
+    );
+    const arquivoTmp = path.resolve(req.file.path);
+
+    if (empresaId) {
+      const destino = path.resolve(pastaCertificados, `certificado-empresa-${empresaId}.pfx`);
+      try {
+        if (fs.existsSync(destino)) fs.unlinkSync(destino);
+        fs.renameSync(arquivoTmp, destino);
+      } catch (moveErr) {
+        fs.copyFileSync(arquivoTmp, destino);
+        try { fs.unlinkSync(arquivoTmp); } catch (_e) { /* ignore */ }
+      }
+      const senha = req.body && (req.body.certificado_senha || req.body.senha);
+      const patch = { certificado_path: destino };
+      if (senha != null && String(senha).trim() !== '') {
+        patch.certificado_senha = String(senha);
+      }
+      await fiscalEmpresa.salvarConfiguracaoFiscalEmpresa(empresaId, patch, { db });
+      const dto = await fiscalEmpresa.obterConfiguracaoFiscalEmpresa(empresaId, { db });
+
+      gravarAuditoria({
+        usuario_id: req.user?.id || null,
+        usuario_nome: req.user?.username || req.user?.nome || null,
+        modulo: 'fiscal',
+        acao: 'upload_certificado_empresa',
+        referencia_tipo: 'empresa',
+        referencia_id: empresaId,
+        detalhes: { empresa_id: empresaId, certificado_nome: dto.certificado_nome, ip: req.ip || null },
+        ip_requisicao: req.ip || null
+      }).catch((auditErr) => console.error('Erro ao gravar auditoria de certificado:', auditErr));
+
+      return res.json({
+        success: true,
+        message: 'Certificado enviado com sucesso.',
+        empresa_id: empresaId,
+        certificado_nome: dto.certificado_nome,
+        certificado_configurado: dto.certificado_configurado
+      });
+    }
+
     const caminhoCompleto = path.resolve(pastaCertificados, 'certificado.pfx');
+    try {
+      if (fs.existsSync(caminhoCompleto) && caminhoCompleto !== arquivoTmp) {
+        fs.unlinkSync(caminhoCompleto);
+      }
+      fs.renameSync(arquivoTmp, caminhoCompleto);
+    } catch (moveErr) {
+      fs.copyFileSync(arquivoTmp, caminhoCompleto);
+      try { fs.unlinkSync(arquivoTmp); } catch (_e) { /* ignore */ }
+    }
 
     await setConfiguracao(
       'fiscal_certificado_path',
@@ -105,7 +157,8 @@ router.post('/certificado/upload', upload.single('certificado'), async (req, res
       path: caminhoCompleto
     });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    const status = Number(error && error.statusCode) || Number(error && error.status) || 500;
+    res.status(status).json({ error: error.message, code: error.code });
   }
 });
 

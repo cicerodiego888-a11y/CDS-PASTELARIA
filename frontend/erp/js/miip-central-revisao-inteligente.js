@@ -990,20 +990,35 @@
   function filtrarProdutosBuscaManual(produtos, termo) {
     const lower = String(termo || '').toLowerCase().trim();
     const digitos = lower.replace(/\D/g, '');
-    return (produtos || []).filter((p) => {
+    const matched = (produtos || []).filter((p) => {
       if (!lower) return true;
       const nome = String(p.nome || '').toLowerCase();
-      const codigo = String(p.codigo || '').toLowerCase();
-      const barras = String(p.codigo_barras || '');
+      const codigo = String(p.codigo || p.codigo_interno || '').toLowerCase();
+      const barras = String(p.codigo_barras || p.ean || '');
+      const barrasDigits = barras.replace(/\D/g, '');
       const plu = String(p.plu || '').toLowerCase();
+      const id = String(p.id || '');
       const cProd = String(p.codigo_fornecedor || p.codigoFornecedor || '').toLowerCase();
       return nome.includes(lower)
         || codigo.includes(lower)
         || plu.includes(lower)
         || cProd.includes(lower)
-        || (digitos && barras.includes(digitos))
+        || id === lower
+        || (digitos && (barras.includes(digitos) || barrasDigits.includes(digitos) || id === digitos || codigo.replace(/\D/g, '') === digitos))
         || barras.toLowerCase().includes(lower);
-    }).slice(0, 40);
+    });
+    if (!lower) return matched.slice(0, 40);
+    const exact = [];
+    const rest = [];
+    matched.forEach((p) => {
+      const barras = String(p.codigo_barras || p.ean || '');
+      const barrasDigits = barras.replace(/\D/g, '');
+      const id = String(p.id || '');
+      const codigo = String(p.codigo || p.codigo_interno || '');
+      if (barras === termo || barrasDigits === digitos || id === lower || id === digitos || codigo === termo) exact.push(p);
+      else rest.push(p);
+    });
+    return exact.concat(rest).slice(0, 40);
   }
 
   function motoresUtilizados(pendencia) {

@@ -7,7 +7,7 @@
   'use strict';
 
   const CATEGORIAS = Object.freeze([
-    { id: 'empresa', icon: 'fa-building', label: 'Empresa', keywords: 'implantação tipo erp cfop csosn origem cest padrão fiscal empresa' },
+    { id: 'empresa', icon: 'fa-building', label: 'Empresa', keywords: 'implantação tipo erp cfop csosn origem cest padrão fiscal empresa empresas cnpj' },
     { id: 'plataformaFiscal', icon: 'fa-university', label: 'Plataforma Fiscal', keywords: 'ambiente produção homologação certificado csc uf sefaz urls qrcode nfc-e nf-e contingência webservices diagnóstico fiscal', fiscal: true },
     { id: 'modulosLicenciados', icon: 'fa-puzzle-piece', label: 'Módulos Licenciados', keywords: 'pdv pedidos expedição faturamento entregas nfe nfce compra fácil marketplace crm invisibilidade' },
     { id: 'motores', icon: 'fa-brain', label: 'Motores Inteligentes', keywords: 'midp miip mib motor busca distribuição pagamentos ativar' },
@@ -187,7 +187,11 @@
             <label class="form-check-label" for="tipoMulticaixa">ERP Multi-Caixa</label>
           </div>
         `, 'implantação tipo erp')}
-        ${fiscalUi ? `<div class="cds-cfg-note">Razão social, CNPJ, IE e certificado são editados em <strong>Plataforma Fiscal</strong> (Super Usuário).</div>
+        ${card('<i class="fas fa-city"></i> EMPRESAS', `
+          <p class="cds-cfg-hint mb-2">Gestão MULTIEMPRESA: dados gerais, configuração fiscal e certificado por CNPJ.</p>
+          <button type="button" class="btn btn-primary btn-sm" id="btnAbrirGestaoEmpresas">Empresas</button>
+        `, 'empresas multiempresa cnpj fiscal')}
+        ${fiscalUi ? `<div class="cds-cfg-note">Razão social, CNPJ, IE e certificado por empresa ficam em <strong>Empresas</strong>. A Plataforma Fiscal permanece para o perfil global/legado.</div>
         <div id="secaoPadraoFiscalEmpresa">
           ${card('<i class="fas fa-file-invoice"></i> Padrão Fiscal da Empresa', `
             <p class="cds-cfg-hint mb-3">Valores padrão para novos produtos. Não altera produtos já cadastrados.</p>
@@ -1146,6 +1150,9 @@
         }
       }
     };
+    document.getElementById('btnAbrirGestaoEmpresas')?.addEventListener('click', () => {
+      if (typeof global.loadPage === 'function') global.loadPage('empresas');
+    });
     document.getElementById('btnConfiguracaoTEF')?.addEventListener('click', abrirTefLazy);
     document.getElementById('btnConfiguracaoTEFIntegracoes')?.addEventListener('click', abrirTefLazy);
     document.getElementById('btnConfiguracaoRede')?.addEventListener('click', () => {

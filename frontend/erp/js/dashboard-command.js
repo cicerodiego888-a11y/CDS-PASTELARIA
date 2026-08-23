@@ -558,7 +558,9 @@
         }
         return;
       }
-      window.location.href = '/pdv';
+      window.location.href = (typeof urlPdvUniversalOficial === 'function')
+        ? urlPdvUniversalOficial()
+        : '/pdv-universal';
       return;
     }
     if (typeof paginaPermitidaPorImplantacao === 'function' && !paginaPermitidaPorImplantacao(page)) {

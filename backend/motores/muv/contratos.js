@@ -141,18 +141,64 @@ const PROIBICOES_MUV = Object.freeze({
 const STATUS_ATENDIMENTO = Object.freeze({
   ABERTO: 'ABERTO',
   VALIDADO: 'VALIDADO',
+  RESERVADO: 'RESERVADO',
+  PAGAMENTO_PROCESSANDO: 'PAGAMENTO_PROCESSANDO',
+  PAGO: 'PAGO',
+  MATERIALIZANDO: 'MATERIALIZANDO',
   AGUARDANDO_PAGAMENTO: 'AGUARDANDO_PAGAMENTO',
   CONCLUIDO: 'CONCLUIDO',
+  FISCALIZANDO: 'FISCALIZANDO',
+  FISCAL_PARCIAL: 'FISCAL_PARCIAL',
+  FISCALIZADO: 'FISCALIZADO',
+  FISCAL_ERRO: 'FISCAL_ERRO',
   CANCELADO: 'CANCELADO'
 });
 
 const STATUS_OPERACAO_EMPRESARIAL = Object.freeze({
   ABERTA: 'ABERTA',
   VALIDADA: 'VALIDADA',
+  RESERVADA: 'RESERVADA',
   AGUARDANDO_CONCLUSAO: 'AGUARDANDO_CONCLUSAO',
   CONCLUIDA: 'CONCLUIDA',
   CANCELADA: 'CANCELADA'
 });
+
+const STATUS_RESERVA_ATENDIMENTO = Object.freeze({
+  ATIVA: 'ATIVA',
+  CANCELADA: 'CANCELADA',
+  CONSUMIDA: 'CONSUMIDA'
+});
+
+const STATUS_PAGAMENTO_ATENDIMENTO = Object.freeze({
+  CONFIRMADO: 'CONFIRMADO'
+});
+
+const STATUS_FISCAL_OPERACAO = Object.freeze({
+  PENDENTE: 'PENDENTE',
+  AUTORIZADA: 'AUTORIZADA',
+  REJEITADA: 'REJEITADA',
+  NAO_APLICAVEL: 'NAO_APLICAVEL',
+  ERRO: 'ERRO'
+});
+
+/** Alias oficial 04.05 — mesmos valores de EstrategiaDistribuicaoPagamento. */
+const EstrategiaRateioAtendimento = Object.freeze({
+  RATEIO_POR_ITEM: EstrategiaDistribuicaoPagamento.POR_ITEM,
+  RATEIO_PROPORCIONAL: EstrategiaDistribuicaoPagamento.PROPORCIONAL,
+  RATEIO_MANUAL: EstrategiaDistribuicaoPagamento.MANUAL
+});
+
+const FORMAS_PAGAMENTO_ATENDIMENTO = Object.freeze([
+  'pix',
+  'dinheiro',
+  'cartao_debito',
+  'cartao_credito',
+  'cartao',
+  'debito',
+  'credito',
+  'tef',
+  'pix_tef'
+]);
 
 const TIPO_FISCAL_ITEM_ATENDIMENTO = Object.freeze({
   TOTAL: 'TOTAL',
@@ -170,8 +216,193 @@ const FLUXO_OPERACAO_04_03 = Object.freeze([
   STATUS_OPERACAO_EMPRESARIAL.VALIDADA
 ]);
 
+const FLUXO_ATENDIMENTO_04_04 = Object.freeze([
+  STATUS_ATENDIMENTO.VALIDADO,
+  STATUS_ATENDIMENTO.RESERVADO,
+  STATUS_ATENDIMENTO.AGUARDANDO_PAGAMENTO
+]);
+
+const FLUXO_CANCELAMENTO_RESERVA_04_04 = Object.freeze([
+  STATUS_ATENDIMENTO.RESERVADO,
+  STATUS_ATENDIMENTO.CANCELADO
+]);
+
+const FLUXO_OPERACAO_04_04 = Object.freeze([
+  STATUS_OPERACAO_EMPRESARIAL.VALIDADA,
+  STATUS_OPERACAO_EMPRESARIAL.RESERVADA,
+  STATUS_OPERACAO_EMPRESARIAL.CANCELADA
+]);
+
+const FLUXO_ATENDIMENTO_04_05 = Object.freeze([
+  STATUS_ATENDIMENTO.RESERVADO,
+  STATUS_ATENDIMENTO.PAGAMENTO_PROCESSANDO,
+  STATUS_ATENDIMENTO.PAGO
+]);
+
+const FLUXO_ATENDIMENTO_04_06 = Object.freeze([
+  STATUS_ATENDIMENTO.PAGO,
+  STATUS_ATENDIMENTO.MATERIALIZANDO,
+  STATUS_ATENDIMENTO.CONCLUIDO
+]);
+
+const FLUXO_ATENDIMENTO_04_07 = Object.freeze([
+  STATUS_ATENDIMENTO.CONCLUIDO,
+  STATUS_ATENDIMENTO.FISCALIZANDO,
+  STATUS_ATENDIMENTO.FISCAL_PARCIAL,
+  STATUS_ATENDIMENTO.FISCAL_ERRO,
+  STATUS_ATENDIMENTO.FISCALIZADO
+]);
+
 function arredondarCentavosMuv(valor) {
   return Math.round(Number(valor || 0) * 100) / 100;
+}
+
+function reaisParaCentavosMuv(valor) {
+  return Math.round(arredondarCentavosMuv(valor) * 100);
+}
+
+function centavosParaReaisMuv(centavos) {
+  return arredondarCentavosMuv(Number(centavos || 0) / 100);
+}
+
+function normalizarFormaPagamentoAtendimento(valor) {
+  const s = String(valor || '').toLowerCase().trim().replace(/[\s-]+/g, '_');
+  if (s === 'cartao_de_credito') return 'cartao_credito';
+  if (s === 'cartao_de_debito') return 'cartao_debito';
+  if (!FORMAS_PAGAMENTO_ATENDIMENTO.includes(s)) {
+    throw erroContrato(
+      'FORMA_PAGAMENTO_INVALIDA',
+      `Forma de pagamento inválida: ${valor}.`
+    );
+  }
+  return s;
+}
+
+function normalizarEstrategiaRateio(valor) {
+  if (valor == null || valor === '') return EstrategiaDistribuicaoPagamento.POR_ITEM;
+  const s = String(valor).toUpperCase().trim().replace(/[\s-]+/g, '_');
+  if (s === 'POR_ITEM' || s === 'RATEIO_POR_ITEM') return EstrategiaDistribuicaoPagamento.POR_ITEM;
+  if (s === 'PROPORCIONAL' || s === 'RATEIO_PROPORCIONAL') {
+    return EstrategiaDistribuicaoPagamento.PROPORCIONAL;
+  }
+  if (s === 'MANUAL' || s === 'RATEIO_MANUAL') return EstrategiaDistribuicaoPagamento.MANUAL;
+  throw erroContrato(
+    'ESTRATEGIA_RATEIO_INVALIDA',
+    `Estratégia de rateio inválida: ${valor}.`
+  );
+}
+
+function calcularTotalOficialItens(itens) {
+  if (!Array.isArray(itens) || itens.length === 0) {
+    throw erroContrato('ATENDIMENTO_INVALIDO', 'Atendimento sem itens para total oficial.');
+  }
+  let centavos = 0;
+  for (const item of itens) {
+    const linha = valorTotalItemAtendimento(item.quantidade, item.valorUnitario);
+    centavos += reaisParaCentavosMuv(linha);
+  }
+  return centavosParaReaisMuv(centavos);
+}
+
+function ordenarOperacoesPorEmpresaId(operacoes) {
+  return [...operacoes].sort((a, b) => Number(a.empresaId) - Number(b.empresaId));
+}
+
+/**
+ * Hamilton (maior resto). Ordem de desempate: empresa_id ASC.
+ * Σ partes = valorCentavos.
+ */
+function ratearProporcionalCentavos(valorCentavos, pesos) {
+  const valor = Math.round(Number(valorCentavos || 0));
+  const lista = ordenarOperacoesPorEmpresaId(pesos).map((p) => ({
+    empresaId: Number(p.empresaId),
+    operacaoId: p.operacaoId,
+    peso: Math.round(Number(p.pesoCentavos != null ? p.pesoCentavos : p.peso || 0))
+  }));
+  const totalPeso = lista.reduce((acc, p) => acc + p.peso, 0);
+  if (valor < 0) {
+    throw erroContrato('RATEIO_NEGATIVO', 'Valor de rateio não pode ser negativo.');
+  }
+  if (totalPeso <= 0) {
+    if (valor === 0) {
+      return lista.map((p) => ({
+        empresaId: p.empresaId,
+        operacaoId: p.operacaoId,
+        valorCentavos: 0
+      }));
+    }
+    throw erroContrato('DISTRIBUICAO_INVALIDA', 'Pesos de rateio inválidos.');
+  }
+
+  const partes = lista.map((p) => {
+    const exact = (valor * p.peso) / totalPeso;
+    const inteiro = Math.floor(exact);
+    return {
+      empresaId: p.empresaId,
+      operacaoId: p.operacaoId,
+      valorCentavos: inteiro,
+      frac: exact - inteiro
+    };
+  });
+  let resto = valor - partes.reduce((acc, p) => acc + p.valorCentavos, 0);
+  const ordemResto = [...partes].sort((a, b) => {
+    if (b.frac !== a.frac) return b.frac - a.frac;
+    return a.empresaId - b.empresaId;
+  });
+  for (let i = 0; i < resto; i += 1) {
+    ordemResto[i].valorCentavos += 1;
+  }
+  return partes
+    .sort((a, b) => a.empresaId - b.empresaId)
+    .map((p) => ({
+      empresaId: p.empresaId,
+      operacaoId: p.operacaoId,
+      valorCentavos: p.valorCentavos
+    }));
+}
+
+/**
+ * Cascata determinística: preenche alvos (subtotais) por empresa_id ASC
+ * consumindo pagamentos na ordem de entrada.
+ */
+function ratearPagamentosPorItem(pagamentosCentavos, alvos) {
+  const restantes = ordenarOperacoesPorEmpresaId(alvos).map((a) => ({
+    empresaId: Number(a.empresaId),
+    operacaoId: a.operacaoId,
+    restante: Math.round(Number(a.pesoCentavos != null ? a.pesoCentavos : a.valorCentavos || 0))
+  }));
+  return pagamentosCentavos.map((pag) => {
+    let sobra = Math.round(Number(pag.valorCentavos));
+    const rateios = [];
+    for (const alvo of restantes) {
+      const q = Math.min(sobra, alvo.restante);
+      rateios.push({
+        empresaId: alvo.empresaId,
+        operacaoId: alvo.operacaoId,
+        valorCentavos: q
+      });
+      alvo.restante -= q;
+      sobra -= q;
+    }
+    if (sobra !== 0) {
+      throw erroContrato(
+        'DISTRIBUICAO_DIVERGENTE',
+        'Rateio por item não absorveu o pagamento integralmente.'
+      );
+    }
+    return rateios;
+  });
+}
+
+function fingerprintPagamentoAtendimento(entrada) {
+  const pagamentos = (entrada.pagamentos || []).map((p) => ({
+    forma: p.formaPagamento || p.forma_pagamento,
+    valorCentavos: reaisParaCentavosMuv(p.valor)
+  }));
+  return JSON.stringify({
+    estrategia: entrada.estrategia || entrada.estrategiaRateio || null,
+    pagamentos
+  });
 }
 
 function arredondarQuantidadeMuv(valor) {
@@ -331,15 +562,34 @@ module.exports = {
   MODOS,
   STATUS_ATENDIMENTO,
   STATUS_OPERACAO_EMPRESARIAL,
+  STATUS_RESERVA_ATENDIMENTO,
+  STATUS_PAGAMENTO_ATENDIMENTO,
+  STATUS_FISCAL_OPERACAO,
+  EstrategiaRateioAtendimento,
+  FORMAS_PAGAMENTO_ATENDIMENTO,
   TIPO_FISCAL_ITEM_ATENDIMENTO,
   FLUXO_ATENDIMENTO_04_03,
   FLUXO_OPERACAO_04_03,
+  FLUXO_ATENDIMENTO_04_04,
+  FLUXO_CANCELAMENTO_RESERVA_04_04,
+  FLUXO_OPERACAO_04_04,
+  FLUXO_ATENDIMENTO_04_05,
+  FLUXO_ATENDIMENTO_04_06,
+  FLUXO_ATENDIMENTO_04_07,
   validarModoOperacaoVenda,
   resolverModoOperacaoVenda,
   exigirEmpresaIdOperacao,
   validarDistribuicaoPagamento,
   itemExigeEmpresaNoModo,
   arredondarCentavosMuv,
+  reaisParaCentavosMuv,
+  centavosParaReaisMuv,
+  normalizarFormaPagamentoAtendimento,
+  normalizarEstrategiaRateio,
+  calcularTotalOficialItens,
+  ratearProporcionalCentavos,
+  ratearPagamentosPorItem,
+  fingerprintPagamentoAtendimento,
   arredondarQuantidadeMuv,
   valorTotalItemAtendimento,
   validarItemEntradaAtendimento,

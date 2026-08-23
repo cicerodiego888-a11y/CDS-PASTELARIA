@@ -4,6 +4,19 @@
 window.CDS_MODULE = 'erp';
 window.CDS_DEFAULT_PAGE = 'dashboard';
 
+const CDS_ERP_ASSET_VERSION = (typeof window.CDS_ASSET_VERSION === 'string' && window.CDS_ASSET_VERSION)
+    ? window.CDS_ASSET_VERSION
+    : '05172';
+
+function cdsErpAsset(src) {
+    const s = String(src || '');
+    if (!s || s.indexOf('?') !== -1) return s;
+    return s + '?v=' + CDS_ERP_ASSET_VERSION;
+}
+
+window.cdsErpAsset = cdsErpAsset;
+window.CDS_ERP_ASSET_VERSION = CDS_ERP_ASSET_VERSION;
+
 const CDS_ERP_PAGE_SCRIPTS = Object.freeze({
     dashboard: [
         '/vendor/chart.js/chart.min.js',
@@ -58,6 +71,7 @@ const CDS_ERP_PAGE_SCRIPTS = Object.freeze({
         '/shared/js/configuracaoRede.js',
         '/erp/js/configuracoes.js'
     ],
+    empresas: [cdsErpAsset('/erp/js/gestao-empresas-fiscal.js')],
     'importacao-inicial-produtos': [
         '/erp/js/importacao-inicial-estado.js',
         '/erp/js/importacao-inicial-produtos.js'
@@ -104,14 +118,24 @@ function cdsErpAgora() {
 }
 
 function carregarScriptErpLazy(src) {
-    const existente = cdsErpLazyScripts.get(src);
-    if (existente) {
+    const chave = String(src || '').split('?')[0];
+    const existente = cdsErpLazyScripts.get(chave);
+    if (existente && existente.src === src) {
         existente.reuses += 1;
         return existente.promise;
     }
+    if (existente && existente.src !== src) {
+        try {
+            document.querySelectorAll('script[data-cds-lazy-loaded="true"]').forEach(function (el) {
+                const atual = el.getAttribute('src') || '';
+                if (atual.split('?')[0] === chave) el.remove();
+            });
+        } catch (_e) { /* ignore */ }
+        cdsErpLazyScripts.delete(chave);
+    }
 
     const inicio = cdsErpAgora();
-    const entry = { promise: null, reuses: 0, loadMs: null };
+    const entry = { promise: null, reuses: 0, loadMs: null, src: src };
     entry.promise = new Promise((resolve, reject) => {
         const script = document.createElement('script');
         script.src = src;
@@ -126,13 +150,13 @@ function carregarScriptErpLazy(src) {
             resolve(src);
         };
         script.onerror = function () {
-            cdsErpLazyScripts.delete(src);
+            cdsErpLazyScripts.delete(chave);
             script.remove();
             reject(new Error(`Falha ao carregar script ERP: ${src}`));
         };
         document.head.appendChild(script);
     });
-    cdsErpLazyScripts.set(src, entry);
+    cdsErpLazyScripts.set(chave, entry);
     return entry.promise;
 }
 
@@ -159,7 +183,7 @@ async function carregarScriptsPaginaErp(page) {
     let novos = 0;
 
     for (const src of scripts) {
-        if (!cdsErpLazyScripts.has(src)) novos += 1;
+        if (!cdsErpLazyScripts.has(String(src).split('?')[0])) novos += 1;
         await carregarScriptErpLazy(src);
     }
 
@@ -298,7 +322,7 @@ async function loadPage(page) {
     );
 
     const scriptsPagina = CDS_ERP_PAGE_SCRIPTS[page] || [];
-    const precisaCarregar = scriptsPagina.some((src) => !cdsErpLazyScripts.has(src));
+    const precisaCarregar = scriptsPagina.some((src) => !cdsErpLazyScripts.has(String(src).split('?')[0]));
     if (precisaCarregar) {
         $('#page-content').html(`
             <div class="text-center p-5" data-erp-lazy-loading="${page}">
@@ -403,6 +427,10 @@ async function loadPage(page) {
             return typeof loadConfiguracoes === 'function'
                 ? loadConfiguracoes()
                 : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar configurações.</div>');
+        case 'empresas':
+            return typeof loadGestaoEmpresasFiscal === 'function'
+                ? loadGestaoEmpresasFiscal()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar empresas.</div>');
         case 'importacao-inicial-produtos':
             return typeof loadImportacaoInicialProdutos === 'function'
                 ? loadImportacaoInicialProdutos()

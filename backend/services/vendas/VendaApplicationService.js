@@ -186,9 +186,40 @@ function criarVenda(req, res, opcoes) {
   return criarVendaComContexto(contract, context, req, res, opcoes);
 }
 
+/**
+ * 04.06 — materialização MULTIEMPRESA. Não altera EMPRESA_UNICA / criarVenda.
+ */
+async function materializarAtendimento(atendimentoId, entrada = {}, opcoes = {}) {
+  const modo = resolverModoOperacaoVendaAtivo(opcoes);
+  if (modo !== 'MULTIEMPRESA') {
+    const err = new Error('Materialização de atendimento é exclusiva do modo MULTIEMPRESA.');
+    err.code = 'MODO_OPERACAO_VENDA_INVALIDO';
+    err.statusCode = 400;
+    throw err;
+  }
+  const service = opcoes.AtendimentoMultiempresaService
+    || require('../../motores/muv/AtendimentoMultiempresaService');
+  return service.materializarAtendimento(atendimentoId, entrada, opcoes);
+}
+
+async function fiscalizarAtendimento(atendimentoId, entrada = {}, opcoes = {}) {
+  const modo = resolverModoOperacaoVendaAtivo(opcoes);
+  if (modo !== 'MULTIEMPRESA') {
+    const err = new Error('Fiscalização de atendimento é exclusiva do modo MULTIEMPRESA.');
+    err.code = 'MODO_OPERACAO_VENDA_INVALIDO';
+    err.statusCode = 400;
+    throw err;
+  }
+  const service = opcoes.FiscalizarAtendimentoService
+    || require('../../motores/muv/FiscalizarAtendimentoService');
+  return service.fiscalizarAtendimento(atendimentoId, { ...entrada, ...opcoes });
+}
+
 module.exports = {
   criarVenda,
   criarVendaComContexto,
+  materializarAtendimento,
+  fiscalizarAtendimento,
   VendaOrigin,
   resolverVendaOrigin
 };

@@ -873,6 +873,8 @@ function filtrarMenuPorPermissoes() {
     $('#nav-cds-copiloto').toggle(isSuperAdminUser());
     const pdvLicenciado = possuiRecurso('pdv') || obterRecursosImplantacao().pdv !== false;
     $('#nav-abrir-pdv').toggle(window.CDS_MODULE === 'erp' && podeAbrirPDV() && pdvLicenciado);
+    $('#nav-abrir-pdv-legado').toggle(window.CDS_MODULE === 'erp' && podeAbrirPDV() && pdvLicenciado);
+    $('#nav-abrir-pdv-universal').toggle(window.CDS_MODULE === 'pdv' && podeAbrirPDV() && pdvLicenciado);
     $('#nav-config-rede-pdv').toggle(window.CDS_MODULE === 'pdv' && isSuperAdminUser());
     $('#nav-nome-terminal-pdv').toggle(window.CDS_MODULE === 'pdv' && isSuperAdminUser());
     $('#nav-abrir-erp').toggle(
@@ -1099,8 +1101,9 @@ function inicializarShellModulo(options = {}) {
     try {
         const params = new URLSearchParams(window.location.search);
         const pageQuery = String(params.get('page') || '').trim();
-        if (pageQuery === 'licenca') {
-            defaultPage = 'licenca';
+        const paginasQuery = ['licenca', 'empresas', 'configuracoes-avancadas'];
+        if (paginasQuery.indexOf(pageQuery) !== -1) {
+            defaultPage = pageQuery;
         }
     } catch (e) { /* ignore */ }
 

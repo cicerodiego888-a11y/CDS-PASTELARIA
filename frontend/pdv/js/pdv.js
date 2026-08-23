@@ -5109,6 +5109,9 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
 
                     const vendaId = response.venda_id || response.id || response.vendaId || response.venda?.id;
                     const statusPagamento = response.status_pagamento;
+                    if (typeof window.notificarAtendimentoMuvSePresente === 'function') {
+                        window.notificarAtendimentoMuvSePresente(response);
+                    }
 
                     if (!vendaId) {
                         vendaEmProcessamento = false;

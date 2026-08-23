@@ -1,10 +1,20 @@
-const db = require('../../database');
+const dbDefault = require('../../database');
+const {
+  normalizarEmpresaId,
+  carregarConfiguracaoFiscalEmpresa,
+  montarConfigEmpresa,
+  incrementaNumeroFiscalEmpresa
+} = require('./empresasConfiguracaoFiscal');
 
-function getConfiguracoes(chaves) {
+function useDb(db) {
+  return db || dbDefault;
+}
+
+function getConfiguracoes(chaves, dbInjected) {
   return new Promise((resolve, reject) => {
     const placeholders = chaves.map(() => '?').join(',');
 
-    db.all(
+    useDb(dbInjected).all(
       `SELECT chave, valor FROM configuracoes WHERE chave IN (${placeholders})`,
       chaves,
       (err, rows) => {
@@ -21,7 +31,13 @@ function getConfiguracoes(chaves) {
   });
 }
 
-async function getFiscalConfig({ validarUrls = true } = {}) {
+async function getFiscalConfig({ validarUrls = true, empresaId, db } = {}) {
+  const idEmpresa = normalizarEmpresaId(empresaId);
+  if (idEmpresa) {
+    const loaded = await carregarConfiguracaoFiscalEmpresa(idEmpresa, useDb(db));
+    return montarConfigEmpresa({ ...loaded, validarUrls });
+  }
+
   const cfg = await getConfiguracoes([
     'nome_empresa',
     'nome_fantasia',
@@ -65,7 +81,7 @@ async function getFiscalConfig({ validarUrls = true } = {}) {
     'fiscal_emitente_logradouro',
     'fiscal_emitente_numero',
     'fiscal_emitente_bairro'
-  ]);
+  ], db);
 
   console.log('[FISCAL CONFIG] Configurações carregadas:', JSON.stringify(cfg, null, 2));
 
@@ -108,6 +124,8 @@ async function getFiscalConfig({ validarUrls = true } = {}) {
   }
 
   return {
+    fonte: 'GLOBAL',
+    empresaId: null,
     ambiente: ambienteFiscal,
     uf: cfg.fiscal_uf_sigla || cfg.fiscal_uf || 'CE',
     codigoUf: String(cfg.fiscal_codigo_uf || '23'),
@@ -143,9 +161,9 @@ async function getFiscalConfig({ validarUrls = true } = {}) {
   };
 }
 
-function setConfiguracao(chave, valor, tipo = 'string', descricao = '') {
+function setConfiguracao(chave, valor, tipo = 'string', descricao = '', dbInjected) {
   return new Promise((resolve, reject) => {
-    db.run(`
+    useDb(dbInjected).run(`
       INSERT INTO configuracoes (chave, valor, tipo, descricao, updated_at)
       VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
       ON CONFLICT(chave) DO UPDATE SET
@@ -160,12 +178,18 @@ function setConfiguracao(chave, valor, tipo = 'string', descricao = '') {
   });
 }
 
-async function incrementaNumeroFiscal() {
+async function incrementaNumeroFiscal(opcoes = {}) {
+  const db = useDb(opcoes.db);
+  const idEmpresa = normalizarEmpresaId(opcoes.empresaId);
+  if (idEmpresa) {
+    return incrementaNumeroFiscalEmpresa(idEmpresa, db);
+  }
+
   const cfg = await getConfiguracoes([
     'fiscal_numero_atual',
     'fiscal_serie',
     'fiscal_ambiente'
-  ]);
+  ], db);
 
   const numeroConfig = Number(cfg.fiscal_numero_atual || 1);
   const serie = Number(cfg.fiscal_serie || 1);
@@ -192,7 +216,8 @@ async function incrementaNumeroFiscal() {
           'fiscal_numero_atual',
           String(numeroSeguro + 1),
           'number',
-          'Próximo número NFC-e'
+          'Próximo número NFC-e',
+          db
         );
 
         console.log(`[FISCAL] Número usado: ${numeroSeguro}`);

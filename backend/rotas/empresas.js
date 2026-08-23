@@ -9,6 +9,7 @@ const router = express.Router();
 const db = require('../database');
 const EmpresaService = require('../services/empresas/EmpresaService');
 const { criarMiddlewareContextoEmpresa, exigirEmpresaAlvoDoContexto } = require('../services/fiscalNaoFiscal/empresaContexto');
+const fiscalEmpresa = require('../services/fiscal/empresasConfiguracaoFiscal');
 
 const STATUS_POR_CODIGO = {
   CNPJ_EMPRESA_OBRIGATORIO: 400,
@@ -25,7 +26,10 @@ const STATUS_POR_CODIGO = {
   VINCULO_EMPRESA_DUPLICADO: 409,
   VINCULO_NAO_ENCONTRADO: 404,
   VINCULO_JA_INATIVO: 409,
-  USUARIO_OBRIGATORIO: 400
+  USUARIO_OBRIGATORIO: 400,
+  EMPRESA_CONFIGURACAO_DIVERGENTE: 409,
+  CONFIGURACAO_FISCAL_EMPRESA_INVALIDA: 400,
+  CONFIGURACAO_FISCAL_EMPRESA_AUSENTE: 409
 };
 
 function responderErro(res, err) {
@@ -90,6 +94,46 @@ router.post('/contexto', async (req, res) => {
   }
 });
 
+router.get('/configuracao-fiscal/status', async (req, res) => {
+  try {
+    const lista = await fiscalEmpresa.listarStatusFiscalEmpresas({ db });
+    return res.json(lista);
+  } catch (err) {
+    return responderErro(res, err);
+  }
+});
+
+router.get('/:empresaId/configuracao-fiscal', async (req, res) => {
+  try {
+    const dto = await fiscalEmpresa.obterConfiguracaoFiscalEmpresa(req.params.empresaId, { db });
+    return res.json(dto);
+  } catch (err) {
+    return responderErro(res, err);
+  }
+});
+
+router.put('/:empresaId/configuracao-fiscal', async (req, res) => {
+  try {
+    const dto = await fiscalEmpresa.salvarConfiguracaoFiscalEmpresa(
+      req.params.empresaId,
+      req.body || {},
+      { db }
+    );
+    return res.json(dto);
+  } catch (err) {
+    return responderErro(res, err);
+  }
+});
+
+router.delete('/:empresaId/configuracao-fiscal', async (req, res) => {
+  try {
+    const dto = await fiscalEmpresa.removerConfiguracaoFiscalEmpresa(req.params.empresaId, { db });
+    return res.json(dto);
+  } catch (err) {
+    return responderErro(res, err);
+  }
+});
+
 router.get('/', async (req, res) => {
   try {
     const filtros = {};
@@ -115,6 +159,16 @@ router.get('/:id', async (req, res) => {
 router.post('/', async (req, res) => {
   try {
     const empresa = await EmpresaService.criarEmpresa(req.body || {}, { db });
+    try {
+      const UsuarioEmpresaService = require('../services/empresas/UsuarioEmpresaService');
+      if (req.user && req.user.id) {
+        await UsuarioEmpresaService.vincularUsuarioEmpresa(req.user, { empresaId: empresa.id }, { db });
+      }
+    } catch (vinculoErr) {
+      if (!vinculoErr || vinculoErr.code !== 'VINCULO_EMPRESA_DUPLICADO') {
+        console.warn('Vínculo automático usuário-empresa ao cadastrar:', vinculoErr && vinculoErr.message);
+      }
+    }
     return res.status(201).json(empresa);
   } catch (err) {
     return responderErro(res, err);

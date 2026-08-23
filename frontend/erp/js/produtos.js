@@ -4537,6 +4537,14 @@ async function saveProduto() {
             const perguntarBalanca = typeof produtoSalvoElegivelPerguntaBalanca === 'function'
                 && produtoSalvoElegivelPerguntaBalanca(produtoNormalizado);
 
+            const payloadEvento = (produtoSalvo && produtoSalvo.id)
+                ? produtoSalvo
+                : produtoNormalizado;
+            try { window.__ultimoProdutoCadastrado = payloadEvento; } catch (_) {}
+            // Disparar ANTES do hide: a Central MIIP vincula neste evento.
+            // hidden.bs.modal sozinho falha se o backdrop/empilhamento disparar hidden cedo demais.
+            try { $(document).trigger('cds:produto-salvo', [payloadEvento]); } catch (_) {}
+
             // RC15.3.1 — sempre fecha o modal (fluxo padrão do ERP)
             const modalEl = document.getElementById('produtoModal');
             if (modalEl && typeof bootstrap !== 'undefined' && bootstrap.Modal) {
