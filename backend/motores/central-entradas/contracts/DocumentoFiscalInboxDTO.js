@@ -21,6 +21,7 @@ class DocumentoFiscalInboxDTO {
     this.tipoDocumento = dados.tipoDocumento ?? dados.tipo_documento ?? null;
     this.origem = dados.origem ?? null;
     this.compraId = dados.compraId ?? dados.compra_id ?? null;
+    this.empresaId = dados.empresaId ?? dados.empresa_id ?? null;
     this.createdAt = dados.createdAt ?? dados.created_at ?? null;
   }
 
@@ -49,6 +50,7 @@ class DocumentoFiscalInboxDTO {
       tipoDocumento: this.tipoDocumento,
       origem: this.origem,
       compraId: this.compraId,
+      empresaId: this.empresaId,
       createdAt: this.createdAt
     };
   }

@@ -10,7 +10,7 @@
     if (root) {
         root.GestaoEmpresasFiscal = api;
         root.loadGestaoEmpresasFiscal = api.loadGestaoEmpresasFiscal;
-        root.__CDS_EMPRESAS_MODULE_VERSION = '05.18';
+        root.__CDS_EMPRESAS_MODULE_VERSION = '05.19';
     }
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
     'use strict';
@@ -48,6 +48,16 @@
         'token_csc', 'tokenCsc', 'csc', 'certificado_senha', 'certificadoSenha',
         'senha', 'certificado_path', 'certificadoPath', 'path'
     ]);
+
+    const PLACEHOLDER_CSC = 'CONFIGURADO — informe para substituir';
+
+    function ehPlaceholderCsc(valor) {
+        const t = String(valor == null ? '' : valor).trim();
+        if (!t) return true;
+        if (t === PLACEHOLDER_CSC) return true;
+        if (/^CONFIGURADO/i.test(t) && /substituir/i.test(t)) return true;
+        return false;
+    }
 
     function formatarCnpj(cnpj) {
         const d = String(cnpj || '').replace(/\D/g, '');
@@ -133,6 +143,7 @@
             const v = src[k];
             if (v == null) return;
             if (typeof v === 'string' && v.trim() === '') return;
+            if ((k === 'token_csc' || k === 'id_csc') && ehPlaceholderCsc(v)) return;
             out[k] = typeof v === 'string' ? v.trim() : v;
         });
         return out;
@@ -195,13 +206,13 @@
         if (typeof globalThis.CDS_ERP_ASSET_VERSION === 'string' && globalThis.CDS_ERP_ASSET_VERSION) {
             return globalThis.CDS_ERP_ASSET_VERSION;
         }
-        return '05172';
+        return '0519';
     }
 
     function logEmpresas(evento, extra) {
         try {
             console.info('[CDS EMPRESAS]', evento, Object.assign({
-                versao: '05.18',
+                versao: '05.19',
                 arquivo: 'gestao-empresas-fiscal.js',
                 origem: '/erp/js/gestao-empresas-fiscal.js?v=' + versaoModuloEmpresas()
             }, extra || {}));
@@ -373,6 +384,7 @@
             status: 'INCOMPLETA',
             csc_configurado: false,
             id_csc_configurado: false,
+            id_csc: null,
             certificado_configurado: false,
             certificado_nome: null,
             sefaz_configurado: false,
@@ -555,6 +567,7 @@
                 })
             });
             const novaId = resolverEmpresaId(criada);
+            logEmpresas('id_resolvido', { empresa_id: novaId });
             if (!novaId) {
                 throw new Error('Empresa criada sem identificador oficial. Recarregue a lista e abra a empresa.');
             }
@@ -595,6 +608,10 @@
             if (!empresaANaoCarregaB(_ui.sessao, empresaId)) return;
             _ui.sessao.empresa = empresa;
             _ui.sessao.fiscal = fiscal;
+            logEmpresas('configuracao_fiscal_carregada', {
+                empresa_id: Number(empresaId),
+                status_fiscal: fiscal && fiscal.status
+            });
             pintarDetalhe();
             logEmpresas('edicao_renderizada', {
                 empresa_id: Number(empresaId),
@@ -613,6 +630,8 @@
 
     function aplicarAba(box, tab) {
         _ui.aba = tab || 'gerais';
+        if (_ui.aba === 'fiscal') logEmpresas('aba_configuracao_fiscal', { empresa_id: _ui.sessao && _ui.sessao.empresa_id });
+        if (_ui.aba === 'cert') logEmpresas('aba_certificado_digital', { empresa_id: _ui.sessao && _ui.sessao.empresa_id });
         box.querySelectorAll('[data-gef-tab]').forEach(function (x) {
             x.classList.toggle('active', x.getAttribute('data-gef-tab') === _ui.aba);
         });
@@ -687,9 +706,14 @@
                         <p class="small" data-gef-csc-status>${escapeHtml(cscTxt)}</p>
                         <div class="row g-2">
                             <div class="col-md-6"><label class="form-label" data-gef-label-id-csc>ID CSC</label>
-                                <input id="gef-id-csc" class="form-control" type="password" autocomplete="new-password" placeholder="${f.id_csc_configurado ? 'CONFIGURADO — informe para substituir' : ''}"></div>
+                                <input id="gef-id-csc" class="form-control" type="text" autocomplete="off"
+                                    value="${escapeHtml(f.id_csc || '')}"
+                                    placeholder="${(!f.id_csc && f.id_csc_configurado) ? PLACEHOLDER_CSC : ''}"></div>
                             <div class="col-md-6"><label class="form-label" data-gef-label-csc>CSC / TOKEN CSC</label>
-                                <input id="gef-csc" class="form-control" type="password" autocomplete="new-password" placeholder="${f.csc_configurado ? 'CONFIGURADO — informe para substituir' : ''}"></div>
+                                <input id="gef-csc" class="form-control" type="password" autocomplete="new-password"
+                                    value=""
+                                    placeholder="${f.csc_configurado ? PLACEHOLDER_CSC : ''}"
+                                    data-gef-csc-mask="1"></div>
                         </div>
                         ${htmlBlocosUrlsFiscais(f)}
                         <button type="button" class="btn btn-primary mt-3" id="gef-salvar-fiscal">SALVAR CONFIGURAÇÃO FISCAL</button>
@@ -856,7 +880,7 @@
 
     function loadGestaoEmpresasFiscal() {
         try {
-            globalThis.__CDS_EMPRESAS_MODULE_VERSION = '05.18';
+            globalThis.__CDS_EMPRESAS_MODULE_VERSION = '05.19';
         } catch (_e) { /* ignore */ }
         logEmpresas('módulo carregado', { loadPage: 'empresas' });
         _ui = { estado: ESTADOS.LOADING, lista: [], sessao: criarSessaoDetalhe(), saving: false, requestId: 0, aba: 'gerais', avisoStatusFiscal: '' };
@@ -898,6 +922,8 @@
         payloadNaoSubstituiUrl,
         dtoNaoExpoeSegredos,
         certificadoIsolado,
+        ehPlaceholderCsc,
+        PLACEHOLDER_CSC,
         loadGestaoEmpresasFiscal
     };
 });

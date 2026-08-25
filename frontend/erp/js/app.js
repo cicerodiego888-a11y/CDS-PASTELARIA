@@ -6,7 +6,7 @@ window.CDS_DEFAULT_PAGE = 'dashboard';
 
 const CDS_ERP_ASSET_VERSION = (typeof window.CDS_ASSET_VERSION === 'string' && window.CDS_ASSET_VERSION)
     ? window.CDS_ASSET_VERSION
-    : '05172';
+    : '0519';
 
 function cdsErpAsset(src) {
     const s = String(src || '');

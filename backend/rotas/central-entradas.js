@@ -36,6 +36,7 @@ function montarFiltrosQuery(query) {
     busca: query.busca || null,
     cnpjFornecedor: query.cnpj_fornecedor || query.cnpjFornecedor || null,
     origem: query.origem || null,
+    empresaId: query.empresa_id || query.empresaId || null,
     dataEmissaoInicio: query.data_emissao_inicio || query.dataEmissaoInicio || null,
     dataEmissaoFim: query.data_emissao_fim || query.dataEmissaoFim || null,
     filtroRapido: query.filtro_rapido || query.filtroRapido || null,
@@ -348,10 +349,16 @@ router.get('/feature-flags', (req, res) => {
 
 router.get('/dashboard', async (req, res) => {
   try {
-    const dashboard = await centralEntradasService.obterDashboard();
+    const filtros = montarFiltrosQuery(req.query);
+    if (!filtros.empresaId && req.empresaId) {
+      filtros.empresaId = req.empresaId;
+    }
+    const dashboard = await centralEntradasService.obterDashboard(filtros);
     return res.json({
       ...dashboard,
-      featureFlags: obterFeatureFlagsPublicas()
+      featureFlags: obterFeatureFlagsPublicas(),
+      empresaId: filtros.empresaId || null,
+      visao: filtros.empresaId ? 'empresa' : 'consolidada_sem_identificacao_por_empresa'
     });
   } catch (error) {
     return res.status(500).json({ error: error.message });
@@ -617,7 +624,11 @@ router.get('/fornecedor/:cnpj/estatisticas', async (req, res) => {
 
 router.get('/', async (req, res) => {
   try {
-    const resultado = await centralEntradasService.listarDocumentos(montarFiltrosQuery(req.query));
+    const filtros = montarFiltrosQuery(req.query);
+    if (!filtros.empresaId && req.empresaId) {
+      filtros.empresaId = req.empresaId;
+    }
+    const resultado = await centralEntradasService.listarDocumentos(filtros);
     return res.json(resultado);
   } catch (error) {
     return res.status(500).json({ error: error.message });

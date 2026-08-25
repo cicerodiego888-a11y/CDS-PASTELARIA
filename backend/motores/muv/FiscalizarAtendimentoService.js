@@ -50,7 +50,7 @@ function dbAll(db, sql, params = []) {
 function resolverEmissor(deps) {
   if (typeof deps.emitirPorVendaId === 'function') return deps.emitirPorVendaId;
   const emissor = require('../../services/fiscal/emissor');
-  return (vendaId) => emissor.emitirPorVendaId(vendaId);
+  return (vendaId, opts) => emissor.emitirPorVendaId(vendaId, opts || {});
 }
 
 function operacaoExigeDocumentoFiscal(operacao) {

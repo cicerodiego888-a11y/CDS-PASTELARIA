@@ -9,6 +9,17 @@ const {
   sqlExcluirContaVendaCancelada,
   sqlExcluirFinanceiroVendaCancelada
 } = require('../services/vendas/VendaFinanceiroService');
+const {
+  middlewareResolverEmpresaFinanceiro,
+  exigirRegistroDaEmpresa,
+  exigirLancamentoDaEmpresa,
+  resolverEmpresaDaOrigemFinanceira,
+  obterMetaEmpresaPorId,
+  statusDeErroEmpresa
+} = require('../services/financeiro/FinanceiroEmpresaContextoService');
+
+const anexarEmpresaFinanceiro = middlewareResolverEmpresaFinanceiro({ db });
+router.use(anexarEmpresaFinanceiro);
 
 function parseNumber(value) {
   const number = Number(value);
@@ -139,6 +150,20 @@ function formatoStatus(tipo, status) {
   return tipo === 'receita' ? 'recebido' : 'pago';
 }
 
+/** Fragmento SQL + param para isolamento empresarial (05.38.D). */
+function filtroEmpresaSql(empresaId, alias = '') {
+  const col = alias ? `${alias}.empresa_id` : 'empresa_id';
+  return { sql: ` AND ${col} = ? `, param: Number(empresaId) };
+}
+
+function responderErroEmpresa(res, err) {
+  return res.status(statusDeErroEmpresa(err)).json({
+    error: err.message,
+    code: err.code,
+    empresa_id: err.empresa_id != null ? err.empresa_id : undefined
+  });
+}
+
 function inserirMovimentacao(data) {
   return new Promise((resolve, reject) => {
     const {
@@ -159,16 +184,25 @@ function inserirMovimentacao(data) {
       compra_id,
       venda_id,
       pessoa_nome,
-      observacao
+      observacao,
+      empresa_id
     } = data;
+
+    const empresaId = Number(empresa_id);
+    if (!Number.isInteger(empresaId) || empresaId <= 0) {
+      return reject(Object.assign(new Error('empresa_id é obrigatório para lançamento financeiro.'), {
+        code: 'FINANCEIRO_EMPRESA_OBRIGATORIA',
+        statusCode: 400
+      }));
+    }
 
     db.run(`
       INSERT INTO financeiro (
         tipo, descricao, valor, data_movimento, categoria, forma_pagamento,
         referencia_id, referencia_tipo, status, origem, documento, vencimento,
         numero_parcela, total_parcelas, compra_id, venda_id, pessoa_nome, observacao,
-        baixado_em
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        baixado_em, empresa_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       tipo,
       descricao,
@@ -188,7 +222,8 @@ function inserirMovimentacao(data) {
       venda_id || null,
       pessoa_nome || null,
       observacao || null,
-      ['pago', 'recebido'].includes(formatoStatus(tipo, status)) ? (data.baixado_em || data_movimento) : null
+      ['pago', 'recebido'].includes(formatoStatus(tipo, status)) ? (data.baixado_em || data_movimento) : null,
+      empresaId
     ], function(err) {
       if (err) reject(err);
       else resolve(this.lastID);
@@ -198,9 +233,10 @@ function inserirMovimentacao(data) {
 
 router.get('/', (req, res) => {
   const { dataInicio, dataFim, tipo, status, busca } = req.query;
+  const emp = filtroEmpresaSql(req.empresaId);
 
-  let sql = `SELECT * FROM financeiro WHERE 1=1`;
-  const params = [];
+  let sql = `SELECT * FROM financeiro WHERE 1=1` + emp.sql;
+  const params = [emp.param];
 
   if (dataInicio && dataFim) {
     sql += ` AND date(data_movimento) BETWEEN ? AND ?`;
@@ -235,6 +271,7 @@ router.get('/', (req, res) => {
 
 router.get('/resumo', (req, res) => {
   const { data_inicio, data_fim, tipo, categoria, forma_pagamento, status, origem } = req.query;
+  const emp = filtroEmpresaSql(req.empresaId, 'f');
 
   let sql = `
     SELECT 
@@ -246,9 +283,10 @@ router.get('/resumo', (req, res) => {
       SUM(CASE WHEN tipo = 'despesa' AND status = 'pendente' THEN valor ELSE 0 END) AS total_a_pagar
     FROM financeiro f
     WHERE 1=1
+      ${emp.sql}
       AND ${sqlExcluirFinanceiroVendaCancelada('f')}
   `;
-  const params = [];
+  const params = [emp.param];
 
   if (data_inicio && data_fim) {
     sql += ' AND COALESCE(vencimento, data_movimento) BETWEEN ? AND ?';
@@ -332,7 +370,8 @@ router.post('/', (req, res) => {
     pessoa_nome,
     origem: 'manual',
     referencia_tipo: 'manual',
-    status: status || (tipo === 'despesa' ? 'pendente' : 'recebido')
+    status: status || (tipo === 'despesa' ? 'pendente' : 'recebido'),
+    empresa_id: req.empresaId
   }).then((id) => {
     // gravar auditoria de criação de movimentação financeira
     gravarAuditoria({
@@ -369,7 +408,7 @@ router.put('/:id', (req, res) => {
     status
   } = req.body;
 
-  db.get('SELECT * FROM financeiro WHERE id = ?', [id], (findErr, row) => {
+  db.get('SELECT * FROM financeiro WHERE id = ? AND empresa_id = ?', [id, req.empresaId], (findErr, row) => {
     if (findErr) {
       res.status(500).json({ error: findErr.message });
       return;
@@ -378,6 +417,12 @@ router.put('/:id', (req, res) => {
     if (!row) {
       res.status(404).json({ error: 'Movimentação não encontrada.' });
       return;
+    }
+
+    try {
+      exigirRegistroDaEmpresa(row, req.empresaId, { rotulo: 'Movimentação financeira' });
+    } catch (empErr) {
+      return responderErroEmpresa(res, empErr);
     }
 
     const novoStatus = status || row.status || 'pendente';
@@ -392,7 +437,7 @@ router.put('/:id', (req, res) => {
             WHEN ? IN ('pago','recebido') THEN COALESCE(baixado_em, DATE('now'))
             ELSE NULL
           END
-      WHERE id = ?
+      WHERE id = ? AND empresa_id = ?
     `, [
       descricao ?? row.descricao,
       valor ?? row.valor,
@@ -405,7 +450,8 @@ router.put('/:id', (req, res) => {
       pessoa_nome ?? row.pessoa_nome,
       novoStatus,
       novoStatus,
-      id
+      id,
+      req.empresaId
     ], function(err) {
       if (err) {
         res.status(500).json({ error: err.message });
@@ -434,21 +480,40 @@ router.put('/:id', (req, res) => {
 
 router.post('/receber/:id/baixar', validarCaixaAberto, (req, res) => {
   const { id } = req.params;
-  db.get('SELECT id, tipo, status FROM financeiro WHERE id = ?', [id], (err, row) => {
+  const empresaId = req.empresaId;
+
+  // Preferir empresa da sessão de caixa quando disponível (05.38.C → 05.38.D)
+  const sessaoEmpresa = req.caixaSessao && req.caixaSessao.empresa_id != null
+    ? Number(req.caixaSessao.empresa_id)
+    : null;
+  if (sessaoEmpresa != null && sessaoEmpresa !== Number(empresaId)) {
+    return res.status(403).json({
+      success: false,
+      error: 'Sessão de caixa pertence a outra empresa. Operação financeira bloqueada.',
+      code: 'FINANCEIRO_EMPRESA_DIVERGENTE'
+    });
+  }
+
+  db.get('SELECT id, tipo, status, empresa_id FROM financeiro WHERE id = ?', [id], (err, row) => {
     if (err) {
       res.status(500).json({ success: false, error: err.message });
       return;
     }
-    if (!row) {
-      res.status(404).json({ success: false, error: 'Movimentação não encontrada.' });
-      return;
+    try {
+      exigirLancamentoDaEmpresa(row, empresaId);
+    } catch (empErr) {
+      return res.status(statusDeErroEmpresa(empErr)).json({
+        success: false,
+        error: empErr.message,
+        code: empErr.code
+      });
     }
     if (['recebido', 'pago'].includes(row.status)) {
       res.status(400).json({ success: false, error: 'Esta movimentação já foi baixada.' });
       return;
     }
     const novoStatus = row.tipo === 'receita' ? 'recebido' : 'pago';
-    db.run(`UPDATE financeiro SET status = ?, baixado_em = DATE('now') WHERE id = ?`, [novoStatus, id], (upErr) => {
+    db.run(`UPDATE financeiro SET status = ?, baixado_em = DATE('now') WHERE id = ? AND empresa_id = ?`, [novoStatus, id, empresaId], (upErr) => {
       if (upErr) {
         res.status(500).json({ success: false, error: upErr.message });
         return;
@@ -473,15 +538,21 @@ router.post('/receber/:id/baixar', validarCaixaAberto, (req, res) => {
 router.post('/pagar/:id/baixar', (req, res) => {
   const { id } = req.params;
   const { valor, forma_pagamento } = req.body;
+  const empresaId = req.empresaId;
 
-  db.get('SELECT id, tipo, status, valor AS valor_total FROM financeiro WHERE id = ?', [id], (err, row) => {
+  db.get('SELECT id, tipo, status, valor AS valor_total, empresa_id FROM financeiro WHERE id = ?', [id], (err, row) => {
     if (err) {
       res.status(500).json({ success: false, error: err.message });
       return;
     }
-    if (!row) {
-      res.status(404).json({ success: false, error: 'Movimentação não encontrada.' });
-      return;
+    try {
+      exigirLancamentoDaEmpresa(row, empresaId);
+    } catch (empErr) {
+      return res.status(statusDeErroEmpresa(empErr)).json({
+        success: false,
+        error: empErr.message,
+        code: empErr.code
+      });
     }
     if (['recebido', 'pago'].includes(row.status)) {
       res.status(400).json({ success: false, error: 'Esta movimentação já foi baixada.' });
@@ -506,9 +577,9 @@ router.post('/pagar/:id/baixar', (req, res) => {
       params.push(forma_pagamento);
     }
 
-    params.push(id);
+    params.push(id, empresaId);
 
-    db.run(`UPDATE financeiro SET ${updates.join(', ')} WHERE id = ?`, params, (upErr) => {
+    db.run(`UPDATE financeiro SET ${updates.join(', ')} WHERE id = ? AND empresa_id = ?`, params, (upErr) => {
       if (upErr) {
         res.status(500).json({ success: false, error: upErr.message });
         return;
@@ -532,11 +603,12 @@ router.post('/pagar/:id/baixar', (req, res) => {
 
 router.get('/dashboard', async (req, res) => {
   const { dataInicio, dataFim } = req.query;
-  const params = [];
-  let periodoFiltro = '';
+  const emp = filtroEmpresaSql(req.empresaId);
+  const params = [emp.param];
+  let periodoFiltro = emp.sql;
 
   if (dataInicio && dataFim) {
-    periodoFiltro = ' AND COALESCE(vencimento, data_movimento) BETWEEN ? AND ?';
+    periodoFiltro += ' AND COALESCE(vencimento, data_movimento) BETWEEN ? AND ?';
     params.push(dataInicio, dataFim);
   }
 
@@ -557,6 +629,8 @@ router.get('/dashboard', async (req, res) => {
       COALESCE(SUM(CASE WHEN tipo = 'receita' AND status NOT IN ('recebido','pago') THEN valor END), 0) AS totalReceber,
       COALESCE(SUM(CASE WHEN tipo = 'despesa' AND status NOT IN ('pago','recebido') THEN valor END), 0) AS totalPagar
     FROM financeiro
+    WHERE 1 = 1
+    ${emp.sql}
   `;
 
   const proximosRecebimentosSql = `
@@ -570,6 +644,7 @@ router.get('/dashboard', async (req, res) => {
       status
     FROM financeiro
     WHERE tipo = 'receita'
+      ${emp.sql}
       AND status NOT IN ('recebido','pago')
       AND vencimento IS NOT NULL
       AND vencimento BETWEEN date('now') AND date('now', '+30 days')
@@ -588,6 +663,7 @@ router.get('/dashboard', async (req, res) => {
       status
     FROM financeiro
     WHERE tipo = 'despesa'
+      ${emp.sql}
       AND status NOT IN ('recebido','pago')
       AND vencimento IS NOT NULL
       AND vencimento BETWEEN date('now') AND date('now', '+30 days')
@@ -607,6 +683,7 @@ router.get('/dashboard', async (req, res) => {
       CASE WHEN status NOT IN ('recebido','pago') AND vencimento < date('now') THEN 'vencido' ELSE status END AS status_exibicao
     FROM financeiro
     WHERE status NOT IN ('recebido','pago')
+      ${emp.sql}
       AND vencimento IS NOT NULL
       AND vencimento < date('now')
     ORDER BY vencimento ASC
@@ -625,11 +702,12 @@ router.get('/dashboard', async (req, res) => {
   `;
 
   try {
+    const empOnly = [emp.param];
     const resumo = await dbGetAsync(resumoSql, params);
-    const pendentes = await dbGetAsync(pendentesSql, []);
-    const proximosRecebimentos = await dbAllAsync(proximosRecebimentosSql, []);
-    const proximosPagamentos = await dbAllAsync(proximosPagamentosSql, []);
-    const alertas = await dbAllAsync(alertasSql, []);
+    const pendentes = await dbGetAsync(pendentesSql, empOnly);
+    const proximosRecebimentos = await dbAllAsync(proximosRecebimentosSql, empOnly);
+    const proximosPagamentos = await dbAllAsync(proximosPagamentosSql, empOnly);
+    const alertas = await dbAllAsync(alertasSql, empOnly);
     const grafico = await dbGetAsync(graficoSql, params);
 
     res.json({
@@ -696,9 +774,10 @@ router.get('/proximos-vencimentos', (req, res) => {
       AND status NOT IN ('recebido', 'pago')
       AND vencimento >= date('now')
       AND vencimento <= date('now', '+30 days')
+      AND empresa_id = ?
     ORDER BY vencimento ASC
     LIMIT 10
-  `, [], (err, rows) => {
+  `, [req.empresaId], (err, rows) => {
     if (err) {
       console.error('Erro na query próximos vencimentos:', err);
       res.status(500).json({ error: err.message });
@@ -732,9 +811,10 @@ router.get('/ultimas-movimentacoes', (req, res) => {
       tipo,
       status
     FROM financeiro
+    WHERE empresa_id = ?
     ORDER BY data_movimento DESC
     LIMIT 10
-  `, [], (err, rows) => {
+  `, [req.empresaId], (err, rows) => {
     if (err) {
       console.error('Erro na query últimas movimentações:', err);
       res.status(500).json({ error: err.message });
@@ -758,8 +838,9 @@ router.get('/ultimas-movimentacoes', (req, res) => {
   });
 });
 
-function buildReceberQueryFilters(query) {
+function buildReceberQueryFilters(query, empresaId) {
   const { dataInicio, dataFim, status, cliente, documento } = query;
+  const emp = filtroEmpresaSql(empresaId, 'f');
 
   let sql = `
     SELECT
@@ -783,10 +864,11 @@ function buildReceberQueryFilters(query) {
         (f.documento IS NOT NULL AND c.cpf_cnpj = f.documento)
       )
     WHERE f.tipo = 'receita'
+      ${emp.sql}
       AND ${sqlExcluirFinanceiroVendaCancelada('f')}
   `;
 
-  const params = [];
+  const params = [emp.param];
 
   if (dataInicio && dataFim) {
     sql += ' AND COALESCE(f.vencimento, f.data_movimento) BETWEEN ? AND ?';
@@ -827,7 +909,7 @@ function buildReceberQueryFilters(query) {
 }
 
 router.get('/receber', (req, res) => {
-  const { sql, params } = buildReceberQueryFilters(req.query);
+  const { sql, params } = buildReceberQueryFilters(req.query, req.empresaId);
 
   db.all(sql, params, (err, rows) => {
     if (err) {
@@ -866,7 +948,7 @@ router.get('/receber', (req, res) => {
 });
 
 router.get('/contas-receber', (req, res) => {
-  const { sql, params } = buildReceberQueryFilters(req.query);
+  const { sql, params } = buildReceberQueryFilters(req.query, req.empresaId);
 
   db.all(sql, params, (err, rows) => {
     if (err) {
@@ -919,10 +1001,11 @@ router.get('/receber/agrupado', async (req, res) => {
       FROM clientes c
       JOIN contas_receber cr ON cr.cliente_id = c.id
       WHERE cr.status IN ('aberto','parcial')
+        AND cr.empresa_id = ?
         AND ${sqlExcluirContaVendaCancelada('cr')}
     `;
 
-    const params = [];
+    const params = [req.empresaId];
 
     if (cliente) {
       sql += ` AND (c.nome LIKE ? OR c.cpf_cnpj LIKE ? OR c.telefone LIKE ?)`;
@@ -1013,9 +1096,10 @@ router.get('/receber/agrupado/:clienteId', async (req, res) => {
       FROM contas_receber cr
       JOIN vendas v ON v.id = cr.venda_id
       WHERE cr.cliente_id = ? AND cr.status IN ('aberto', 'parcial')
+        AND cr.empresa_id = ?
         AND ${sqlExcluirContaVendaCancelada('cr')}
       ORDER BY v.data_venda ASC, cr.data_vencimento ASC
-    `, [clienteId]);
+    `, [clienteId, req.empresaId]);
 
     const vendaIds = [...new Set(contas.map(conta => conta.venda_id))];
 
@@ -1140,24 +1224,13 @@ router.get('/receber/agrupado/:clienteId', async (req, res) => {
 
 router.get('/receber/agrupado/:clienteId/extrato', async (req, res) => {
   try {
-    const configuracoes = await dbAllAsync(`
-      SELECT chave, valor
-      FROM configuracoes
-      WHERE chave IN ('nome_empresa', 'cnpj', 'telefone', 'endereco')
-    `, []);
-
+    const meta = await obterMetaEmpresaPorId(req.empresaId, { db });
     const empresa = {
-      nome: '',
-      cnpj: '',
+      nome: meta.empresa_nome || '',
+      cnpj: meta.empresa_cnpj || '',
       telefone: '',
       endereco: ''
     };
-    configuracoes.forEach(conf => {
-      if (conf.chave === 'nome_empresa') empresa.nome = conf.valor;
-      if (conf.chave === 'cnpj') empresa.cnpj = conf.valor;
-      if (conf.chave === 'telefone') empresa.telefone = conf.valor;
-      if (conf.chave === 'endereco') empresa.endereco = conf.valor;
-    });
 
     const clienteId = req.params.clienteId;
 
@@ -1191,8 +1264,9 @@ router.get('/receber/agrupado/:clienteId/extrato', async (req, res) => {
       FROM contas_receber cr
       JOIN vendas v ON v.id = cr.venda_id
       WHERE cr.cliente_id = ?
+        AND cr.empresa_id = ?
       ORDER BY v.data_venda ASC, cr.data_vencimento ASC
-    `, [clienteId]);
+    `, [clienteId, req.empresaId]);
 
     const vendaIds = [...new Set(contas.map(conta => conta.venda_id))];
     let produtos = [];
@@ -1326,8 +1400,9 @@ router.get('/receber/agrupado/:clienteId/pagamentos', async (req, res) => {
       JOIN contas_receber cr ON cr.id = crp.conta_receber_id
       JOIN vendas v ON v.id = cr.venda_id
       WHERE crp.cliente_id = ?
+        AND cr.empresa_id = ?
       ORDER BY crp.data_pagamento DESC, crp.created_at DESC
-    `, [clienteId]);
+    `, [clienteId, req.empresaId]);
 
     const pagamentos = rows.map(row => ({
       id: row.id,
@@ -1376,13 +1451,16 @@ router.post('/receber/agrupado/:clienteId/pagamento-parcial', async (req, res) =
         cr.data_vencimento,
         cr.numero_parcela,
         cr.total_parcelas,
-        v.codigo AS numero_venda
+        cr.empresa_id,
+        v.codigo AS numero_venda,
+        v.empresa_id AS venda_empresa_id
       FROM contas_receber cr
       LEFT JOIN vendas v ON v.id = cr.venda_id
       WHERE cr.cliente_id = ? AND cr.status IN ('aberto','parcial')
+        AND cr.empresa_id = ?
         AND ${sqlExcluirContaVendaCancelada('cr')}
       ORDER BY cr.data_vencimento ASC, cr.id ASC
-    `, [clienteId]);
+    `, [clienteId, req.empresaId]);
 
     if (!contas.length) {
       return res.status(400).json({ success: false, error: 'Cliente não possui contas em aberto' });
@@ -1468,6 +1546,18 @@ router.post('/receber/agrupado/:clienteId/pagamento-parcial', async (req, res) =
 
               const descricaoFinanceiro = `Recebimento venda #${conta.numero_venda || conta.venda_id} - Parcela ${conta.numero_parcela || '-'} / ${conta.total_parcelas || '-'}`;
 
+              let empresaIdFin;
+              try {
+                empresaIdFin = resolverEmpresaDaOrigemFinanceira({
+                  venda: { empresa_id: conta.venda_empresa_id },
+                  empresaId: req.empresaId
+                });
+              } catch (ownErr) {
+                db.run('ROLLBACK');
+                reject(ownErr);
+                return;
+              }
+
               db.get(`
                 SELECT id
                 FROM financeiro
@@ -1475,9 +1565,10 @@ router.post('/receber/agrupado/:clienteId/pagamento-parcial', async (req, res) =
                   AND referencia_tipo = 'venda'
                   AND referencia_id = ?
                   AND numero_parcela = ?
+                  AND empresa_id = ?
                 ORDER BY id DESC
                 LIMIT 1
-              `, [conta.venda_id, conta.numero_parcela || null], (err, movFinanceiro) => {
+              `, [conta.venda_id, conta.numero_parcela || null, empresaIdFin], (err, movFinanceiro) => {
                 if (err) {
                   db.run('ROLLBACK');
                   reject(err);
@@ -1495,7 +1586,7 @@ router.post('/receber/agrupado/:clienteId/pagamento-parcial', async (req, res) =
                       baixado_em = CASE WHEN ? = 'recebido' THEN ? ELSE NULL END,
                       data_movimento = CASE WHEN ? = 'recebido' THEN ? ELSE data_movimento END,
                       vencimento = CASE WHEN ? = 'recebido' THEN ? ELSE vencimento END
-                    WHERE id = ?
+                    WHERE id = ? AND empresa_id = ?
                   `, [
                     novoStatus,
                     forma_pagamento || 'dinheiro',
@@ -1507,7 +1598,8 @@ router.post('/receber/agrupado/:clienteId/pagamento-parcial', async (req, res) =
                     data_pagamento,
                     novoStatus,
                     data_pagamento,
-                    movFinanceiro.id
+                    movFinanceiro.id,
+                    empresaIdFin
                   ], (err) => {
                     if (err) {
                       db.run('ROLLBACK');
@@ -1546,8 +1638,9 @@ router.post('/receber/agrupado/:clienteId/pagamento-parcial', async (req, res) =
                       venda_id,
                       pessoa_nome,
                       observacao,
-                      baixado_em
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                      baixado_em,
+                      empresa_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                   `, [
                     'receita',
                     descricaoFinanceiro,
@@ -1566,7 +1659,8 @@ router.post('/receber/agrupado/:clienteId/pagamento-parcial', async (req, res) =
                     conta.venda_id,
                     cliente.nome || null,
                     observacao || `Pagamento parcial registrado em ${data_pagamento}`,
-                    novoStatus === 'recebido' ? data_pagamento : null
+                    novoStatus === 'recebido' ? data_pagamento : null,
+                    empresaIdFin
                   ], (err) => {
                     if (err) {
                       db.run('ROLLBACK');
@@ -1602,12 +1696,18 @@ router.post('/receber/agrupado/:clienteId/pagamento-parcial', async (req, res) =
     });
   } catch (err) {
     console.error('Erro ao processar pagamento parcial:', err);
-    res.status(500).json({ success: false, error: err.message });
+    const status = statusDeErroEmpresa(err);
+    res.status(status === 500 && !err.code ? 500 : status).json({
+      success: false,
+      error: err.message,
+      code: err.code
+    });
   }
 });
 
-function buildPagarQueryFilters(query) {
+function buildPagarQueryFilters(query, empresaId) {
   const { dataInicio, dataFim, status, fornecedor } = query;
+  const emp = filtroEmpresaSql(empresaId, 'f');
 
   let sql = `
     SELECT
@@ -1628,9 +1728,10 @@ function buildPagarQueryFilters(query) {
         (f.pessoa_nome IS NOT NULL AND TRIM(f.pessoa_nome) <> '' AND forn.nome = f.pessoa_nome)
       )
     WHERE f.tipo = 'despesa'
+      ${emp.sql}
   `;
 
-  const params = [];
+  const params = [emp.param];
 
   if (dataInicio && dataFim) {
     sql += ' AND COALESCE(f.vencimento, f.data_movimento) BETWEEN ? AND ?';
@@ -1669,7 +1770,7 @@ function buildPagarQueryFilters(query) {
 }
 
 router.get('/pagar', (req, res) => {
-  const { sql, params } = buildPagarQueryFilters(req.query);
+  const { sql, params } = buildPagarQueryFilters(req.query, req.empresaId);
 
   db.all(sql, params, (err, rows) => {
     if (err) {
@@ -1709,7 +1810,7 @@ router.get('/pagar', (req, res) => {
 });
 
 router.get('/contas-pagar', (req, res) => {
-  const { sql, params } = buildPagarQueryFilters(req.query);
+  const { sql, params } = buildPagarQueryFilters(req.query, req.empresaId);
 
   db.all(sql, params, (err, rows) => {
     if (err) {
@@ -1760,6 +1861,7 @@ router.get('/contas-pagar', (req, res) => {
 // Relatório de Resumo Financeiro
 router.get('/relatorios/resumo', async (req, res) => {
   const { dataInicio, dataFim, modo_fiscal } = req.query;
+  const emp = filtroEmpresaSql(req.empresaId);
 
   let sql = `
     SELECT
@@ -1769,9 +1871,10 @@ router.get('/relatorios/resumo', async (req, res) => {
       COUNT(*) as quantidade
     FROM financeiro
     WHERE 1=1
+      ${emp.sql}
   `;
 
-  const params = [];
+  const params = [emp.param];
 
   if (dataInicio && dataFim) {
     sql += ' AND data_movimento BETWEEN ? AND ?';
@@ -1860,10 +1963,11 @@ router.get('/relatorios/receber', (req, res) => {
     FROM financeiro f
     LEFT JOIN vendas v ON v.id = f.venda_id
     WHERE f.tipo = 'receita'
+      AND f.empresa_id = ?
       AND ${sqlExcluirFinanceiroVendaCancelada('f')}
   `;
 
-  const params = [];
+  const params = [req.empresaId];
 
   if (dataInicio && dataFim) {
     sql += ' AND date(COALESCE(f.vencimento, f.data_movimento)) BETWEEN date(?) AND date(?)';
@@ -1951,7 +2055,7 @@ router.get('/relatorios/receber', (req, res) => {
 
 // Relatório de Contas a Pagar
 router.get('/relatorios/pagar', (req, res) => {
-  const { sql, params } = buildPagarQueryFilters(req.query);
+  const { sql, params } = buildPagarQueryFilters(req.query, req.empresaId);
 
   db.all(sql, params, (err, rows) => {
     if (err) {
@@ -2001,6 +2105,7 @@ router.get('/relatorios/pagar', (req, res) => {
 // Relatório de Fluxo Financeiro
 router.get('/relatorios/fluxo', async (req, res) => {
   const { dataInicio, dataFim, modo_fiscal } = req.query;
+  const emp = filtroEmpresaSql(req.empresaId);
 
   let sql = `
     SELECT
@@ -2009,9 +2114,10 @@ router.get('/relatorios/fluxo', async (req, res) => {
       SUM(valor) as valor
     FROM financeiro
     WHERE 1=1
+      ${emp.sql}
   `;
 
-  const params = [];
+  const params = [emp.param];
 
   if (dataInicio && dataFim) {
     sql += ' AND data_movimento BETWEEN ? AND ?';
@@ -2078,9 +2184,10 @@ router.get('/relatorios/inadimplencia', (req, res) => {
       julianday('now') - julianday(f.vencimento) as dias_atraso
     FROM financeiro f
     WHERE (f.status != 'recebido' AND f.status != 'pago') AND f.vencimento < date('now')
+      AND f.empresa_id = ?
   `;
 
-  const params = [];
+  const params = [req.empresaId];
 
   if (dataInicio && dataFim) {
     sql += ' AND f.data_movimento BETWEEN ? AND ?';
@@ -2129,9 +2236,15 @@ router.get('/relatorios/inadimplencia', (req, res) => {
 router.get('/contas-pagar/:id/detalhes', (req, res) => {
   const { id } = req.params;
 
-  db.get(`SELECT * FROM financeiro WHERE id = ? AND tipo = 'despesa'`, [id], (err, conta) => {
+  db.get(`SELECT * FROM financeiro WHERE id = ? AND tipo = 'despesa' AND empresa_id = ?`, [id, req.empresaId], (err, conta) => {
     if (err) return res.status(500).json({ error: err.message });
     if (!conta) return res.status(404).json({ error: 'Conta a pagar não encontrada.' });
+
+    try {
+      exigirRegistroDaEmpresa(conta, req.empresaId, { rotulo: 'Conta a pagar' });
+    } catch (empErr) {
+      return responderErroEmpresa(res, empErr);
+    }
 
     const compraId = conta.compra_id || conta.referencia_id;
 
@@ -2175,9 +2288,10 @@ router.get('/:id(\\d+)', (req, res) => {
       res.status(500).json({ error: err.message });
       return;
     }
-    if (!row) {
-      res.status(404).json({ error: 'Movimentação não encontrada' });
-      return;
+    try {
+      exigirLancamentoDaEmpresa(row, req.empresaId);
+    } catch (empErr) {
+      return responderErroEmpresa(res, empErr);
     }
     res.json(row);
   });
@@ -2188,7 +2302,7 @@ router.delete('/:id(\\d+)', (req, res) => {
 
   const { id } = req.params;
 
-  db.get('SELECT * FROM financeiro WHERE id = ?', [id], (err, row) => {
+  db.get('SELECT * FROM financeiro WHERE id = ? AND empresa_id = ?', [id, req.empresaId], (err, row) => {
     if (err) {
       res.status(500).json({ error: err.message });
       return;
@@ -2199,6 +2313,12 @@ router.delete('/:id(\\d+)', (req, res) => {
       return;
     }
 
+    try {
+      exigirRegistroDaEmpresa(row, req.empresaId);
+    } catch (empErr) {
+      return responderErroEmpresa(res, empErr);
+    }
+
     if (row.origem && row.origem !== 'manual') {
       res.status(400).json({
         error: 'Movimentações automáticas devem ser removidas na origem (compra/venda).'
@@ -2206,7 +2326,7 @@ router.delete('/:id(\\d+)', (req, res) => {
       return;
     }
 
-    db.run('DELETE FROM financeiro WHERE id = ?', [id], function(deleteErr) {
+    db.run('DELETE FROM financeiro WHERE id = ? AND empresa_id = ?', [id, req.empresaId], function(deleteErr) {
       if (deleteErr) {
         res.status(500).json({ error: deleteErr.message });
         return;

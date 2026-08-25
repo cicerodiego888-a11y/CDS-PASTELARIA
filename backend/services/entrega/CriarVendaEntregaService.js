@@ -28,6 +28,7 @@ const { gravarAuditoria, contextoAuditoriaRequisicao } = require('../auditoria')
 const { normalizarTipoVendaItem } = require('../vendaUnidadeHelpers');
 const VendaFinanceiroService = require('../vendas/VendaFinanceiroService');
 const { obterCaixaTurnoId } = require('../../utils/caixaSessaoHelpers');
+const { exigirEmpresaDaOperacao } = require('../vendas/VendaEmpresaContextoService');
 
 const { agoraLocalBrasil } = VendaFinanceiroService;
 
@@ -87,6 +88,17 @@ function montarHtmlComprovanteEntrega(venda, itens, empresa = {}) {
 }
 
 function criarVendaEntrega(req, res) {
+  let empresaIdVenda;
+  try {
+    empresaIdVenda = exigirEmpresaDaOperacao(req);
+  } catch (errEmp) {
+    return res.status(errEmp.statusCode || 400).json({
+      error: errEmp.message,
+      code: errEmp.code || 'EMPRESA_CONTEXT_REQUIRED',
+      empresa_id: errEmp.empresa_id
+    });
+  }
+
   if (!configService.recursoHabilitado('vendasEntrega')) {
     return res.status(404).json({
       error: 'Módulo Vendas para Entrega desabilitado.',
@@ -266,7 +278,7 @@ function criarVendaEntrega(req, res) {
                 tipo_venda, status_venda, status_entrega, pagamento_previsto,
                 entregador, endereco_entrega, referencia_entrega, observacao_entrega,
                 taxa_entrega, leva_maquineta, troco_para,
-                prestacao_realizada, telefone_entrega
+                prestacao_realizada, telefone_entrega, empresa_id
               ) VALUES (
                 ?, ?, ?, ?, ?,
                 ?, 'reserva_entrega', 0,
@@ -275,7 +287,7 @@ function criarVendaEntrega(req, res) {
                 ?, ?, ?, ?,
                 ?, ?, ?, ?,
                 ?, ?, ?,
-                0, ?
+                0, ?, ?
               )
             `,
             [
@@ -302,7 +314,8 @@ function criarVendaEntrega(req, res) {
               taxaEntrega,
               levaMaquineta,
               levaTroco ? trocoPara : 0,
-              String(body.telefone_entrega || cliente?.telefone || '').trim() || null
+              String(body.telefone_entrega || cliente?.telefone || '').trim() || null,
+              empresaIdVenda
             ],
             function onInsertVenda(errIns) {
               if (errIns) {

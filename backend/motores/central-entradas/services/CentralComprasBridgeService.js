@@ -122,11 +122,14 @@ class CentralComprasBridgeService {
       documentoId: documento.id,
       chave: documento.chave,
       status: documento.status,
+      empresaId: documento.empresaId != null ? Number(documento.empresaId) : null,
       dadosCompra: {
         ...payload,
         xml: documento.xml || null,
         natureza_operacao: payload.natureza_operacao || payload.natureza || null,
-        cfop: payload.cfop || null
+        cfop: payload.cfop || null,
+        empresa_id: documento.empresaId != null ? Number(documento.empresaId) : null,
+        empresaId: documento.empresaId != null ? Number(documento.empresaId) : null
       }
     };
   }
@@ -252,6 +255,34 @@ class CentralComprasBridgeService {
       erro.statusCode = 404;
       throw erro;
     }
+
+    const {
+      exigirDocumentoCompraMesmaEmpresa,
+      erroCentralEmpresa
+    } = require('../../../services/central-entradas/CentralEntradasEmpresaContextoService');
+
+    const compraEmpresaId = opcoes.empresaId != null
+      ? Number(opcoes.empresaId)
+      : (opcoes.empresa_id != null ? Number(opcoes.empresa_id) : null);
+    const docEmpresaId = documento.empresaId != null
+      ? Number(documento.empresaId)
+      : null;
+
+    if (!Number.isInteger(compraEmpresaId) || compraEmpresaId <= 0) {
+      throw erroCentralEmpresa(
+        'EMPRESA_COMPRA_AUSENTE',
+        'Vínculo Central exige empresa_id da compra.',
+        409
+      );
+    }
+    if (!Number.isInteger(docEmpresaId) || docEmpresaId <= 0) {
+      throw erroCentralEmpresa(
+        'EMPRESA_CENTRAL_AUSENTE',
+        'Documento Central sem empresa_id — vínculo bloqueado.',
+        409
+      );
+    }
+    exigirDocumentoCompraMesmaEmpresa(docEmpresaId, compraEmpresaId);
 
     const statusAtual = documento.status;
     const statusDestino = DocumentoFiscalStatus.GRAVADA;

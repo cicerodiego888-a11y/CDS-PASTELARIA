@@ -199,17 +199,24 @@ function carregarFiscalConfig(targetSelector = '#fiscal-config-form-area') {
             `;
 
             const blocoCert = `
-                    ${getFiscalField('ID CSC', 'fiscal_id_csc', cfg.idCSC || '')}
-                    ${getFiscalField('Token CSC', 'fiscal_token_csc', cfg.tokenCSC || '')}
+                    ${getFiscalField('ID CSC', 'fiscal_id_csc', cfg.idCSC || cfg.id_csc || '')}
+                    <div class="col-md-4 mb-3" data-cfg-search="token csc">
+                        <label class="form-label cds-cfg-label">Token CSC</label>
+                        <input type="password" class="form-control fiscal-field" id="fiscal_token_csc" value=""
+                            autocomplete="new-password"
+                            placeholder="${(cfg.cscConfigurado || cfg.csc_configurado || cfg.tokenCSC) ? 'CONFIGURADO — informe para substituir' : ''}"
+                            data-fiscal-csc-mask="1">
+                        <div class="form-text cds-cfg-hint">${(cfg.cscConfigurado || cfg.csc_configurado) ? 'CSC configurado — informe apenas para substituir.' : 'Informe o token CSC da SEFAZ.'}</div>
+                    </div>
                     <div class="col-md-4 mb-3" data-cfg-search="certificado pfx a1">
                         <label class="form-label cds-cfg-label">Enviar certificado A1 (.pfx)</label>
                         <input type="file" id="fiscal_certificado_upload" class="form-control" accept=".pfx">
                         <div class="form-text cds-cfg-hint">Envie o certificado digital da empresa em formato .pfx</div>
-                        <div class="form-text mt-2" style="color: ${cfg.certificadoPath ? 'green' : 'red'};">
-                            ${cfg.certificadoPath ? 'Certificado ativo' : 'Certificado inativo'}
+                        <div class="form-text mt-2" style="color: ${cfg.certificadoPath || cfg.certificado_configurado ? 'green' : 'red'};">
+                            ${cfg.certificadoPath || cfg.certificado_configurado ? 'Certificado ativo' : 'Certificado inativo'}
                         </div>
                     </div>
-                    ${getFiscalField('Senha do certificado', 'fiscal_certificado_senha', cfg.certificadoSenha || '', '', 'password')}
+                    ${getFiscalField('Senha do certificado', 'fiscal_certificado_senha', '', '', 'password')}
                     <input type="hidden" class="fiscal-field" id="fiscal_certificado_path" value="${cfg.certificadoPath || ''}">
                     ${getFiscalField('Tipo impressão', 'fiscal_tp_imp', cfg.tpImp || 4, '4 = DANFE NFC-e')}
             `;
@@ -328,9 +335,25 @@ function carregarFiscalConfig(targetSelector = '#fiscal-config-form-area') {
 
 function coletarPayloadFiscal() {
     const payload = {};
+    const PLACEHOLDER = 'CONFIGURADO — informe para substituir';
+
+    function ehPlaceholder(v) {
+        const t = String(v == null ? '' : v).trim();
+        if (!t) return true;
+        if (t === PLACEHOLDER) return true;
+        if (/^CONFIGURADO/i.test(t) && /substituir/i.test(t)) return true;
+        return false;
+    }
 
     $('.fiscal-field').each(function() {
-        payload[$(this).attr('id')] = $(this).val();
+        const id = $(this).attr('id');
+        const val = $(this).val();
+        // Não enviar CSC/senha vazios ou placeholder — preserva o valor no backend.
+        if (id === 'fiscal_token_csc' || id === 'fiscal_certificado_senha') {
+            if (ehPlaceholder(val)) return;
+        }
+        if (id === 'fiscal_id_csc' && ehPlaceholder(val)) return;
+        payload[id] = val;
     });
 
     return payload;

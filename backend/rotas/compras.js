@@ -78,8 +78,30 @@ const {
   estoqueAtualParaValidacaoCompra
 } = require('../services/compras/estoqueAtualValidacaoCompra');
 const { criarMiddlewareContextoEmpresa } = require('../services/fiscalNaoFiscal/empresaContexto');
+const {
+  resolverEmpresaIdParaFinanceiro,
+  statusDeErroEmpresa
+} = require('../services/financeiro/FinanceiroEmpresaContextoService');
+const {
+  resolverEmpresaDaCompra,
+  resolverEmpresaContextoCompra,
+  exigirCompraDaEmpresa,
+  statusDeErroCompraEmpresa
+} = require('../services/compras/ComprasEmpresaContextoService');
+const { ModoOperacionalGlobal } = require('../core/modo-operacional');
 
 router.use(criarMiddlewareContextoEmpresa(db));
+
+/** @deprecated 05.38.F.B — preferir empresaCompraId já resolvida */
+function garantirEmpresaIdParaFinanceiroCompra(req, callback) {
+  if (req.empresaId) return callback(null, req.empresaId);
+  resolverEmpresaIdParaFinanceiro(req, { db, exigirAutorizacaoUsuario: false })
+    .then((r) => {
+      req.empresaId = r.empresaId;
+      callback(null, r.empresaId);
+    })
+    .catch((err) => callback(err));
+}
 
 const itemCompraEhFracionado = itemCompraUsaConversaoUnidades;
 const obterTotalConvertidoItemCompraBackend = obterTotalConvertidoItemCompra;
@@ -105,15 +127,20 @@ function _setComprasMipServiceForTests(svc) {
  * @param {number|string|null} centralDocumentoId
  * @param {number} compraId
  * @param {number|null} usuarioId
+ * @param {number|null} [empresaId]
  * @returns {Promise<void>}
  */
-async function vincularDocumentoCentralAposCompra(centralDocumentoId, compraId, usuarioId) {
+async function vincularDocumentoCentralAposCompra(centralDocumentoId, compraId, usuarioId, empresaId = null) {
   if (!centralDocumentoId) return;
 
   try {
-    await centralOrchestrator.vincularCompra(centralDocumentoId, compraId, { usuarioId });
+    await centralOrchestrator.vincularCompra(centralDocumentoId, compraId, {
+      usuarioId,
+      empresaId: empresaId != null ? Number(empresaId) : null
+    });
   } catch (err) {
-    logCentralErro('COMPRAS', err, { documentoId: centralDocumentoId, compraId });
+    logCentralErro('COMPRAS', err, { documentoId: centralDocumentoId, compraId, empresaId });
+    throw err;
   }
 }
 
@@ -247,8 +274,15 @@ function criarFinanceiroCompra(compra, callback) {
     numero_nf,
     dias_entre_parcelas,
     parcelas_detalhe,
-    parcelas_importadas_xml
+    parcelas_importadas_xml,
+    empresa_id,
+    empresaId
   } = compra;
+
+  const empresaIdFin = Number(empresa_id != null ? empresa_id : empresaId);
+  if (!Number.isInteger(empresaIdFin) || empresaIdFin <= 0) {
+    return callback(new Error('empresa_id é obrigatório para lançamento financeiro da compra.'));
+  }
 
   const qtdParcelas = Math.max(1, Number(parcelas) || 1);
   const valorTotal = Number(total) || 0;
@@ -260,7 +294,7 @@ function criarFinanceiroCompra(compra, callback) {
     || parcelas_importadas_xml === 1
     || String(parcelas_importadas_xml) === '1';
 
-  db.run('DELETE FROM financeiro WHERE compra_id = ?', [id], (deleteErr) => {
+  db.run('DELETE FROM financeiro WHERE compra_id = ? AND (empresa_id = ? OR empresa_id IS NULL)', [id, empresaIdFin], (deleteErr) => {
     if (deleteErr) return callback(deleteErr);
 
     const inserir = (payload, done) => {
@@ -268,8 +302,8 @@ function criarFinanceiroCompra(compra, callback) {
         INSERT INTO financeiro (
           tipo, descricao, valor, data_movimento, categoria, forma_pagamento,
           referencia_id, referencia_tipo, status, origem, documento, vencimento,
-          numero_parcela, total_parcelas, compra_id, pessoa_nome, observacao, baixado_em
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          numero_parcela, total_parcelas, compra_id, pessoa_nome, observacao, baixado_em, empresa_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         'despesa',
         payload.descricao,
@@ -288,7 +322,8 @@ function criarFinanceiroCompra(compra, callback) {
         id,
         fornecedor || null,
         observacao || null,
-        payload.status === 'pago' ? data_compra : null
+        payload.status === 'pago' ? data_compra : null,
+        empresaIdFin
       ], done);
     };
 
@@ -699,7 +734,9 @@ function processarItensCompra(compraId, itens, fornecedor, opcoes, done) {
             produtoId,
             quantidadeFiscal: qtdFiscal,
             quantidadeNaoFiscal: qtdNaoFiscal,
-            empresaId: empresaIdDoReqCompra({ empresaId: opcoes?.empresaId }),
+            empresaId: opcoes?.empresaId != null
+              ? Number(opcoes.empresaId)
+              : empresaIdDoReqCompra({ empresaId: opcoes?.empresaId }),
             usuarioId: opcoes?.usuarioId ?? opcoes?.usuario_id,
             exigirEmpresa: opcoes?.exigirEmpresa === true,
             motivoCompat: opcoes?.motivoCompat
@@ -809,7 +846,7 @@ function garantirTabelaDevolucoesCompra(callback) {
   `, callback);
 }
 
-router.post('/:id/devolver', validarCaixaAberto, (req, res) => {
+router.post('/:id/devolver', validarCaixaAberto, async (req, res) => {
   const compraId = Number(req.params.id);
   const motivo = String(req.body?.motivo || '').trim();
   const itens = Array.isArray(req.body?.itens) ? req.body.itens : [];
@@ -829,6 +866,16 @@ router.post('/:id/devolver', validarCaixaAberto, (req, res) => {
     return res.status(400).json({ error: 'Informe ao menos um item para devolução.' });
   }
 
+  let ctxEmp;
+  try {
+    ctxEmp = await resolverEmpresaContextoCompra(req, { db });
+  } catch (err) {
+    return res.status(statusDeErroCompraEmpresa(err)).json({
+      error: err.message,
+      code: err.code
+    });
+  }
+
   garantirTabelaDevolucoesCompra((tableErr) => {
     if (tableErr) return res.status(500).json({ error: tableErr.message });
 
@@ -845,6 +892,22 @@ router.post('/:id/devolver', validarCaixaAberto, (req, res) => {
           db.run('ROLLBACK');
           return res.status(404).json({ error: 'Compra não encontrada.' });
         }
+
+        try {
+          exigirCompraDaEmpresa(compra, ctxEmp.empresaId, {
+            modo: ctxEmp.modo,
+            permitirLegadoSimples: false
+          });
+        } catch (ownErr) {
+          db.run('ROLLBACK');
+          return res.status(statusDeErroCompraEmpresa(ownErr)).json({
+            error: ownErr.message,
+            code: ownErr.code
+          });
+        }
+
+        const empresaCompraId = Number(compra.empresa_id);
+        req.empresaId = empresaCompraId;
 
         if (String(compra.status || '').toLowerCase() === 'cancelada') {
           db.run('ROLLBACK');
@@ -947,7 +1010,8 @@ router.post('/:id/devolver', validarCaixaAberto, (req, res) => {
                 produtoId: item.produto_id,
                 quantidadeFiscal: splitDevolucao.qtdFiscal,
                 quantidadeNaoFiscal: splitDevolucao.qtdNaoFiscal,
-                empresaId: empresaIdDoReqCompra(req),
+                empresaId: empresaCompraId,
+                exigirEmpresa: true,
                 usuarioId: req.operadorId || req.user?.id,
                 origem: 'devolucao_compra'
               }, (estoqueErr) => {
@@ -994,8 +1058,8 @@ router.post('/:id/devolver', validarCaixaAberto, (req, res) => {
               INSERT INTO financeiro (
                 tipo, descricao, valor, data_movimento, categoria, forma_pagamento,
                 referencia_id, referencia_tipo, status, origem, documento,
-                vencimento, compra_id, pessoa_nome, observacao
-              ) VALUES (?, ?, ?, DATE('now','localtime'), ?, ?, ?, ?, ?, ?, ?, DATE('now','localtime'), ?, ?, ?)
+                vencimento, compra_id, pessoa_nome, observacao, empresa_id
+              ) VALUES (?, ?, ?, DATE('now','localtime'), ?, ?, ?, ?, ?, ?, ?, DATE('now','localtime'), ?, ?, ?, ?)
             `, [
               'receita',
               `Crédito de devolução da compra ${compraId}`,
@@ -1009,7 +1073,8 @@ router.post('/:id/devolver', validarCaixaAberto, (req, res) => {
               null,
               compraId,
               compra.fornecedor || null,
-              motivo
+              motivo,
+              empresaCompraId
             ], (finErr) => {
               if (finErr) {
                 db.run('ROLLBACK');
@@ -1063,10 +1128,20 @@ router.post('/:id/devolver', validarCaixaAberto, (req, res) => {
   });
 });
 
-router.get('/relatorio/uso-consumo', (req, res) => {
+router.get('/relatorio/uso-consumo', async (req, res) => {
   const { inicio, fim } = req.query;
-  let where = `WHERE COALESCE(c.tipo_entrada, '${TIPO_ENTRADA_PADRAO}') = 'USO_CONSUMO'`;
-  const params = [];
+  let ctxEmp;
+  try {
+    ctxEmp = await resolverEmpresaContextoCompra(req, { db });
+  } catch (err) {
+    return res.status(statusDeErroCompraEmpresa(err)).json({
+      error: err.message,
+      code: err.code
+    });
+  }
+
+  let where = `WHERE COALESCE(c.tipo_entrada, '${TIPO_ENTRADA_PADRAO}') = 'USO_CONSUMO' AND c.empresa_id = ?`;
+  const params = [ctxEmp.empresaId];
 
   if (inicio) {
     where += ' AND date(COALESCE(c.data_emissao, c.data_entrada, c.data_compra)) >= date(?)';
@@ -1196,12 +1271,13 @@ router.post('/resumo-fiscal-entrada', (req, res) => {
   }
 });
 
-router.get('/', (req, res) => {
+router.get('/', async (req, res) => {
   const { garantirTabelas } = require('../services/fiscal/nfeDevolucaoCompra');
   const { garantirTabelasSaldoDevolucao } = require('../services/fiscal/controleSaldoDevolucaoCompra');
-  Promise.resolve(garantirTabelas())
-    .then(() => garantirTabelasSaldoDevolucao())
-    .then(() => {
+  try {
+    const ctxEmp = await resolverEmpresaContextoCompra(req, { db });
+    await Promise.resolve(garantirTabelas());
+    await garantirTabelasSaldoDevolucao();
     db.all(`
       SELECT c.*, 
         (SELECT COUNT(*) FROM compras_itens WHERE compra_id = c.id) as total_itens,
@@ -1215,16 +1291,32 @@ router.get('/', (req, res) => {
           WHERE i.compra_id = c.id AND n.status = 'autorizada') as qtd_devolvida_fiscal,
         (SELECT COALESCE(SUM(ci.quantidade), 0) FROM compras_itens ci WHERE ci.compra_id = c.id) as qtd_comprada_total
       FROM compras c 
+      WHERE c.empresa_id = ?
       ORDER BY c.data_compra DESC, c.id DESC
-    `, (err, rows) => {
+    `, [ctxEmp.empresaId], (err, rows) => {
       if (err) return res.status(500).json({ error: err.message });
       res.json(rows);
     });
-  }).catch((err) => res.status(500).json({ error: err.message }));
+  } catch (err) {
+    return res.status(statusDeErroCompraEmpresa(err)).json({
+      error: err.message,
+      code: err.code
+    });
+  }
 });
 
-router.get('/:id', (req, res) => {
+router.get('/:id', async (req, res) => {
   const { id } = req.params;
+
+  let ctxEmp;
+  try {
+    ctxEmp = await resolverEmpresaContextoCompra(req, { db });
+  } catch (err) {
+    return res.status(statusDeErroCompraEmpresa(err)).json({
+      error: err.message,
+      code: err.code
+    });
+  }
 
   garantirTabelaDevolucoesCompra((tableErr) => {
     if (tableErr) return res.status(500).json({ error: tableErr.message });
@@ -1232,6 +1324,18 @@ router.get('/:id', (req, res) => {
     db.get('SELECT * FROM compras WHERE id = ?', [id], (err, compra) => {
       if (err) return res.status(500).json({ error: err.message });
       if (!compra) return res.status(404).json({ error: 'Compra não encontrada.' });
+
+      try {
+        exigirCompraDaEmpresa(compra, ctxEmp.empresaId, {
+          modo: ctxEmp.modo,
+          permitirLegadoSimples: ctxEmp.modo === ModoOperacionalGlobal.EMPRESA_SIMPLES
+        });
+      } catch (ownErr) {
+        return res.status(statusDeErroCompraEmpresa(ownErr)).json({
+          error: ownErr.message,
+          code: ownErr.code
+        });
+      }
 
       db.all(`
         SELECT
@@ -1439,7 +1543,12 @@ router.post('/', (req, res) => {
     }
   }
 
-  const continuarGravacao = () => {
+  const continuarGravacao = (empresaResolvida) => {
+    const empresaCompraId = Number(empresaResolvida.empresaId);
+    const exigirEmpresaEstoque = empresaResolvida.exigirEmpresaEstoque === true
+      || empresaResolvida.modo === ModoOperacionalGlobal.MULTIEMPRESA;
+    req.empresaId = empresaCompraId;
+
     db.serialize(() => {
       db.run('BEGIN IMMEDIATE');
 
@@ -1455,8 +1564,8 @@ router.post('/', (req, res) => {
           natureza_operacao, natureza_operacao_xml, cfop, cfop_xml,
           csosn_cst, csosn_cst_xml, cst_pis, cst_pis_xml,
           cst_cofins, cst_cofins_xml, cst_ipi, cst_ipi_xml,
-          escrituracao_alterada, escrituracao_motivo
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          escrituracao_alterada, escrituracao_motivo, empresa_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         data_compra,
         data_emissao || null,
@@ -1504,7 +1613,8 @@ router.post('/', (req, res) => {
         escrituracao.cst_ipi,
         escrituracao.cst_ipi_xml,
         escrituracao.escrituracao_alterada,
-        escrituracao.escrituracao_motivo
+        escrituracao.escrituracao_motivo,
+        empresaCompraId
       ], function(err) {
         if (err) {
           db.run('ROLLBACK');
@@ -1533,7 +1643,8 @@ router.post('/', (req, res) => {
             parcelas_detalhe: gradeParcelasReq,
             parcelas_importadas_xml: parcelasImportadasXmlReq,
             numero_nf,
-            observacao
+            observacao,
+            empresa_id: empresaCompraId
           }, (finErr) => {
             if (finErr) {
               db.run('ROLLBACK');
@@ -1582,8 +1693,17 @@ router.post('/', (req, res) => {
               uso_consumo: isUsoConsumo
             };
 
-            vincularDocumentoCentralAposCompra(centralDocumentoId, compraId, req.user?.id)
-              .finally(() => res.json(payloadResposta));
+            vincularDocumentoCentralAposCompra(centralDocumentoId, compraId, req.user?.id, empresaCompraId)
+              .then(() => res.json({ ...payloadResposta, empresa_id: empresaCompraId }))
+              .catch((vincErr) => {
+                console.error('Erro ao vincular documento Central após compra:', vincErr);
+                return res.status(statusDeErroCompraEmpresa(vincErr)).json({
+                  error: vincErr.message || 'Compra gravada, mas falhou o vínculo com a Central.',
+                  code: vincErr.code,
+                  id: compraId,
+                  empresa_id: empresaCompraId
+                });
+              });
           });
         } else {
           // Compra Normal: process items and create financial records
@@ -1591,13 +1711,21 @@ router.post('/', (req, res) => {
           processarItensCompra(compraId, itensComRateio, fornecedor, {
             fornecedor_cnpj,
             tipo_entrada: tipoEntrada,
-            empresaId: empresaIdDoReqCompra(req),
+            empresaId: empresaCompraId,
+            exigirEmpresa: exigirEmpresaEstoque,
             usuarioId: req.user?.id
           }, (itensErr) => {
             if (itensErr) {
               console.error('Erro ao processar itens da compra:', itensErr);
               db.run('ROLLBACK');
-              return res.status(500).json({ error: itensErr.message });
+              const status = itensErr.code === 'EMPRESA_OBRIGATORIA'
+                || itensErr.code === 'EMPRESA_NAO_ENCONTRADA'
+                ? 400
+                : 500;
+              return res.status(status).json({
+                error: itensErr.message,
+                code: itensErr.code || undefined
+              });
             }
 
             criarFinanceiroCompra({
@@ -1614,7 +1742,8 @@ router.post('/', (req, res) => {
               parcelas_detalhe: gradeParcelasReq,
               parcelas_importadas_xml: parcelasImportadasXmlReq,
               numero_nf,
-              observacao
+              observacao,
+              empresa_id: empresaCompraId
             }, (finErr) => {
               if (finErr) {
                 db.run('ROLLBACK');
@@ -1638,6 +1767,7 @@ router.post('/', (req, res) => {
                   tipo_entrada_confianca: confiancaSugestao,
                   tipo_entrada_motivo: motivoSugestao,
                   tipo_entrada_alterado: Boolean(tipoAlterado),
+                  empresa_id: empresaCompraId,
                   escrituracao: {
                     original: resumoEscrituracao.original,
                     utilizado: resumoEscrituracao.utilizado,
@@ -1651,6 +1781,7 @@ router.post('/', (req, res) => {
 
               const payloadResposta = {
                 id: compraId,
+                empresa_id: empresaCompraId,
                 message: 'Compra registrada com sucesso e integrada ao estoque/financeiro.',
                 tipo_entrada: tipoEntrada,
                 conferencia: {
@@ -1660,14 +1791,38 @@ router.post('/', (req, res) => {
                 }
               };
 
-              vincularDocumentoCentralAposCompra(centralDocumentoId, compraId, req.user?.id)
-                .finally(() => res.json(payloadResposta));
+              vincularDocumentoCentralAposCompra(centralDocumentoId, compraId, req.user?.id, empresaCompraId)
+                .then(() => res.json(payloadResposta))
+                .catch((vincErr) => {
+                  console.error('Erro ao vincular documento Central após compra:', vincErr);
+                  return res.status(statusDeErroCompraEmpresa(vincErr)).json({
+                    error: vincErr.message || 'Compra gravada, mas falhou o vínculo com a Central.',
+                    code: vincErr.code,
+                    id: compraId,
+                    empresa_id: empresaCompraId
+                  });
+                });
             });
           });
         }
       });
     });
-  }
+  };
+
+  const iniciarGravacaoComEmpresa = () => {
+    resolverEmpresaDaCompra(req, {
+      centralDocumentoId,
+      empresaIdBody: req.body && (req.body.empresa_id != null ? req.body.empresa_id : req.body.empresaId)
+    }, { db })
+      .then((resolvida) => continuarGravacao(resolvida))
+      .catch((err) => res.status(statusDeErroCompraEmpresa(err)).json({
+        error: err.message,
+        code: err.code,
+        empresa_id: err.empresa_id,
+        documento_empresa_id: err.documento_empresa_id,
+        contexto_empresa_id: err.contexto_empresa_id
+      }));
+  };
 
   if (chaveLimpa) {
     db.get('SELECT id, status FROM compras WHERE chave_acesso = ? LIMIT 1', [chaveLimpa], (dupErr, existente) => {
@@ -1690,7 +1845,7 @@ router.post('/', (req, res) => {
         fornecedor_cep
       }, (fornErr) => {
         if (fornErr) return res.status(500).json({ error: fornErr.message });
-        continuarGravacao();
+        iniciarGravacaoComEmpresa();
       });
     });
   } else {
@@ -1705,14 +1860,24 @@ router.post('/', (req, res) => {
       fornecedor_cep
     }, (fornErr) => {
       if (fornErr) return res.status(500).json({ error: fornErr.message });
-      continuarGravacao();
+      iniciarGravacaoComEmpresa();
     });
   }
 });
 
-router.post('/:id/cancelar', (req, res) => {
+router.post('/:id/cancelar', async (req, res) => {
   const { id } = req.params;
   const motivo = String(req.body?.motivo || 'Cancelamento manual da compra').trim();
+
+  let ctxEmp;
+  try {
+    ctxEmp = await resolverEmpresaContextoCompra(req, { db });
+  } catch (err) {
+    return res.status(statusDeErroCompraEmpresa(err)).json({
+      error: err.message,
+      code: err.code
+    });
+  }
 
   db.serialize(() => {
     db.run('BEGIN IMMEDIATE');
@@ -1727,6 +1892,22 @@ router.post('/:id/cancelar', (req, res) => {
         db.run('ROLLBACK');
         return res.status(404).json({ error: 'Compra não encontrada.' });
       }
+
+      try {
+        exigirCompraDaEmpresa(compra, ctxEmp.empresaId, {
+          modo: ctxEmp.modo,
+          permitirLegadoSimples: false
+        });
+      } catch (ownErr) {
+        db.run('ROLLBACK');
+        return res.status(statusDeErroCompraEmpresa(ownErr)).json({
+          error: ownErr.message,
+          code: ownErr.code
+        });
+      }
+
+      const empresaCompraId = Number(compra.empresa_id);
+      req.empresaId = empresaCompraId;
 
       if (compra.status === 'cancelada') {
         db.run('ROLLBACK');
@@ -1760,7 +1941,7 @@ router.post('/:id/cancelar', (req, res) => {
               estoqueAtual = await estoqueAtualParaValidacaoCompra({
                 produto,
                 produtoId: item.produto_id,
-                req,
+                req: { empresaId: empresaCompraId },
                 db
               });
             } catch (isoErr) {
@@ -1788,12 +1969,12 @@ router.post('/:id/cancelar', (req, res) => {
           const item = itens[index];
           const qtds = resolverQuantidadesCompraItemPersistido(item);
 
-          // Implementação 02.4: débito F/NF pela porta (sem UPDATE de saldo).
           debitarEstoqueItemCompra(db, {
             produtoId: item.produto_id,
             quantidadeFiscal: qtds.quantidade_fiscal,
             quantidadeNaoFiscal: qtds.quantidade_nao_fiscal,
-            empresaId: empresaIdDoReqCompra(req),
+            empresaId: empresaCompraId,
+            exigirEmpresa: true,
             usuarioId: req.user?.id,
             origem: 'cancelamento_compra'
           }, (upErr) => {
@@ -1820,7 +2001,8 @@ router.post('/:id/cancelar', (req, res) => {
             SET status = 'cancelado',
                 observacao = COALESCE(observacao, '') || ' | Cancelado junto com a compra.'
             WHERE compra_id = ?
-          `, [id], (finErr) => {
+              AND (empresa_id = ? OR empresa_id IS NULL)
+          `, [id, empresaCompraId], (finErr) => {
             if (finErr) {
               db.run('ROLLBACK');
               return res.status(500).json({ error: finErr.message });
@@ -1832,14 +2014,14 @@ router.post('/:id/cancelar', (req, res) => {
                   cancelada_em = CURRENT_TIMESTAMP,
                   motivo_cancelamento = ?
               WHERE id = ?
-            `, [motivo, id], (compraUpErr) => {
+                AND empresa_id = ?
+            `, [motivo, id, empresaCompraId], (compraUpErr) => {
               if (compraUpErr) {
                 db.run('ROLLBACK');
                 return res.status(500).json({ error: compraUpErr.message });
               }
 
               db.run('COMMIT');
-              // gravar auditoria do cancelamento
               gravarAuditoria({
                 usuario_id: req.user?.id || null,
                 usuario_nome: req.user?.nome || req.user?.username || null,
@@ -1847,7 +2029,7 @@ router.post('/:id/cancelar', (req, res) => {
                 acao: 'cancelar_compra',
                 referencia_tipo: 'compra',
                 referencia_id: id,
-                detalhes: { motivo },
+                detalhes: { motivo, empresa_id: empresaCompraId },
                 ip_requisicao: req.ip || null
               }).catch((auditErr) => console.error('Erro ao gravar auditoria de cancelamento de compra:', auditErr));
 

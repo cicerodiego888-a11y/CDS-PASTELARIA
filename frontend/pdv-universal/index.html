@@ -13,26 +13,50 @@
 <body>
     <div id="pdvu-root" class="pdvu-page" data-estado="LOADING">
         <header class="pdvu-topo">
-            <div>
-                <p class="pdvu-marca">CDS SISTEMAS</p>
-                <h1>PDV UNIVERSAL</h1>
-                <small>Operador: <span id="pdvu-operador">—</span></small>
-                <small>
-                    <a href="/erp" class="pdvu-link-erp">Voltar ao ERP</a>
-                    ·
-                    <a href="/pdv" class="pdvu-link-erp">PDV legado</a>
-                </small>
+            <div class="pdvu-header-left">
+                <button type="button" id="pdvu-btn-menu" class="pdvu-btn-menu" aria-label="Abrir menu" aria-expanded="false">
+                    <i class="fas fa-bars" aria-hidden="true"></i>
+                </button>
+                <div>
+                    <p class="pdvu-marca">CDS SISTEMAS</p>
+                    <h1>PDV UNIVERSAL</h1>
+                </div>
             </div>
-            <div>
+            <div class="pdvu-header-centro">
                 <span>Modo:</span>
                 <span id="pdvu-modo" class="pdvu-modo">—</span>
-            </div>
-            <div>
+                <span class="pdvu-sep">·</span>
                 <span>Empresa:</span>
                 <span id="pdvu-empresa" class="pdvu-empresa">—</span>
                 <button type="button" id="pdvu-btn-selecionar" class="pdvu-btn" hidden>SELECIONAR EMPRESA</button>
             </div>
+            <div class="pdvu-header-direita">
+                <button type="button" id="pdvu-btn-calculadora" class="pdvu-btn-ghost" title="Calculadora">
+                    <i class="fas fa-calculator" aria-hidden="true"></i>
+                    <span>Calculadora</span>
+                </button>
+                <span id="pdvu-status-caixa" class="pdvu-caixa pdvu-caixa--verificando" data-caixa="VERIFICANDO" role="status">CAIXA: VERIFICANDO</span>
+                <button type="button" id="pdvu-btn-atualizar-caixa" class="pdvu-btn-ghost" title="Atualizar status do caixa">
+                    Atualizar status
+                </button>
+                <button type="button" id="pdvu-btn-abrir-caixa" class="pdvu-btn-caixa" hidden>Abrir Caixa</button>
+                <button type="button" id="pdvu-btn-sangria" class="pdvu-btn-caixa" hidden>Sangria</button>
+                <button type="button" id="pdvu-btn-suprimento" class="pdvu-btn-caixa" hidden>Suprimento</button>
+                <button type="button" id="pdvu-btn-fechar-caixa" class="pdvu-btn-fechar-caixa" hidden>
+                    <i class="fas fa-lock" aria-hidden="true"></i> Fechar Caixa
+                </button>
+                <span>Operador: <span id="pdvu-operador">—</span></span>
+                <time id="pdvu-data-hora">—</time>
+            </div>
         </header>
+
+        <nav id="pdvu-drawer" class="pdvu-drawer" hidden>
+            <p class="pdvu-drawer-titulo">Menu</p>
+            <a href="/erp" class="pdvu-link-erp">Voltar ao ERP</a>
+            <button type="button" id="pdvu-drawer-empresa" class="pdvu-btn">Selecionar empresa</button>
+            <p class="pdvu-drawer-hint">Ações futuras do PDV</p>
+            <button type="button" id="pdvu-drawer-fechar" class="pdvu-btn">Fechar menu</button>
+        </nav>
 
         <div id="pdvu-loading" class="pdvu-center">
             <p>Carregando contexto operacional…</p>
@@ -51,7 +75,13 @@
             <div class="pdvu-body">
                 <section class="pdvu-card pdvu-atendimento">
                     <div class="pdvu-busca">
-                        <input id="pdvu-busca-input" type="text" placeholder="Buscar produto, código ou código de barras…">
+                        <label class="pdvu-busca-label" for="pdvu-busca-input">
+                            Código de barras / Código interno / PLU / Nome
+                        </label>
+                        <div class="pdvu-busca-linha">
+                            <input id="pdvu-busca-input" type="text" placeholder="Digite código de barras, código, PLU ou nome do produto" autocomplete="off">
+                            <button type="button" id="pdvu-btn-buscar" class="pdvu-btn">BUSCAR</button>
+                        </div>
                     </div>
                     <div id="pdvu-resultados" class="pdvu-resultados"></div>
                     <p id="pdvu-aviso" class="pdvu-aviso"></p>
@@ -59,17 +89,76 @@
                         <strong>EMPRESAS NO ATENDIMENTO</strong>
                         <p id="pdvu-empresas-atendimento-lista">Nenhuma empresa adicionada</p>
                     </div>
-                    <div id="pdvu-atendimento-vazio" class="pdvu-vazio">
-                        <h2>ATENDIMENTO</h2>
-                        <p>Nenhum item adicionado</p>
-                        <p>Use a busca ou leitor para adicionar produtos.</p>
+                    <div class="pdvu-itens-wrap">
+                        <h2 class="pdvu-itens-titulo">Itens do atendimento</h2>
+                        <div class="pdvu-itens-scroll">
+                            <table class="pdvu-tabela" aria-label="Itens do atendimento">
+                                <thead>
+                                    <tr>
+                                        <th>QTD</th>
+                                        <th>UN</th>
+                                        <th>PRODUTO</th>
+                                        <th>UNITÁRIO</th>
+                                        <th>DESC %</th>
+                                        <th>DESC R$</th>
+                                        <th>TOTAL</th>
+                                        <th></th>
+                                    </tr>
+                                </thead>
+                                <tbody id="pdvu-linhas-carrinho">
+                                    <tr id="pdvu-atendimento-vazio" class="pdvu-tr-vazio">
+                                        <td colspan="8">Nenhum item no carrinho</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </section>
                 <aside class="pdvu-card pdvu-resumo">
-                    <div>ITENS<br><strong id="pdvu-qtd-itens">0</strong></div>
-                    <div>TOTAL<br><span id="pdvu-total" class="pdvu-total">R$ 0,00</span></div>
-                    <div id="pdvu-linhas-carrinho"></div>
-                    <div>PAGAMENTO<br>
+                    <h2 class="pdvu-resumo-titulo">Resumo</h2>
+                    <div class="pdvu-linha-resumo">
+                        <span>Subtotal</span>
+                        <strong id="pdvu-subtotal">R$ 0,00</strong>
+                    </div>
+                    <div class="pdvu-linha-resumo">
+                        <span>Itens</span>
+                        <strong id="pdvu-qtd-itens">0</strong>
+                    </div>
+                    <div class="pdvu-linha-resumo pdvu-linha-input">
+                        <span>Desconto R$</span>
+                        <input type="number" id="pdvu-input-desconto-rs" min="0" step="0.01" placeholder="0,00" inputmode="decimal">
+                    </div>
+                    <div class="pdvu-linha-resumo pdvu-linha-input">
+                        <span>Desconto %</span>
+                        <input type="number" id="pdvu-input-desconto-pct" min="0" max="100" step="0.01" placeholder="0" inputmode="decimal">
+                    </div>
+                    <div class="pdvu-linha-resumo pdvu-linha-input">
+                        <span>Acréscimo R$</span>
+                        <input type="number" id="pdvu-input-acrescimo" min="0" step="0.01" placeholder="0,00" inputmode="decimal">
+                    </div>
+                    <div class="pdvu-linha-resumo">
+                        <span>Desconto aplicado</span>
+                        <strong id="pdvu-desconto">R$ 0,00</strong>
+                    </div>
+                    <div class="pdvu-linha-resumo">
+                        <span>Acréscimo aplicado</span>
+                        <strong id="pdvu-acrescimo">R$ 0,00</strong>
+                    </div>
+                    <div class="pdvu-total-box">
+                        <span>TOTAL</span>
+                        <strong id="pdvu-total" class="pdvu-total">R$ 0,00</strong>
+                    </div>
+                    <div class="pdvu-modalidade-box">
+                        <span class="pdvu-modalidade-label">Modalidade</span>
+                        <div class="pdvu-modalidade-btns" role="group" aria-label="Modalidade da venda">
+                            <button type="button" id="pdvu-modalidade-balcao" class="pdvu-modalidade-btn pdvu-modalidade-btn--ativo" data-modalidade="BALCAO">Balcão</button>
+                            <button type="button" id="pdvu-modalidade-entrega" class="pdvu-modalidade-btn" data-modalidade="ENTREGA">Entrega</button>
+                        </div>
+                        <p id="pdvu-modalidade-status" class="pdvu-modalidade-status">Balcão</p>
+                        <button type="button" id="pdvu-btn-configurar-entrega" class="pdvu-btn-entrega" hidden>Configurar entrega</button>
+                    </div>
+                    <div class="pdvu-forma-box">
+                        PAGAMENTO<br>
                         <select id="pdvu-forma">
                             <option value="dinheiro">Dinheiro</option>
                             <option value="pix">PIX</option>
@@ -77,7 +166,14 @@
                             <option value="credito">Crédito</option>
                         </select>
                     </div>
-                    <button type="button" id="pdvu-finalizar" class="pdvu-finalizar" disabled>FINALIZAR ATENDIMENTO</button>
+                    <button type="button" id="pdvu-finalizar" class="pdvu-finalizar" disabled>
+                        <span>FINALIZAR ATENDIMENTO</span>
+                        <small>(F10)</small>
+                    </button>
+                    <button type="button" id="pdvu-cancelar" class="pdvu-cancelar">
+                        <span>CANCELAR ATENDIMENTO</span>
+                        <small>(ESC)</small>
+                    </button>
                     <div id="pdvu-atendimento-criado" class="pdvu-atendimento-criado" hidden>
                         <h3>ATENDIMENTO CRIADO</h3>
                         <p id="pdvu-atd-codigo">—</p>
@@ -92,9 +188,40 @@
                         <button type="button" id="pdvu-ver-comprovante-main" class="pdvu-btn" hidden>VER COMPROVANTE</button>
                         <button type="button" id="pdvu-novo-main" class="pdvu-btn">NOVO ATENDIMENTO</button>
                     </div>
-                    <p class="pdvu-atalhos">F1 — Buscar produto. ESC fecha modal sem cancelar pagamento.</p>
                 </aside>
             </div>
+            <footer class="pdvu-atalhos-bar" aria-label="Atalhos">
+                <span class="pdvu-atalho-chip">F1 Buscar</span>
+                <span class="pdvu-atalho-chip">F10 Finalizar</span>
+                <span class="pdvu-atalho-chip">ESC Fechar / Cancelar</span>
+            </footer>
+        </div>
+    </div>
+
+    <div id="pdvu-calc" class="pdvu-calc" hidden>
+        <div class="pdvu-calc-head">
+            <strong>Calculadora</strong>
+            <button type="button" id="pdvu-calc-fechar" class="pdvu-calc-x" aria-label="Fechar calculadora">&times;</button>
+        </div>
+        <div id="pdvu-calc-display" class="pdvu-calc-display">0</div>
+        <div class="pdvu-calc-grid">
+            <button type="button" data-calc="7">7</button>
+            <button type="button" data-calc="8">8</button>
+            <button type="button" data-calc="9">9</button>
+            <button type="button" data-calc="/">÷</button>
+            <button type="button" data-calc="4">4</button>
+            <button type="button" data-calc="5">5</button>
+            <button type="button" data-calc="6">6</button>
+            <button type="button" data-calc="*">×</button>
+            <button type="button" data-calc="1">1</button>
+            <button type="button" data-calc="2">2</button>
+            <button type="button" data-calc="3">3</button>
+            <button type="button" data-calc="-">−</button>
+            <button type="button" data-calc="0">0</button>
+            <button type="button" data-calc=".">.</button>
+            <button type="button" data-calc="C">C</button>
+            <button type="button" data-calc="+">+</button>
+            <button type="button" data-calc="=" class="pdvu-calc-eq">=</button>
         </div>
     </div>
 
@@ -110,6 +237,103 @@
         <div class="pdvu-dialog" role="dialog">
             <h2>ESTE PRODUTO POSSUI ESTOQUE EM:</h2>
             <div id="pdvu-lista-empresa-item"></div>
+        </div>
+    </div>
+
+    <div id="pdvu-modal-entrega" class="pdvu-overlay" hidden>
+        <div class="pdvu-dialog pdvu-dialog-pgto" role="dialog" aria-labelledby="pdvu-entrega-titulo">
+            <h2 id="pdvu-entrega-titulo">VENDA PARA ENTREGA</h2>
+            <p class="pdvu-aviso">Estoque será reservado. Pagamento na entrega.</p>
+            <label class="pdvu-entrega-label" for="pdvu-entrega-cliente">Cliente</label>
+            <select id="pdvu-entrega-cliente" class="pdvu-entrega-input">
+                <option value="">Consumidor</option>
+            </select>
+            <label class="pdvu-entrega-label" for="pdvu-entrega-telefone">Telefone</label>
+            <input id="pdvu-entrega-telefone" class="pdvu-entrega-input" type="text" autocomplete="off">
+            <label class="pdvu-entrega-label" for="pdvu-entrega-cep">CEP</label>
+            <input id="pdvu-entrega-cep" class="pdvu-entrega-input" type="text" maxlength="9" autocomplete="off">
+            <label class="pdvu-entrega-label" for="pdvu-entrega-endereco">Endereço de entrega</label>
+            <input id="pdvu-entrega-endereco" class="pdvu-entrega-input" type="text" required autocomplete="off">
+            <div class="pdvu-entrega-linha">
+                <div>
+                    <label class="pdvu-entrega-label" for="pdvu-entrega-numero">Número</label>
+                    <input id="pdvu-entrega-numero" class="pdvu-entrega-input" type="text" autocomplete="off">
+                </div>
+                <div>
+                    <label class="pdvu-entrega-label" for="pdvu-entrega-bairro">Bairro</label>
+                    <input id="pdvu-entrega-bairro" class="pdvu-entrega-input" type="text" autocomplete="off">
+                </div>
+            </div>
+            <div class="pdvu-entrega-linha">
+                <div>
+                    <label class="pdvu-entrega-label" for="pdvu-entrega-cidade">Cidade</label>
+                    <input id="pdvu-entrega-cidade" class="pdvu-entrega-input" type="text" autocomplete="off">
+                </div>
+                <div>
+                    <label class="pdvu-entrega-label" for="pdvu-entrega-uf">UF</label>
+                    <input id="pdvu-entrega-uf" class="pdvu-entrega-input" type="text" maxlength="2" autocomplete="off">
+                </div>
+            </div>
+            <label class="pdvu-entrega-label" for="pdvu-entrega-taxa">Taxa de entrega (R$)</label>
+            <input id="pdvu-entrega-taxa" class="pdvu-entrega-input" type="text" inputmode="decimal" value="0">
+            <label class="pdvu-entrega-label" for="pdvu-entrega-pagamento">Pagamento previsto</label>
+            <select id="pdvu-entrega-pagamento" class="pdvu-entrega-input">
+                <option value="NAO_INFORMADO">Não informado</option>
+                <option value="PIX">PIX</option>
+                <option value="DINHEIRO">Dinheiro</option>
+                <option value="DEBITO">Débito</option>
+                <option value="CREDITO">Crédito</option>
+            </select>
+            <p id="pdvu-entrega-msg" class="pdvu-aviso"></p>
+            <div class="pdvu-entrega-acoes">
+                <button type="button" id="pdvu-entrega-confirmar" class="pdvu-btn">CONFIRMAR ENTREGA</button>
+                <button type="button" id="pdvu-entrega-cancelar" class="pdvu-btn">CANCELAR</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="pdvu-modal-caixa" class="pdvu-overlay" hidden>
+        <div class="pdvu-dialog pdvu-dialog-pgto" role="dialog" aria-labelledby="pdvu-caixa-titulo">
+            <h2 id="pdvu-caixa-titulo">CAIXA</h2>
+            <p id="pdvu-caixa-hint" class="pdvu-aviso"></p>
+            <label class="pdvu-caixa-label" id="pdvu-caixa-lbl-valor" for="pdvu-caixa-valor">Valor</label>
+            <input id="pdvu-caixa-valor" class="pdvu-caixa-input" type="text" inputmode="decimal" autocomplete="off">
+            <label class="pdvu-caixa-label" id="pdvu-caixa-lbl-motivo" for="pdvu-caixa-motivo" hidden>Motivo / Observação</label>
+            <input id="pdvu-caixa-motivo" class="pdvu-caixa-input" type="text" autocomplete="off" hidden>
+            <label class="pdvu-caixa-label" for="pdvu-caixa-senha">Senha admin (se exigida)</label>
+            <input id="pdvu-caixa-senha" class="pdvu-caixa-input" type="password" autocomplete="off">
+            <p id="pdvu-caixa-msg" class="pdvu-aviso"></p>
+            <div class="pdvu-caixa-acoes">
+                <button type="button" id="pdvu-caixa-confirmar" class="pdvu-btn">CONFIRMAR</button>
+                <button type="button" id="pdvu-caixa-cancelar" class="pdvu-btn">CANCELAR</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="pdvu-modal-tef" class="pdvu-overlay" hidden>
+        <div class="pdvu-dialog pdvu-dialog-pgto" role="dialog" aria-labelledby="pdvu-tef-titulo">
+            <h2 id="pdvu-tef-titulo">PAGAMENTO TEF</h2>
+            <p>Valor: <strong id="pdvu-tef-valor">R$ 0,00</strong></p>
+            <p id="pdvu-tef-tipo" class="pdvu-tef-tipo">—</p>
+            <p id="pdvu-tef-estado" class="pdvu-tef-estado">TEF PROCESSANDO</p>
+            <p id="pdvu-tef-msg" class="pdvu-aviso"></p>
+            <button type="button" id="pdvu-tef-fechar" class="pdvu-btn">FECHAR</button>
+        </div>
+    </div>
+
+    <div id="pdvu-modal-pix" class="pdvu-overlay" hidden>
+        <div class="pdvu-dialog pdvu-dialog-pgto" role="dialog" aria-labelledby="pdvu-pix-titulo">
+            <h2 id="pdvu-pix-titulo">PAGAMENTO PIX</h2>
+            <p>Valor: <strong id="pdvu-pix-valor">R$ 0,00</strong></p>
+            <p id="pdvu-pix-estado" class="pdvu-pix-estado">AGUARDANDO PIX</p>
+            <div id="pdvu-pix-qr-wrap" class="pdvu-pix-qr-wrap" hidden>
+                <img id="pdvu-pix-qr" alt="QR Code PIX" class="pdvu-pix-qr">
+            </div>
+            <label class="pdvu-pix-label" for="pdvu-pix-copia">PIX Copia e Cola</label>
+            <textarea id="pdvu-pix-copia" class="pdvu-pix-copia" rows="3" readonly></textarea>
+            <button type="button" id="pdvu-pix-copiar" class="pdvu-btn">Copiar código</button>
+            <p id="pdvu-pix-msg" class="pdvu-aviso"></p>
+            <button type="button" id="pdvu-pix-fechar" class="pdvu-btn">FECHAR</button>
         </div>
     </div>
 
@@ -159,7 +383,16 @@
         window.API_URL = window.API_URL || (window.location.origin + '/api');
     </script>
     <script src="/shared/js/muv-comprovante-client.js"></script>
+    <script src="/shared/js/tefFluxoPagamento.js"></script>
     <script src="/pdv-universal/pdv-universal-cart.js"></script>
+    <script src="/pdv-universal/pdv-universal-identificacao.js"></script>
+    <script src="/pdv-universal/pdv-universal-pix.js"></script>
+    <script src="/pdv-universal/pdv-universal-tef.js"></script>
+    <script src="/pdv-universal/pdv-universal-caixa.js"></script>
+    <script src="/shared/js/motor-preco-atacado.js"></script>
+    <script src="/pdv-universal/pdv-universal-entrega.js"></script>
+    <script src="/pdv-universal/pdv-universal-promocao.js"></script>
+    <script src="/pdv-universal/pdv-universal-preco-atacado.js"></script>
     <script src="/pdv-universal/pdv-universal-checkout.js"></script>
     <script src="/pdv-universal/pdv-universal-pagamento.js"></script>
     <script src="/pdv-universal/pdv-universal-pos-pagamento.js"></script>

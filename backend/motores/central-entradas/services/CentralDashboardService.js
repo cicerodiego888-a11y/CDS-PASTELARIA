@@ -26,12 +26,17 @@ class CentralDashboardService {
   }
 
   /**
+   * @param {Object} [filtros]
    * @returns {Promise<Object>}
    */
-  async obterResumo() {
-    const contadoresPorStatus = await this._documentosRepository.contarPorStatus({});
+  async obterResumo(filtros = {}) {
+    const filtrosEmpresa = {};
+    if (filtros.empresaId != null || filtros.empresa_id != null) {
+      filtrosEmpresa.empresaId = filtros.empresaId ?? filtros.empresa_id;
+    }
+    const contadoresPorStatus = await this._documentosRepository.contarPorStatus(filtrosEmpresa);
     const ultimoNsu = await this._nsuRepository.obterUltimaSincronizacao();
-    const estatisticas = await this._documentosRepository.obterEstatisticas();
+    const estatisticas = await this._documentosRepository.obterEstatisticas(filtrosEmpresa);
 
     const contadores = {};
     TODOS.forEach((status) => {

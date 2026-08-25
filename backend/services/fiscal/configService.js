@@ -5,6 +5,12 @@ const {
   montarConfigEmpresa,
   incrementaNumeroFiscalEmpresa
 } = require('./empresasConfiguracaoFiscal');
+const { logFiscalRuntime } = require('./core/FiscalRuntimeLog');
+const {
+  ehPlaceholderCsc,
+  preencherUrlsVaziasComOficiais,
+  resolverUrlsOficiaisNfce
+} = require('./FiscalConfigUrlsResolver');
 
 function useDb(db) {
   return db || dbDefault;
@@ -31,11 +37,62 @@ function getConfiguracoes(chaves, dbInjected) {
   });
 }
 
+function resolverUrlsEmissao(config) {
+  if (!config || !config.urls) {
+    const err = new Error('Configuração fiscal sem urls.');
+    err.code = 'CONFIGURACAO_FISCAL_EMPRESA_INCOMPLETA';
+    throw err;
+  }
+  const ambiente = Number(config.ambiente);
+  const bloco = ambiente === 1 ? config.urlsProducao : config.urlsHomologacao;
+  if (bloco) {
+    ['autorizacao', 'consultaQr', 'consultaChave'].forEach((chave) => {
+      const ativa = String(config.urls[chave] || '');
+      const doBloco = String(bloco[chave] || '');
+      if (ativa && doBloco && ativa !== doBloco) {
+        const err = new Error('URL ativa diverge do bloco do ambiente fiscal.');
+        err.code = 'CONFIGURACAO_FISCAL_AMBIENTE_DIVERGENTE';
+        throw err;
+      }
+    });
+  }
+  return {
+    autorizacao: String(config.urls.autorizacao || ''),
+    consultaQr: String(config.urls.consultaQr || ''),
+    consultaChave: String(config.urls.consultaChave || ''),
+    retorno: String(config.urls.retorno || ''),
+    status: String(config.urls.status || ''),
+    ambiente,
+    empresaId: config.empresaId != null ? Number(config.empresaId) : null,
+    origem: config.fonte === 'EMPRESA' ? 'CONFIGURACAO_EMPRESA' : 'CONFIGURACAO_GLOBAL'
+  };
+}
+
+function logFiscalConfigSeguro(config, operacao) {
+  const urls = config && config.urls ? config.urls : {};
+  logFiscalRuntime(operacao || 'CONFIG', {
+    empresa_id: config && config.empresaId != null ? config.empresaId : null,
+    ambiente: Number(config && config.ambiente) === 1 ? 'PRODUCAO' : 'HOMOLOGACAO',
+    origem: config && config.fonte === 'EMPRESA' ? 'CONFIGURACAO_EMPRESA' : 'CONFIGURACAO_GLOBAL',
+    operacao: operacao || 'CARGA',
+    url_autorizacao: urls.autorizacao || '',
+    url_qrcode: urls.consultaQr || '',
+    url_consulta_chave: urls.consultaChave || ''
+  });
+}
+
 async function getFiscalConfig({ validarUrls = true, empresaId, db } = {}) {
-  const idEmpresa = normalizarEmpresaId(empresaId);
-  if (idEmpresa) {
+  if (empresaId != null && empresaId !== '') {
+    const idEmpresa = normalizarEmpresaId(empresaId);
+    if (!idEmpresa) {
+      const err = new Error('empresaId inválido para configuração fiscal empresarial.');
+      err.code = 'EMPRESA_OBRIGATORIA';
+      throw err;
+    }
     const loaded = await carregarConfiguracaoFiscalEmpresa(idEmpresa, useDb(db));
-    return montarConfigEmpresa({ ...loaded, validarUrls });
+    const config = montarConfigEmpresa({ ...loaded, validarUrls });
+    logFiscalConfigSeguro(config, 'CARGA');
+    return config;
   }
 
   const cfg = await getConfiguracoes([
@@ -83,7 +140,11 @@ async function getFiscalConfig({ validarUrls = true, empresaId, db } = {}) {
     'fiscal_emitente_bairro'
   ], db);
 
-  console.log('[FISCAL CONFIG] Configurações carregadas:', JSON.stringify(cfg, null, 2));
+  const cfgLog = { ...cfg };
+  ['fiscal_token_csc', 'fiscal_certificado_senha'].forEach((k) => {
+    if (cfgLog[k]) cfgLog[k] = '***';
+  });
+  console.log('[FISCAL CONFIG] Configurações carregadas:', JSON.stringify(cfgLog, null, 2));
 
   if (!cfg.fiscal_ambiente) {
     throw new Error('Ambiente fiscal não configurado. Selecione Produção ou Homologação.');
@@ -123,7 +184,7 @@ async function getFiscalConfig({ validarUrls = true, empresaId, db } = {}) {
     );
   }
 
-  return {
+  const configGlobal = {
     fonte: 'GLOBAL',
     empresaId: null,
     ambiente: ambienteFiscal,
@@ -159,6 +220,8 @@ async function getFiscalConfig({ validarUrls = true, empresaId, db } = {}) {
     urlsHomologacao,
     urlsProducao
   };
+  logFiscalConfigSeguro(configGlobal, 'CARGA');
+  return configGlobal;
 }
 
 function setConfiguracao(chave, valor, tipo = 'string', descricao = '', dbInjected) {
@@ -176,6 +239,119 @@ function setConfiguracao(chave, valor, tipo = 'string', descricao = '', dbInject
       resolve();
     });
   });
+}
+
+const CHAVES_SEGREDAS_PRESERVAR = Object.freeze([
+  'fiscal_token_csc',
+  'fiscal_certificado_senha'
+]);
+
+/**
+ * DTO seguro para UI — não devolve TOKEN CSC puro.
+ * idCSC permanece (não é segredo).
+ */
+function dtoPublicoFiscalParaUi(config) {
+  const cfg = config && typeof config === 'object' ? config : {};
+  const cscOk = !!(cfg.tokenCSC && String(cfg.tokenCSC).trim());
+  const idOk = !!(cfg.idCSC && String(cfg.idCSC).trim());
+  const out = { ...cfg };
+  delete out.tokenCSC;
+  delete out.certificadoSenha;
+  out.idCSC = idOk ? String(cfg.idCSC).trim() : '';
+  out.id_csc = out.idCSC;
+  out.cscConfigurado = cscOk;
+  out.csc_configurado = cscOk;
+  out.idCscConfigurado = idOk;
+  out.id_csc_configurado = idOk;
+  out.certificado_configurado = !!(cfg.certificadoPath && String(cfg.certificadoPath).trim());
+  // Preencher URLs vazias na exibição a partir do catálogo oficial.
+  const uf = cfg.uf || 'CE';
+  const enriquecer = (bloco, ambiente) => {
+    const oficial = resolverUrlsOficiaisNfce({ uf, ambiente });
+    const b = bloco && typeof bloco === 'object' ? { ...bloco } : {};
+    ['autorizacao', 'retorno', 'status', 'consultaQr', 'consultaChave'].forEach((k) => {
+      if (!b[k] || !String(b[k]).trim()) b[k] = oficial[k];
+    });
+    return b;
+  };
+  out.urlsHomologacao = enriquecer(cfg.urlsHomologacao, 2);
+  out.urlsProducao = enriquecer(cfg.urlsProducao, 1);
+  if (out.urls) {
+    out.urls = Number(cfg.ambiente) === 1 ? out.urlsProducao : out.urlsHomologacao;
+  }
+  return out;
+}
+
+/**
+ * Filtra payload do PUT /fiscal/config:
+ * - não persiste placeholder CSC
+ * - não zera segredos com string vazia
+ */
+function filtrarPayloadConfigFiscalUi(payload) {
+  const bruto = payload && typeof payload === 'object' ? payload : {};
+  const out = {};
+  for (const [chave, valor] of Object.entries(bruto)) {
+    if (chave === 'fiscal_token_csc' || chave === 'fiscal_id_csc') {
+      if (ehPlaceholderCsc(valor)) continue;
+    }
+    if (CHAVES_SEGREDAS_PRESERVAR.includes(chave)) {
+      if (valor == null || String(valor).trim() === '') continue;
+    }
+    if (chave === 'fiscal_certificado_senha' && (valor == null || String(valor).trim() === '')) continue;
+    out[chave] = valor;
+  }
+  return out;
+}
+
+/**
+ * Completa chaves de URL vazias no mapa global configuracoes com oficiais.
+ */
+async function completarUrlsGlobaisVazias(dbInjected) {
+  const db = useDb(dbInjected);
+  const ufRow = await getConfiguracoes(['fiscal_uf_sigla', 'fiscal_uf'], db);
+  const uf = ufRow.fiscal_uf_sigla || ufRow.fiscal_uf || 'CE';
+  const merged = {};
+  const chavesUrl = [
+    'fiscal_ws_autorizacao_homologacao', 'fiscal_ws_retorno_homologacao', 'fiscal_ws_status_homologacao',
+    'fiscal_csc_qrcode_url_homologacao', 'fiscal_consulta_chave_url_homologacao',
+    'fiscal_ws_autorizacao_producao', 'fiscal_ws_retorno_producao', 'fiscal_ws_status_producao',
+    'fiscal_csc_qrcode_url_producao', 'fiscal_consulta_chave_url_producao'
+  ];
+  const atuais = await getConfiguracoes(chavesUrl, db);
+  const comoEmpresa = {
+    uf,
+    ws_autorizacao_homologacao: atuais.fiscal_ws_autorizacao_homologacao,
+    ws_retorno_homologacao: atuais.fiscal_ws_retorno_homologacao,
+    ws_status_homologacao: atuais.fiscal_ws_status_homologacao,
+    csc_qrcode_url_homologacao: atuais.fiscal_csc_qrcode_url_homologacao,
+    consulta_chave_url_homologacao: atuais.fiscal_consulta_chave_url_homologacao,
+    ws_autorizacao_producao: atuais.fiscal_ws_autorizacao_producao,
+    ws_retorno_producao: atuais.fiscal_ws_retorno_producao,
+    ws_status_producao: atuais.fiscal_ws_status_producao,
+    csc_qrcode_url_producao: atuais.fiscal_csc_qrcode_url_producao,
+    consulta_chave_url_producao: atuais.fiscal_consulta_chave_url_producao
+  };
+  preencherUrlsVaziasComOficiais(comoEmpresa, { uf });
+  const mapa = {
+    fiscal_ws_autorizacao_homologacao: comoEmpresa.ws_autorizacao_homologacao,
+    fiscal_ws_retorno_homologacao: comoEmpresa.ws_retorno_homologacao,
+    fiscal_ws_status_homologacao: comoEmpresa.ws_status_homologacao,
+    fiscal_csc_qrcode_url_homologacao: comoEmpresa.csc_qrcode_url_homologacao,
+    fiscal_consulta_chave_url_homologacao: comoEmpresa.consulta_chave_url_homologacao,
+    fiscal_ws_autorizacao_producao: comoEmpresa.ws_autorizacao_producao,
+    fiscal_ws_retorno_producao: comoEmpresa.ws_retorno_producao,
+    fiscal_ws_status_producao: comoEmpresa.ws_status_producao,
+    fiscal_csc_qrcode_url_producao: comoEmpresa.csc_qrcode_url_producao,
+    fiscal_consulta_chave_url_producao: comoEmpresa.consulta_chave_url_producao
+  };
+  for (const [chave, valor] of Object.entries(mapa)) {
+    const atual = atuais[chave] != null ? String(atuais[chave]).trim() : '';
+    if (!atual && valor) {
+      await setConfiguracao(chave, valor, 'string', `URL fiscal auto: ${chave}`, db);
+      merged[chave] = valor;
+    }
+  }
+  return merged;
 }
 
 async function incrementaNumeroFiscal(opcoes = {}) {
@@ -234,5 +410,10 @@ async function incrementaNumeroFiscal(opcoes = {}) {
 module.exports = {
   getFiscalConfig,
   setConfiguracao,
-  incrementaNumeroFiscal
+  incrementaNumeroFiscal,
+  resolverUrlsEmissao,
+  logFiscalConfigSeguro,
+  dtoPublicoFiscalParaUi,
+  filtrarPayloadConfigFiscalUi,
+  completarUrlsGlobaisVazias
 };

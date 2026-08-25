@@ -40,14 +40,17 @@ function sanitizarOpcoesResolucao(opcoes) {
 /**
  * Único ponto operacional: lê a configuração oficial e devolve
  * EMPRESA_UNICA | MULTIEMPRESA. Não lê body/query/CNPJ.
+ * Sprint 05.38.B — derivado do modo operacional global quando não injetado.
  */
 function resolverModoOperacaoVendaAtivo(opcoes = {}) {
   const limpo = sanitizarOpcoesResolucao(opcoes);
   if (typeof limpo.obterModoOperacaoVenda === 'function') {
     return validarModoOperacaoVenda(limpo.obterModoOperacaoVenda());
   }
-  const configService = require('../../services/configuracaoService');
-  return configService.obterModoOperacaoVenda();
+  const { modoGlobalParaModoVenda } = require('../../core/modo-operacional/compatibilidadeModoVenda');
+  const { resolverModoOperacionalGlobalAtivo } = require('../../core/modo-operacional/modoOperacionalGlobal');
+  const modoGlobal = resolverModoOperacionalGlobalAtivo(opcoes);
+  return validarModoOperacaoVenda(modoGlobalParaModoVenda(modoGlobal));
 }
 
 /**

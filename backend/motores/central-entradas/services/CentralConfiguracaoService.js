@@ -84,6 +84,8 @@ class CentralConfiguracaoService {
    */
   constructor(deps = {}) {
     /** @private */
+    this._db = deps.db ?? null;
+    /** @private */
     this._repository = deps.configuracaoRepository
       ?? deps.configRepository
       ?? new CentralConfiguracaoRepository();
@@ -211,23 +213,79 @@ class CentralConfiguracaoService {
 
   /**
    * Contexto operacional para sync/SOAP — único contrato interno.
-   * Ambiente/UF/certificado/CNPJ: sempre getFiscalConfig (RC3.1).
+   * Ambiente/UF/certificado/CNPJ:
+   *   - com empresaId e config fiscal empresarial completa → empresas_configuracao_fiscal
+   *   - EMPRESA_SIMPLES / fallback → getFiscalConfig (RC3.1, transparência)
+   * @param {Object} [opcoes]
+   * @param {number|string} [opcoes.empresaId]
+   * @param {boolean} [opcoes.permitirFallbackGlobal=true]
    * @returns {Promise<{ ok: boolean, codigoErro?: string, mensagem?: string, contexto?: Object }>}
    */
-  async obterContextoOperacional() {
+  async obterContextoOperacional(opcoes = {}) {
     await this._repository.ensureDefaults();
     const mapa = await this._obterMapaValores();
     const sync = await this._syncConfig.obterResumo();
 
+    const empresaIdOpcao = opcoes.empresaId != null ? Number(opcoes.empresaId) : null;
+    const permitirFallbackGlobal = opcoes.permitirFallbackGlobal !== false;
+
     let fiscal = {};
-    try {
-      fiscal = await this._getFiscalConfig();
-    } catch (error) {
-      return {
-        ok: false,
-        codigoErro: 'CONFIG_FISCAL',
-        mensagem: this._mensagemAmigavel(error.message)
-      };
+    let origemAmbiente = 'getFiscalConfig';
+    let empresaIdContexto = Number.isInteger(empresaIdOpcao) && empresaIdOpcao > 0
+      ? empresaIdOpcao
+      : null;
+
+    if (empresaIdContexto) {
+      try {
+        const { obterConfiguracaoFiscalEmpresa } = require('../../../services/fiscal/empresasConfiguracaoFiscal');
+        const cfgEmp = await obterConfiguracaoFiscalEmpresa(empresaIdContexto, {
+          db: this._db || null,
+          validarUrls: false
+        });
+        const cnpjEmp = String(cfgEmp.cnpj || '').replace(/\D/g, '');
+        const certOk = !!(cfgEmp.certificadoPath && cfgEmp.certificadoSenha && cnpjEmp.length === 14);
+        if (certOk) {
+          fiscal = {
+            certificadoPath: cfgEmp.certificadoPath,
+            certificadoSenha: cfgEmp.certificadoSenha,
+            cnpj: cnpjEmp,
+            fiscal_ambiente: cfgEmp.ambiente,
+            ambiente: cfgEmp.ambiente,
+            fiscal_codigo_uf: cfgEmp.codigoUf,
+            codigo_uf: cfgEmp.codigoUf,
+            fiscal_uf: cfgEmp.uf,
+            uf: cfgEmp.uf
+          };
+          origemAmbiente = 'empresas_configuracao_fiscal';
+        } else if (!permitirFallbackGlobal) {
+          return {
+            ok: false,
+            codigoErro: 'CERTIFICADO',
+            mensagem: `Certificado/CNPJ não configurados para a empresa ${empresaIdContexto}.`
+          };
+        }
+      } catch (error) {
+        if (!permitirFallbackGlobal) {
+          return {
+            ok: false,
+            codigoErro: 'CONFIG_FISCAL',
+            mensagem: this._mensagemAmigavel(error.message)
+          };
+        }
+      }
+    }
+
+    if (!fiscal.certificadoPath) {
+      try {
+        fiscal = await this._getFiscalConfig();
+        origemAmbiente = 'getFiscalConfig';
+      } catch (error) {
+        return {
+          ok: false,
+          codigoErro: 'CONFIG_FISCAL',
+          mensagem: this._mensagemAmigavel(error.message)
+        };
+      }
     }
 
     const ambiente = this._ambienteDeFiscal(fiscal);
@@ -273,10 +331,11 @@ class CentralConfiguracaoService {
     return {
       ok: true,
       contexto: {
+        empresaId: empresaIdContexto,
         ambiente,
         uf: ufSnap.uf,
         codigoUf: ufSnap.codigoUf,
-        origemAmbiente: 'getFiscalConfig',
+        origemAmbiente,
         cnpj,
         certificadoPath,
         certificadoSenha,

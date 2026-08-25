@@ -441,14 +441,22 @@ async function _finalizarPrestacaoInterno({ vendaId, body = {}, req = {}, contex
     await gravarRecebimentosAsync(vendaId, recebimentos);
 
     // Financeiro
+    const {
+      resolverEmpresaDaOrigemFinanceira
+    } = require('../financeiro/FinanceiroEmpresaContextoService');
+    const empresaIdFin = resolverEmpresaDaOrigemFinanceira({
+      venda,
+      caixa: req.caixaSessao || req.caixa_sessao
+    });
+
     await run(`DELETE FROM financeiro WHERE venda_id = ? AND origem = 'venda'`, [vendaId]);
     await run(
       `
         INSERT INTO financeiro (
           tipo, descricao, valor, data_movimento, categoria, forma_pagamento,
           referencia_id, referencia_tipo, status, origem, documento, vencimento,
-          numero_parcela, total_parcelas, venda_id, pessoa_nome, baixado_em
-        ) VALUES ('receita', ?, ?, ?, 'vendas', ?, ?, 'venda', ?, 'venda', ?, ?, 1, 1, ?, ?, ?)
+          numero_parcela, total_parcelas, venda_id, pessoa_nome, baixado_em, empresa_id
+        ) VALUES ('receita', ?, ?, ?, 'vendas', ?, ?, 'venda', ?, 'venda', ?, ?, 1, 1, ?, ?, ?, ?)
       `,
       [
         `Venda entrega ${venda.codigo || vendaId}`,
@@ -461,7 +469,8 @@ async function _finalizarPrestacaoInterno({ vendaId, body = {}, req = {}, contex
         dataMov,
         vendaId,
         venda.cliente_nome || null,
-        baixadoEm
+        baixadoEm,
+        empresaIdFin
       ]
     );
 

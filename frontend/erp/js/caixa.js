@@ -66,12 +66,18 @@ function getTerminalRequestQuery(params = {}) {
 }
 
 function carregarCaixaAberto() {
-  $.ajax({
+  const ajaxOpts = {
     url: `${API_URL}/caixa/aberto`,
     method: 'GET',
     data: getTerminalRequestQuery(),
     cache: false
-  }).done(function(resumo) {
+  };
+  try {
+    const emp = typeof localStorage !== 'undefined' ? localStorage.getItem('cds_empresa_id') : null;
+    if (emp) ajaxOpts.headers = { 'X-Empresa-Id': emp };
+  } catch (_e) { /* ignore */ }
+
+  $.ajax(ajaxOpts).done(function(resumo) {
     if (!resumo) {
       renderStatusCaixa(null);
       renderAbrirCaixa();

@@ -132,10 +132,17 @@ async function enviarOperacaoCaixa(permissao, url, body, opcoes = {}) {
         ? getTerminalRequestData(payload)
         : payload;
 
+      const headers = { 'Content-Type': 'application/json' };
+      try {
+        const emp = typeof localStorage !== 'undefined' ? localStorage.getItem('cds_empresa_id') : null;
+        if (emp) headers['X-Empresa-Id'] = emp;
+      } catch (_e) { /* ignore */ }
+
       return $.ajax({
         url: `${API_URL}${url}`,
         method: 'POST',
         contentType: 'application/json',
+        headers,
         data: JSON.stringify(data),
         global: opcoes.global !== false
       });

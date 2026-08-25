@@ -90,11 +90,12 @@ function test07CscPodeSerEnviado() {
   assert.strictEqual(p.id_csc, '1');
 }
 
-function test08CscNaoRetornaGet() {
+function test08CscGetMascaraTokenMasExpoeId() {
   const dto = dtoSeguro(5);
   assert.ok(!Object.prototype.hasOwnProperty.call(dto, 'token_csc'));
-  assert.ok(!Object.prototype.hasOwnProperty.call(dto, 'id_csc'));
+  assert.strictEqual(dto.id_csc, 'ID-CSC');
   assert.strictEqual(dto.csc_configurado, true);
+  assert.strictEqual(dto.id_csc_configurado, true);
 }
 
 function test09CscIndicadorVisual() {
@@ -171,7 +172,7 @@ function run() {
     test05EmpresaIdCorreto,
     test06DivergenciaBloqueada,
     test07CscPodeSerEnviado,
-    test08CscNaoRetornaGet,
+    test08CscGetMascaraTokenMasExpoeId,
     test09CscIndicadorVisual,
     test10CertificadoEmpresaId,
     test11SenhaNaoRetorna,

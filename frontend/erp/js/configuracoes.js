@@ -1366,7 +1366,32 @@ async function salvarConfiguracoesAvancadas() {
 
     try {
         const servidorAtual = window.configuracaoAvancadaServidor || {};
+        const modoOperacionalGlobal = String(
+            $('input[name="modoOperacionalGlobal"]:checked').val() || servidorAtual.modo_operacional_global || 'EMPRESA_SIMPLES'
+        ).toUpperCase();
+        const modoAnterior = String(
+            $('#cfgModoOperacionalAnterior').val() || servidorAtual.modo_operacional_global || 'EMPRESA_SIMPLES'
+        ).toUpperCase();
+        const empresaOperacionalRaw = $('#cfgEmpresaOperacionalId').length
+            ? String($('#cfgEmpresaOperacionalId').val() || '').trim()
+            : String(servidorAtual.empresa_operacional_id || '').trim();
+        let confirmacaoModoOperacional = false;
+
+        if (modoOperacionalGlobal !== modoAnterior) {
+            const confirmou = confirm(
+                'Alterar o modo operacional pode modificar a forma como os módulos organizam os dados empresariais.\n\nDeseja continuar?'
+            );
+            if (!confirmou) {
+                showNotification('Alteração do modo operacional cancelada.', 'warning');
+                return;
+            }
+            confirmacaoModoOperacional = true;
+        }
+
         const body = {
+            modo_operacional_global: modoOperacionalGlobal,
+            confirmacao_modo_operacional: confirmacaoModoOperacional,
+            empresa_operacional_id: empresaOperacionalRaw !== '' ? Number(empresaOperacionalRaw) : null,
             tipoImplantacao,
             modo_confirmacao_fiscal: modoConfirmacaoFiscal,
             porta,

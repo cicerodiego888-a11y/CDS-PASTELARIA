@@ -16,6 +16,11 @@ const {
   extrairMetadadosNota,
   detectarNfCancelada
 } = require('../../../services/fiscal/dfeXmlMetadados');
+const {
+  resolverEmpresaParaCentral,
+  normalizarCnpj
+} = require('../../../services/central-entradas/CentralEntradasEmpresaContextoService');
+const { extrairCnpjDestinatarioXml } = require('../../../utils/centralEntradasEmpresaHelpers');
 
 const ORIGEM_UPLOAD = 'upload_manual';
 const EXTENSAO_XML = /\.xml$/i;
@@ -113,9 +118,43 @@ class CentralUploadService {
       return this._itemErro(nome, 'XML_INVALIDO', 'XML sem chave de acesso identificável');
     }
 
+    let empresaResolvida;
+    try {
+      empresaResolvida = await resolverEmpresaParaCentral({
+        empresaId: opcoes.empresaId ?? opcoes.empresa_id ?? null,
+        cnpj: extrairCnpjDestinatarioXml(xml),
+        operacao: 'upload_xml',
+        req: opcoes.req || null
+      }, {
+        db: opcoes.db || null,
+        contrato: opcoes.contrato || null
+      });
+    } catch (err) {
+      return this._itemErro(
+        nome,
+        err.code || 'EMPRESA_CENTRAL_AUSENTE',
+        err.message || 'Não foi possível resolver a empresa do XML'
+      );
+    }
+
+    const cnpjDest = extrairCnpjDestinatarioXml(xml);
+    if (
+      cnpjDest.length === 14
+      && empresaResolvida.cnpj
+      && normalizarCnpj(empresaResolvida.cnpj) !== cnpjDest
+      && empresaResolvida.origem !== 'CONTRATO_EMPRESA_SIMPLES'
+    ) {
+      return this._itemErro(
+        nome,
+        'DOCUMENTO_EMPRESA_INCOMPATIVEL',
+        'CNPJ do destinatário diverge da empresa selecionada'
+      );
+    }
+
     const persistido = await this._persistencia.persistirDocumentoDfe({
       xml,
-      origem: ORIGEM_UPLOAD
+      origem: ORIGEM_UPLOAD,
+      empresaId: empresaResolvida.empresaId
     });
 
     // RC7.4.2 — upload cancela wait, backoff, bloqueio 656 e erro 593.

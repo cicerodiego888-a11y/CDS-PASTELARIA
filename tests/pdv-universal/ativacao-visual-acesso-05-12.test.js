@@ -54,6 +54,7 @@ function test05AssetsDeclaradosExistem() {
   const refs = [
     '/pdv-universal/pdv-universal.css',
     '/pdv-universal/pdv-universal-cart.js',
+    '/pdv-universal/pdv-universal-identificacao.js',
     '/pdv-universal/pdv-universal-checkout.js',
     '/pdv-universal/pdv-universal-pagamento.js',
     '/pdv-universal/pdv-universal-pos-pagamento.js',

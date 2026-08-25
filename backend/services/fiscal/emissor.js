@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const db = require('../../database');
-const { getFiscalConfig, incrementaNumeroFiscal, setConfiguracao } = require('./configService');
+const { getFiscalConfig, incrementaNumeroFiscal, setConfiguracao, resolverUrlsEmissao, logFiscalConfigSeguro } = require('./configService');
 const {
   normalizarEmpresaId,
   garantirSchemaFiscalEmpresaAsync,
@@ -403,6 +403,7 @@ async function emitirPorVendaId(vendaId, opcoes = {}) {
   let qrCodeUrl = '';
   let assinaturaErro = null;
   let certificado = null;
+  let urlsEmissao = resolverUrlsEmissao(config);
 
   try {
     salvarDebug('01-xml-nfe-original.xml', xmlBase.xmlSemAssinatura);
@@ -439,7 +440,8 @@ async function emitirPorVendaId(vendaId, opcoes = {}) {
       `DigestValue: ${assinatura.digestValue || ''}`
     ].join('\n'));
 
-    const consultaUrlQr = String(config.urls?.consultaQr || '').trim();
+    logFiscalConfigSeguro(config, 'AUTORIZACAO');
+    const consultaUrlQr = String(urlsEmissao.consultaQr || '').trim();
     if (!consultaUrlQr) {
       throw new Error(
         Number(config.ambiente) === 1
@@ -457,7 +459,7 @@ async function emitirPorVendaId(vendaId, opcoes = {}) {
       uf: config.uf
     });
 
-    const urlConsulta = String(config.urls?.consultaChave || '').trim();
+    const urlConsulta = String(urlsEmissao.consultaChave || '').trim();
     if (!urlConsulta) {
       throw new Error(
         Number(config.ambiente) === 1
@@ -548,15 +550,11 @@ async function emitirPorVendaId(vendaId, opcoes = {}) {
     const loteXml = montarLote(xmlAssinadoFinal, String(numero));
 
     // Sprint F10 — transporte via Plataforma Fiscal (fallback automático para legado)
-    const envio = await enviarAutorizacao({
-      url: config.urls.autorizacao,
+    const envio = await entregarUrlsAoTransporte(config, {
       loteXml,
-      ambiente: config.ambiente,
       cUF: config.codigoUf || '23',
-      versaoDados: '4.00',
-      certificadoPath: config.certificadoPath,
-      certificadoSenha: config.certificadoSenha
-    });
+      operacao: 'AUTORIZACAO'
+    }, typeof opcoes.enviarAutorizacao === 'function' ? opcoes.enviarAutorizacao : enviarAutorizacao);
 
     soapResponse = {
       success: envio.success,
@@ -680,7 +678,8 @@ async function obterDanfeHtmlAtualizado(vendaId) {
   }
 
   const { venda, itens } = await carregarVenda(id);
-  const config = await getFiscalConfig();
+  const empresaNota = normalizarEmpresaId(nota.empresa_id);
+  const config = await getFiscalConfig(empresaNota ? { empresaId: empresaNota } : {});
   const ambiente = Number(nota.ambiente || config.ambiente || 1);
 
   const danfeHtml = await gerarDanfeHtml({
@@ -735,4 +734,24 @@ async function obterDanfeHtmlAtualizado(vendaId) {
   };
 }
 
-module.exports = { emitirPorVendaId, obterDanfeHtmlAtualizado };
+function entregarUrlsAoTransporte(config, extras, enviar) {
+  const urlsEmissao = resolverUrlsEmissao(config);
+  logFiscalConfigSeguro(config, extras && extras.operacao ? extras.operacao : 'AUTORIZACAO');
+  const fn = typeof enviar === 'function' ? enviar : enviarAutorizacao;
+  return fn({
+    url: urlsEmissao.autorizacao,
+    ambiente: config.ambiente,
+    cUF: (extras && extras.cUF) || config.codigoUf || '23',
+    versaoDados: '4.00',
+    loteXml: extras && extras.loteXml,
+    certificadoPath: config.certificadoPath,
+    certificadoSenha: config.certificadoSenha
+  });
+}
+
+module.exports = {
+  emitirPorVendaId,
+  obterDanfeHtmlAtualizado,
+  entregarUrlsAoTransporte,
+  resolverUrlsEmissao
+};

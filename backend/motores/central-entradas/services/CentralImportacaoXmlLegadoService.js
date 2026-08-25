@@ -124,7 +124,7 @@ class CentralImportacaoXmlLegadoService {
     const usuarioId = opcoes.usuarioId ?? null;
     const lista = Array.isArray(arquivos) ? arquivos : [];
 
-    const cnpjEmpresa = await this._resolverCnpjEmpresa();
+    const cnpjEmpresa = await this._resolverCnpjEmpresa(opcoes);
 
     const relatorio = {
       sprint: 'RC3.4.9',
@@ -164,6 +164,9 @@ class CentralImportacaoXmlLegadoService {
         usuarioId,
         usuarioNome: opcoes.usuarioNome || null,
         cnpjEmpresa,
+        empresaId: opcoes.empresaId ?? opcoes.empresa_id ?? null,
+        req: opcoes.req || null,
+        db: opcoes.db || null,
         chavesNoLote
       });
 
@@ -212,8 +215,27 @@ class CentralImportacaoXmlLegadoService {
   }
 
   /** @private */
-  async _resolverCnpjEmpresa() {
+  async _resolverCnpjEmpresa(opcoes = {}) {
     try {
+      const {
+        resolverEmpresaParaCentral,
+        normalizarCnpj
+      } = require('../../../services/central-entradas/CentralEntradasEmpresaContextoService');
+
+      if (opcoes.cnpjDestinatario || opcoes.empresaId || opcoes.req) {
+        try {
+          const resolvido = await resolverEmpresaParaCentral({
+            empresaId: opcoes.empresaId ?? opcoes.empresa_id ?? null,
+            cnpj: opcoes.cnpjDestinatario || null,
+            operacao: 'importacao_xml',
+            req: opcoes.req || null
+          }, { db: opcoes.db || null });
+          if (resolvido.cnpj) return normalizarCnpj(resolvido.cnpj);
+        } catch {
+          /* segue fallback legado abaixo */
+        }
+      }
+
       if (typeof this._obterCnpjEmpresa === 'function') {
         const cnpj = await this._obterCnpjEmpresa();
         return String(cnpj || '').replace(/\D/g, '');
@@ -405,9 +427,55 @@ class CentralImportacaoXmlLegadoService {
     const xml = this._obterXml(arquivo);
     const agora = new Date();
 
+    let cnpjEmpresa = ctx.cnpjEmpresa;
+    try {
+      const participantes = this._extrairParticipantes(xml || '');
+      const {
+        resolverEmpresaParaCentral,
+        normalizarCnpj
+      } = require('../../../services/central-entradas/CentralEntradasEmpresaContextoService');
+      const resolvido = await resolverEmpresaParaCentral({
+        empresaId: ctx.empresaId || null,
+        cnpj: participantes.cnpjDestinatario || null,
+        operacao: 'importacao_xml',
+        req: ctx.req || null
+      }, { db: ctx.db || null });
+      cnpjEmpresa = resolvido.cnpj || cnpjEmpresa;
+    } catch (err) {
+      if (err && (
+        err.code === 'EMPRESA_CENTRAL_INVALIDA'
+        || err.code === 'EMPRESA_CENTRAL_INATIVA'
+        || err.code === 'EMPRESA_CENTRAL_AUSENTE'
+        || err.code === 'EMPRESA_CENTRAL_AMBIGUA'
+      )) {
+        return {
+          nomeArquivo: nome,
+          chave: null,
+          emitente: null,
+          destinatario: null,
+          protocolo: null,
+          hash: null,
+          valido: false,
+          documentoEncontrado: false,
+          documentoNaoEncontrado: false,
+          documentoAlterado: false,
+          documentoId: null,
+          statusInicial: null,
+          statusFinal: null,
+          parserExecutado: false,
+          miipExecutado: false,
+          compraCriada: false,
+          reaberto: false,
+          codigo: err.code,
+          mensagem: err.message,
+          situacao: 'Empresa não resolvida'
+        };
+      }
+    }
+
     const validacao = this._validarXml(xml, nome, {
       recusarCancelados: ctx.recusarCancelados,
-      cnpjEmpresa: ctx.cnpjEmpresa
+      cnpjEmpresa
     });
 
     const base = {
@@ -497,6 +565,30 @@ class CentralImportacaoXmlLegadoService {
     base.documentoEncontrado = true;
     base.documentoId = Number(documento.id);
     base.statusInicial = documento.status;
+    base.empresaId = documento.empresaId != null ? Number(documento.empresaId) : null;
+
+    // 05.38.E — não permitir XML de outra empresa sobre documento existente
+    if (
+      documento.empresaId != null
+      && ctx.cnpjEmpresa
+      && String(ctx.cnpjEmpresa).replace(/\D/g, '').length === 14
+    ) {
+      try {
+        const EmpresaService = require('../../../services/empresas/EmpresaService');
+        const empDoc = await EmpresaService.buscarEmpresaPorId(documento.empresaId, {});
+        const cnpjDoc = String(empDoc?.cnpj || '').replace(/\D/g, '');
+        if (cnpjDoc && cnpjDoc !== String(ctx.cnpjEmpresa).replace(/\D/g, '')) {
+          return {
+            ...base,
+            valido: false,
+            codigo: 'DOCUMENTO_EMPRESA_INCOMPATIVEL',
+            mensagem: 'XML destinado a outra empresa — importação bloqueada',
+            situacao: 'Empresa incompatível',
+            statusFinal: documento.status
+          };
+        }
+      } catch { /* empresa ausente — segue validação de destinatário já feita */ }
+    }
 
     if (STATUS_SAUDAVEIS.includes(documento.status)) {
       const tipo = documento.tipoDocumento || documento.tipo_documento;

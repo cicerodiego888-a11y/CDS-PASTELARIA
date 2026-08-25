@@ -346,8 +346,8 @@ class CentralEntradasOrchestrator {
     return this._historicoService.listarPorDocumento(documentoId);
   }
 
-  async obterDashboard() {
-    return this._dashboardService.obterResumo();
+  async obterDashboard(filtros = {}) {
+    return this._dashboardService.obterResumo(filtros);
   }
 
   /** RC3.4.6 — painel Saúde da Central (sem SEFAZ). */

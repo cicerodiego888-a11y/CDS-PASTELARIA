@@ -23,7 +23,7 @@ function test01SemApiApi() {
 
 function test02UmaVersao() {
   const app = src('frontend/erp/js/app.js');
-  assert.ok(app.includes(": '05172'"));
+  assert.ok(app.includes(": '0519'"));
   assert.ok(!app.includes('?v=0515'));
   assert.ok(!app.includes('?v=0516'));
   assert.ok(app.includes('existente.src !== src'));
@@ -81,7 +81,7 @@ async function test11InvalidaRetry() {
 }
 
 function testVersaoModulo() {
-  assert.ok(src('frontend/erp/js/gestao-empresas-fiscal.js').includes("__CDS_EMPRESAS_MODULE_VERSION = '05.18'"));
+  assert.ok(src('frontend/erp/js/gestao-empresas-fiscal.js').includes("__CDS_EMPRESAS_MODULE_VERSION = '05.19'"));
 }
 
 async function run() {

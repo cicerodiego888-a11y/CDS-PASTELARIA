@@ -1,7 +1,8 @@
 const db = require('../database');
 const { isMultiCaixaAtivo, obterTerminalIdDaRequisicao, parsePositiveInteger } = require('../utils/multiCaixa');
-const { obterCaixaTurnoId } = require('../utils/caixaSessaoHelpers');
+const { obterCaixaTurnoId, montarSqlSessaoAberta } = require('../utils/caixaSessaoHelpers');
 const { origemExigeCaixa } = require('../services/vendas/VendaOrigin');
+const { exigirSessaoDaEmpresa, statusDeErroEmpresa } = require('../services/caixa/CaixaEmpresaContextoService');
 
 function obterTerminalId(req) {
   return obterTerminalIdDaRequisicao(req);
@@ -10,6 +11,12 @@ function obterTerminalId(req) {
 function obterSessaoId(req) {
   const rawId = req.body?.caixa_sessao_id || req.query?.caixa_sessao_id || req.headers['x-caixa-sessao-id'] || req.user?.caixa_sessao_id;
   return parsePositiveInteger(rawId);
+}
+
+function obterEmpresaIdDoReq(req) {
+  const raw = req.empresaId != null ? req.empresaId : req.caixaEmpresaContexto?.empresaId;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : null;
 }
 
 /**
@@ -28,6 +35,7 @@ function validarCaixaSeOrigemPdv(req, res, next) {
 function validarCaixaAberto(req, res, next) {
   const terminalId = obterTerminalId(req);
   const sessaoId = obterSessaoId(req);
+  const empresaId = obterEmpresaIdDoReq(req);
 
   if (isMultiCaixaAtivo() && !sessaoId && !terminalId) {
     return res.status(400).json({
@@ -39,14 +47,9 @@ function validarCaixaAberto(req, res, next) {
   let params;
 
   if (sessaoId) {
-    sql = `SELECT * FROM caixa_sessoes WHERE id = ? AND status = 'aberto'`;
-    params = [sessaoId];
-  } else if (terminalId) {
-    sql = `SELECT * FROM caixa_sessoes WHERE status = 'aberto' AND terminal_id = ? ORDER BY id DESC LIMIT 1`;
-    params = [terminalId];
-  } else if (!isMultiCaixaAtivo()) {
-    sql = `SELECT * FROM caixa_sessoes WHERE status = 'aberto' ORDER BY id DESC LIMIT 1`;
-    params = [];
+    ({ sql, params } = montarSqlSessaoAberta({ sessaoId }));
+  } else if (terminalId || empresaId || !isMultiCaixaAtivo()) {
+    ({ sql, params } = montarSqlSessaoAberta({ terminalId, empresaId }));
   } else {
     return res.status(400).json({ error: 'Nenhum caixa aberto neste terminal.' });
   }
@@ -64,6 +67,18 @@ function validarCaixaAberto(req, res, next) {
           ? 'Nenhum caixa aberto neste terminal.'
           : 'Nenhum caixa aberto.';
       return res.status(400).json({ error: mensagem });
+    }
+
+    if (empresaId != null) {
+      try {
+        exigirSessaoDaEmpresa(sessao, empresaId);
+      } catch (empErr) {
+        return res.status(statusDeErroEmpresa(empErr)).json({
+          error: empErr.message,
+          code: empErr.code,
+          empresa_id: empErr.empresa_id
+        });
+      }
     }
 
     const turnoId = obterCaixaTurnoId(sessao);
@@ -96,6 +111,9 @@ function validarCaixaAberto(req, res, next) {
       req.terminalId = terminalId || sessao.terminal_id || null;
       req.operadorId = req.user?.id || sessao.operador_id || null;
       req.caixaSessao = sessao;
+      if (sessao.empresa_id != null && req.empresaId == null) {
+        req.empresaId = Number(sessao.empresa_id);
+      }
 
       next();
     });
@@ -131,19 +149,15 @@ function validarCaixaAbertoCancelamentoVenda(req, res, next) {
 
       const terminalId = obterTerminalId(req);
       const sessaoId = obterSessaoId(req);
+      const empresaId = obterEmpresaIdDoReq(req);
 
       let sql;
       let params;
 
       if (sessaoId) {
-        sql = `SELECT * FROM caixa_sessoes WHERE id = ? AND status = 'aberto'`;
-        params = [sessaoId];
-      } else if (terminalId) {
-        sql = `SELECT * FROM caixa_sessoes WHERE status = 'aberto' AND terminal_id = ? ORDER BY id DESC LIMIT 1`;
-        params = [terminalId];
-      } else if (!isMultiCaixaAtivo()) {
-        sql = `SELECT * FROM caixa_sessoes WHERE status = 'aberto' ORDER BY id DESC LIMIT 1`;
-        params = [];
+        ({ sql, params } = montarSqlSessaoAberta({ sessaoId }));
+      } else if (terminalId || empresaId || !isMultiCaixaAtivo()) {
+        ({ sql, params } = montarSqlSessaoAberta({ terminalId, empresaId }));
       } else {
         req.operadorId = req.user?.id || venda.operador_id || null;
         return next();
@@ -156,6 +170,17 @@ function validarCaixaAbertoCancelamentoVenda(req, res, next) {
         }
 
         if (sessao) {
+          if (empresaId != null) {
+            try {
+              exigirSessaoDaEmpresa(sessao, empresaId);
+            } catch (empErr) {
+              return res.status(statusDeErroEmpresa(empErr)).json({
+                sucesso: false,
+                mensagem: empErr.message,
+                code: empErr.code
+              });
+            }
+          }
           req.caixaSessaoId = sessao.id;
           req.caixaId = obterCaixaTurnoId(sessao);
           req.caixaConfigId = sessao.caixa_id || null;

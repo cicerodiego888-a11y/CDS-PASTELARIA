@@ -43,21 +43,29 @@ const {
   obterXmlVersionado
 } = require('../services/fiscal/nfeDevolucaoVenda');
 const { criarMiddlewareContextoEmpresa, resolverEmpresaId } = require('../services/fiscalNaoFiscal/empresaContexto');
+const { sqlFiltroEmpresaVenda } = require('../utils/vendasEmpresaHelpers');
+const {
+  middlewareResolverEmpresaVenda,
+  exigirVendaDaEmpresa,
+  responderErroEmpresaVenda
+} = require('../services/vendas/VendaEmpresaContextoService');
+
+const anexarEmpresaVenda = middlewareResolverEmpresaVenda({ db, exigirAutorizacaoUsuario: false });
 
 router.use(criarMiddlewareContextoEmpresa(db));
 
-// Listar vendas com busca
-router.get('/', (req, res) => {
+// Listar vendas com busca — apenas empresa do contexto (exclui legado NULL)
+router.get('/', anexarEmpresaVenda, (req, res) => {
   const busca = String(req.query.busca || '').trim();
   const todas = req.query.todas === '1';
   const somenteFiscal = String(req.query.modo || '').toLowerCase() === 'fiscal';
-
-  let where = '';
+  const empresaId = Number(req.empresaId);
   const params = [];
+  let where = ' WHERE ' + sqlFiltroEmpresaVenda('v', empresaId, params);
 
   if (busca) {
-    where = `
-      WHERE (
+    where += `
+      AND (
         v.id LIKE ?
         OR v.codigo LIKE ?
         OR c.nome LIKE ?
@@ -143,9 +151,10 @@ router.get('/', (req, res) => {
   });
 });
 
-// Buscar venda por ID
-router.get('/:id', (req, res) => {
+// Buscar venda por ID — ownership obrigatório (outra empresa / legado NULL = 404)
+router.get('/:id', anexarEmpresaVenda, (req, res) => {
   const { id } = req.params;
+  const empresaId = Number(req.empresaId);
 
   db.get(`
     SELECT
@@ -180,10 +189,17 @@ router.get('/:id', (req, res) => {
       LIMIT 1
     )
     WHERE v.id = ?
-  `, [id], (err, venda) => {
+      AND v.empresa_id = ?
+  `, [id, empresaId], (err, venda) => {
     if (err) {
       res.status(500).json({ error: err.message });
       return;
+    }
+
+    try {
+      exigirVendaDaEmpresa(venda, empresaId);
+    } catch (ownErr) {
+      return responderErroEmpresaVenda(res, ownErr);
     }
 
     db.all(`
@@ -191,31 +207,34 @@ router.get('/:id', (req, res) => {
       FROM vendas_itens vi
       JOIN produtos p ON vi.produto_id = p.id
       WHERE vi.venda_id = ?
-    `, [id], (err, itens) => {
-      if (err) {
-        res.status(500).json({ error: err.message });
+    `, [id], (errItens, itens) => {
+      if (errItens) {
+        res.status(500).json({ error: errItens.message });
         return;
       }
-      // Visão comercial: todos os itens originais (não filtrar pela NF-e).
       res.json({ ...venda, itens });
     });
   });
 });
 
 // Buscar detalhes completos da venda para emissão de NFC-e
-router.get('/:id/detalhes', (req, res) => {
+router.get('/:id/detalhes', anexarEmpresaVenda, (req, res) => {
   const vendaId = req.params.id;
+  const empresaId = Number(req.empresaId);
 
   db.get(`
     SELECT v.*, c.nome as cliente_nome
     FROM vendas v
     LEFT JOIN clientes c ON c.id = v.cliente_id
     WHERE v.id = ?
-  `, [vendaId], (err, venda) => {
+      AND v.empresa_id = ?
+  `, [vendaId, empresaId], (err, venda) => {
     if (err) return res.status(500).json({ error: err.message });
 
-    if (!venda) {
-      return res.status(404).json({ error: 'Venda não encontrada' });
+    try {
+      exigirVendaDaEmpresa(venda, empresaId);
+    } catch (ownErr) {
+      return responderErroEmpresaVenda(res, ownErr);
     }
 
     db.all(`
@@ -263,20 +282,24 @@ router.post('/cancelar/:id', validarCaixaAbertoCancelamentoVenda, (req, res) => 
   cancelarVendaPost(vendaId, motivo, req, res);
 });
 
-router.delete('/:id', (req, res) => {
+router.delete('/:id', anexarEmpresaVenda, (req, res) => {
   const id = Number(req.params.id);
+  const empresaId = Number(req.empresaId);
 
   db.get(`
     SELECT *
     FROM vendas
     WHERE id = ?
-  `, [id], (err, venda) => {
+      AND empresa_id = ?
+  `, [id, empresaId], (err, venda) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
 
-    if (!venda) {
-      return res.status(404).json({ error: 'Venda não encontrada' });
+    try {
+      exigirVendaDaEmpresa(venda, empresaId);
+    } catch (ownErr) {
+      return responderErroEmpresaVenda(res, ownErr);
     }
 
     if (venda.nfce_id) {
@@ -308,7 +331,7 @@ router.delete('/:id', (req, res) => {
   });
 });
 
-router.get('/relatorio/fechamento-caixa', (req, res) => {
+router.get('/relatorio/fechamento-caixa', anexarEmpresaVenda, (req, res) => {
   const { data_inicio, data_fim, modo_fiscal } = req.query;
 
   if (!data_inicio || !data_fim) {
@@ -317,6 +340,7 @@ router.get('/relatorio/fechamento-caixa', (req, res) => {
 
   const modoFiscal = modo_fiscal || '0';
   const exprValor = getExprValorVenda(modoFiscal);
+  const empresaId = Number(req.empresaId);
 
   db.all(`
     SELECT
@@ -325,10 +349,11 @@ router.get('/relatorio/fechamento-caixa', (req, res) => {
       SUM(${exprValor}) as total
     FROM vendas v
     WHERE ${FILTRO_VENDA_VALIDA}
+      AND v.empresa_id = ?
       AND date(v.data_venda) BETWEEN date(?) AND date(?)
     GROUP BY forma_pagamento
     ORDER BY total DESC
-  `, [data_inicio, data_fim], (err, pagamentos) => {
+  `, [empresaId, data_inicio, data_fim], (err, pagamentos) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
@@ -341,8 +366,9 @@ router.get('/relatorio/fechamento-caixa', (req, res) => {
         AVG(${exprValor}) as ticket_medio
       FROM vendas v
       WHERE ${FILTRO_VENDA_VALIDA}
+        AND v.empresa_id = ?
         AND date(v.data_venda) BETWEEN date(?) AND date(?)
-    `, [data_inicio, data_fim], (errResumo, resumo) => {
+    `, [empresaId, data_inicio, data_fim], (errResumo, resumo) => {
       if (errResumo) {
         return res.status(500).json({ error: errResumo.message });
       }
@@ -361,7 +387,7 @@ router.get('/relatorio/fechamento-caixa', (req, res) => {
   });
 });
 
-router.get('/relatorio/produtos-mais-vendidos', (req, res) => {
+router.get('/relatorio/produtos-mais-vendidos', anexarEmpresaVenda, (req, res) => {
   const { data_inicio, data_fim, modo_fiscal, limite } = req.query;
 
   if (!data_inicio || !data_fim) {
@@ -377,6 +403,7 @@ router.get('/relatorio/produtos-mais-vendidos', (req, res) => {
   const exprValorNaoFiscal = getExprValorItemNaoFiscal();
   const filtroItens = getFiltroItensFiscal(modoFiscal);
   const limit = Math.min(Math.max(parseInt(limite, 10) || 100, 1), 500);
+  const empresaId = Number(req.empresaId);
 
   db.all(`
     SELECT
@@ -398,13 +425,14 @@ router.get('/relatorio/produtos-mais-vendidos', (req, res) => {
     INNER JOIN vendas_itens vi ON v.id = vi.venda_id
     INNER JOIN produtos p ON vi.produto_id = p.id
     WHERE ${FILTRO_VENDA_VALIDA}
+      AND v.empresa_id = ?
       AND date(v.data_venda) BETWEEN date(?) AND date(?)
       ${filtroItens}
     GROUP BY p.id
     HAVING quantidade_vendida > 0
     ORDER BY total_vendido DESC
     LIMIT ?
-  `, [data_inicio, data_fim, limit], (err, produtos) => {
+  `, [empresaId, data_inicio, data_fim, limit], (err, produtos) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
@@ -416,10 +444,11 @@ router.get('/relatorio/produtos-mais-vendidos', (req, res) => {
   });
 });
 
-router.get('/relatorio/periodo', (req, res) => {
+router.get('/relatorio/periodo', anexarEmpresaVenda, (req, res) => {
   const { data_inicio, data_fim, modo_fiscal } = req.query;
   const modoFiscal = modo_fiscal || '0';
   const exprValor = getExprValorVenda(modoFiscal);
+  const empresaId = Number(req.empresaId);
 
   db.all(`
     SELECT
@@ -430,10 +459,11 @@ router.get('/relatorio/periodo', (req, res) => {
       SUM(CASE WHEN v.cliente_id IS NOT NULL THEN 1 ELSE 0 END) as vendas_com_cliente
     FROM vendas v
     WHERE ${FILTRO_VENDA_VALIDA}
+      AND v.empresa_id = ?
       AND date(v.data_venda) BETWEEN date(?) AND date(?)
     GROUP BY DATE(v.data_venda)
     ORDER BY data DESC
-  `, [data_inicio, data_fim], (err, rows) => {
+  `, [empresaId, data_inicio, data_fim], (err, rows) => {
     if (err) {
       res.status(500).json({ error: err.message });
       return;

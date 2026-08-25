@@ -7,6 +7,9 @@
 
 const { resolverModoOperacaoVendaAtivo } = require('../../motores/muv/modoOperacaoVenda');
 const { ModoOperacaoVenda } = require('../../motores/muv/contratos');
+const { resolverModoOperacionalGlobalAtivo } = require('../../core/modo-operacional/modoOperacionalGlobal');
+const { ModoOperacionalGlobal, capacidadesParaModoGlobal, validarModoOperacionalGlobal } = require('../../core/modo-operacional/contratos');
+const PoliticaEmpresaSimples = require('../../core/modo-operacional/PoliticaEmpresaSimples');
 const {
   CAMADA,
   capacidadesParaModo,
@@ -98,15 +101,29 @@ function resolverEmpresaSelecionada(modo, empresas, empresaIdInformado) {
   return { empresa: null, origem: empresaIdInformado == null ? 'AUSENTE' : 'AUSENTE' };
 }
 
-function montarDto({ modo, operador, empresa, empresas, terminalId, origemSelecao }) {
+function montarDto({ modo, modoGlobal, operador, empresa, empresas, terminalId, origemSelecao, contratoOperacional }) {
   const capacidades = capacidadesParaModo(modo);
-  const exigeSelecao = modo === ModoOperacaoVenda.EMPRESA_UNICA && !empresa;
+  const capacidadesGlobais = modoGlobal
+    ? capacidadesParaModoGlobal(modoGlobal)
+    : null;
+  const exigeSelecao = modoGlobal === ModoOperacionalGlobal.EMPRESA_SIMPLES
+    ? false
+    : (modo === ModoOperacaoVenda.EMPRESA_UNICA && !empresa);
   const dto = {
     camada: CAMADA,
+    modo_operacional_global: modoGlobal,
     modo_operacao: modo,
     operador,
     empresa_selecionada: empresa,
-    empresas_disponiveis: empresas,
+    empresas_disponiveis: modoGlobal === ModoOperacionalGlobal.EMPRESA_SIMPLES ? [] : empresas,
+    contrato_operacional: contratoOperacional || (modoGlobal ? {
+      modo_operacional: modoGlobal,
+      modo_operacao_venda: modo,
+      empresa_operacional: empresa
+        ? { empresa_id: empresa.id, cnpj: empresa.cnpj, razao_social: empresa.razao_social || empresa.nome }
+        : null,
+      capacidades: capacidadesGlobais
+    } : null),
     contexto: {
       operador_id: operador && operador.id != null ? operador.id : null,
       terminal_id: terminalId,
@@ -138,11 +155,53 @@ function montarDto({ modo, operador, empresa, empresas, terminalId, origemSeleca
   return Object.freeze(dto);
 }
 
+function resolverModoGlobalContexto(deps = {}) {
+  if (typeof deps.obterModoOperacionalGlobal === 'function') {
+    return validarModoOperacionalGlobal(deps.obterModoOperacionalGlobal());
+  }
+  if (typeof deps.obterModoOperacaoVenda === 'function') {
+    const venda = deps.obterModoOperacaoVenda();
+    if (venda === ModoOperacaoVenda.MULTIEMPRESA) {
+      return ModoOperacionalGlobal.MULTIEMPRESA;
+    }
+    return null;
+  }
+  return resolverModoOperacionalGlobalAtivo(deps);
+}
+
 async function obterContextoOperacional(entrada = {}, deps = {}) {
+  const modoGlobal = resolverModoGlobalContexto(deps);
   const modo = resolverModoOperacaoVendaAtivo(deps);
   const operador = resolverOperador(entrada);
   const brutas = await listarEmpresasDisponiveisSeguro(entrada, deps);
   const empresas = filtrarOperacionais(brutas);
+
+  if (modoGlobal === ModoOperacionalGlobal.EMPRESA_SIMPLES && operador && operador.id) {
+    const resolvida = await PoliticaEmpresaSimples.resolverEmpresaOperacional(deps);
+    const empresa = mapearEmpresaOperacional({
+      id: resolvida.empresa.empresa_id,
+      cnpj: resolvida.empresa.cnpj,
+      razao_social: resolvida.empresa.razao_social,
+      nome_fantasia: resolvida.empresa.nome_fantasia,
+      ativo: 1
+    });
+    const contratoOperacional = {
+      modo_operacional: modoGlobal,
+      modo_operacao_venda: modo,
+      empresa_operacional: resolvida.empresa,
+      capacidades: capacidadesParaModoGlobal(modoGlobal)
+    };
+    return montarDto({
+      modo,
+      modoGlobal,
+      operador,
+      empresa,
+      empresas: [],
+      terminalId: resolverTerminalId(entrada),
+      origemSelecao: resolvida.origem,
+      contratoOperacional
+    });
+  }
 
   if (modo === ModoOperacaoVenda.EMPRESA_UNICA && operador && operador.id && empresas.length === 0) {
     throw erroContexto(
@@ -156,6 +215,7 @@ async function obterContextoOperacional(entrada = {}, deps = {}) {
   const { empresa, origem } = resolverEmpresaSelecionada(modo, empresas, informado);
   return montarDto({
     modo,
+    modoGlobal,
     operador,
     empresa,
     empresas,
@@ -232,6 +292,7 @@ module.exports = {
   obterContextoOperacional,
   selecionarEmpresaOperacional,
   resolverEmpresaSelecionada,
+  resolverModoGlobalContexto,
   mapearEmpresaOperacional,
   filtrarOperacionais,
   empresaContextoNaoSubstituiItem,

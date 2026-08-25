@@ -86,9 +86,16 @@ function montarPagamentosOficiais(pagamentos, total) {
   return [{ forma_pagamento: 'dinheiro', valor: arred2(total) }];
 }
 
-function montarPayloadVendaOficial({ itens, pagamentos, emitir_fiscal, origem }) {
+function montarPayloadVendaOficial({ itens, pagamentos, emitir_fiscal, origem, desconto, acrescimo }) {
   const oficiais = montarItensOficiais(itens);
-  const total = arred2(oficiais.reduce((acc, i) => acc + Number(i.subtotal || 0), 0));
+  const subtotal = arred2(oficiais.reduce((acc, i) => acc + Number(i.subtotal || 0), 0));
+  let desc = Number(desconto);
+  if (!Number.isFinite(desc) || desc < 0) desc = 0;
+  desc = arred2(Math.min(subtotal, desc));
+  let acr = Number(acrescimo);
+  if (!Number.isFinite(acr) || acr < 0) acr = 0;
+  acr = arred2(acr);
+  const total = arred2(Math.max(0, subtotal - desc + acr));
   const pags = montarPagamentosOficiais(pagamentos, total);
   return {
     origem: origem || 'PDV',
@@ -96,8 +103,8 @@ function montarPayloadVendaOficial({ itens, pagamentos, emitir_fiscal, origem })
     forma_pagamento: pags.length > 1 ? 'misto' : pags[0].forma_pagamento,
     pagamentos: pags,
     total,
-    desconto: 0,
-    acrescimo: 0,
+    desconto: desc,
+    acrescimo: acr,
     emitir_fiscal: emitir_fiscal === true,
     itens: oficiais
   };

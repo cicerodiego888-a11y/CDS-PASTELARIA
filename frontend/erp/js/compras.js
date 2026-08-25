@@ -13,6 +13,8 @@ let linhaIdEditandoCompra = null;
 let compraImportadaXml = null;
 let cnpjEmitenteXmlOriginal = null;
 let centralDocumentoIdAtual = null;
+/** 05.38.F.B — empresa do documento Central (quando origem CENTRAL_NFE) */
+let centralEmpresaIdAtual = null;
 /** RC4.31.16 — origem do lançamento (MANUAL | CENTRAL_NFE) */
 let origemCompraAtual = 'MANUAL';
 let modoEntradaF7Compra = false;
@@ -5505,6 +5507,18 @@ function saveCompra() {
         data.central_documento_id = centralDocumentoIdAtual;
     }
 
+    // 05.38.F.B — preservar empresa do documento Central / payload (backend é autoridade)
+    const empCentral = centralEmpresaIdAtual
+        ?? data.empresa_id
+        ?? data.empresaId
+        ?? (typeof CdsEmpresaContexto !== 'undefined' && CdsEmpresaContexto.lerEmpresaId
+            ? CdsEmpresaContexto.lerEmpresaId()
+            : null);
+    if (empCentral != null && Number(empCentral) > 0) {
+        data.empresa_id = Number(empCentral);
+        data.empresaId = Number(empCentral);
+    }
+
     if (data.chave_acesso && data.chave_acesso.length !== 44) {
         showNotification('A chave de acesso deve ter 44 dígitos.', 'warning');
         return;
@@ -5663,6 +5677,7 @@ function executarGravacaoCompra(data, isUsoConsumo, isNotaAvulsa) {
     }).done(function() {
         const docCentral = centralDocumentoIdAtual;
         centralDocumentoIdAtual = null;
+        centralEmpresaIdAtual = null;
         origemCompraAtual = ORIGEM_COMPRA.MANUAL;
         classificacaoEntradaAtual = null;
         // RC4.31.25 — histórico gravado em compras_itens; limpa cache para próxima seleção
@@ -5965,6 +5980,11 @@ function abrirCompraDesdeCentralEntradas(payload) {
     // RC8.4.1 — deep clone do payload (sessionStorage / bridge) antes de usar
     const payloadIsolado = clonarDadosItemCompra(payload);
     centralDocumentoIdAtual = payloadIsolado.documentoId || null;
+    const empDoc = payloadIsolado.dadosCompra?.empresa_id
+        ?? payloadIsolado.dadosCompra?.empresaId
+        ?? payloadIsolado.empresaId
+        ?? null;
+    centralEmpresaIdAtual = empDoc != null && Number(empDoc) > 0 ? Number(empDoc) : null;
     showCompraModal();
     origemCompraAtual = ORIGEM_COMPRA.CENTRAL_NFE;
     finalizarImportacaoXmlCompra(payloadIsolado.dadosCompra);

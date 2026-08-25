@@ -327,8 +327,8 @@ async function recalcularFinanceiroDevolucaoVenda(vendaId, valorDevolvido, venda
       INSERT INTO financeiro (
         tipo, descricao, valor, data_movimento, categoria, forma_pagamento,
         referencia_id, referencia_tipo, status, origem, documento, vencimento,
-        venda_id, baixado_em, observacao
-      ) VALUES ('despesa', ?, ?, ?, 'estorno_devolucao', ?, ?, 'venda', 'pago', 'devolucao_venda', ?, ?, ?, ?, ?)
+        venda_id, baixado_em, observacao, empresa_id
+      ) VALUES ('despesa', ?, ?, ?, 'estorno_devolucao', ?, ?, 'venda', 'pago', 'devolucao_venda', ?, ?, ?, ?, ?, ?)
       `,
       [
         `Estorno devolução parcial ${venda?.codigo || vendaId}`,
@@ -340,7 +340,8 @@ async function recalcularFinanceiroDevolucaoVenda(vendaId, valorDevolvido, venda
         dataMov,
         vendaId,
         dataMov,
-        observacao
+        observacao,
+        opcoes.empresaId || opcoes.empresa_id || null
       ]
     );
     estorno = restante;

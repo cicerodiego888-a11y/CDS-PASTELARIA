@@ -169,10 +169,36 @@
     const licPlano = config.licenca_plano || '';
     const fiscalUi = configPermiteFiscalUi();
 
+    const modoOperacionalGlobal = String(config.modo_operacional_global || 'EMPRESA_SIMPLES').toUpperCase();
+    const empresaOperacionalId = config.empresa_operacional_id != null ? Number(config.empresa_operacional_id) : '';
+
     return `
       <div class="cds-cfg-pane is-active" data-cfg-pane="empresa">
         <h2 class="cds-cfg-pane__title">Empresa</h2>
         <p class="cds-cfg-pane__sub">Tipo de implantação e padrões contábeis.${fiscalUi ? ' Cadastro fiscal oficial fica em Plataforma Fiscal.' : ''}</p>
+        ${card('<i class="fas fa-sitemap"></i> Modo Operacional da Instalação', `
+          <p class="cds-cfg-hint mb-3">Define como todos os módulos organizam o contexto empresarial. A alteração exige confirmação explícita ao salvar.</p>
+          <div class="form-check mb-2" data-cfg-search="empresa simples única cnpj">
+            <input class="form-check-input" type="radio" name="modoOperacionalGlobal" id="modoEmpresaSimples" value="EMPRESA_SIMPLES" ${modoOperacionalGlobal === 'EMPRESA_SIMPLES' ? 'checked' : ''}>
+            <label class="form-check-label" for="modoEmpresaSimples"><strong>Empresa Simples</strong></label>
+            <div class="small text-muted ms-4">Utilize quando a operação possuir apenas um CNPJ operacional. O sistema funcionará no modo tradicional, sem seleção de empresas.</div>
+          </div>
+          <div class="form-check mb-3" data-cfg-search="multiempresa múltiplas empresas cnpj">
+            <input class="form-check-input" type="radio" name="modoOperacionalGlobal" id="modoMultiempresa" value="MULTIEMPRESA" ${modoOperacionalGlobal === 'MULTIEMPRESA' ? 'checked' : ''}>
+            <label class="form-check-label" for="modoMultiempresa"><strong>Multiempresa</strong></label>
+            <div class="small text-muted ms-4">Utilize quando a operação possuir mais de um CNPJ. Estoque, entradas, compras, vendas, fiscal, caixa e demais módulos serão organizados por empresa.</div>
+          </div>
+          <div id="cfgEmpresaOperacionalWrap" class="row g-2 ${modoOperacionalGlobal === 'EMPRESA_SIMPLES' ? '' : 'd-none'}">
+            <div class="col-md-6" data-cfg-search="empresa operacional id">
+              <label for="cfgEmpresaOperacionalId" class="cds-cfg-label">Empresa operacional (CNPJ único)</label>
+              <input type="number" min="1" step="1" class="form-control form-control-sm" id="cfgEmpresaOperacionalId"
+                value="${empresaOperacionalId ? escapeHtml(String(empresaOperacionalId)) : ''}"
+                placeholder="ID da empresa quando houver mais de uma cadastrada">
+              <div class="form-text">Obrigatório quando existir mais de uma empresa ativa. Com uma única empresa, resolve automaticamente.</div>
+            </div>
+          </div>
+          <input type="hidden" id="cfgModoOperacionalAnterior" value="${escapeHtml(modoOperacionalGlobal)}">
+        `, 'modo operacional global empresa simples multiempresa')}
         ${card('<i class="fas fa-layer-group"></i> Tipo de Implantação', `
           <div class="form-check mb-2" data-cfg-search="erp sem fiscal">
             <input class="form-check-input" type="radio" name="tipoImplantacao" id="tipoSemFiscal" value="ERP_SEM_FISCAL" ${tipo === 'ERP_SEM_FISCAL' ? 'checked' : ''}>
@@ -979,10 +1005,25 @@
     }
   }
 
+  function aplicarEstadoModoOperacionalGlobal() {
+    const selecionado = String(
+      document.querySelector('input[name="modoOperacionalGlobal"]:checked')?.value || 'EMPRESA_SIMPLES'
+    ).toUpperCase();
+    const wrap = document.getElementById('cfgEmpresaOperacionalWrap');
+    if (wrap) {
+      wrap.classList.toggle('d-none', selecionado !== 'EMPRESA_SIMPLES');
+    }
+  }
+
   function wireShell() {
     document.querySelectorAll('[data-cfg-nav]').forEach((btn) => {
       btn.addEventListener('click', () => ativarCategoria(btn.getAttribute('data-cfg-nav')));
     });
+
+    document.querySelectorAll('input[name="modoOperacionalGlobal"]').forEach((input) => {
+      input.addEventListener('change', aplicarEstadoModoOperacionalGlobal);
+    });
+    aplicarEstadoModoOperacionalGlobal();
 
     const search = document.getElementById('cdsCfgSearch');
     if (search) {

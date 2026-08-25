@@ -2,6 +2,8 @@
  * CentralSincronizacaoService — Orquestração da sincronização DF-e na Central.
  *
  * RC4: obtém contexto via CentralConfiguracaoService (sem leitura fiscal direta).
+ * 05.38.E: sincroniza por empresa conforme Modo Operacional Global
+ * (EMPRESA_SIMPLES = 1 CNPJ; MULTIEMPRESA = loop de empresas ativas).
  *
  * @class CentralSincronizacaoService
  */
@@ -11,11 +13,16 @@ const CentralDocumentosRepository = require('../repositories/CentralDocumentosRe
 const CentralConfiguracaoService = require('./CentralConfiguracaoService');
 const CentralNsuRepository = require('../repositories/CentralNsuRepository');
 const CentralNsuService = require('./CentralNsuService');
+const CentralDfePersistenciaService = require('./CentralDfePersistenciaService');
 const {
   sincronizarDistribuicaoDFe,
   consultarNotaPorChave
 } = require('../../../services/fiscal/distribuicaoDFe');
 const { paraInboxDTO } = require('../utils/centralEntradasMapper');
+const {
+  listarAlvosSincronizacaoCentral
+} = require('../../../services/central-entradas/CentralEntradasEmpresaContextoService');
+const { ModoOperacionalGlobal } = require('../../../core/modo-operacional');
 
 class CentralSincronizacaoService {
   /**
@@ -32,6 +39,91 @@ class CentralSincronizacaoService {
     /** @private */
     this._nsuService = deps.nsuService
       ?? new CentralNsuService({ nsuRepository: this._nsuRepository });
+    /** @private */
+    this._deps = deps;
+  }
+
+  /**
+   * Sincroniza uma empresa isolada (CNPJ + NSU + persistência com empresa_id).
+   * @param {{ empresaId: number, cnpj?: string|null }} alvo
+   * @param {Object} [opcoes]
+   * @returns {Promise<Object>}
+   * @private
+   */
+  async _sincronizarEmpresa(alvo, opcoes = {}) {
+    const empresaId = Number(alvo.empresaId);
+    const modo = opcoes.modo || null;
+    const permitirFallbackGlobal = modo === ModoOperacionalGlobal.EMPRESA_SIMPLES;
+
+    const ctxResult = await this._configuracao.obterContextoOperacional({
+      empresaId,
+      permitirFallbackGlobal
+    });
+
+    if (!ctxResult.ok) {
+      return {
+        sucesso: false,
+        pulado: true,
+        empresaId,
+        cnpj: alvo.cnpj || null,
+        notasNovas: 0,
+        notasDuplicadas: 0,
+        erros: [ctxResult.mensagem],
+        mensagem: ctxResult.mensagem,
+        codigoErro: ctxResult.codigoErro
+      };
+    }
+
+    const contexto = {
+      ...ctxResult.contexto,
+      empresaId
+    };
+
+    if (!opcoes.ignorarCooldown) {
+      try {
+        const ambiente = Number(contexto.ambiente) === 1 ? 1 : 2;
+        const controle = await this._nsuService.buscarPorCnpjAmbiente(contexto.cnpj, ambiente);
+        const cooldown = this._nsuService.avaliarCooldown(controle);
+        if (cooldown && cooldown.ativo) {
+          return {
+            sucesso: true,
+            ignorado: true,
+            pulado: true,
+            empresaId,
+            cnpj: contexto.cnpj,
+            codigo: 'AGUARDAR_JANELA_DFE',
+            mensagem: 'Consulta DF-e adiada (cooldown por CNPJ).',
+            proximaConsultaEm: cooldown.proximaConsultaEm,
+            ultNsu: cooldown.ultNsu,
+            maxNsu: cooldown.maxNsu,
+            notasNovas: 0,
+            notasDuplicadas: 0
+          };
+        }
+      } catch { /* cooldown indisponível — segue */ }
+    }
+
+    const persistencia = new CentralDfePersistenciaService({
+      documentosRepository: this._documentosRepository,
+      empresaId
+    });
+
+    const resultado = await sincronizarDistribuicaoDFe({
+      maxIteracoes: opcoes.maxIteracoes ?? contexto.syncMaxDocumentos,
+      contextoCentral: contexto,
+      nsuRepository: this._nsuRepository,
+      nsuService: this._nsuService,
+      persistenciaService: persistencia,
+      correlationId: opcoes.correlationId || null
+    });
+
+    return {
+      ...resultado,
+      sucesso: resultado.sucesso !== false,
+      empresaId,
+      cnpj: contexto.cnpj,
+      ambiente: contexto.ambiente
+    };
   }
 
   /**
@@ -40,49 +132,94 @@ class CentralSincronizacaoService {
    */
   async sincronizar(opcoes = {}) {
     try {
-      const ctxResult = await this._configuracao.obterContextoOperacional();
-      if (!ctxResult.ok) {
+      const plano = await listarAlvosSincronizacaoCentral(this._deps);
+      if (!plano.alvos.length) {
         return SincronizacaoResultadoDTO.create({
           sucesso: false,
           notasNovas: 0,
           notasDuplicadas: 0,
-          erros: [ctxResult.mensagem],
-          mensagem: ctxResult.mensagem,
-          mensagemAmigavel: ctxResult.mensagem,
-          codigoErro: ctxResult.codigoErro
+          erros: ['Nenhuma empresa ativa para sincronização'],
+          mensagem: 'Nenhuma empresa ativa para sincronização',
+          mensagemAmigavel: 'Nenhuma empresa ativa para sincronização',
+          codigoErro: 'EMPRESA_CENTRAL_AUSENTE'
         }).toJSON();
       }
 
-      const resultado = await sincronizarDistribuicaoDFe({
-        maxIteracoes: opcoes.maxIteracoes ?? ctxResult.contexto.syncMaxDocumentos,
-        contextoCentral: ctxResult.contexto,
-        nsuRepository: this._nsuRepository,
-        nsuService: this._nsuService,
-        correlationId: opcoes.correlationId || null
-      });
+      const porEmpresa = [];
+      let notasNovas = 0;
+      let notasDuplicadas = 0;
+      let ignorados = 0;
+      const erros = [];
+      let algumSucesso = false;
+      let ultimoOk = null;
 
-      return SincronizacaoResultadoDTO.create({
-        sucesso: resultado.sucesso !== false,
-        notasNovas: resultado.notasNovas,
-        notasDuplicadas: resultado.notasDuplicadas,
-        ignorados: resultado.ignorados,
-        ultNsu: resultado.ultNsu,
-        maxNsu: resultado.maxNsu,
-        iteracoes: resultado.iteracoes,
-        cStat: resultado.cStat,
-        mensagem: resultado.mensagem,
-        ultimaSincronizacao: resultado.ultimaSincronizacao,
-        erros: resultado.sucesso === false ? [resultado.mensagem].filter(Boolean) : []
-      }).toJSON();
+      for (const alvo of plano.alvos) {
+        // eslint-disable-next-line no-await-in-loop
+        const r = await this._sincronizarEmpresa(alvo, {
+          ...opcoes,
+          modo: plano.modo
+        });
+        porEmpresa.push({
+          empresaId: r.empresaId,
+          cnpj: r.cnpj,
+          sucesso: r.sucesso !== false,
+          pulado: !!r.pulado,
+          ignorado: !!r.ignorado,
+          notasNovas: r.notasNovas || 0,
+          notasDuplicadas: r.notasDuplicadas || 0,
+          ultNsu: r.ultNsu || null,
+          maxNsu: r.maxNsu || null,
+          cStat: r.cStat || null,
+          mensagem: r.mensagem || null,
+          codigoErro: r.codigoErro || r.codigo || null
+        });
+
+        notasNovas += Number(r.notasNovas) || 0;
+        notasDuplicadas += Number(r.notasDuplicadas) || 0;
+        ignorados += Number(r.ignorados) || 0;
+        if (r.sucesso !== false && !r.pulado) {
+          algumSucesso = true;
+          ultimoOk = r;
+        } else if (r.sucesso === false && r.mensagem) {
+          erros.push(`[empresa ${r.empresaId}] ${r.mensagem}`);
+        }
+      }
+
+      const sucesso = algumSucesso || (erros.length === 0 && porEmpresa.every((p) => p.sucesso));
+      const mensagem = sucesso
+        ? (plano.modo === ModoOperacionalGlobal.MULTIEMPRESA
+          ? `Sincronização multiempresa: ${porEmpresa.length} empresa(s)`
+          : (ultimoOk && ultimoOk.mensagem) || 'Sincronização concluída')
+        : (erros[0] || 'Falha na sincronização');
+
+      return {
+        ...SincronizacaoResultadoDTO.create({
+          sucesso,
+          notasNovas,
+          notasDuplicadas,
+          ignorados,
+          ultNsu: ultimoOk ? ultimoOk.ultNsu : (porEmpresa[0] && porEmpresa[0].ultNsu),
+          maxNsu: ultimoOk ? ultimoOk.maxNsu : (porEmpresa[0] && porEmpresa[0].maxNsu),
+          iteracoes: ultimoOk ? ultimoOk.iteracoes : null,
+          cStat: ultimoOk ? ultimoOk.cStat : (porEmpresa[0] && porEmpresa[0].cStat),
+          mensagem,
+          mensagemAmigavel: mensagem,
+          ultimaSincronizacao: ultimoOk ? ultimoOk.ultimaSincronizacao : null,
+          erros
+        }).toJSON(),
+        modoOperacional: plano.modo,
+        porEmpresa
+      };
     } catch (error) {
       const mensagem = error.message || String(error);
-      const codigoErro = /certificado/i.test(mensagem)
-        ? 'CERTIFICADO'
-        : /cnpj/i.test(mensagem)
-          ? 'CNPJ'
-          : /timeout|ECONN/i.test(mensagem)
-            ? 'SEFAZ'
-            : 'SEFAZ';
+      const codigoErro = error.code
+        || (/certificado/i.test(mensagem)
+          ? 'CERTIFICADO'
+          : /cnpj/i.test(mensagem)
+            ? 'CNPJ'
+            : /timeout|ECONN/i.test(mensagem)
+              ? 'SEFAZ'
+              : 'SEFAZ');
       return SincronizacaoResultadoDTO.create({
         sucesso: false,
         notasNovas: 0,

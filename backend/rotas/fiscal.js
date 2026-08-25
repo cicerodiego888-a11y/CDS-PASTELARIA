@@ -4,7 +4,7 @@ const db = require('../database');
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
-const { getFiscalConfig, setConfiguracao } = require('../services/fiscal/configService');
+const { getFiscalConfig, setConfiguracao, dtoPublicoFiscalParaUi, filtrarPayloadConfigFiscalUi, completarUrlsGlobaisVazias } = require('../services/fiscal/configService');
 const { carregarCertificadoPfx } = require('../services/fiscal/certificateService');
 const { emitirPorVendaId, obterDanfeHtmlAtualizado } = require('../services/fiscal/emissor');
 const cancelarNfce = require('../services/fiscal/cancelarNfce');
@@ -164,8 +164,9 @@ router.post('/certificado/upload', upload.single('certificado'), async (req, res
 
 router.get('/config', async (req, res) => {
   try {
+    await completarUrlsGlobaisVazias().catch(() => null);
     const config = await getFiscalConfig({ validarUrls: false });
-    res.json(config);
+    res.json(dtoPublicoFiscalParaUi(config));
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -173,11 +174,11 @@ router.get('/config', async (req, res) => {
 
 router.put('/config', carregarPerfilUsuario, async (req, res) => {
   try {
-    const payload = req.body || {};
+    const payload = filtrarPayloadConfigFiscalUi(req.body || {});
 
     // Validação do número NFC-e
     if (payload.fiscal_numero_atual !== undefined) {
-      const numeroAtual = parseInt(payload.fiscal_numero_atual);
+      const numeroAtual = parseInt(payload.fiscal_numero_atual, 10);
 
       if (numeroAtual < 0) {
         return res.status(400).json({
@@ -224,6 +225,8 @@ router.put('/config', carregarPerfilUsuario, async (req, res) => {
     for (const [chave, valor] of entries) {
       await setConfiguracao(chave, String(valor ?? ''), 'string', `Configuração fiscal: ${chave}`);
     }
+
+    await completarUrlsGlobaisVazias().catch(() => null);
 
     gravarAuditoria({
       usuario_id: req.user?.id || null,

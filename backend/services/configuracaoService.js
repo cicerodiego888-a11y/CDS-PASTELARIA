@@ -4,6 +4,18 @@ const {
   validarModoOperacaoVenda,
   DEFAULT_MODO_OPERACAO_VENDA
 } = require('../motores/muv/contratos');
+const {
+  validarModoOperacionalGlobal,
+  DEFAULT_MODO_OPERACIONAL_GLOBAL,
+  ModoOperacionalGlobal,
+  CODIGO_MODO_OPERACIONAL_GLOBAL_INVALIDO
+} = require('../core/modo-operacional/contratos');
+const {
+  modoGlobalParaModoVenda,
+  modoVendaParaModoGlobal,
+  sincronizarModoOperacaoVendaLegado
+} = require('../core/modo-operacional/compatibilidadeModoVenda');
+const { normalizarEmpresaOperacionalId } = require('../core/modo-operacional/PoliticaEmpresaSimples');
 
 const LEGACY_CONFIG_PATH = path.join(__dirname, '..', '..', 'config', 'configuracoes.json');
 const LEGACY_ELECTRON_PATHS = [
@@ -58,8 +70,11 @@ const DEFAULT = {
   licenca_mensagem_renovacao: MENSAGEM_RENOVACAO_PADRAO,
   // Hotfix RC1.3 — plano exibido na Barra de Status (opcional; senão deriva do tipo)
   licenca_plano: '',
-  // Sprint 04.02 — Motor Universal de Vendas (default = PDV atual)
-  modo_operacao_venda: DEFAULT_MODO_OPERACAO_VENDA
+  // Sprint 04.02 — Motor Universal de Vendas (compatibilidade; derivado do modo global)
+  modo_operacao_venda: DEFAULT_MODO_OPERACAO_VENDA,
+  // Sprint 05.38.B — Modo Operacional Global oficial da instalação
+  modo_operacional_global: DEFAULT_MODO_OPERACIONAL_GLOBAL,
+  empresa_operacional_id: null
 };
 
 const TIPOS = ['ERP_SEM_FISCAL', 'ERP_FISCAL', 'ERP_MULTICAIXA'];
@@ -181,6 +196,7 @@ function ensureConfigFile() {
     syncElectronConfig(DEFAULT);
   }
   bootstrapModoOperacaoVenda();
+  bootstrapModoOperacionalGlobal();
 }
 
 /**
@@ -233,16 +249,147 @@ function lerModoOperacaoVendaPersistido() {
 }
 
 /**
- * Leitura oficial do modo. Valor ausente → EMPRESA_UNICA (após bootstrap).
- * Valor inválido persistido → MODO_OPERACAO_VENDA_INVALIDO (não escolhe MULTIEMPRESA
- * nem mascara a corrupção como EMPRESA_UNICA operacional).
+ * Sprint 05.38.B — bootstrap idempotente do modo operacional global.
+ * Migra de modo_operacao_venda legado quando a chave global estiver ausente.
+ */
+function bootstrapModoOperacionalGlobal() {
+  const configPath = getConfigPath();
+  if (!fs.existsSync(configPath)) {
+    return DEFAULT.modo_operacional_global;
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(configPath, 'utf8') || '{}');
+  } catch (e) {
+    console.warn('bootstrapModoOperacionalGlobal: arquivo ilegível:', e.message);
+    return DEFAULT.modo_operacional_global;
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return DEFAULT.modo_operacional_global;
+  }
+
+  let alterou = false;
+
+  if (Object.prototype.hasOwnProperty.call(parsed, 'modo_operacional_global')) {
+    const raw = parsed.modo_operacional_global;
+    if (raw !== null && raw !== undefined && String(raw).trim() !== '') {
+      try {
+        parsed.modo_operacional_global = validarModoOperacionalGlobal(raw);
+      } catch (e) {
+        return parsed.modo_operacional_global;
+      }
+    }
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(parsed, 'modo_operacional_global')
+      || parsed.modo_operacional_global == null
+      || String(parsed.modo_operacional_global).trim() === '') {
+    try {
+      const legadoValidado = validarModoOperacaoVenda(parsed.modo_operacao_venda);
+      parsed.modo_operacional_global = modoVendaParaModoGlobal(legadoValidado);
+      alterou = true;
+    } catch (e) {
+      return parsed.modo_operacional_global || DEFAULT.modo_operacional_global;
+    }
+  }
+
+  const modoGlobal = validarModoOperacionalGlobal(parsed.modo_operacional_global);
+  const modoVendaSync = sincronizarModoOperacaoVendaLegado(modoGlobal);
+  if (parsed.modo_operacao_venda !== modoVendaSync) {
+    parsed.modo_operacao_venda = modoVendaSync;
+    alterou = true;
+  }
+
+  if (!Object.prototype.hasOwnProperty.call(parsed, 'empresa_operacional_id')) {
+    parsed.empresa_operacional_id = null;
+    alterou = true;
+  }
+
+  if (alterou) {
+    fs.writeFileSync(configPath, JSON.stringify(parsed, null, 2), 'utf8');
+  }
+
+  return modoGlobal;
+}
+
+function lerModoOperacionalGlobalPersistido() {
+  bootstrapModoOperacionalGlobal();
+  const parsed = readJsonFile(getConfigPath()) || {};
+  if (Object.prototype.hasOwnProperty.call(parsed, 'modo_operacional_global')
+      && parsed.modo_operacional_global != null
+      && String(parsed.modo_operacional_global).trim() !== '') {
+    return validarModoOperacionalGlobal(parsed.modo_operacional_global);
+  }
+  if (Object.prototype.hasOwnProperty.call(parsed, 'modo_operacao_venda')
+      && parsed.modo_operacao_venda != null
+      && String(parsed.modo_operacao_venda).trim() !== '') {
+    return modoVendaParaModoGlobal(validarModoOperacaoVenda(parsed.modo_operacao_venda));
+  }
+  return DEFAULT.modo_operacional_global;
+}
+
+/**
+ * Leitura oficial do modo operacional global da instalação.
+ */
+function obterModoOperacionalGlobal(cfg) {
+  if (cfg != null && typeof cfg === 'object') {
+    if (Object.prototype.hasOwnProperty.call(cfg, 'modo_operacional_global')) {
+      return validarModoOperacionalGlobal(cfg.modo_operacional_global);
+    }
+    if (Object.prototype.hasOwnProperty.call(cfg, 'modo_operacao_venda')) {
+      return modoVendaParaModoGlobal(validarModoOperacaoVenda(cfg.modo_operacao_venda));
+    }
+  }
+  return lerModoOperacionalGlobalPersistido();
+}
+
+/**
+ * Leitura oficial do modo de venda (compatibilidade MUV).
+ * Derivado do modo operacional global; valor legado inválido → MODO_OPERACAO_VENDA_INVALIDO.
  */
 function obterModoOperacaoVenda(cfg) {
-  if (cfg != null && typeof cfg === 'object'
-      && Object.prototype.hasOwnProperty.call(cfg, 'modo_operacao_venda')) {
-    return validarModoOperacaoVenda(cfg.modo_operacao_venda);
+  try {
+    return modoGlobalParaModoVenda(obterModoOperacionalGlobal(cfg));
+  } catch (err) {
+    if (err && err.code === CODIGO_MODO_OPERACIONAL_GLOBAL_INVALIDO) {
+      const wrapped = new Error(err.message);
+      wrapped.code = 'MODO_OPERACAO_VENDA_INVALIDO';
+      throw wrapped;
+    }
+    throw err;
   }
-  return lerModoOperacaoVendaPersistido();
+}
+
+function obterEmpresaOperacionalId(cfg) {
+  if (cfg != null && typeof cfg === 'object'
+      && Object.prototype.hasOwnProperty.call(cfg, 'empresa_operacional_id')) {
+    return normalizarEmpresaOperacionalId(cfg.empresa_operacional_id);
+  }
+  const parsed = readJsonFile(getConfigPath()) || {};
+  return normalizarEmpresaOperacionalId(parsed.empresa_operacional_id);
+}
+
+function validarAlteracaoModoOperacionalGlobal(atual, novoModo, confirmacao) {
+  const atualNorm = validarModoOperacionalGlobal(atual);
+  const novoNorm = validarModoOperacionalGlobal(novoModo);
+  if (atualNorm === novoNorm) {
+    return { alterou: false, modo: novoNorm };
+  }
+  if (confirmacao !== true) {
+    const err = new Error(
+      'Alterar o modo operacional exige confirmação explícita (confirmacao_modo_operacional: true).'
+    );
+    err.code = 'MODO_OPERACIONAL_ALTERACAO_REQUER_CONFIRMACAO';
+    err.details = {
+      modo_atual: atualNorm,
+      modo_novo: novoNorm,
+      aviso: 'Alterar o modo operacional pode modificar a forma como os módulos organizam os dados empresariais.'
+    };
+    throw err;
+  }
+  return { alterou: true, modo: novoNorm };
 }
 
 function normalizeModoOperacaoVendaCampo(valor) {
@@ -406,6 +553,12 @@ function normalizeConfig(obj) {
     licenca_mensagem_renovacao: normalizeLicencaMensagem(obj?.licenca_mensagem_renovacao),
     licenca_plano: String(obj?.licenca_plano || '').trim(),
     modo_operacao_venda: normalizeModoOperacaoVendaCampo(obj?.modo_operacao_venda),
+    modo_operacional_global: obj?.modo_operacional_global != null && String(obj.modo_operacional_global).trim() !== ''
+      ? String(obj.modo_operacional_global).toUpperCase().trim()
+      : (obj?.modo_operacao_venda != null && String(obj.modo_operacao_venda).trim() !== ''
+        ? modoVendaParaModoGlobal(obj.modo_operacao_venda)
+        : DEFAULT.modo_operacional_global),
+    empresa_operacional_id: normalizarEmpresaOperacionalId(obj?.empresa_operacional_id),
     ...normalizePadraoFiscal(obj)
   };
 }
@@ -560,6 +713,23 @@ function validateConfig(obj) {
     }
   }
 
+  if (Object.prototype.hasOwnProperty.call(obj || {}, 'modo_operacional_global')) {
+    try {
+      validarModoOperacionalGlobal(obj.modo_operacional_global);
+    } catch (e) {
+      errors.push('modo_operacional_global inválido');
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(obj || {}, 'empresa_operacional_id')
+      && obj.empresa_operacional_id != null
+      && obj.empresa_operacional_id !== '') {
+    const id = normalizarEmpresaOperacionalId(obj.empresa_operacional_id);
+    if (id == null) {
+      errors.push('empresa_operacional_id inválido');
+    }
+  }
+
   return { valid: errors.length === 0, errors, config };
 }
 
@@ -658,6 +828,24 @@ function reloadGlobalConfig() {
   return cfg;
 }
 
+function resolverModoGlobalParaSalvar(current, obj, validation) {
+  const modoAtual = obterModoOperacionalGlobal(current);
+  let modoNovo = modoAtual;
+  const confirmacao = obj && obj.confirmacao_modo_operacional === true;
+
+  if (Object.prototype.hasOwnProperty.call(obj || {}, 'modo_operacional_global')) {
+    modoNovo = validarModoOperacionalGlobal(validation.config.modo_operacional_global);
+  } else if (Object.prototype.hasOwnProperty.call(obj || {}, 'modo_operacao_venda')) {
+    modoNovo = modoVendaParaModoGlobal(validarModoOperacaoVenda(obj.modo_operacao_venda));
+  }
+
+  if (modoNovo !== modoAtual) {
+    validarAlteracaoModoOperacionalGlobal(modoAtual, modoNovo, confirmacao);
+  }
+
+  return modoNovo;
+}
+
 function saveConfig(obj) {
   const validation = validateConfig(obj);
   if (!validation.valid) {
@@ -678,6 +866,7 @@ function saveConfig(obj) {
   );
 
   const current = readConfig();
+  const modoGlobalSalvar = resolverModoGlobalParaSalvar(current, obj, validation);
   const toSave = {
     ...current,
     tipoImplantacao: validation.config.tipoImplantacao,
@@ -755,9 +944,11 @@ function saveConfig(obj) {
     entrega_alerta_horas_aguardando: pickNum(obj, 'entrega_alerta_horas_aguardando', validation.config, current, 2),
     entrega_alerta_horas_reserva: pickNum(obj, 'entrega_alerta_horas_reserva', validation.config, current, 4),
     entrega_alerta_horas_parado: pickNum(obj, 'entrega_alerta_horas_parado', validation.config, current, 3),
-    modo_operacao_venda: Object.prototype.hasOwnProperty.call(obj || {}, 'modo_operacao_venda')
-      ? validarModoOperacaoVenda(obj.modo_operacao_venda)
-      : (current.modo_operacao_venda || DEFAULT.modo_operacao_venda)
+    modo_operacional_global: modoGlobalSalvar,
+    empresa_operacional_id: Object.prototype.hasOwnProperty.call(obj || {}, 'empresa_operacional_id')
+      ? normalizarEmpresaOperacionalId(validation.config.empresa_operacional_id)
+      : normalizarEmpresaOperacionalId(current.empresa_operacional_id),
+    modo_operacao_venda: sincronizarModoOperacaoVendaLegado(modoGlobalSalvar)
   };
 
   ensureConfigFile();
@@ -860,6 +1051,10 @@ module.exports = {
   validateConfig,
   ensureConfigFile,
   bootstrapModoOperacaoVenda,
+  bootstrapModoOperacionalGlobal,
+  obterModoOperacionalGlobal,
+  obterEmpresaOperacionalId,
+  validarAlteracaoModoOperacionalGlobal,
   obterModoOperacaoVenda,
   getRecursos,
   getLicenciamentoCds,

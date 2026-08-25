@@ -109,6 +109,7 @@ async function garantirColunasFiscaisVenda(db) {
   await garantir('vendas_itens', 'item_fiscal', 'item_fiscal INTEGER DEFAULT 0');
   await garantir('vendas', 'valor_fiscal', 'valor_fiscal REAL DEFAULT 0');
   await garantir('vendas', 'valor_nao_fiscal', 'valor_nao_fiscal REAL DEFAULT 0');
+  await garantir('vendas', 'empresa_id', 'empresa_id INTEGER');
 }
 
 function fatiasFiscaisItem(item, reservas) {
@@ -161,7 +162,8 @@ function pagamentosEmpresariais(rateios) {
 }
 
 async function persistirVendaOperacao(db, atendimento, operacao, pagamentos) {
-  const empresaId = Number(operacao.empresaId);
+  const { exigirEmpresaDaOperacao } = require('../../services/vendas/VendaEmpresaContextoService');
+  const empresaId = exigirEmpresaDaOperacao(operacao.empresaId);
   await garantirColunasFiscaisVenda(db);
   const forma = pagamentos.length === 1 ? pagamentos[0].forma_pagamento : 'misto';
   const codigo = `MUV-${atendimento.atendimentoId}-${operacao.operacaoId}`;
@@ -176,9 +178,9 @@ async function persistirVendaOperacao(db, atendimento, operacao, pagamentos) {
     db,
     `INSERT INTO vendas (
        codigo, data_venda, total, desconto, forma_pagamento, status, status_pagamento, origem,
-       valor_fiscal, valor_nao_fiscal
-     ) VALUES (?, CURRENT_TIMESTAMP, ?, 0, ?, 'concluida', 'quitada', 'ATENDIMENTO', ?, ?)`,
-    [codigo, operacao.subtotal, forma, valorFiscal, valorNaoFiscal]
+       valor_fiscal, valor_nao_fiscal, empresa_id
+     ) VALUES (?, CURRENT_TIMESTAMP, ?, 0, ?, 'concluida', 'quitada', 'ATENDIMENTO', ?, ?, ?)`,
+    [codigo, operacao.subtotal, forma, valorFiscal, valorNaoFiscal, empresaId]
   );
   const vendaId = ins.lastID;
 
@@ -223,11 +225,25 @@ async function persistirVendaOperacao(db, atendimento, operacao, pagamentos) {
     );
   });
   if (temFinanceiro) {
+    const { resolverEmpresaDaOrigemFinanceira } = require('../../services/financeiro/FinanceiroEmpresaContextoService');
+    const empresaIdFin = resolverEmpresaDaOrigemFinanceira({
+      operacao,
+      venda: { empresa_id: empresaId }
+    });
+    const colsFin = await new Promise((resolve, reject) => {
+      db.all(`PRAGMA table_info(financeiro)`, (err, rows) => (err ? reject(err) : resolve(rows || [])));
+    });
+    if (!colsFin.some((c) => c.name === 'empresa_id')) {
+      await dbRun(db, `ALTER TABLE financeiro ADD COLUMN empresa_id INTEGER`);
+    }
+    if (!colsFin.some((c) => c.name === 'data_movimento')) {
+      await dbRun(db, `ALTER TABLE financeiro ADD COLUMN data_movimento DATE`);
+    }
     await dbRun(
       db,
-      `INSERT INTO financeiro (venda_id, tipo, origem, valor, status)
-       VALUES (?, 'receita', 'venda', ?, 'recebido')`,
-      [vendaId, operacao.subtotal]
+      `INSERT INTO financeiro (venda_id, tipo, origem, valor, status, data_movimento, empresa_id)
+       VALUES (?, 'receita', 'venda', ?, 'recebido', DATE('now','localtime'), ?)`,
+      [vendaId, operacao.subtotal, empresaIdFin]
     );
   }
 

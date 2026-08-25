@@ -5,32 +5,32 @@ const { verificarToken } = require('../middleware/auth');
 const { validarCaixaAberto } = require('../middleware/validarCaixaAberto');
 const { gravarAuditoria } = require('../services/auditoria');
 const { isMultiCaixaAtivo, exigirTerminalId, obterTerminalIdDaRequisicao } = require('../utils/multiCaixa');
-const { obterCaixaTurnoId } = require('../utils/caixaSessaoHelpers');
+const { obterCaixaTurnoId, montarSqlSessaoAberta } = require('../utils/caixaSessaoHelpers');
 const FechamentoCaixaResumoService = require('../services/caixa/FechamentoCaixaResumoService');
 const { gerarHtmlCupomFechamento } = require('../services/caixa/FechamentoCaixaCupomService');
+const {
+  middlewareResolverEmpresaCaixa,
+  obterMetaEmpresaPorId,
+  exigirSessaoDaEmpresa,
+  statusDeErroEmpresa
+} = require('../services/caixa/CaixaEmpresaContextoService');
+
+const anexarEmpresaCaixa = middlewareResolverEmpresaCaixa({ db });
 
 function n(valor) {
   return Number(valor || 0);
 }
 
-function obterConfigsEmpresa(callback) {
-  db.all(
-    `SELECT chave, valor FROM configuracoes WHERE chave IN ('nome_empresa', 'nome_fantasia', 'razao_social', 'cnpj')`,
-    [],
-    (err, rows) => {
-      if (err) return callback(err);
-      const map = {};
-      (rows || []).forEach((r) => { map[r.chave] = r.valor; });
-      callback(null, {
-        empresa_nome: map.nome_fantasia || map.nome_empresa || map.razao_social || 'CDS Sistemas',
-        empresa_cnpj: map.cnpj || ''
-      });
-    }
-  );
+/** Metadados de empresa via empresa_id da sessão (não configuracoes.cnpj). */
+function obterConfigsEmpresa(empresaId, callback) {
+  obterMetaEmpresaPorId(empresaId, { db })
+    .then((meta) => callback(null, meta))
+    .catch((err) => callback(err));
 }
 
 function obterMetaSessao(sessao, operadorNome, callback) {
-  obterConfigsEmpresa((cfgErr, empresa) => {
+  const empresaId = sessao && sessao.empresa_id != null ? sessao.empresa_id : null;
+  obterConfigsEmpresa(empresaId, (cfgErr, empresa) => {
     if (cfgErr) return callback(cfgErr);
     if (!sessao?.terminal_id) {
       return callback(null, {
@@ -86,25 +86,18 @@ function obterTerminalId(req) {
   return obterTerminalIdDaRequisicao(req);
 }
 
-function obterSessaoAberta(terminalId, callback) {
+function obterSessaoAberta(terminalId, empresaId, callback) {
+  if (typeof empresaId === 'function') {
+    callback = empresaId;
+    empresaId = null;
+  }
+
   if (!terminalId && isMultiCaixaAtivo()) {
     return callback(null, null);
   }
 
-  if (terminalId) {
-    db.get(
-      `SELECT * FROM caixa_sessoes WHERE status = 'aberto' AND terminal_id = ? ORDER BY id DESC LIMIT 1`,
-      [terminalId],
-      callback
-    );
-    return;
-  }
-
-  db.get(
-    `SELECT * FROM caixa_sessoes WHERE status = 'aberto' ORDER BY id DESC LIMIT 1`,
-    [],
-    callback
-  );
+  const { sql, params } = montarSqlSessaoAberta({ terminalId, empresaId });
+  db.get(sql, params, callback);
 }
 
 function obterCaixaAberto(terminalId, callback) {
@@ -190,16 +183,26 @@ function encerrarSessaoOrfa(sessao, motivo, callback) {
   );
 }
 
-router.get('/aberto', (req, res) => {
+router.get('/aberto', anexarEmpresaCaixa, (req, res) => {
   const terminalId = obterTerminalId(req);
+  const empresaId = req.empresaId;
 
   if (isMultiCaixaAtivo() && !terminalId) {
     return res.json(null);
   }
 
-  obterSessaoAberta(terminalId, (sessErr, sessao) => {
+  obterSessaoAberta(terminalId, empresaId, (sessErr, sessao) => {
     if (sessErr) return res.status(500).json({ error: sessErr.message });
     if (sessao) {
+      try {
+        exigirSessaoDaEmpresa(sessao, empresaId);
+      } catch (empErr) {
+        return res.status(statusDeErroEmpresa(empErr)).json({
+          error: empErr.message,
+          code: empErr.code
+        });
+      }
+
       buscarCaixaTurnoDaSessao(sessao, (cErr, caixa) => {
         if (cErr) return res.status(500).json({ error: cErr.message });
 
@@ -216,6 +219,7 @@ router.get('/aberto', (req, res) => {
         calcularResumoCaixa(caixa, { sessaoId: sessao.id }, (calcErr, resumo) => {
           if (calcErr) return res.status(500).json({ error: calcErr.message });
           resumo.sessao = sessao;
+          resumo.empresa_id = empresaId;
           res.json(resumo);
         });
       });
@@ -228,8 +232,9 @@ router.get('/aberto', (req, res) => {
   });
 });
 
-router.get('/saldo-inicial-sugerido', (req, res) => {
+router.get('/saldo-inicial-sugerido', anexarEmpresaCaixa, (req, res) => {
   const terminalId = obterTerminalId(req);
+  const empresaId = req.empresaId;
 
   if (isMultiCaixaAtivo() && !terminalId) {
     return res.json({
@@ -240,18 +245,20 @@ router.get('/saldo-inicial-sugerido', (req, res) => {
     });
   }
 
-  const filtroTerminal = terminalId ? 'AND terminal_id = ?' : '';
-  const params = terminalId ? [terminalId] : [];
+  const filtroTerminal = terminalId ? 'AND c.terminal_id = ?' : '';
+  const params = terminalId ? [empresaId, terminalId] : [empresaId];
 
   db.get(`
     SELECT
-      id,
-      valor_fechamento,
-      fechado_em
-    FROM caixa
-    WHERE status = 'fechado'
+      c.id,
+      c.valor_fechamento,
+      c.fechado_em
+    FROM caixa c
+    INNER JOIN caixa_sessoes s ON s.caixa_turno_id = c.id
+    WHERE c.status = 'fechado'
+      AND s.empresa_id = ?
       ${filtroTerminal}
-    ORDER BY id DESC
+    ORDER BY c.id DESC
     LIMIT 1
   `, params, (err, caixa) => {
     if (err) {
@@ -271,12 +278,12 @@ router.get('/saldo-inicial-sugerido', (req, res) => {
   });
 });
 
-function executarAberturaCaixa(req, res, { valorInicial, terminalId, caixaConfigId }) {
+function executarAberturaCaixa(req, res, { valorInicial, terminalId, caixaConfigId, empresaId }) {
   db.serialize(() => {
     db.run('BEGIN IMMEDIATE', (beginErr) => {
       if (beginErr) return res.status(500).json({ error: beginErr.message });
 
-      obterSessaoAberta(terminalId, (sessErr, sessaoAberta) => {
+      obterSessaoAberta(terminalId, empresaId, (sessErr, sessaoAberta) => {
         if (sessErr) {
           db.run('ROLLBACK');
           return res.status(500).json({ error: sessErr.message });
@@ -306,9 +313,9 @@ function executarAberturaCaixa(req, res, { valorInicial, terminalId, caixaConfig
 
           db.run(`
             INSERT INTO caixa_sessoes (
-              caixa_id, caixa_turno_id, terminal_id, operador_id, valor_abertura, aberto_em, status
-            ) VALUES (?, ?, ?, ?, ?, DATETIME('now','localtime'), 'aberto')
-          `, [sessaoCaixaConfigId, caixaTurnoId, terminalId || null, req.user?.id || null, valorInicial], function(sessInsertErr) {
+              caixa_id, caixa_turno_id, terminal_id, operador_id, empresa_id, valor_abertura, aberto_em, status
+            ) VALUES (?, ?, ?, ?, ?, ?, DATETIME('now','localtime'), 'aberto')
+          `, [sessaoCaixaConfigId, caixaTurnoId, terminalId || null, req.user?.id || null, empresaId, valorInicial], function(sessInsertErr) {
             if (sessInsertErr) {
               db.run('ROLLBACK');
               return res.status(500).json({ error: sessInsertErr.message });
@@ -349,7 +356,8 @@ function executarAberturaCaixa(req, res, { valorInicial, terminalId, caixaConfig
                     valor_inicial: valorInicial,
                     caixa_turno_id: caixaTurnoId,
                     caixa_config_id: sessaoCaixaConfigId,
-                    terminal_id: terminalId || null
+                    terminal_id: terminalId || null,
+                    empresa_id: empresaId
                   },
                   ip_requisicao: req.ip || null
                 }).catch((auditErr) => console.error('Erro ao gravar auditoria de abertura de caixa:', auditErr));
@@ -374,7 +382,8 @@ function executarAberturaCaixa(req, res, { valorInicial, terminalId, caixaConfig
                   caixa_id: caixaTurnoId,
                   caixa_config_id: sessaoCaixaConfigId,
                   sessao_id: sessaoId,
-                  terminal_id: terminalId || null
+                  terminal_id: terminalId || null,
+                  empresa_id: empresaId
                 });
               });
             });
@@ -385,12 +394,13 @@ function executarAberturaCaixa(req, res, { valorInicial, terminalId, caixaConfig
   });
 }
 
-router.post('/abrir', exigirPermissaoOuSenhaAdmin('abrir_caixa'), exigirTerminalId, (req, res) => {
+router.post('/abrir', anexarEmpresaCaixa, exigirPermissaoOuSenhaAdmin('abrir_caixa'), exigirTerminalId, (req, res) => {
   const valorInicial = n(req.body.valor_inicial);
   const terminalId = obterTerminalId(req);
+  const empresaId = req.empresaId;
 
   if (!isMultiCaixaAtivo()) {
-    return executarAberturaCaixa(req, res, { valorInicial, terminalId, caixaConfigId: null });
+    return executarAberturaCaixa(req, res, { valorInicial, terminalId, caixaConfigId: null, empresaId });
   }
 
   validarTerminalParaAbertura(terminalId, (valErr, validacao) => {
@@ -400,16 +410,18 @@ router.post('/abrir', exigirPermissaoOuSenhaAdmin('abrir_caixa'), exigirTerminal
     executarAberturaCaixa(req, res, {
       valorInicial,
       terminalId,
-      caixaConfigId: validacao.caixaConfigId
+      caixaConfigId: validacao.caixaConfigId,
+      empresaId
     });
   });
 });
 
-router.post('/sangria', verificarToken, validarCaixaAberto, exigirPermissaoOuSenhaAdmin('sangria_caixa'), async (req, res) => {
+router.post('/sangria', verificarToken, anexarEmpresaCaixa, validarCaixaAberto, exigirPermissaoOuSenhaAdmin('sangria_caixa'), async (req, res) => {
   const valor = n(req.body.valor);
   const motivo = req.body.motivo || 'Sangria de caixa';
   const operadorId = req.user?.id || null;
   const operadorNome = req.user?.nome || req.user?.username || 'Desconhecido';
+  const empresaId = req.empresaId;
 
   if (valor <= 0) {
     return res.status(400).json({ error: 'Informe um valor válido para sangria.' });
@@ -417,13 +429,23 @@ router.post('/sangria', verificarToken, validarCaixaAberto, exigirPermissaoOuSen
 
   const terminalId = obterTerminalId(req);
 
-  obterSessaoAberta(terminalId, (errSess, sessao) => {
+  obterSessaoAberta(terminalId, empresaId, (errSess, sessao) => {
         if (errSess) {
           return res.status(500).json({ error: errSess.message });
         }
 
         if (!sessao) {
           return res.status(400).json({ error: terminalId ? 'Nenhuma sessão de caixa aberta para este terminal.' : 'Nenhuma sessão de caixa aberta.' });
+        }
+
+        try {
+          exigirSessaoDaEmpresa(sessao, empresaId);
+        } catch (empErr) {
+          return res.status(statusDeErroEmpresa(empErr)).json({
+            error: empErr.message,
+            code: empErr.code,
+            empresa_id: empErr.empresa_id
+          });
         }
 
         db.get('SELECT * FROM caixa WHERE id = ?', [obterCaixaTurnoId(sessao)], (errCaixa, caixa) => {
@@ -473,7 +495,7 @@ router.post('/sangria', verificarToken, validarCaixaAberto, exigirPermissaoOuSen
                         valor,
                         detalhes
                       ) VALUES (?, ?, ?, ?, 'sangria', 'sangria', ?, ?)`,
-                      [sessao.id, caixa.id, operadorId, sessao.terminal_id || terminalId, valor, JSON.stringify({ motivo, operador: operadorNome, sessao_id: sessao.id })], (auditErr) => {
+                      [sessao.id, caixa.id, operadorId, sessao.terminal_id || terminalId, valor, JSON.stringify({ motivo, operador: operadorNome, sessao_id: sessao.id, empresa_id: empresaId })], (auditErr) => {
                       if (auditErr) console.error('Erro ao registrar auditoria:', auditErr);
 
                       db.run('COMMIT', (commitErr) => {
@@ -490,7 +512,7 @@ router.post('/sangria', verificarToken, validarCaixaAberto, exigirPermissaoOuSen
                           acao: 'sangria',
                           referencia_tipo: 'caixa_sessao',
                           referencia_id: sessao.id,
-                          detalhes: { valor, motivo, caixa_id: caixa.id },
+                          detalhes: { valor, motivo, caixa_id: caixa.id, empresa_id: empresaId },
                           ip_requisicao: req.ip || null
                         }).catch((auditErr) => console.error('Erro ao gravar auditoria de sangria:', auditErr));
 
@@ -498,7 +520,8 @@ router.post('/sangria', verificarToken, validarCaixaAberto, exigirPermissaoOuSen
                           message: 'Sangria registrada com sucesso.',
                           valor,
                           motivo,
-                          operador: operadorNome
+                          operador: operadorNome,
+                          empresa_id: empresaId
                         });
                       });
                     }
@@ -511,11 +534,12 @@ router.post('/sangria', verificarToken, validarCaixaAberto, exigirPermissaoOuSen
       });
 });
 
-router.post('/suprimento', verificarToken, validarCaixaAberto, exigirPermissaoOuSenhaAdmin('suprimento_caixa'), (req, res) => {
+router.post('/suprimento', verificarToken, anexarEmpresaCaixa, validarCaixaAberto, exigirPermissaoOuSenhaAdmin('suprimento_caixa'), (req, res) => {
   const valor = n(req.body.valor);
   const motivo = req.body.motivo || 'Suprimento de caixa';
   const operadorId = req.user?.id || null;
   const operadorNome = req.user?.nome || req.user?.username || 'Desconhecido';
+  const empresaId = req.empresaId;
 
   if (valor <= 0) {
     return res.status(400).json({ error: 'Informe um valor válido para suprimento.' });
@@ -523,9 +547,19 @@ router.post('/suprimento', verificarToken, validarCaixaAberto, exigirPermissaoOu
 
   const terminalId = obterTerminalId(req);
 
-  obterSessaoAberta(terminalId, (errSess, sessao) => {
+  obterSessaoAberta(terminalId, empresaId, (errSess, sessao) => {
       if (errSess) return res.status(500).json({ error: errSess.message });
       if (!sessao) return res.status(400).json({ error: terminalId ? 'Nenhuma sessão de caixa aberta para este terminal.' : 'Nenhuma sessão de caixa aberta.' });
+
+      try {
+        exigirSessaoDaEmpresa(sessao, empresaId);
+      } catch (empErr) {
+        return res.status(statusDeErroEmpresa(empErr)).json({
+          error: empErr.message,
+          code: empErr.code,
+          empresa_id: empErr.empresa_id
+        });
+      }
 
       db.get('SELECT * FROM caixa WHERE id = ?', [obterCaixaTurnoId(sessao)], (err, caixa) => {
         if (err) return res.status(500).json({ error: err.message });
@@ -564,7 +598,7 @@ router.post('/suprimento', verificarToken, validarCaixaAberto, exigirPermissaoOu
                   detalhes,
                   ip_requisicao
                 ) VALUES (?, ?, ?, ?, 'suprimento', 'suprimento', ?, ?, ?)`,
-                [sessao.id, caixa.id, operadorId, sessao.terminal_id || terminalId, valor, JSON.stringify({ motivo, operador: operadorNome, sessao_id: sessao.id }), req.ip || null],
+                [sessao.id, caixa.id, operadorId, sessao.terminal_id || terminalId, valor, JSON.stringify({ motivo, operador: operadorNome, sessao_id: sessao.id, empresa_id: empresaId }), req.ip || null],
                 (auditErr) => {
                   if (auditErr) console.error('Erro ao registrar auditoria:', auditErr);
 
@@ -582,7 +616,7 @@ router.post('/suprimento', verificarToken, validarCaixaAberto, exigirPermissaoOu
                       acao: 'suprimento',
                       referencia_tipo: 'caixa_sessao',
                       referencia_id: sessao.id,
-                      detalhes: { valor, motivo, caixa_id: caixa.id },
+                      detalhes: { valor, motivo, caixa_id: caixa.id, empresa_id: empresaId },
                       ip_requisicao: req.ip || null
                     }).catch((auditErr) => console.error('Erro ao gravar auditoria de suprimento:', auditErr));
 
@@ -590,7 +624,8 @@ router.post('/suprimento', verificarToken, validarCaixaAberto, exigirPermissaoOu
                       message: 'Suprimento registrado com sucesso.',
                       valor,
                       motivo,
-                      operador: operadorNome
+                      operador: operadorNome,
+                      empresa_id: empresaId
                     });
                   });
                 }
@@ -603,15 +638,26 @@ router.post('/suprimento', verificarToken, validarCaixaAberto, exigirPermissaoOu
   );
 });
 
-router.post('/fechar', verificarToken, validarCaixaAberto, exigirPermissaoOuSenhaAdmin('fechar_caixa'), (req, res) => {
+router.post('/fechar', verificarToken, anexarEmpresaCaixa, validarCaixaAberto, exigirPermissaoOuSenhaAdmin('fechar_caixa'), (req, res) => {
   const valorInformado = n(req.body.valor_informado);
   const observacao = req.body.observacao || '';
   const operadorId = req.user?.id || null;
   const operadorNome = req.user?.nome || req.user?.username || 'Desconhecido';
   const terminalId = obterTerminalId(req);
-  obterSessaoAberta(terminalId, (errSess, sessao) => {
+  const empresaId = req.empresaId;
+  obterSessaoAberta(terminalId, empresaId, (errSess, sessao) => {
       if (errSess) return res.status(500).json({ error: errSess.message });
       if (!sessao) return res.status(400).json({ error: terminalId ? 'Nenhuma sessão de caixa aberta para este terminal.' : 'Nenhuma sessão de caixa aberta.' });
+
+      try {
+        exigirSessaoDaEmpresa(sessao, empresaId);
+      } catch (empErr) {
+        return res.status(statusDeErroEmpresa(empErr)).json({
+          error: empErr.message,
+          code: empErr.code,
+          empresa_id: empErr.empresa_id
+        });
+      }
 
       db.get('SELECT * FROM caixa WHERE id = ?', [obterCaixaTurnoId(sessao)], (err, caixa) => {
         if (err) return res.status(500).json({ error: err.message });
@@ -648,6 +694,7 @@ router.post('/fechar', verificarToken, validarCaixaAberto, exigirPermissaoOuSenh
                   nome: operadorNome
                 };
                 consolidacao.empresa = {
+                  id: empresaId,
                   nome: meta.empresa_nome,
                   cnpj: meta.empresa_cnpj
                 };
@@ -752,16 +799,16 @@ router.post('/fechar', verificarToken, validarCaixaAberto, exigirPermissaoOuSenh
                       return res.status(500).json({ error: insertErr.message });
                     }
 
-                    const paramsSessao = [valorInformado, sessao.id, caixa.id];
                     let sqlSessoes = `
                       UPDATE caixa_sessoes
                       SET status = 'fechado',
                           fechado_em = ?,
                           valor_fechamento = ?
                       WHERE status = 'aberto'
+                        AND empresa_id = ?
                         AND (id = ? OR caixa_turno_id = ?)
                     `;
-                    const paramsSessaoFull = [fechadoEm, ...paramsSessao];
+                    const paramsSessaoFull = [fechadoEm, valorInformado, empresaId, sessao.id, caixa.id];
                     if (terminalId) {
                       sqlSessoes += ' AND (terminal_id = ? OR terminal_id IS NULL)';
                       paramsSessaoFull.push(terminalId);
@@ -800,6 +847,7 @@ router.post('/fechar', verificarToken, validarCaixaAberto, exigirPermissaoOuSenh
                           operador: operadorNome,
                           observacao,
                           sessao_id: sessao.id,
+                          empresa_id: empresaId,
                           sessoes_encerradas: this.changes,
                           total_recebido: detalhes.total_vendido,
                           entregas_pendentes: detalhes.entregas_pendentes || 0
@@ -842,6 +890,7 @@ router.post('/fechar', verificarToken, validarCaixaAberto, exigirPermissaoOuSenh
                                 diferenca,
                                 observacao,
                                 caixa_id: caixa.id,
+                                empresa_id: empresaId,
                                 total_recebido: detalhes.total_vendido
                               },
                               ip_requisicao: req.ip || null
@@ -851,6 +900,7 @@ router.post('/fechar', verificarToken, validarCaixaAberto, exigirPermissaoOuSenh
                               message: 'Caixa fechado com sucesso.',
                               caixa_id: caixa.id,
                               sessao_id: sessao.id,
+                              empresa_id: empresaId,
                               operador: operadorNome,
                               cupom_html: cupomHtml,
                               detalhes: {

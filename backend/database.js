@@ -156,6 +156,14 @@ function aplicarAlteracoesPosCriacao() {
   aplicarAlteracaoSegura('terminais', `ALTER TABLE terminais ADD COLUMN usuario_id INTEGER REFERENCES usuarios(id)`);
   aplicarAlteracaoSegura('terminais', `ALTER TABLE terminais ADD COLUMN usuario_nome TEXT`);
   aplicarAlteracaoSegura('caixa_sessoes', `ALTER TABLE caixa_sessoes ADD COLUMN caixa_turno_id INTEGER REFERENCES caixa(id)`);
+  // Sprint 05.38.C — isolamento empresarial do Caixa
+  aplicarAlteracaoSegura('caixa_sessoes', `ALTER TABLE caixa_sessoes ADD COLUMN empresa_id INTEGER REFERENCES empresas(id)`);
+  // Sprint 05.40 — ownership explícito da venda (nullable: legado não classificado)
+  aplicarAlteracaoSegura('vendas', `ALTER TABLE vendas ADD COLUMN empresa_id INTEGER REFERENCES empresas(id)`);
+  aplicarAlteracaoSegura(
+    'vendas',
+    `CREATE INDEX IF NOT EXISTS idx_vendas_empresa_id ON vendas(empresa_id)`
+  );
 
   // Adicionar colunas faltantes na tabela vendas_itens (para suportar promoções e desconto atacado)
   aplicarAlteracaoSegura('vendas_itens', `ALTER TABLE vendas_itens ADD COLUMN desconto_percentual DECIMAL(5,2) DEFAULT 0`);
@@ -291,7 +299,9 @@ function aplicarAlteracoesPosCriacao() {
     `ALTER TABLE compras ADD COLUMN cst_ipi TEXT`,
     `ALTER TABLE compras ADD COLUMN cst_ipi_xml TEXT`,
     `ALTER TABLE compras ADD COLUMN escrituracao_alterada INTEGER DEFAULT 0`,
-    `ALTER TABLE compras ADD COLUMN escrituracao_motivo TEXT`
+    `ALTER TABLE compras ADD COLUMN escrituracao_motivo TEXT`,
+    // Sprint 05.38.F.B — ownership estrutural
+    `ALTER TABLE compras ADD COLUMN empresa_id INTEGER REFERENCES empresas(id)`
   ];
 
   const alteracoesFinanceiro = [
@@ -305,7 +315,9 @@ function aplicarAlteracoesPosCriacao() {
     `ALTER TABLE financeiro ADD COLUMN venda_id INTEGER`,
     `ALTER TABLE financeiro ADD COLUMN pessoa_nome TEXT`,
     `ALTER TABLE financeiro ADD COLUMN observacao TEXT`,
-    `ALTER TABLE financeiro ADD COLUMN baixado_em DATE`
+    `ALTER TABLE financeiro ADD COLUMN baixado_em DATE`,
+    // Sprint 05.38.D — isolamento empresarial do Financeiro
+    `ALTER TABLE financeiro ADD COLUMN empresa_id INTEGER REFERENCES empresas(id)`
   ];
 
   const alteracoesComprasItens = [
@@ -363,7 +375,9 @@ function aplicarAlteracoesPosCriacao() {
   ];
 
   const alteracoesContasReceber = [
-    `ALTER TABLE contas_receber ADD COLUMN observacao TEXT`
+    `ALTER TABLE contas_receber ADD COLUMN observacao TEXT`,
+    // Sprint 05.38.D — isolamento empresarial de contas a receber
+    `ALTER TABLE contas_receber ADD COLUMN empresa_id INTEGER REFERENCES empresas(id)`
   ];
 
   const alteracoesCaixaMovimentacoes = [
@@ -1762,7 +1776,9 @@ function criarTabelas() {
         parcelas INTEGER DEFAULT 1,
         valor_entrada DECIMAL(10,2) DEFAULT 0,
         observacao TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        empresa_id INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (empresa_id) REFERENCES empresas(id)
       )
     `, (err) => {
       if (err) console.error('Erro ao criar tabela compras:', err);
@@ -1843,8 +1859,10 @@ function criarTabelas() {
         desconto_autorizado_por TEXT,
         desconto_autorizado_em DATETIME,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        empresa_id INTEGER,
         FOREIGN KEY (cliente_id) REFERENCES clientes(id),
-        FOREIGN KEY (caixa_id) REFERENCES caixa(id)
+        FOREIGN KEY (caixa_id) REFERENCES caixa(id),
+        FOREIGN KEY (empresa_id) REFERENCES empresas(id)
       )
     `, (err) => {
       if (err) console.error('Erro ao criar tabela vendas:', err);
@@ -1913,6 +1931,7 @@ function criarTabelas() {
     });
 
     // Tabela de movimentações financeiras
+    // Sprint 05.38.D — empresa_id em novos registros (backfill nas existentes)
     db.run(`
       CREATE TABLE IF NOT EXISTS financeiro (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1924,7 +1943,9 @@ function criarTabelas() {
         forma_pagamento VARCHAR(50),
         referencia_id INTEGER,
         referencia_tipo VARCHAR(50),
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        empresa_id INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (empresa_id) REFERENCES empresas(id)
       )
     `, (err) => {
       if (err) console.error('Erro ao criar tabela financeiro:', err);
@@ -1956,11 +1977,13 @@ function criarTabelas() {
     }
 
     // Tabela de contas a receber (parcelas de vendas a prazo)
+    // Sprint 05.38.D — empresa_id
     db.run(`
       CREATE TABLE IF NOT EXISTS contas_receber (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         venda_id INTEGER,
         cliente_id INTEGER,
+        empresa_id INTEGER,
         numero_parcela INTEGER,
         total_parcelas INTEGER,
         valor_parcela DECIMAL(10,2) NOT NULL,
@@ -1970,7 +1993,8 @@ function criarTabelas() {
         status VARCHAR(20) DEFAULT 'aberto',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (venda_id) REFERENCES vendas(id),
-        FOREIGN KEY (cliente_id) REFERENCES clientes(id)
+        FOREIGN KEY (cliente_id) REFERENCES clientes(id),
+        FOREIGN KEY (empresa_id) REFERENCES empresas(id)
       )
     `, (err) => {
       if (err) console.error('Erro ao criar tabela contas_receber:', err);
@@ -2187,9 +2211,11 @@ function criarTabelas() {
         compra_id INTEGER,
         usuario_id INTEGER,
         processado_em DATETIME,
+        empresa_id INTEGER,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (compra_id) REFERENCES compras(id)
+        FOREIGN KEY (compra_id) REFERENCES compras(id),
+        FOREIGN KEY (empresa_id) REFERENCES empresas(id)
       )
     `, (err) => {
       if (err) console.error('Erro ao criar tabela central_entradas_documentos:', err);
@@ -2200,6 +2226,12 @@ function criarTabelas() {
     aplicarAlteracaoSegura(
       'central_entradas_documentos',
       'ALTER TABLE central_entradas_documentos ADD COLUMN tipo_documento TEXT'
+    );
+
+    // Sprint 05.38.E — vínculo empresarial do documento
+    aplicarAlteracaoSegura(
+      'central_entradas_documentos',
+      'ALTER TABLE central_entradas_documentos ADD COLUMN empresa_id INTEGER REFERENCES empresas(id)'
     );
 
     db.run(`
@@ -2239,6 +2271,9 @@ function criarTabelas() {
     });
     db.run(`CREATE INDEX IF NOT EXISTS idx_central_entradas_documentos_cnpj ON central_entradas_documentos(cnpj_fornecedor)`, (err) => {
       if (err) console.error('Erro ao criar índice idx_central_entradas_documentos_cnpj:', err);
+    });
+    db.run(`CREATE INDEX IF NOT EXISTS idx_central_entradas_documentos_empresa ON central_entradas_documentos(empresa_id)`, (err) => {
+      if (err) console.error('Erro ao criar índice idx_central_entradas_documentos_empresa:', err);
     });
     db.run(`CREATE INDEX IF NOT EXISTS idx_central_entradas_documentos_emissao ON central_entradas_documentos(data_emissao)`, (err) => {
       if (err) console.error('Erro ao criar índice idx_central_entradas_documentos_emissao:', err);
@@ -2544,12 +2579,68 @@ function migrarRecalcularSaldosEstoque() {
 
 function inicializarBanco() {
   const { migrarDadosCaixaSessoes } = require('./utils/caixaSessaoHelpers');
+  const {
+    migrarEmpresaIdFinanceiro,
+    migrarOwnershipFinanceiro0541,
+    formatarLogMigracaoFinanceiro0541
+  } = require('./utils/financeiroEmpresaHelpers');
+  const { migrarEmpresaIdCentralDocumentos } = require('./utils/centralEntradasEmpresaHelpers');
+  const { migrarEmpresaIdCompras } = require('./utils/comprasEmpresaHelpers');
+  const { migrarEmpresaIdVendas, formatarLogMigracaoVendas } = require('./utils/vendasEmpresaHelpers');
 
   db.serialize(() => {
     criarTabelas();
     criarTabelasMiip();
     aplicarAlteracoesPosCriacao();
-    migrarDadosCaixaSessoes(db);
+    migrarDadosCaixaSessoes(db, () => {
+      migrarEmpresaIdFinanceiro(db)
+        .then((info) => {
+          if (info && info.empresaId != null) {
+            console.log(
+              `[05.38.D] financeiro/contas_receber.empresa_id: ` +
+              `fin_added=${info.financeiro.added} fin_origem=${info.financeiro.fromCaixa} ` +
+              `fin_op=${info.financeiro.fromOperacional} cr_added=${info.contas_receber.added} ` +
+              `cr_origem=${info.contas_receber.fromOrigem} cr_op=${info.contas_receber.fromOperacional} ` +
+              `empresaId=${info.empresaId}`
+            );
+          }
+          return migrarEmpresaIdCentralDocumentos(db);
+        })
+        .then((infoCe) => {
+          if (infoCe && !infoCe.skipped) {
+            console.log(
+              `[05.38.E] central_entradas_documentos.empresa_id: ` +
+              `added=${infoCe.added} fromCnpj=${infoCe.fromCnpj} ` +
+              `fromOperacional=${infoCe.fromOperacional} ambiguos=${infoCe.ambiguos} ` +
+              `empresaId=${infoCe.empresaId}`
+            );
+          }
+          return migrarEmpresaIdCompras(db);
+        })
+        .then((infoCp) => {
+          if (infoCp && !infoCp.skipped) {
+            console.log(
+              `[05.38.F.B] compras.empresa_id: ` +
+              `added=${infoCp.added} fromCentral=${infoCp.fromCentral} ` +
+              `fromFinanceiro=${infoCp.fromFinanceiro} fromOperacional=${infoCp.fromOperacional} ` +
+              `ambiguos=${infoCp.ambiguos} empresaId=${infoCp.empresaId}`
+            );
+          }
+          return migrarEmpresaIdVendas(db);
+        })
+        .then((infoVd) => {
+          if (infoVd && !infoVd.skipped) {
+            console.log(`[05.40] ${formatarLogMigracaoVendas(infoVd).replace(/\n/g, ' | ')}`);
+          }
+          return migrarOwnershipFinanceiro0541(db);
+        })
+        .then((infoFin) => {
+          if (infoFin && !infoFin.skipped) {
+            console.log(`[05.41] ${formatarLogMigracaoFinanceiro0541(infoFin).replace(/\n/g, ' | ')}`);
+          }
+        })
+        .catch((err) => console.error('Erro migration 05.38.D/E/F.B/05.40/05.41:', err.message));
+    });
     inserirConfiguracoesPadrao();
     migrarUrlsFiscalProducao();
     seedPinpadCatalogoTEF();
@@ -2709,7 +2800,8 @@ function garantirColunasFinanceiro() {
       !colunas.includes('venda_id') && `ALTER TABLE financeiro ADD COLUMN venda_id INTEGER`,
       !colunas.includes('pessoa_nome') && `ALTER TABLE financeiro ADD COLUMN pessoa_nome TEXT`,
       !colunas.includes('observacao') && `ALTER TABLE financeiro ADD COLUMN observacao TEXT`,
-      !colunas.includes('baixado_em') && `ALTER TABLE financeiro ADD COLUMN baixado_em DATE`
+      !colunas.includes('baixado_em') && `ALTER TABLE financeiro ADD COLUMN baixado_em DATE`,
+      !colunas.includes('empresa_id') && `ALTER TABLE financeiro ADD COLUMN empresa_id INTEGER REFERENCES empresas(id)`
     ].filter(Boolean);
 
     db.serialize(() => {
@@ -3056,6 +3148,7 @@ db.serialize(() => {
   `);
 
   // Nova tabela de sessões de caixa (multi-caixa profissional)
+  // Sprint 05.38.C — empresa_id obrigatório em novas sessões (backfill nas existentes)
   db.run(`
     CREATE TABLE IF NOT EXISTS caixa_sessoes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3063,6 +3156,7 @@ db.serialize(() => {
       caixa_turno_id INTEGER,
       terminal_id INTEGER,
       operador_id INTEGER,
+      empresa_id INTEGER,
       valor_abertura DECIMAL(10,2) DEFAULT 0,
       valor_fechamento DECIMAL(10,2) DEFAULT 0,
       aberto_em DATETIME,
@@ -3073,7 +3167,8 @@ db.serialize(() => {
       FOREIGN KEY (caixa_id) REFERENCES caixas(id),
       FOREIGN KEY (caixa_turno_id) REFERENCES caixa(id),
       FOREIGN KEY (terminal_id) REFERENCES terminais(id),
-      FOREIGN KEY (operador_id) REFERENCES usuarios(id)
+      FOREIGN KEY (operador_id) REFERENCES usuarios(id),
+      FOREIGN KEY (empresa_id) REFERENCES empresas(id)
     )
   `);
 

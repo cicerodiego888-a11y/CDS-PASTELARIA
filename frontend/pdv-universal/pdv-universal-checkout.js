@@ -72,7 +72,7 @@
         return { executado: true, acao: 'INICIAR_RESERVA' };
     }
 
-    async function finalizarCheckout({ itens, pagamentos, emitir_fiscal, idempotency_key }, fetchFn) {
+    async function finalizarCheckout({ itens, pagamentos, emitir_fiscal, desconto, acrescimo, idempotency_key }, fetchFn) {
         const fn = fetchFn || fetch;
         const headers = { 'Content-Type': 'application/json', Accept: 'application/json' };
         try {
@@ -83,7 +83,14 @@
         } catch (_e) { /* ignore */ }
         if (idempotency_key) headers['Idempotency-Key'] = idempotency_key;
 
-        const payload = { itens, pagamentos, emitir_fiscal: !!emitir_fiscal, idempotency_key };
+        const payload = {
+            itens,
+            pagamentos,
+            emitir_fiscal: !!emitir_fiscal,
+            desconto: Number(desconto) > 0 ? Number(desconto) : 0,
+            acrescimo: Number(acrescimo) > 0 ? Number(acrescimo) : 0,
+            idempotency_key
+        };
         const res = await fn(urlCheckout(), {
             method: 'POST',
             headers,

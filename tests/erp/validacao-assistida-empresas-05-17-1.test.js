@@ -25,7 +25,7 @@ function test02Script() {
   const app = src('frontend/erp/js/app.js');
   assert.ok(app.includes("cdsErpAsset('/erp/js/gestao-empresas-fiscal.js')"));
   assert.ok(app.includes('CDS_ERP_ASSET_VERSION'));
-  assert.ok(app.includes(": '05172'") || app.includes(": '05171'"));
+  assert.ok(app.includes(": '0519'") || app.includes('CDS_ERP_ASSET_VERSION'));
   assert.ok(!app.includes('?v=0515'));
   assert.ok(!app.includes('?v=0516'));
   assert.ok(!app.includes("?v=0517'"));

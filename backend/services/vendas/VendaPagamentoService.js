@@ -23,6 +23,13 @@ const {
   montarOpcoesBaixaEstoqueVenda
 } = require('./debitoEstoqueVendaViaPorta');
 const { aplicarSaldosDisponibilidadeVenda } = require('../estoque/leituraEstoqueEmpresaProduto');
+const {
+  exigirEmpresaDaOperacao,
+  exigirCaixaCompativelComVenda,
+  resolverEmpresaIdParaVenda,
+  exigirVendaDaEmpresa,
+  responderErroEmpresaVenda
+} = require('./VendaEmpresaContextoService');
 
 /**
  * RC8.2 — carrega MPFC e entrega política aos consumidores.
@@ -662,6 +669,31 @@ function vendaExigeAutorizacaoDescontoManual(body = {}) {
 }
 
 function criarVenda(req, res) {
+if (!req.__financeiroEmpresaOk) {
+  const { resolverEmpresaIdParaFinanceiro } = require('../financeiro/FinanceiroEmpresaContextoService');
+  return resolverEmpresaIdParaFinanceiro(req, { db, exigirAutorizacaoUsuario: false })
+    .then((resolved) => {
+      req.empresaId = resolved.empresaId;
+      req.__financeiroEmpresaOk = true;
+      return criarVenda(req, res);
+    })
+    .catch((err) => res.status(err.statusCode || 400).json({
+      error: err.message || 'Empresa obrigatória para persistência financeira da venda.',
+      code: err.code || 'FINANCEIRO_EMPRESA_OBRIGATORIA'
+    }));
+}
+let empresaIdVenda;
+try {
+  empresaIdVenda = exigirEmpresaDaOperacao(req);
+  exigirCaixaCompativelComVenda(req, empresaIdVenda);
+} catch (errEmp) {
+  return res.status(errEmp.statusCode || 400).json({
+    error: errEmp.message || 'Empresa do contexto é obrigatória para criar venda.',
+    code: errEmp.code || 'EMPRESA_CONTEXT_REQUIRED',
+    empresa_id: errEmp.empresa_id
+  });
+}
+req.empresaIdVenda = empresaIdVenda;
 const opcoesBaixaEstoque = montarOpcoesBaixaEstoqueVenda(req, 'baixa_venda', db);
 const tipoVendaCanal = String(req.body?.tipo_venda || 'BALCAO').toUpperCase();
 if (tipoVendaCanal === 'ENTREGA') {
@@ -1053,9 +1085,9 @@ db.all(`
     db.serialize(() => {
       db.run('BEGIN IMMEDIATE');
       db.run(`
-        INSERT INTO vendas (codigo, data_venda, cliente_id, total, desconto, forma_pagamento, status, caixa_sessao_id, caixa_id, terminal_id, operador_id, valor_fiscal, valor_nao_fiscal, status_pagamento, tef_transacao_id, mpfc_politica_snapshot)
-          VALUES (?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `, [codigo, data_venda, cliente_id || null, totalNum, desconto || 0, formaPagamentoFinal, req.caixaSessaoId || null, req.caixaId || null, req.terminalId || null, req.operadorId || null, totalFiscal, totalNaoFiscal, statusPagamento, resultadoFiscal?.transacoes?.[0] || null, snapshotJson], function(err) {
+        INSERT INTO vendas (codigo, data_venda, cliente_id, total, desconto, forma_pagamento, status, caixa_sessao_id, caixa_id, terminal_id, operador_id, valor_fiscal, valor_nao_fiscal, status_pagamento, tef_transacao_id, mpfc_politica_snapshot, empresa_id)
+          VALUES (?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `, [codigo, data_venda, cliente_id || null, totalNum, desconto || 0, formaPagamentoFinal, req.caixaSessaoId || null, req.caixaId || null, req.terminalId || null, req.operadorId || null, totalFiscal, totalNaoFiscal, statusPagamento, resultadoFiscal?.transacoes?.[0] || null, snapshotJson, empresaIdVenda], function(err) {
         if (err) {
           db.run('ROLLBACK');
           res.status(500).json(erroPersistenciaVenda(err, 'insert_vendas_prazo', {
@@ -1231,9 +1263,9 @@ db.all(`
                 }
                 for (let i = 1; i <= qtdParcelas; i++) {
                   db.run(`
-                    INSERT INTO contas_receber (venda_id, cliente_id, numero_parcela, total_parcelas, valor_parcela, valor_restante, data_vencimento, status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'aberto')
-                  `, [vendaId, cliente_id, i, qtdParcelas, valorParcela, valorParcela, vencimento.format('YYYY-MM-DD')]);
+                    INSERT INTO contas_receber (venda_id, cliente_id, numero_parcela, total_parcelas, valor_parcela, valor_restante, data_vencimento, status, empresa_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'aberto', ?)
+                  `, [vendaId, cliente_id, i, qtdParcelas, valorParcela, valorParcela, vencimento.format('YYYY-MM-DD'), req.empresaId || null]);
                   vencimento = avancarVencimentoParcela(vencimento, intervaloParcelasBody);
                 }
                 buscarNomeCliente((clienteErr, clienteNome, clienteCpf) => {
@@ -1266,8 +1298,8 @@ db.all(`
                       INSERT INTO financeiro (
                         tipo, descricao, valor, data_movimento, categoria, forma_pagamento,
                         referencia_id, referencia_tipo, status, origem, documento, vencimento,
-                        numero_parcela, total_parcelas, venda_id, pessoa_nome, baixado_em
-                      ) VALUES ('receita', ?, ?, ?, 'vendas', ?, ?, 'venda', 'pendente', 'venda', ?, ?, ?, ?, ?, ?, NULL)
+                        numero_parcela, total_parcelas, venda_id, pessoa_nome, baixado_em, empresa_id
+                      ) VALUES ('receita', ?, ?, ?, 'vendas', ?, ?, 'venda', 'pendente', 'venda', ?, ?, ?, ?, ?, ?, NULL, ?)
                     `, [
                       `Venda ${codigo} - Parcela ${indice}/${qtdParcelas}`,
                       valorParcela,
@@ -1279,7 +1311,8 @@ db.all(`
                       indice,
                       qtdParcelas,
                       vendaId,
-                      clienteNome
+                      clienteNome,
+                      empresaIdVenda
                     ], (finErr) => {
                       if (finErr) {
                         db.run('ROLLBACK');
@@ -1392,9 +1425,10 @@ const executarVenda = async () => {
         valor_nao_fiscal,
         status_pagamento,
         tef_transacao_id,
-        mpfc_politica_snapshot
+        mpfc_politica_snapshot,
+        empresa_id
       )
-      VALUES (?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       codigo,
       data_venda,
@@ -1412,7 +1446,8 @@ const executarVenda = async () => {
       totalNaoFiscal,
       statusPagamento,
       resultadoFiscal?.transacoes?.[0] || null,
-      snapshotJson
+      snapshotJson,
+      empresaIdVenda
     ], function(err) {
       if (err) {
         db.run('ROLLBACK');
@@ -1603,9 +1638,9 @@ const executarVenda = async () => {
                   db.run(`
                     INSERT INTO contas_receber (
                       venda_id, cliente_id, numero_parcela, total_parcelas, valor_parcela,
-                      valor_restante, data_vencimento, status
-                    ) VALUES (?, ?, ?, ?, ?, ?, date('now', '+30 day'), 'aberto')
-                  `, [vendaId, cliente_id, 1, 1, valorParcela, valorParcela], (crErr) => {
+                      valor_restante, data_vencimento, status, empresa_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, date('now', '+30 day'), 'aberto', ?)
+                  `, [vendaId, cliente_id, 1, 1, valorParcela, valorParcela, req.empresaId || null], (crErr) => {
                     if (crErr) {
                       db.run('ROLLBACK');
                       res.status(500).json({ error: crErr.message });
@@ -1629,8 +1664,8 @@ const executarVenda = async () => {
                   INSERT INTO financeiro (
                     tipo, descricao, valor, data_movimento, categoria, forma_pagamento,
                     referencia_id, referencia_tipo, status, origem, documento, vencimento,
-                    numero_parcela, total_parcelas, venda_id, pessoa_nome, baixado_em
-                  ) VALUES ('receita', ?, ?, ?, 'vendas', ?, ?, 'venda', ?, 'venda', ?, ?, 1, 1, ?, ?, ?)
+                    numero_parcela, total_parcelas, venda_id, pessoa_nome, baixado_em, empresa_id
+                  ) VALUES ('receita', ?, ?, ?, 'vendas', ?, ?, 'venda', ?, 'venda', ?, ?, 1, 1, ?, ?, ?, ?)
                 `, [
                   `Venda ${codigo}`,
                   totalNum,
@@ -1642,7 +1677,8 @@ const executarVenda = async () => {
                   data_venda,
                   vendaId,
                   clienteNome,
-                  baixadoEm
+                  baixadoEm,
+                  empresaIdVenda
                 ], (finErr) => {
                   if (finErr) {
                     db.run('ROLLBACK');
@@ -1721,15 +1757,19 @@ if (forma_pagamento === 'credito') {
 function consultarPagamentoNaoFiscal(req, res) {
 const { id } = req.params;
 
-db.get('SELECT * FROM vendas WHERE id = ?', [id], (err, venda) => {
+return resolverEmpresaIdParaVenda(req, { db, exigirAutorizacaoUsuario: false })
+  .then((resolved) => {
+    req.empresaId = resolved.empresaId;
+    db.get('SELECT * FROM vendas WHERE id = ? AND empresa_id = ?', [id, resolved.empresaId], (err, venda) => {
   if (err) {
     res.status(500).json({ error: err.message });
     return;
   }
 
-  if (!venda) {
-    res.status(404).json({ error: 'Venda não encontrada.' });
-    return;
+  try {
+    exigirVendaDaEmpresa(venda, resolved.empresaId);
+  } catch (ownErr) {
+    return responderErroEmpresaVenda(res, ownErr);
   }
 
   db.all(`
@@ -1757,7 +1797,9 @@ db.get('SELECT * FROM vendas WHERE id = ?', [id], (err, venda) => {
       aguardando_pagamento: venda.status_pagamento === 'aguardando_nao_fiscal'
     });
   });
-});
+    });
+  })
+  .catch((err) => responderErroEmpresaVenda(res, err));
 }
 
 function registrarPagamentoNaoFiscal(req, res) {
@@ -1775,15 +1817,19 @@ if (erroValidacao) {
   return;
 }
 
-db.get('SELECT * FROM vendas WHERE id = ?', [id], (err, venda) => {
+return resolverEmpresaIdParaVenda(req, { db, exigirAutorizacaoUsuario: false })
+  .then((resolved) => {
+    req.empresaId = resolved.empresaId;
+    db.get('SELECT * FROM vendas WHERE id = ? AND empresa_id = ?', [id, resolved.empresaId], (err, venda) => {
   if (err) {
     res.status(500).json({ error: err.message });
     return;
   }
 
-  if (!venda) {
-    res.status(404).json({ error: 'Venda não encontrada.' });
-    return;
+  try {
+    exigirVendaDaEmpresa(venda, resolved.empresaId);
+  } catch (ownErr) {
+    return responderErroEmpresaVenda(res, ownErr);
   }
 
   if (venda.status !== 'concluida') {
@@ -2090,7 +2136,9 @@ db.get('SELECT * FROM vendas WHERE id = ?', [id], (err, venda) => {
       });
     });
   });
-});
+    });
+  })
+  .catch((err) => responderErroEmpresaVenda(res, err));
 }
 
 module.exports = {

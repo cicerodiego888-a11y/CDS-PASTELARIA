@@ -63,6 +63,8 @@ router.post('/checkout', validarCaixaSeOrigemPdv, async (req, res) => {
       itens: body.itens,
       pagamentos: body.pagamentos,
       emitir_fiscal: body.emitir_fiscal,
+      desconto: body.desconto,
+      acrescimo: body.acrescimo,
       idempotency_key: body.idempotency_key || req.headers['idempotency-key']
     });
     return res.json(resultado);

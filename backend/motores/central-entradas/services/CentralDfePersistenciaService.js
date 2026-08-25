@@ -34,6 +34,7 @@ const STATUS_PERMITE_XML_COMPLETO = Object.freeze([
 class CentralDfePersistenciaService {
   constructor(deps = {}) {
     this._db = deps.db ?? null;
+    this._empresaId = deps.empresaId != null ? Number(deps.empresaId) : null;
     this._documentosRepository = deps.documentosRepository
       ?? new CentralDocumentosRepository({ db: this._db });
     this._historicoRepository = deps.historicoRepository
@@ -294,7 +295,10 @@ class CentralDfePersistenciaService {
       origem: dados.origem,
       status,
       statusDetalhe,
-      tipoDocumento: tipoDfe
+      tipoDocumento: tipoDfe,
+      empresaId: dados.empresaId != null
+        ? Number(dados.empresaId)
+        : (this._empresaId != null ? Number(this._empresaId) : null)
     });
 
     await this._historicoRepository.inserir({

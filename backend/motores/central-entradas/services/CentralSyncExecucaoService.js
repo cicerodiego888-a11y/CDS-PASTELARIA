@@ -278,7 +278,20 @@ class CentralSyncExecucaoService {
   /** @private */
   async _verificarCooldownDfe() {
     try {
-      const contexto = await this._config.obterContextoOperacional();
+      const { listarAlvosSincronizacaoCentral } = require('../../../services/central-entradas/CentralEntradasEmpresaContextoService');
+      const { ModoOperacionalGlobal } = require('../../../core/modo-operacional');
+      const plano = await listarAlvosSincronizacaoCentral();
+
+      // MULTIEMPRESA: cooldown é por CNPJ dentro de sincronizarEmpresa — não bloqueia o lote global.
+      if (plano.modo === ModoOperacionalGlobal.MULTIEMPRESA) {
+        return { ativo: false };
+      }
+
+      const alvo = plano.alvos[0];
+      const contexto = await this._config.obterContextoOperacional({
+        empresaId: alvo && alvo.empresaId,
+        permitirFallbackGlobal: true
+      });
       if (!contexto.ok) return { ativo: false };
 
       const ambiente = Number(contexto.contexto.ambiente) === 1 ? 1 : 2;

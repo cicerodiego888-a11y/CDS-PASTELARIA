@@ -6,6 +6,12 @@
  */
 'use strict';
 
+const {
+  preencherUrlsVaziasComOficiais,
+  enriquecerBlocoUrlsExibicao,
+  sanitizarPatchCsc
+} = require('./FiscalConfigUrlsResolver');
+
 const DDL_EMPRESAS_CONFIGURACAO_FISCAL = `
   CREATE TABLE IF NOT EXISTS empresas_configuracao_fiscal (
     empresa_id INTEGER NOT NULL UNIQUE,
@@ -163,6 +169,7 @@ function resolverUrlsEmpresa(row) {
 }
 
 function complementarUrlsPorAmbiente(merged) {
+  preencherUrlsVaziasComOficiais(merged, { uf: merged.uf || 'CE' });
   const amb = Number(merged.ambiente);
   const sufixo = amb === 1 ? 'producao' : (amb === 2 ? 'homologacao' : null);
   if (!sufixo) return merged;
@@ -433,6 +440,9 @@ function dtoPublicoConfiguracao(empresa, row) {
     serie: row && row.serie != null ? Number(row.serie) : null,
     numero_atual: row && row.numero_atual != null ? Number(row.numero_atual) : null,
     uf: (row && row.uf) || null,
+    // ID CSC não é segredo — devolver valor real para a tela.
+    // TOKEN CSC é segredo — apenas flag (nunca token_csc puro no DTO público).
+    id_csc: row && preencherTexto(row.id_csc) ? String(row.id_csc).trim() : null,
     id_csc_configurado: !!(row && preencherTexto(row.id_csc)),
     csc_configurado: !!(row && preencherTexto(row.token_csc)),
     certificado_configurado: !!(row && preencherTexto(row.certificado_path) && preencherTexto(row.certificado_senha)),
@@ -442,8 +452,14 @@ function dtoPublicoConfiguracao(empresa, row) {
       || preencherTexto(row.ws_autorizacao_homologacao)
       || preencherTexto(row.ws_autorizacao_producao)
     )),
-    urls_homologacao: resolverUrlsEmpresa(row || {}).urlsHomologacao,
-    urls_producao: resolverUrlsEmpresa(row || {}).urlsProducao,
+    urls_homologacao: enriquecerBlocoUrlsExibicao(
+      resolverUrlsEmpresa(row || {}).urlsHomologacao,
+      { uf: (row && row.uf) || 'CE', ambiente: 2 }
+    ),
+    urls_producao: enriquecerBlocoUrlsExibicao(
+      resolverUrlsEmpresa(row || {}).urlsProducao,
+      { uf: (row && row.uf) || 'CE', ambiente: 1 }
+    ),
     ie_configurada: !!(row && preencherTexto(row.ie)) || preencherTexto(empresa.inscricao_estadual),
     status,
     campos,
@@ -527,7 +543,7 @@ async function salvarConfiguracaoFiscalEmpresa(empresaId, configuracao, deps = {
   const id = exigirEmpresaAlvoAdministrativo(empresaId, configuracao);
   validarConfiguracaoFiscalEmpresa(id, configuracao);
   const empresa = await obterEmpresaOuErro(id, db);
-  const patch = normalizarPayloadEscrita(configuracao);
+  const patch = sanitizarPatchCsc(normalizarPayloadEscrita(configuracao));
   const existente = await dbGet(db, `SELECT * FROM empresas_configuracao_fiscal WHERE empresa_id = ?`, [id]);
 
   let txAberta = false;
@@ -537,12 +553,24 @@ async function salvarConfiguracaoFiscalEmpresa(empresaId, configuracao, deps = {
     const base = existente || {};
     const merged = {};
     for (const campo of CAMPOS_ESCRITA) {
-      merged[campo] = Object.prototype.hasOwnProperty.call(patch, campo)
-        ? patch[campo]
-        : (base[campo] != null ? base[campo] : null);
+      if (Object.prototype.hasOwnProperty.call(patch, campo)) {
+        const valor = patch[campo];
+        // Nunca apagar CSC/certificado com string vazia acidental.
+        if (
+          (campo === 'token_csc' || campo === 'id_csc' || campo === 'certificado_senha' || campo === 'certificado_path')
+          && (valor == null || String(valor).trim() === '')
+        ) {
+          merged[campo] = base[campo] != null ? base[campo] : null;
+        } else {
+          merged[campo] = valor;
+        }
+      } else {
+        merged[campo] = base[campo] != null ? base[campo] : null;
+      }
     }
     if (merged.serie == null) merged.serie = 1;
     if (merged.numero_atual == null) merged.numero_atual = 1;
+    if (!merged.uf) merged.uf = 'CE';
     complementarUrlsPorAmbiente(merged);
     await upsertConfiguracaoFiscalEmpresa(id, merged, db);
     if (typeof deps.aposPersistir === 'function') {

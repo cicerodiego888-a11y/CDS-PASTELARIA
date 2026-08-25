@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const configService = require('../services/configuracaoService');
+const { ContratoOperacionalService } = require('../core/modo-operacional');
 const { exigirSuperAdmin } = require('../middleware/auth');
 
 router.get('/confirmacao-fiscal', (req, res) => {
@@ -18,6 +19,23 @@ router.get('/recursos', (req, res) => {
     res.json(configService.getRecursos());
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/contrato-operacional', async (req, res) => {
+  try {
+    const contrato = await ContratoOperacionalService.montarContratoOperacional();
+    res.json(contrato);
+  } catch (err) {
+    const status = err.code === 'EMPRESA_OPERACIONAL_AUSENTE'
+      || err.code === 'EMPRESA_OPERACIONAL_AMBIGUA'
+      || err.code === 'EMPRESA_OPERACIONAL_INVALIDA'
+      ? 409
+      : 500;
+    res.status(status).json({
+      error: err.message,
+      code: err.code || undefined
+    });
   }
 });
 
@@ -72,10 +90,13 @@ router.post('/', exigirSuperAdmin, (req, res) => {
       recursos: configService.getRecursos(saved).recursos
     });
   } catch (err) {
-    const status = err.details ? 400 : 500;
+    const status = err.code === 'MODO_OPERACIONAL_ALTERACAO_REQUER_CONFIRMACAO'
+      ? 409
+      : (err.details ? 400 : 500);
     res.status(status).json({
       error: err.message,
-      details: err.details || undefined
+      details: err.details || undefined,
+      code: err.code || undefined
     });
   }
 });

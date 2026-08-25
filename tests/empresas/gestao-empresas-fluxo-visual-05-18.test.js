@@ -28,7 +28,7 @@ function test02ModuloUnico() {
 }
 
 function test03VersaoModulo() {
-  assert.strictEqual(globalThis.__CDS_EMPRESAS_MODULE_VERSION, '05.18');
+  assert.strictEqual(globalThis.__CDS_EMPRESAS_MODULE_VERSION, '05.19');
 }
 
 function test04NovaEmpresaSoGerais() {

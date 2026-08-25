@@ -46,8 +46,8 @@ class CentralEntradasService {
     return this._orchestrator.obterHistorico(documentoId);
   }
 
-  obterDashboard() {
-    return this._orchestrator.obterDashboard();
+  obterDashboard(filtros = {}) {
+    return this._orchestrator.obterDashboard(filtros);
   }
 
   /** RC3.4.6 — Health Monitor (somente diagnóstico local). */

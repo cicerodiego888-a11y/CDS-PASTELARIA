@@ -319,7 +319,10 @@ async function persistirDocumentosRetorno(xmlRetorno, persistencia, origem, ctxA
       resultado = await persistencia.persistirDocumentoDfe({
         xml: doc.xml,
         nsu: doc.nsu,
-        origem
+        origem,
+        empresaId: deps.contextoCentral?.empresaId
+          ?? persistencia._empresaId
+          ?? null
       });
     } catch (err) {
       ignorados += 1;

@@ -46,7 +46,8 @@ const MAPA_CAMPOS = {
   miipResumoJson: 'miip_resumo_json',
   compraId: 'compra_id',
   usuarioId: 'usuario_id',
-  processadoEm: 'processado_em'
+  processadoEm: 'processado_em',
+  empresaId: 'empresa_id'
 };
 
 class CentralDocumentosRepository extends IRepository {
@@ -121,6 +122,7 @@ class CentralDocumentosRepository extends IRepository {
       compraTipoEntradaAlterado: Number(row.compra_tipo_entrada_alterado) === 1,
       usuarioId: row.usuario_id,
       processadoEm: row.processado_em,
+      empresaId: row.empresa_id != null ? Number(row.empresa_id) : null,
       createdAt: row.created_at,
       updatedAt: row.updated_at
     };
@@ -200,6 +202,12 @@ class CentralDocumentosRepository extends IRepository {
     if (filtros.origem) {
       where.push('origem = ?');
       params.push(filtros.origem);
+    }
+
+    const empresaFiltro = filtros.empresaId ?? filtros.empresa_id;
+    if (empresaFiltro != null && empresaFiltro !== '' && empresaFiltro !== 'todas') {
+      where.push('empresa_id = ?');
+      params.push(Number(empresaFiltro));
     }
 
     // RC3.6.C — busca inteligente (CNPJ máscara, zeros NF, &amp;, acentos)
@@ -410,11 +418,14 @@ class CentralDocumentosRepository extends IRepository {
   /**
    * Estatísticas agregadas para o dashboard (somente leitura).
    *
+   * @param {Object} [filtros]
    * @returns {Promise<{ totalDocumentos: number, valorTotalDia: number, documentosHoje: number }>}
    */
-  async obterEstatisticas() {
+  async obterEstatisticas(filtros = {}) {
     const sql = this._obterSql();
     await sql.whenReady();
+
+    const { clausulaWhere, params } = this._montarClausulaWhere(filtros);
 
     const row = await sql.get(
       `SELECT
@@ -427,7 +438,9 @@ class CentralDocumentosRepository extends IRepository {
            WHEN data_emissao IS NOT NULL AND TRIM(data_emissao) != ''
             AND date(data_emissao) = date('now', 'localtime')
            THEN 1 ELSE 0 END), 0) AS documentos_hoje
-       FROM ${CentralDocumentosRepository.TABELA}`
+       FROM ${CentralDocumentosRepository.TABELA}
+       ${clausulaWhere}`,
+      params
     );
 
     return {
@@ -445,13 +458,14 @@ class CentralDocumentosRepository extends IRepository {
     const sql = this._obterSql();
     await sql.whenReady();
 
+    const empresaId = dados.empresaId ?? dados.empresa_id ?? null;
     const resultado = await sql.run(
       `INSERT INTO ${CentralDocumentosRepository.TABELA} (
         chave, numero, serie, modelo, fornecedor, cnpj_fornecedor,
         data_emissao, data_entrada, valor_total, xml, nsu, origem,
         status, status_detalhe, tipo_documento, parse_json, miip_sessao_id, miip_resumo_json,
-        compra_id, usuario_id, processado_em, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+        compra_id, usuario_id, processado_em, empresa_id, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
       [
         dados.chave,
         dados.numero ?? null,
@@ -473,7 +487,8 @@ class CentralDocumentosRepository extends IRepository {
         serializarJson(dados.miipResumoJson ?? dados.miip_resumo_json),
         dados.compraId ?? dados.compra_id ?? null,
         dados.usuarioId ?? dados.usuario_id ?? null,
-        dados.processadoEm ?? dados.processado_em ?? null
+        dados.processadoEm ?? dados.processado_em ?? null,
+        empresaId != null ? Number(empresaId) : null
       ]
     );
 

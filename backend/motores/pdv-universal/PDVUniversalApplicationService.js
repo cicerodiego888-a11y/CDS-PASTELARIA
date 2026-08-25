@@ -112,6 +112,8 @@ async function finalizarCheckout(entrada = {}, deps = {}) {
     itens: entrada.itens,
     pagamentos: entrada.pagamentos,
     emitir_fiscal: entrada.emitir_fiscal,
+    desconto: entrada.desconto,
+    acrescimo: entrada.acrescimo,
     origem: 'PDV'
   });
 
