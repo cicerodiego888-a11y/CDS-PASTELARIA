@@ -28,7 +28,7 @@ function test02ModuloUnico() {
 }
 
 function test03VersaoModulo() {
-  assert.strictEqual(globalThis.__CDS_EMPRESAS_MODULE_VERSION, '05.19');
+  assert.strictEqual(globalThis.__CDS_EMPRESAS_MODULE_VERSION, '05.20');
 }
 
 function test04NovaEmpresaSoGerais() {
@@ -105,6 +105,8 @@ function test10UploadUsaEmpresaDaTela() {
 function test11RotasOficiais() {
   assert.ok(empresasRota.includes("router.get('/:empresaId/configuracao-fiscal'"));
   assert.ok(empresasRota.includes("router.put('/:empresaId/configuracao-fiscal'"));
+  assert.ok(empresasRota.includes("router.patch('/:id/ativar'"));
+  assert.ok(empresasRota.includes("router.patch('/:id/inativar'"));
   assert.ok(empresasRota.includes("router.post('/',"));
   assert.ok(fiscalRota.includes("router.post('/certificado/upload'"));
   assert.strictEqual(G.urlGetFiscal(8), '/api/empresas/8/configuracao-fiscal');
@@ -115,6 +117,23 @@ function test12CacheBustUnico() {
   assert.ok(appJs.includes("CDS_ERP_ASSET_VERSION"));
   assert.ok(!appJs.includes('0518'));
   assert.ok(!appJs.includes('05171'));
+}
+
+function test13DesativarReativarNaTela() {
+  const ativa = G.htmlAcoesAtivoEmpresa({ id: 1, ativo: 1 });
+  const inativa = G.htmlAcoesAtivoEmpresa({ id: 1, ativo: 0 });
+  assert.ok(ativa.includes('data-gef-inativar="1"'));
+  assert.ok(ativa.includes('Desativar'));
+  assert.ok(!ativa.includes('data-gef-ativar='));
+  assert.ok(inativa.includes('data-gef-ativar="1"'));
+  assert.ok(inativa.includes('Reativar'));
+  const painel = G.htmlPainelEdicao(
+    { id: 1, razao_social: 'Matriz', cnpj: '38204469000115', ativo: 1 },
+    G.fiscalVazio(1),
+    ''
+  );
+  assert.ok(painel.includes('data-gef-inativar="1"'));
+  assert.ok(!painel.includes('Excluir empresa'));
 }
 
 const testes = [
@@ -129,7 +148,8 @@ const testes = [
   ['09 PFX e senha no HTML', test09CertificadoPfx],
   ['10 upload usa empresa da tela', test10UploadUsaEmpresaDaTela],
   ['11 rotas oficiais', test11RotasOficiais],
-  ['12 versão de cache única', test12CacheBustUnico]
+  ['12 versão de cache única', test12CacheBustUnico],
+  ['13 desativar/reativar na tela (sem exclusão física)', test13DesativarReativarNaTela]
 ];
 
 let ok = 0;

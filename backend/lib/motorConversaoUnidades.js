@@ -1,5 +1,10 @@
 /**
- * Motor de Conversão de Unidades
+ * Motor de Conversão de Unidades (legado de compra/embalagem).
+ *
+ * @deprecated MUC-02 — não é mais a autoridade de conversão.
+ * Novos consumidores devem usar obterMuc(db).converter / converterQuantidade.
+ * Mantido para custo, rateio F/NF e compatibilidade de compras.
+ *
  * Converte embalagens de compra (rolo, galão, fardo…) para a unidade real de estoque/venda (MT, KG, LT…).
  * Campo persistido: produto_fracionado (alias legado de vendido_por_peso).
  */
@@ -66,7 +71,10 @@ function obterQuantidadeComercial(item = {}) {
 }
 
 /**
- * RC4.31.19 — Quantidade convertida (ex.: 60 MT). Única base para estoque, fiscal e financeiro.
+ * Lê quantidade já convertida do item (custo, F/NF, subtotal).
+ * @deprecated MUC-08 — não é autoridade de conversão de estoque.
+ * Persistência/preview: obterMuc(db).converterQuantidade / processarItemCompra.
+ * Quando `quantidade_convertida` está preenchida, apenas lê o valor; não reconverte.
  */
 function obterQuantidadeConvertida(item = {}) {
   const convertidaExplicita = Number(item.quantidade_convertida || 0);
@@ -95,6 +103,11 @@ function obterTotalConvertidoItemCompra(item = {}) {
   return obterQuantidadeConvertida(item);
 }
 
+/**
+ * Helper de custo para `muc.simular()` sem unidades (contrato RC2.1).
+ * @deprecated MUC-08 — quantidade operacional: obterMuc(db).converterQuantidade.
+ * Multiplicador emb × fator aqui só alimenta custo/simulação pública, não estoque oficial.
+ */
 function simularConversaoEmbalagem({ qtdEmbalagens, qtdPorEmbalagem, valorTotal }) {
   const qtdTotal = Number(qtdEmbalagens || 0) * Number(qtdPorEmbalagem || 0);
   const valor = Number(valorTotal || 0);

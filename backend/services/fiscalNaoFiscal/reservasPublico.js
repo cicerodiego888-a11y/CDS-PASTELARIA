@@ -105,10 +105,23 @@ CREATE TABLE IF NOT EXISTS pedido_estoque_reservas (
 
 async function garantirSchemaReservas(db) {
   await dbRun(db, SQL_RESERVAS_PEDIDO);
+  try {
+    await dbRun(
+      db,
+      `ALTER TABLE pedido_estoque_reservas ADD COLUMN empresa_id INTEGER REFERENCES empresas(id)`
+    );
+  } catch (err) {
+    const msg = String(err && err.message || '');
+    if (!msg.includes('duplicate column name') && !msg.includes('already exists')) {
+      throw err;
+    }
+  }
   await dbRun(db, `CREATE INDEX IF NOT EXISTS idx_pedido_reservas_pedido_status
     ON pedido_estoque_reservas(pedido_id, status)`);
   await dbRun(db, `CREATE INDEX IF NOT EXISTS idx_pedido_reservas_produto_status
     ON pedido_estoque_reservas(produto_id, status)`);
+  await dbRun(db, `CREATE INDEX IF NOT EXISTS idx_pedido_reservas_empresa
+    ON pedido_estoque_reservas(empresa_id, produto_id, status)`);
 }
 
 function mesclarOptsEmpresa(produtoIdOrParams, opts = {}) {
@@ -263,12 +276,19 @@ async function consultarDisponibilidadeParaPedido(produtoId, pedidoId, opts = {}
 
   const db = getDb(opts.db);
   await garantirSchemaReservas(db);
+  const empresaId = empresaIdExplicitoConsulta(opts);
   const row = await dbGet(
     db,
-    `SELECT COALESCE(SUM(quantidade_fiscal), 0) AS q
-     FROM pedido_estoque_reservas
-     WHERE pedido_id = ? AND produto_id = ? AND status = 'ATIVA'`,
-    [pid, Number(disp.produto_id)]
+    empresaId != null
+      ? `SELECT COALESCE(SUM(quantidade_fiscal), 0) AS q
+         FROM pedido_estoque_reservas
+         WHERE pedido_id = ? AND produto_id = ? AND status = 'ATIVA' AND empresa_id = ?`
+      : `SELECT COALESCE(SUM(quantidade_fiscal), 0) AS q
+         FROM pedido_estoque_reservas
+         WHERE pedido_id = ? AND produto_id = ? AND status = 'ATIVA' AND empresa_id IS NULL`,
+    empresaId != null
+      ? [pid, Number(disp.produto_id), empresaId]
+      : [pid, Number(disp.produto_id)]
   );
   const propria = round3(row?.q || 0);
   if (propria <= 0) return disp;
@@ -320,8 +340,59 @@ async function _criarReservaTipo(params = {}, opts = {}, tipoSaldo) {
   const db = getDb(callOpts.db);
   await garantirSchemaReservas(db);
 
-  const disp = await consultarDisponibilidade(produtoId, { ...callOpts, db });
-  if (!produtoControlaEstoque(disp)) {
+  const ins = await executarComTxOuReutilizar(db, async () => {
+    const disp = await consultarDisponibilidade(produtoId, { ...callOpts, db });
+    if (!produtoControlaEstoque(disp)) {
+      return { lastID: null, changes: 0, ignorada: true, disp };
+    }
+
+    if (tipo === TipoSaldo.FISCAL && ctx.empresaId != null && ctx.legado !== true) {
+      const existente = await dbGet(
+        db,
+        `SELECT id, quantidade_fiscal FROM pedido_estoque_reservas
+         WHERE pedido_id = ? AND produto_id = ? AND empresa_id = ? AND status = 'ATIVA'
+         LIMIT 1`,
+        [pedidoId, produtoId, ctx.empresaId]
+      );
+      if (existente) {
+        return { lastID: existente.id, changes: 0, reprocessada: true, disp };
+      }
+    }
+
+    const disponivel = tipo === TipoSaldo.FISCAL
+      ? disp.disponivel_fiscal
+      : disp.disponivel_nao_fiscal;
+
+    if (disponivel + 1e-9 < quantidade) {
+      const err = new Error(
+        tipo === TipoSaldo.FISCAL
+          ? 'Saldo fiscal insuficiente para reserva.'
+          : 'Saldo não fiscal insuficiente para reserva.'
+      );
+      err.code = 'SALDO_INSUFICIENTE';
+      err.saldo_disponivel = disponivel;
+      throw err;
+    }
+
+    await _aplicarDeltaReservado(db, produtoId, tipo, quantidade);
+    if (ctx.empresaId != null && ctx.legado !== true) {
+      await espelharReservadoEmEstoqueEmpresa(db, produtoId, ctx.empresaId, tipo, quantidade);
+    }
+
+    if (tipo === TipoSaldo.FISCAL) {
+      return dbRun(
+        db,
+        `INSERT INTO pedido_estoque_reservas (
+        pedido_id, pedido_item_id, produto_id, quantidade_fiscal, status, criado_em, empresa_id
+      ) VALUES (?, ?, ?, ?, 'ATIVA', CURRENT_TIMESTAMP, ?)`,
+        [pedidoId, pedidoItemId, produtoId, quantidade, ctx.empresaId != null ? ctx.empresaId : null]
+      );
+    }
+
+    return { lastID: null, changes: 1 };
+  });
+
+  if (ins && ins.ignorada) {
     return Object.freeze({
       id: null,
       pedido_id: pedidoId,
@@ -335,39 +406,6 @@ async function _criarReservaTipo(params = {}, opts = {}, tipoSaldo) {
       controla_estoque: 0
     });
   }
-
-  const disponivel = tipo === TipoSaldo.FISCAL
-    ? disp.disponivel_fiscal
-    : disp.disponivel_nao_fiscal;
-
-  if (disponivel + 1e-9 < quantidade) {
-    const err = new Error(
-      tipo === TipoSaldo.FISCAL
-        ? 'Saldo fiscal insuficiente para reserva.'
-        : 'Saldo não fiscal insuficiente para reserva.'
-    );
-    err.code = 'SALDO_INSUFICIENTE';
-    err.saldo_disponivel = disponivel;
-    throw err;
-  }
-
-  const ins = await executarComTxOuReutilizar(db, async () => {
-    await _aplicarDeltaReservado(db, produtoId, tipo, quantidade);
-
-    // Tracking de pedido permanece na estrutura fiscal existente (sem migration).
-    // Reservas NF atualizam apenas reservado_nao_fiscal em produtos nesta Sprint.
-    if (tipo === TipoSaldo.FISCAL) {
-      return dbRun(
-        db,
-        `INSERT INTO pedido_estoque_reservas (
-        pedido_id, pedido_item_id, produto_id, quantidade_fiscal, status, criado_em
-      ) VALUES (?, ?, ?, ?, 'ATIVA', CURRENT_TIMESTAMP)`,
-        [pedidoId, pedidoItemId, produtoId, quantidade]
-      );
-    }
-
-    return { lastID: null, changes: 1 };
-  });
 
   logOperacaoSaldo({
     operacao: tipo === TipoSaldo.FISCAL ? 'criarReservaFiscal' : 'criarReservaNaoFiscal',
@@ -404,12 +442,33 @@ async function criarReservaNaoFiscal(params = {}, opts = {}) {
   return _criarReservaTipo(params, opts, TipoSaldo.NAO_FISCAL);
 }
 
+function erroOwnershipReserva(message = 'Reserva sem ownership empresarial identificável.') {
+  const err = new Error(message);
+  err.code = 'EMPRESA_OWNERSHIP_REQUIRED';
+  err.status = 400;
+  return err;
+}
+
+function erroReservaEmpresaDivergente(callerEmpresaId, reservaEmpresaId) {
+  const err = new Error('empresa_id da reserva diverge da empresa informada na operação.');
+  err.code = 'RESERVA_EMPRESA_DIVERGENTE';
+  err.status = 409;
+  err.operacao_empresa_id = callerEmpresaId;
+  err.reserva_empresa_id = reservaEmpresaId;
+  return err;
+}
+
 /**
  * Libera reservas ativas de um pedido (tracking fiscal em pedido_estoque_reservas).
+ * Fonte da empresa do estoque: reserva.empresa_id (nunca COMPAT / req / usuário).
+ * Contexto (opts.empresaId) só autoriza; divergência → RESERVA_EMPRESA_DIVERGENTE.
+ * Reserva NULL → EMPRESA_OWNERSHIP_REQUIRED antes de qualquer mutação.
  */
 async function liberarReservasPedido(pedidoId, opts = {}) {
   const id = Number(pedidoId);
-  await resolverContextoEmpresa(opts);
+  const callerEmpresa = resolverEmpresaId(
+    opts.empresaId != null ? opts.empresaId : opts.empresa_id
+  );
   const db = getDb(opts.db);
   await garantirSchemaReservas(db);
 
@@ -420,20 +479,45 @@ async function liberarReservasPedido(pedidoId, opts = {}) {
   );
 
   for (const row of rows) {
+    const dona = resolverEmpresaId(row.empresa_id);
+    if (dona == null) {
+      throw erroOwnershipReserva();
+    }
+    if (callerEmpresa != null && callerEmpresa !== dona) {
+      throw erroReservaEmpresaDivergente(callerEmpresa, dona);
+    }
+  }
+
+  let liberadas = 0;
+  let empresaUsada = null;
+  for (const row of rows) {
+    const dona = resolverEmpresaId(row.empresa_id);
+    empresaUsada = dona;
     const q = round3(row.quantidade_fiscal);
     if (q > 0) {
       await _aplicarDeltaReservado(db, row.produto_id, TipoSaldo.FISCAL, -q);
+      await espelharReservadoEmEstoqueEmpresa(
+        db,
+        row.produto_id,
+        dona,
+        TipoSaldo.FISCAL,
+        -q
+      );
     }
     await dbRun(
       db,
       `UPDATE pedido_estoque_reservas
        SET status = 'CANCELADA', atualizado_em = CURRENT_TIMESTAMP
-       WHERE id = ?`,
+       WHERE id = ? AND status = 'ATIVA'`,
       [row.id]
     );
+    liberadas += 1;
   }
 
-  return { liberadas: rows.length, empresa_id: resolverEmpresaId(opts) };
+  return {
+    liberadas,
+    empresa_id: empresaUsada != null ? empresaUsada : callerEmpresa
+  };
 }
 
 /**
@@ -535,6 +619,63 @@ async function ajustarReservado(produtoIdOrParams, tipo, delta, opts = {}) {
   return consultarDisponibilidade(produtoId, { ...callOpts, db });
 }
 
+function erroReservaNaoEncontrada() {
+  const err = new Error('Reserva não encontrada.');
+  err.code = 'RESERVA_NAO_ENCONTRADA';
+  err.status = 404;
+  return err;
+}
+
+/**
+ * Leitura empresarial. Outra empresa → 404 (não revela existência).
+ */
+async function obterReservaPedidoDaEmpresa(reservaId, empresaId, opts = {}) {
+  const id = Number(reservaId);
+  const emp = resolverEmpresaId(empresaId);
+  if (!Number.isInteger(id) || id <= 0 || emp == null) {
+    throw erroReservaNaoEncontrada();
+  }
+  const db = getDb(opts.db);
+  await garantirSchemaReservas(db);
+  const row = await dbGet(
+    db,
+    `SELECT * FROM pedido_estoque_reservas WHERE id = ? AND empresa_id = ?`,
+    [id, emp]
+  );
+  if (!row) throw erroReservaNaoEncontrada();
+  return row;
+}
+
+/**
+ * Cancelamento/liberação de uma reserva pela empresa proprietária persistida.
+ */
+async function cancelarReservaPedidoDaEmpresa(reservaId, empresaId, opts = {}) {
+  const row = await obterReservaPedidoDaEmpresa(reservaId, empresaId, opts);
+  const db = getDb(opts.db);
+  if (String(row.status).toUpperCase() !== 'ATIVA') {
+    return { id: row.id, status: row.status, alterada: false };
+  }
+  const q = round3(row.quantidade_fiscal);
+  const dona = resolverEmpresaId(row.empresa_id);
+  if (dona == null) {
+    const err = new Error('Reserva sem ownership empresarial identificável.');
+    err.code = 'EMPRESA_OWNERSHIP_REQUIRED';
+    throw err;
+  }
+  if (q > 0) {
+    await _aplicarDeltaReservado(db, row.produto_id, TipoSaldo.FISCAL, -q);
+    await espelharReservadoEmEstoqueEmpresa(db, row.produto_id, dona, TipoSaldo.FISCAL, -q);
+  }
+  await dbRun(
+    db,
+    `UPDATE pedido_estoque_reservas
+     SET status = 'CANCELADA', atualizado_em = CURRENT_TIMESTAMP
+     WHERE id = ? AND empresa_id = ? AND status = 'ATIVA'`,
+    [row.id, dona]
+  );
+  return { id: row.id, status: 'CANCELADA', alterada: true, empresa_id: dona };
+}
+
 async function reservarQuantidade(produtoId, tipo, quantidade, opts = {}) {
   const q = round3(quantidade);
   if (!(q > 0)) {
@@ -563,6 +704,8 @@ module.exports = {
   criarReservaFiscal,
   criarReservaNaoFiscal,
   liberarReservasPedido,
+  obterReservaPedidoDaEmpresa,
+  cancelarReservaPedidoDaEmpresa,
   ajustarReservado,
   reservarQuantidade,
   liberarQuantidadeReservada,

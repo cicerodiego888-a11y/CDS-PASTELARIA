@@ -16,47 +16,44 @@
 
 const reservasPublico = require('../fiscalNaoFiscal/reservasPublico');
 const { TipoSaldo } = require('../fiscalNaoFiscal/constants');
-const { resolverEmpresaId, resolverEmpresaIdDaRequisicao } = require('../fiscalNaoFiscal/empresaContexto');
-
-/** Compat explícita: consumo Pedido→venda ainda sem empresa no JWT. */
-const MOTIVO_COMPAT_CONSUMO_RESERVA_PEDIDO = 'COMPAT_CONSUMO_RESERVA_PEDIDO_PRE_MULTIEMPRESA';
+const { resolverEmpresaId } = require('../fiscalNaoFiscal/empresaContexto');
+const {
+  exigirEmpresaDoPedido,
+  exigirPedidoDaEmpresa,
+  exigirReservaDaMesmaEmpresa,
+  erroPedidoEmpresa,
+  CODIGO_EMPRESA_CONTEXT_REQUIRED,
+  CODIGO_OPERACAO_EMPRESA_DIVERGENTE
+} = require('../pedidos/PedidoEmpresaContextoService');
 
 function round3(n) {
   return Math.round(Number(n || 0) * 1000) / 1000;
 }
 
+/**
+ * Porta de consumo de reserva originada de PEDIDO.
+ * Empresa é obrigatória e explícita. Sem COMPAT, sem descoberta de req/contexto.
+ */
 function montarOptsPortaConsumoReservaPedido(opcoes = {}) {
-  const empresaId = resolverEmpresaId(opcoes)
-    ?? resolverEmpresaId(opcoes.contexto)
-    ?? resolverEmpresaId(opcoes.ctx)
-    ?? resolverEmpresaId(opcoes.req)
-    ?? resolverEmpresaIdDaRequisicao(opcoes.req)
-    ?? resolverEmpresaIdDaRequisicao(opcoes.contexto)
-    ?? resolverEmpresaIdDaRequisicao(opcoes.ctx);
-
-  const base = {
-    db: getDb(opcoes.db),
-    usuarioId: opcoes.usuarioId,
-    validarEmpresa: opcoes.validarEmpresa
-  };
-
-  if (empresaId != null) {
-    return { ...base, empresaId, legado: false, motivoCompat: null };
-  }
-
-  if (opcoes.exigirEmpresa === true) {
-    const err = new Error(
-      'empresaId é obrigatório para operações de saldo/reserva. Informe empresa_id/empresaId no contexto.'
+  const empresaId = resolverEmpresaId(
+    opcoes.empresaId != null ? opcoes.empresaId : opcoes.empresa_id
+  );
+  if (empresaId == null) {
+    throw erroPedidoEmpresa(
+      CODIGO_EMPRESA_CONTEXT_REQUIRED,
+      'empresaId é obrigatório para consumo de reserva originada de pedido.',
+      400
     );
-    err.code = 'EMPRESA_OBRIGATORIA';
-    throw err;
   }
 
   return {
-    ...base,
-    modoLegadoSemEmpresa: true,
-    motivoCompat: opcoes.motivoCompat || MOTIVO_COMPAT_CONSUMO_RESERVA_PEDIDO,
-    legado: true
+    db: getDb(opcoes.db),
+    usuarioId: opcoes.usuarioId,
+    validarEmpresa: opcoes.validarEmpresa,
+    empresaId,
+    legado: false,
+    motivoCompat: null,
+    modoLegadoSemEmpresa: false
   };
 }
 
@@ -68,6 +65,12 @@ function getDb(dbInjected) {
 function dbAll(db, sql, params = []) {
   return new Promise((resolve, reject) => {
     db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
+  });
+}
+
+function dbGet(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
   });
 }
 
@@ -155,13 +158,71 @@ async function consumirReservasPedidoNaVenda(pedidoId, vendaId = null, opts = {}
     return { consumidas: 0, pedido_id: null };
   }
 
-  const optsPorta = montarOptsPortaConsumoReservaPedido(opts);
-  const db = optsPorta.db;
+  const db = getDb(opts.db);
+
+  let pedido = null;
+  try {
+    pedido = await dbGet(db, `SELECT id, empresa_id FROM pedidos WHERE id = ?`, [id]);
+  } catch (err) {
+    const msg = String(err && err.message || '');
+    if (!msg.includes('no such table') && !msg.includes('no such column')) {
+      throw err;
+    }
+  }
+
+  const empresaIdPedido = exigirEmpresaDoPedido(pedido);
+
+  const empresaContexto = resolverEmpresaId(
+    opts.empresaId != null ? opts.empresaId : opts.empresa_id
+  );
+  if (empresaContexto != null) {
+    exigirPedidoDaEmpresa(pedido, empresaContexto);
+  }
+
+  const vid = vendaId != null ? Number(vendaId) : null;
+  if (Number.isInteger(vid) && vid > 0) {
+    let venda = null;
+    try {
+      venda = await dbGet(db, `SELECT id, empresa_id FROM vendas WHERE id = ?`, [vid]);
+    } catch (err) {
+      const msg = String(err && err.message || '');
+      if (!msg.includes('no such table') && !msg.includes('no such column')) {
+        throw err;
+      }
+    }
+    if (venda) {
+      const empresaIdVenda = resolverEmpresaId(venda.empresa_id != null ? venda.empresa_id : venda.empresaId);
+      if (empresaIdVenda == null || empresaIdVenda !== empresaIdPedido) {
+        throw erroPedidoEmpresa(
+          CODIGO_OPERACAO_EMPRESA_DIVERGENTE,
+          'empresa_id da venda diverge da empresa persistida do pedido.',
+          409,
+          {
+            pedido_empresa_id: empresaIdPedido,
+            venda_empresa_id: empresaIdVenda
+          }
+        );
+      }
+    }
+  }
+
+  await reservasPublico.garantirSchemaReservas(db);
   const rows = await dbAll(
     db,
     `SELECT * FROM pedido_estoque_reservas WHERE pedido_id = ? AND status = 'ATIVA'`,
     [id]
   );
+
+  for (const row of rows) {
+    exigirReservaDaMesmaEmpresa(pedido, row);
+  }
+
+  const optsPorta = montarOptsPortaConsumoReservaPedido({
+    db,
+    empresaId: empresaIdPedido,
+    usuarioId: opts.usuarioId,
+    validarEmpresa: opts.validarEmpresa
+  });
 
   let consumidas = 0;
   for (const row of rows) {
@@ -190,11 +251,9 @@ async function consumirReservasPedidoNaVenda(pedidoId, vendaId = null, opts = {}
     consumidas,
     pedido_id: id,
     venda_id: vendaId != null ? Number(vendaId) : null,
-    empresa_id: optsPorta.empresaId != null ? optsPorta.empresaId : null,
-    legado: optsPorta.legado === true,
-    motivo_compat: optsPorta.legado
-      ? (optsPorta.motivoCompat || MOTIVO_COMPAT_CONSUMO_RESERVA_PEDIDO)
-      : null
+    empresa_id: empresaIdPedido,
+    legado: false,
+    motivo_compat: null
   };
 }
 
@@ -212,7 +271,6 @@ function consumirReservasPedidoNaVendaCb(pedidoId, vendaId, db, callback, extra 
 }
 
 module.exports = {
-  MOTIVO_COMPAT_CONSUMO_RESERVA_PEDIDO,
   montarOptsPortaConsumoReservaPedido,
   obterCreditoReservaPedido,
   creditarDisponibilidadeComReservaPedido,

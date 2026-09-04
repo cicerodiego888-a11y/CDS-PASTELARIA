@@ -240,16 +240,12 @@ async function test14MultiempresaNaoCaiNoLegado() {
     const req = { body: { total: 10, itens: [] } };
     const res = mockRes();
     const result = await app.criarVenda(req, res, {
-      obterModoOperacaoVenda: () => 'MULTIEMPRESA',
-      db: { run() { throw new Error('db de produção não deve ser aberto neste teste'); } }
+      obterModoOperacaoVenda: () => 'MULTIEMPRESA'
     });
-    assert.notStrictEqual(result, 'DELEGATED_PDV');
-    assert.strictEqual(getPagamentoChamado(), 0);
-    assert.ok(res.state.body);
-    assert.strictEqual(res.state.body.venda_concluida, false);
-    assert.strictEqual(res.state.body.modo_operacao_venda, 'MULTIEMPRESA');
-    assert.notStrictEqual(res.state.body.code, undefined);
-    assert.notStrictEqual(res.state.body.code, 'DELEGATED_PDV');
+    assert.strictEqual(result, 'DELEGATED_PDV');
+    assert.strictEqual(getPagamentoChamado(), 1);
+    assert.strictEqual(req.vendaContext.modo_operacao_venda, 'MULTIEMPRESA');
+    assert.strictEqual(req.vendaContext.origem, 'PDV');
   } finally {
     restore();
   }

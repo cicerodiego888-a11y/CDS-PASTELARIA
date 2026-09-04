@@ -57,13 +57,29 @@ class CentralDfePersistenciaService {
     return criarDbHelpers(resolverDb(this._db));
   }
 
-  async existeCompraComChave(chave) {
+  /** @private alvo da Central (05.54) — não HTTP */
+  _empresaIdOperacao(dados = {}) {
+    const raw = dados.empresaId != null ? dados.empresaId : this._empresaId;
+    const emp = Number(raw);
+    return Number.isInteger(emp) && emp > 0 ? emp : null;
+  }
+
+  /**
+   * Duplicidade de compra na Central: chave + empresa do alvo.
+   * Sem empresa resolvida não consulta globalmente (retorna false).
+   * @param {string} chave
+   * @param {number} [empresaId] alvo da execução; fallback this._empresaId
+   * @returns {Promise<boolean>}
+   */
+  async existeCompraComChave(chave, empresaId) {
     if (!chave) return false;
+    const emp = Number(empresaId != null ? empresaId : this._empresaId);
+    if (!Number.isInteger(emp) || emp <= 0) return false;
     const sql = this._obterSql();
     await sql.whenReady();
     const row = await sql.get(
-      'SELECT id FROM compras WHERE chave_acesso = ? LIMIT 1',
-      [chave]
+      'SELECT id FROM compras WHERE chave_acesso = ? AND empresa_id = ? LIMIT 1',
+      [chave, emp]
     );
     return Boolean(row);
   }
@@ -97,7 +113,8 @@ class CentralDfePersistenciaService {
       return { aplicado: false, ignorado: true, motivo: 'Evento sem efeito de status', chave };
     }
 
-    const existente = await this._documentosRepository.buscarPorChave(chave);
+    const empresaIdOperacao = this._empresaIdOperacao(dados);
+    const existente = await this._documentosRepository.buscarPorChave(chave, empresaIdOperacao);
     if (!existente) {
       return { aplicado: false, ignorado: true, motivo: 'Documento não encontrado para evento', chave };
     }
@@ -160,16 +177,19 @@ class CentralDfePersistenciaService {
       };
     }
 
+    const empresaIdOperacao = this._empresaIdOperacao(dados);
+
     // Situação no resumo (cSitNFe): 2 denegada, 3 cancelada (comum em resNFe)
     const sit = String(metadados.situacaoNfe || '').trim();
     if (sit === '3' || detectarNfCancelada(dados.xml)) {
-      const existenteCancel = await this._documentosRepository.buscarPorChave(chave);
+      const existenteCancel = await this._documentosRepository.buscarPorChave(chave, empresaIdOperacao);
       if (existenteCancel) {
         const ev = await this.aplicarEventoDfe({
           xml: dados.xml,
           chave,
           nsu: dados.nsu,
-          origem: dados.origem
+          origem: dados.origem,
+          empresaId: empresaIdOperacao
         });
         if (ev.aplicado) {
           return {
@@ -185,7 +205,7 @@ class CentralDfePersistenciaService {
       }
     }
 
-    const existente = await this._documentosRepository.buscarPorChave(chave);
+    const existente = await this._documentosRepository.buscarPorChave(chave, empresaIdOperacao);
     if (existente) {
       const statusAtual = normalizarStatus(existente.status);
       const ehXmlCompleto = TIPOS_XML_COMPLETO.includes(tipoDfe);
@@ -248,7 +268,7 @@ class CentralDfePersistenciaService {
       };
     }
 
-    const jaComprada = await this.existeCompraComChave(chave);
+    const jaComprada = await this.existeCompraComChave(chave, empresaIdOperacao);
     const ehResumoDfe = tipoDfe === DocumentoDfeTipo.RES_NFE;
 
     let status;
@@ -296,9 +316,7 @@ class CentralDfePersistenciaService {
       status,
       statusDetalhe,
       tipoDocumento: tipoDfe,
-      empresaId: dados.empresaId != null
-        ? Number(dados.empresaId)
-        : (this._empresaId != null ? Number(this._empresaId) : null)
+      empresaId: empresaIdOperacao
     });
 
     await this._historicoRepository.inserir({

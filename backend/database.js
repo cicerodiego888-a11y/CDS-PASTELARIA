@@ -164,6 +164,37 @@ function aplicarAlteracoesPosCriacao() {
     'vendas',
     `CREATE INDEX IF NOT EXISTS idx_vendas_empresa_id ON vendas(empresa_id)`
   );
+  // Sprint 05.49 — ownership explícito do pedido (nullable: legado não classificado)
+  aplicarAlteracaoSegura('pedidos', `ALTER TABLE pedidos ADD COLUMN empresa_id INTEGER REFERENCES empresas(id)`);
+  aplicarAlteracaoSegura(
+    'pedidos',
+    `CREATE INDEX IF NOT EXISTS idx_pedidos_empresa_id ON pedidos(empresa_id)`
+  );
+  // Sprint 05.47 — lotes e reservas empresariais (nullable: legado sem ownership)
+  aplicarAlteracaoSegura(
+    'produtos_lotes',
+    `ALTER TABLE produtos_lotes ADD COLUMN empresa_id INTEGER REFERENCES empresas(id)`
+  );
+  aplicarAlteracaoSegura(
+    'produtos_lotes',
+    `CREATE INDEX IF NOT EXISTS idx_produtos_lotes_empresa_produto ON produtos_lotes(empresa_id, produto_id, ativo)`
+  );
+  aplicarAlteracaoSegura(
+    'pedido_estoque_reservas',
+    `ALTER TABLE pedido_estoque_reservas ADD COLUMN empresa_id INTEGER REFERENCES empresas(id)`
+  );
+  aplicarAlteracaoSegura(
+    'pedido_estoque_reservas',
+    `CREATE INDEX IF NOT EXISTS idx_pedido_reservas_empresa ON pedido_estoque_reservas(empresa_id, produto_id, status)`
+  );
+  aplicarAlteracaoSegura(
+    'venda_estoque_reservas',
+    `ALTER TABLE venda_estoque_reservas ADD COLUMN empresa_id INTEGER REFERENCES empresas(id)`
+  );
+  aplicarAlteracaoSegura(
+    'venda_estoque_reservas',
+    `CREATE INDEX IF NOT EXISTS idx_venda_reservas_empresa ON venda_estoque_reservas(empresa_id, produto_id, status)`
+  );
 
   // Adicionar colunas faltantes na tabela vendas_itens (para suportar promoções e desconto atacado)
   aplicarAlteracaoSegura('vendas_itens', `ALTER TABLE vendas_itens ADD COLUMN desconto_percentual DECIMAL(5,2) DEFAULT 0`);
@@ -429,6 +460,15 @@ function aplicarAlteracoesPosCriacao() {
 
   // RC8.0.Y — garantia explícita (bancos já migrados pelo lote alteracoesProdutos)
   aplicarAlteracaoSegura('produtos', `ALTER TABLE produtos ADD COLUMN controla_estoque INTEGER DEFAULT 1`);
+      aplicarAlteracaoSegura(
+        'produtos',
+        `ALTER TABLE produtos ADD COLUMN tipo_operacional TEXT NOT NULL DEFAULT 'COMERCIAL'`
+      );
+      aplicarAlteracaoSegura(
+        'produtos',
+        `ALTER TABLE produtos ADD COLUMN utiliza_conversao INTEGER NOT NULL DEFAULT 0`
+      );
+      aplicarAlteracaoSegura('produtos', `ALTER TABLE produtos ADD COLUMN unidade_estoque TEXT`);
 
   // Sprint 2 — Vendas para Entrega: reserva de estoque (sem baixa definitiva)
   aplicarAlteracaoSegura('produtos', `ALTER TABLE produtos ADD COLUMN reservado_fiscal REAL DEFAULT 0`);
@@ -1549,6 +1589,7 @@ function criarTabelas() {
         dias_alerta_validade INTEGER DEFAULT 30,
         controlar_validade INTEGER DEFAULT 0,
         controla_estoque INTEGER DEFAULT 1,
+        tipo_operacional TEXT NOT NULL DEFAULT 'COMERCIAL',
         permite_venda_unidade INTEGER DEFAULT 0,
         peso_medio_unidade REAL DEFAULT 0,
         preco_unidade REAL DEFAULT 0,
@@ -1572,6 +1613,38 @@ function criarTabelas() {
       });
     } catch (requireErr) {
       console.error('Erro ao carregar schema estoque_empresa:', requireErr.message);
+    }
+
+    // Sprint 03.03 — tipo operacional + ficha técnica (catálogo compartilhado)
+    try {
+      const { garantirColunaTipoOperacional } = require('./services/produtos/tipoOperacionalProduto');
+      garantirColunaTipoOperacional(db, (colErr) => {
+        if (colErr) {
+          console.error('Erro ao garantir produtos.tipo_operacional:', colErr.message);
+        }
+      });
+    } catch (requireErr) {
+      console.error('Erro ao carregar tipo operacional de produto:', requireErr.message);
+    }
+    try {
+      const { garantirSchemaFichaTecnica } = require('./services/produtos/fichaTecnicaSchema');
+      garantirSchemaFichaTecnica(db, (schemaErr) => {
+        if (schemaErr) {
+          console.error('Erro ao garantir schema ficha_tecnica:', schemaErr.message);
+        }
+      });
+    } catch (requireErr) {
+      console.error('Erro ao carregar schema ficha_tecnica:', requireErr.message);
+    }
+    try {
+      const { garantirSchemaVendaFichaConsumo } = require('./services/produtos/vendaFichaConsumoSchema');
+      garantirSchemaVendaFichaConsumo(db, (schemaErr) => {
+        if (schemaErr) {
+          console.error('Erro ao garantir schema venda_ficha_consumo:', schemaErr.message);
+        }
+      });
+    } catch (requireErr) {
+      console.error('Erro ao carregar schema venda_ficha_consumo:', requireErr.message);
     }
 
     // Sprint 04.03 — ATENDIMENTO multiempresa (não substitui vendas)
@@ -1666,6 +1739,16 @@ function criarTabelas() {
       garantirSchemaMuc(db, (schemaErr) => {
         if (schemaErr) {
           console.error('Erro ao garantir schema MUC RC1:', schemaErr.message);
+        }
+        try {
+          const { garantirSchemaProdutoConversao } = require('./services/produtos/produtoConversaoSchema');
+          garantirSchemaProdutoConversao(db, (convErr) => {
+            if (convErr) {
+              console.error('Erro ao garantir schema conversão de produto:', convErr.message);
+            }
+          });
+        } catch (convReqErr) {
+          console.error('Erro ao carregar schema conversão de produto:', convReqErr.message);
         }
       });
     } catch (requireErr) {
@@ -2191,7 +2274,7 @@ function criarTabelas() {
     db.run(`
       CREATE TABLE IF NOT EXISTS central_entradas_documentos (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chave TEXT NOT NULL UNIQUE,
+        chave TEXT NOT NULL,
         numero TEXT,
         serie TEXT,
         modelo TEXT DEFAULT '55',
@@ -2215,7 +2298,8 @@ function criarTabelas() {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (compra_id) REFERENCES compras(id),
-        FOREIGN KEY (empresa_id) REFERENCES empresas(id)
+        FOREIGN KEY (empresa_id) REFERENCES empresas(id),
+        UNIQUE(chave, empresa_id)
       )
     `, (err) => {
       if (err) console.error('Erro ao criar tabela central_entradas_documentos:', err);
@@ -2584,9 +2668,13 @@ function inicializarBanco() {
     migrarOwnershipFinanceiro0541,
     formatarLogMigracaoFinanceiro0541
   } = require('./utils/financeiroEmpresaHelpers');
-  const { migrarEmpresaIdCentralDocumentos } = require('./utils/centralEntradasEmpresaHelpers');
+  const {
+    migrarEmpresaIdCentralDocumentos,
+    migrarIdentidadeUnicaChaveEmpresaDocumentos
+  } = require('./utils/centralEntradasEmpresaHelpers');
   const { migrarEmpresaIdCompras } = require('./utils/comprasEmpresaHelpers');
   const { migrarEmpresaIdVendas, formatarLogMigracaoVendas } = require('./utils/vendasEmpresaHelpers');
+  const { migrarEmpresaIdPedidos, formatarLogMigracaoPedidos } = require('./utils/pedidosEmpresaHelpers');
 
   db.serialize(() => {
     criarTabelas();
@@ -2615,7 +2703,16 @@ function inicializarBanco() {
               `empresaId=${infoCe.empresaId}`
             );
           }
-          return migrarEmpresaIdCompras(db);
+          return migrarIdentidadeUnicaChaveEmpresaDocumentos(db)
+            .then((info70) => {
+              if (info70 && !info70.skipped) {
+                console.log(
+                  `[05.70] central_entradas_documentos UNIQUE(chave, empresa_id): ` +
+                  `migrado=${!!info70.migrated} linhas=${info70.linhas != null ? info70.linhas : '?'}`
+                );
+              }
+              return migrarEmpresaIdCompras(db);
+            });
         })
         .then((infoCp) => {
           if (infoCp && !infoCp.skipped) {
@@ -2638,8 +2735,14 @@ function inicializarBanco() {
           if (infoFin && !infoFin.skipped) {
             console.log(`[05.41] ${formatarLogMigracaoFinanceiro0541(infoFin).replace(/\n/g, ' | ')}`);
           }
+          return migrarEmpresaIdPedidos(db);
         })
-        .catch((err) => console.error('Erro migration 05.38.D/E/F.B/05.40/05.41:', err.message));
+        .then((infoPed) => {
+          if (infoPed && !infoPed.skipped) {
+            console.log(`[05.49] ${formatarLogMigracaoPedidos(infoPed).replace(/\n/g, ' | ')}`);
+          }
+        })
+        .catch((err) => console.error('Erro migration 05.38.D/E/F.B/05.40/05.41/05.49:', err.message));
     });
     inserirConfiguracoesPadrao();
     migrarUrlsFiscalProducao();
@@ -3516,6 +3619,7 @@ db.serialize(() => {
         observacao TEXT,
         operador_id INTEGER,
         venda_id INTEGER,
+        empresa_id INTEGER,
         faturado_em DATETIME,
         faturado_por INTEGER,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,

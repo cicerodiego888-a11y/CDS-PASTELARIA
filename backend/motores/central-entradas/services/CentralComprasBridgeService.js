@@ -106,13 +106,58 @@ class CentralComprasBridgeService {
    * @param {number|string} documentoId
    * @returns {Promise<Object>}
    */
-  async montarPayloadAbrirCompra(documentoId) {
-    const documento = await this._documentosRepository.buscarPorId(documentoId);
-    if (!documento) {
+  async _autorizarDocumentoSeContexto(documento, documentoId, opcoes = {}) {
+    if (opcoes.empresaIdContexto == null && !opcoes.req) {
+      return documento;
+    }
+    const {
+      exigirDocumentoDaEmpresa,
+      resolverEmpresaParaCentral
+    } = require('../../../services/central-entradas/CentralEntradasEmpresaContextoService');
+    let empresaId = opcoes.empresaIdContexto;
+    if (empresaId == null && opcoes.req) {
+      const ctx = await resolverEmpresaParaCentral({
+        req: opcoes.req,
+        empresaId: opcoes.req.empresaId
+      }, opcoes);
+      empresaId = ctx.empresaId;
+    }
+    const r = await exigirDocumentoDaEmpresa(
+      { documento, documentoId, empresaId },
+      { documentosRepository: this._documentosRepository }
+    );
+    return r.documento;
+  }
+
+  async _empresaIdPersistidaDaCompra(compraId) {
+    try {
+      const sql = this._documentosRepository._obterSql();
+      await sql.whenReady();
+      const row = await sql.get(
+        'SELECT empresa_id FROM compras WHERE id = ?',
+        [Number(compraId)]
+      );
+      if (row && row.empresa_id != null) {
+        const n = Number(row.empresa_id);
+        return Number.isInteger(n) && n > 0 ? n : null;
+      }
+    } catch { /* compras ausente em teste isolado */ }
+    return null;
+  }
+
+  async montarPayloadAbrirCompra(documentoId, opcoes = {}) {
+    const documentoBruto = await this._documentosRepository.buscarPorId(documentoId);
+    if (!documentoBruto) {
       const erro = new Error('Documento não encontrado');
       erro.statusCode = 404;
+      erro.code = 'DOCUMENTO_NAO_ENCONTRADO';
       throw erro;
     }
+    const documento = await this._autorizarDocumentoSeContexto(documentoBruto, documentoId, opcoes);
+    const {
+      exigirEmpresaIdDoDocumento
+    } = require('../../../services/central-entradas/CentralEntradasEmpresaContextoService');
+    const empresaDocumentoId = exigirEmpresaIdDoDocumento(documento);
 
     let payload = this._obterPayloadParsePersistido(documento);
     payload = await this._enriquecerFinanceiroDoXml(payload, documento.xml);
@@ -122,14 +167,14 @@ class CentralComprasBridgeService {
       documentoId: documento.id,
       chave: documento.chave,
       status: documento.status,
-      empresaId: documento.empresaId != null ? Number(documento.empresaId) : null,
+      empresaId: empresaDocumentoId,
       dadosCompra: {
         ...payload,
         xml: documento.xml || null,
         natureza_operacao: payload.natureza_operacao || payload.natureza || null,
         cfop: payload.cfop || null,
-        empresa_id: documento.empresaId != null ? Number(documento.empresaId) : null,
-        empresaId: documento.empresaId != null ? Number(documento.empresaId) : null
+        empresa_id: empresaDocumentoId,
+        empresaId: empresaDocumentoId
       }
     };
   }
@@ -140,11 +185,24 @@ class CentralComprasBridgeService {
    * @returns {Promise<Object>}
    */
   async registrarAberturaCompra(documentoId, opcoes = {}) {
-    const documento = await this._documentosRepository.buscarPorId(documentoId);
-    if (!documento) {
+    const documentoBruto = await this._documentosRepository.buscarPorId(documentoId);
+    if (!documentoBruto) {
       const erro = new Error('Documento não encontrado');
       erro.statusCode = 404;
+      erro.code = 'DOCUMENTO_NAO_ENCONTRADO';
       throw erro;
+    }
+    const documento = await this._autorizarDocumentoSeContexto(documentoBruto, documentoId, opcoes);
+    const {
+      exigirEmpresaIdDoDocumento,
+      exigirDocumentoCompraMesmaEmpresa
+    } = require('../../../services/central-entradas/CentralEntradasEmpresaContextoService');
+    exigirEmpresaIdDoDocumento(documento);
+
+    const compraJaVinculada = documento.compraId != null ? Number(documento.compraId) : null;
+    if (Number.isInteger(compraJaVinculada) && compraJaVinculada > 0) {
+      const compraEmpresaId = await this._empresaIdPersistidaDaCompra(compraJaVinculada);
+      exigirDocumentoCompraMesmaEmpresa(exigirEmpresaIdDoDocumento(documento), compraEmpresaId);
     }
 
     const statusPermitidos = [
@@ -171,7 +229,7 @@ class CentralComprasBridgeService {
       );
     }
 
-    const payload = await this.montarPayloadAbrirCompra(documentoId);
+    const payload = await this.montarPayloadAbrirCompra(documentoId, opcoes);
     const atualizado = await this._documentosRepository.buscarPorId(documentoId);
 
     return {
@@ -186,12 +244,14 @@ class CentralComprasBridgeService {
    * @returns {Promise<Object>}
    */
   async concluirRevisao(documentoId, dados = {}) {
-    const documento = await this._documentosRepository.buscarPorId(documentoId);
-    if (!documento) {
+    const documentoBruto = await this._documentosRepository.buscarPorId(documentoId);
+    if (!documentoBruto) {
       const erro = new Error('Documento não encontrado');
       erro.statusCode = 404;
+      erro.code = 'DOCUMENTO_NAO_ENCONTRADO';
       throw erro;
     }
+    const documento = await this._autorizarDocumentoSeContexto(documentoBruto, documentoId, dados);
 
     if (documento.status !== DocumentoFiscalStatus.AGUARDANDO_REVISAO) {
       const erro = new Error(`Revisão só pode ser concluída em AGUARDANDO_REVISAO (atual: ${documento.status})`);
@@ -249,40 +309,41 @@ class CentralComprasBridgeService {
    * @returns {Promise<Object>}
    */
   async vincularCompra(documentoId, compraId, opcoes = {}) {
-    const documento = await this._documentosRepository.buscarPorId(documentoId);
-    if (!documento) {
+    const documentoBruto = await this._documentosRepository.buscarPorId(documentoId);
+    if (!documentoBruto) {
       const erro = new Error('Documento não encontrado');
       erro.statusCode = 404;
+      erro.code = 'DOCUMENTO_NAO_ENCONTRADO';
       throw erro;
     }
+    const documento = await this._autorizarDocumentoSeContexto(documentoBruto, documentoId, opcoes);
 
     const {
       exigirDocumentoCompraMesmaEmpresa,
-      erroCentralEmpresa
+      erroCentralEmpresa,
+      empresaIdDoDocumento
     } = require('../../../services/central-entradas/CentralEntradasEmpresaContextoService');
 
-    const compraEmpresaId = opcoes.empresaId != null
-      ? Number(opcoes.empresaId)
-      : (opcoes.empresa_id != null ? Number(opcoes.empresa_id) : null);
-    const docEmpresaId = documento.empresaId != null
-      ? Number(documento.empresaId)
-      : null;
+    const docEmpresaId = empresaIdDoDocumento(documento);
+    if (docEmpresaId == null) {
+      throw erroCentralEmpresa(
+        'EMPRESA_DOCUMENTO_NAO_RESOLVIDA',
+        'Documento sem empresa_id — vínculo com compra bloqueado.',
+        409
+      );
+    }
 
-    if (!Number.isInteger(compraEmpresaId) || compraEmpresaId <= 0) {
-      throw erroCentralEmpresa(
-        'EMPRESA_COMPRA_AUSENTE',
-        'Vínculo Central exige empresa_id da compra.',
-        409
-      );
-    }
-    if (!Number.isInteger(docEmpresaId) || docEmpresaId <= 0) {
-      throw erroCentralEmpresa(
-        'EMPRESA_CENTRAL_AUSENTE',
-        'Documento Central sem empresa_id — vínculo bloqueado.',
-        409
-      );
-    }
+    const compraEmpresaId = await this._empresaIdPersistidaDaCompra(compraId);
     exigirDocumentoCompraMesmaEmpresa(docEmpresaId, compraEmpresaId);
+
+    const jaVinculado = documento.compraId != null ? Number(documento.compraId) : null;
+    if (Number.isInteger(jaVinculado) && jaVinculado > 0 && jaVinculado !== Number(compraId)) {
+      throw erroCentralEmpresa(
+        'OPERACAO_EMPRESA_DIVERGENTE',
+        'Documento já vinculado a outra compra. Vínculo empresarial inconsistente bloqueado.',
+        409
+      );
+    }
 
     const statusAtual = documento.status;
     const statusDestino = DocumentoFiscalStatus.GRAVADA;

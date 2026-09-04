@@ -114,7 +114,10 @@ class HealthAnalyzer {
   async analisarTodos(opcoes = {}) {
     const inicio = Date.now();
     const anteriores = opcoes.anteriores || {};
-    const docs = await this._repo.listarDocumentosParaAnalise(opcoes.limite);
+    const docs = await this._repo.listarDocumentosParaAnalise({
+      limite: opcoes.limite,
+      empresaId: opcoes.empresaId
+    });
     const resultados = [];
     const porNivel = {
       [HealthNiveis.SAUDAVEL]: 0,
@@ -137,16 +140,24 @@ class HealthAnalyzer {
         || r.nivel === HealthNiveis.BLOQUEADO
     );
 
-    const stats = await this._repo.obterEstatisticasFluxo();
+    const stats = await this._repo.obterEstatisticasFluxo(opcoes.empresaId);
+    let ultimaEntrada = null;
+    if (Number.isInteger(Number(opcoes.empresaId)) && Number(opcoes.empresaId) > 0
+      && typeof this._repo.obterUltimaEntrada === 'function') {
+      ultimaEntrada = await this._repo.obterUltimaEntrada(opcoes.empresaId);
+    }
     let taxaMirx = null;
-    try {
-      const tel = this._obterMirx()?.obterTelemetria?.() || {};
-      const ok = Number(tel.documentosRecuperados || 0);
-      const tent = Number(tel.numeroTentativas || tel.tentativasTotais || 0);
-      if (ok > 0 || tent > 0) {
-        taxaMirx = tent > 0 ? Math.round((ok / Math.max(tent, 1)) * 100) : 100;
-      }
-    } catch { /* ignore */ }
+    const empresaPainel = Number.isInteger(Number(opcoes.empresaId)) && Number(opcoes.empresaId) > 0;
+    if (!empresaPainel) {
+      try {
+        const tel = this._obterMirx()?.obterTelemetria?.() || {};
+        const ok = Number(tel.documentosRecuperados || 0);
+        const tent = Number(tel.numeroTentativas || tel.tentativasTotais || 0);
+        if (ok > 0 || tent > 0) {
+          taxaMirx = tent > 0 ? Math.round((ok / Math.max(tent, 1)) * 100) : 100;
+        }
+      } catch { /* ignore */ }
+    }
 
     return {
       analisados: docs.length,
@@ -168,8 +179,12 @@ class HealthAnalyzer {
       estatisticas: {
         ...stats,
         documentosEmAlerta: alertas.length,
-        taxaSucessoMirx: taxaMirx
+        taxaSucessoMirx: taxaMirx,
+        ultimaEntrada
       },
+      empresaId: Number.isInteger(Number(opcoes.empresaId)) && Number(opcoes.empresaId) > 0
+        ? Number(opcoes.empresaId)
+        : null,
       geradoEm: new Date(this._agora()).toISOString()
     };
   }

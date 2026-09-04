@@ -1,6 +1,8 @@
 /**
- * Destinos oficiais do PDV (Sprint 05.12).
- * Sem fallback silencioso universal → legado.
+ * Destinos do PDV (Sprint 05.12).
+ * /pdv-universal = PDV Universal CONGELADO (legado). /pdv = PDV Normal (oficial em evolução).
+ * URLs de produção não foram alteradas nesta sprint.
+ * Sem fallback silencioso universal → /pdv.
  */
 (function (root, factory) {
     const api = factory();

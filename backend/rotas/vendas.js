@@ -262,7 +262,7 @@ router.get('/:id/pagamento-nao-fiscal', consultarPagamentoNaoFiscal);
 
 router.post('/:id/pagamento-nao-fiscal', validarCaixaAberto, registrarPagamentoNaoFiscal);
 
-router.post('/:id/devolver', validarCaixaAbertoDevolucaoVenda, exigirSenhaAdmin, (req, res) => {
+router.post('/:id/devolver', anexarEmpresaVenda, validarCaixaAbertoDevolucaoVenda, exigirSenhaAdmin, (req, res) => {
   const vendaId = Number(req.params.id);
   const motivo = String(req.body?.motivo || '').trim();
   const itens = Array.isArray(req.body?.itens) ? req.body.itens : [];
@@ -270,13 +270,13 @@ router.post('/:id/devolver', validarCaixaAbertoDevolucaoVenda, exigirSenhaAdmin,
   devolverParcial(vendaId, motivo, itens, req, res);
 });
 
-router.put('/:id/cancelar', validarCaixaAbertoCancelamentoVenda, (req, res) => {
+router.put('/:id/cancelar', anexarEmpresaVenda, validarCaixaAbertoCancelamentoVenda, (req, res) => {
   const { id } = req.params;
   const motivo = req.body.motivo || req.body.justificativa || '';
   cancelarVendaPut(id, motivo, req, res);
 });
 
-router.post('/cancelar/:id', validarCaixaAbertoCancelamentoVenda, (req, res) => {
+router.post('/cancelar/:id', anexarEmpresaVenda, validarCaixaAbertoCancelamentoVenda, (req, res) => {
   const vendaId = req.params.id;
   const { motivo } = req.body;
   cancelarVendaPost(vendaId, motivo, req, res);

@@ -20,7 +20,32 @@ const {
 } = require('../monitoring/monitoringDateHelpers');
 const { DocumentoFiscalStatus } = require('../motores/central-entradas/core/DocumentoFiscalStatus');
 
-const dbGet = dbGetFactory(db);
+function dbGetDe(opcoes = {}) {
+  return dbGetFactory(opcoes.db || db);
+}
+
+function empresaIdIndicadores(opcoes = {}) {
+  const n = Number(opcoes.empresaId != null ? opcoes.empresaId : opcoes.empresa_id);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+function sqlEmpresaIndicadores(opcoes, params) {
+  const rawLista = opcoes.empresaIds || opcoes.empresa_ids;
+  if (Array.isArray(rawLista)) {
+    const ids = [...new Set(rawLista.map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+    if (!ids.length) {
+      return ' AND 1 = 0';
+    }
+    params.push(...ids);
+    return ` AND empresa_id IN (${ids.map(() => '?').join(', ')}) AND empresa_id IS NOT NULL`;
+  }
+  const empresaId = empresaIdIndicadores(opcoes);
+  if (empresaId != null) {
+    params.push(empresaId);
+    return ' AND empresa_id = ?';
+  }
+  return '';
+}
 
 /** Status de entrada equivalentes a cancelada / inválida para contagem de NF-e. */
 const STATUS_EXCLUIDOS_CONTAGEM = Object.freeze([
@@ -34,9 +59,9 @@ const STATUS_NFE_EXCLUIDOS = Object.freeze([
   'inutilizada'
 ]);
 
-async function obterAmbienteConfigurado() {
+async function obterAmbienteConfigurado(opcoes = {}) {
   try {
-    const row = await dbGet(
+    const row = await dbGetDe(opcoes)(
       `SELECT valor FROM configuracoes WHERE chave = 'fiscal_ambiente' LIMIT 1`
     );
     const ambiente = Number(row?.valor);
@@ -107,12 +132,12 @@ function resolverPeriodosIndicadores(input = {}) {
  * Valor total vendido (fiscal) na competência — referência data_venda.
  * @param {{ inicio: string, fim: string }} periodo
  */
-async function obterValorTotalVendido(periodo) {
+async function obterValorTotalVendido(periodo, opcoes = {}) {
   if (!periodo?.inicio || !periodo?.fim || periodo.vazio) {
     return { valor: 0, quantidade: 0 };
   }
   const exprFiscal = getExprValorVendaFiscal();
-  const row = await dbGet(
+  const row = await dbGetDe(opcoes)(
     `SELECT
        COALESCE(SUM(${exprFiscal}), 0) AS valor,
        COUNT(CASE WHEN COALESCE(${exprFiscal}, 0) > 0 THEN 1 END) AS quantidade
@@ -148,7 +173,9 @@ async function obterAgregadoEntradasPorEmissao(periodo, opcoes = {}) {
   params.push(...STATUS_EXCLUIDOS_CONTAGEM);
   params.push(periodo.inicio, periodo.fim);
 
-  const row = await dbGet(
+  const sqlEmpresa = sqlEmpresaIndicadores(opcoes, params);
+
+  const row = await dbGetDe(opcoes)(
     `SELECT
        ${valorExpr} AS valor,
        COALESCE(SUM(CASE
@@ -156,7 +183,8 @@ async function obterAgregadoEntradasPorEmissao(periodo, opcoes = {}) {
      FROM central_entradas_documentos
      WHERE data_emissao IS NOT NULL
        AND TRIM(data_emissao) != ''
-       AND date(data_emissao) BETWEEN date(?) AND date(?)`,
+       AND date(data_emissao) BETWEEN date(?) AND date(?)
+       ${sqlEmpresa}`,
     params
   );
   return { valor: num(row.valor), quantidade: num(row.quantidade) };
@@ -166,8 +194,8 @@ async function obterAgregadoEntradasPorEmissao(periodo, opcoes = {}) {
  * Valor total comprado (entradas DF-e) na competência — referência data_emissao.
  * @param {{ inicio: string, fim: string }} periodo
  */
-async function obterValorTotalComprado(periodo) {
-  return obterAgregadoEntradasPorEmissao(periodo, { excluirInvalidas: false });
+async function obterValorTotalComprado(periodo, opcoes = {}) {
+  return obterAgregadoEntradasPorEmissao(periodo, { excluirInvalidas: false, ...opcoes });
 }
 
 /**
@@ -202,11 +230,17 @@ async function obterQuantidadeNfeEmitidas(periodo, ambiente) {
  */
 async function obterIndicadoresCentral(input = {}) {
   const resolvido = resolverPeriodosIndicadores(input);
-  const ambiente = await obterAmbienteConfigurado();
+  const ambiente = await obterAmbienteConfigurado(input);
+  const opcoesAgregado = {
+    excluirInvalidas: false,
+    empresaId: input.empresaId ?? input.empresa_id,
+    empresaIds: input.empresaIds || input.empresa_ids,
+    db: input.db
+  };
 
   const [mes, ano] = await Promise.all([
-    obterAgregadoEntradasPorEmissao(resolvido.periodoMensal, { excluirInvalidas: false }),
-    obterAgregadoEntradasPorEmissao(resolvido.periodoAnual, { excluirInvalidas: false })
+    obterAgregadoEntradasPorEmissao(resolvido.periodoMensal, opcoesAgregado),
+    obterAgregadoEntradasPorEmissao(resolvido.periodoAnual, opcoesAgregado)
   ]);
 
   return {

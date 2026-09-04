@@ -17,6 +17,7 @@ const MemoryMonitor = require('./observability/MemoryMonitor');
 const AnalyticsEngine = require('./observability/AnalyticsEngine');
 const SearchAI = require('./ai/SearchAI');
 const { EventBus, EVENTOS } = require('./events/EventBus');
+const { origemPdvExigeVendavel, filtrarItensVendaveisPdv } = require('../../services/produtos/tipoOperacionalProduto');
 
 /**
  * Motor Cognitivo de Busca RC2.0 —
@@ -192,7 +193,10 @@ class SearchEngine {
         err.code = 'MIB_CANCELLED';
         throw err;
       }
-      const ranqueados = this.ranking.ordenar(itens, {
+      const itensVendaveis = origemPdvExigeVendavel(opcoes.origem)
+        ? filtrarItensVendaveisPdv(itens)
+        : (itens || []);
+      const ranqueados = this.ranking.ordenar(itensVendaveis, {
         ...rankCtx,
         estrategia: meta.estrategia
       })
@@ -396,6 +400,7 @@ class SearchEngine {
         termoNorm,
         limite,
         modoFiscal,
+        origem: opcoes.origem,
         signal
       });
       if (signal.cancelled) throw Object.assign(new Error('MIB_CANCELLED'), { code: 'MIB_CANCELLED' });

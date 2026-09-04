@@ -9,8 +9,13 @@ const { recalcularFinanceiroDevolucaoVenda } = require('./VendaFinanceiroService
 const mpfc = require('../mpfc');
 const {
   creditarEstoqueItemVenda,
-  montarOpcoesRetornoEstoqueVenda
+  montarOpcoesRetornoEstoqueDaVenda
 } = require('./creditoEstoqueVendaViaPorta');
+const {
+  exigirOperacaoReversaoDaVenda,
+  responderErroEmpresaVenda
+} = require('./VendaEmpresaContextoService');
+const { estornarConsumoFichaTecnicaDaDevolucaoCb } = require('../produtos/FichaTecnicaConsumoService');
 
 function dbDeOpcoes(opcoes) {
   return (opcoes && opcoes.db) || db;
@@ -78,7 +83,10 @@ function devolverEstoqueItemVenda(item, callback, opcoes = {}) {
       };
 
       if (controlaValidade) {
-        lotesService.restaurarLotesVenda(item.id, aplicarSaldos);
+        lotesService.restaurarLotesVenda(item.id, aplicarSaldos, {
+          db: dbConn,
+          empresaId: opcoes.empresaId ?? opcoes.empresa_id
+        });
         return;
       }
 
@@ -87,18 +95,27 @@ function devolverEstoqueItemVenda(item, callback, opcoes = {}) {
   });
 }
 
-function devolverLotesParcialItem(vendaItemId, quantidade, callback) {
-  db.all(
+function devolverLotesParcialItem(vendaItemId, quantidade, callback, opcoes = {}) {
+  const dbConn = dbDeOpcoes(opcoes);
+  const empresaId = opcoes.empresaId ?? opcoes.empresa_id;
+  dbConn.all(
     `
-    SELECT id, produto_lote_id, quantidade
-    FROM venda_lotes
-    WHERE venda_item_id = ?
-    ORDER BY id DESC
+    SELECT vl.id, vl.produto_lote_id, vl.quantidade, pl.empresa_id
+    FROM venda_lotes vl
+    INNER JOIN produtos_lotes pl ON pl.id = vl.produto_lote_id
+    WHERE vl.venda_item_id = ?
+    ORDER BY vl.id DESC
     `,
     [vendaItemId],
     (err, lotes) => {
       if (err) return callback(err);
       if (!lotes || lotes.length === 0) return callback(null);
+
+      if (empresaId == null) {
+        const e = new Error('empresaId é obrigatório para operação empresarial de lote.');
+        e.code = 'EMPRESA_CONTEXT_REQUIRED';
+        return callback(e);
+      }
 
       let restante = Number(quantidade || 0);
       let indice = 0;
@@ -109,19 +126,36 @@ function devolverLotesParcialItem(vendaItemId, quantidade, callback) {
         }
 
         const lote = lotes[indice++];
+        if (lote.empresa_id == null) {
+          const e = new Error('Lote sem ownership empresarial identificável.');
+          e.code = 'EMPRESA_OWNERSHIP_REQUIRED';
+          return callback(e);
+        }
+        if (Number(lote.empresa_id) !== Number(empresaId)) {
+          const e = new Error('Lote não encontrado.');
+          e.code = 'LOTE_NAO_ENCONTRADO';
+          return callback(e);
+        }
+
         const consumido = Number(lote.quantidade || 0);
         const restaurar = Math.min(restante, consumido);
 
-        db.run(
+        dbConn.run(
           `
           UPDATE produtos_lotes
           SET quantidade_atual = quantidade_atual + ?,
               atualizado_em = CURRENT_TIMESTAMP
           WHERE id = ?
+            AND empresa_id = ?
           `,
-          [restaurar, lote.produto_lote_id],
-          (loteErr) => {
+          [restaurar, lote.produto_lote_id, empresaId],
+          function (loteErr) {
             if (loteErr) return callback(loteErr);
+            if (!this.changes) {
+              const e = new Error('Lote não encontrado.');
+              e.code = 'LOTE_NAO_ENCONTRADO';
+              return callback(e);
+            }
 
             const saldoConsumo = consumido - restaurar;
             const finalizarLote = (updateErr) => {
@@ -131,9 +165,9 @@ function devolverLotesParcialItem(vendaItemId, quantidade, callback) {
             };
 
             if (saldoConsumo <= 0.0009) {
-              db.run('DELETE FROM venda_lotes WHERE id = ?', [lote.id], finalizarLote);
+              dbConn.run('DELETE FROM venda_lotes WHERE id = ?', [lote.id], finalizarLote);
             } else {
-              db.run(
+              dbConn.run(
                 'UPDATE venda_lotes SET quantidade = ? WHERE id = ?',
                 [saldoConsumo, lote.id],
                 finalizarLote
@@ -164,7 +198,7 @@ function devolverEstoqueParcialItem(item, splitDevolucao, callback, opcoes = {})
     };
 
     if (controlaValidade && Number(splitDevolucao.qtdTotal || 0) > 0) {
-      devolverLotesParcialItem(item.id, splitDevolucao.qtdTotal, aplicarSaldos);
+      devolverLotesParcialItem(item.id, splitDevolucao.qtdTotal, aplicarSaldos, opcoes);
       return;
     }
 
@@ -240,8 +274,10 @@ garantirTabelaDevolucoesVenda((tableErr) => {
     if (vendaErr) {
       return res.status(500).json({ error: vendaErr.message });
     }
-    if (!venda) {
-      return res.status(404).json({ error: 'Venda não encontrada.' });
+    try {
+      exigirOperacaoReversaoDaVenda(venda, req.empresaId);
+    } catch (ownErr) {
+      return responderErroEmpresaVenda(res, ownErr);
     }
     if (String(venda.status || '').toLowerCase() === 'cancelada') {
       return res.status(400).json({ error: 'Venda cancelada não pode receber devolução.' });
@@ -250,7 +286,7 @@ garantirTabelaDevolucoesVenda((tableErr) => {
     db.serialize(() => {
       db.run('BEGIN IMMEDIATE');
 
-      const opcoesEstoque = montarOpcoesRetornoEstoqueVenda(req, 'devolucao_venda', db);
+      const opcoesEstoque = montarOpcoesRetornoEstoqueDaVenda(venda, req, 'devolucao_venda', db);
       let index = 0;
       let valorTotalDevolvido = 0;
       const itensProcessados = [];
@@ -279,7 +315,13 @@ garantirTabelaDevolucoesVenda((tableErr) => {
               SELECT SUM(vd.quantidade)
               FROM vendas_devolucoes vd
               WHERE vd.venda_item_id = vi.id
-            ), 0) AS quantidade_ja_devolvida
+            ), 0) AS quantidade_ja_devolvida,
+            COALESCE((
+              SELECT SUM(vi2.quantidade)
+              FROM vendas_itens vi2
+              WHERE vi2.venda_id = vi.venda_id
+                AND vi2.produto_id = vi.produto_id
+            ), 0) AS quantidade_vendida_produto
           FROM vendas_itens vi
           LEFT JOIN produtos p ON p.id = vi.produto_id
           WHERE vi.id = ? AND vi.venda_id = ?
@@ -331,17 +373,33 @@ garantirTabelaDevolucoesVenda((tableErr) => {
             valorUnitario,
             valorTotal,
             motivo
-          ], (insertErr) => {
+          ], function (insertErr) {
             if (insertErr) {
               db.run('ROLLBACK');
               return res.status(500).json({ error: insertErr.message });
             }
+            const vendaDevolucaoId = this.lastID;
 
             devolverEstoqueParcialItem(item, splitDevolucao, (estoqueErr) => {
                 if (estoqueErr) {
                   db.run('ROLLBACK');
                   return res.status(500).json({ error: estoqueErr.message });
                 }
+
+                estornarConsumoFichaTecnicaDaDevolucaoCb({
+                  vendaId,
+                  empresaId: opcoesEstoque.empresaId,
+                  produtoId: item.produto_id,
+                  quantidadeDevolvida: splitDevolucao.qtdTotal,
+                  quantidadeVendida: Number(item.quantidade_vendida_produto || qtdVendida),
+                  vendaDevolucaoId,
+                  db,
+                  usuarioId: opcoesEstoque.usuarioId
+                }, (fichaErr) => {
+                  if (fichaErr) {
+                    db.run('ROLLBACK');
+                    return res.status(500).json({ error: fichaErr.message });
+                  }
 
                 itensProcessados.push({
                   venda_item_id: item.id,
@@ -353,6 +411,7 @@ garantirTabelaDevolucoesVenda((tableErr) => {
                 });
 
                 processarProximo();
+                });
               },
               opcoesEstoque
             );

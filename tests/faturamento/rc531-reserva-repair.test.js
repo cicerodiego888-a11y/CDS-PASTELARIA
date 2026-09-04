@@ -79,6 +79,7 @@ async function setupDb() {
       total REAL DEFAULT 0,
       status TEXT NOT NULL,
       operador_id INTEGER,
+      empresa_id INTEGER DEFAULT 1,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -99,6 +100,7 @@ async function setupDb() {
       pedido_item_id INTEGER,
       produto_id INTEGER NOT NULL,
       quantidade_fiscal REAL NOT NULL DEFAULT 0,
+      empresa_id INTEGER,
       status TEXT NOT NULL DEFAULT 'ATIVA',
       criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
       atualizado_em DATETIME
@@ -291,8 +293,8 @@ async function seedReservaOrfa(db, opts = {}) {
   const produtoId = prod.lastID;
   const res = await run(
     db,
-    `INSERT INTO pedido_estoque_reservas (pedido_id, produto_id, quantidade_fiscal, status)
-     VALUES (?, ?, ?, 'ATIVA')`,
+    `INSERT INTO pedido_estoque_reservas (pedido_id, produto_id, quantidade_fiscal, status, empresa_id)
+     VALUES (?, ?, ?, 'ATIVA', 1)`,
     [pedidoIdFantasma, produtoId, qtd]
   );
   return { produtoId, pedidoIdFantasma, reservaId: res.lastID, quantidade: qtd };

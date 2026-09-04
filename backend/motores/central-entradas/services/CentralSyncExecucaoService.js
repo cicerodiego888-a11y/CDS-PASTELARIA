@@ -28,11 +28,12 @@ class CentralSyncExecucaoService {
     this._sincronizacao = deps.sincronizacaoService ?? new CentralSincronizacaoService({
       nsuRepository: this._nsuRepository,
       nsuService: this._nsuService,
-      configuracaoService: deps.configuracaoService ?? deps.configService
+      configuracaoService: deps.configuracaoService ?? deps.configService,
+      db: deps.db ?? null
     });
     this._config = deps.configuracaoService
       ?? deps.configService
-      ?? new CentralConfiguracaoService();
+      ?? new CentralConfiguracaoService({ db: deps.db ?? null });
     this._notificacoes = deps.notificacoesService ?? new CentralNotificacoesService();
     this._emitirEvento = deps.emitirEvento || emitirEvento;
     this._executando = false;

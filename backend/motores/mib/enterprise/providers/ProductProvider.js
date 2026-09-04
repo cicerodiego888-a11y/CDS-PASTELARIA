@@ -38,7 +38,8 @@ class ProductProvider extends ISearchProvider {
       modoFiscal: ctx.modoFiscal,
       operador_id: ctx.operador_id,
       filial_id: ctx.filial_id,
-      caixa_id: ctx.caixa_id
+      caixa_id: ctx.caixa_id,
+      origem: ctx.origem
     });
     const itens = (resultado.itens || []).map((p) => ({
       ...p,

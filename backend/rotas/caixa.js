@@ -5,7 +5,7 @@ const { verificarToken } = require('../middleware/auth');
 const { validarCaixaAberto } = require('../middleware/validarCaixaAberto');
 const { gravarAuditoria } = require('../services/auditoria');
 const { isMultiCaixaAtivo, exigirTerminalId, obterTerminalIdDaRequisicao } = require('../utils/multiCaixa');
-const { obterCaixaTurnoId, montarSqlSessaoAberta } = require('../utils/caixaSessaoHelpers');
+const { obterCaixaTurnoId, obterSessaoAtivaDaEmpresa, montarSqlHistoricoTurnosDaEmpresa, montarSqlUltimaSessaoDoTurnoDaEmpresa, montarSqlMovimentacoesDaSessaoDaEmpresa, obterSessaoDaEmpresaPorId, obterMovimentacaoDaEmpresaPorId } = require('../utils/caixaSessaoHelpers');
 const FechamentoCaixaResumoService = require('../services/caixa/FechamentoCaixaResumoService');
 const { gerarHtmlCupomFechamento } = require('../services/caixa/FechamentoCaixaCupomService');
 const {
@@ -96,29 +96,7 @@ function obterSessaoAberta(terminalId, empresaId, callback) {
     return callback(null, null);
   }
 
-  const { sql, params } = montarSqlSessaoAberta({ terminalId, empresaId });
-  db.get(sql, params, callback);
-}
-
-function obterCaixaAberto(terminalId, callback) {
-  if (!terminalId && isMultiCaixaAtivo()) {
-    return callback(null, null);
-  }
-
-  if (terminalId) {
-    db.get(
-      `SELECT * FROM caixa WHERE status = 'aberto' AND terminal_id = ? ORDER BY id DESC LIMIT 1`,
-      [terminalId],
-      callback
-    );
-    return;
-  }
-
-  db.get(
-    `SELECT * FROM caixa WHERE status = 'aberto' ORDER BY id DESC LIMIT 1`,
-    [],
-    callback
-  );
+  obterSessaoAtivaDaEmpresa(db, { terminalId, empresaId }, callback);
 }
 
 function validarTerminalParaAbertura(terminalId, callback) {
@@ -167,15 +145,24 @@ function calcularFechamentoDetalhado(caixa, options = {}, callback) {
 
 const { exigirPermissaoOuSenhaAdmin } = require('../middleware/exigirPermissaoOuSenhaAdmin');
 
-function encerrarSessaoOrfa(sessao, motivo, callback) {
+function encerrarSessaoOrfa(sessao, motivo, empresaId, callback) {
+  if (typeof empresaId === 'function') {
+    callback = empresaId;
+    empresaId = sessao && sessao.empresa_id != null ? sessao.empresa_id : null;
+  }
   if (!sessao || !sessao.id) return callback && callback(null);
+  const emp = Number(empresaId);
+  const params = Number.isInteger(emp) && emp > 0
+    ? [motivo || 'Sessão órfã encerrada automaticamente', sessao.id, emp]
+    : null;
+  if (!params) return callback && callback(null);
   db.run(
     `UPDATE caixa_sessoes
      SET status = 'fechado',
          fechado_em = COALESCE(fechado_em, DATETIME('now','localtime')),
          observacoes = COALESCE(observacoes, ?)
-     WHERE id = ? AND status = 'aberto'`,
-    [motivo || 'Sessão órfã encerrada automaticamente', sessao.id],
+     WHERE id = ? AND status = 'aberto' AND empresa_id = ?`,
+    params,
     (err) => {
       if (err) console.error('Erro ao encerrar sessão órfã:', err.message);
       if (callback) callback(err || null);
@@ -212,6 +199,7 @@ router.get('/aberto', anexarEmpresaCaixa, (req, res) => {
           return encerrarSessaoOrfa(
             sessao,
             'Encerrada automaticamente: turno de caixa já estava fechado',
+            empresaId,
             () => res.json(null)
           );
         }
@@ -924,26 +912,36 @@ router.post('/fechar', verificarToken, anexarEmpresaCaixa, validarCaixaAberto, e
   );
 });
 
-function obterDetalhesCaixa(caixaId, callback) {
+function obterDetalhesCaixa(caixaId, empresaId, callback) {
+  if (typeof empresaId === 'function') {
+    return empresaId(new Error('Empresa é obrigatória para detalhar turno de caixa.'));
+  }
   db.get(`
     SELECT c.*, ua.nome AS aberto_por_nome, uf.nome AS fechado_por_nome
     FROM caixa c
     LEFT JOIN usuarios ua ON ua.id = c.aberto_por
     LEFT JOIN usuarios uf ON uf.id = c.fechado_por
     WHERE c.id = ?
-  `, [caixaId], (err, caixa) => {
+      AND EXISTS (
+        SELECT 1 FROM caixa_sessoes s
+        WHERE s.empresa_id = ?
+          AND (s.caixa_turno_id = c.id OR (s.caixa_turno_id IS NULL AND s.caixa_id = c.id))
+      )
+  `, [caixaId, empresaId], (err, caixa) => {
     if (err) return callback(err);
     if (!caixa) return callback(null, null);
 
-    db.get(`
-      SELECT id FROM caixa_sessoes
-      WHERE caixa_turno_id = ? OR (caixa_turno_id IS NULL AND caixa_id = ?)
-      ORDER BY id DESC LIMIT 1
-    `, [caixaId, caixaId], (sErr, sRow) => {
+    let querySessao;
+    try {
+      querySessao = montarSqlUltimaSessaoDoTurnoDaEmpresa({ caixaTurnoId: caixaId, empresaId });
+    } catch (sqlErr) {
+      return callback(sqlErr);
+    }
+
+    db.get(querySessao.sql, querySessao.params, (sErr, sRow) => {
       if (sErr) return callback(sErr);
 
       if (!sRow) {
-        // sem sessão: retornar sem movimentações/auditoria
         return callback(null, {
           caixa,
           fechamento: null,
@@ -980,12 +978,12 @@ function obterDetalhesCaixa(caixaId, callback) {
   });
 }
 
-router.get('/fechamento/:caixa_id', (req, res) => {
+router.get('/fechamento/:caixa_id', anexarEmpresaCaixa, (req, res) => {
   const caixaId = Number(req.params.caixa_id);
 
-  obterDetalhesCaixa(caixaId, (err, detalhes) => {
+  obterDetalhesCaixa(caixaId, req.empresaId, (err, detalhes) => {
     if (err) return res.status(500).json({ error: err.message });
-    if (!detalhes) return res.status(404).json({ error: 'Caixa não encontrado.' });
+    if (!detalhes) return res.status(404).json({ error: 'Caixa não encontrado.', code: 'CAIXA_NAO_ENCONTRADO' });
 
     let consolidacao = null;
     if (detalhes.fechamento?.resumo_json) {
@@ -1010,13 +1008,13 @@ router.get('/fechamento/:caixa_id', (req, res) => {
  * Reimpressão do cupom de fechamento — não altera valores financeiros.
  * Marca ja_reimpresso = 1 apenas como flag informativa (não bloqueia novas reimpressões).
  */
-router.post('/:caixa_id/reimprimir', verificarToken, (req, res) => {
+router.post('/:caixa_id/reimprimir', verificarToken, anexarEmpresaCaixa, (req, res) => {
   const caixaId = Number(req.params.caixa_id);
   if (!caixaId) return res.status(400).json({ error: 'ID do caixa inválido.' });
 
-  obterDetalhesCaixa(caixaId, (err, detalhes) => {
+  obterDetalhesCaixa(caixaId, req.empresaId, (err, detalhes) => {
     if (err) return res.status(500).json({ error: err.message });
-    if (!detalhes?.caixa) return res.status(404).json({ error: 'Caixa não encontrado.' });
+    if (!detalhes?.caixa) return res.status(404).json({ error: 'Caixa não encontrado.', code: 'CAIXA_NAO_ENCONTRADO' });
     if (detalhes.caixa.status !== 'fechado') {
       return res.status(400).json({ error: 'Somente caixas fechados podem ser reimpressos.' });
     }
@@ -1078,7 +1076,7 @@ router.post('/:caixa_id/reimprimir', verificarToken, (req, res) => {
     }
 
     // Fallback: recomputa a partir da sessão (não altera o registro de fechamento)
-    db.get('SELECT * FROM caixa_sessoes WHERE id = ?', [fechamento.sessao_id], (sErr, sessao) => {
+    db.get('SELECT * FROM caixa_sessoes WHERE id = ? AND empresa_id = ?', [fechamento.sessao_id, req.empresaId], (sErr, sessao) => {
       if (sErr) return res.status(500).json({ error: sErr.message });
       if (!sessao) return res.status(404).json({ error: 'Sessão do fechamento não encontrada.' });
 
@@ -1108,48 +1106,107 @@ router.post('/:caixa_id/reimprimir', verificarToken, (req, res) => {
   });
 });
 
-router.get('/historico', (req, res) => {
-  db.all(`
-    SELECT c.*, ua.nome AS aberto_por_nome, uf.nome AS fechado_por_nome
-    FROM caixa c
-    LEFT JOIN usuarios ua ON ua.id = c.aberto_por
-    LEFT JOIN usuarios uf ON uf.id = c.fechado_por
-    ORDER BY c.id DESC
-    LIMIT 100
-  `, [], (err, rows) => {
+router.get('/sessoes/:sessao_id', anexarEmpresaCaixa, (req, res) => {
+  obterSessaoDaEmpresaPorId(db, {
+    sessaoId: Number(req.params.sessao_id),
+    empresaId: req.empresaId
+  }).then((sessao) => res.json(sessao)).catch((err) => {
+    const status = err.statusCode || statusDeErroEmpresa(err);
+    return res.status(status).json({
+      error: err.message || 'Sessão de caixa não encontrada.',
+      code: err.code || 'CAIXA_SESSAO_NAO_ENCONTRADA'
+    });
+  });
+});
+
+router.get('/movimentacao/:id', anexarEmpresaCaixa, (req, res) => {
+  obterMovimentacaoDaEmpresaPorId(db, {
+    movimentacaoId: Number(req.params.id),
+    empresaId: req.empresaId
+  }).then((row) => res.json(row)).catch((err) => {
+    const status = err.statusCode || statusDeErroEmpresa(err);
+    return res.status(status).json({
+      error: err.message || 'Movimentação de caixa não encontrada.',
+      code: err.code || 'CAIXA_MOVIMENTACAO_NAO_ENCONTRADA'
+    });
+  });
+});
+
+router.get('/historico', anexarEmpresaCaixa, (req, res) => {
+  let query;
+  try {
+    query = montarSqlHistoricoTurnosDaEmpresa(req.empresaId, { limite: 100 });
+  } catch (sqlErr) {
+    return res.status(statusDeErroEmpresa(sqlErr)).json({
+      error: sqlErr.message,
+      code: sqlErr.code
+    });
+  }
+  db.all(query.sql, query.params, (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
     res.json(rows || []);
   });
 });
 
-router.get('/movimentacoes/:caixa_id', validarCaixaAberto, (req, res) => {
+router.get('/movimentacoes/:caixa_id', anexarEmpresaCaixa, validarCaixaAberto, (req, res) => {
   const sessaoId = req.caixaSessaoId;
+  const empresaId = req.empresaId;
+  const caixaId = Number(req.params.caixa_id);
   if (!sessaoId) return res.status(400).json({ error: 'Nenhuma sessão de caixa aberta para este terminal.' });
 
-  db.all(`
-      SELECT cm.*, u.nome as usuario_nome
-      FROM caixa_movimentacoes cm
-      LEFT JOIN usuarios u ON u.id = cm.usuario_id
-      WHERE cm.sessao_id = ?
-      ORDER BY cm.id DESC
-    `, [sessaoId], (err, rows) => {
+  let turnoQuery;
+  try {
+    turnoQuery = montarSqlUltimaSessaoDoTurnoDaEmpresa({ caixaTurnoId: caixaId, empresaId });
+  } catch (sqlErr) {
+    return res.status(statusDeErroEmpresa(sqlErr)).json({
+      error: sqlErr.message,
+      code: sqlErr.code
+    });
+  }
+
+  db.get(turnoQuery.sql, turnoQuery.params, (turnoErr, turnoSessao) => {
+    if (turnoErr) return res.status(500).json({ error: turnoErr.message });
+    if (!turnoSessao) {
+      return res.status(404).json({
+        error: 'Sessão de caixa não encontrada.',
+        code: 'CAIXA_SESSAO_NAO_ENCONTRADA'
+      });
+    }
+
+    let query;
+    try {
+      query = montarSqlMovimentacoesDaSessaoDaEmpresa({ sessaoId, empresaId });
+    } catch (sqlErr) {
+      return res.status(statusDeErroEmpresa(sqlErr)).json({
+        error: sqlErr.message,
+        code: sqlErr.code
+      });
+    }
+
+    db.all(query.sql, query.params, (err, rows) => {
       if (err) return res.status(500).json({ error: err.message });
       res.json(rows || []);
     });
+  });
 });
 
-router.get('/por-data', (req, res) => {
+router.get('/por-data', anexarEmpresaCaixa, (req, res) => {
   const data = req.query.data || hoje();
   const modoFiscal = req.query.modo_fiscal || '0';
+  const empresaId = req.empresaId;
 
-  db.all(`
-    SELECT c.*, ua.nome AS aberto_por_nome, uf.nome AS fechado_por_nome
-    FROM caixa c
-    LEFT JOIN usuarios ua ON ua.id = c.aberto_por
-    LEFT JOIN usuarios uf ON uf.id = c.fechado_por
-    WHERE c.data = ?
-    ORDER BY c.id DESC
-  `, [data], (err, caixas) => {
+  let query;
+  try {
+    query = montarSqlHistoricoTurnosDaEmpresa(empresaId, { limite: 500, data });
+  } catch (sqlErr) {
+    return res.status(statusDeErroEmpresa(sqlErr)).json({
+      sucesso: false,
+      mensagem: sqlErr.message,
+      code: sqlErr.code
+    });
+  }
+
+  db.all(query.sql, query.params, (err, caixas) => {
     if (err) {
       return res.status(500).json({
         sucesso: false,
@@ -1169,12 +1226,18 @@ router.get('/por-data', (req, res) => {
     let processados = 0;
 
     caixas.forEach((caixa) => {
-      // Resolver última sessão e calcular resumo por sessão
-      db.get(`
-        SELECT id FROM caixa_sessoes
-        WHERE caixa_turno_id = ? OR (caixa_turno_id IS NULL AND caixa_id = ?)
-        ORDER BY id DESC LIMIT 1
-      `, [caixa.id, caixa.id], (sErr, sRow) => {
+      let querySessao;
+      try {
+        querySessao = montarSqlUltimaSessaoDoTurnoDaEmpresa({ caixaTurnoId: caixa.id, empresaId });
+      } catch (sqlErr) {
+        return res.status(statusDeErroEmpresa(sqlErr)).json({
+          sucesso: false,
+          mensagem: sqlErr.message,
+          code: sqlErr.code
+        });
+      }
+
+      db.get(querySessao.sql, querySessao.params, (sErr, sRow) => {
         if (sErr) {
           return res.status(500).json({ sucesso: false, mensagem: sErr.message });
         }

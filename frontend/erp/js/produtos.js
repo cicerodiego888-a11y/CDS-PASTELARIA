@@ -2395,6 +2395,99 @@ function renderProdutosRows(produtos) {
 
 
 // Abre modal de produto
+function unidadesFichaTecnicaOpcoes(selecionada) {
+    const unidades = ['UN', 'KG', 'G', 'L', 'ML', 'M', 'CM', 'M2', 'M3', 'PACOTE', 'CAIXA', 'FARDO', 'SACO', 'LATA', 'BALDE'];
+    const sel = String(selecionada || 'UN').toUpperCase();
+    return unidades.map((u) => `<option value="${u}" ${sel === u ? 'selected' : ''}>${u}</option>`).join('');
+}
+
+function linhaFichaTecnicaHtml(item, insumos) {
+    const insumoId = String(item.insumo_id || '');
+    const opcoes = (insumos || []).map((i) => (
+        `<option value="${i.id}" ${String(i.id) === insumoId ? 'selected' : ''}>${escapeHtml(i.nome || ('#' + i.id))}</option>`
+    )).join('');
+    return `
+        <tr>
+            <td>
+                <select class="form-control form-control-sm ficha-insumo">
+                    <option value="">Selecione um insumo</option>
+                    ${opcoes}
+                </select>
+            </td>
+            <td><input type="number" min="0.0001" step="0.0001" class="form-control form-control-sm ficha-qtd" value="${item.quantidade != null ? item.quantidade : ''}"></td>
+            <td><select class="form-control form-control-sm ficha-un">${unidadesFichaTecnicaOpcoes(item.unidade || 'UN')}</select></td>
+            <td><button type="button" class="btn btn-outline-danger btn-sm btn-remover-ficha-item" title="Remover">×</button></td>
+        </tr>
+    `;
+}
+
+function coletarFichaTecnicaItens() {
+    const itens = [];
+    $('#fichaTecnicaItensBody tr').each(function () {
+        const insumo_id = Number($(this).find('.ficha-insumo').val());
+        const quantidade = Number($(this).find('.ficha-qtd').val());
+        const unidade = ($(this).find('.ficha-un').val() || 'UN').trim();
+        if (insumo_id) itens.push({ insumo_id, quantidade, unidade });
+    });
+    return itens;
+}
+
+function sincronizarVisibilidadeFichaTecnica() {
+    const comercial = ($('#tipo_operacional').val() || 'COMERCIAL') === 'COMERCIAL';
+    $('#cardFichaTecnicaProduto').toggle(comercial);
+}
+
+function inicializarFichaTecnicaCadastro(produto, isEdit) {
+    const token = localStorage.getItem('token') || '';
+    sincronizarVisibilidadeFichaTecnica();
+    $('#tipo_operacional').off('change.ficha03').on('change.ficha03', sincronizarVisibilidadeFichaTecnica);
+    $('#btnAddFichaTecnicaItem').off('click.ficha03').on('click.ficha03', function () {
+        const insumos = $('#produtoModal').data('insumosFicha') || [];
+        $('#fichaTecnicaItensBody').append(linhaFichaTecnicaHtml({}, insumos));
+    });
+    $('#fichaTecnicaItensBody').off('click.ficha03').on('click.ficha03', '.btn-remover-ficha-item', function () {
+        $(this).closest('tr').remove();
+    });
+    fetch(`${API_URL}/produtos/catalogo/insumos`, {
+        headers: { Authorization: `Bearer ${token}` }
+    })
+        .then((r) => (r.ok ? r.json() : []))
+        .then((insumos) => {
+            $('#produtoModal').data('insumosFicha', insumos || []);
+            if (!isEdit || !produto || !produto.id) return null;
+            return fetch(`${API_URL}/produtos/${produto.id}/ficha-tecnica`, {
+                headers: { Authorization: `Bearer ${token}` }
+            }).then((r) => (r.ok ? r.json() : { itens: [] }))
+                .then((ficha) => {
+                    $('#fichaTecnicaItensBody').empty();
+                    (ficha.itens || []).forEach((item) => {
+                        $('#fichaTecnicaItensBody').append(linhaFichaTecnicaHtml(item, insumos || []));
+                    });
+                });
+        })
+        .catch(() => {});
+}
+
+function persistirFichaTecnicaCadastro(produtoSalvo, done) {
+    const cb = typeof done === 'function' ? done : () => {};
+    const tipo = $('#tipo_operacional').val();
+    const id = produtoSalvo && produtoSalvo.id;
+    if (!id || tipo === 'INSUMO') return cb();
+    $.ajax({
+        url: `${API_URL}/produtos/${id}/ficha-tecnica`,
+        method: 'PUT',
+        contentType: 'application/json',
+        headers: { Authorization: 'Bearer ' + (localStorage.getItem('token') || '') },
+        data: JSON.stringify({ ativo: 1, itens: coletarFichaTecnicaItens() }),
+        success: function () { cb(); },
+        error: function (xhr) {
+            const msg = (xhr.responseJSON && xhr.responseJSON.error) || 'Erro ao salvar ficha técnica.';
+            showNotification(msg, 'danger');
+            cb(new Error(msg));
+        }
+    });
+}
+
 // RC4.31.27 — opcoes.origem === 'COMPRA' NÃO substitui #modal-container (preserva Lançamento de Compra)
 function showProdutoModal(produto = null, opcoes = {}) {
     const origemCadastro = opcoes && typeof opcoes === 'object' ? (opcoes.origem || null) : null;
@@ -2504,6 +2597,14 @@ function showProdutoModal(produto = null, opcoes = {}) {
                                     <div class="cds-prod-cadastro__card-body">
                                         <div class="row g-3">
                                             <div class="col-md-6">
+                                                <label for="tipo_operacional" class="form-label">Tipo operacional</label>
+                                                <select class="form-control" id="tipo_operacional">
+                                                    <option value="COMERCIAL" ${!isEdit || String(produto.tipo_operacional || 'COMERCIAL').toUpperCase() !== 'INSUMO' ? 'selected' : ''}>Produto comercial</option>
+                                                    <option value="INSUMO" ${isEdit && String(produto.tipo_operacional || '').toUpperCase() === 'INSUMO' ? 'selected' : ''}>Insumo</option>
+                                                </select>
+                                                <small class="text-muted">Insumo não aparece no PDV. A ficha técnica vale só para produto comercial.</small>
+                                            </div>
+                                            <div class="col-md-6">
                                                 <label for="categoria_id" class="form-label">Categoria</label>
                                                 <div class="input-group">
                                                     <select class="form-control" id="categoria_id">
@@ -2565,6 +2666,30 @@ function showProdutoModal(produto = null, opcoes = {}) {
                                                 ? ProdutoEmbalagensUI.montarHtmlPainelApresentacoes()
                                                 : ''}
                                         </div>
+                                    </div>
+                                </div>
+
+                                <div class="cds-prod-cadastro__card" id="cardFichaTecnicaProduto">
+                                    <div class="cds-prod-cadastro__card-header">
+                                        <span class="cds-prod-cadastro__card-icon" aria-hidden="true">🧾</span>
+                                        <h6 class="cds-prod-cadastro__card-title">Ficha técnica</h6>
+                                    </div>
+                                    <div class="cds-prod-cadastro__card-body">
+                                        <p class="text-muted small mb-2">Componentes somente insumos. Catálogo compartilhado — a ficha pertence ao produto, não ao CNPJ.</p>
+                                        <div class="table-responsive">
+                                            <table class="table table-sm align-middle mb-2">
+                                                <thead>
+                                                    <tr>
+                                                        <th>Insumo</th>
+                                                        <th style="width: 140px;">Quantidade</th>
+                                                        <th style="width: 140px;">Unidade</th>
+                                                        <th style="width: 48px;"></th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody id="fichaTecnicaItensBody"></tbody>
+                                            </table>
+                                        </div>
+                                        <button type="button" class="btn btn-outline-primary btn-sm" id="btnAddFichaTecnicaItem">Adicionar componente</button>
                                     </div>
                                 </div>
 
@@ -3067,6 +3192,7 @@ function showProdutoModal(produto = null, opcoes = {}) {
     inicializarVendaUnidadeCadastro(produto, isEdit);
     inicializarVendaAtacado(produto, isEdit);
     inicializarImagemProdutoCadastro(produto, isEdit);
+    inicializarFichaTecnicaCadastro(produto, isEdit);
 
     if (isEdit && produto) {
         $('#controlar_validade').prop('checked', produto.controlar_validade == 1);
@@ -4375,6 +4501,7 @@ async function saveProduto() {
         observacoes: ($('#produto_observacoes').val() || '').trim() || null,
         imagem_principal: ($('#produtoModal').data('produtoImagemPath') || null),
         unidade: ($('#unidade').val() || '').trim(),
+        tipo_operacional: ($('#tipo_operacional').val() || 'COMERCIAL').trim(),
         preco_compra: parseFloat($('#preco_compra').val()) || 0,
         preco_venda: parseFloat($('#preco_venda').val()) || 0,
         lucro_percentual: $('#lucro_percentual').val() !== '' ? parseFloat($('#lucro_percentual').val()) : (
@@ -4411,6 +4538,31 @@ async function saveProduto() {
         // Campos para lote inicial (apenas para novos produtos)
         data_validade_inicial: ($('#data_validade_inicial').val() || '').trim() || null
     };
+
+    if (typeof ProdutoEmbalagensUI !== 'undefined' && typeof ProdutoEmbalagensUI.utilizaConversaoAtiva === 'function') {
+        const usaConv = ProdutoEmbalagensUI.utilizaConversaoAtiva();
+        data.utiliza_conversao = usaConv ? 1 : 0;
+        if (usaConv) {
+            data.unidade_estoque = ($('#unidade_estoque').val() || '').trim();
+            if (!data.unidade_estoque) {
+                showNotification('Informe uma unidade de estoque válida.', 'warning');
+                $('#unidade_estoque').focus();
+                return;
+            }
+            data.unidade = data.unidade_estoque;
+            data.relacoes = ProdutoEmbalagensUI.coletarRelacoesDoFormulario();
+            for (let r = 0; r < data.relacoes.length; r += 1) {
+                const rel = data.relacoes[r];
+                if (!(Number(rel.fator) > 0) || !rel.unidade_origem || !rel.unidade_destino) {
+                    showNotification(`Relação ${r + 1}: informe origem, destino e fator maior que zero.`, 'warning');
+                    return;
+                }
+            }
+        } else {
+            data.unidade_estoque = null;
+            data.relacoes = [];
+        }
+    }
 
     if ($('#produto_fracionado').is(':checked')) {
         const ref = obterReferenciaConversaoCadastro();
@@ -4449,7 +4601,7 @@ async function saveProduto() {
         return;
     }
 
-    if (data.preco_venda <= 0) {
+    if (data.tipo_operacional !== 'INSUMO' && data.preco_venda <= 0) {
         showNotification('Informe um preço de venda válido.', 'warning');
         $('#preco_venda').focus();
         return;
@@ -4516,6 +4668,8 @@ async function saveProduto() {
         },
         data: JSON.stringify(data),
         success: function (produtoSalvo) {
+            persistirFichaTecnicaCadastro(produtoSalvo, function (fichaErr) {
+            if (fichaErr) return;
             const $modal = $('#produtoModal');
             $modal.data('produtoRecemSalvo', produtoSalvo || null);
             $modal.data('produtoSalvoComSucesso', true);
@@ -4588,6 +4742,7 @@ async function saveProduto() {
             if (perguntarBalanca) {
                 perguntarEnvioBalancaAposSalvar(produtoNormalizado, eqPreferido);
             }
+            });
         },
         error: function (xhr) {
             const erro = xhr.responseJSON?.error || 'Erro desconhecido';

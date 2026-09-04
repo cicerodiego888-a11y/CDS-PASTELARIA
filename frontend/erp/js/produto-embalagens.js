@@ -153,8 +153,169 @@
         $('#produtoModal').data('apresentacoesTemp', lista);
     }
 
+    function utilizaConversaoAtiva() {
+        return String($('input[name="utiliza_conversao"]:checked').val() || '0') === '1';
+    }
+
+    function atualizarVisibilidadeConversaoMuc() {
+        if (utilizaConversaoAtiva()) {
+            $('#bloco_conversao_muc_detalhe').removeClass('d-none');
+        } else {
+            $('#bloco_conversao_muc_detalhe').addClass('d-none');
+            $('#resultado_simular_muc').empty();
+        }
+    }
+
+    function montarLinhaRelacaoMuc(rel, index) {
+        const origem = String(rel.unidade_origem || rel.de || 'UN').replace(/"/g, '&quot;');
+        const destino = String(rel.unidade_destino || rel.para || 'ML').replace(/"/g, '&quot;');
+        const fator = Number(rel.fator);
+        const idAttr = rel.id ? ` data-relacao-id="${rel.id}"` : '';
+        return `
+            <tr${idAttr} data-relacao-index="${index}">
+                <td class="text-center">1</td>
+                <td><input type="text" class="form-control form-control-sm rel-origem" value="${origem}" placeholder="UN"></td>
+                <td class="text-center">=</td>
+                <td><input type="number" step="0.001" min="0" class="form-control form-control-sm rel-fator" value="${Number.isFinite(fator) && fator > 0 ? fator : ''}" placeholder="2000"></td>
+                <td><input type="text" class="form-control form-control-sm rel-destino" value="${destino}" placeholder="ML"></td>
+                <td class="text-end"><button type="button" class="btn btn-sm btn-outline-danger rel-remover" title="Remover">&times;</button></td>
+            </tr>
+        `;
+    }
+
+    function renderTabelaRelacoesMuc(lista) {
+        const $tbody = $('#tabelaRelacoesMuc tbody');
+        if (!$tbody.length) return;
+        $tbody.empty();
+        (lista || []).forEach((rel, index) => {
+            $tbody.append(montarLinhaRelacaoMuc(rel, index));
+        });
+        fixarEventosRelacoesMuc();
+    }
+
+    function coletarRelacoesDoFormulario() {
+        const lista = [];
+        $('#tabelaRelacoesMuc tbody tr').each(function coletarRel() {
+            const $tr = $(this);
+            const origem = String($tr.find('.rel-origem').val() || '').trim();
+            const destino = String($tr.find('.rel-destino').val() || '').trim();
+            const fator = num($tr.find('.rel-fator').val(), 6);
+            const id = $tr.data('relacao-id') || null;
+            if (!origem && !destino && !(fator > 0)) return;
+            lista.push({
+                id,
+                unidade_origem: origem,
+                unidade_destino: destino,
+                de: origem,
+                para: destino,
+                fator
+            });
+        });
+        return lista;
+    }
+
+    function fixarEventosRelacoesMuc() {
+        $('#btnAdicionarRelacaoMuc').off('click.relMuc').on('click.relMuc', () => {
+            const lista = coletarRelacoesDoFormulario();
+            lista.push({ unidade_origem: 'UN', unidade_destino: 'ML', fator: '' });
+            renderTabelaRelacoesMuc(lista);
+        });
+        $('#tabelaRelacoesMuc').off('click.relMuc').on('click.relMuc', '.rel-remover', function onRemoverRel() {
+            const $tr = $(this).closest('tr');
+            const relacaoId = $tr.data('relacao-id');
+            const produtoId = $('#produtoId').val();
+            const token = localStorage.getItem('token') || '';
+            if (relacaoId && produtoId && utilizaConversaoAtiva()) {
+                if (!window.confirm('Excluir esta relação? Se ela for necessária para o caminho de conversão, o sistema bloqueará a exclusão.')) {
+                    return;
+                }
+                $.ajax({
+                    url: `${typeof API_URL !== 'undefined' ? API_URL : '/api'}/produtos/${produtoId}/conversao/relacoes/${relacaoId}`,
+                    method: 'DELETE',
+                    headers: { Authorization: 'Bearer ' + token },
+                    success: function onExcluiu(cfg) {
+                        renderTabelaRelacoesMuc(cfg.relacoes || []);
+                    },
+                    error: function onErroExcluir(xhr) {
+                        const msg = (xhr.responseJSON && xhr.responseJSON.error)
+                            || 'Não é possível excluir esta relação: a configuração ficaria inconsistente.';
+                        if (typeof global.showNotification === 'function') {
+                            global.showNotification(msg, 'warning');
+                        } else {
+                            window.alert(msg);
+                        }
+                    }
+                });
+                return;
+            }
+            $tr.remove();
+        });
+        $('#btnSimularConversaoMuc').off('click.relMuc').on('click.relMuc', function onSimular() {
+            const $out = $('#resultado_simular_muc');
+            $out.removeClass('text-danger text-success').empty();
+            const produtoId = $('#produtoId').val();
+            if (!produtoId) {
+                $out.addClass('text-danger').text('Salve o produto antes de simular a conversão.');
+                return;
+            }
+            const token = localStorage.getItem('token') || '';
+            $.ajax({
+                url: `${typeof API_URL !== 'undefined' ? API_URL : '/api'}/produtos/${produtoId}/conversao/simular`,
+                method: 'POST',
+                contentType: 'application/json',
+                headers: { Authorization: 'Bearer ' + token },
+                data: JSON.stringify({
+                    quantidade: num($('#simular_qtd_muc').val(), 6),
+                    unidade: ($('#simular_un_muc').val() || '').trim(),
+                    unidadeOrigem: ($('#simular_un_muc').val() || '').trim(),
+                    unidadeDestino: ($('#unidade_estoque').val() || '').trim()
+                }),
+                success: function onOk(r) {
+                    const caminhoArr = Array.isArray(r.caminho) ? r.caminho : [];
+                    const caminho = caminhoArr.length && typeof caminhoArr[0] === 'string'
+                        ? caminhoArr.join(' → ')
+                        : (caminhoArr.length && caminhoArr[0] && caminhoArr[0].de
+                            ? [caminhoArr[0].de].concat(caminhoArr.map((e) => e.para)).join(' → ')
+                            : '');
+                    const qtd = r.quantidade;
+                    if (qtd == null || !Number.isFinite(Number(qtd))) {
+                        $out.addClass('text-danger').text('Conversão não disponível.');
+                        return;
+                    }
+                    $out.addClass('text-success').html(
+                        `<strong>${Number(qtd).toLocaleString('pt-BR')} ${r.unidade || ''}</strong>`
+                        + (caminho ? `<div class="text-muted">Caminho: ${caminho}</div>` : '')
+                    );
+                },
+                error: function onFail(xhr) {
+                    const msg = (xhr.responseJSON && xhr.responseJSON.error)
+                        || 'Conversão não disponível.';
+                    $out.addClass('text-danger').text(msg);
+                }
+            });
+        });
+        $('input[name="utiliza_conversao"]').off('change.relMuc').on('change.relMuc', atualizarVisibilidadeConversaoMuc);
+    }
+
+    function inicializarConversaoMuc(produto) {
+        const usa = Number(produto?.utiliza_conversao || 0) === 1;
+        $('#utiliza_conversao_sim').prop('checked', usa);
+        $('#utiliza_conversao_nao').prop('checked', !usa);
+        const dest = String(produto?.unidade_estoque || (usa ? produto?.unidade : '') || 'UN').toUpperCase();
+        if ($('#unidade_estoque option[value="' + dest + '"]').length) {
+            $('#unidade_estoque').val(dest);
+        } else if (dest) {
+            $('#unidade_estoque').append(`<option value="${dest}">${dest}</option>`).val(dest);
+        }
+        renderTabelaRelacoesMuc(produto?.relacoes || []);
+        atualizarVisibilidadeConversaoMuc();
+        fixarEventosRelacoesMuc();
+    }
+
     function coletarApresentacoesDoFormulario() {
-        const unidadeBase = String($('#unidade').val() || 'un').trim().toLowerCase();
+        const unidadeBase = utilizaConversaoAtiva()
+            ? 'UN'
+            : String($('#unidade').val() || 'un').trim().toLowerCase();
         const lista = [];
         $('#tabelaApresentacoes tbody tr').each(function coletarLinha() {
             const $tr = $(this);
@@ -381,6 +542,60 @@
                             Quando ativo, o lançamento manual de compras utiliza embalagens e conversão MUC.
                         </small>
                     </div>
+                    <div class="border rounded p-3 bg-white mb-3" id="painel_conversao_muc">
+                        <h6 class="mb-2">Conversão / estoque</h6>
+                        <p class="small text-muted mb-2">Independente de comercial ou insumo. O MUC calcula; compras registra o estoque.</p>
+                        <div class="mb-2">
+                            <span class="fw-semibold d-block mb-1">Utiliza conversão?</span>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="utiliza_conversao" id="utiliza_conversao_nao" value="0" checked>
+                                <label class="form-check-label" for="utiliza_conversao_nao">Não</label>
+                            </div>
+                            <div class="form-check form-check-inline">
+                                <input class="form-check-input" type="radio" name="utiliza_conversao" id="utiliza_conversao_sim" value="1">
+                                <label class="form-check-label" for="utiliza_conversao_sim">Sim</label>
+                            </div>
+                        </div>
+                        <div id="bloco_conversao_muc_detalhe" class="d-none">
+                            <div class="mb-2">
+                                <label class="form-label" for="unidade_estoque">Unidade de estoque</label>
+                                <select class="form-control form-control-sm" id="unidade_estoque">
+                                    <option value="UN">UN</option>
+                                    <option value="ML">ML</option>
+                                    <option value="L">L</option>
+                                    <option value="G">G</option>
+                                    <option value="KG">KG</option>
+                                </select>
+                            </div>
+                            <div class="mb-2">
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <h6 class="mb-0">Relações</h6>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary" id="btnAdicionarRelacaoMuc">+ Adicionar relação</button>
+                                </div>
+                                <small class="text-muted">Ex.: 1 UN = 2.000 ML. Não cadastre 1 CAIXA = 24.000 ML no lugar das duas etapas.</small>
+                                <table class="table table-sm table-bordered mt-2 mb-0" id="tabelaRelacoesMuc">
+                                    <thead class="table-light"><tr><th>1</th><th>Origem</th><th>=</th><th>Fator</th><th>Destino</th><th></th></tr></thead>
+                                    <tbody></tbody>
+                                </table>
+                            </div>
+                            <div class="row g-2 align-items-end">
+                                <div class="col-md-3">
+                                    <label class="form-label small" for="simular_qtd_muc">Simular qtd</label>
+                                    <input type="number" class="form-control form-control-sm" id="simular_qtd_muc" min="0" step="0.001" value="12">
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small" for="simular_un_muc">Unidade</label>
+                                    <input type="text" class="form-control form-control-sm" id="simular_un_muc" value="CAIXA">
+                                </div>
+                                <div class="col-md-3">
+                                    <button type="button" class="btn btn-sm btn-primary" id="btnSimularConversaoMuc">Simular conversão</button>
+                                </div>
+                                <div class="col-12">
+                                    <div id="resultado_simular_muc" class="small"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                     <div id="alerta_sem_embalagens_compra" class="alert alert-warning py-2 d-none mb-3">
                         <div class="small mb-2">Este produto ainda não possui embalagens comerciais cadastradas. Deseja cadastrá-las agora?</div>
                         <div class="d-flex gap-2 flex-wrap">
@@ -391,7 +606,7 @@
                     <div class="d-flex justify-content-between align-items-center mb-2">
                         <div>
                             <h6 class="mb-0">Apresentações Comerciais</h6>
-                            <small class="text-muted">Cadastre múltiplas embalagens (UN, CX, FD, PCT…). Estoque permanece na unidade base.</small>
+                            <small class="text-muted">Cadastre múltiplas embalagens (UN, CX, FD, PCT…). Com conversão ativa, a quantidade é em UN (ex.: 1 CAIXA = 12 UN).</small>
                         </div>
                         <button type="button" class="btn btn-sm btn-outline-primary" id="btnAdicionarApresentacao">
                             + Apresentação
@@ -429,6 +644,7 @@
         salvarListaNoModal(lista);
         renderTabelaApresentacoes(lista);
         inicializarCompraPorEmbalagem(produto);
+        inicializarConversaoMuc(produto);
         setTimeout(() => sincronizarFormacaoPrecoApresentacaoPrincipal('init'), 0);
     }
 
@@ -452,6 +668,8 @@
         montarHtmlPainelApresentacoes,
         inicializarApresentacoes,
         coletarApresentacoesDoFormulario,
+        coletarRelacoesDoFormulario,
+        utilizaConversaoAtiva,
         obterApresentacaoPrincipal,
         obterApresentacaoCompraProduto,
         obterCompraPorEmbalagemAtiva,

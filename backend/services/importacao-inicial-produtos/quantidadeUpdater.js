@@ -20,6 +20,7 @@ const {
   arredondarCasas,
   mapearTipoApresentacao
 } = require('./helpers');
+const { carregarProdutoConfigMuc } = require('./resolverEstoqueInicialImportacao');
 
 function dbRun(db, sql, params = []) {
   return new Promise((resolve, reject) => {
@@ -161,19 +162,28 @@ function resolverFatorAtualizacao(linha, apresentacoesDb) {
   };
 }
 
-function calcularQuantidadeALancar(linha, fatorResolvido) {
+function calcularQuantidadeALancar(linha, fatorResolvido, opcoes = {}) {
   const fatorRaw = Number(
     fatorResolvido && fatorResolvido.fator !== undefined && fatorResolvido.fator !== null
       ? fatorResolvido.fator
       : linha.fator_conversao
   );
   const fator = Number.isFinite(fatorRaw) && fatorRaw > 0 ? fatorRaw : 1;
+  const apresentacao = fatorResolvido?.apresentacao || null;
+  const unidadeOrigemArquivo = String(linha.unidade_origem || '').trim();
+  const unidadeBase = String(linha.unidade_base || 'UN').toUpperCase();
   const calc = calcularEstoqueInicial({
     quantidadeDocumento: linha.quantidade_documento,
-    fatorConversao: fator
+    fatorConversao: fator,
+    unidadeOrigem: unidadeOrigemArquivo,
+    unidadeDestino: unidadeBase,
+    apresentacoes: apresentacao ? [apresentacao] : (opcoes.apresentacoes || []),
+    relacoes: opcoes.relacoes,
+    produtoConfig: opcoes.produtoConfig,
+    db: opcoes.db || null
   });
-  const unidadeOrigem = String(linha.unidade_origem || linha.unidade_base || 'UN').toUpperCase();
-  const unidadeBase = String(linha.unidade_base || 'UN').toUpperCase();
+  const unidadeOrigem = String(unidadeOrigemArquivo || linha.unidade_base || 'UN').toUpperCase();
+  const unEstoque = calc.unidadeEstoque || unidadeBase;
   return {
     quantidade_origem: calc.quantidade_origem,
     fator_conversao: calc.fator_conversao,
@@ -182,8 +192,10 @@ function calcularQuantidadeALancar(linha, fatorResolvido) {
     unidade_base: unidadeBase,
     qtd_origem_label: `${calc.quantidade_origem} ${unidadeOrigem}`,
     conversao_label: String(calc.fator_conversao),
-    quantidade_label: `+${calc.estoque_inicial} ${unidadeBase}`,
-    fator_fonte: fatorResolvido?.fonte || null
+    quantidade_label: `+${calc.estoque_inicial} ${unEstoque}`,
+    fator_fonte: fatorResolvido?.fonte || null,
+    origem_calculo: calc.origemCalculo || null,
+    modo_calculo: calc.modo || null
   };
 }
 
@@ -225,18 +237,32 @@ async function validarAtualizacaoQuantidades(db, dadosExtraidos, { nomeArquivo }
         mensagens.push('APRESENTAÇÃO NÃO ENCONTRADA');
         apresNaoEncontradas += 1;
       } else {
-        qtdCalc = calcularQuantidadeALancar(linhaFator, fatorInfo);
-        const unBase = String(match.produto.unidade || raw.unidade_base || 'UN').toUpperCase();
-        qtdCalc.unidade_base = unBase;
-        qtdCalc.quantidade_label = `+${qtdCalc.quantidade_a_lancar} ${unBase}`;
-
-        if (!Number.isFinite(qtdCalc.quantidade_a_lancar) || qtdCalc.quantidade_a_lancar < 0) {
+        const cfg = await carregarProdutoConfigMuc(db, match.produto.id);
+        try {
+          qtdCalc = calcularQuantidadeALancar(linhaFator, fatorInfo, {
+            produtoConfig: cfg,
+            apresentacoes: embDb,
+            db
+          });
+        } catch (e) {
           status = STATUS.ERRO;
-          mensagens.push('Quantidade inválida');
+          mensagens.push(e.message || 'Falha na conversão de quantidade.');
           erros += 1;
-        } else {
-          encontrados += 1;
-          quantidadeTotal = arredondarCasas(quantidadeTotal + qtdCalc.quantidade_a_lancar, 3);
+          qtdCalc = null;
+        }
+        if (qtdCalc) {
+          const unBase = String(match.produto.unidade || raw.unidade_base || 'UN').toUpperCase();
+          qtdCalc.unidade_base = unBase;
+          qtdCalc.quantidade_label = `+${qtdCalc.quantidade_a_lancar} ${unBase}`;
+
+          if (!Number.isFinite(qtdCalc.quantidade_a_lancar) || qtdCalc.quantidade_a_lancar < 0) {
+            status = STATUS.ERRO;
+            mensagens.push('Quantidade inválida');
+            erros += 1;
+          } else {
+            encontrados += 1;
+            quantidadeTotal = arredondarCasas(quantidadeTotal + qtdCalc.quantidade_a_lancar, 3);
+          }
         }
       }
     }

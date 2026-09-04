@@ -43,7 +43,8 @@ router.get('/', async (req, res) => {
       dataInicio: req.query.dataInicio || req.query.inicio,
       dataFim: req.query.dataFim || req.query.fim,
       busca: req.query.busca || req.query.q,
-      limite: req.query.limite
+      limite: req.query.limite,
+      empresaId: empresaIdDoReqPedido(req)
     });
     res.json(out);
   } catch (err) {
@@ -53,7 +54,9 @@ router.get('/', async (req, res) => {
 
 router.get('/:id', async (req, res) => {
   try {
-    const out = await PedidoOperacional.obter(req.params.id);
+    const out = await PedidoOperacional.obter(req.params.id, {
+      empresaId: empresaIdDoReqPedido(req)
+    });
     res.json(out);
   } catch (err) {
     responderErro(res, err);
@@ -99,7 +102,9 @@ router.post('/:id/cancelar', async (req, res) => {
 
 router.delete('/:id', async (req, res) => {
   try {
-    const out = await PedidoOperacional.excluir(req.params.id);
+    const out = await PedidoOperacional.excluir(req.params.id, {
+      empresaId: empresaIdDoReqPedido(req)
+    });
     res.json(out);
   } catch (err) {
     responderErro(res, err);

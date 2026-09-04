@@ -13,8 +13,7 @@ const sqlite3 = require('sqlite3').verbose();
 
 const {
   consumirReservasPedidoNaVenda,
-  montarOptsPortaConsumoReservaPedido,
-  MOTIVO_COMPAT_CONSUMO_RESERVA_PEDIDO
+  montarOptsPortaConsumoReservaPedido
 } = require('../../backend/services/estoque/pedidoReservaPonteNucleo');
 
 const ROOT = path.resolve(__dirname, '../..');
@@ -93,12 +92,20 @@ async function setup({ sf = 100, snf = 50, rf = 10, rnf = 4 } = {}) {
   await run(db, `CREATE TABLE empresas (id INTEGER PRIMARY KEY, razao TEXT)`);
   await run(db, `INSERT INTO empresas (id, razao) VALUES (1, 'A')`);
   await run(db, `
+    CREATE TABLE pedidos (
+      id INTEGER PRIMARY KEY,
+      empresa_id INTEGER,
+      status TEXT DEFAULT 'PEDIDO'
+    )
+  `);
+  await run(db, `
     CREATE TABLE pedido_estoque_reservas (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       pedido_id INTEGER NOT NULL,
       pedido_item_id INTEGER,
       produto_id INTEGER NOT NULL,
       quantidade_fiscal REAL NOT NULL DEFAULT 0,
+      empresa_id INTEGER,
       status TEXT NOT NULL DEFAULT 'ATIVA',
       criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
       atualizado_em DATETIME
@@ -125,13 +132,24 @@ async function setup({ sf = 100, snf = 50, rf = 10, rnf = 4 } = {}) {
   return { db, produtoId: p.lastID, empresaId: 1 };
 }
 
-async function seedReserva(db, { pedidoId, produtoId, qtdFiscal, status = 'ATIVA' }) {
+async function seedPedido(db, id, empresaId = 1) {
+  await run(
+    db,
+    `INSERT OR IGNORE INTO pedidos (id, empresa_id, status) VALUES (?, ?, 'PEDIDO')`,
+    [id, empresaId]
+  );
+}
+
+async function seedReserva(db, { pedidoId, produtoId, qtdFiscal, status = 'ATIVA', empresaId = 1, skipPedido = false }) {
+  if (!skipPedido) {
+    await seedPedido(db, pedidoId, empresaId);
+  }
   const r = await run(
     db,
     `INSERT INTO pedido_estoque_reservas
-       (pedido_id, produto_id, quantidade_fiscal, status)
-     VALUES (?, ?, ?, ?)`,
-    [pedidoId, produtoId, qtdFiscal, status]
+       (pedido_id, produto_id, quantidade_fiscal, status, empresa_id)
+     VALUES (?, ?, ?, ?, ?)`,
+    [pedidoId, produtoId, qtdFiscal, status, empresaId]
   );
   return r.lastID;
 }
@@ -192,43 +210,46 @@ async function test04EmpresaIdPropagado() {
   const viaOpcoes = montarOptsPortaConsumoReservaPedido({ db, empresaId: 1 });
   assert.strictEqual(viaOpcoes.empresaId, 1);
   assert.strictEqual(viaOpcoes.legado, false);
+  assert.strictEqual(viaOpcoes.motivoCompat, null);
 
-  const viaContexto = montarOptsPortaConsumoReservaPedido({
-    db,
-    contexto: { empresa_id: 1 }
-  });
-  assert.strictEqual(viaContexto.empresaId, 1);
-
-  const viaReqHeader = montarOptsPortaConsumoReservaPedido({
-    db,
-    contexto: { headers: { 'x-empresa-id': '1' } }
-  });
-  assert.strictEqual(viaReqHeader.empresaId, 1);
-  assert.strictEqual(viaReqHeader.legado, false);
+  await assertRejects(
+    Promise.resolve().then(() => montarOptsPortaConsumoReservaPedido({
+      db,
+      contexto: { empresa_id: 1 }
+    })),
+    'EMPRESA_CONTEXT_REQUIRED'
+  );
   await closeDb(db);
 }
 
 async function test05CompatExplicita() {
   const { db, produtoId } = await setup();
-  await seedReserva(db, { pedidoId: 81, produtoId, qtdFiscal: 2 });
-
-  const r = await consumirReservasPedidoNaVenda(81, 1, { db });
-  assert.strictEqual(r.legado, true);
-  assert.strictEqual(r.motivo_compat, MOTIVO_COMPAT_CONSUMO_RESERVA_PEDIDO);
-  assert.strictEqual(r.empresa_id, null);
 
   await assertRejects(
-    consumirReservasPedidoNaVenda(81, 1, { db, exigirEmpresa: true }),
-    'EMPRESA_OBRIGATORIA'
+    consumirReservasPedidoNaVenda(999, 1, { db }),
+    'PEDIDO_NAO_ENCONTRADO'
   );
 
-  const semEmpresa = montarOptsPortaConsumoReservaPedido({ db });
-  assert.strictEqual(semEmpresa.legado, true);
-  assert.strictEqual(semEmpresa.motivoCompat, MOTIVO_COMPAT_CONSUMO_RESERVA_PEDIDO);
+  await run(
+    db,
+    `INSERT INTO pedidos (id, empresa_id, status) VALUES (81, NULL, 'PEDIDO')`
+  );
+  await seedReserva(db, { pedidoId: 81, produtoId, qtdFiscal: 2, skipPedido: true });
+  await assertRejects(
+    consumirReservasPedidoNaVenda(81, 1, { db }),
+    'EMPRESA_OWNERSHIP_REQUIRED'
+  );
+
+  await assertRejects(
+    Promise.resolve().then(() => montarOptsPortaConsumoReservaPedido({ db })),
+    'EMPRESA_CONTEXT_REQUIRED'
+  );
 
   const src = fs.readFileSync(SRC_PONTE, 'utf8');
-  assert.ok(src.includes('COMPAT_CONSUMO_RESERVA_PEDIDO_PRE_MULTIEMPRESA'));
-  assert.ok(!/empresaId\s*=\s*1/.test(src));
+  assert.ok(!src.includes('COMPAT_CONSUMO_RESERVA_PEDIDO_PRE_MULTIEMPRESA'));
+  assert.ok(!src.includes('COMPAT_CERTIFICADA_PRE_MULTIEMPRESA'));
+  assert.ok(!/empresaId\s*\|\|/.test(src));
+  assert.ok(!/empresaId\s*\?\?/.test(src));
   assert.ok(!/configuracoes\.cnpj/.test(src));
   await closeDb(db);
 }
@@ -352,7 +373,7 @@ async function main() {
     ['02 reservado_fiscal diminui', test02ReservadoFiscalDiminui],
     ['03 saldo fisico nao muda', test03SaldoFisicoNaoMuda],
     ['04 empresaId propagado', test04EmpresaIdPropagado],
-    ['05 COMPAT explicita', test05CompatExplicita],
+    ['05 ownership do pedido (helper exige empresa)', test05CompatExplicita],
     ['06 rollback restaura reservado', test06RollbackRestauraReservado],
     ['07 consumo nao duplica', test07ConsumoNaoDuplica],
     ['08 SQL direto de reservado removido', test08SqlDiretoRemovido],

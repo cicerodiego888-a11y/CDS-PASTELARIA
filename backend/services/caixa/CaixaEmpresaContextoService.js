@@ -29,7 +29,7 @@ function statusDeErroEmpresa(err) {
   if (err.statusCode) return err.statusCode;
   if (err.status) return err.status;
   const code = err.code || '';
-  if (code === 'EMPRESA_NAO_ENCONTRADA') return 404;
+  if (code === 'EMPRESA_NAO_ENCONTRADA' || code === 'CAIXA_NAO_ENCONTRADO' || code === 'CAIXA_SESSAO_NAO_ENCONTRADA' || code === 'CAIXA_MOVIMENTACAO_NAO_ENCONTRADA' || code === 'CAIXA_FECHAMENTO_NAO_ENCONTRADO') return 404;
   if (code === 'EMPRESA_NAO_AUTORIZADA') return 403;
   if (
     code === 'EMPRESA_INATIVA'
@@ -40,6 +40,9 @@ function statusDeErroEmpresa(err) {
     || code === 'EMPRESA_OPERACIONAL_INVALIDA'
     || code === 'CAIXA_EMPRESA_OBRIGATORIA'
     || code === 'CAIXA_SESSAO_EMPRESA_DIVERGENTE'
+    || code === 'CAIXA_SESSAO_SEM_EMPRESA'
+    || code === 'CAIXA_SESSAO_AUSENTE'
+    || code === 'EMPRESA_OWNERSHIP_REQUIRED'
   ) {
     return 400;
   }
@@ -121,9 +124,9 @@ function exigirSessaoDaEmpresa(sessao, empresaId) {
   const sid = sessao.empresa_id != null ? Number(sessao.empresa_id) : null;
   if (sid == null || !Number.isInteger(sid) || sid <= 0) {
     throw erroCaixaEmpresa(
-      'CAIXA_SESSAO_SEM_EMPRESA',
-      'Sessão de caixa sem empresa_id. Execute a migration 05.38.C.',
-      409,
+      'EMPRESA_OWNERSHIP_REQUIRED',
+      'Sessão de caixa sem empresa_id. Ownership é obrigatório para operação empresarial.',
+      400,
       { sessao_id: sessao.id }
     );
   }
@@ -132,7 +135,7 @@ function exigirSessaoDaEmpresa(sessao, empresaId) {
       'CAIXA_SESSAO_EMPRESA_DIVERGENTE',
       'A sessão de caixa não pertence à empresa do contexto atual.',
       403,
-      { sessao_id: sessao.id, empresa_id: empresaId, sessao_empresa_id: sid }
+      { sessao_id: sessao.id, empresa_id: empresaId }
     );
   }
   return sessao;

@@ -55,10 +55,10 @@ console.log('\n=== MUC RC2 — Certificação Arquitetural ===\n');
 MUC.BarramentoEventos.limparHistorico();
 MUC.MucMetricas.reset();
 
-test('Versão RC2.1 oficial congelada', () => {
-  assert.strictEqual(MUC.VERSAO.VERSAO, 'RC2.1');
-  assert.strictEqual(MUC.VERSAO.STATUS, 'ARQUITETURA_CONGELADA');
-  assert.strictEqual(MUC.VERSAO.TAG, 'MUC_RC2.1_ENTERPRISE');
+test('Versão RC3.0 oficial consolidada', () => {
+  assert.strictEqual(MUC.VERSAO.VERSAO, 'RC3.0');
+  assert.strictEqual(MUC.VERSAO.STATUS, 'CONSOLIDADO');
+  assert.strictEqual(MUC.VERSAO.TAG, 'MUC_RC3.0_CONSOLIDADO');
 });
 
 test('Estrutura RC2 — pipeline + etapas desacopladas', () => {
@@ -84,7 +84,7 @@ test('ResultadoConversaoDTO RC2 — campos obrigatórios e imutabilidade', () =>
     'warnings', 'metadata', 'hashConversao', 'correlationId', 'regraAplicada'
   ].forEach((campo) => assert.ok(campo in r, `campo ausente: ${campo}`));
   assert.strictEqual(r.correlationId, 'test-corr-001');
-  assert.strictEqual(r.versaoMotor, 'RC2.1');
+  assert.strictEqual(r.versaoMotor, 'RC3.0');
   assert.strictEqual(r.hash, r.hashConversao);
   assert.ok(Object.isFrozen(r));
   assert.ok(Object.isFrozen(r.warnings));
@@ -203,7 +203,7 @@ test('Facade obterMuc — converter via pipeline + exportarMetricas', () => {
 test('MotorConversao delega ao pipeline (API RC1 preservada)', () => {
   const r = MUC.MotorConversao.converter(inputCaixa12());
   assert.strictEqual(r.quantidadeEstoque, 120);
-  assert.strictEqual(r.versaoMotor, 'RC2.1');
+  assert.strictEqual(r.versaoMotor, 'RC3.0');
 });
 
 test('Simulação RC1 compatível com campos RC2', () => {

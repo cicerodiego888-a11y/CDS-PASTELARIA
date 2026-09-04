@@ -31,7 +31,9 @@ class CentralDashboardService {
    */
   async obterResumo(filtros = {}) {
     const filtrosEmpresa = {};
-    if (filtros.empresaId != null || filtros.empresa_id != null) {
+    if (Array.isArray(filtros.empresaIds) || Array.isArray(filtros.empresa_ids)) {
+      filtrosEmpresa.empresaIds = filtros.empresaIds || filtros.empresa_ids;
+    } else if (filtros.empresaId != null || filtros.empresa_id != null) {
       filtrosEmpresa.empresaId = filtros.empresaId ?? filtros.empresa_id;
     }
     const contadoresPorStatus = await this._documentosRepository.contarPorStatus(filtrosEmpresa);
@@ -51,9 +53,19 @@ class CentralDashboardService {
     const filas = montarContadoresFilas(contadores);
 
     let saude = null;
+    const empPainel = Number(filtrosEmpresa.empresaId);
     try {
       const health = require('../health');
-      saude = await health.obterMonitor().obterPainel({ forcar: false });
+      if (Number.isInteger(empPainel) && empPainel > 0) {
+        saude = await health.obterMonitor().obterPainel({
+          forcar: true,
+          exigirEmpresa: true,
+          empresaId: empPainel,
+          persistirEstado: false,
+          atualizarCacheGlobal: false,
+          autoRecuperar: false
+        });
+      }
     } catch {
       saude = null;
     }

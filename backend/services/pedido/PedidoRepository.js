@@ -4,9 +4,14 @@
 
 'use strict';
 
-const db = require('../../database');
+const dbPadrao = require('../../database');
 
-function run(sql, params = []) {
+function conn(dbInjected) {
+  return dbInjected || dbPadrao;
+}
+
+function run(sql, params = [], dbInjected) {
+  const db = conn(dbInjected);
   return new Promise((resolve, reject) => {
     db.run(sql, params, function onRun(err) {
       if (err) return reject(err);
@@ -15,19 +20,31 @@ function run(sql, params = []) {
   });
 }
 
-function get(sql, params = []) {
+function get(sql, params = [], dbInjected) {
+  const db = conn(dbInjected);
   return new Promise((resolve, reject) => {
     db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
   });
 }
 
-function all(sql, params = []) {
+function all(sql, params = [], dbInjected) {
+  const db = conn(dbInjected);
   return new Promise((resolve, reject) => {
     db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
   });
 }
 
-async function listarAguardandoFaturamento() {
+async function listarAguardandoFaturamento(filtros = {}) {
+  const db = filtros.db;
+  const empresaId = filtros.empresaId != null ? Number(filtros.empresaId) : null;
+  const where = [`p.status IN ('AGUARDANDO_FATURAMENTO')`];
+  const params = [];
+  if (Number.isInteger(empresaId) && empresaId > 0) {
+    where.push('p.empresa_id = ?');
+    params.push(empresaId);
+  } else {
+    where.push('1 = 0');
+  }
   return all(`
     SELECT
       p.id,
@@ -44,18 +61,27 @@ async function listarAguardandoFaturamento() {
       p.observacao,
       p.created_at,
       p.operador_id,
+      p.empresa_id,
       u.username AS usuario_nome
     FROM pedidos p
     LEFT JOIN clientes c ON c.id = p.cliente_id
     LEFT JOIN usuarios u ON u.id = p.operador_id
-    WHERE p.status IN ('AGUARDANDO_FATURAMENTO')
+    WHERE ${where.join(' AND ')}
     ORDER BY p.data_pedido DESC, p.id DESC
-  `);
+  `, params, db);
 }
 
 async function listarPedidos(filtros = {}) {
+  const db = filtros.db;
   const where = ['1=1'];
   const params = [];
+  const empresaId = filtros.empresaId != null ? Number(filtros.empresaId) : null;
+  if (Number.isInteger(empresaId) && empresaId > 0) {
+    where.push('p.empresa_id = ?');
+    params.push(empresaId);
+  } else {
+    where.push('1 = 0');
+  }
 
   const statusLista = [];
   if (Array.isArray(filtros.statusIn) && filtros.statusIn.length) {
@@ -117,6 +143,7 @@ async function listarPedidos(filtros = {}) {
       p.created_at,
       p.updated_at,
       p.operador_id,
+      p.empresa_id,
       COALESCE(u.username, u.nome) AS usuario_nome
     FROM pedidos p
     LEFT JOIN clientes c ON c.id = p.cliente_id
@@ -124,10 +151,11 @@ async function listarPedidos(filtros = {}) {
     WHERE ${where.join(' AND ')}
     ORDER BY p.id DESC
     LIMIT ?
-  `, [...params, limite]);
+  `, [...params, limite], db);
 }
 
-async function obterPorId(pedidoId) {
+async function obterPorId(pedidoId, opts = {}) {
+  const db = opts.db;
   const pedido = await get(`
     SELECT
       p.*,
@@ -137,7 +165,7 @@ async function obterPorId(pedidoId) {
     LEFT JOIN clientes c ON c.id = p.cliente_id
     LEFT JOIN usuarios u ON u.id = p.operador_id
     WHERE p.id = ?
-  `, [pedidoId]);
+  `, [pedidoId], db);
   if (!pedido) return null;
   const itens = await all(`
     SELECT
@@ -149,7 +177,7 @@ async function obterPorId(pedidoId) {
     LEFT JOIN produtos pr ON pr.id = i.produto_id
     WHERE i.pedido_id = ?
     ORDER BY i.id ASC
-  `, [pedidoId]);
+  `, [pedidoId], db);
   return { ...pedido, itens };
 }
 
@@ -165,15 +193,17 @@ async function criarPedido({
   representanteNome,
   observacao,
   operadorId,
-  itens
+  empresaId,
+  itens,
+  db
 }) {
-  await run('BEGIN IMMEDIATE');
+  await run('BEGIN IMMEDIATE', [], db);
   try {
     const ins = await run(`
       INSERT INTO pedidos (
         codigo, data_pedido, cliente_id, total, desconto, frete, status,
-        representante_id, representante_nome, observacao, operador_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        representante_id, representante_nome, observacao, operador_id, empresa_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       codigo,
       dataPedido,
@@ -185,8 +215,9 @@ async function criarPedido({
       representanteId || null,
       representanteNome || null,
       observacao || null,
-      operadorId || null
-    ]);
+      operadorId || null,
+      empresaId != null ? Number(empresaId) : null
+    ], db);
     const pedidoId = ins.lastID;
     for (const item of itens) {
       await run(`
@@ -202,12 +233,12 @@ async function criarPedido({
         item.desconto_percentual || 0,
         item.subtotal,
         item.tipo_venda || 'PESO'
-      ]);
+      ], db);
     }
-    await run('COMMIT');
+    await run('COMMIT', [], db);
     return pedidoId;
   } catch (err) {
-    try { await run('ROLLBACK'); } catch (_) { /* ignore */ }
+    try { await run('ROLLBACK', [], db); } catch (_) { /* ignore */ }
     throw err;
   }
 }
@@ -221,11 +252,23 @@ async function substituirPedido({
   representanteId,
   representanteNome,
   observacao,
-  itens
+  itens,
+  empresaId,
+  db
 }) {
-  await run('BEGIN IMMEDIATE');
+  await run('BEGIN IMMEDIATE', [], db);
   try {
-    const upd = await run(`
+    const params = [
+      clienteId || null,
+      Number(total || 0),
+      Number(desconto || 0),
+      Number(frete || 0),
+      representanteId || null,
+      representanteNome || null,
+      observacao || null,
+      pedidoId
+    ];
+    let sql = `
       UPDATE pedidos SET
         cliente_id = ?,
         total = ?,
@@ -237,22 +280,19 @@ async function substituirPedido({
         updated_at = DATETIME('now', 'localtime')
       WHERE id = ?
         AND status IN ('ORCAMENTO', 'PEDIDO', 'ABERTO', 'EM_SEPARACAO', 'AGUARDANDO_FATURAMENTO')
-    `, [
-      clienteId || null,
-      Number(total || 0),
-      Number(desconto || 0),
-      Number(frete || 0),
-      representanteId || null,
-      representanteNome || null,
-      observacao || null,
-      pedidoId
-    ]);
+    `;
+    const emp = empresaId != null ? Number(empresaId) : null;
+    if (Number.isInteger(emp) && emp > 0) {
+      sql += ' AND empresa_id = ?';
+      params.push(emp);
+    }
+    const upd = await run(sql, params, db);
     if (!upd.changes) {
       const err = new Error('Pedido não pode ser editado neste status.');
       err.statusCode = 400;
       throw err;
     }
-    await run('DELETE FROM pedidos_itens WHERE pedido_id = ?', [pedidoId]);
+    await run('DELETE FROM pedidos_itens WHERE pedido_id = ?', [pedidoId], db);
     for (const item of itens) {
       await run(`
         INSERT INTO pedidos_itens (
@@ -267,17 +307,18 @@ async function substituirPedido({
         item.desconto_percentual || 0,
         item.subtotal,
         item.tipo_venda || 'PESO'
-      ]);
+      ], db);
     }
-    await run('COMMIT');
+    await run('COMMIT', [], db);
     return true;
   } catch (err) {
-    try { await run('ROLLBACK'); } catch (_) { /* ignore */ }
+    try { await run('ROLLBACK', [], db); } catch (_) { /* ignore */ }
     throw err;
   }
 }
 
-async function atualizarStatus(pedidoId, status, statusPermitidos = null) {
+async function atualizarStatus(pedidoId, status, statusPermitidos = null, opts = {}) {
+  const db = opts.db;
   const params = [status, pedidoId];
   let sql = `
     UPDATE pedidos
@@ -289,15 +330,22 @@ async function atualizarStatus(pedidoId, status, statusPermitidos = null) {
     sql += ` AND status IN (${statusPermitidos.map(() => '?').join(',')})`;
     params.push(...statusPermitidos);
   }
-  const result = await run(sql, params);
+  const emp = opts.empresaId != null ? Number(opts.empresaId) : null;
+  if (Number.isInteger(emp) && emp > 0) {
+    sql += ' AND empresa_id = ?';
+    params.push(emp);
+  }
+  const result = await run(sql, params, db);
   return result.changes > 0;
 }
 
 /** Exclusão física — somente Orçamento (Sprint 3.14). */
-async function excluirOrcamento(pedidoId) {
-  await run('BEGIN IMMEDIATE');
+async function excluirOrcamento(pedidoId, opts = {}) {
+  const db = opts.db;
+  const emp = opts.empresaId != null ? Number(opts.empresaId) : null;
+  await run('BEGIN IMMEDIATE', [], db);
   try {
-    const row = await get('SELECT id, status FROM pedidos WHERE id = ?', [pedidoId]);
+    const row = await get('SELECT id, status, empresa_id FROM pedidos WHERE id = ?', [pedidoId], db);
     if (!row) {
       const err = new Error('Pedido não encontrado.');
       err.statusCode = 404;
@@ -308,26 +356,37 @@ async function excluirOrcamento(pedidoId) {
       err.statusCode = 400;
       throw err;
     }
-    await run('DELETE FROM pedidos_itens WHERE pedido_id = ?', [pedidoId]);
-    const del = await run(
-      `DELETE FROM pedidos WHERE id = ? AND status = 'ORCAMENTO'`,
-      [pedidoId]
-    );
+    if (Number.isInteger(emp) && emp > 0 && Number(row.empresa_id) !== emp) {
+      const err = new Error('Pedido não encontrado.');
+      err.statusCode = 404;
+      err.code = 'PEDIDO_NAO_ENCONTRADO';
+      throw err;
+    }
+    await run('DELETE FROM pedidos_itens WHERE pedido_id = ?', [pedidoId], db);
+    const delParams = [pedidoId];
+    let delSql = `DELETE FROM pedidos WHERE id = ? AND status = 'ORCAMENTO'`;
+    if (Number.isInteger(emp) && emp > 0) {
+      delSql += ' AND empresa_id = ?';
+      delParams.push(emp);
+    }
+    const del = await run(delSql, delParams, db);
     if (!del.changes) {
       const err = new Error('Não foi possível excluir o orçamento.');
       err.statusCode = 400;
       throw err;
     }
-    await run('COMMIT');
+    await run('COMMIT', [], db);
     return true;
   } catch (err) {
-    try { await run('ROLLBACK'); } catch (_) { /* ignore */ }
+    try { await run('ROLLBACK', [], db); } catch (_) { /* ignore */ }
     throw err;
   }
 }
 
-async function marcarFaturado(pedidoId, vendaId, operadorId) {
-  const result = await run(`
+async function marcarFaturado(pedidoId, vendaId, operadorId, opts = {}) {
+  const db = opts.db;
+  const params = [vendaId, operadorId || null, pedidoId];
+  let sql = `
     UPDATE pedidos
     SET status = 'FATURADO',
         venda_id = ?,
@@ -336,7 +395,13 @@ async function marcarFaturado(pedidoId, vendaId, operadorId) {
         updated_at = DATETIME('now', 'localtime')
     WHERE id = ?
       AND status IN ('ABERTO', 'AGUARDANDO_FATURAMENTO')
-  `, [vendaId, operadorId || null, pedidoId]);
+  `;
+  const emp = opts.empresaId != null ? Number(opts.empresaId) : null;
+  if (Number.isInteger(emp) && emp > 0) {
+    sql += ' AND empresa_id = ?';
+    params.push(emp);
+  }
+  const result = await run(sql, params, db);
   return result.changes > 0;
 }
 

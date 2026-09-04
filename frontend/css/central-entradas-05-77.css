@@ -1,0 +1,276 @@
+/**
+ * Sprint 05.77 — camada visual da Central Inteligente de Entradas.
+ * Não altera motor, endpoints ou ownership. Preserva identidade CDS.
+ */
+
+.central-entradas-page.central-0577 {
+  --ce77-sidebar: #1e293b;
+  --ce77-accent: #0d9488;
+  --ce77-border: #e2e8f0;
+  --ce77-muted: #64748b;
+  --ce77-bg: #f8fafc;
+  --ce77-panel: 380px;
+}
+
+.central-0577 .central-ux1-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  border: 1px solid var(--ce77-border);
+  border-radius: 12px;
+}
+
+.central-0577 .central-ux1-title {
+  font-size: 1.15rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: #0f172a;
+}
+
+.central-0577-empresas {
+  margin-top: 0.75rem;
+  padding: 0.75rem 0.9rem;
+  background: #fff;
+  border: 1px solid var(--ce77-border);
+  border-radius: 12px;
+}
+
+.central-0577-empresas-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem 1rem;
+  margin-bottom: 0.55rem;
+}
+
+.central-0577-empresas-label {
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  color: var(--ce77-muted);
+}
+
+.central-0577-empresas-contador {
+  font-size: 0.8rem;
+  color: var(--ce77-muted);
+}
+
+.central-0577-empresas-select {
+  min-width: min(100%, 260px);
+  max-width: 360px;
+}
+
+.central-0577-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.central-0577-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.1rem;
+  min-width: 0;
+  max-width: 220px;
+  padding: 0.4rem 0.65rem;
+  border: 1px solid var(--ce77-border);
+  border-radius: 10px;
+  background: #fff;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.central-0577-chip:hover {
+  border-color: #94a3b8;
+}
+
+.central-0577-chip.is-active {
+  border-color: var(--ce77-accent);
+  box-shadow: 0 0 0 1px var(--ce77-accent);
+}
+
+.central-0577-chip-nome {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #0f172a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+.central-0577-chip-meta {
+  font-size: 0.68rem;
+  color: var(--ce77-muted);
+}
+
+.central-0577-chip-kpis {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.45rem;
+  font-size: 0.65rem;
+  color: #475569;
+}
+
+.central-0577-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.5rem;
+}
+
+.central-0577-toolbar .form-control,
+.central-0577-toolbar .form-select {
+  min-height: 36px;
+}
+
+.central-0577-tabela-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.central-0577-tabela {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+
+.central-0577-tabela th {
+  text-align: left;
+  font-size: 0.65rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ce77-muted);
+  padding: 0.45rem 0.5rem;
+  border-bottom: 1px solid var(--ce77-border);
+  background: #f8fafc;
+  white-space: nowrap;
+}
+
+.central-0577-tabela td {
+  padding: 0.5rem;
+  border-bottom: 1px solid #f1f5f9;
+  vertical-align: middle;
+}
+
+.central-0577-tabela tbody tr.central-0577-doc-row,
+.central-0577-tabela tbody tr {
+  display: table-row;
+  cursor: pointer;
+  grid-template-columns: none;
+  grid-template-areas: none;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  gap: 0;
+}
+
+.central-0577-tabela tbody tr.central-0577-doc-row > td,
+.central-0577-tabela td {
+  display: table-cell;
+}
+
+.central-0577-td-empresa,
+.central-0577-td-fornecedor {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.central-0577-td-cnpj {
+  white-space: nowrap;
+}
+
+.central-0577-acoes {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  white-space: nowrap;
+}
+
+.central-0577-acoes .btn {
+  padding: 0.15rem 0.4rem;
+  font-size: 0.72rem;
+  line-height: 1.2;
+}
+
+@media (max-width: 1100px) {
+  .central-0577-tabela tbody tr.central-0577-doc-row > td,
+  .central-0577-tabela tbody tr > td {
+    display: table-cell;
+  }
+}
+
+.central-0577-tabela tbody tr:hover {
+  background: #f8fafc;
+}
+
+.central-0577-tabela tbody tr.is-selected {
+  background: #ecfdf5;
+}
+
+.central-0577 .central-ux1-corpo {
+  grid-template-columns: minmax(0, 1fr) var(--ce77-panel);
+}
+
+.central-0577 .central-ux1-painel {
+  max-width: 420px;
+}
+
+.central-0577-skel {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.75rem;
+}
+
+.central-0577-skel-bar {
+  height: 12px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, #e2e8f0 0%, #f1f5f9 50%, #e2e8f0 100%);
+  background-size: 200% 100%;
+  animation: central0577skel 1.1s ease-in-out infinite;
+}
+
+@keyframes central0577skel {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+.central-0577 .central-ux1-monitor-sefaz,
+.central-0577 .central-saude-wrap,
+.central-0577 #centralRc75SaudeWrap {
+  border-radius: 12px;
+}
+
+@media (max-width: 1200px) {
+  .central-0577 .central-ux1-corpo {
+    grid-template-columns: 1fr;
+  }
+  .central-0577 .central-ux1-painel {
+    max-width: none;
+    width: 100%;
+  }
+}
+
+@media (max-width: 768px) {
+  .central-0577-chips {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 0.25rem;
+  }
+  .central-0577-chip {
+    flex: 0 0 auto;
+  }
+  .central-0577-tabela {
+    min-width: 640px;
+  }
+}

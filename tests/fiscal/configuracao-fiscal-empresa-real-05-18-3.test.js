@@ -212,7 +212,8 @@ function test10CaminhoRealNoCodigo() {
   const empresas = fs.readFileSync(path.join(__dirname, '../../backend/rotas/empresas.js'), 'utf8');
   assert.ok(empresas.includes("router.put('/:empresaId/configuracao-fiscal'"));
   const emissor = fs.readFileSync(path.join(__dirname, '../../backend/services/fiscal/emissor.js'), 'utf8');
-  assert.ok(emissor.includes('getFiscalConfig(fiscalOpts)'));
+  assert.ok(emissor.includes('exigirEmpresaFiscalDaVenda'));
+  assert.ok(emissor.includes('resolverCredenciaisNfceDaEmpresa'));
   assert.ok(emissor.includes('entregarUrlsAoTransporte'));
   const muv = fs.readFileSync(path.join(__dirname, '../../backend/motores/muv/FiscalizarAtendimentoService.js'), 'utf8');
   assert.ok(muv.includes('emitirPorVendaId(vendaId, opts'));

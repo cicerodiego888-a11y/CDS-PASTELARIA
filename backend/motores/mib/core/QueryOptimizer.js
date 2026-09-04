@@ -63,6 +63,7 @@ class QueryOptimizer {
         COALESCE(p.permite_venda_unidade, 0) AS permite_venda_unidade,
         COALESCE(p.peso_medio_unidade, 0) AS peso_medio_unidade,
         COALESCE(p.preco_unidade, 0) AS preco_unidade,
+        COALESCE(p.tipo_operacional, 'COMERCIAL') AS tipo_operacional,
         COALESCE(m.nome, '') AS marca,
         CASE WHEN promo.id IS NOT NULL THEN 1 ELSE 0 END AS tem_promocao,
         CASE WHEN promo.id IS NOT NULL THEN promo.preco_promocional ELSE NULL END AS preco_promocional,
@@ -95,7 +96,9 @@ class QueryOptimizer {
     const modoFiscal = opts.modoFiscal === true;
     const signal = opts.signal || { cancelled: false };
     const hoje = this._hoje();
-    const fiscal = this._filtroFiscal(modoFiscal);
+    const { origemPdvExigeVendavel, sqlFiltroProdutoVendavelPdv } = require('../../../services/produtos/tipoOperacionalProduto');
+    const fiscal = this._filtroFiscal(modoFiscal)
+      + (origemPdvExigeVendavel(opts.origem) ? sqlFiltroProdutoVendavelPdv('p') : '');
 
     // STABLE-1.0 — sem LIKE '%x%', sem LOWER/REPLACE em coluna.
     // Contém/marca ficam no catálogo em memória (SearchEngine), não no SQL.

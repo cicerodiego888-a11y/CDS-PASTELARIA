@@ -99,6 +99,7 @@ async function setupDb(opts = {}) {
       pedido_item_id INTEGER,
       produto_id INTEGER NOT NULL,
       quantidade_fiscal REAL NOT NULL DEFAULT 0,
+      empresa_id INTEGER,
       status TEXT NOT NULL DEFAULT 'ATIVA',
       criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
       atualizado_em DATETIME
@@ -121,6 +122,17 @@ async function setupDb(opts = {}) {
       data_hora DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  await run(db, `
+    CREATE TABLE pedidos (
+      id INTEGER PRIMARY KEY,
+      empresa_id INTEGER,
+      status TEXT DEFAULT 'PEDIDO'
+    )
+  `);
+  for (const id of [501, 503]) {
+    await run(db, `INSERT INTO pedidos (id, empresa_id, status) VALUES (?, 1, 'PEDIDO')`, [id]);
+  }
 
   const sf = opts.saldo_fiscal != null ? opts.saldo_fiscal : 5;
   const snf = opts.saldo_nao_fiscal != null ? opts.saldo_nao_fiscal : 100;

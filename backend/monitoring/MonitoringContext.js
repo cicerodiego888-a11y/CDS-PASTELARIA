@@ -4,6 +4,10 @@
  */
 
 const { resolverCompetencia } = require('./monitoringDateHelpers');
+const {
+  resolverEmpresaId,
+  resolverEmpresaIdDaRequisicao
+} = require('../services/fiscalNaoFiscal/empresaContexto');
 
 function criarMonitoringContext(req = {}, extras = {}) {
   const query = req.query || {};
@@ -13,6 +17,9 @@ function criarMonitoringContext(req = {}, extras = {}) {
     mes: query.mes,
     competencia: query.competencia
   });
+  const empresaId = resolverEmpresaId(req.empresaId)
+    ?? resolverEmpresaIdDaRequisicao(req)
+    ?? resolverEmpresaId(extras.empresaId);
 
   return {
     requestId: extras.requestId || `mon-${Date.now()}`,
@@ -20,6 +27,9 @@ function criarMonitoringContext(req = {}, extras = {}) {
     perfil: usuario.perfil || null,
     role: usuario.role || null,
     permissoes: usuario.permissoes || [],
+    empresaId: empresaId != null ? empresaId : null,
+    headers: req.headers || {},
+    user: usuario,
     modoFiscalUi: query.modo_fiscal === '1' || query.modo_fiscal === 'true',
     competencia,
     ano: competencia.ano,

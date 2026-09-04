@@ -56,7 +56,8 @@ function executar(input = {}, opcoes = {}) {
       metadata: Object.freeze({
         regraId: regra.id,
         dataRegra: regra.dataRegra,
-        motivoRegra: regra.motivo
+        motivoRegra: regra.motivo,
+        caminho: ctx.calculado?.metadata?.caminho || []
       }),
       correlationId
     });

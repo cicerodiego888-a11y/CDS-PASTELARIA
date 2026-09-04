@@ -11,6 +11,11 @@ const cancelarNfce = require('../services/fiscal/cancelarNfce');
 const { gravarAuditoria } = require('../services/auditoria');
 const { validarMotivoTexto } = require('../services/validacao/validarMotivoTexto');
 const { getFiscalSubDir } = require('../services/fiscal/paths');
+const { middlewareResolverEmpresaVenda } = require('../services/vendas/VendaEmpresaContextoService');
+const {
+  statusDeErroFiscalEmpresa,
+  mensagemErroFiscalSanitizada
+} = require('../services/fiscal/FiscalEmpresaContextoService');
 const {
   exportarContabilidade,
   limparExportacaoTemporaria
@@ -36,6 +41,7 @@ function carregarPerfilUsuario(req, res, next) {
 }
 
 const pastaCertificados = getFiscalSubDir('certificados');
+const anexarEmpresaFiscal = middlewareResolverEmpresaVenda({ db, exigirAutorizacaoUsuario: false });
 
 function agoraLocalBrasil() {
   const agora = new Date();
@@ -258,10 +264,10 @@ router.post('/config/certificado/testar', async (req, res) => {
   }
 });
 
-router.post('/emitir/venda/:vendaId', async (req, res) => {
+router.post('/emitir/venda/:vendaId', anexarEmpresaFiscal, async (req, res) => {
   try {
     const vendaId = Number(req.params.vendaId);
-    const resultado = await emitirPorVendaId(vendaId);
+    const resultado = await emitirPorVendaId(vendaId, { empresaIdContexto: req.empresaId });
 
     gravarAuditoria({
       usuario_id: req.user?.id || null,
@@ -280,20 +286,30 @@ router.post('/emitir/venda/:vendaId', async (req, res) => {
 
     res.json(resultado);
   } catch (error) {
-    console.error('Erro ao emitir NFC-e:', error);
-    res.json({
+    const status = statusDeErroFiscalEmpresa(error);
+    if (error && (error.code === 'VENDA_NAO_ENCONTRADA' || status === 404)) {
+      return res.status(404).json({
+        success: false,
+        status: 'erro_emissao',
+        message: 'Venda não encontrada.',
+        code: 'VENDA_NAO_ENCONTRADA'
+      });
+    }
+    console.error('Erro ao emitir NFC-e:', mensagemErroFiscalSanitizada(error));
+    res.status(status >= 400 && status < 600 ? status : 200).json({
       success: false,
       status: 'erro_emissao',
-      message: error?.message || 'Erro ao emitir NFC-e.'
+      message: mensagemErroFiscalSanitizada(error),
+      code: error && error.code
     });
   }
 });
 
-router.get('/danfe/venda/:vendaId', async (req, res) => {
+router.get('/danfe/venda/:vendaId', anexarEmpresaFiscal, async (req, res) => {
   const vendaId = Number(req.params.vendaId);
 
   try {
-    const { html } = await obterDanfeHtmlAtualizado(vendaId);
+    const { html } = await obterDanfeHtmlAtualizado(vendaId, { empresaIdContexto: req.empresaId });
     if (!html) {
       return res.status(404).send('DANFE não gerado para esta NFC-e.');
     }
@@ -301,9 +317,13 @@ router.get('/danfe/venda/:vendaId', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     return res.send(html);
   } catch (error) {
-    console.error('Erro ao gerar DANFE atualizado:', error);
-    const msg = error?.message || 'Erro interno ao buscar DANFE.';
-    const status = /não encontrada/i.test(msg) ? 404 : 500;
+    const statusFiscal = statusDeErroFiscalEmpresa(error);
+    if (error && error.code === 'VENDA_NAO_ENCONTRADA') {
+      return res.status(404).send('Venda não encontrada.');
+    }
+    console.error('Erro ao gerar DANFE atualizado:', mensagemErroFiscalSanitizada(error));
+    const msg = mensagemErroFiscalSanitizada(error) || 'Erro interno ao buscar DANFE.';
+    const status = /não encontrada/i.test(msg) || statusFiscal === 404 ? 404 : (statusFiscal || 500);
     return res.status(status).send(msg);
   }
 });
@@ -330,7 +350,7 @@ function extrairCancelamentoSefaz(xml) {
   };
 }
 
-router.post('/notas/:id/cancelar', async (req, res) => {
+router.post('/notas/:id/cancelar', anexarEmpresaFiscal, async (req, res) => {
   try {
     const id = Number(req.params.id);
     const { justificativa } = req.body || {};
@@ -343,16 +363,18 @@ router.post('/notas/:id/cancelar', async (req, res) => {
     }
 
     db.get(`
-      SELECT *
-      FROM nfce_notas
-      WHERE id = ?
-    `, [id], async (err, nota) => {
+      SELECT n.*, v.empresa_id AS venda_empresa_id
+      FROM nfce_notas n
+      INNER JOIN vendas v ON v.id = n.venda_id
+      WHERE n.id = ?
+        AND v.empresa_id = ?
+    `, [id, req.empresaId], async (err, nota) => {
       if (err) {
         return res.status(500).json({ error: err.message });
       }
 
       if (!nota) {
-        return res.status(404).json({ error: 'NFC-e não encontrada.' });
+        return res.status(404).json({ error: 'NFC-e não encontrada.', code: 'NFCE_NAO_ENCONTRADA' });
       }
 
       if (!nota.venda_id) {
@@ -384,7 +406,9 @@ router.post('/notas/:id/cancelar', async (req, res) => {
         }
 
         try {
-          const cancelamento = await cancelarNfce(nota.venda_id, justificativa.trim());
+          const cancelamento = await cancelarNfce(nota.venda_id, justificativa.trim(), {
+            empresaIdContexto: req.empresaId
+          });
           const notaIdAutorizada = cancelamento.notaId;
 
           const retornoTexto = typeof cancelamento.sefaz === 'string'
@@ -462,8 +486,10 @@ justificativa: ${justificativa.trim()}
             }).catch((auditErr) => console.error('Erro ao gravar auditoria de cancelamento NFC-e:', auditErr));
           });
         } catch (cancelErr) {
-          res.status(500).json({
-            error: cancelErr.message
+          const status = statusDeErroFiscalEmpresa(cancelErr);
+          return res.status(status).json({
+            error: status === 404 ? 'NFC-e não encontrada.' : mensagemErroFiscalSanitizada(cancelErr),
+            code: cancelErr && cancelErr.code
           });
         }
       });
@@ -473,21 +499,21 @@ justificativa: ${justificativa.trim()}
   }
 });
 
-router.get('/notas', (req, res) => {
+router.get('/notas', anexarEmpresaFiscal, (req, res) => {
   const todas = req.query.todas === '1';
-  const params = [];
-  let where = '';
+  const params = [req.empresaId];
+  let where = ' WHERE v.empresa_id = ? ';
 
   if (!todas) {
     const dataHoje = agoraLocalBrasil().split(' ')[0];
-    where = ' WHERE DATE(n.created_at) = ? ';
+    where += ' AND DATE(n.created_at) = ? ';
     params.push(dataHoje);
   }
 
   db.all(`
     SELECT n.*, v.codigo as venda_codigo, v.total as venda_total
     FROM nfce_notas n
-    LEFT JOIN vendas v ON v.id = n.venda_id
+    INNER JOIN vendas v ON v.id = n.venda_id
     ${where}
     ORDER BY n.id DESC
   `, params, (err, rows) => {
@@ -496,15 +522,16 @@ router.get('/notas', (req, res) => {
   });
 });
 
-router.get('/notas/:id', (req, res) => {
+router.get('/notas/:id', anexarEmpresaFiscal, (req, res) => {
   db.get(`
     SELECT n.*, v.codigo as venda_codigo, v.total as venda_total
     FROM nfce_notas n
-    LEFT JOIN vendas v ON v.id = n.venda_id
+    INNER JOIN vendas v ON v.id = n.venda_id
     WHERE n.id = ?
-  `, [req.params.id], (err, row) => {
+      AND v.empresa_id = ?
+  `, [req.params.id, req.empresaId], (err, row) => {
     if (err) return res.status(500).json({ error: err.message });
-    if (!row) return res.status(404).json({ error: 'NFC-e não encontrada.' });
+    if (!row) return res.status(404).json({ error: 'NFC-e não encontrada.', code: 'NFCE_NAO_ENCONTRADA' });
     res.json(row);
   });
 });

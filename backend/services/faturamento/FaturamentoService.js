@@ -13,6 +13,7 @@
 const configService = require('../configuracaoService');
 const PedidoRepository = require('../pedido/PedidoRepository');
 const { PedidoStatus } = require('../pedido/enums');
+const { exigirOperacaoDoPedido } = require('../pedidos/PedidoEmpresaContextoService');
 const { VendaOrigin } = require('../vendas/VendaOrigin');
 const { criarVendaContract } = require('../vendas/VendaContract');
 const { criarVendaContext } = require('../vendas/VendaContext');
@@ -199,11 +200,10 @@ async function faturarPedido(pedidoId, body = {}, reqHttp = {}) {
   }
 
   const pedido = await PedidoRepository.obterPorId(id);
-  if (!pedido) {
-    const err = new Error('Pedido não encontrado.');
-    err.statusCode = 404;
-    throw err;
-  }
+  const empresaIdPedido = exigirOperacaoDoPedido(
+    pedido,
+    reqHttp.empresaId != null ? reqHttp.empresaId : reqHttp.empresa_id
+  );
 
   if (pedido.status === PedidoStatus.FATURADO) {
     const err = new Error('Pedido já faturado.');
@@ -284,7 +284,7 @@ async function faturarPedido(pedidoId, body = {}, reqHttp = {}) {
     const { consumirReservasPedidoNaVenda } = require('../estoque/pedidoReservaPonteNucleo');
     await consumirReservasPedidoNaVenda(id, vendaId, {
       db,
-      empresaId: reqHttp.empresaId ?? reqHttp.empresa_id,
+      empresaId: empresaIdPedido,
       contexto: reqHttp,
       usuarioId: reqHttp.operadorId || reqHttp.user?.id || null
     });
@@ -293,7 +293,9 @@ async function faturarPedido(pedidoId, body = {}, reqHttp = {}) {
   }
 
   const operadorId = reqHttp.operadorId || reqHttp.user?.id || null;
-  const ok = await PedidoRepository.marcarFaturado(id, vendaId, operadorId);
+  const ok = await PedidoRepository.marcarFaturado(id, vendaId, operadorId, {
+    empresaId: empresaIdPedido
+  });
   if (!ok) {
     const err = new Error('Venda gerada, mas falha ao atualizar status do pedido.');
     err.statusCode = 500;

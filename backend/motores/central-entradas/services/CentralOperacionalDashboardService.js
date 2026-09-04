@@ -39,12 +39,16 @@ class CentralOperacionalDashboardService {
       mes: opcoes.mes,
       competencia: opcoes.competencia,
       dataEmissaoInicio: opcoes.dataEmissaoInicio || opcoes.data_emissao_inicio || null,
-      dataEmissaoFim: opcoes.dataEmissaoFim || opcoes.data_emissao_fim || null
+      dataEmissaoFim: opcoes.dataEmissaoFim || opcoes.data_emissao_fim || null,
+      empresaId: opcoes.empresaId ?? opcoes.empresa_id,
+      empresaIds: opcoes.empresaIds || opcoes.empresa_ids
     };
 
     const filtrosContagem = {
       dataEmissaoInicio: filtrosPeriodo.dataEmissaoInicio,
-      dataEmissaoFim: filtrosPeriodo.dataEmissaoFim
+      dataEmissaoFim: filtrosPeriodo.dataEmissaoFim,
+      empresaId: opcoes.empresaId ?? opcoes.empresa_id,
+      empresaIds: opcoes.empresaIds || opcoes.empresa_ids
     };
 
     const [

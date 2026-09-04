@@ -277,6 +277,9 @@ async function recalcularFinanceiroDevolucaoVenda(vendaId, valorDevolvido, venda
     return { contas_receber: 0, financeiro: 0, estorno: 0 };
   }
 
+  const { resolverEmpresaDaOrigemFinanceira } = require('../financeiro/FinanceiroEmpresaContextoService');
+  const empresaIdFin = resolverEmpresaDaOrigemFinanceira({ venda });
+
   const observacao = opcoes.observacao || `Devolução parcial venda #${vendaId}`;
   let restante = valor;
   let contasAtualizadas = 0;
@@ -341,7 +344,7 @@ async function recalcularFinanceiroDevolucaoVenda(vendaId, valorDevolvido, venda
         vendaId,
         dataMov,
         observacao,
-        opcoes.empresaId || opcoes.empresa_id || null
+        empresaIdFin
       ]
     );
     estorno = restante;

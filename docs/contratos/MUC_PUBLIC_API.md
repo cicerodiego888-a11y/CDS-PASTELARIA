@@ -1,9 +1,11 @@
-# MUC — Contrato Público Oficial (RC2.1)
+# MUC — Contrato Público Oficial (RC3.0)
 
-**Versão do contrato:** 1.0.0  
-**Versão do motor:** RC2.1  
-**Tag:** `MUC_RC2.1_ENTERPRISE`  
-**Status:** ARQUITETURA CONGELADA  
+**Versão do contrato:** 1.0.0 (inalterado desde RC2.1)  
+**Versão do motor:** RC3.0  
+**Tag:** `MUC_RC3.0_CONSOLIDADO`  
+**Status:** CONSOLIDADO  
+
+A superfície pública dos 7 métodos RC2.1 permanece. `converterQuantidade` continua como extensão MUC-02. RC3.0 declara consolidação operacional (sem conversor paralelo de quantidade), não breaking change de DTO.  
 
 ---
 
@@ -85,6 +87,18 @@ Exporta métricas (`'json'` default | `'markdown'`).
 ### `muc.obterVersao()`
 
 Retorna objeto imutável com versão, status, tag e versões de contrato/eventos.
+
+### `muc.converterQuantidade({ quantidade, unidadeOrigem, unidadeDestino, relacoes? })` — MUC-02
+
+Conversão pura (SI + grafo/encadeamento). **Não** faz parte dos 7 métodos congelados RC2.1; é extensão compatível.
+
+- **Não recebe** `empresa_id`. **Não grava** estoque.
+- **Erros:** `CONVERSAO_INVALIDA`, `CONVERSAO_NAO_DISPONIVEL`, `CONVERSAO_CICLO`.
+- Pipeline `converter` / `processarItemCompra` usa o mesmo núcleo para a quantidade de estoque.
+
+`simular` aceita opcionalmente `unidadeOrigem`, `unidadeDestino`, `relacoes` (compat: sem esses campos permanece CX × fator).
+
+Preview oficial da compra (MUC-06): `POST /api/compras/simular-conversao-muc` usa `converterQuantidade` e **exige** origem/destino. Não usa o multiplicador de `simular` sem unidades.
 
 ## 6. DTOs Públicos (contratos oficiais)
 
@@ -174,6 +188,7 @@ Sequência: `RC2.0` → `RC2.1` → `RC2.2` → `RC3.0`
 
 ## 11. Compatibilidade
 
+- RC3.0 é **100% compatível** com o contrato público RC2.1 (mesmos 7 métodos, DTO 1.0.0).
 - RC2.1 é **100% compatível** com integrações RC2.0 e RC1 funcional.
 - Campos RC1 (`hash`) permanecem como alias.
 - Métodos legados (`simularConversao`, `validarDistribuicao`) existem mas **não fazem parte** do contrato público.
@@ -184,8 +199,8 @@ Sequência: `RC2.0` → `RC2.1` → `RC2.2` → `RC3.0`
 |------|--------|--------|
 | RC1 | RC1 | Congelado funcional |
 | RC2 | RC2 | Enterprise certificado |
-| RC2.1 | RC2.1 | **Arquitetura congelada** |
-| RC3+ | — | Requer RFC arquitetural |
+| RC2.1 | RC2.1 | Arquitetura congelada (fronteira da API) |
+| RC3.0 | RC3.0 | **Consolidado** — autoridade única de quantidade; contrato DTO 1.0.0 |
 
 ## 13. Entrada oficial recomendada
 
@@ -203,4 +218,4 @@ console.log(muc.obterVersao());
 
 ---
 
-**Assinatura:** CDS Arquitetura — MUC RC2.1 Enterprise — 2026-07-31
+**Assinatura:** CDS Arquitetura — MUC RC3.0 Consolidado — 2026-09-03

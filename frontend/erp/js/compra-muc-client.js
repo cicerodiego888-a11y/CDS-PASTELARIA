@@ -16,7 +16,9 @@
         });
         const json = await resp.json().catch(() => ({}));
         if (!resp.ok) {
-            throw new Error(json.error || 'Falha na simulação MUC');
+            const err = new Error(json.mensagem || json.error || 'Falha na simulação MUC');
+            err.codigo = json.codigo || 'CONVERSAO_INVALIDA';
+            throw err;
         }
         return json.resultado || null;
     }

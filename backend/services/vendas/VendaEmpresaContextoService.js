@@ -19,6 +19,7 @@ const {
 const { exigirSessaoDaEmpresa } = require('../caixa/CaixaEmpresaContextoService');
 
 const CODIGO_EMPRESA_CONTEXT_REQUIRED = 'EMPRESA_CONTEXT_REQUIRED';
+const CODIGO_EMPRESA_OWNERSHIP_REQUIRED = 'EMPRESA_OWNERSHIP_REQUIRED';
 
 function erroVendaEmpresa(code, message, statusCode = 400, extra = {}) {
   const err = erroModoGlobal(code, message);
@@ -44,6 +45,7 @@ function statusDeErroEmpresaVenda(err) {
     || code === 'EMPRESA_OPERACIONAL_INVALIDA'
     || code === 'CAIXA_SESSAO_SEM_EMPRESA'
     || code === 'CAIXA_SESSAO_AUSENTE'
+    || code === CODIGO_EMPRESA_OWNERSHIP_REQUIRED
   ) {
     return 400;
   }
@@ -170,6 +172,48 @@ function exigirVendaDaEmpresa(venda, empresaId) {
   return venda;
 }
 
+/**
+ * Fonte autoritativa da empresa da venda (05.42).
+ * Não infere caixa, MUV, COMPAT, req.empresaId ou empresa global.
+ */
+function resolverEmpresaDaVenda(venda) {
+  if (!venda) {
+    throw erroVendaEmpresa(
+      'VENDA_NAO_ENCONTRADA',
+      'Venda não encontrada.',
+      404
+    );
+  }
+  const sid = venda.empresa_id != null ? Number(venda.empresa_id) : null;
+  if (sid == null || !Number.isInteger(sid) || sid <= 0) {
+    throw erroVendaEmpresa(
+      CODIGO_EMPRESA_OWNERSHIP_REQUIRED,
+      'Empresa é obrigatória para cancelar ou devolver a venda.',
+      400,
+      { venda_id: venda.id != null ? venda.id : undefined }
+    );
+  }
+  return sid;
+}
+
+/**
+ * Cancelamento/devolução: empresa da venda + autorização do contexto atual.
+ * Cruzado → VENDA_NAO_ENCONTRADA. Legado NULL → EMPRESA_OWNERSHIP_REQUIRED.
+ */
+function exigirOperacaoReversaoDaVenda(venda, empresaIdContexto) {
+  if (!venda) {
+    throw erroVendaEmpresa(
+      'VENDA_NAO_ENCONTRADA',
+      'Venda não encontrada.',
+      404,
+      { empresa_id: empresaIdContexto != null ? Number(empresaIdContexto) : undefined }
+    );
+  }
+  const empresaDaVenda = resolverEmpresaDaVenda(venda);
+  exigirVendaDaEmpresa(venda, empresaIdContexto);
+  return empresaDaVenda;
+}
+
 function middlewareResolverEmpresaVenda(deps = {}) {
   return async function anexarEmpresaVenda(req, res, next) {
     try {
@@ -203,10 +247,13 @@ function responderErroEmpresaVenda(res, err) {
 
 module.exports = {
   CODIGO_EMPRESA_CONTEXT_REQUIRED,
+  CODIGO_EMPRESA_OWNERSHIP_REQUIRED,
   resolverEmpresaIdParaVenda,
+  resolverEmpresaDaVenda,
   exigirEmpresaDaOperacao,
   exigirCaixaCompativelComVenda,
   exigirVendaDaEmpresa,
+  exigirOperacaoReversaoDaVenda,
   middlewareResolverEmpresaVenda,
   statusDeErroEmpresaVenda,
   responderErroEmpresaVenda,

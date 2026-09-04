@@ -177,6 +177,7 @@ module.exports = {
   calcularCustoUnitarioDeEmbalagem,
   calcularPrecoPorMarkup,
   calcularEstoqueInicial: require('./helpers').calcularEstoqueInicial,
+  resolverEstoqueInicialImportacao: require('./resolverEstoqueInicialImportacao').resolverEstoqueInicialImportacao,
   resolverFatorConversao: require('./helpers').resolverFatorConversao,
   resolverCustosEPrecos: validator.resolverCustosEPrecos,
   montarEstoquePreview: validator.montarEstoquePreview,

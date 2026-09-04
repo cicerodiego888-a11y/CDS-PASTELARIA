@@ -34,9 +34,10 @@ function ler(rel) {
 
 console.log('\n=== MUC RC1 — Certificação ===\n');
 
-test('MUC RC1 baseline funcional preservado no RC2.1', () => {
-  assert.strictEqual(MUC.VERSAO.VERSAO, 'RC2.1');
+test('MUC RC1 baseline funcional preservado no RC3.0', () => {
+  assert.strictEqual(MUC.VERSAO.VERSAO, 'RC3.0');
   assert.strictEqual(MUC.VERSAO.VERSAO_RC1, 'RC1');
+  assert.strictEqual(MUC.VERSAO.VERSAO_RC2_1, 'RC2.1');
 });
 
 test('Estrutura oficial backend/motores/muc/', () => {

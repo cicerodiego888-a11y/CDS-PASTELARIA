@@ -145,7 +145,8 @@ function mapearErroPorta(err) {
     e.code = err.code;
     return e;
   }
-  if (err.code === 'EMPRESA_OBRIGATORIA' || err.code === 'EMPRESA_NAO_ENCONTRADA') {
+  if (err.code === 'EMPRESA_OBRIGATORIA' || err.code === 'EMPRESA_NAO_ENCONTRADA'
+    || err.code === 'EMPRESA_CONTEXT_REQUIRED' || err.code === 'EMPRESA_OWNERSHIP_REQUIRED') {
     return err;
   }
   return err;
@@ -285,14 +286,16 @@ function aplicarAjusteEstoqueProduto(db, opcoes, callback) {
                 data_validade: dataValidade,
                 data_entrada: hoje,
                 origem: 'AJUSTE_ESTOQUE',
-                compra_id: null
+                compra_id: null,
+                empresaId: optsPorta.empresaId,
+                db
               }, (loteErr) => (loteErr ? reject(loteErr) : resolve()));
             });
           } else if (ajusteTotalNegativo > 0) {
             await new Promise((resolve, reject) => {
               lotesService.consumirLotesFEFO(produtoId, ajusteTotalNegativo, (consumoErr) => (
                 consumoErr ? reject(consumoErr) : resolve()
-              ));
+              ), { empresaId: optsPorta.empresaId, db });
             });
           }
         }

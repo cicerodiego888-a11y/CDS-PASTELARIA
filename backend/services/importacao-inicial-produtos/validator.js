@@ -21,6 +21,7 @@ const {
   itemFiscalDeModoImportacao,
   rotuloModoFiscalImportacao
 } = require('./helpers');
+const { carregarProdutoConfigMuc } = require('./resolverEstoqueInicialImportacao');
 
 function dbAll(db, sql, params = []) {
   return new Promise((resolve, reject) => {
@@ -171,17 +172,24 @@ function resolverCustosEPrecos(produto, apresentacoesDoProduto) {
   };
 }
 
-function montarEstoquePreview(produto, pricing) {
+function montarEstoquePreview(produto, pricing, opcoes = {}) {
   const fatorInfo = resolverFatorConversao(pricing.apresentacoes);
-  const calc = calcularEstoqueInicial({
-    quantidadeDocumento: produto.quantidade_documento,
-    fatorConversao: fatorInfo.fator
-  });
   const unidadeBase = String(
     normalizarUnidadeBaseCadastro(produto.unidade_base || 'UN')
   ).toUpperCase();
+  const unidadeOrigemArquivo = String(produto.unidade_origem || '').trim();
+  const calc = calcularEstoqueInicial({
+    quantidadeDocumento: produto.quantidade_documento,
+    fatorConversao: fatorInfo.fator,
+    unidadeOrigem: unidadeOrigemArquivo,
+    unidadeDestino: unidadeBase,
+    apresentacoes: pricing.apresentacoes,
+    relacoes: opcoes.relacoes,
+    produtoConfig: opcoes.produtoConfig,
+    db: opcoes.db || null
+  });
   const unidadeOrigem = String(
-    produto.unidade_origem
+    unidadeOrigemArquivo
     || fatorInfo.tipo
     || unidadeBase
   ).toUpperCase();
@@ -198,9 +206,11 @@ function montarEstoquePreview(produto, pricing) {
     fator_conversao: calc.fator_conversao,
     conversao_label: fatorInfo.label,
     estoque_inicial: calc.estoque_inicial,
-    estoque_inicial_label: `${calc.estoque_inicial} ${unidadeBase}`,
+    estoque_inicial_label: `${calc.estoque_inicial} ${calc.unidadeEstoque || unidadeBase}`,
     unidade_base: unidadeBase,
-    custo_total_estoque: custoTotal
+    custo_total_estoque: custoTotal,
+    origem_calculo: calc.origemCalculo || null,
+    modo_calculo: calc.modo || null
   };
 }
 
@@ -349,9 +359,22 @@ async function validarImportacao(db, dadosExtraidos, { nomeArquivo, modo_fiscal_
     const produtoRaw = dadosExtraidos.produtos[idx];
     const apresentacoes = vincularApresentacoes(produtoRaw, dadosExtraidos.apresentacoes);
     const pricing = resolverCustosEPrecos(produtoRaw, apresentacoes);
-    const estoque = montarEstoquePreview(produtoRaw, pricing);
     const mensagens = [];
     let status = STATUS.PRONTO;
+    let estoque;
+    try {
+      estoque = montarEstoquePreview(produtoRaw, pricing);
+    } catch (e) {
+      estoque = {
+        quantidade_origem: 0,
+        estoque_inicial: 0,
+        fator_conversao: 1,
+        unidade_origem: '',
+        unidade_base: produtoRaw.unidade_base || 'UN'
+      };
+      status = STATUS.ERRO;
+      mensagens.push(e.message || 'Falha na conversão de estoque inicial.');
+    }
     let enriquecimento = null;
     const chaveCodigo = chaveNomeCadastroSimples(produtoRaw.codigo_origem);
     const duplicidadeArquivo = chaveCodigo ? duplicidadesArquivo.get(chaveCodigo) || null : null;
@@ -370,6 +393,18 @@ async function validarImportacao(db, dadosExtraidos, { nomeArquivo, modo_fiscal_
     const match = duplicidadeArquivo
       ? null
       : encontrarCorrespondencia(produtoRaw, indices);
+
+    if (match?.produto?.id && status !== STATUS.ERRO) {
+      const cfg = await carregarProdutoConfigMuc(db, match.produto.id);
+      if (cfg && Number(cfg.utiliza_conversao) === 1) {
+        try {
+          estoque = montarEstoquePreview(produtoRaw, pricing, { produtoConfig: cfg, db });
+        } catch (e) {
+          status = STATUS.ERRO;
+          mensagens.push(e.message || 'Falha na conversão MUC do estoque inicial.');
+        }
+      }
+    }
 
     // Produto novo: exige custo/preço válidos
     if (!match && !statusBloqueiaImportacao(status)) {

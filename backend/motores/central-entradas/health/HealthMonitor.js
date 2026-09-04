@@ -33,9 +33,12 @@ class HealthMonitor {
    * @param {Object} [opcoes]
    */
   async executarScan(opcoes = {}) {
+    const isolado = opcoes.atualizarCacheGlobal === false;
     const anteriores = {};
-    for (const [id, av] of this._porDocumento.entries()) {
-      anteriores[id] = av;
+    if (!isolado) {
+      for (const [id, av] of this._porDocumento.entries()) {
+        anteriores[id] = av;
+      }
     }
 
     const resumo = await this._analyzer.analisarTodos({
@@ -43,19 +46,21 @@ class HealthMonitor {
       anteriores
     });
 
-    this._porDocumento.clear();
-    for (const av of resumo.documentos || []) {
-      this._porDocumento.set(String(av.documentoId), av);
-      if (
-        av.nivel === HealthNiveis.ATENCAO
-        || av.nivel === HealthNiveis.CRITICO
-        || av.nivel === HealthNiveis.BLOQUEADO
-        || av.nivel === HealthNiveis.RESOLVIDO
-      ) {
-        this._notifier.notificarDocumento(av, {
-          id: av.documentoId,
-          chave: av.chave
-        });
+    if (!isolado) {
+      this._porDocumento.clear();
+      for (const av of resumo.documentos || []) {
+        this._porDocumento.set(String(av.documentoId), av);
+        if (
+          av.nivel === HealthNiveis.ATENCAO
+          || av.nivel === HealthNiveis.CRITICO
+          || av.nivel === HealthNiveis.BLOQUEADO
+          || av.nivel === HealthNiveis.RESOLVIDO
+        ) {
+          this._notifier.notificarDocumento(av, {
+            id: av.documentoId,
+            chave: av.chave
+          });
+        }
       }
     }
 
@@ -65,14 +70,18 @@ class HealthMonitor {
     }
 
     const painel = this._montarPainel(resumo, auto);
-    this._ultimoScan = painel;
-    this._notifier.notificarScan(resumo);
-
-    await this._repo.salvarEstado({
-      versao: 'RC3.4.6',
-      painel,
-      porDocumento: Object.fromEntries(this._porDocumento.entries())
-    });
+    if (resumo.empresaId != null) {
+      painel.empresaId = resumo.empresaId;
+    }
+    if (opcoes.atualizarCacheGlobal !== false && opcoes.persistirEstado !== false) {
+      this._ultimoScan = painel;
+      this._notifier.notificarScan(resumo);
+      await this._repo.salvarEstado({
+        versao: 'RC3.4.6',
+        painel,
+        porDocumento: Object.fromEntries(this._porDocumento.entries())
+      });
+    }
 
     return painel;
   }
@@ -90,18 +99,29 @@ class HealthMonitor {
 
     try {
       const orch = this._obterOrchestrator();
-      if (typeof orch.processarDocumentosPendentes !== 'function') {
+      if (typeof orch.processarDocumento !== 'function') {
         return { executado: false, processados: 0, motivo: 'orchestrator_indisponivel' };
       }
       const ids = [...new Set(elegiveis.map((a) => a.documentoId))];
-      const resultado = await orch.processarDocumentosPendentes({
-        limite: Math.min(ids.length, 20),
-        origemHealth: true
-      });
+      const repo = orch._documentosRepository;
+      let processados = 0;
+      const documentoIds = [];
+      for (const id of ids) {
+        const doc = repo && typeof repo.buscarPorId === 'function'
+          ? await repo.buscarPorId(id)
+          : null;
+        const emp = Number(doc && (doc.empresaId != null ? doc.empresaId : doc.empresa_id));
+        if (!Number.isInteger(emp) || emp <= 0) {
+          continue;
+        }
+        await orch.processarDocumento(id, { empresaIdContexto: emp, empresaId: emp });
+        processados += 1;
+        documentoIds.push(id);
+      }
       return {
-        executado: true,
-        processados: Array.isArray(resultado) ? resultado.length : 0,
-        documentoIds: ids,
+        executado: processados > 0,
+        processados,
+        documentoIds,
         sefazConsultada: false
       };
     } catch (error) {
@@ -142,12 +162,33 @@ class HealthMonitor {
         detectadoEm: a.detectadoEm
       })),
       estatisticas: resumo.estatisticas || {},
+      documentos: resumo.documentos || [],
       autoRecuperacao: auto,
       sefazConsultada: false
     };
   }
 
   async obterPainel(opcoes = {}) {
+    const empresaId = Number(opcoes.empresaId);
+    const exigir = opcoes.exigirEmpresa === true;
+    if (exigir) {
+      if (!Number.isInteger(empresaId) || empresaId <= 0) {
+        const erro = new Error(
+          'Modo MULTIEMPRESA exige empresa explícita (X-Empresa-Id) para consultar a saúde.'
+        );
+        erro.code = 'EMPRESA_CENTRAL_AUSENTE';
+        erro.statusCode = 400;
+        throw erro;
+      }
+      return this.executarScan({
+        ...opcoes,
+        empresaId,
+        persistirEstado: false,
+        atualizarCacheGlobal: false,
+        autoRecuperar: opcoes.autoRecuperar === true
+      });
+    }
+
     if (this._ultimoScan && opcoes.forcar !== true) {
       return this._ultimoScan;
     }

@@ -6,12 +6,14 @@
  * Sprint 04.02: resolve o modo de operação (EMPRESA_UNICA | MULTIEMPRESA)
  *               num único ponto. EMPRESA_UNICA = fluxo atual.
  * Sprint 04.03: MULTIEMPRESA → AtendimentoMultiempresaService (preview VALIDADO).
- *               Não chama VendaPagamentoService. Não cria vendas.
+ * Sprint 03.02: POST /api/vendas (PDV Normal e origens que concluem) usa
+ *               VendaPagamentoService também em MULTIEMPRESA.
+ *               MUV/criarAtendimento não persiste a venda oficial.
  *
  * Política de porta:
- * - origem PDV → delega integralmente a VendaPagamentoService (comportamento atual)
- * - origem FATURAMENTO → delega ao núcleo sem exigir caixa (Sprint 3.1)
+ * - origem PDV / FATURAMENTO / NF_AVULSA → VendaPagamentoService
  * - demais origens → reconhece sem concluir
+ * - MUV permanece em /api/pdv-universal e AtendimentoMultiempresaService
  *
  * Proibido neste módulo:
  * - regras do Motor Fiscal × Não Fiscal
@@ -74,6 +76,7 @@ function responderErroModoOperacao(res, err) {
 }
 
 async function executarAtendimentoMultiempresa(req, res, ctx, ctr, opcoes = {}) {
+  // Fora do POST /api/vendas (03.02). Conservado para MUV / PDV Universal / testes.
   const service = opcoes.AtendimentoMultiempresaService
     || require('../../motores/muv/AtendimentoMultiempresaService');
   try {
@@ -121,8 +124,20 @@ async function executarAtendimentoMultiempresa(req, res, ctx, ctr, opcoes = {}) 
 }
 
 /**
+ * Núcleo único de persistência da venda (03.02).
+ * EMPRESA_UNICA e MULTIEMPRESA compartilham VendaPagamentoService.
+ * Não chama criarAtendimento — evita segunda gravação.
+ */
+function concluirVendaNoNucleoOficial(req, res, ctx, ctr) {
+  if (!origemPodeConcluirVenda(ctx.origem)) {
+    return responderOrigemReconhecidaSemConclusao(res, ctx, ctr);
+  }
+  return VendaPagamentoService.criarVenda(req, res);
+}
+
+/**
  * Porta oficial: recebe contrato + contexto e aplica política de origem.
- * PDV / FATURAMENTO → delegação integral ao núcleo. Demais → reconhecimento sem conclusão.
+ * PDV / FATURAMENTO / NF_AVULSA → delegação integral ao núcleo. Demais → reconhecimento sem conclusão.
  *
  * @param {import('./VendaContract').VendaContract} contract
  * @param {import('./VendaContext').VendaContext} context
@@ -157,15 +172,10 @@ function criarVendaComContexto(contract, context, req, res, opcoes) {
 
   return executarNoModoOperacaoVenda(modo, {
     EMPRESA_UNICA() {
-      if (!origemPodeConcluirVenda(ctx.origem)) {
-        return responderOrigemReconhecidaSemConclusao(res, ctx, ctr);
-      }
-      return VendaPagamentoService.criarVenda(req, res);
+      return concluirVendaNoNucleoOficial(req, res, ctx, ctr);
     },
     MULTIEMPRESA() {
-      return executarAtendimentoMultiempresa(req, res, ctx, ctr, opcoes && typeof opcoes === 'object'
-        ? opcoes
-        : {});
+      return concluirVendaNoNucleoOficial(req, res, ctx, ctr);
     }
   });
 }
@@ -220,6 +230,7 @@ module.exports = {
   criarVendaComContexto,
   materializarAtendimento,
   fiscalizarAtendimento,
+  executarAtendimentoMultiempresa,
   VendaOrigin,
   resolverVendaOrigin
 };

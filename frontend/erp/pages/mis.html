@@ -1,0 +1,120 @@
+<div class="mis-page">
+  <style>
+    .mis-page { max-width: 1080px; overflow-x: hidden; }
+    .mis-toolbar { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: end; margin: 0 0 0.75rem; }
+    .mis-toolbar label { font-size: 0.75rem; color: #6b7280; display: block; margin-bottom: 0.15rem; }
+    .mis-toolbar .form-control { min-width: 9.5rem; max-width: 100%; }
+    .mis-ctx { font-size: 0.875rem; color: #374151; margin-bottom: 0.35rem; word-break: break-word; }
+    .mis-periodo { font-size: 0.9rem; color: #111827; margin-bottom: 0.65rem; }
+    .mis-compare { font-size: 0.875rem; margin: 0 0 1rem; display: flex; align-items: center; gap: 0.4rem; }
+    .mis-kpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; margin-bottom: 1.25rem; }
+    .mis-kpi, .mis-block { background: #fff; border: 1px solid #e5e7eb; border-radius: 8px; padding: 1rem 1.1rem; min-width: 0; }
+    .mis-kpi__label, .mis-block__label { font-size: 0.72rem; letter-spacing: 0.04em; text-transform: uppercase; color: #6b7280; }
+    .mis-kpi__value { font-size: 1.35rem; font-weight: 650; color: #111827; margin-top: 0.25rem; overflow-wrap: anywhere; }
+    .mis-kpi__cmp { font-size: 0.8rem; color: #4b5563; margin-top: 0.35rem; line-height: 1.35; }
+    .mis-kpi__cmp .mis-var-up { color: #15803d; }
+    .mis-kpi__cmp .mis-var-down { color: #b91c1c; }
+    .mis-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; margin-bottom: 1.25rem; min-width: 0; }
+    .mis-grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; margin-bottom: 1.25rem; min-width: 0; }
+    .mis-block__value { font-size: 1.2rem; font-weight: 650; margin-top: 0.35rem; overflow-wrap: anywhere; }
+    .mis-block__hint { font-size: 0.85rem; color: #6b7280; margin-top: 0.2rem; }
+    .mis-section { margin-bottom: 1.25rem; min-width: 0; }
+    .mis-section h2 { font-size: 0.95rem; font-weight: 650; margin: 0 0 0.55rem; color: #111827; }
+    .mis-chart-wrap { position: relative; height: 220px; width: 100%; max-width: 100%; }
+    .mis-evolucao-tabela { max-height: 11rem; overflow: auto; margin-top: 0.65rem; }
+    .mis-table { width: 100%; font-size: 0.9rem; table-layout: fixed; }
+    .mis-table th { font-size: 0.72rem; text-transform: uppercase; color: #6b7280; font-weight: 600; padding: 0.25rem 0; text-align: left; }
+    .mis-table td { padding: 0.35rem 0; border-bottom: 1px solid #f3f4f6; overflow-wrap: anywhere; }
+    .mis-table td:last-child, .mis-table th:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+    .mis-table .mis-num { width: 4.5rem; text-align: right; font-variant-numeric: tabular-nums; }
+    .mis-empty { color: #6b7280; font-size: 0.9rem; }
+    .mis-banner { font-size: 0.9rem; color: #4b5563; margin-bottom: 1rem; }
+    @media (max-width: 768px) {
+      .mis-kpis, .mis-grid2, .mis-grid3 { grid-template-columns: 1fr; }
+      .mis-toolbar .btn { flex: 0 0 auto; }
+    }
+  </style>
+
+  <div id="misShell"></div>
+  <p class="mis-ctx" id="misEmpresa">Empresa do contexto operacional</p>
+  <div class="mis-toolbar">
+    <div>
+      <label for="misDataInicio">Data inicial</label>
+      <input type="date" id="misDataInicio" class="form-control form-control-sm">
+    </div>
+    <div>
+      <label for="misDataFim">Data final</label>
+      <input type="date" id="misDataFim" class="form-control form-control-sm">
+    </div>
+    <button type="button" class="btn btn-sm btn-primary" id="misBtnAplicar">Aplicar</button>
+    <button type="button" class="btn btn-sm btn-outline-secondary" data-mis-atalho="hoje">Hoje</button>
+    <button type="button" class="btn btn-sm btn-outline-secondary" data-mis-atalho="7">7 dias</button>
+    <button type="button" class="btn btn-sm btn-outline-secondary" data-mis-atalho="30">30 dias</button>
+    <button type="button" class="btn btn-sm btn-outline-secondary" data-mis-atalho="mes">Este mês</button>
+  </div>
+  <label class="mis-compare">
+    <input type="checkbox" id="misComparar">
+    Comparar com período anterior
+  </label>
+  <p class="mis-periodo" id="misPeriodoLabel">Período atual: —</p>
+  <div id="misAlerta"></div>
+  <div id="misLoading" class="text-muted mb-3" hidden><span class="spinner-border spinner-border-sm me-2"></span>Carregando indicadores…</div>
+  <div id="misConteudo" hidden>
+    <p class="mis-banner" id="misEmptyBanner" hidden>Nenhum dado encontrado.</p>
+    <section class="mis-section" aria-label="Vendas">
+      <h2>Vendas</h2>
+      <div class="mis-kpis">
+        <article class="mis-kpi">
+          <div class="mis-kpi__label">Faturamento</div>
+          <div class="mis-kpi__value" id="misFat">R$ 0,00</div>
+          <div class="mis-kpi__cmp" id="misFatCmp" hidden></div>
+        </article>
+        <article class="mis-kpi">
+          <div class="mis-kpi__label">Nº de vendas</div>
+          <div class="mis-kpi__value" id="misQtdVendas">0</div>
+          <div class="mis-kpi__cmp" id="misQtdCmp" hidden></div>
+        </article>
+        <article class="mis-kpi">
+          <div class="mis-kpi__label">Ticket médio</div>
+          <div class="mis-kpi__value" id="misTicket">R$ 0,00</div>
+          <div class="mis-kpi__cmp" id="misTicketCmp" hidden></div>
+        </article>
+      </div>
+    </section>
+    <section class="mis-section mis-block" aria-label="Evolução das vendas">
+      <h2>Evolução das vendas</h2>
+      <p class="mis-empty" id="misEvolucaoVazio" hidden>Sem vendas no período.</p>
+      <div class="mis-chart-wrap" id="misChartWrap">
+        <canvas id="misEvolucaoChart" aria-label="Faturamento diário"></canvas>
+      </div>
+      <div class="mis-evolucao-tabela" id="misEvolucaoTabela"></div>
+    </section>
+    <div class="mis-grid3">
+      <section class="mis-block" aria-label="Compras">
+        <div class="mis-block__label">Compras no período</div>
+        <div class="mis-block__value" id="misComprasTotal">R$ 0,00</div>
+        <div class="mis-block__hint" id="misComprasQtd">0 compras</div>
+      </section>
+      <section class="mis-block" aria-label="Contas a receber">
+        <div class="mis-block__label">Contas a receber — em aberto</div>
+        <div class="mis-block__value" id="misReceberTotal">R$ 0,00</div>
+        <div class="mis-block__hint" id="misReceberQtd">0 títulos</div>
+      </section>
+      <section class="mis-block" aria-label="Fiscal">
+        <div class="mis-block__label">Fiscal (NFC-e)</div>
+        <div class="mis-block__value" id="misFiscalQtd">0</div>
+        <div class="mis-block__hint" id="misFiscal">NFC-e emitidas: 0 · Total: R$ 0,00</div>
+      </section>
+    </div>
+    <div class="mis-grid2">
+      <section class="mis-section" aria-label="Produtos mais vendidos">
+        <h2>Produtos mais vendidos</h2>
+        <div id="misRanking" class="mis-empty">Nenhum produto vendido no período.</div>
+      </section>
+      <section class="mis-section" aria-label="Estoque crítico">
+        <h2>Estoque crítico</h2>
+        <div id="misEstoque" class="mis-empty">Nenhum produto abaixo do mínimo.</div>
+      </section>
+    </div>
+  </div>
+</div>

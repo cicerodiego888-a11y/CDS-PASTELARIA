@@ -55,7 +55,8 @@ class MonitoringEngine {
   async summary(context = {}) {
     const metrics = criarMonitoringMetrics();
     const competenciaKey = context.competencia?.competencia || 'atual';
-    const cacheKey = `summary:v5:${competenciaKey}`;
+    const empresaKey = context.empresaId != null ? String(context.empresaId) : 'none';
+    const cacheKey = `summary:v5:${competenciaKey}:emp:${empresaKey}`;
     // Cache desabilitado em M1–M4 (estrutura); ações dependem de contexto/usuário
     metrics.markCacheHit(false);
     void this.cache.get(cacheKey);

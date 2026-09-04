@@ -279,6 +279,7 @@ async function prepararNfeDevolucaoCompra(compraId) {
       espelhamento = await espelharTributosNfeDevolucaoCompra({
         compraId: id,
         chave,
+        empresaId: compra.empresa_id,
         itens: itensComSaldo,
         cfopPadrao: cfopSugerido,
         exigirXml: false
@@ -595,6 +596,7 @@ async function emitirNFeDevolucaoCompra(compraId, opcoes = {}) {
   const espelhamento = await espelharTributosNfeDevolucaoCompra({
     compraId: id,
     chave: refNFe,
+    empresaId: compra.empresa_id,
     itens: itensAtivos,
     cfopPadrao,
     exigirXml: true

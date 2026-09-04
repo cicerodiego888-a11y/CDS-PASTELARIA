@@ -71,8 +71,8 @@ const CLASSIFICACAO = Object.freeze([
   { fluxo: 'consumo reserva PDV', arquivo: SRC.pdvConsumo, tipo: 'reserva', classe: 'A', empresaId: 'req.empresaId', acao: 'não alterar (03.26)' },
   { fluxo: 'Pedido / Expedição → Motor Comercial → MTS', arquivo: SRC.comercial, tipo: 'saldo', classe: 'A', empresaId: 'params.empresaId', acao: 'não alterar (03.29/03.30)' },
   { fluxo: 'MTS F↔NF', arquivo: SRC.mts, tipo: 'saldo', classe: 'A', empresaId: 'params.empresaId', acao: 'não alterar (03.29)' },
-  { fluxo: 'consumo reserva pedido (ponte)', arquivo: SRC.ponte, tipo: 'reserva', classe: 'C', empresaId: 'opcoes.empresaId ou COMPAT', acao: 'COMPAT quando caller não tem empresa' },
-  { fluxo: 'ReservaRepairService', arquivo: SRC.repair, tipo: 'reserva', classe: 'C', empresaId: 'ausente (sem HTTP)', acao: 'COMPAT; sem rota' },
+  { fluxo: 'consumo reserva pedido (ponte)', arquivo: SRC.ponte, tipo: 'reserva', classe: 'A', empresaId: 'pedidos.empresa_id', acao: 'ownership do pedido (05.49); helper COMPAT não é fonte' },
+  { fluxo: 'ReservaRepairService', arquivo: SRC.repair, tipo: 'reserva', classe: 'A', empresaId: 'pedidos.empresa_id', acao: 'Repair persiste empresa_id; sem COMPAT (05.49)' },
   { fluxo: 'CREATE produto saldo 0 + crédito inicial', arquivo: SRC.produtos, tipo: 'saldo', classe: 'A', empresaId: 'req.empresaId', acao: 'não alterar (03.8/03.28)' },
   { fluxo: 'lotes atualizarEstoqueConsolidado', arquivo: SRC.lotes, tipo: 'EA legado', classe: 'D', empresaId: 'n/a', acao: 'código morto (03.9/03.10)' },
   { fluxo: 'migração conversão unidades', arquivo: SRC.migracaoUnidades, tipo: 'cadastro', classe: 'D', empresaId: 'n/a', acao: 'não toca saldo' },
@@ -112,13 +112,16 @@ function test02Classificacao() {
   const classes = new Set(CLASSIFICACAO.map((r) => r.classe));
   assert.ok(classes.has('A'));
   assert.ok(classes.has('B'));
-  assert.ok(classes.has('C'));
   assert.ok(classes.has('D'));
   const b = CLASSIFICACAO.filter((r) => r.classe === 'B');
   assert.strictEqual(b.length, 2);
   assert.ok(b.every((r) => r.acao.includes('corrigido')));
   const producao = CLASSIFICACAO.find((r) => r.fluxo.startsWith('produção'));
   assert.strictEqual(producao.arquivo, '(inexistente)');
+  const repair = CLASSIFICACAO.find((r) => r.fluxo === 'ReservaRepairService');
+  assert.strictEqual(repair.classe, 'A');
+  const ponte = CLASSIFICACAO.find((r) => r.fluxo.startsWith('consumo reserva pedido'));
+  assert.strictEqual(ponte.classe, 'A');
 }
 
 function test03SemSqlDiretoNovo() {
@@ -195,7 +198,8 @@ function test09CompatPreservado() {
   assert.ok(credVenda.includes('COMPAT_CREDITO_VENDA_CANCEL_DEV_PRE_MULTIEMPRESA'));
   assert.ok(credVenda.includes('modoLegadoSemEmpresa: true'));
   assert.ok(nfe.includes('COMPAT_REVERT_DEVOLUCAO_VENDA_PRE_MULTIEMPRESA'));
-  assert.ok(repair.includes('COMPAT_RESERVA_REPAIR_PRE_MULTIEMPRESA') || repair.includes('modoLegadoSemEmpresa'));
+  assert.ok(!repair.includes('motivoCompat: fonte.motivoCompat || MOTIVO_COMPAT_RESERVA_REPAIR'));
+  assert.ok(repair.includes('EMPRESA_OWNERSHIP_REQUIRED'));
   assert.ok(!credVenda.includes('empresaId = 1'));
   assert.ok(!nfe.includes('empresaId = 1'));
 }

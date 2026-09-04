@@ -1,5 +1,5 @@
 /**
- * MUC RC2.1 — Motor Universal de Conversão (facade oficial)
+ * MUC RC3.0 — Motor Universal de Conversão (facade oficial, consolidado)
  * @module motores/muc
  */
 'use strict';
@@ -25,6 +25,7 @@ const BarramentoEventos = require('./eventos/BarramentoEventos');
 const MucMetricas = require('./observabilidade/MucMetricas');
 const { MotorCacheConversao } = require('./cache/MotorCacheConversao');
 const { resolverRegra, CATALOGO_REGRAS } = require('./constants/catalogoRegras');
+const { converterQuantidade } = require('./core/MotorConversaoQuantidade');
 const VERSAO = require('./version');
 
 /** @deprecated Uso interno — consumidores devem usar obterMuc() */
@@ -44,6 +45,14 @@ class MotorUniversalConversao {
     this.metricas = MucMetricas;
   }
 
+  /**
+   * @public API MUC-02 — quantidade + unidade origem → quantidade + unidade destino.
+   * Sem empresa_id, sem estoque, sem persistência.
+   */
+  converterQuantidade(input = {}) {
+    return converterQuantidade(input);
+  }
+
   /** @public API — converter(input, opcoes?) → ResultadoConversaoDTO */
   converter(input, opcoes = {}) {
     if (opcoes.usarCache) {
@@ -58,11 +67,17 @@ class MotorUniversalConversao {
     const produtoId = item.produto_id || produto?.id;
     const apresentacaoId = item.produto_apresentacao_id || item.embalagem_id;
 
-    const executar = (apresentacao) => {
+    const executar = (apresentacao, apresentacoes, relacoesDb) => {
       const resultado = self.converter({
         produtoId,
         apresentacaoId: apresentacao?.id ?? apresentacaoId,
         apresentacao,
+        apresentacoes: apresentacoes || [],
+        relacoes: [
+          ...(Array.isArray(item.relacoes) ? item.relacoes : []),
+          ...(Array.isArray(opcoes.relacoes) ? opcoes.relacoes : []),
+          ...(relacoesDb || [])
+        ],
         produto,
         item,
         origem: item.origem_conversao || opcoes.origem || 'MANUAL',
@@ -105,10 +120,28 @@ class MotorUniversalConversao {
       return resultado;
     };
 
+    const comLista = (ap) => {
+      const seguirComRelacoes = (lista) => {
+        if (Number(produto?.utiliza_conversao) !== 1 || !produtoId) {
+          return executar(ap, lista || [], []);
+        }
+        const { listarRelacoesCb } = require('../../services/produtos/ProdutoConversaoConfigService');
+        return listarRelacoesCb(self.db, produtoId, (relErr, rels) => {
+          if (relErr && callback) return callback(relErr);
+          return executar(ap, lista || [], rels || []);
+        });
+      };
+      if (!produtoId) return seguirComRelacoes([]);
+      return this.apresentacoes.listarPorProduto(produtoId, (listErr, lista) => {
+        if (listErr && callback) return callback(listErr);
+        return seguirComRelacoes(lista || []);
+      });
+    };
+
     if (apresentacaoId) {
       return this.apresentacoes.buscarPorId(apresentacaoId, (err, ap) => {
         if (err && callback) return callback(err);
-        return executar(ap);
+        return comLista(ap);
       });
     }
 
@@ -122,12 +155,12 @@ class MotorUniversalConversao {
         },
         (err, ap) => {
           if (err && callback) return callback(err);
-          return executar(ap);
+          return comLista(ap);
         }
       );
     }
 
-    return executar(null);
+    return comLista(null);
   }
 
   /** @public API — simular({ quantidadeCompra, quantidadePorApresentacao, valorTotal }) → ResultadoConversaoDTO */

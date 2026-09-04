@@ -12,12 +12,16 @@ const {
   getExprQuantidadeItem,
   getFiltroItensFiscal,
   getExprLucroItem,
-  sqlRankingProdutos
+  sqlRankingProdutosDaEmpresa
 } = require('../services/reportFiscalHelpers');
 const {
   sqlExcluirContaVendaCancelada,
   sqlExcluirFinanceiroVendaCancelada
 } = require('../services/vendas/VendaFinanceiroService');
+const {
+  resolverEmpresaIdParaMis,
+  statusDeErroEmpresaMis
+} = require('../services/mis/MisEmpresaContextoService');
 
 function parseNumber(valor) {
   const n = Number(valor);
@@ -60,6 +64,12 @@ function exprEstoqueDashboard(modoFiscal) {
     : 'COALESCE(estoque_atual, 0)';
 }
 
+function exprEstoqueEmpresaDashboard(modoFiscal) {
+  return isModoFiscalRelatorio(modoFiscal)
+    ? 'COALESCE(ee.saldo_fiscal, 0)'
+    : 'COALESCE(ee.estoque_atual, 0)';
+}
+
 function filtroProdutoFiscalDashboard(modoFiscal) {
   return isModoFiscalRelatorio(modoFiscal)
     ? ' AND COALESCE(item_fiscal, 1) = 1'
@@ -68,6 +78,18 @@ function filtroProdutoFiscalDashboard(modoFiscal) {
 
 router.get('/resumo', verificarPermissaoEspecifica('relatorios'), async (req, res) => {
   try {
+    let misEmpresa;
+    try {
+      misEmpresa = await resolverEmpresaIdParaMis(req, { db });
+    } catch (empErr) {
+      return res.status(statusDeErroEmpresaMis(empErr)).json({
+        error: empErr.message,
+        code: empErr.code,
+        empresa_id: empErr.empresa_id != null ? empErr.empresa_id : undefined
+      });
+    }
+    const empresaId = Number(misEmpresa.empresaId);
+
     const hoje = new Date();
     const seteDiasAtras = new Date();
     seteDiasAtras.setDate(hoje.getDate() - 7);
@@ -84,9 +106,10 @@ router.get('/resumo', verificarPermissaoEspecifica('relatorios'), async (req, re
     const exprQuantidade = getExprQuantidadeItem(modoFiscal);
     const filtroItensFiscal = getFiltroItensFiscal(modoFiscal);
     const exprLucro = getExprLucroItem(modoFiscal);
-    const exprEstoque = exprEstoqueDashboard(modoFiscal);
     const filtroProdutoFiscal = filtroProdutoFiscalDashboard(modoFiscal);
-    const sqlRanking = sqlRankingProdutos(modoFiscal);
+    const exprEstoqueEe = exprEstoqueEmpresaDashboard(modoFiscal);
+    const sqlRanking = sqlRankingProdutosDaEmpresa(modoFiscal);
+    const filtroVendaEmpresa = 'AND v.empresa_id = ?';
 
     const [
       resumoPeriodo,
@@ -114,7 +137,8 @@ router.get('/resumo', verificarPermissaoEspecifica('relatorios'), async (req, re
         FROM vendas v
         WHERE date(v.data_venda) BETWEEN date(?) AND date(?)
           AND ${FILTRO_VENDA_VALIDA}
-      `, [dataInicio, dataFim]),
+          ${filtroVendaEmpresa}
+      `, [dataInicio, dataFim, empresaId]),
 
       dbGet(`
         SELECT
@@ -123,7 +147,8 @@ router.get('/resumo', verificarPermissaoEspecifica('relatorios'), async (req, re
         FROM vendas v
         WHERE date(v.data_venda) BETWEEN date(?) AND date(?)
           AND ${FILTRO_VENDA_VALIDA}
-      `, [dataInicio, dataFim]),
+          ${filtroVendaEmpresa}
+      `, [dataInicio, dataFim, empresaId]),
 
       dbGet(`
         SELECT
@@ -133,7 +158,8 @@ router.get('/resumo', verificarPermissaoEspecifica('relatorios'), async (req, re
         FROM vendas v
         WHERE date(v.data_venda) = date(?)
           AND ${FILTRO_VENDA_VALIDA}
-      `, [dataHoje]),
+          ${filtroVendaEmpresa}
+      `, [dataHoje, empresaId]),
 
       dbGet(`
         SELECT
@@ -142,7 +168,8 @@ router.get('/resumo', verificarPermissaoEspecifica('relatorios'), async (req, re
         FROM vendas v
         WHERE date(v.data_venda) = date(?)
           AND ${FILTRO_VENDA_VALIDA}
-      `, [dataHoje]),
+          ${filtroVendaEmpresa}
+      `, [dataHoje, empresaId]),
 
       dbGet(`
         SELECT COALESCE(SUM(${exprLucro}), 0) AS lucro_estimado
@@ -151,8 +178,9 @@ router.get('/resumo', verificarPermissaoEspecifica('relatorios'), async (req, re
         INNER JOIN produtos p ON p.id = vi.produto_id
         WHERE date(v.data_venda) BETWEEN date(?) AND date(?)
           AND ${FILTRO_VENDA_VALIDA}
+          ${filtroVendaEmpresa}
           ${filtroItensFiscal}
-      `, [dataInicio, dataFim]),
+      `, [dataInicio, dataFim, empresaId]),
 
       dbGet(`
         SELECT COALESCE(SUM(${exprLucro}), 0) AS lucro_estimado
@@ -161,8 +189,9 @@ router.get('/resumo', verificarPermissaoEspecifica('relatorios'), async (req, re
         INNER JOIN produtos p ON p.id = vi.produto_id
         WHERE date(v.data_venda) = date(?)
           AND ${FILTRO_VENDA_VALIDA}
+          ${filtroVendaEmpresa}
           ${filtroItensFiscal}
-      `, [dataHoje]),
+      `, [dataHoje, empresaId]),
 
       dbGet(`
         SELECT COALESCE(SUM(${exprQuantidade}), 0) AS produtos_vendidos
@@ -170,31 +199,34 @@ router.get('/resumo', verificarPermissaoEspecifica('relatorios'), async (req, re
         INNER JOIN vendas v ON v.id = vi.venda_id
         WHERE date(v.data_venda) BETWEEN date(?) AND date(?)
           AND ${FILTRO_VENDA_VALIDA}
+          ${filtroVendaEmpresa}
           ${filtroItensFiscal}
-      `, [dataInicio, dataFim]),
+      `, [dataInicio, dataFim, empresaId]),
 
       dbAll(`
         ${sqlRanking}
         HAVING quantidade_vendida > 0
         ORDER BY quantidade_vendida DESC
         LIMIT 3
-      `, [dataInicio, dataFim]),
+      `, [dataInicio, dataFim, empresaId]),
 
       dbAll(`
         SELECT
-          id,
-          nome,
-          ${exprEstoque} AS estoque_atual,
-          COALESCE(saldo_fiscal, 0) AS saldo_fiscal,
-          COALESCE(saldo_nao_fiscal, 0) AS saldo_nao_fiscal,
-          estoque_minimo,
-          unidade
-        FROM produtos
-        WHERE ${exprEstoque} <= estoque_minimo
-          ${filtroProdutoFiscal}
-        ORDER BY ${exprEstoque} ASC, nome ASC
+          p.id,
+          p.nome,
+          ${exprEstoqueEe} AS estoque_atual,
+          COALESCE(ee.saldo_fiscal, 0) AS saldo_fiscal,
+          COALESCE(ee.saldo_nao_fiscal, 0) AS saldo_nao_fiscal,
+          p.estoque_minimo,
+          p.unidade
+        FROM estoque_empresa ee
+        INNER JOIN produtos p ON p.id = ee.produto_id
+        WHERE ee.empresa_id = ?
+          AND ${exprEstoqueEe} <= COALESCE(p.estoque_minimo, 0)
+          ${filtroProdutoFiscal.replace('item_fiscal', 'p.item_fiscal')}
+        ORDER BY ${exprEstoqueEe} ASC, p.nome ASC
         LIMIT 10
-      `),
+      `, [empresaId]),
 
       dbGet(`
         SELECT
@@ -202,8 +234,9 @@ router.get('/resumo', verificarPermissaoEspecifica('relatorios'), async (req, re
           COUNT(*) AS quantidade
         FROM contas_receber cr
         WHERE cr.status IN ('aberto', 'parcial')
+          AND cr.empresa_id = ?
           AND ${sqlExcluirContaVendaCancelada('cr')}
-      `),
+      `, [empresaId]),
 
       dbGet(`
         SELECT
@@ -212,8 +245,9 @@ router.get('/resumo', verificarPermissaoEspecifica('relatorios'), async (req, re
         FROM financeiro f
         WHERE f.tipo = 'receita'
           AND f.status NOT IN ('recebido', 'pago', 'cancelado')
+          AND f.empresa_id = ?
           AND ${sqlExcluirFinanceiroVendaCancelada('f')}
-      `),
+      `, [empresaId]),
 
       dbGet(`
         SELECT
@@ -222,8 +256,9 @@ router.get('/resumo', verificarPermissaoEspecifica('relatorios'), async (req, re
         FROM financeiro f
         WHERE f.tipo = 'despesa'
           AND f.status NOT IN ('pago', 'recebido', 'cancelado')
+          AND f.empresa_id = ?
           AND ${sqlExcluirFinanceiroVendaCancelada('f')}
-      `),
+      `, [empresaId]),
 
       dbAll(`
         SELECT
@@ -233,9 +268,10 @@ router.get('/resumo', verificarPermissaoEspecifica('relatorios'), async (req, re
         FROM vendas v
         WHERE date(v.data_venda) BETWEEN date(?) AND date(?)
           AND ${FILTRO_VENDA_VALIDA}
+          ${filtroVendaEmpresa}
         GROUP BY COALESCE(NULLIF(TRIM(LOWER(forma_pagamento)), ''), 'nao_informado')
         ORDER BY total DESC
-      `, [dataInicio, dataFim]),
+      `, [dataInicio, dataFim, empresaId]),
 
       dbAll(`
         SELECT
@@ -246,35 +282,38 @@ router.get('/resumo', verificarPermissaoEspecifica('relatorios'), async (req, re
         INNER JOIN vendas v ON v.id = vr.venda_id
         WHERE date(v.data_venda) BETWEEN date(?) AND date(?)
           AND ${FILTRO_VENDA_VALIDA}
+          ${filtroVendaEmpresa}
           AND COALESCE(vr.status, 'aprovado') != 'cancelado'
           ${modoFiscalAtivo ? "AND vr.tipo_recebimento = 'fiscal'" : ''}
         GROUP BY vr.tipo_recebimento
-      `, [dataInicio, dataFim]),
+      `, [dataInicio, dataFim, empresaId]),
 
       dbAll(`
-        SELECT id, nome, ${exprEstoque} AS estoque_atual, data_validade
-        FROM produtos
-        WHERE data_validade IS NOT NULL
-          AND data_validade <> ''
-          AND ${exprEstoque} > 0
-          ${filtroProdutoFiscal}
-          AND date(data_validade) < date('now', 'localtime')
-        ORDER BY date(data_validade) ASC
+        SELECT p.id, p.nome, ${exprEstoqueEe} AS estoque_atual, p.data_validade
+        FROM produtos p
+        INNER JOIN estoque_empresa ee ON ee.produto_id = p.id AND ee.empresa_id = ?
+        WHERE p.data_validade IS NOT NULL
+          AND p.data_validade <> ''
+          AND ${exprEstoqueEe} > 0
+          ${filtroProdutoFiscal.replace('item_fiscal', 'p.item_fiscal')}
+          AND date(p.data_validade) < date('now', 'localtime')
+        ORDER BY date(p.data_validade) ASC
         LIMIT 10
-      `),
+      `, [empresaId]),
 
       dbAll(`
-        SELECT id, nome, ${exprEstoque} AS estoque_atual, data_validade
-        FROM produtos
-        WHERE data_validade IS NOT NULL
-          AND data_validade <> ''
-          AND ${exprEstoque} > 0
-          ${filtroProdutoFiscal}
-          AND date(data_validade) >= date('now', 'localtime')
-          AND date(data_validade) <= date('now', 'localtime', '+30 days')
-        ORDER BY date(data_validade) ASC
+        SELECT p.id, p.nome, ${exprEstoqueEe} AS estoque_atual, p.data_validade
+        FROM produtos p
+        INNER JOIN estoque_empresa ee ON ee.produto_id = p.id AND ee.empresa_id = ?
+        WHERE p.data_validade IS NOT NULL
+          AND p.data_validade <> ''
+          AND ${exprEstoqueEe} > 0
+          ${filtroProdutoFiscal.replace('item_fiscal', 'p.item_fiscal')}
+          AND date(p.data_validade) >= date('now', 'localtime')
+          AND date(p.data_validade) <= date('now', 'localtime', '+30 days')
+        ORDER BY date(p.data_validade) ASC
         LIMIT 10
-      `)
+      `, [empresaId])
     ]);
 
     const auditoriaUltimos7 = await dbGet(
@@ -362,7 +401,7 @@ router.get('/resumo', verificarPermissaoEspecifica('relatorios'), async (req, re
       HAVING quantidade_vendida > 0 ${idsMais.length ? `AND p.id NOT IN (${idsMais.map(() => '?').join(',')})` : ''}
       ORDER BY quantidade_vendida ASC, p.nome ASC
       LIMIT 3
-    `, [dataInicio, dataFim, ...idsMais]);
+    `, [dataInicio, dataFim, empresaId, ...idsMais]);
 
     const totalReceberCr = parseNumber(contasReceberCr.total);
     const totalReceberFin = parseNumber(contasReceberFin.total);
@@ -387,6 +426,8 @@ router.get('/resumo', verificarPermissaoEspecifica('relatorios'), async (req, re
         inicio: dataInicio,
         fim: dataFim
       },
+      empresa_id: empresaId,
+      modo_operacional: misEmpresa.modo,
       data_hoje: dataHoje,
       modo_fiscal_ativo: modoFiscalAtivo,
 

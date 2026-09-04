@@ -16,7 +16,6 @@ describe('Sprint 3.9 — estrutura Configurações Avançadas', () => {
     const src = fs.readFileSync(path.join(ROOT, 'frontend/erp/js/cds-centro-configuracoes.js'), 'utf8');
     const ids = [
       'empresa',
-      'plataformaFiscal',
       'modulosLicenciados',
       'motores',
       'equipamentos',
@@ -34,6 +33,8 @@ describe('Sprint 3.9 — estrutura Configurações Avançadas', () => {
     });
     assert.doesNotMatch(src, /id:\s*'fiscal'/);
     assert.doesNotMatch(src, /id:\s*'aparencia'/);
+    assert.doesNotMatch(src, /id:\s*'plataformaFiscal'/);
+    assert.doesNotMatch(src, /label:\s*'Plataforma Fiscal'/);
   });
 
   it('Configurações da Empresa só têm blocos operacionais', () => {

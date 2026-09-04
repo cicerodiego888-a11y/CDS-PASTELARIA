@@ -14,8 +14,7 @@ const sqlite3 = require('sqlite3').verbose();
 
 const {
   executarPlano,
-  montarOptsPortaReservaRepair,
-  MOTIVO_COMPAT_RESERVA_REPAIR
+  montarOptsPortaReservaRepair
 } = require('../../backend/motores/comercial/ReservaRepairService');
 const {
   montarPlanoCorrecao,
@@ -108,6 +107,7 @@ async function setup({
       total REAL DEFAULT 0,
       status TEXT NOT NULL,
       operador_id INTEGER,
+      empresa_id INTEGER,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -128,6 +128,7 @@ async function setup({
       pedido_item_id INTEGER,
       produto_id INTEGER NOT NULL,
       quantidade_fiscal REAL NOT NULL DEFAULT 0,
+      empresa_id INTEGER,
       status TEXT NOT NULL DEFAULT 'ATIVA',
       criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
       atualizado_em DATETIME
@@ -164,12 +165,13 @@ async function setup({
 async function seedPedido(db, {
   produtoId,
   quantidade,
-  status = PedidoStatus.AGUARDANDO_FATURAMENTO
+  status = PedidoStatus.AGUARDANDO_FATURAMENTO,
+  empresaId = 1
 }) {
   const ped = await run(
     db,
-    `INSERT INTO pedidos (codigo, data_pedido, total, status) VALUES ('R', date('now'), 0, ?)`,
-    [status]
+    `INSERT INTO pedidos (codigo, data_pedido, total, status, empresa_id) VALUES ('R', date('now'), 0, ?, ?)`,
+    [status, empresaId]
   );
   await run(
     db,
@@ -367,43 +369,36 @@ async function test05EmpresaIdPropagado() {
   await closeDb(db);
 }
 
-async function test06CompatExplicita() {
+async function test06OwnershipSemCompat() {
   const { db, produtoId } = await setup({ rf: 0 });
-  const pedidoId = await seedPedido(db, { produtoId, quantidade: 1 });
-
+  const legado = await run(
+    db,
+    `INSERT INTO pedidos (codigo, data_pedido, total, status, empresa_id) VALUES ('L', date('now'), 0, ?, NULL)`,
+    [PedidoStatus.PEDIDO]
+  );
+  await run(
+    db,
+    `INSERT INTO pedidos_itens (pedido_id, produto_id, quantidade, preco_unitario, subtotal) VALUES (?, ?, 1, 1, 1)`,
+    [legado.lastID, produtoId]
+  );
   const r = await executarPlano(
     montarPlanoCorrecao(TipoInconsistencia.PEDIDO_SEM_RESERVA),
     {
       dryRun: false,
       db,
-      contexto: { pedido_id: pedidoId, produto_id: produtoId, pedido_quantidade: 1 }
+      contexto: { pedido_id: legado.lastID, produto_id: produtoId, pedido_quantidade: 1 }
     }
   );
-  assert.strictEqual(r.sucesso, true);
-  assert.strictEqual(r.detalhes.legado, true);
-  assert.strictEqual(r.detalhes.motivo_compat, MOTIVO_COMPAT_RESERVA_REPAIR);
-  assert.strictEqual(r.detalhes.empresa_id, null);
+  assert.strictEqual(r.sucesso, false);
+  assert.strictEqual(r.codigo, 'EMPRESA_OWNERSHIP_REQUIRED');
 
-  const pedidoExigir = await seedPedido(db, { produtoId, quantidade: 1 });
   await assertRejects(
-    executarPlano(
-      montarPlanoCorrecao(TipoInconsistencia.PEDIDO_SEM_RESERVA),
-      {
-        dryRun: false,
-        db,
-        exigirEmpresa: true,
-        contexto: { pedido_id: pedidoExigir, produto_id: produtoId, pedido_quantidade: 1 }
-      }
-    ),
-    'EMPRESA_OBRIGATORIA'
+    Promise.resolve().then(() => montarOptsPortaReservaRepair({ db })),
+    'EMPRESA_OWNERSHIP_REQUIRED'
   );
 
-  const semEmpresa = montarOptsPortaReservaRepair({ db });
-  assert.strictEqual(semEmpresa.legado, true);
-  assert.strictEqual(semEmpresa.motivoCompat, MOTIVO_COMPAT_RESERVA_REPAIR);
-
   const src = fs.readFileSync(SRC_REPAIR, 'utf8');
-  assert.ok(src.includes('COMPAT_RESERVA_REPAIR_PRE_MULTIEMPRESA'));
+  assert.ok(!src.includes('motivoCompat: fonte.motivoCompat || MOTIVO_COMPAT_RESERVA_REPAIR'));
   assert.ok(!/empresaId\s*=\s*1/.test(src));
   assert.ok(!/configuracoes\.cnpj/.test(src));
   await closeDb(db);
@@ -586,7 +581,7 @@ async function main() {
     ['03 fiscal preservado', test03FiscalPreservado],
     ['04 nao fiscal nao inventado', test04NaoFiscalNaoInventado],
     ['05 empresaId propagado', test05EmpresaIdPropagado],
-    ['06 COMPAT explicita', test06CompatExplicita],
+    ['06 ownership sem COMPAT', test06OwnershipSemCompat],
     ['07 rollback restaura reservado', test07RollbackRestauraReservado],
     ['08 nao duplica', test08NaoDuplica],
     ['09 SQL direto de reservado removido', test09SqlDiretoRemovido],

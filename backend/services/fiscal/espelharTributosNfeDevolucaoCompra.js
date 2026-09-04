@@ -26,6 +26,31 @@ function dbGet(sql, params = []) {
   });
 }
 
+function obterDbGet(deps) {
+  return deps && typeof deps.dbGet === 'function' ? deps.dbGet : dbGet;
+}
+
+function resolverEmpresaIdEspelhamento(opts = {}) {
+  const compra = opts.compra || null;
+  const candidatos = [
+    opts.empresaId,
+    opts.empresa_id,
+    compra && (compra.empresa_id != null ? compra.empresa_id : compra.empresaId)
+  ];
+  for (const c of candidatos) {
+    const n = Number(c);
+    if (Number.isInteger(n) && n > 0) return n;
+  }
+  return null;
+}
+
+function erroEmpresaOwnershipEspelhamento() {
+  return Object.assign(
+    new Error('Empresa da operação não resolvida para localizar o XML da NF-e original.'),
+    { code: 'EMPRESA_OWNERSHIP_REQUIRED', statusCode: 409 }
+  );
+}
+
 function round2(v) {
   const n = Number(v);
   if (!Number.isFinite(n)) return 0;
@@ -82,17 +107,24 @@ const DIFAL_PERC = ['pFCPUFDest', 'pICMSUFDest', 'pICMSInter', 'pICMSInterPart']
 
 /**
  * Carrega XML da NF-e original da compra (Central → legado → disco).
+ * Central: chave + empresa_id (05.71). Sem empresa não consulta globalmente.
  */
-async function carregarXmlNfeCompraOrigem({ compraId, chave }) {
+async function carregarXmlNfeCompraOrigem({ compraId, chave, empresaId, empresa_id, compra } = {}, deps = {}) {
   const chaveLimpa = String(chave || '').replace(/\D/g, '');
   const id = Number(compraId) || 0;
+  const emp = resolverEmpresaIdEspelhamento({ empresaId, empresa_id, compra });
+  const get = obterDbGet(deps);
+
+  if (!emp) {
+    throw erroEmpresaOwnershipEspelhamento();
+  }
 
   if (id) {
-    const porCompra = await dbGet(
+    const porCompra = await get(
       `SELECT xml, chave FROM central_entradas_documentos
-       WHERE compra_id = ? AND xml IS NOT NULL AND length(trim(xml)) > 100
+       WHERE compra_id = ? AND empresa_id = ? AND xml IS NOT NULL AND length(trim(xml)) > 100
        ORDER BY id DESC LIMIT 1`,
-      [id]
+      [id, emp]
     );
     if (porCompra?.xml) {
       return { xml: String(porCompra.xml), fonte: 'central_compra_id', chave: porCompra.chave || chaveLimpa };
@@ -100,20 +132,20 @@ async function carregarXmlNfeCompraOrigem({ compraId, chave }) {
   }
 
   if (chaveLimpa.length === 44) {
-    const porChave = await dbGet(
+    const porChave = await get(
       `SELECT xml, chave FROM central_entradas_documentos
-       WHERE REPLACE(chave, ' ', '') = ? AND xml IS NOT NULL AND length(trim(xml)) > 100
+       WHERE REPLACE(chave, ' ', '') = ? AND empresa_id = ? AND xml IS NOT NULL AND length(trim(xml)) > 100
        LIMIT 1`,
-      [chaveLimpa]
+      [chaveLimpa, emp]
     );
     if (porChave?.xml) {
       return { xml: String(porChave.xml), fonte: 'central_chave', chave: chaveLimpa };
     }
 
-    const dfe = await dbGet('SELECT xml FROM notas_recebidas_dfe WHERE chave = ? LIMIT 1', [chaveLimpa]);
+    const dfe = await get('SELECT xml FROM notas_recebidas_dfe WHERE chave = ? LIMIT 1', [chaveLimpa]);
     if (dfe?.xml) return { xml: String(dfe.xml), fonte: 'notas_recebidas_dfe', chave: chaveLimpa };
 
-    const recebida = await dbGet('SELECT xml FROM notas_recebidas WHERE chave = ? LIMIT 1', [chaveLimpa]);
+    const recebida = await get('SELECT xml FROM notas_recebidas WHERE chave = ? LIMIT 1', [chaveLimpa]);
     if (recebida?.xml) return { xml: String(recebida.xml), fonte: 'notas_recebidas', chave: chaveLimpa };
   }
 
@@ -529,9 +561,31 @@ async function espelharTributosNfeDevolucaoCompra({
   chave,
   itens,
   cfopPadrao = '5202',
-  exigirXml = true
-}) {
-  const carregado = await carregarXmlNfeCompraOrigem({ compraId, chave });
+  exigirXml = true,
+  empresaId,
+  empresa_id,
+  compra
+} = {}, deps = {}) {
+  const emp = resolverEmpresaIdEspelhamento({ empresaId, empresa_id, compra });
+  if (!emp) {
+    const erro = erroEmpresaOwnershipEspelhamento();
+    if (exigirXml) throw erro;
+    return {
+      ok: false,
+      erro,
+      tributacaoOriginal: null,
+      comparacaoFiscal: [],
+      itens: itens || [],
+      ajustes: [],
+      fonteXml: null
+    };
+  }
+
+  const carregado = await carregarXmlNfeCompraOrigem({
+    compraId,
+    chave,
+    empresaId: emp
+  }, deps);
   if (!carregado.xml) {
     const erro = Object.assign(
       new Error('XML da NF-e original não encontrado para espelhamento fiscal. Importe o XML na Central de Entradas.'),
@@ -787,6 +841,7 @@ function validarEspelhamentoAntesTransmissao(espelhamento, itens) {
 module.exports = {
   carregarXmlNfeCompraOrigem,
   carregarXmlNfeVendaOrigem,
+  resolverEmpresaIdEspelhamento,
   espelharTributosNfeDevolucaoCompra,
   espelharTributosNfeDevolucaoVenda,
   validarEspelhamentoAntesTransmissao,

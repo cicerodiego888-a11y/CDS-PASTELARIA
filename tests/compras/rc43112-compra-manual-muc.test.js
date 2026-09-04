@@ -31,7 +31,7 @@ console.log('\n=== RC4.31.12 — Compra Manual MUC ===\n');
 test('API simular-conversao-muc registrada', () => {
   const src = fs.readFileSync(path.join(ROOT, 'backend/rotas/compras.js'), 'utf8');
   assert.match(src, /simular-conversao-muc/);
-  assert.match(src, /muc\.simular/);
+  assert.match(src, /simularConversaoCompraPreview/);
 });
 
 test('MUC simular — 1 pacote × 10 UN = 10 UN estoque', () => {

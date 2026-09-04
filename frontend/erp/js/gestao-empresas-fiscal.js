@@ -10,7 +10,7 @@
     if (root) {
         root.GestaoEmpresasFiscal = api;
         root.loadGestaoEmpresasFiscal = api.loadGestaoEmpresasFiscal;
-        root.__CDS_EMPRESAS_MODULE_VERSION = '05.19';
+        root.__CDS_EMPRESAS_MODULE_VERSION = '05.20';
     }
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
     'use strict';
@@ -250,6 +250,15 @@
         return `<span class="badge ${v.classe}">${v.marca} ${escapeHtml(v.texto)}</span>`;
     }
 
+    function htmlAcoesAtivoEmpresa(empresa) {
+        const id = Number(empresa && empresa.id);
+        if (!Number.isInteger(id) || id <= 0) return '';
+        if (Number(empresa.ativo) !== 0) {
+            return `<button type="button" class="btn btn-sm btn-outline-warning" data-gef-inativar="${id}">Desativar</button>`;
+        }
+        return `<button type="button" class="btn btn-sm btn-outline-success" data-gef-ativar="${id}">Reativar</button>`;
+    }
+
     function htmlFormNovaEmpresa() {
         return `
             <div class="card mt-3" data-gef-nova="1">
@@ -487,7 +496,7 @@
                 <div class="d-flex justify-content-between align-items-center mb-3">
                     <div>
                         <h2 class="h4 mb-0">EMPRESAS</h2>
-                        <p class="text-muted mb-0">Gerencie as empresas e configurações fiscais</p>
+                        <p class="text-muted mb-0">Gerencie as empresas e configurações fiscais. Desativar tira a empresa da Central e do PDV; não apaga histórico fiscal.</p>
                     </div>
                     <button type="button" class="btn btn-primary" id="gef-nova">+ NOVA EMPRESA</button>
                 </div>
@@ -508,7 +517,10 @@
                                 <td>${escapeHtml(formatarCnpj(e.cnpj))}</td>
                                 <td>${Number(e.ativo) === 1 ? 'Ativa' : 'Inativa'}</td>
                                 <td>Fiscal: ${badgeStatus(e.status_fiscal)}</td>
-                                <td><button type="button" class="btn btn-sm btn-outline-primary" data-gef-abrir="${e.id}">Abrir / Editar</button></td>
+                                <td class="text-nowrap">
+                                    <button type="button" class="btn btn-sm btn-outline-primary" data-gef-abrir="${e.id}">Abrir / Editar</button>
+                                    ${htmlAcoesAtivoEmpresa(e)}
+                                </td>
                             </tr>`;
                         }).join('')}
                         </tbody></table></div>`}
@@ -535,6 +547,16 @@
         document.querySelectorAll('[data-gef-abrir]').forEach(function (btn) {
             btn.addEventListener('click', function () {
                 abrirDetalhe(btn.getAttribute('data-gef-abrir'));
+            });
+        });
+        document.querySelectorAll('[data-gef-inativar]').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                alternarAtivoEmpresa(btn.getAttribute('data-gef-inativar'), false);
+            });
+        });
+        document.querySelectorAll('[data-gef-ativar]').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                alternarAtivoEmpresa(btn.getAttribute('data-gef-ativar'), true);
             });
         });
         const nova = document.getElementById('gef-nova');
@@ -661,8 +683,9 @@
                             <div class="text-muted small">EMPRESA</div>
                             <strong data-gef-topo-nome>${escapeHtml(e.razao_social || e.nome_fantasia || '')}</strong>
                             <div data-gef-topo-cnpj>CNPJ: ${escapeHtml(formatarCnpj(e.cnpj))}</div>
-                            <div class="mt-1">STATUS FISCAL: ${badgeStatus(f.status)}</div>
+                            <div class="mt-1">STATUS: ${Number(e.ativo) === 1 ? 'Ativa' : 'Inativa'} · STATUS FISCAL: ${badgeStatus(f.status)}</div>
                         </div>
+                        <div class="d-flex gap-2">${htmlAcoesAtivoEmpresa(e)}</div>
                     </div>
                 </div>
                 <div class="card-body">
@@ -749,6 +772,46 @@
         document.getElementById('gef-upload-cert').addEventListener('click', enviarCertificado);
         const retrySt = document.getElementById('gef-retry-status');
         if (retrySt) retrySt.addEventListener('click', carregarLista);
+        box.querySelectorAll('[data-gef-inativar]').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                alternarAtivoEmpresa(btn.getAttribute('data-gef-inativar'), false);
+            });
+        });
+        box.querySelectorAll('[data-gef-ativar]').forEach(function (btn) {
+            btn.addEventListener('click', function () {
+                alternarAtivoEmpresa(btn.getAttribute('data-gef-ativar'), true);
+            });
+        });
+    }
+
+    async function alternarAtivoEmpresa(empresaId, ativar) {
+        const id = Number(empresaId);
+        if (!Number.isInteger(id) || id <= 0 || _ui.saving) return;
+        if (!ativar) {
+            const ok = typeof globalThis.confirm === 'function'
+                ? globalThis.confirm(
+                    'Desativar esta empresa?\n\nEla sai da sincronização da Central e deixa de ser contexto operacional.\nNotas, vendas e certificado não são apagados.\nExclusão definitiva não existe neste cadastro.'
+                )
+                : true;
+            if (!ok) return;
+        }
+        _ui.saving = true;
+        try {
+            await jsonFetch(`/empresas/${id}/${ativar ? 'ativar' : 'inativar'}`, {
+                method: 'PATCH',
+                headers: authHeaders()
+            });
+            feedback(ativar ? 'Empresa reativada.' : 'Empresa desativada. Fora da Central até reativar.', 'success');
+            if (!ativar && Number(_ui.sessao && _ui.sessao.empresa_id) === id) {
+                _ui.sessao = criarSessaoDetalhe();
+            }
+            await carregarLista();
+            if (ativar) await abrirDetalhe(id);
+        } catch (err) {
+            feedback(err.message, 'danger');
+        } finally {
+            _ui.saving = false;
+        }
     }
 
     async function salvarGerais() {
@@ -880,7 +943,7 @@
 
     function loadGestaoEmpresasFiscal() {
         try {
-            globalThis.__CDS_EMPRESAS_MODULE_VERSION = '05.19';
+            globalThis.__CDS_EMPRESAS_MODULE_VERSION = '05.20';
         } catch (_e) { /* ignore */ }
         logEmpresas('módulo carregado', { loadPage: 'empresas' });
         _ui = { estado: ESTADOS.LOADING, lista: [], sessao: criarSessaoDetalhe(), saving: false, requestId: 0, aba: 'gerais', avisoStatusFiscal: '' };
@@ -910,6 +973,7 @@
         idEmpresaResposta,
         fiscalVazio,
         htmlFormNovaEmpresa,
+        htmlAcoesAtivoEmpresa,
         htmlPainelEdicao,
         htmlBlocosUrlsFiscais,
         empresaNovaNaoMostraFiscal,

@@ -273,13 +273,14 @@ async function test10SemRetornoDuplicado() {
   assert.ok(porta.includes('creditarSaldo'));
   assert.ok(devolucao.includes('creditarEstoqueItemVenda'));
   assert.ok(cancelamento.includes('devolverEstoqueItensVenda'));
-  assert.ok(cancelamento.includes('montarOpcoesRetornoEstoqueVenda'));
+  assert.ok(cancelamento.includes('montarOpcoesRetornoEstoqueDaVenda'));
 
   const callsPorta = (devolucao.match(/creditarEstoqueItemVenda\s*\(/g) || []).length;
   assert.strictEqual(callsPorta, 1, 'único caminho de crédito: devolverSaldosDistribuidos');
 
-  const callsCancel = (cancelamento.match(/devolverEstoqueItensVenda\s*\(/g) || []).length;
-  assert.strictEqual(callsCancel, 2, 'PUT e POST de cancelamento usam o mesmo retorno');
+  const callsCancel = (cancelamento.match(/devolverEstoqueEEstornarFichaDaVenda\(itens, venda, req, db,/g) || []).length;
+  assert.strictEqual(callsCancel, 2, 'PUT e POST de cancelamento usam o mesmo retorno + ficha');
+  assert.ok(cancelamento.includes('devolverEstoqueItensVenda'));
 
   assert.ok(
     !/saldo_fiscal\s*=\s*saldo_fiscal\s*\+/i.test(devolucao),

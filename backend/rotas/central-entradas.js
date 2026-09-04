@@ -15,9 +15,34 @@ const {
   recuperacaoPortalNacionalHabilitada,
   obterFeatureFlagsPublicas
 } = require('../motores/central-entradas/config/centralFeatureFlags');
+const {
+  autorizarDocumentoCentralHttp,
+  responderErroDocumentoCentral,
+  resolverEmpresaParaCentral,
+  aplicarFiltroLeituraEmpresasCentral
+} = require('../services/central-entradas/CentralEntradasEmpresaContextoService');
 
 const router = express.Router();
 const centralEntradasService = new CentralEntradasService();
+
+function comDocumentoAutorizado(handler) {
+  return async (req, res, next) => {
+    try {
+      await autorizarDocumentoCentralHttp(req);
+    } catch (error) {
+      return responderErroDocumentoCentral(res, error);
+    }
+    return handler(req, res, next);
+  };
+}
+
+function opcoesEmpresaDocumento(req, extra = {}) {
+  return {
+    ...extra,
+    empresaIdContexto: req.empresaDocumentoId,
+    req
+  };
+}
 
 const uploadXml = multer({
   storage: multer.memoryStorage(),
@@ -72,42 +97,81 @@ router.get('/health', async (req, res) => {
 /** RC3.4.6 — Saúde documental (monitor contínuo, sem SEFAZ). */
 router.get('/saude', async (req, res) => {
   try {
+    const ctx = await resolverEmpresaParaCentral({
+      req,
+      empresaId: req.empresaId
+    });
     const painel = await centralEntradasService.obterSaudeCentral({
-      forcar: req.query.forcar === '1'
+      forcar: true,
+      exigirEmpresa: true,
+      empresaId: ctx.empresaId,
+      persistirEstado: false,
+      atualizarCacheGlobal: false,
+      autoRecuperar: false
     });
     return res.json(painel);
   } catch (error) {
+    if (error && (error.code === 'EMPRESA_CENTRAL_AUSENTE'
+      || error.code === 'EMPRESA_OPERACIONAL_AUSENTE'
+      || error.code === 'EMPRESA_OPERACIONAL_AMBIGUA'
+      || error.code === 'EMPRESA_CENTRAL_INATIVA')) {
+      return responderErroDocumentoCentral(res, error);
+    }
     return res.status(500).json({ error: error.message });
   }
 });
 
 router.get('/saude/alertas', async (req, res) => {
   try {
+    const ctx = await resolverEmpresaParaCentral({
+      req,
+      empresaId: req.empresaId
+    });
     const lista = await centralEntradasService.listarAlertasSaude({
-      nivel: req.query.nivel || null
+      nivel: req.query.nivel || null,
+      empresaId: ctx.empresaId
     });
     return res.json(lista);
   } catch (error) {
+    if (error && (error.code === 'EMPRESA_CENTRAL_AUSENTE'
+      || error.code === 'EMPRESA_OPERACIONAL_AUSENTE'
+      || error.code === 'EMPRESA_OPERACIONAL_AMBIGUA'
+      || error.code === 'EMPRESA_CENTRAL_INATIVA')) {
+      return responderErroDocumentoCentral(res, error);
+    }
     return res.status(500).json({ error: error.message });
   }
 });
 
-router.get('/saude/documento/:id', async (req, res) => {
+router.get('/saude/documento/:id', comDocumentoAutorizado(async (req, res) => {
   try {
     const saude = await centralEntradasService.obterSaudeDocumento(req.params.id);
     return res.json(saude);
   } catch (error) {
     return res.status(error.statusCode || 500).json({ error: error.message });
   }
-});
+}));
 
 router.post('/saude/analisar', async (req, res) => {
   try {
+    const ctx = await resolverEmpresaParaCentral({
+      req,
+      empresaId: req.empresaId
+    });
     const painel = await centralEntradasService.analisarSaudeCentral({
-      autoRecuperar: req.body?.autoRecuperar !== false
+      autoRecuperar: req.body?.autoRecuperar !== false,
+      empresaId: ctx.empresaId,
+      persistirEstado: false,
+      atualizarCacheGlobal: false
     });
     return res.json(painel);
   } catch (error) {
+    if (error && (error.code === 'EMPRESA_CENTRAL_AUSENTE'
+      || error.code === 'EMPRESA_OPERACIONAL_AUSENTE'
+      || error.code === 'EMPRESA_OPERACIONAL_AMBIGUA'
+      || error.code === 'EMPRESA_CENTRAL_INATIVA')) {
+      return responderErroDocumentoCentral(res, error);
+    }
     return res.status(500).json({ error: error.message });
   }
 });
@@ -282,13 +346,7 @@ router.post('/diagnostico/acoes/sincronizar', exigirDiagnosticoCentral, async (r
   try {
     const resultado = await centralEntradasService.sincronizar({ origem: 'diagnostico' });
     centralEntradasService.limparCacheDiagnostico();
-    return res.status(statusHttpSync(resultado)).json({
-      ...resultado,
-      mensagemAmigavel: resultado.mensagemAmigavel
-        || resultado.mensagem
-        || (resultado.erros && resultado.erros[0])
-        || null
-    });
+    return res.status(statusHttpSync(resultado)).json(jsonSyncCentral(resultado));
   } catch (error) {
     return res.status(422).json({
       sucesso: false,
@@ -300,10 +358,22 @@ router.post('/diagnostico/acoes/sincronizar', exigirDiagnosticoCentral, async (r
 
 router.post('/diagnostico/acoes/reprocessar-pendencias', exigirDiagnosticoCentral, async (req, res) => {
   try {
-    const resultado = await centralEntradasService.processarDocumentosPendentes({ origem: 'diagnostico' });
+    const ctx = await resolverEmpresaParaCentral({
+      req,
+      empresaId: req.empresaId
+    });
+    const resultado = await centralEntradasService.processarDocumentosPendentes({
+      origem: 'diagnostico',
+      empresaId: ctx.empresaId
+    });
     centralEntradasService.limparCacheDiagnostico();
     return res.json(resultado);
   } catch (error) {
+    if (error && (error.code === 'EMPRESA_CENTRAL_AUSENTE'
+      || error.code === 'EMPRESA_OPERACIONAL_AUSENTE'
+      || error.code === 'DOCUMENTO_NAO_ENCONTRADO')) {
+      return responderErroDocumentoCentral(res, error);
+    }
     return res.status(500).json({ error: error.message, sucesso: false });
   }
 });
@@ -350,18 +420,22 @@ router.get('/feature-flags', (req, res) => {
 router.get('/dashboard', async (req, res) => {
   try {
     const filtros = montarFiltrosQuery(req.query);
-    if (!filtros.empresaId && req.empresaId) {
-      filtros.empresaId = req.empresaId;
-    }
+    const ctx = await resolverEmpresaParaCentral({
+      req,
+      empresaId: req.empresaId
+    });
+    const visao = await aplicarFiltroLeituraEmpresasCentral({ req, ctx, dest: filtros });
     const dashboard = await centralEntradasService.obterDashboard(filtros);
     return res.json({
       ...dashboard,
       featureFlags: obterFeatureFlagsPublicas(),
-      empresaId: filtros.empresaId || null,
-      visao: filtros.empresaId ? 'empresa' : 'consolidada_sem_identificacao_por_empresa'
+      empresaId: ctx.empresaId,
+      visao: visao.visao,
+      modo: ctx.modo,
+      origem: ctx.origem
     });
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    return responderErroDocumentoCentral(res, error);
   }
 });
 
@@ -387,34 +461,50 @@ router.get('/pendencias', async (req, res) => {
 
 router.get('/operacional', async (req, res) => {
   try {
-    const operacional = await centralEntradasService.obterOperacional(montarPeriodoIndicadoresQuery(req.query));
+    const ctx = await resolverEmpresaParaCentral({
+      req,
+      empresaId: req.empresaId
+    });
+    const dest = { ...montarPeriodoIndicadoresQuery(req.query) };
+    await aplicarFiltroLeituraEmpresasCentral({ req, ctx, dest });
+    const operacional = await centralEntradasService.obterOperacional(dest);
     return res.json(operacional);
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    return responderErroDocumentoCentral(res, error);
   }
 });
 
 router.get('/indicadores-fiscais', async (req, res) => {
   try {
+    const ctx = await resolverEmpresaParaCentral({
+      req,
+      empresaId: req.empresaId
+    });
     const IndicadoresFiscaisService = require('../services/IndicadoresFiscaisService');
-    const indicadores = await IndicadoresFiscaisService.obterIndicadoresCentral(
-      montarPeriodoIndicadoresQuery(req.query)
-    );
+    const dest = { ...montarPeriodoIndicadoresQuery(req.query) };
+    await aplicarFiltroLeituraEmpresasCentral({ req, ctx, dest });
+    const indicadores = await IndicadoresFiscaisService.obterIndicadoresCentral(dest);
     return res.json(indicadores);
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    return responderErroDocumentoCentral(res, error);
   }
 });
 
 router.get('/inteligencia', async (req, res) => {
   try {
-    const inteligencia = await centralEntradasService.obterInteligenciaOperacional({
+    const ctx = await resolverEmpresaParaCentral({
+      req,
+      empresaId: req.empresaId
+    });
+    const dest = {
       limitePendencias: req.query.limite != null ? Number(req.query.limite) : 20,
       ...montarPeriodoIndicadoresQuery(req.query)
-    });
+    };
+    await aplicarFiltroLeituraEmpresasCentral({ req, ctx, dest });
+    const inteligencia = await centralEntradasService.obterInteligenciaOperacional(dest);
     return res.json(inteligencia);
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    return responderErroDocumentoCentral(res, error);
   }
 });
 
@@ -533,6 +623,23 @@ function statusHttpSync(resultado) {
   return 200;
 }
 
+/**
+ * Garante `error` no JSON (o fetch da UI lia só esse campo e virava "Erro HTTP 503").
+ * @param {Object} resultado
+ * @returns {Object}
+ */
+function jsonSyncCentral(resultado) {
+  const mensagemAmigavel = resultado.mensagemAmigavel
+    || resultado.mensagem
+    || (resultado.erros && resultado.erros[0])
+    || null;
+  return {
+    ...resultado,
+    mensagemAmigavel,
+    error: resultado.error || mensagemAmigavel
+  };
+}
+
 /** RC3.4 — Homologação assistida (somente leitura). */
 router.get('/homologacao/painel', async (req, res) => {
   try {
@@ -554,7 +661,7 @@ router.get('/homologacao/metricas', async (req, res) => {
   }
 });
 
-router.get('/homologacao/:id/inspecionar', async (req, res) => {
+router.get('/homologacao/:id/inspecionar', comDocumentoAutorizado(async (req, res) => {
   try {
     const inspecao = await centralEntradasService.inspecionarDocumentoHomologacao(req.params.id);
     return res.json(inspecao);
@@ -562,9 +669,9 @@ router.get('/homologacao/:id/inspecionar', async (req, res) => {
     const code = error.statusCode || 500;
     return res.status(code).json({ error: error.message });
   }
-});
+}));
 
-router.get('/homologacao/:id/exportar', async (req, res) => {
+router.get('/homologacao/:id/exportar', comDocumentoAutorizado(async (req, res) => {
   try {
     const formato = String(req.query.formato || 'json').toLowerCase() === 'txt' ? 'txt' : 'json';
     const rel = await centralEntradasService.exportarRelatorioHomologacao(req.params.id, formato);
@@ -575,7 +682,7 @@ router.get('/homologacao/:id/exportar', async (req, res) => {
     const code = error.statusCode || 500;
     return res.status(code).json({ error: error.message });
   }
-});
+}));
 
 router.post('/sincronizar-ao-abrir', async (req, res) => {
   try {
@@ -588,13 +695,7 @@ router.post('/sincronizar-ao-abrir', async (req, res) => {
         mensagemAmigavel: 'Sincronização ao abrir está desabilitada nas configurações.'
       });
     }
-    return res.status(statusHttpSync(resultado)).json({
-      ...resultado,
-      mensagemAmigavel: resultado.mensagemAmigavel
-        || resultado.mensagem
-        || (resultado.erros && resultado.erros[0])
-        || null
-    });
+    return res.status(statusHttpSync(resultado)).json(jsonSyncCentral(resultado));
   } catch (error) {
     return res.status(422).json({
       sucesso: false,
@@ -625,26 +726,22 @@ router.get('/fornecedor/:cnpj/estatisticas', async (req, res) => {
 router.get('/', async (req, res) => {
   try {
     const filtros = montarFiltrosQuery(req.query);
-    if (!filtros.empresaId && req.empresaId) {
-      filtros.empresaId = req.empresaId;
-    }
+    const ctx = await resolverEmpresaParaCentral({
+      req,
+      empresaId: req.empresaId
+    });
+    await aplicarFiltroLeituraEmpresasCentral({ req, ctx, dest: filtros });
     const resultado = await centralEntradasService.listarDocumentos(filtros);
     return res.json(resultado);
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    return responderErroDocumentoCentral(res, error);
   }
 });
 
 router.post('/sincronizar', async (req, res) => {
   try {
     const resultado = await centralEntradasService.sincronizar();
-    return res.status(statusHttpSync(resultado)).json({
-      ...resultado,
-      mensagemAmigavel: resultado.mensagemAmigavel
-        || resultado.mensagem
-        || (resultado.erros && resultado.erros[0])
-        || null
-    });
+    return res.status(statusHttpSync(resultado)).json(jsonSyncCentral(resultado));
   } catch (error) {
     return res.status(422).json({
       sucesso: false,
@@ -661,11 +758,28 @@ router.get('/buscar-chave', async (req, res) => {
       return res.status(400).json({ error: 'Informe uma chave de acesso com 44 dígitos' });
     }
 
-    const resultado = await centralEntradasService.buscarPorChave(chave);
+    const ctx = await resolverEmpresaParaCentral({
+      req,
+      empresaId: req.empresaId
+    });
+    const resultado = await centralEntradasService.buscarPorChave(chave, {
+      empresaId: ctx.empresaId,
+      modo: ctx.modo
+    });
     return res.json(resultado);
   } catch (error) {
+    if (error && (error.code === 'EMPRESA_CENTRAL_AUSENTE'
+      || error.code === 'EMPRESA_OPERACIONAL_AUSENTE'
+      || error.code === 'EMPRESA_OPERACIONAL_AMBIGUA'
+      || error.code === 'EMPRESA_OPERACIONAL_INVALIDA'
+      || error.code === 'EMPRESA_CENTRAL_INATIVA'
+      || error.code === 'EMPRESA_CENTRAL_INVALIDA'
+      || error.code === 'EMPRESA_CENTRAL_AMBIGUA'
+      || error.code === 'DOCUMENTO_NAO_ENCONTRADO')) {
+      return responderErroDocumentoCentral(res, error);
+    }
     const code = error.statusCode || 500;
-    return res.status(code).json({ error: error.message });
+    return res.status(code).json({ error: error.message, code: error.code });
   }
 });
 
@@ -692,21 +806,27 @@ router.post('/upload', (req, res, next) => {
   }
 });
 
-router.post('/:id/processar', async (req, res) => {
+router.post('/:id/processar', comDocumentoAutorizado(async (req, res) => {
   try {
     const { usuario_id: usuarioId, forcar_reprocessamento: forcarReprocessamento } = req.body || {};
-    const resultado = await centralEntradasService.processarDocumento(req.params.id, {
-      usuarioId,
-      forcarReprocessamento: Boolean(forcarReprocessamento)
-    });
+    const resultado = await centralEntradasService.processarDocumento(
+      req.params.id,
+      opcoesEmpresaDocumento(req, {
+        usuarioId,
+        forcarReprocessamento: Boolean(forcarReprocessamento)
+      })
+    );
 
     const statusCode = resultado.sucesso ? 200 : 400;
     return res.status(statusCode).json(resultado);
   } catch (error) {
+    if (error.code === 'DOCUMENTO_NAO_ENCONTRADO' || error.code === 'EMPRESA_DOCUMENTO_NAO_RESOLVIDA') {
+      return responderErroDocumentoCentral(res, error);
+    }
     const code = error.statusCode || 500;
     return res.status(code).json({ error: error.message, sucesso: false });
   }
-});
+}));
 
 /**
  * RC7.4.6 — HTTP do ciclo DF-e: resultado de negócio ≠ erro técnico.
@@ -719,40 +839,46 @@ function statusHttpCicloDfe(resultado) {
   return 200;
 }
 
-router.post('/:id/ciclo-dfe', async (req, res) => {
+router.post('/:id/ciclo-dfe', comDocumentoAutorizado(async (req, res) => {
   try {
     const { usuario_id: usuarioId, confirmado } = req.body || {};
     const resultado = await centralEntradasService.processarCicloDfeDocumento(
       req.params.id,
-      {
+      opcoesEmpresaDocumento(req, {
         usuarioId,
         confirmado: confirmado === true
-      }
+      })
     );
     return res.status(statusHttpCicloDfe(resultado)).json(resultado);
   } catch (error) {
+    if (error.code === 'DOCUMENTO_NAO_ENCONTRADO' || error.code === 'EMPRESA_DOCUMENTO_NAO_RESOLVIDA') {
+      return responderErroDocumentoCentral(res, error);
+    }
     const code = error.statusCode || 500;
     return res.status(code).json({ error: error.message, sucesso: false });
   }
-});
+}));
 
 /**
  * RC3.4.2 — Solicitar XML Completo (exceção manual via MIRX + Gate).
  * Não consulta SEFAZ se Gate bloqueado (656); não reenfileira em SLEEP.
  */
-router.post('/:id/solicitar-xml-completo', async (req, res) => {
+router.post('/:id/solicitar-xml-completo', comDocumentoAutorizado(async (req, res) => {
   try {
     const { usuario_id: usuarioId } = req.body || {};
     const resultado = await centralEntradasService.solicitarXmlCompletoManual(
       req.params.id,
-      { usuarioId }
+      opcoesEmpresaDocumento(req, { usuarioId })
     );
     return res.status(200).json(resultado);
   } catch (error) {
+    if (error.code === 'DOCUMENTO_NAO_ENCONTRADO' || error.code === 'EMPRESA_DOCUMENTO_NAO_RESOLVIDA') {
+      return responderErroDocumentoCentral(res, error);
+    }
     const code = error.statusCode || 500;
     return res.status(code).json({ error: error.message, sucesso: false });
   }
-});
+}));
 
 /** RC3.6.H — bloqueia recuperação pelo Portal quando feature flag desativada. */
 router.use((req, res, next) => {
@@ -771,7 +897,7 @@ router.use((req, res, next) => {
 /**
  * RC3.6.H — Log de chave copiada manualmente pelo usuário.
  */
-router.post('/:id/chave-copiada', async (req, res) => {
+router.post('/:id/chave-copiada', comDocumentoAutorizado(async (req, res) => {
   try {
     const body = req.body || {};
     const resultado = await centralEntradasService.registrarChaveCopiada(req.params.id, {
@@ -780,14 +906,17 @@ router.post('/:id/chave-copiada', async (req, res) => {
     });
     return res.json(resultado);
   } catch (error) {
+    if (error.code === 'DOCUMENTO_NAO_ENCONTRADO' || error.code === 'EMPRESA_DOCUMENTO_NAO_RESOLVIDA') {
+      return responderErroDocumentoCentral(res, error);
+    }
     return res.status(error.statusCode || 500).json({ error: error.message, sucesso: false });
   }
-});
+}));
 
 /**
  * RC3.5.0 — Avalia elegibilidade para Recuperar pelo Portal Nacional.
  */
-router.get('/:id/recuperar-portal-nacional', async (req, res) => {
+router.get('/:id/recuperar-portal-nacional', comDocumentoAutorizado(async (req, res) => {
   try {
     const incluirAguardandoXml = req.query.incluirAguardandoXml === '1'
       || req.query.incluir_aguardando_xml === '1';
@@ -796,14 +925,17 @@ router.get('/:id/recuperar-portal-nacional', async (req, res) => {
     });
     return res.json(resultado);
   } catch (error) {
+    if (error.code === 'DOCUMENTO_NAO_ENCONTRADO' || error.code === 'EMPRESA_DOCUMENTO_NAO_RESOLVIDA') {
+      return responderErroDocumentoCentral(res, error);
+    }
     return res.status(error.statusCode || 500).json({ error: error.message, sucesso: false });
   }
-});
+}));
 
 /**
  * RC3.6.0 — Registra abertura da Central de Recuperação CDS.
  */
-router.post('/:id/recuperar-portal-nacional/central-aberta', async (req, res) => {
+router.post('/:id/recuperar-portal-nacional/central-aberta', comDocumentoAutorizado(async (req, res) => {
   try {
     const body = req.body || {};
     const resultado = await centralEntradasService.registrarCentralRecuperacaoAberta(req.params.id, {
@@ -814,14 +946,17 @@ router.post('/:id/recuperar-portal-nacional/central-aberta', async (req, res) =>
     });
     return res.json(resultado);
   } catch (error) {
+    if (error.code === 'DOCUMENTO_NAO_ENCONTRADO' || error.code === 'EMPRESA_DOCUMENTO_NAO_RESOLVIDA') {
+      return responderErroDocumentoCentral(res, error);
+    }
     return res.status(error.statusCode || 500).json({ error: error.message, sucesso: false });
   }
-});
+}));
 
 /**
  * RC3.6.0 — Usuário confirmou "Consultar no Portal Nacional".
  */
-router.post('/:id/recuperar-portal-nacional/consulta-iniciada', async (req, res) => {
+router.post('/:id/recuperar-portal-nacional/consulta-iniciada', comDocumentoAutorizado(async (req, res) => {
   try {
     const body = req.body || {};
     const resultado = await centralEntradasService.registrarConsultaPortalIniciada(req.params.id, {
@@ -832,14 +967,17 @@ router.post('/:id/recuperar-portal-nacional/consulta-iniciada', async (req, res)
     });
     return res.json(resultado);
   } catch (error) {
+    if (error.code === 'DOCUMENTO_NAO_ENCONTRADO' || error.code === 'EMPRESA_DOCUMENTO_NAO_RESOLVIDA') {
+      return responderErroDocumentoCentral(res, error);
+    }
     return res.status(error.statusCode || 500).json({ error: error.message, sucesso: false });
   }
-});
+}));
 
 /**
  * RC3.6.0 — Download detectado pelo Electron will-download.
  */
-router.post('/:id/recuperar-portal-nacional/download-detectado', async (req, res) => {
+router.post('/:id/recuperar-portal-nacional/download-detectado', comDocumentoAutorizado(async (req, res) => {
   try {
     const body = req.body || {};
     const resultado = await centralEntradasService.registrarDownloadDetectadoPortalNfe(req.params.id, {
@@ -850,14 +988,17 @@ router.post('/:id/recuperar-portal-nacional/download-detectado', async (req, res
     });
     return res.json(resultado);
   } catch (error) {
+    if (error.code === 'DOCUMENTO_NAO_ENCONTRADO' || error.code === 'EMPRESA_DOCUMENTO_NAO_RESOLVIDA') {
+      return responderErroDocumentoCentral(res, error);
+    }
     return res.status(error.statusCode || 500).json({ error: error.message, sucesso: false });
   }
-});
+}));
 
 /**
  * RC3.5.0 — Registra abertura do Portal (timeline/eventos).
  */
-router.post('/:id/recuperar-portal-nacional/abrir', async (req, res) => {
+router.post('/:id/recuperar-portal-nacional/abrir', comDocumentoAutorizado(async (req, res) => {
   try {
     const body = req.body || {};
     const resultado = await centralEntradasService.registrarPortalNfeAberto(req.params.id, {
@@ -869,9 +1010,12 @@ router.post('/:id/recuperar-portal-nacional/abrir', async (req, res) => {
     });
     return res.json(resultado);
   } catch (error) {
+    if (error.code === 'DOCUMENTO_NAO_ENCONTRADO' || error.code === 'EMPRESA_DOCUMENTO_NAO_RESOLVIDA') {
+      return responderErroDocumentoCentral(res, error);
+    }
     return res.status(error.statusCode || 500).json({ error: error.message, sucesso: false });
   }
-});
+}));
 
 /**
  * RC3.5.0 — Importa XML baixado do Portal via pipeline oficial RC3.4.9.
@@ -887,7 +1031,7 @@ router.post('/:id/recuperar-portal-nacional/importar', (req, res, next) => {
     });
   }
   return next();
-}, async (req, res) => {
+}, comDocumentoAutorizado(async (req, res) => {
   try {
     const body = req.body || {};
     let arquivo = null;
@@ -915,60 +1059,76 @@ router.post('/:id/recuperar-portal-nacional/importar', (req, res, next) => {
 
     return res.status(resultado.sucesso ? 200 : 400).json(resultado);
   } catch (error) {
+    if (error.code === 'DOCUMENTO_NAO_ENCONTRADO' || error.code === 'EMPRESA_DOCUMENTO_NAO_RESOLVIDA') {
+      return responderErroDocumentoCentral(res, error);
+    }
     return res.status(error.statusCode || 500).json({ error: error.message, sucesso: false });
   }
-});
+}));
 
-router.post('/:id/revisar/concluir', async (req, res) => {
+router.post('/:id/revisar/concluir', comDocumentoAutorizado(async (req, res) => {
   try {
     const { itens, usuario_id: usuarioId } = req.body || {};
-    const resultado = await centralEntradasService.concluirRevisao(req.params.id, {
-      itens,
-      usuarioId
-    });
+    const resultado = await centralEntradasService.concluirRevisao(
+      req.params.id,
+      opcoesEmpresaDocumento(req, { itens, usuarioId })
+    );
     return res.json(resultado);
   } catch (error) {
+    if (error.code === 'DOCUMENTO_NAO_ENCONTRADO' || error.code === 'EMPRESA_DOCUMENTO_NAO_RESOLVIDA') {
+      return responderErroDocumentoCentral(res, error);
+    }
     const code = error.statusCode || 500;
     return res.status(code).json({ error: error.message });
   }
-});
+}));
 
-router.get('/:id/payload-compra', async (req, res) => {
+router.get('/:id/payload-compra', comDocumentoAutorizado(async (req, res) => {
   try {
-    const payload = await centralEntradasService.obterPayloadCompra(req.params.id);
+    const payload = await centralEntradasService.obterPayloadCompra(
+      req.params.id,
+      opcoesEmpresaDocumento(req)
+    );
     return res.json(payload);
   } catch (error) {
+    if (error.code === 'DOCUMENTO_NAO_ENCONTRADO' || error.code === 'EMPRESA_DOCUMENTO_NAO_RESOLVIDA') {
+      return responderErroDocumentoCentral(res, error);
+    }
     const code = error.statusCode || 500;
     return res.status(code).json({ error: error.message });
   }
-});
+}));
 
-router.post('/:id/abrir-compra', async (req, res) => {
+router.post('/:id/abrir-compra', comDocumentoAutorizado(async (req, res) => {
   try {
     const { usuario_id: usuarioId } = req.body || {};
-    const resultado = await centralEntradasService.abrirCompra(req.params.id, { usuarioId });
+    const resultado = await centralEntradasService.abrirCompra(
+      req.params.id,
+      opcoesEmpresaDocumento(req, { usuarioId })
+    );
     return res.json(resultado);
   } catch (error) {
+    if (error.code === 'DOCUMENTO_NAO_ENCONTRADO' || error.code === 'EMPRESA_DOCUMENTO_NAO_RESOLVIDA') {
+      return responderErroDocumentoCentral(res, error);
+    }
     const code = error.statusCode || 500;
     return res.status(code).json({ error: error.message });
   }
-});
+}));
 
-router.get('/:id/historico', async (req, res) => {
+router.get('/:id/historico', comDocumentoAutorizado(async (req, res) => {
   try {
-    const documento = await centralEntradasService.obterDocumento(req.params.id);
-    if (!documento) {
-      return res.status(404).json({ error: 'Documento não encontrado' });
-    }
-
     const historico = await centralEntradasService.obterHistorico(req.params.id);
     return res.json({ historico });
   } catch (error) {
+    if (error.code === 'DOCUMENTO_NAO_ENCONTRADO' || error.code === 'EMPRESA_DOCUMENTO_NAO_RESOLVIDA') {
+      return responderErroDocumentoCentral(res, error);
+    }
     return res.status(500).json({ error: error.message });
   }
-});
+}));
 
-router.get('/:id/xml', async (req, res) => {
+router.get('/:id/xml', comDocumentoAutorizado(async (req, res) => {
   try {
     const xmlDoc = await centralEntradasService.obterXmlDocumento(req.params.id);
     if (!xmlDoc) {
@@ -976,47 +1136,59 @@ router.get('/:id/xml', async (req, res) => {
     }
     return res.json(xmlDoc);
   } catch (error) {
+    if (error.code === 'DOCUMENTO_NAO_ENCONTRADO' || error.code === 'EMPRESA_DOCUMENTO_NAO_RESOLVIDA') {
+      return responderErroDocumentoCentral(res, error);
+    }
     return res.status(500).json({ error: error.message });
   }
-});
+}));
 
-router.get('/:id/parse', async (req, res) => {
+router.get('/:id/parse', comDocumentoAutorizado(async (req, res) => {
   try {
     const resultado = await centralEntradasService.obterParseDocumento(req.params.id);
     if (!resultado) {
-      return res.status(404).json({ error: 'Documento não encontrado' });
+      return responderErroDocumentoCentral(res, { code: 'DOCUMENTO_NAO_ENCONTRADO', statusCode: 404 });
     }
     return res.json(resultado);
   } catch (error) {
+    if (error.code === 'DOCUMENTO_NAO_ENCONTRADO' || error.code === 'EMPRESA_DOCUMENTO_NAO_RESOLVIDA') {
+      return responderErroDocumentoCentral(res, error);
+    }
     return res.status(500).json({ error: error.message });
   }
-});
+}));
 
-router.get('/:id/score', async (req, res) => {
+router.get('/:id/score', comDocumentoAutorizado(async (req, res) => {
   try {
     const score = await centralEntradasService.obterScoreDocumento(req.params.id);
     if (!score) {
-      return res.status(404).json({ error: 'Documento não encontrado' });
+      return responderErroDocumentoCentral(res, { code: 'DOCUMENTO_NAO_ENCONTRADO', statusCode: 404 });
     }
     return res.json(score);
   } catch (error) {
+    if (error.code === 'DOCUMENTO_NAO_ENCONTRADO' || error.code === 'EMPRESA_DOCUMENTO_NAO_RESOLVIDA') {
+      return responderErroDocumentoCentral(res, error);
+    }
     return res.status(500).json({ error: error.message });
   }
-});
+}));
 
-router.get('/:id', async (req, res) => {
+router.get('/:id', comDocumentoAutorizado(async (req, res) => {
   try {
     const detalhe = await centralEntradasService.obterDocumentoDetalhe(req.params.id);
     if (!detalhe) {
-      return res.status(404).json({ error: 'Documento não encontrado' });
+      return responderErroDocumentoCentral(res, { code: 'DOCUMENTO_NAO_ENCONTRADO', statusCode: 404 });
     }
     return res.json(detalhe);
   } catch (error) {
+    if (error.code === 'DOCUMENTO_NAO_ENCONTRADO' || error.code === 'EMPRESA_DOCUMENTO_NAO_RESOLVIDA') {
+      return responderErroDocumentoCentral(res, error);
+    }
     return res.status(500).json({ error: error.message });
   }
-});
+}));
 
-router.patch('/:id/status', async (req, res) => {
+router.patch('/:id/status', comDocumentoAutorizado(async (req, res) => {
   try {
     const { status, detalhe, usuario_id: usuarioId } = req.body || {};
 
@@ -1024,20 +1196,23 @@ router.patch('/:id/status', async (req, res) => {
       return res.status(400).json({ error: 'Campo status é obrigatório' });
     }
 
-    const documento = await centralEntradasService.alterarStatus(req.params.id, status, {
+    const documento = await centralEntradasService.alterarStatus(req.params.id, status, opcoesEmpresaDocumento(req, {
       detalhe,
       usuarioId: usuarioId ?? req.user?.id,
       usuarioNome: req.user?.username || req.user?.nome,
       perfilUsuario: req.user?.perfil,
       roleUsuario: req.user?.role,
       ipRequisicao: req.ip
-    });
+    }));
 
     return res.json({ documento });
   } catch (error) {
+    if (error.code === 'DOCUMENTO_NAO_ENCONTRADO' || error.code === 'EMPRESA_DOCUMENTO_NAO_RESOLVIDA') {
+      return responderErroDocumentoCentral(res, error);
+    }
     const code = error.statusCode || 500;
     return res.status(code).json({ error: error.message });
   }
-});
+}));
 
 module.exports = router;

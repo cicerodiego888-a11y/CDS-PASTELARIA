@@ -31,7 +31,7 @@ function renderFiscal() {
         ? `<div class="alert alert-info py-2 mb-3">
                 <i class="fas fa-info-circle"></i>
                 A configuração fiscal (certificado, CSC, numeração) está em
-                <a href="#" onclick="loadPage('configuracoes-avancadas'); return false;">Centro de Configurações</a>.
+                <a href="#" onclick="loadPage('empresas'); return false;">Empresas → Configuração Fiscal</a>.
            </div>`
         : '';
 

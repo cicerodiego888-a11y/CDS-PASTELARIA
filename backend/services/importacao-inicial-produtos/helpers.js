@@ -476,18 +476,12 @@ function resolverFatorConversao(apresentacoes) {
 }
 
 /**
- * ESTOQUE INICIAL = Qtd documento × fator de conversão (unidade base).
+ * MUC-07 — orquestra estoque inicial (MUC se houver unidades; senão fator legado).
+ * Não é conversor autônomo.
  */
-function calcularEstoqueInicial({ quantidadeDocumento, fatorConversao }) {
-  const origemRaw = Number(quantidadeDocumento);
-  const fatorRaw = Number(fatorConversao);
-  const quantidade_origem = Number.isFinite(origemRaw) && origemRaw >= 0 ? origemRaw : 0;
-  const fator_conversao = Number.isFinite(fatorRaw) && fatorRaw > 0 ? fatorRaw : 1;
-  return {
-    quantidade_origem,
-    fator_conversao,
-    estoque_inicial: arredondarCasas(quantidade_origem * fator_conversao, 3)
-  };
+function calcularEstoqueInicial(input = {}) {
+  const { resolverEstoqueInicialImportacao } = require('./resolverEstoqueInicialImportacao');
+  return resolverEstoqueInicialImportacao(input);
 }
 
 /**

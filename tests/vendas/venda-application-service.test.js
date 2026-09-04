@@ -40,6 +40,14 @@ describe('VendaApplicationService — Sprint 2.0 / 2.2', () => {
       assert.ok(typeof VendaApplicationService.criarVenda === 'function');
       assert.ok(typeof VendaApplicationService.criarVendaComContexto === 'function');
       assert.equal(req.vendaContext.origem, 'PDV');
+
+      const reqMulti = { body: { total: 10, origem: 'PDV' } };
+      const resMulti = { statusCode: 200 };
+      const resultMulti = VendaApplicationService.criarVenda(reqMulti, resMulti, {
+        obterModoOperacaoVenda: () => 'MULTIEMPRESA'
+      });
+      assert.equal(resultMulti, 'DELEGATED_OK');
+      assert.equal(reqMulti.vendaContext.modo_operacao_venda, 'MULTIEMPRESA');
     } finally {
       if (originalCache) require.cache[pagamentoPath] = originalCache;
       else delete require.cache[pagamentoPath];

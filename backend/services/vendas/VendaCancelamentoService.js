@@ -8,13 +8,38 @@ const VendaDevolucaoService = require('./VendaDevolucaoService');
 const VendaFiscalService = require('./VendaFiscalService');
 const { cancelarFinanceiroVenda } = require('./VendaFinanceiroService');
 const mpfc = require('../mpfc');
-const { montarOpcoesRetornoEstoqueVenda } = require('./creditoEstoqueVendaViaPorta');
+const { montarOpcoesRetornoEstoqueDaVenda } = require('./creditoEstoqueVendaViaPorta');
+const { estornarConsumoFichaTecnicaDaVendaCb } = require('../produtos/FichaTecnicaConsumoService');
+const {
+  exigirOperacaoReversaoDaVenda,
+  responderErroEmpresaVenda
+} = require('./VendaEmpresaContextoService');
+const {
+  resolverEmpresaDaOrigemFinanceira
+} = require('../financeiro/FinanceiroEmpresaContextoService');
 
 const { devolverEstoqueItensVenda } = VendaDevolucaoService;
 const {
   buscarNfceAutorizadaVenda,
   cancelarNfceAutorizadaVenda
 } = VendaFiscalService;
+
+/**
+ * Único ponto de estoque no cancelamento: item comercial + estorno do snapshot da ficha.
+ * Empresa: vendas.empresa_id (montarOpcoesRetornoEstoqueDaVenda).
+ */
+function devolverEstoqueEEstornarFichaDaVenda(itens, venda, req, dbConn, callback) {
+  const opcoes = montarOpcoesRetornoEstoqueDaVenda(venda, req, 'cancelamento_venda', dbConn);
+  devolverEstoqueItensVenda(itens, (estErr) => {
+    if (estErr) return callback(estErr);
+    estornarConsumoFichaTecnicaDaVendaCb({
+      vendaId: Number(venda.id),
+      empresaId: opcoes.empresaId,
+      db: dbConn,
+      usuarioId: opcoes.usuarioId
+    }, callback);
+  }, opcoes);
+}
 
 /**
  * RC8.2.2 — política operacional da venda via snapshot (nunca configuração atual).
@@ -54,9 +79,10 @@ db.get('SELECT * FROM vendas WHERE id = ?', [id], (err, venda) => {
     res.status(500).json({ error: err.message });
     return;
   }
-  if (!venda) {
-    res.status(404).json({ error: 'Venda não encontrada.' });
-    return;
+  try {
+    exigirOperacaoReversaoDaVenda(venda, req.empresaId);
+  } catch (ownErr) {
+    return responderErroEmpresaVenda(res, ownErr);
   }
   if (venda.status !== 'concluida') {
     res.status(400).json({ error: 'Apenas vendas concluídas podem ser canceladas.' });
@@ -117,8 +143,8 @@ db.get('SELECT * FROM vendas WHERE id = ?', [id], (err, venda) => {
                 INSERT INTO financeiro (
                   tipo, descricao, valor, data_movimento, categoria, forma_pagamento,
                   referencia_id, referencia_tipo, status, origem, documento, vencimento,
-                  venda_id, baixado_em
-                ) VALUES ('despesa', ?, ?, ?, 'estorno_venda', 'estorno', ?, 'estorno_venda', 'pago', 'cancelamento_venda', ?, ?, ?, ?)
+                  venda_id, baixado_em, empresa_id
+                ) VALUES ('despesa', ?, ?, ?, 'estorno_venda', 'estorno', ?, 'estorno_venda', 'pago', 'cancelamento_venda', ?, ?, ?, ?, ?)
               `, [
                 `Estorno cancelamento ${venda.codigo}`,
                 venda.total,
@@ -127,7 +153,8 @@ db.get('SELECT * FROM vendas WHERE id = ?', [id], (err, venda) => {
                 venda.codigo,
                 venda.data_venda,
                 id,
-                venda.data_venda
+                venda.data_venda,
+                resolverEmpresaDaOrigemFinanceira({ venda })
               ], (finErr) => {
                 if (finErr) {
                   db.run('ROLLBACK');
@@ -166,14 +193,14 @@ db.get('SELECT * FROM vendas WHERE id = ?', [id], (err, venda) => {
         });
       };
 
-      devolverEstoqueItensVenda(itens, (estErr) => {
+      devolverEstoqueEEstornarFichaDaVenda(itens, venda, req, db, (estErr) => {
         if (estErr) {
           db.run('ROLLBACK');
           res.status(500).json({ error: estErr.message });
           return;
         }
         finalizarCancelamento();
-      }, montarOpcoesRetornoEstoqueVenda(req, 'cancelamento_venda', db));
+      });
     });
   });
   };
@@ -194,7 +221,7 @@ db.get('SELECT * FROM vendas WHERE id = ?', [id], (err, venda) => {
       });
     }
 
-    cancelarNfceAutorizadaVenda(id, motivo)
+    cancelarNfceAutorizadaVenda(id, motivo, { empresaIdContexto: req.empresaId })
       .then(() => executarCancelamentoVenda())
       .catch((cancelErr) => res.status(400).json({ error: cancelErr.message }));
   });
@@ -206,10 +233,21 @@ db.get(
   'SELECT * FROM vendas WHERE id = ?',
   [vendaId],
   (err, venda) => {
-    if (err || !venda) {
-      return res.status(404).json({
+    if (err) {
+      return res.status(500).json({
         sucesso: false,
-        mensagem: 'Venda não encontrada.'
+        mensagem: err.message
+      });
+    }
+    try {
+      exigirOperacaoReversaoDaVenda(venda, req.empresaId);
+    } catch (ownErr) {
+      const status = ownErr.statusCode || ownErr.status || 400;
+      return res.status(status).json({
+        sucesso: false,
+        mensagem: ownErr.message || 'Venda não encontrada.',
+        error: ownErr.message,
+        code: ownErr.code
       });
     }
 
@@ -245,7 +283,7 @@ db.get(
                   });
                 }
 
-                devolverEstoqueItensVenda(itens, (estErr) => {
+                devolverEstoqueEEstornarFichaDaVenda(itens, venda, req, db, (estErr) => {
                   if (estErr) {
                     db.run('ROLLBACK');
                     return res.status(500).json({
@@ -330,7 +368,7 @@ db.get(
                       }
                     );
                   });
-                }, montarOpcoesRetornoEstoqueVenda(req, 'cancelamento_venda', db));
+                });
               }
             );
           });
@@ -349,11 +387,12 @@ db.get(
           });
         }
 
-        cancelarNfceAutorizadaVenda(vendaId, justificativa)
+        cancelarNfceAutorizadaVenda(vendaId, justificativa, { empresaIdContexto: req.empresaId })
           .then(() => executarCancelamentoLocal())
           .catch((cancelErr) => res.status(400).json({
             sucesso: false,
-            mensagem: cancelErr.message
+            mensagem: cancelErr.message,
+            code: cancelErr.code
           }));
       });
     };
@@ -387,5 +426,6 @@ module.exports = {
   cancelarRecebimentosVenda,
   cancelarVendaPut,
   cancelarVendaPost,
-  anexarPoliticaSnapshotAuditoria
+  anexarPoliticaSnapshotAuditoria,
+  devolverEstoqueEEstornarFichaDaVenda
 };

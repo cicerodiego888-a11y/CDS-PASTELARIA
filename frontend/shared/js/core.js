@@ -101,6 +101,7 @@ const PAGINAS_MODULO_FISCAL = Object.freeze([
 /** Catálogo de pesquisa de navegação (telas). Itens fiscais só aparecem com fiscalHabilitado. */
 const CATALOGO_PESQUISA_PAGINAS = Object.freeze([
     { page: 'dashboard', titulo: 'Dashboard', keywords: 'painel inicio home' },
+    { page: 'mis', titulo: 'MIS', keywords: 'mis gerencial indicadores faturamento' },
     { page: 'monitoring', titulo: 'Central de Monitoramento', keywords: 'monitor fiscal indicadores sefaz', fiscal: true },
     { page: 'vendas', titulo: 'Histórico de Vendas', keywords: 'vendas histórico comercial' },
     { page: 'entregas', titulo: 'Entregas', keywords: 'entrega delivery', recurso: 'vendasEntrega' },

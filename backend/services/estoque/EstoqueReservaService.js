@@ -3,6 +3,9 @@
  * NÃO baixa saldo_fiscal / saldo_nao_fiscal / estoque_atual.
  * reservado_fiscal / reservado_nao_fiscal: escritos somente via reservasPublico.
  * Tracking permanece em venda_estoque_reservas.
+ *
+ * Sprint 05.52 — criação: vendas.empresa_id é a fonte de ownership.
+ * COMPAT não decide empresa neste fluxo.
  */
 
 'use strict';
@@ -13,7 +16,7 @@ const reservasPublico = require('../fiscalNaoFiscal/reservasPublico');
 const { TipoSaldo } = require('../fiscalNaoFiscal/constants');
 const { resolverEmpresaId } = require('../fiscalNaoFiscal/empresaContexto');
 
-/** Compat explícita: PDV/entrega ainda sem empresa no JWT. */
+/** @deprecated 05.52 — não é mais fallback do helper operacional PDV. */
 const MOTIVO_COMPAT_RESERVA_PDV = 'COMPAT_RESERVA_PDV_PRE_MULTIEMPRESA';
 
 function dbDeOpcoes(opcoes) {
@@ -21,42 +24,38 @@ function dbDeOpcoes(opcoes) {
 }
 
 /**
- * 03.26 — req.empresaId (contexto validado) é a única autoridade.
- * body / query / contexto / ctx / CNPJ não substituem.
+ * Extrai empresaId já anexado em req (middleware). Não é ownership da reserva.
  */
 function empresaIdDoReqReservaPdv(req) {
   return resolverEmpresaId(req && req.empresaId);
 }
 
+/**
+ * Opções da porta F×NF para PDV.
+ * Empresa explícita obrigatória. Sem COMPAT, sem descoberta de header/body/usuário.
+ */
 function montarOptsPortaReservaPdv(fonte = {}, dbConn) {
-  const empresaId = empresaIdDoReqReservaPdv(fonte.req)
-    ?? empresaIdDoReqReservaPdv(fonte)
-    ?? resolverEmpresaId(fonte.empresaId);
+  const empresaId = resolverEmpresaId(
+    fonte.empresaId != null ? fonte.empresaId : fonte.empresa_id
+  );
 
   const base = {
     db: dbConn || dbDeOpcoes(fonte),
-    usuarioId: fonte.usuarioId || fonte.operadorId || fonte.user?.id || fonte.req?.operadorId || fonte.req?.user?.id || null,
+    usuarioId: fonte.usuarioId || fonte.operadorId || fonte.user?.id
+      || fonte.req?.operadorId || fonte.req?.user?.id || null,
     validarEmpresa: fonte.validarEmpresa
   };
 
   if (empresaId != null) {
-    return { ...base, empresaId, legado: false, motivoCompat: null };
+    return { ...base, empresaId, legado: false, motivoCompat: null, modoLegadoSemEmpresa: false };
   }
 
-  if (fonte.exigirEmpresa === true) {
-    const err = new Error(
-      'empresaId é obrigatório para operações de saldo/reserva. Informe empresa_id/empresaId no contexto.'
-    );
-    err.code = 'EMPRESA_OBRIGATORIA';
-    throw err;
-  }
-
-  return {
-    ...base,
-    modoLegadoSemEmpresa: true,
-    motivoCompat: fonte.motivoCompat || MOTIVO_COMPAT_RESERVA_PDV,
-    legado: true
-  };
+  const err = new Error(
+    'empresaId é obrigatório para reserva PDV. Informe empresa da venda ou do contexto operacional.'
+  );
+  err.code = 'EMPRESA_CONTEXT_REQUIRED';
+  err.status = 400;
+  throw err;
 }
 
 function run(sql, params = [], dbConn = db) {
@@ -66,6 +65,21 @@ function run(sql, params = [], dbConn = db) {
       resolve({ lastID: this.lastID, changes: this.changes });
     });
   });
+}
+
+async function garantirSchemaReservasVenda(dbConn) {
+  try {
+    await run(
+      `ALTER TABLE venda_estoque_reservas ADD COLUMN empresa_id INTEGER REFERENCES empresas(id)`,
+      [],
+      dbConn
+    );
+  } catch (err) {
+    const msg = String(err && err.message || '');
+    if (!msg.includes('duplicate column name') && !msg.includes('already exists')) {
+      throw err;
+    }
+  }
 }
 
 function get(sql, params = [], dbConn = db) {
@@ -85,9 +99,43 @@ async function aplicarReservadoViaPorta(produtoId, qF, qNf, optsPorta, sentido) 
   if (qNf > 0) await fn(produtoId, TipoSaldo.NAO_FISCAL, qNf, optsPorta);
 }
 
+function erroVendaNaoEncontrada(empresaId) {
+  const err = new Error('Venda não encontrada.');
+  err.code = 'VENDA_NAO_ENCONTRADA';
+  err.status = 404;
+  if (empresaId != null) err.empresa_id = empresaId;
+  return err;
+}
+
+function erroOwnershipVenda() {
+  const err = new Error('Empresa é obrigatória para criar reserva da venda.');
+  err.code = 'EMPRESA_OWNERSHIP_REQUIRED';
+  err.status = 400;
+  return err;
+}
+
+/**
+ * Resolve empresa da venda persistida para criação de reserva PDV.
+ * Fonte: vendas.empresa_id. Caller só autoriza.
+ */
+function resolverEmpresaParaCriacaoReservaPdv(venda, empresaIdCaller) {
+  if (!venda) {
+    throw erroVendaNaoEncontrada(empresaIdCaller);
+  }
+  const dona = resolverEmpresaId(venda.empresa_id != null ? venda.empresa_id : venda.empresaId);
+  if (dona == null) {
+    throw erroOwnershipVenda();
+  }
+  const caller = resolverEmpresaId(empresaIdCaller);
+  if (caller != null && caller !== dona) {
+    throw erroVendaNaoEncontrada(caller);
+  }
+  return dona;
+}
+
 /**
  * Incrementa reserva no produto (porta) e registra linha da reserva.
- * Deve ser chamado DENTRO de uma transação já aberta pelo caller quando possível.
+ * Ownership = vendas.empresa_id. Deve ser chamado DENTRO de TX do caller quando possível.
  */
 function reservarItem({
   vendaId,
@@ -107,56 +155,87 @@ function reservarItem({
   const qF = Number(quantidadeFiscal || 0);
   const qNf = Number(quantidadeNaoFiscal || 0);
   const dbConn = dbInjected || db;
+  const vid = Number(vendaId);
 
   if (qF <= 0 && qNf <= 0) {
     return callback(null);
   }
 
+  if (!Number.isInteger(vid) || vid <= 0) {
+    return callback(erroVendaNaoEncontrada(empresaId));
+  }
+
   dbConn.get(
-    `SELECT COALESCE(controla_estoque, 1) AS controla_estoque FROM produtos WHERE id = ?`,
-    [produtoId],
-    (errFlag, rowFlag) => {
-      if (errFlag) return callback(errFlag);
-      if (!produtoControlaEstoque(rowFlag || {})) {
-        return callback(null);
+    `SELECT id, empresa_id FROM vendas WHERE id = ?`,
+    [vid],
+    (errVenda, venda) => {
+      if (errVenda) {
+        const msg = String(errVenda.message || '');
+        if (msg.includes('no such table') || msg.includes('no such column')) {
+          return callback(erroVendaNaoEncontrada(empresaId));
+        }
+        return callback(errVenda);
       }
 
-      let optsPorta;
+      let empresaDona;
       try {
-        optsPorta = montarOptsPortaReservaPdv({
-          empresaId,
-          usuarioId,
-          exigirEmpresa,
-          db: dbConn
-        }, dbConn);
+        empresaDona = resolverEmpresaParaCriacaoReservaPdv(venda, empresaId);
       } catch (e) {
         return callback(e);
       }
 
-      aplicarReservadoViaPorta(produtoId, qF, qNf, optsPorta, 'reservar')
-        .then(() => run(
-          `
+      dbConn.get(
+        `SELECT COALESCE(controla_estoque, 1) AS controla_estoque FROM produtos WHERE id = ?`,
+        [produtoId],
+        (errFlag, rowFlag) => {
+          if (errFlag) return callback(errFlag);
+          if (!produtoControlaEstoque(rowFlag || {})) {
+            return callback(null);
+          }
+
+          let optsPorta;
+          try {
+            optsPorta = montarOptsPortaReservaPdv({
+              empresaId: empresaDona,
+              usuarioId,
+              exigirEmpresa: exigirEmpresa === true ? true : undefined,
+              db: dbConn
+            }, dbConn);
+          } catch (e) {
+            return callback(e);
+          }
+
+          aplicarReservadoViaPorta(produtoId, qF, qNf, optsPorta, 'reservar')
+            .then(() => garantirSchemaReservasVenda(dbConn))
+            .then(() => run(
+              `
               INSERT INTO venda_estoque_reservas (
                 venda_id, venda_item_id, produto_id,
                 quantidade_fiscal, quantidade_nao_fiscal,
-                status, criado_em
-              ) VALUES (?, ?, ?, ?, ?, 'ATIVA', CURRENT_TIMESTAMP)
+                status, criado_em, empresa_id
+              ) VALUES (?, ?, ?, ?, ?, 'ATIVA', CURRENT_TIMESTAMP, ?)
             `,
-          [vendaId, vendaItemId || null, produtoId, qF, qNf],
-          dbConn
-        ))
-        .then(() => callback(null))
-        .catch(callback);
+              [vid, vendaItemId || null, produtoId, qF, qNf, empresaDona],
+              dbConn
+            ))
+            .then(() => callback(null))
+            .catch(callback);
+        }
+      );
     }
   );
 }
 
 /**
  * Libera reservas ativas de uma venda (cancelamento / entrega).
+ * Fonte: venda_estoque_reservas.empresa_id. Sem COMPAT como dono.
  */
 async function liberarReservasDaVenda(vendaId, opcoes = {}) {
   const dbConn = dbDeOpcoes(opcoes);
-  const optsPorta = montarOptsPortaReservaPdv(opcoes, dbConn);
+  await garantirSchemaReservasVenda(dbConn);
+  const callerEmpresa = resolverEmpresaId(
+    opcoes.empresaId != null ? opcoes.empresaId : opcoes.empresa_id
+  ) ?? empresaIdDoReqReservaPdv(opcoes.req) ?? empresaIdDoReqReservaPdv(opcoes);
 
   const rows = await new Promise((resolve, reject) => {
     dbConn.all(
@@ -167,6 +246,32 @@ async function liberarReservasDaVenda(vendaId, opcoes = {}) {
   });
 
   for (const row of rows) {
+    const dona = resolverEmpresaId(row.empresa_id);
+    if (dona == null) {
+      const err = new Error('Reserva sem ownership empresarial identificável.');
+      err.code = 'EMPRESA_OWNERSHIP_REQUIRED';
+      throw err;
+    }
+    if (callerEmpresa != null && callerEmpresa !== dona) {
+      const err = new Error('empresa_id da reserva diverge da empresa informada na operação.');
+      err.code = 'RESERVA_EMPRESA_DIVERGENTE';
+      err.status = 409;
+      err.reserva_empresa_id = dona;
+      throw err;
+    }
+  }
+
+  let liberadas = 0;
+  for (const row of rows) {
+    const dona = resolverEmpresaId(row.empresa_id);
+    const optsPorta = {
+      db: dbConn,
+      empresaId: dona,
+      legado: false,
+      motivoCompat: null,
+      modoLegadoSemEmpresa: false,
+      usuarioId: opcoes.usuarioId || opcoes.operadorId || null
+    };
     const qF = Number(row.quantidade_fiscal || 0);
     const qNf = Number(row.quantidade_nao_fiscal || 0);
     await aplicarReservadoViaPorta(row.produto_id, qF, qNf, optsPorta, 'liberar');
@@ -175,9 +280,10 @@ async function liberarReservasDaVenda(vendaId, opcoes = {}) {
       [row.id],
       dbConn
     );
+    liberadas += 1;
   }
 
-  return { liberadas: rows.length };
+  return { liberadas };
 }
 
 function obterProdutoComReserva(produtoId, callback, opcoes = {}) {
@@ -202,6 +308,7 @@ module.exports = {
   MOTIVO_COMPAT_RESERVA_PDV,
   empresaIdDoReqReservaPdv,
   montarOptsPortaReservaPdv,
+  resolverEmpresaParaCriacaoReservaPdv,
   reservarItem,
   liberarReservasDaVenda,
   obterProdutoComReserva,

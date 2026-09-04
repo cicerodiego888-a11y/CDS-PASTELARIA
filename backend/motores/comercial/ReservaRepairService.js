@@ -31,8 +31,15 @@ const {
   resolverEmpresaId,
   resolverEmpresaIdDaRequisicao
 } = require('../../services/fiscalNaoFiscal/empresaContexto');
+const {
+  exigirEmpresaDoPedido,
+  CODIGO_EMPRESA_OWNERSHIP_REQUIRED,
+  CODIGO_PEDIDO_EMPRESA_DIVERGENTE,
+  CODIGO_RESERVA_EMPRESA_DIVERGENTE,
+  CODIGO_PEDIDO_NAO_ENCONTRADO
+} = require('../../services/pedidos/PedidoEmpresaContextoService');
 
-/** Compat explícita: repair comercial ainda sem empresa no caller. */
+/** @deprecated 05.49 — não é mais fonte de ownership do Repair. */
 const MOTIVO_COMPAT_RESERVA_REPAIR = 'COMPAT_RESERVA_REPAIR_PRE_MULTIEMPRESA';
 
 /** Ações conhecidas. */
@@ -78,8 +85,8 @@ function normalizarOptions(options = {}) {
 }
 
 /**
- * Prioridade: opts.empresaId → contexto → req.empresaId.
- * Sem empresa: COMPAT_RESERVA_REPAIR_PRE_MULTIEMPRESA (nunca empresa 1 / CNPJ).
+ * Repair operacional: empresa vem do pedido persistido (ou da reserva órfã).
+ * Sem COMPAT. Sem empresa 1 / CNPJ / contexto como dono.
  */
 function montarOptsPortaReservaRepair(fonte = {}) {
   const empresaId = resolverEmpresaId(fonte)
@@ -102,20 +109,112 @@ function montarOptsPortaReservaRepair(fonte = {}) {
     return { ...base, empresaId, legado: false, motivoCompat: null };
   }
 
-  if (fonte.exigirEmpresa === true) {
-    const err = new Error(
-      'empresaId é obrigatório para operações de saldo/reserva. Informe empresa_id/empresaId no contexto.'
-    );
-    err.code = 'EMPRESA_OBRIGATORIA';
-    throw err;
+  const err = new Error(
+    'Pedido sem ownership empresarial. Repair não inventa empresa.'
+  );
+  err.code = CODIGO_EMPRESA_OWNERSHIP_REQUIRED;
+  throw err;
+}
+
+async function avaliarOwnershipRepair(ctx = {}, opts = {}) {
+  const db = getDb(opts.db);
+  const pedidoIdCtx = Number(ctx.pedido_id ?? ctx.pedidoId);
+  const reservaId = Number(ctx.reserva_id ?? ctx.reservaId);
+  let reserva = null;
+  if (Number.isInteger(reservaId) && reservaId > 0) {
+    try {
+      reserva = await dbGet(
+        db,
+        `SELECT id, pedido_id, produto_id, quantidade_fiscal, status, empresa_id
+         FROM pedido_estoque_reservas WHERE id = ?`,
+        [reservaId]
+      );
+    } catch (_) {
+      reserva = await dbGet(
+        db,
+        `SELECT id, pedido_id, produto_id, quantidade_fiscal, status
+         FROM pedido_estoque_reservas WHERE id = ?`,
+        [reservaId]
+      );
+    }
   }
 
-  return {
-    ...base,
-    modoLegadoSemEmpresa: true,
-    motivoCompat: fonte.motivoCompat || MOTIVO_COMPAT_RESERVA_REPAIR,
-    legado: true
-  };
+  const pedidoId = Number.isInteger(pedidoIdCtx) && pedidoIdCtx > 0
+    ? pedidoIdCtx
+    : (reserva && reserva.pedido_id != null ? Number(reserva.pedido_id) : null);
+
+  if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
+    const empRes = reserva ? resolverEmpresaId(reserva) : null;
+    if (empRes == null) {
+      if (!reserva) {
+        return { ok: true, empresaId: null, pedido: null, reserva: null };
+      }
+      return {
+        ok: false,
+        codigo: CODIGO_EMPRESA_OWNERSHIP_REQUIRED,
+        descricao: 'Pedido/reserva sem ownership empresarial. Repair não inventa empresa.'
+      };
+    }
+    return { ok: true, empresaId: empRes, pedido: null, reserva };
+  }
+
+  let pedido;
+  try {
+    pedido = await dbGet(
+      db,
+      `SELECT id, status, empresa_id FROM pedidos WHERE id = ?`,
+      [pedidoId]
+    );
+  } catch (_) {
+    pedido = await dbGet(db, `SELECT id, status FROM pedidos WHERE id = ?`, [pedidoId]);
+  }
+
+  if (!pedido) {
+    const empRes = reserva ? resolverEmpresaId(reserva) : null;
+    if (reserva && empRes != null) {
+      return { ok: true, empresaId: empRes, pedido: null, reserva };
+    }
+    if (!reserva) {
+      return { ok: true, empresaId: null, pedido: null, reserva: null };
+    }
+    return {
+      ok: false,
+      codigo: CODIGO_EMPRESA_OWNERSHIP_REQUIRED,
+      descricao: 'Reserva órfã sem ownership empresarial. Repair não inventa empresa.'
+    };
+  }
+
+  try {
+    const empresaId = exigirEmpresaDoPedido(pedido);
+    const empRes = reserva ? resolverEmpresaId(reserva) : null;
+    if (empRes != null && empRes !== empresaId) {
+      return {
+        ok: false,
+        codigo: CODIGO_RESERVA_EMPRESA_DIVERGENTE,
+        descricao: 'empresa_id da reserva diverge da empresa persistida do pedido.',
+        empresaId
+      };
+    }
+    const caller = resolverEmpresaId(opts)
+      ?? resolverEmpresaId(opts.contexto)
+      ?? resolverEmpresaId(ctx);
+    if (caller != null && caller !== empresaId) {
+      return {
+        ok: false,
+        codigo: CODIGO_PEDIDO_EMPRESA_DIVERGENTE,
+        descricao: 'empresaId do Repair diverge de pedidos.empresa_id.',
+        empresaId
+      };
+    }
+    return { ok: true, empresaId, pedido, reserva };
+  } catch (err) {
+    return {
+      ok: false,
+      codigo: err.code || CODIGO_EMPRESA_OWNERSHIP_REQUIRED,
+      descricao: err.message || 'Pedido sem ownership empresarial.',
+      pedido
+    };
+  }
 }
 
 function fontePortaRepair(ctx = {}, opts = {}) {
@@ -238,7 +337,7 @@ async function handlerLiberarReserva(ctx = {}, opts = {}) {
 
   const pedido = await dbGet(
     db,
-    `SELECT id, status FROM pedidos WHERE id = ?`,
+    `SELECT id, status, empresa_id FROM pedidos WHERE id = ?`,
     [pedidoIdEfetivo]
   );
 
@@ -441,7 +540,7 @@ async function handlerRemoverReserva(ctx = {}, opts = {}) {
   if (Number.isInteger(pedidoIdReserva) && pedidoIdReserva > 0) {
     const pedido = await dbGet(
       db,
-      `SELECT id, status FROM pedidos WHERE id = ?`,
+      `SELECT id, status, empresa_id FROM pedidos WHERE id = ?`,
       [pedidoIdReserva]
     );
     if (pedido) {
@@ -598,7 +697,7 @@ async function handlerCriarReserva(ctx = {}, opts = {}) {
   // 1) Localizar Pedido
   const pedido = await dbGet(
     db,
-    `SELECT id, status FROM pedidos WHERE id = ?`,
+    `SELECT id, status, empresa_id FROM pedidos WHERE id = ?`,
     [pedidoId]
   );
 
@@ -745,20 +844,36 @@ async function handlerCriarReserva(ctx = {}, opts = {}) {
 
   const reservadoDepois = round3(reservadoAntes + quantidade);
 
-  // 3–4) Reservar quantidade (↑ reservado_fiscal via porta) e criar tracking
+  let empresaIdPedido;
+  try {
+    empresaIdPedido = exigirEmpresaDoPedido(pedido);
+  } catch (err) {
+    return resultado({
+      sucesso: false,
+      acao: AcaoCorrecao.CRIAR_RESERVA,
+      executaria: false,
+      descricao: err.message || 'Pedido sem ownership empresarial. Repair não inventa empresa.',
+      risco,
+      codigo: err.code || CODIGO_EMPRESA_OWNERSHIP_REQUIRED,
+      dryRun: false,
+      detalhes: { pedido_id: pedidoId }
+    });
+  }
+
+  const optsComEmpresa = { ...opts, empresaId: empresaIdPedido, exigirEmpresa: true };
   const optsPorta = await aplicarDeltaReservadoFiscal(
     produtoId,
     quantidade,
     'reservar',
-    fontePortaRepair(ctx, opts)
+    fontePortaRepair(ctx, optsComEmpresa)
   );
 
   const ins = await dbRun(
     db,
     `INSERT INTO pedido_estoque_reservas (
-      pedido_id, produto_id, quantidade_fiscal, status, criado_em
-    ) VALUES (?, ?, ?, 'ATIVA', CURRENT_TIMESTAMP)`,
-    [pedidoId, produtoId, quantidade]
+      pedido_id, produto_id, quantidade_fiscal, status, criado_em, empresa_id
+    ) VALUES (?, ?, ?, 'ATIVA', CURRENT_TIMESTAMP, ?)`,
+    [pedidoId, produtoId, quantidade, empresaIdPedido]
   );
 
   const reservaId = ins.lastID;
@@ -836,7 +951,7 @@ async function handlerAjustarReserva(ctx = {}, opts = {}) {
   // 1) Localizar Pedido
   const pedido = await dbGet(
     db,
-    `SELECT id, status FROM pedidos WHERE id = ?`,
+    `SELECT id, status, empresa_id FROM pedidos WHERE id = ?`,
     [pedidoId]
   );
 
@@ -1153,7 +1268,31 @@ async function executarPlano(plano, options = {}) {
     : `Ação ${acao}`;
   const risco = plano.risco != null ? String(plano.risco) : null;
 
-  // DRY_RUN — não muta banco
+  const contexto = opts.contexto && typeof opts.contexto === 'object'
+    ? opts.contexto
+    : {};
+  const temAlvo = Number(contexto.pedido_id || contexto.pedidoId || contexto.reserva_id || contexto.reservaId) > 0
+    || Number(plano.pedido_id || plano.pedidoId) > 0;
+  if (temAlvo || opts.dryRun === false) {
+    const ownership = await avaliarOwnershipRepair({ plano, ...contexto }, opts);
+    if (!ownership.ok) {
+      return resultado({
+        sucesso: false,
+        acao,
+        executaria: false,
+        descricao: ownership.descricao || 'Pedido sem ownership empresarial.',
+        risco,
+        codigo: ownership.codigo,
+        dryRun: opts.dryRun,
+        detalhes: { empresa_id: ownership.empresaId || null }
+      });
+    }
+    if (ownership.empresaId != null) {
+      opts.empresaId = ownership.empresaId;
+      opts.exigirEmpresa = true;
+    }
+  }
+
   if (opts.dryRun) {
     return resultado({
       sucesso: true,
@@ -1161,7 +1300,8 @@ async function executarPlano(plano, options = {}) {
       executaria: true,
       descricao,
       risco,
-      dryRun: true
+      dryRun: true,
+      detalhes: opts.empresaId != null ? { empresa_id: opts.empresaId } : undefined
     });
   }
 
@@ -1178,10 +1318,6 @@ async function executarPlano(plano, options = {}) {
     });
   }
 
-  const contexto = opts.contexto && typeof opts.contexto === 'object'
-    ? opts.contexto
-    : {};
-
   return handler({ plano, ...contexto }, opts);
 }
 
@@ -1197,6 +1333,7 @@ module.exports = {
   handlerCriarReserva,
   handlerAjustarReserva,
   montarOptsPortaReservaRepair,
+  avaliarOwnershipRepair,
   MOTIVO_COMPAT_RESERVA_REPAIR,
   AcaoCorrecao,
   RiscoCorrecao,

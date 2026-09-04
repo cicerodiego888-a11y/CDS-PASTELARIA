@@ -351,7 +351,7 @@ function aplicarSaldosIdentificacaoNoProdutoPdv(produto, resultado) {
 
 function urlProdutosPdv() {
     const modoFiscal = typeof modoFiscalQueryParam === 'function' ? modoFiscalQueryParam() : '0';
-    return `${API_URL}/produtos?modo_fiscal=${modoFiscal}`;
+    return `${API_URL}/produtos?modo_fiscal=${modoFiscal}&somente_vendaveis=1`;
 }
 
 function loadPDV() {
@@ -6543,7 +6543,7 @@ function toggleProdutosCategoria(categoriaId) {
         // Se ainda não carregou os produtos, carregar
         if (container.find('.spinner-border').length > 0) {
             $.ajax({
-                url: `${API_URL}/produtos`,
+                url: `${API_URL}/produtos?somente_vendaveis=1`,
                 method: 'GET',
                 data: { categoria_id: categoriaId },
                 success: function(produtos) {

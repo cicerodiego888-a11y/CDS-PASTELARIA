@@ -7,6 +7,7 @@
 
   const PAGE_META = {
     dashboard: { grupo: 'Painel', titulo: 'Dashboard', subtitulo: 'Visão geral do negócio' },
+    mis: { grupo: 'Painel', titulo: 'MIS', subtitulo: 'Visão gerencial da empresa' },
     monitoring: { grupo: 'Painel', titulo: 'Central de Monitoramento', subtitulo: 'Indicadores oficiais via CDS Monitoring Engine' },
     produtos: { grupo: 'Suprimentos', titulo: 'Produtos', subtitulo: 'Cadastro e estoque de produtos' },
     categorias: { grupo: 'Suprimentos', titulo: 'Categorias', subtitulo: 'Organização do catálogo' },

@@ -70,7 +70,13 @@ const centralEntradasState = {
     loadingFase: 'preparando',
     featureFlags: {
         recuperacaoPortalNacional: false
-    }
+    },
+    empresasPermitidas: [],
+    vistaEmpresas: 'contexto',
+    buscaEmpresaUi: '',
+    contextoSeq: 0,
+    modoOperacional: null,
+    empresaOperacionalId: null
 };
 
 const CENTRAL_STATUS_META = {
@@ -305,22 +311,348 @@ function renderBadgeStatusCentral(status, label) {
     </span>`;
 }
 
+function mensagemErroHttpCentral(data, status) {
+    return (data && data.mensagemAmigavel)
+        || (data && data.mensagem)
+        || (data && Array.isArray(data.erros) && data.erros[0])
+        || (data && data.error)
+        || `Erro HTTP ${status}`;
+}
+
+function centralModoEmpresaSimples() {
+    const modoDash = String(centralEntradasState.modoOperacional || '').toUpperCase();
+    const cfg = (typeof window !== 'undefined' && window.CONFIG_IMPLANTACAO) ? window.CONFIG_IMPLANTACAO : {};
+    const modoCfg = String(cfg.modo_operacional_global || '').toUpperCase();
+    return (modoDash || modoCfg) === 'EMPRESA_SIMPLES';
+}
+
+function empresaOperacionalIdCentralUi() {
+    const doEstado = Number(centralEntradasState.empresaOperacionalId);
+    if (Number.isInteger(doEstado) && doEstado > 0) return doEstado;
+    const cfg = (typeof window !== 'undefined' && window.CONFIG_IMPLANTACAO) ? window.CONFIG_IMPLANTACAO : {};
+    const doCfg = Number(cfg.empresa_operacional_id);
+    if (Number.isInteger(doCfg) && doCfg > 0) return doCfg;
+    return null;
+}
+
+function empresasParaAreaCentral() {
+    const lista = Array.isArray(centralEntradasState.empresasPermitidas)
+        ? centralEntradasState.empresasPermitidas
+        : [];
+    if (!centralModoEmpresaSimples()) return lista;
+    const opId = empresaOperacionalIdCentralUi();
+    if (opId != null) {
+        const hit = lista.filter((e) => Number(e.id) === opId);
+        if (hit.length) return hit;
+        return [{ id: opId, nome_fantasia: 'Empresa operacional', razao_social: 'Empresa operacional', ativo: 1 }];
+    }
+    const Ctx = typeof CdsEmpresaContexto !== 'undefined' ? CdsEmpresaContexto : null;
+    const ctxId = Ctx && typeof Ctx.lerEmpresaId === 'function' ? Number(Ctx.lerEmpresaId()) : null;
+    if (Number.isInteger(ctxId) && ctxId > 0) {
+        const hit = lista.filter((e) => Number(e.id) === ctxId);
+        if (hit.length) return hit;
+    }
+    return lista.length === 1 ? lista : [];
+}
+
+function qsComEscopoEmpresaCentral(params) {
+    const qs = params instanceof URLSearchParams ? params : new URLSearchParams(params || '');
+    if (centralEntradasState.vistaEmpresas === 'todas' && !centralModoEmpresaSimples()) {
+        qs.set('escopo', 'todas');
+    }
+    return qs;
+}
+
+async function alinharContextoComDocumentoCentral(doc) {
+    if (centralModoEmpresaSimples()) return;
+    if (centralEntradasState.vistaEmpresas !== 'todas' || !doc) return;
+    const empDoc = Number(doc.empresaId != null ? doc.empresaId : doc.empresa_id);
+    if (!Number.isInteger(empDoc) || empDoc <= 0) return;
+    if (!empresaPermitidaPorIdCentral(empDoc)) return;
+    const Ctx = typeof CdsEmpresaContexto !== 'undefined' ? CdsEmpresaContexto : null;
+    const atual = Ctx && typeof Ctx.lerEmpresaId === 'function' ? Number(Ctx.lerEmpresaId()) : null;
+    if (atual === empDoc) return;
+    if (Ctx && typeof Ctx.selecionar === 'function') {
+        await Ctx.selecionar(empDoc);
+    }
+}
+
 async function centralEntradasFetch(path, options = {}) {
     const token = localStorage.getItem('token');
+    const headers = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+        ...(options.headers || {})
+    };
+    const emp = (typeof CdsEmpresaContexto !== 'undefined' && CdsEmpresaContexto.lerEmpresaId)
+        ? CdsEmpresaContexto.lerEmpresaId()
+        : null;
+    if (emp) headers['X-Empresa-Id'] = String(emp);
     const response = await fetch(`${API_URL}/central-entradas${path}`, {
         ...options,
-        headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-            ...(options.headers || {})
-        }
+        headers
     });
 
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
-        throw new Error(data.error || `Erro HTTP ${response.status}`);
+        const err = new Error(mensagemErroHttpCentral(data, response.status));
+        err.code = data.code;
+        err.status = response.status;
+        throw err;
     }
     return data;
+}
+
+async function garantirEmpresaAtivaParaCentral() {
+    const Ctx = typeof CdsEmpresaContexto !== 'undefined' ? CdsEmpresaContexto : null;
+    if (!Ctx || typeof Ctx.listarDisponiveis !== 'function' || typeof Ctx.selecionar !== 'function') {
+        return;
+    }
+    const atual = Ctx.lerEmpresaId();
+    let lista = [];
+    try {
+        lista = await Ctx.listarDisponiveis();
+    } catch (_e) {
+        return;
+    }
+    if (!Array.isArray(lista) || !lista.length) return;
+    centralEntradasState.empresasPermitidas = lista;
+    if (centralModoEmpresaSimples()) {
+        const opId = empresaOperacionalIdCentralUi();
+        if (Number.isInteger(opId) && opId > 0 && lista.some((e) => Number(e.id) === opId)) {
+            if (Number(atual) !== opId) await Ctx.selecionar(opId);
+            return;
+        }
+    }
+    if (atual && lista.some((e) => Number(e.id) === Number(atual))) return;
+    const proxima = lista[0];
+    await Ctx.selecionar(proxima.id);
+    if (typeof showNotification === 'function') {
+        const nome = proxima.nome_fantasia || proxima.razao_social || ('empresa ' + proxima.id);
+        showNotification('Contexto ajustado para ' + nome + ' (a empresa anterior está inativa ou ausente).', 'warning');
+    }
+}
+
+function formatarCnpjUiCentral(valor) {
+    const d = String(valor == null ? '' : valor).replace(/\D/g, '');
+    if (d.length !== 14) return valor == null ? '' : String(valor);
+    return d.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5');
+}
+
+function nomeEmpresaUiCentral(empresa) {
+    if (!empresa) return '—';
+    return String(empresa.nome_fantasia || empresa.razao_social || ('Empresa #' + empresa.id)).trim();
+}
+
+function empresaPermitidaPorIdCentral(empresaId) {
+    const id = Number(empresaId);
+    if (!Number.isInteger(id) || id <= 0) return null;
+    return (centralEntradasState.empresasPermitidas || []).find((e) => Number(e.id) === id) || null;
+}
+
+function empresaDoDocumentoUiCentral(doc) {
+    const id = doc?.empresaId ?? doc?.empresa_id ?? null;
+    return empresaPermitidaPorIdCentral(id);
+}
+
+function kpisContextoDashboardCentral() {
+    const c = centralEntradasState.ultimoDashboardContadores || {};
+    const filas = c.filas || {};
+    return {
+        documentos: Number(c.total ?? centralEntradasState.total ?? 0) || 0,
+        pendentes: Number(filas.pendentes ?? 0) || 0,
+        emRevisao: Number(filas.em_revisao ?? c.aguardandoRevisao ?? 0) || 0,
+        prontas: Number(filas.prontas ?? c.prontasParaCompra ?? 0) || 0
+    };
+}
+
+async function carregarEmpresasPermitidasCentral() {
+    const Ctx = typeof CdsEmpresaContexto !== 'undefined' ? CdsEmpresaContexto : null;
+    if (!Ctx || typeof Ctx.listarDisponiveis !== 'function') return;
+    if ((centralEntradasState.empresasPermitidas || []).length) return;
+    try {
+        const lista = await Ctx.listarDisponiveis();
+        centralEntradasState.empresasPermitidas = Array.isArray(lista) ? lista : [];
+    } catch (_e) {
+        centralEntradasState.empresasPermitidas = centralEntradasState.empresasPermitidas || [];
+    }
+}
+
+function empresasFiltradasBuscaUiCentral() {
+    const q = String(centralEntradasState.buscaEmpresaUi || '').trim().toLowerCase();
+    const lista = empresasParaAreaCentral();
+    if (!q) return lista;
+    return lista.filter((e) => {
+        const nome = nomeEmpresaUiCentral(e).toLowerCase();
+        const cnpj = String(e.cnpj || '').replace(/\D/g, '');
+        return nome.includes(q) || cnpj.includes(q.replace(/\D/g, ''));
+    });
+}
+
+function renderAreaEmpresasCentral() {
+    const wrap = document.getElementById('centralEmpresasWrap');
+    if (!wrap) return;
+
+    const Ctx = typeof CdsEmpresaContexto !== 'undefined' ? CdsEmpresaContexto : null;
+    const contextoId = Ctx && typeof Ctx.lerEmpresaId === 'function' ? Ctx.lerEmpresaId() : null;
+    const todas = empresasParaAreaCentral();
+    const filtradas = empresasFiltradasBuscaUiCentral();
+    const n = todas.length;
+    const compacto = n >= 6;
+    const simples = centralModoEmpresaSimples();
+    const vista = simples ? 'contexto' : centralEntradasState.vistaEmpresas;
+    const valorSelect = vista === 'todas' ? 'todas' : String(contextoId || '');
+    const kpisCtx = kpisContextoDashboardCentral();
+    const rawSync = centralEntradasState.ultimaSincronizacao;
+    const syncVal = rawSync && typeof rawSync === 'object'
+        ? (rawSync.dataSincronizacao || rawSync.data || rawSync)
+        : rawSync;
+    const syncLabel = syncVal
+        ? formatarDataHoraCentral(syncVal)
+        : '—';
+
+    const options = (simples
+        ? []
+        : [`<option value="todas"${valorSelect === 'todas' ? ' selected' : ''}>Todas as empresas</option>`]
+    ).concat(filtradas.map((e) => {
+        const sel = valorSelect !== 'todas' && Number(e.id) === Number(contextoId) ? ' selected' : '';
+        return `<option value="${escapeHtmlCentralEntradas(String(e.id))}"${sel}>${escapeHtmlCentralEntradas(nomeEmpresaUiCentral(e))}</option>`;
+    }));
+
+    const chips = compacto ? '' : filtradas.map((e) => {
+        const ativa = Number(e.id) === Number(contextoId) && vista !== 'todas';
+        const noContexto = Number(e.id) === Number(contextoId);
+        const kpis = vista === 'todas'
+            ? `<span class="central-0577-chip-kpis">visão consolidada autorizada</span>`
+            : (noContexto
+                ? `<span class="central-0577-chip-kpis">docs ${kpisCtx.documentos} · pend. ${kpisCtx.pendentes} · rev. ${kpisCtx.emRevisao} · prontas ${kpisCtx.prontas}</span>`
+                : `<span class="central-0577-chip-kpis">contagens no contexto autorizado</span>`);
+        const status = e.ativo === 0 || e.ativo === false ? 'inativa' : 'ativa';
+        return `<button type="button" class="central-0577-chip${ativa ? ' is-active' : ''}" data-central-empresa-id="${escapeHtmlCentralEntradas(String(e.id))}" title="${escapeHtmlCentralEntradas(nomeEmpresaUiCentral(e))}">
+            <span class="central-0577-chip-nome">${escapeHtmlCentralEntradas(nomeEmpresaUiCentral(e))}</span>
+            <span class="central-0577-chip-meta">${escapeHtmlCentralEntradas(formatarCnpjUiCentral(e.cnpj))} · ${escapeHtmlCentralEntradas(status)}</span>
+            ${kpis}
+        </button>`;
+    }).join('');
+
+    wrap.innerHTML = `
+        <div class="central-0577-empresas-head">
+            <span class="central-0577-empresas-label">EMPRESA${simples ? '' : 'S'}</span>
+            ${simples || n <= 1 ? '' : `<input type="search" class="form-control form-control-sm" id="centralBuscaEmpresa"
+                placeholder="Pesquisar empresa..." autocomplete="off"
+                value="${escapeHtmlCentralEntradas(centralEntradasState.buscaEmpresaUi || '')}"
+                style="max-width:220px">`}
+            <select class="form-select form-select-sm central-0577-empresas-select" id="centralFiltroEmpresa"
+                title="${simples ? 'Empresa operacional da Central' : 'Filtrar empresa da Central'}"
+                ${simples ? 'disabled' : ''}>
+                ${options.join('')}
+            </select>
+            <span class="central-0577-empresas-contador">${simples
+                ? 'empresa operacional'
+                : `${n} empresa${n === 1 ? '' : 's'} ativas`}</span>
+        </div>
+        ${compacto || simples ? '' : `<div class="central-0577-chips">${chips}</div>`}
+        <p class="small text-muted mb-0 mt-2">${simples
+            ? `Modo Empresa Simples: a Central opera somente na empresa operacional. Última sincronização: ${escapeHtmlCentralEntradas(syncLabel)}.`
+            : `“Todas as empresas” lista documentos das empresas autorizadas ao usuário (sem cruzar com outras). Indicadores da lista seguem o mesmo recorte. Monitoramento SEFAZ permanece da empresa do contexto. Última sincronização do contexto: ${escapeHtmlCentralEntradas(syncLabel)}.`}</p>
+    `;
+
+    const toolbarSel = document.getElementById('centralFiltroEmpresaToolbar');
+    if (toolbarSel) {
+        toolbarSel.innerHTML = options.join('');
+        toolbarSel.value = valorSelect === 'todas' ? 'todas' : String(contextoId || (simples ? '' : 'todas'));
+        toolbarSel.classList.toggle('d-none', !!simples);
+        toolbarSel.disabled = !!simples;
+    }
+}
+
+async function aplicarVistaEmpresaCentral(valor) {
+    const Ctx = typeof CdsEmpresaContexto !== 'undefined' ? CdsEmpresaContexto : null;
+    if (valor === 'todas') {
+        if (centralModoEmpresaSimples()) return;
+        const jaTodas = centralEntradasState.vistaEmpresas === 'todas';
+        centralEntradasState.vistaEmpresas = 'todas';
+        renderAreaEmpresasCentral();
+        if (!jaTodas) {
+            await recarregarDadosCentralAposTrocaEmpresa();
+        }
+        return;
+    }
+    const id = Number(valor);
+    if (!Number.isInteger(id) || id <= 0) return;
+    if (centralModoEmpresaSimples()) {
+        const opId = empresaOperacionalIdCentralUi();
+        if (opId != null && id !== opId) return;
+    }
+    const permitida = empresaPermitidaPorIdCentral(id);
+    if (!permitida) return;
+    const contextoAtual = Ctx && typeof Ctx.lerEmpresaId === 'function' ? Number(Ctx.lerEmpresaId()) : null;
+    const mesmoContexto = contextoAtual === id && centralEntradasState.vistaEmpresas === id;
+    centralEntradasState.vistaEmpresas = id;
+    if (Ctx && typeof Ctx.selecionar === 'function' && contextoAtual !== id) {
+        await Ctx.selecionar(id);
+    }
+    if (!mesmoContexto) {
+        await recarregarDadosCentralAposTrocaEmpresa();
+    }
+    renderAreaEmpresasCentral();
+}
+
+function bumpContextoSeqCentral() {
+    centralEntradasState.contextoSeq = (Number(centralEntradasState.contextoSeq) || 0) + 1;
+    return centralEntradasState.contextoSeq;
+}
+
+function contextoSeqAtualCentral() {
+    return Number(centralEntradasState.contextoSeq) || 0;
+}
+
+function invalidarEstadoDadosCentral() {
+    centralEntradasState.documentos = [];
+    centralEntradasState.total = 0;
+    centralEntradasState.indicadoresFiscais = null;
+    centralEntradasState.operacional = null;
+    centralEntradasState.ultimoDashboardContadores = null;
+    centralEntradasState.indicadores = null;
+    centralEntradasState.sefazOperacional = null;
+    centralEntradasState.saudeCentral = null;
+    centralEntradasState.alertas = null;
+    centralEntradasState.pendencias = null;
+    centralEntradasState.atencao = null;
+    centralEntradasState.detalheAtual = null;
+    centralEntradasState.xmlAtual = null;
+    centralEntradasState.parseAtual = null;
+    centralEntradasState.documentoSelecionadoId = null;
+    centralEntradasState.carregando = false;
+    centralEntradasState.carregandoDashboard = false;
+    centralEntradasState.carregandoInteligencia = false;
+    try {
+        localStorage.removeItem('central_entradas_kpi_snapshot_v1');
+    } catch (_e) { /* ignore */ }
+}
+
+async function recarregarDadosCentralAposTrocaEmpresa() {
+    bumpContextoSeqCentral();
+    invalidarEstadoDadosCentral();
+    const fiscais = document.getElementById('centralIndicadoresFiscais');
+    if (fiscais) fiscais.innerHTML = '';
+    const cards = document.getElementById('centralEntradasCards');
+    if (cards) {
+        cards.innerHTML = '';
+        cards.setAttribute('aria-busy', 'true');
+    }
+    if (typeof renderPainelLateralPlaceholder === 'function') {
+        renderPainelLateralPlaceholder();
+    }
+    centralEntradasState.pagina = 1;
+    await Promise.all([
+        carregarDashboardCentral(),
+        carregarDocumentosCentral()
+    ]);
+}
+
+function tipoDocumentoLabelUiCentral(doc) {
+    return doc?.tipoDocumento || doc?.tipo_documento || doc?.modelo || 'NF-e';
 }
 
 async function centralEntradasUpload(arquivos) {
@@ -1504,6 +1836,7 @@ function renderScoreBadgeCentral(score, cor) {
 }
 
 async function carregarInteligenciaCentral() {
+    const seq = contextoSeqAtualCentral();
     centralEntradasState.carregandoInteligencia = true;
 
     try {
@@ -1512,7 +1845,8 @@ async function carregarInteligenciaCentral() {
         if (filtros.dataEmissaoInicio) params.set('data_emissao_inicio', filtros.dataEmissaoInicio);
         if (filtros.dataEmissaoFim) params.set('data_emissao_fim', filtros.dataEmissaoFim);
 
-        const inteligencia = await centralEntradasFetch(`/inteligencia?${params.toString()}`);
+        const inteligencia = await centralEntradasFetch(`/inteligencia?${qsComEscopoEmpresaCentral(params).toString()}`);
+        if (contextoSeqAtualCentral() !== seq) return;
 
         centralEntradasState.operacional = inteligencia.operacional;
         centralEntradasState.alertas = inteligencia.alertas;
@@ -1548,14 +1882,16 @@ async function carregarInteligenciaCentral() {
 }
 
 async function carregarIndicadoresFiscaisCentral() {
+    const seq = contextoSeqAtualCentral();
     try {
         const filtros = obterFiltrosCentralDaTela();
         const params = new URLSearchParams();
         if (filtros.dataEmissaoInicio) params.set('data_emissao_inicio', filtros.dataEmissaoInicio);
         if (filtros.dataEmissaoFim) params.set('data_emissao_fim', filtros.dataEmissaoFim);
 
-        const qs = params.toString();
+        const qs = qsComEscopoEmpresaCentral(params).toString();
         const indicadores = await centralEntradasFetch(`/indicadores-fiscais${qs ? `?${qs}` : ''}`);
+        if (contextoSeqAtualCentral() !== seq) return;
         centralEntradasState.indicadoresFiscais = indicadores;
         if (centralEntradasState.operacional) {
             centralEntradasState.operacional = {
@@ -3057,49 +3393,60 @@ function renderGridCentralEntradas() {
         container.innerHTML = centralUx().renderEmptyStateCentral?.(emptyTipo) || '';
     } else if (lista) {
         const UX = centralUx();
-        const cabecalho = `
-            <div class="central-rc40-doc-cols-header" role="row" aria-label="Cabeçalho da listagem">
-                <span class="central-rc40-doc-cols-spacer" aria-hidden="true"></span>
-                <span>Fornecedor</span>
-                <span>NF</span>
-                <span>Emissão</span>
-                <span>Valor</span>
-                <span>Status</span>
-                <span>Ação</span>
-            </div>`;
         const linhas = centralEntradasState.documentos.map((doc) => {
-            const selecionado = centralEntradasState.documentoSelecionadoId === doc.id ? 'central-ux1-doc-card--selected' : '';
-            const numero = doc.numero ? `${doc.numero}${doc.serie ? '/' + doc.serie : ''}` : '—';
-            const avatar = UX.avatarFornecedorCentral?.(doc.fornecedor) || { iniciais: '?', cor: '#94a3b8' };
+            const selecionado = centralEntradasState.documentoSelecionadoId === doc.id ? 'is-selected' : '';
+            const numero = doc.numero ? String(doc.numero) : '—';
+            const serie = doc.serie ? String(doc.serie) : '—';
             const badge = UX.badgeStatusUx1?.(doc.status, doc.statusLabel) || renderBadgeStatusCentral(doc.status, doc.statusLabel);
             const emissao = formatarDataEmissaoCurtaListaCentral(doc.dataEmissao || doc.data_emissao);
             const acao = documentoElegivelPortalNfeCentral(doc)
                 ? { emoji: '☁️', label: 'Portal Nacional', tom: 'atencao', acao: 'portal-nfe' }
                 : (UX.resolverProximaAcaoOperacional?.(doc) || { emoji: '🔵', label: 'Acompanhar', tom: 'processando' });
+            const emp = empresaDoDocumentoUiCentral(doc);
+            const empNome = emp ? nomeEmpresaUiCentral(emp) : (doc.empresaNome || '—');
+            const empCnpj = emp ? formatarCnpjUiCentral(emp.cnpj) : (doc.cnpjDestinatario || '—');
+            const permiteRevisar = acao.acao === 'revisar' && typeof MiipCentralRevisao !== 'undefined';
 
             return `
-                <div class="central-rc40-doc-row central-ux1-doc-card ${selecionado} central-entradas-row"
+                <tr class="central-0577-doc-row central-entradas-row ${selecionado}"
                      data-documento-id="${doc.id}"
                      tabindex="0"
                      role="button"
                      aria-label="Documento ${escapeHtmlCentralEntradas(doc.fornecedor || 'sem fornecedor')}, ${escapeHtmlCentralEntradas(acao.label)}">
-                    <span class="central-rc40-doc-avatar" style="background:${escapeHtmlCentralEntradas(avatar.cor)}" aria-hidden="true">${escapeHtmlCentralEntradas(avatar.iniciais)}</span>
-                    <div>
-                        <div class="central-rc40-doc-fornecedor">${escapeHtmlCentralEntradas(doc.fornecedor || '—')}</div>
-                        <div class="central-rc40-doc-meta d-md-none">${escapeHtmlCentralEntradas(numero)} · ${escapeHtmlCentralEntradas(emissao)} · ${escapeHtmlCentralEntradas(formatarMoedaCentral(doc.valorTotal))}</div>
-                    </div>
-                    <div class="central-rc40-doc-meta" title="NF">${escapeHtmlCentralEntradas(numero)}</div>
-                    <div class="central-rc40-doc-meta" title="Emissão">${escapeHtmlCentralEntradas(emissao)}</div>
-                    <div class="fw-semibold" title="Valor">${escapeHtmlCentralEntradas(formatarMoedaCentral(doc.valorTotal))}</div>
-                    <div>${badge}</div>
-                    <div class="central-rc40-acao central-rc40-acao--${escapeHtmlCentralEntradas(acao.tom)}"
-                        ${acao.acao === 'portal-nfe' ? `data-portal-nfe-id="${doc.id}" data-portal-nfe-chave="${escapeHtmlCentralEntradas(doc.chave || '')}"` : ''}
-                        ${acao.acao === 'copiar-chave' ? `data-copiar-chave-id="${doc.id}" data-copiar-chave="${escapeHtmlCentralEntradas(doc.chave || '')}"` : ''}>
-                        ${escapeHtmlCentralEntradas(acao.emoji)} ${escapeHtmlCentralEntradas(acao.label)}
-                    </div>
-                </div>`;
+                    <td class="central-0577-td-empresa" title="${escapeHtmlCentralEntradas(empNome)}">${escapeHtmlCentralEntradas(empNome)}</td>
+                    <td class="central-0577-td-cnpj">${escapeHtmlCentralEntradas(empCnpj)}</td>
+                    <td>${escapeHtmlCentralEntradas(tipoDocumentoLabelUiCentral(doc))}</td>
+                    <td>${escapeHtmlCentralEntradas(numero)}</td>
+                    <td>${escapeHtmlCentralEntradas(serie)}</td>
+                    <td class="central-0577-td-fornecedor">${escapeHtmlCentralEntradas(doc.fornecedor || '—')}</td>
+                    <td>${escapeHtmlCentralEntradas(emissao)}</td>
+                    <td class="fw-semibold text-nowrap">${escapeHtmlCentralEntradas(formatarMoedaCentral(doc.valorTotal))}</td>
+                    <td>${badge}</td>
+                    <td>
+                        <div class="central-0577-acoes">
+                            <button type="button" class="btn btn-outline-secondary central-0577-btn-ver" data-documento-id="${doc.id}" title="Visualizar">👁</button>
+                            ${permiteRevisar ? `<button type="button" class="btn btn-outline-warning central-0577-btn-revisar" data-doc-id="${doc.id}" title="Revisar">✏</button>` : ''}
+                            <button type="button" class="btn btn-outline-secondary central-0577-btn-mais" data-documento-id="${doc.id}" title="Mais ações">⋮</button>
+                        </div>
+                        <div class="d-none"
+                            ${acao.acao === 'portal-nfe' ? `data-portal-nfe-id="${doc.id}" data-portal-nfe-chave="${escapeHtmlCentralEntradas(doc.chave || '')}"` : ''}
+                            ${acao.acao === 'copiar-chave' ? `data-copiar-chave-id="${doc.id}" data-copiar-chave="${escapeHtmlCentralEntradas(doc.chave || '')}"` : ''}>
+                        </div>
+                    </td>
+                </tr>`;
         }).join('');
-        container.innerHTML = cabecalho + linhas;
+        container.innerHTML = `
+            <div class="central-0577-tabela-wrap">
+            <table class="central-0577-tabela">
+                <thead>
+                    <tr>
+                        <th>Empresa</th><th>CNPJ</th><th>Tipo</th><th>Número</th><th>Série</th>
+                        <th>Fornecedor</th><th>Emissão</th><th>Valor</th><th>Status</th><th>Ações</th>
+                    </tr>
+                </thead>
+                <tbody>${linhas}</tbody>
+            </table>
+            </div>`;
     } else {
         container.innerHTML = centralEntradasState.documentos.map((doc) => {
             const meta = metaStatusCentral(doc.status);
@@ -3764,9 +4111,13 @@ function renderPainelLateralCentral(detalhe) {
             <div class="central-ux1-painel-header">
                 <div class="d-flex justify-content-between align-items-start gap-2">
                     <div class="text-truncate">
+                        <div class="small text-muted fw-semibold mb-1">DETALHE DA NF-E</div>
                         <strong>${escapeHtmlCentralEntradas(doc.fornecedor || '—')}</strong>
                         <div class="small text-muted">NF ${escapeHtmlCentralEntradas(numero)}</div>
                     </div>
+                    <button type="button" class="btn-close" id="centralPainelFechar" title="Fechar detalhe" aria-label="Fechar"></button>
+                </div>
+                <div class="d-flex flex-wrap align-items-center gap-2 mt-2">
                     ${badge}${renderBadgeUsoConsumoCentral(doc)}
                     <span class="central-ux1-chip" title="Valor total"><i class="fas fa-coins me-1"></i>${escapeHtmlCentralEntradas(formatarMoedaCentral(doc.valorTotal))}</span>
                     <span class="central-ux1-chip central-rc40-acao--${escapeHtmlCentralEntradas(acao.tom)}" title="Próxima ação">${escapeHtmlCentralEntradas(acao.emoji)} ${escapeHtmlCentralEntradas(acao.label)}</span>
@@ -3800,6 +4151,7 @@ function renderPainelLateralCentral(detalhe) {
  * ============================================================ */
 
 async function carregarDashboardCentral() {
+    const seq = contextoSeqAtualCentral();
     const cardsContainer = document.getElementById('centralEntradasCards');
 
     centralEntradasState.carregandoDashboard = true;
@@ -3817,7 +4169,13 @@ async function carregarDashboardCentral() {
     }
 
     try {
-        const dashboard = await centralEntradasFetch('/dashboard');
+        const dashboard = await centralEntradasFetch(`/dashboard?${qsComEscopoEmpresaCentral(new URLSearchParams()).toString()}`);
+        if (contextoSeqAtualCentral() !== seq) return;
+        if (dashboard.modo) centralEntradasState.modoOperacional = dashboard.modo;
+        if (dashboard.empresaId != null) centralEntradasState.empresaOperacionalId = dashboard.empresaId;
+        if (centralModoEmpresaSimples()) {
+            centralEntradasState.vistaEmpresas = 'contexto';
+        }
         centralEntradasState.ultimoDashboardContadores = dashboard.contadores || {};
 
         centralEntradasState.indicadores = dashboard.indicadores || null;
@@ -3860,9 +4218,10 @@ async function carregarDashboardCentral() {
 
         renderRodapeUx1Central();
         renderAtencaoBannerUx1();
+        renderAreaEmpresasCentral();
     } catch (error) {
         if (cardsContainer) {
-            cardsContainer.innerHTML = '<div class="col-12 text-danger small">Erro ao carregar dashboard.</div>';
+            cardsContainer.innerHTML = `<div class="col-12 text-danger small">Erro ao carregar dashboard. ${escapeHtmlCentralEntradas(error.message || '')}</div>`;
         }
         console.warn('[Central Entradas] Dashboard:', error.message);
         // RC7.3.1 — não relança: permite que a lista de documentos conclua o Promise.all.
@@ -4619,6 +4978,7 @@ async function exportarXmlCentral(documentoId) {
  * ============================================================ */
 
 async function carregarDocumentosCentral(opcoes = {}) {
+    const seq = contextoSeqAtualCentral();
     if (centralEntradasState.carregando) return;
     centralEntradasState.carregando = true;
     centralEntradasState.loadingFase = 'preparando';
@@ -4661,7 +5021,8 @@ async function carregarDocumentosCentral(opcoes = {}) {
         });
 
         centralEntradasState.loadingFase = 'atualizando';
-        const resultado = await centralEntradasFetch(`/?${params.toString()}`);
+        const resultado = await centralEntradasFetch(`/?${qsComEscopoEmpresaCentral(params).toString()}`);
+        if (contextoSeqAtualCentral() !== seq) return;
         centralEntradasState.documentos = resultado.documentos || [];
         centralEntradasState.total = resultado.paginacao?.total || 0;
         centralEntradasState.totalPaginas = resultado.paginacao?.totalPaginas || 1;
@@ -4680,6 +5041,9 @@ async function carregarDocumentosCentral(opcoes = {}) {
         // RC7.3.1 / RC7.5 — sempre desliga loading e redesenha (evita skeleton infinito).
         centralEntradasState.carregando = false;
         renderGridCentralEntradas();
+        if (document.activeElement?.id !== 'centralBuscaEmpresa') {
+            renderAreaEmpresasCentral();
+        }
     }
 }
 
@@ -4695,7 +5059,9 @@ async function selecionarDocumentoCentral(id) {
         painel.innerHTML = centralUx().renderSkeletonPainelCentral?.() || '';
     }
 
+    const docLista = (centralEntradasState.documentos || []).find((d) => Number(d.id) === Number(id));
     try {
+        await alinharContextoComDocumentoCentral(docLista);
         const detalhe = await centralEntradasFetch(`/${id}`);
         centralEntradasState.detalheAtual = detalhe;
         await carregarStatsFornecedorCentral(detalhe.documento?.cnpjFornecedor);
@@ -4782,6 +5148,45 @@ function bindEventosCentralEntradas() {
 
     $(document).on('click.centralEntradas', '#centralEmptySync', function () {
         sincronizarCentralEntradas();
+    });
+
+    $(document).on('change.centralEntradas', '#centralFiltroEmpresa, #centralFiltroEmpresaToolbar', function () {
+        aplicarVistaEmpresaCentral(this.value);
+    });
+
+    $(document).on('input.centralEntradas', '#centralBuscaEmpresa', function () {
+        centralEntradasState.buscaEmpresaUi = this.value || '';
+        renderAreaEmpresasCentral();
+        const el = document.getElementById('centralBuscaEmpresa');
+        if (el) {
+            el.focus();
+            const len = el.value.length;
+            try { el.setSelectionRange(len, len); } catch (_e) { /* ignore */ }
+        }
+    });
+
+    $(document).on('click.centralEntradas', '[data-central-empresa-id]', function () {
+        aplicarVistaEmpresaCentral($(this).data('central-empresa-id'));
+    });
+
+    $(document).on('click.centralEntradas', '#centralPainelFechar', function (event) {
+        event.preventDefault();
+        centralEntradasState.documentoSelecionadoId = null;
+        centralEntradasState.detalheAtual = null;
+        renderGridCentralEntradas();
+        renderPainelLateralPlaceholder();
+    });
+
+    $(document).on('click.centralEntradas', '.central-0577-btn-ver, .central-0577-btn-mais', function (event) {
+        event.stopPropagation();
+        const id = Number($(this).data('documento-id'));
+        if (id) selecionarDocumentoCentral(id);
+    });
+
+    $(document).on('click.centralEntradas', '.central-0577-btn-revisar', function (event) {
+        event.stopPropagation();
+        const id = Number($(this).data('doc-id'));
+        if (id && typeof abrirRevisaoMiipCentral === 'function') abrirRevisaoMiipCentral(id);
     });
 
     $(document).on('click.centralEntradas', '#centralEmptyLimparFiltros', function () {
@@ -5295,7 +5700,7 @@ function loadCentralEntradas() {
     centralEntradasState.abaAtiva = 'resumo';
 
     const html = `
-        <div class="central-ux1-page">
+        <div class="central-ux1-page central-entradas-page central-0577">
             <div id="centralUx1Header"></div>
 
             <div id="centralEntradasViewConfig" class="d-none mb-4">
@@ -5404,6 +5809,8 @@ function loadCentralEntradas() {
 
             <div id="centralEntradasAtencao"></div>
 
+            <section id="centralEmpresasWrap" class="central-0577-empresas" aria-label="Empresas da Central"></section>
+
             <div id="centralIndicadoresFiscais" class="mb-2" aria-live="polite"></div>
 
             <div id="centralEntradasCards" class="central-rc40-kpis" aria-busy="true">
@@ -5420,7 +5827,7 @@ function loadCentralEntradas() {
 
             <div id="centralEntradasFiltrosRapidos" class="mb-2"></div>
 
-            <div class="central-rc40-toolbar central-ux1-toolbar">
+            <div class="central-rc40-toolbar central-ux1-toolbar central-0577-toolbar">
                 <div class="central-ux1-busca flex-grow-1">
                     <i class="fas fa-search" aria-hidden="true"></i>
                     <input type="search" class="form-control" id="centralFiltroBusca"
@@ -5428,16 +5835,19 @@ function loadCentralEntradas() {
                         title="Pesquisa por fornecedor, NF-e, chave, protocolo ou CNPJ"
                         autocomplete="off">
                 </div>
-                <div class="central-rc40-periodo">
+                <select class="form-select form-select-sm" id="centralFiltroEmpresaToolbar" title="Empresa (mesmo seletor da área EMPRESAS)" aria-label="Empresa">
+                    <option value="todas">Todas as empresas</option>
+                </select>
+                <div class="central-rc40-periodo" title="Período">
                     <input type="date" class="form-control form-control-sm" id="centralFiltroDataInicio" title="Data de emissão — início">
                     <span class="text-muted small">até</span>
                     <input type="date" class="form-control form-control-sm" id="centralFiltroDataFim" title="Data de emissão — fim">
                 </div>
-                <button type="button" class="btn btn-outline-secondary btn-sm" id="centralBtnFiltroAvancado" title="Filtro avançado" aria-expanded="false">
-                    <i class="fas fa-sliders-h"></i> Avançado
+                <button type="button" class="btn btn-outline-secondary btn-sm" id="centralBtnFiltroAvancado" title="Filtros" aria-expanded="false">
+                    <i class="fas fa-sliders-h"></i> Filtros
                 </button>
                 <button type="button" class="btn btn-outline-secondary btn-sm" id="centralBtnAtualizar" title="Atualizar lista e indicadores">
-                    <i class="fas fa-redo-alt"></i>
+                    <i class="fas fa-redo-alt"></i> Atualizar
                 </button>
             </div>
             <div id="centralFiltroAvancadoPainel" class="central-rc40-avancado d-none">
@@ -5571,11 +5981,16 @@ function loadCentralEntradas() {
             const select = document.getElementById('centralFiltroStatus');
             if (select) select.innerHTML = montarOptionsStatusCentral('');
             renderFiltrosRapidosCentral();
+            return garantirEmpresaAtivaParaCentral();
+        })
+        .then(() => carregarEmpresasPermitidasCentral())
+        .then(() => {
+            renderAreaEmpresasCentral();
             return Promise.all([
-                sincronizarAoAbrirCentralSuave(),
-                carregarDashboardCentral(),
-                carregarDocumentosCentral()
-            ]);
+            sincronizarAoAbrirCentralSuave(),
+            carregarDashboardCentral(),
+            carregarDocumentosCentral()
+        ]);
         })
         .then(() => {
             if (posGravacao) {

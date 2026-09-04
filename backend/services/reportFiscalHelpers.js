@@ -62,26 +62,29 @@ function getExprLucroItem(modoFiscal, aliasVi = 'vi', aliasP = 'p') {
   return `(${valor} - (${qtd} * COALESCE(${aliasP}.preco_compra, 0)))`;
 }
 
-function sqlRankingProdutos(modoFiscal) {
+function montarSqlRankingPorProduto(modoFiscal, { filtrarEmpresa } = {}) {
   const exprQtd = getExprQuantidadeItem(modoFiscal, 'vi');
   const exprQtdFiscal = getExprQuantidadeItemFiscal('vi');
   const exprQtdNaoFiscal = getExprQuantidadeItemNaoFiscal('vi');
-
-  if (isModoFiscalRelatorio(modoFiscal)) {
+  const qtdNaoFiscalSelect = isModoFiscalRelatorio(modoFiscal)
+    ? '0 AS quantidade_nao_fiscal'
+    : `COALESCE(SUM(${exprQtdNaoFiscal}), 0) AS quantidade_nao_fiscal`;
+  if (filtrarEmpresa === true) {
     return `
-      SELECT
-        p.id,
-        p.nome,
-        COALESCE(SUM(${exprQtd}), 0) AS quantidade_vendida,
-        COALESCE(SUM(${exprQtdFiscal}), 0) AS quantidade_fiscal,
-        0 AS quantidade_nao_fiscal
-      FROM produtos p
-      LEFT JOIN vendas_itens vi ON vi.produto_id = p.id
-      LEFT JOIN vendas v ON v.id = vi.venda_id
-        AND date(v.data_venda) BETWEEN date(?) AND date(?)
-        AND ${FILTRO_VENDA_VALIDA}
-      GROUP BY p.id, p.nome
-    `;
+    SELECT
+      p.id,
+      p.nome,
+      COALESCE(SUM(${exprQtd}), 0) AS quantidade_vendida,
+      COALESCE(SUM(${exprQtdFiscal}), 0) AS quantidade_fiscal,
+      ${qtdNaoFiscalSelect}
+    FROM produtos p
+    INNER JOIN vendas_itens vi ON vi.produto_id = p.id
+    INNER JOIN vendas v ON v.id = vi.venda_id
+    WHERE date(v.data_venda) BETWEEN date(?) AND date(?)
+      AND ${FILTRO_VENDA_VALIDA}
+      AND v.empresa_id = ?
+    GROUP BY p.id, p.nome
+  `;
   }
 
   return `
@@ -90,7 +93,7 @@ function sqlRankingProdutos(modoFiscal) {
       p.nome,
       COALESCE(SUM(${exprQtd}), 0) AS quantidade_vendida,
       COALESCE(SUM(${exprQtdFiscal}), 0) AS quantidade_fiscal,
-      COALESCE(SUM(${exprQtdNaoFiscal}), 0) AS quantidade_nao_fiscal
+      ${qtdNaoFiscalSelect}
     FROM produtos p
     LEFT JOIN vendas_itens vi ON vi.produto_id = p.id
     LEFT JOIN vendas v ON v.id = vi.venda_id
@@ -98,6 +101,16 @@ function sqlRankingProdutos(modoFiscal) {
       AND ${FILTRO_VENDA_VALIDA}
     GROUP BY p.id, p.nome
   `;
+}
+
+/** Legado: ranking global (sem empresa). Não usar no MIS. */
+function sqlRankingProdutos(modoFiscal) {
+  return montarSqlRankingPorProduto(modoFiscal, { filtrarEmpresa: false });
+}
+
+/** MIS / dashboard: ranking da empresa do contexto. Params: inicio, fim, empresaId. */
+function sqlRankingProdutosDaEmpresa(modoFiscal) {
+  return montarSqlRankingPorProduto(modoFiscal, { filtrarEmpresa: true });
 }
 
 module.exports = {
@@ -114,5 +127,6 @@ module.exports = {
   getExprQuantidadeItemNaoFiscal,
   getFiltroItensFiscal,
   getExprLucroItem,
-  sqlRankingProdutos
+  sqlRankingProdutos,
+  sqlRankingProdutosDaEmpresa
 };

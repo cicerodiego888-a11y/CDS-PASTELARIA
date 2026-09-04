@@ -57,13 +57,22 @@ function reservarItemAsync(params) {
 }
 
 async function reservarComoPdv(db, req, dados) {
+  const empresaId = empresaIdDoReqReservaPdv(req);
+  const vendaId = dados.vendaId || 1;
+  if (empresaId != null) {
+    await run(
+      db,
+      `INSERT OR IGNORE INTO vendas (id, empresa_id, status) VALUES (?, ?, 'aberta')`,
+      [vendaId, empresaId]
+    );
+  }
   const opts = montarOptsPortaReservaPdv({
     req,
-    empresaId: empresaIdDoReqReservaPdv(req),
+    empresaId,
     db
   }, db);
   await reservarItemAsync({
-    vendaId: dados.vendaId || 1,
+    vendaId,
     vendaItemId: dados.vendaItemId || 1,
     produtoId: dados.produtoId,
     quantidadeFiscal: dados.quantidadeFiscal || 0,
@@ -93,6 +102,13 @@ async function setup() {
     )
   `);
   await run(db, `
+    CREATE TABLE vendas (
+      id INTEGER PRIMARY KEY,
+      empresa_id INTEGER,
+      status TEXT
+    )
+  `);
+  await run(db, `
     CREATE TABLE venda_estoque_reservas (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       venda_id INTEGER NOT NULL,
@@ -101,6 +117,7 @@ async function setup() {
       quantidade_fiscal REAL DEFAULT 0,
       quantidade_nao_fiscal REAL DEFAULT 0,
       status TEXT DEFAULT 'ATIVA',
+      empresa_id INTEGER,
       criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
       atualizado_em DATETIME
     )
@@ -235,22 +252,32 @@ async function test05ReqPrevaleceSobreBodyQuery() {
   await closeDb(db);
 }
 
-async function test06SemEmpresaMantemCompat() {
+async function test06SemEmpresaExigeContexto() {
   const { db, produtoId } = await setup();
   const req = { empresaId: null, body: { empresaId: 99 }, query: { empresaId: 99 } };
-  const opts = await reservarComoPdv(db, req, { produtoId, quantidadeFiscal: 3 });
-  assert.strictEqual(opts.legado, true);
-  assert.ok(opts.empresaId == null);
+  try {
+    await reservarComoPdv(db, req, { produtoId, quantidadeFiscal: 3 });
+    throw new Error('Esperava EMPRESA_CONTEXT_REQUIRED');
+  } catch (err) {
+    assert.strictEqual(err.code, 'EMPRESA_CONTEXT_REQUIRED');
+  }
   const prod = await get(db, 'SELECT * FROM produtos WHERE id = ?', [produtoId]);
-  assert.strictEqual(prod.reservado_fiscal, 3);
+  assert.strictEqual(prod.reservado_fiscal, 0);
+  const n = await get(db, 'SELECT COUNT(*) AS c FROM venda_estoque_reservas');
+  assert.strictEqual(n.c, 0);
   await closeDb(db);
 }
 
 async function test07SemEmpresaNaoCriaEstoqueEmpresa() {
   const { db, produtoId } = await setup();
-  await reservarComoPdv(db, { empresaId: null, body: { empresaId: 1 } }, {
-    produtoId, quantidadeFiscal: 3
-  });
+  try {
+    await reservarComoPdv(db, { empresaId: null, body: { empresaId: 1 } }, {
+      produtoId, quantidadeFiscal: 3
+    });
+    throw new Error('Esperava EMPRESA_CONTEXT_REQUIRED');
+  } catch (err) {
+    assert.strictEqual(err.code, 'EMPRESA_CONTEXT_REQUIRED');
+  }
   const n = await get(db, 'SELECT COUNT(*) AS c FROM estoque_empresa');
   assert.strictEqual(n.c, 0);
   await closeDb(db);
@@ -260,6 +287,7 @@ async function test08NaoDuplicaReserva() {
   const { db, produtoId, empresaA, empresaB } = await setup();
   await seedAB(db, produtoId, empresaA, empresaB);
   const req = { empresaId: empresaA.id };
+  await run(db, `INSERT INTO vendas (id, empresa_id, status) VALUES (22, ?, 'aberta')`, [empresaA.id]);
   const opts = montarOptsPortaReservaPdv({
     req,
     empresaId: empresaIdDoReqReservaPdv(req),
@@ -386,7 +414,7 @@ async function main() {
     ['03 liberacao na empresa correta', test03LiberacaoEmpresaCorreta],
     ['04 req.empresaId chega ate reservasPublico', test04ReqEmpresaIdChegaNaPorta],
     ['05 req.empresaId prevalece sobre body/query', test05ReqPrevaleceSobreBodyQuery],
-    ['06 sem empresa mantem COMPAT', test06SemEmpresaMantemCompat],
+    ['06 sem empresa exige EMPRESA_CONTEXT_REQUIRED', test06SemEmpresaExigeContexto],
     ['07 sem empresa nao cria estoque_empresa', test07SemEmpresaNaoCriaEstoqueEmpresa],
     ['08 nao duplica reserva', test08NaoDuplicaReserva],
     ['09 rollback externo restaura ambos', test09RollbackExterno],

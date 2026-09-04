@@ -302,6 +302,7 @@ async function test12LegadoEWiring() {
     path.join(ROOT, 'backend/services/vendas/debitoEstoqueVendaViaPorta.js'),
     'utf8'
   );
+  assert.ok(baixa.includes('resolverEmpresaId(req && req.empresaIdVenda)'));
   assert.ok(baixa.includes('resolverEmpresaId(req && req.empresaId)'));
   assert.ok(baixa.includes('estoqueSaldosPublico.debitarSaldo'));
   assert.ok(!baixa.includes('extrairEmpresaIdDeReq'));

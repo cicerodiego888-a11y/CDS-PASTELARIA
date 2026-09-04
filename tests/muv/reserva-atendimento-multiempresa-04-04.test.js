@@ -484,16 +484,13 @@ async function test20MultiempresaNaoCriaVendas() {
 
 async function test21MultiempresaNaoChamaPagamento() {
   const { db, produtoId, empresaA } = await setupBase();
-  const { app, getPagamentoChamado, restore } = loadAppWithFakePagamento();
+  const { getPagamentoChamado, restore } = loadAppWithFakePagamento();
   try {
-    const req = { body: { origem: 'PDV', itens: [item(produtoId, empresaA.id, 1, 10)] } };
-    const res = mockRes();
-    await app.criarVenda(req, res, {
-      obterModoOperacaoVenda: () => 'MULTIEMPRESA',
-      db
-    });
-    const id = res.state.body.atendimentoId;
-    await atendimentoService.reservarAtendimento(id, { db });
+    const atd = await atendimentoService.criarAtendimento({
+      origem: 'PDV',
+      itens: [item(produtoId, empresaA.id, 1, 10)]
+    }, { db });
+    await atendimentoService.reservarAtendimento(atd.atendimentoId, { db });
     assert.strictEqual(getPagamentoChamado(), 0);
   } finally {
     restore();

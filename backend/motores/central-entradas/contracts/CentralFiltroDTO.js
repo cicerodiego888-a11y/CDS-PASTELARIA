@@ -19,6 +19,10 @@ class CentralFiltroDTO {
     this.dataEmissaoInicio = dados.dataEmissaoInicio || dados.data_emissao_inicio || null;
     this.dataEmissaoFim = dados.dataEmissaoFim || dados.data_emissao_fim || null;
     this.origem = dados.origem || null;
+    this.empresaId = dados.empresaId ?? dados.empresa_id ?? null;
+    this.empresaIds = Array.isArray(dados.empresaIds || dados.empresa_ids)
+      ? (dados.empresaIds || dados.empresa_ids)
+      : null;
     this.filtroRapido = dados.filtroRapido || dados.filtro_rapido || null;
     this.createdAtInicio = dados.createdAtInicio || dados.created_at_inicio || null;
     this.createdAtFim = dados.createdAtFim || dados.created_at_fim || null;
@@ -48,6 +52,8 @@ class CentralFiltroDTO {
       dataEmissaoInicio: this.dataEmissaoInicio,
       dataEmissaoFim: this.dataEmissaoFim,
       origem: this.origem,
+      empresaId: this.empresaId,
+      empresaIds: this.empresaIds,
       filtroRapido: this.filtroRapido,
       createdAtInicio: this.createdAtInicio,
       createdAtFim: this.createdAtFim,

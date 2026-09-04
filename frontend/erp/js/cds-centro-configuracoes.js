@@ -7,8 +7,7 @@
   'use strict';
 
   const CATEGORIAS = Object.freeze([
-    { id: 'empresa', icon: 'fa-building', label: 'Empresa', keywords: 'implantação tipo erp cfop csosn origem cest padrão fiscal empresa empresas cnpj' },
-    { id: 'plataformaFiscal', icon: 'fa-university', label: 'Plataforma Fiscal', keywords: 'ambiente produção homologação certificado csc uf sefaz urls qrcode nfc-e nf-e contingência webservices diagnóstico fiscal', fiscal: true },
+    { id: 'empresa', icon: 'fa-building', label: 'Empresa', keywords: 'implantação tipo erp cfop csosn origem cest padrão fiscal empresa empresas cnpj configuração fiscal certificado digital' },
     { id: 'modulosLicenciados', icon: 'fa-puzzle-piece', label: 'Módulos Licenciados', keywords: 'pdv pedidos expedição faturamento entregas nfe nfce compra fácil marketplace crm invisibilidade' },
     { id: 'motores', icon: 'fa-brain', label: 'Motores Inteligentes', keywords: 'midp miip mib motor busca distribuição pagamentos ativar' },
     { id: 'equipamentos', icon: 'fa-cash-register', label: 'Equipamentos', keywords: 'tef pinpad equipamento' },
@@ -109,9 +108,9 @@
         ${fiscalUi ? `
         ${renderKpi('ambiente', 'Ambiente Fiscal', ambCode != null ? escapeHtml(labelAmbiente(ambCode)) : '—', 'Origem: Centro de Configurações', toneAmbiente(ambCode))}
         ${renderKpi('sefaz', 'SEFAZ', badge(cen.ambiente?.label || '—', sefazOnline === 'ok' ? 'ok' : 'warn'), 'Visão via Central / DF-e', sefazOnline)}
-        ${renderKpi('cert', 'Certificado Digital', badge(certLabel, certTone), cert.validade ? `Validade: ${escapeHtml(String(cert.validade).slice(0, 10))} · ${cert.diasRestantes != null ? cert.diasRestantes + ' dias' : ''}` : (cert.mensagem || 'Configure na aba Fiscal'), certTone)}
+        ${renderKpi('cert', 'Certificado Digital', badge(certLabel, certTone), cert.validade ? `Validade: ${escapeHtml(String(cert.validade).slice(0, 10))} · ${cert.diasRestantes != null ? cert.diasRestantes + ' dias' : ''}` : (cert.mensagem || 'Configure em Empresas'), certTone)}
         ${renderKpi('miip', 'MIIP', badge(cen.diagnostico?.versaoMiip || 'RC1', 'info'), 'Health via pipeline Central', 'ok')}
-        ${renderKpi('plataforma', 'Plataforma Fiscal', badge('RC1.1', 'prep'), 'Registry · Resolver · SoapTransport', 'ok')}
+        ${renderKpi('plataforma', 'Motor SEFAZ', badge('RC1.1', 'prep'), 'Registry · Resolver · SoapTransport', 'ok')}
         ${renderKpi('central', 'Central Inteligente', badge(syncLabel, cen.sincronizacao?.syncAutomaticaHabilitada ? 'ok' : 'neutral'), cen.diagnostico?.ultimaSincronizacao ? `Última sync: ${escapeHtml(String(cen.diagnostico.ultimaSincronizacao).slice(0, 19).replace('T', ' '))}` : 'Consome config fiscal oficial', 'ok')}
         ` : ''}
         ${renderKpi('servicos', 'Serviços', badge('Operacional', 'ok'), fiscalUi ? 'Parser · Motor Fiscal · Financeiro · Equipamentos' : 'Financeiro · Equipamentos · Comercial', 'ok')}
@@ -175,26 +174,30 @@
     return `
       <div class="cds-cfg-pane is-active" data-cfg-pane="empresa">
         <h2 class="cds-cfg-pane__title">Empresa</h2>
-        <p class="cds-cfg-pane__sub">Tipo de implantação e padrões contábeis.${fiscalUi ? ' Cadastro fiscal oficial fica em Plataforma Fiscal.' : ''}</p>
+        <p class="cds-cfg-pane__sub">Tipo de implantação e padrões contábeis.${fiscalUi ? ' Cadastro fiscal oficial fica em Empresas → Configuração Fiscal.' : ''}</p>
         ${card('<i class="fas fa-sitemap"></i> Modo Operacional da Instalação', `
           <p class="cds-cfg-hint mb-3">Define como todos os módulos organizam o contexto empresarial. A alteração exige confirmação explícita ao salvar.</p>
           <div class="form-check mb-2" data-cfg-search="empresa simples única cnpj">
             <input class="form-check-input" type="radio" name="modoOperacionalGlobal" id="modoEmpresaSimples" value="EMPRESA_SIMPLES" ${modoOperacionalGlobal === 'EMPRESA_SIMPLES' ? 'checked' : ''}>
             <label class="form-check-label" for="modoEmpresaSimples"><strong>Empresa Simples</strong></label>
-            <div class="small text-muted ms-4">Utilize quando a operação possuir apenas um CNPJ operacional. O sistema funcionará no modo tradicional, sem seleção de empresas.</div>
+            <div class="small text-muted ms-4">Opera com uma única empresa operacional.</div>
           </div>
           <div class="form-check mb-3" data-cfg-search="multiempresa múltiplas empresas cnpj">
             <input class="form-check-input" type="radio" name="modoOperacionalGlobal" id="modoMultiempresa" value="MULTIEMPRESA" ${modoOperacionalGlobal === 'MULTIEMPRESA' ? 'checked' : ''}>
             <label class="form-check-label" for="modoMultiempresa"><strong>Multiempresa</strong></label>
-            <div class="small text-muted ms-4">Utilize quando a operação possuir mais de um CNPJ. Estoque, entradas, compras, vendas, fiscal, caixa e demais módulos serão organizados por empresa.</div>
+            <div class="small text-muted ms-4">Permite operar várias empresas/CNPJs utilizando o contexto da empresa selecionada.</div>
           </div>
           <div id="cfgEmpresaOperacionalWrap" class="row g-2 ${modoOperacionalGlobal === 'EMPRESA_SIMPLES' ? '' : 'd-none'}">
-            <div class="col-md-6" data-cfg-search="empresa operacional id">
-              <label for="cfgEmpresaOperacionalId" class="cds-cfg-label">Empresa operacional (CNPJ único)</label>
-              <input type="number" min="1" step="1" class="form-control form-control-sm" id="cfgEmpresaOperacionalId"
-                value="${empresaOperacionalId ? escapeHtml(String(empresaOperacionalId)) : ''}"
-                placeholder="ID da empresa quando houver mais de uma cadastrada">
-              <div class="form-text">Obrigatório quando existir mais de uma empresa ativa. Com uma única empresa, resolve automaticamente.</div>
+            <div class="col-md-8" data-cfg-search="empresa operacional id cnpj">
+              <label for="cfgEmpresaOperacionalId" class="cds-cfg-label">Empresa operacional</label>
+              <select class="form-select form-select-sm" id="cfgEmpresaOperacionalId"
+                data-empresa-salva="${empresaOperacionalId ? escapeHtml(String(empresaOperacionalId)) : ''}"
+                data-qtd-empresas="0">
+                ${empresaOperacionalId
+                  ? `<option value="${escapeHtml(String(empresaOperacionalId))}" selected>Empresa #${escapeHtml(String(empresaOperacionalId))}</option>`
+                  : '<option value="">Selecione a empresa operacional</option>'}
+              </select>
+              <div class="form-text">Obrigatório quando houver mais de uma empresa ativa. Empresa Simples opera com um único CNPJ.</div>
             </div>
           </div>
           <input type="hidden" id="cfgModoOperacionalAnterior" value="${escapeHtml(modoOperacionalGlobal)}">
@@ -217,7 +220,7 @@
           <p class="cds-cfg-hint mb-2">Gestão MULTIEMPRESA: dados gerais, configuração fiscal e certificado por CNPJ.</p>
           <button type="button" class="btn btn-primary btn-sm" id="btnAbrirGestaoEmpresas">Empresas</button>
         `, 'empresas multiempresa cnpj fiscal')}
-        ${fiscalUi ? `<div class="cds-cfg-note">Razão social, CNPJ, IE e certificado por empresa ficam em <strong>Empresas</strong>. A Plataforma Fiscal permanece para o perfil global/legado.</div>
+        ${fiscalUi ? `<div class="cds-cfg-note">Razão social, CNPJ, IE, configuração fiscal e certificado por empresa ficam em <strong>Empresas</strong>.</div>
         <div id="secaoPadraoFiscalEmpresa">
           ${card('<i class="fas fa-file-invoice"></i> Padrão Fiscal da Empresa', `
             <p class="cds-cfg-hint mb-3">Valores padrão para novos produtos. Não altera produtos já cadastrados.</p>
@@ -289,23 +292,21 @@
       </div>
 
       ${fiscalUi ? `
-      <div class="cds-cfg-pane" data-cfg-pane="plataformaFiscal">
-        <h2 class="cds-cfg-pane__title">Plataforma Fiscal</h2>
-        <p class="cds-cfg-pane__sub">Única fonte oficial — Super Usuário. Ambiente, série, CSC, certificado, contingência e WebServices.</p>
-        <div class="cds-cfg-note">
-          ${badge('Fonte oficial Sprint 3.9', 'ok')}
-          <span class="ms-2">Acesso restrito a SUPER_ADMIN.</span>
+      <div class="cds-cfg-pane" data-cfg-pane="plataformaFiscalRuntime" style="display:none" aria-hidden="true">
+        <h2 class="cds-cfg-pane__title">Runtime Fiscal</h2>
+        <p class="cds-cfg-pane__sub">Visão somente leitura da plataforma (Registry, Resolver, Transport).</p>
+        <div class="row g-3">
+          <div class="col-md-6">${card('Registry', `<div class="cds-cfg-kpi__value">Ativo</div><p class="cds-cfg-hint mb-0">Catálogo de endpoints SEFAZ por modelo/operação/ambiente.</p>`, 'registry')}</div>
+          <div class="col-md-6">${card('UrlResolver', `<div class="cds-cfg-kpi__value">Ativo</div><p class="cds-cfg-hint mb-0">Resolve URL a partir do contexto (recebe ambiente por parâmetro).</p>`, 'resolver')}</div>
+          <div class="col-md-6">${card('SoapTransport', `<div class="cds-cfg-kpi__value">Ativo</div><p class="cds-cfg-hint mb-0">Transporte SOAP oficial. Sem edição nesta tela.</p>`, 'soap transport')}</div>
+          <div class="col-md-6">${card('Enablement / Health', `${badge('RC1.1', 'prep')} ${badge('Somente leitura', 'neutral')}<p class="cds-cfg-hint mt-2 mb-0">Fallback e Confidence Score são internos da plataforma — não editáveis.</p>`, 'fallback confidence enablement health')}</div>
         </div>
-        <div id="secaoConfigFiscalAvancadas">
-          <p class="text-muted small" id="msgConfigFiscalIndisponivel" style="display:none;">
-            Selecione ERP Fiscal ou ERP Multi-Caixa em Empresa para configurar os parâmetros fiscais.
-          </p>
-          <div id="fiscal-config-form-area-avancadas" class="cds-cfg-fiscal-grid" data-cfg-search="ambiente certificado csc produção homologação série token contingência">
-            <div class="text-center py-4 text-muted">
-              <i class="fas fa-spinner fa-spin me-2"></i> Carregando configuração fiscal...
-            </div>
-          </div>
-        </div>
+        <div class="cds-cfg-note">Ambiente SEFAZ utilizado pelo motor: o mesmo da configuração fiscal da empresa (getFiscalConfig interno).</div>
+      </div>
+
+      <div class="cds-cfg-pane" data-cfg-pane="diagnostico">
+        <h2 class="cds-cfg-pane__title">Diagnóstico</h2>
+        <p class="cds-cfg-pane__sub">Central Inteligente e saúde da plataforma (somente leitura operacional).</p>
         <div class="mt-3" id="cdsCfgSecaoManifestacao">
           <div class="cds-cfg-card cds-cfg-card--manifestacao" id="cdsCfgCardManifestacao"
                data-cfg-search="manifestação destinatário ciência 210210 automática manual confirmação">
@@ -339,25 +340,8 @@
             </div>
           </div>
         </div>
-      </div>
-
-      <div class="cds-cfg-pane" data-cfg-pane="plataformaFiscalRuntime" style="display:none" aria-hidden="true">
-        <h2 class="cds-cfg-pane__title">Runtime Fiscal</h2>
-        <p class="cds-cfg-pane__sub">Visão somente leitura da plataforma (Registry, Resolver, Transport).</p>
-        <div class="row g-3">
-          <div class="col-md-6">${card('Registry', `<div class="cds-cfg-kpi__value">Ativo</div><p class="cds-cfg-hint mb-0">Catálogo de endpoints SEFAZ por modelo/operação/ambiente.</p>`, 'registry')}</div>
-          <div class="col-md-6">${card('UrlResolver', `<div class="cds-cfg-kpi__value">Ativo</div><p class="cds-cfg-hint mb-0">Resolve URL a partir do contexto (recebe ambiente por parâmetro).</p>`, 'resolver')}</div>
-          <div class="col-md-6">${card('SoapTransport', `<div class="cds-cfg-kpi__value">Ativo</div><p class="cds-cfg-hint mb-0">Transporte SOAP oficial. Sem edição nesta tela.</p>`, 'soap transport')}</div>
-          <div class="col-md-6">${card('Enablement / Health', `${badge('RC1.1', 'prep')} ${badge('Somente leitura', 'neutral')}<p class="cds-cfg-hint mt-2 mb-0">Fallback e Confidence Score são internos da plataforma — não editáveis.</p>`, 'fallback confidence enablement health')}</div>
-        </div>
-        <div class="cds-cfg-note">Ambiente SEFAZ utilizado pela plataforma: o mesmo de <strong>Fiscal</strong> (getFiscalConfig).</div>
-      </div>
-
-      <div class="cds-cfg-pane" data-cfg-pane="diagnostico">
-        <h2 class="cds-cfg-pane__title">Diagnóstico</h2>
-        <p class="cds-cfg-pane__sub">Central Inteligente e saúde da plataforma (somente leitura operacional).</p>
         <div class="cds-cfg-note">
-          Ambiente, UF, certificado e Manifestação: origem em <strong>Plataforma Fiscal</strong>.
+          Ambiente, UF e certificado: origem em <strong>Empresas → Configuração Fiscal</strong>.
         </div>
         <div class="row g-3" id="cdsCfgCentralReadonly">
           <div class="col-md-6">${card('Ambiente (somente leitura)', `<div id="cdsCfgCentralAmbiente">—</div>`, 'ambiente produção homologação')}</div>
@@ -367,7 +351,7 @@
         </div>
         <div class="cds-cfg-actions">
           <button type="button" class="btn btn-primary btn-sm" id="btnAbrirConfigFiscalOficial">
-            <i class="fas fa-file-invoice"></i> Abrir Plataforma Fiscal
+            <i class="fas fa-building"></i> Abrir Empresas
           </button>
           <button type="button" class="btn btn-outline-secondary btn-sm" onclick="typeof loadPage==='function'&&loadPage('central-entradas')">
             <i class="fas fa-inbox"></i> Abrir Central Inteligente
@@ -487,7 +471,7 @@
       ${fiscalUi ? `
       <div class="cds-cfg-pane" data-cfg-pane="seguranca">
         <h2 class="cds-cfg-pane__title">Segurança</h2>
-        <p class="cds-cfg-pane__sub">Confirmação fiscal no PDV. Certificado digital na aba Fiscal.</p>
+        <p class="cds-cfg-pane__sub">Confirmação fiscal no PDV. Certificado digital em Empresas.</p>
         ${card('Confirmação Fiscal', `
           <p class="cds-cfg-hint mb-2">Define como o PDV confirma o recebimento fiscal antes da NFC-e.</p>
           <div class="form-check" data-cfg-search="confirmação tef">
@@ -499,7 +483,7 @@
             <label class="form-check-label" for="confirmacaoFiscalManual">Manual</label>
           </div>
         `, 'confirmação fiscal segurança')}
-        <div class="cds-cfg-note">Certificado A1 e senha: edite em <strong>Fiscal</strong> (fonte oficial).</div>
+        <div class="cds-cfg-note">Certificado A1 e senha: edite em <strong>Empresas → Certificado Digital</strong>.</div>
       </div>
       ` : ''}
 
@@ -742,7 +726,7 @@
   }
 
   function focarCardManifestacao() {
-    ativarCategoria('plataformaFiscal');
+    ativarCategoria('diagnostico');
     const tentar = (tentativa) => {
       const el = document.getElementById('cdsCfgCardManifestacao');
       if (el) {
@@ -757,6 +741,9 @@
   }
 
   function ativarCategoria(id) {
+    if (id === 'plataformaFiscal' || id === 'plataforma') {
+      id = 'empresa';
+    }
     const cats = categoriasVisiveis();
     const cat = cats.find((c) => c.id === id) || cats[0] || CATEGORIAS[0];
     document.querySelectorAll('[data-cfg-nav]').forEach((el) => {
@@ -1005,6 +992,44 @@
     }
   }
 
+  function rotuloEmpresaOperacionalCfg(empresa) {
+    if (!empresa) return '—';
+    const nome = String(empresa.nome_fantasia || empresa.razao_social || '').trim();
+    const cnpj = String(empresa.cnpj || '').trim();
+    if (nome && cnpj) return `${nome} — ${cnpj}`;
+    return nome || cnpj || (`Empresa #${empresa.id}`);
+  }
+
+  async function popularSelectEmpresaOperacional() {
+    const sel = document.getElementById('cfgEmpresaOperacionalId');
+    if (!sel) return;
+    const salvo = String(sel.getAttribute('data-empresa-salva') || '').trim();
+    let lista = [];
+    try {
+      if (global.CdsEmpresaContexto && typeof global.CdsEmpresaContexto.listarDisponiveis === 'function') {
+        lista = await global.CdsEmpresaContexto.listarDisponiveis();
+      }
+    } catch (_e) {
+      lista = [];
+    }
+    if (!Array.isArray(lista)) lista = [];
+    sel.setAttribute('data-qtd-empresas', String(lista.length));
+    sel.innerHTML = ['<option value="">Selecione a empresa operacional</option>']
+      .concat(lista.map((e) => {
+        const id = Number(e && e.id);
+        if (!Number.isInteger(id) || id <= 0) return '';
+        return `<option value="${id}">${escapeHtml(rotuloEmpresaOperacionalCfg(e))}</option>`;
+      }))
+      .join('');
+    if (salvo && lista.some((e) => Number(e.id) === Number(salvo))) {
+      sel.value = String(Number(salvo));
+    } else if (lista.length === 1) {
+      sel.value = String(Number(lista[0].id));
+    } else {
+      sel.value = '';
+    }
+  }
+
   function aplicarEstadoModoOperacionalGlobal() {
     const selecionado = String(
       document.querySelector('input[name="modoOperacionalGlobal"]:checked')?.value || 'EMPRESA_SIMPLES'
@@ -1142,9 +1167,7 @@
     carregarDiagnosticoMib();
 
     document.getElementById('btnAbrirConfigFiscalOficial')?.addEventListener('click', () => {
-      ativarCategoria('plataformaFiscal');
-      const area = document.getElementById('fiscal-config-form-area-avancadas');
-      try { area?.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch { /* ignore */ }
+      if (typeof global.loadPage === 'function') global.loadPage('empresas');
     });
 
     document.getElementById('btnSalvarPoliticaManifestacao')?.addEventListener('click', () => {
@@ -1153,7 +1176,14 @@
 
     document.getElementById('btnCdsCfgSalvar')?.addEventListener('click', () => {
       if (typeof global.salvarConfiguracoesAvancadas === 'function') {
-        global.salvarConfiguracoesAvancadas().then?.(() => atualizarPainelExecutivo());
+        Promise.resolve(global.salvarConfiguracoesAvancadas()).then(() => atualizarPainelExecutivo());
+        return;
+      }
+      if (typeof global.showNotification === 'function') {
+        global.showNotification(
+          'Não foi possível salvar: persistência de configurações avançadas indisponível.',
+          'danger'
+        );
       }
     });
 
@@ -1206,11 +1236,12 @@
     } catch { /* ignore */ }
     const legacyTabs = {
       geral: 'empresa',
-      fiscal: 'plataformaFiscal',
+      fiscal: 'diagnostico',
       avancado: 'modulosLicenciados',
       aparencia: 'empresa',
       central: 'diagnostico',
-      plataforma: 'plataformaFiscal'
+      plataforma: 'empresa',
+      plataformaFiscal: 'empresa'
     };
     if (legacyTabs[tab]) tab = legacyTabs[tab];
     if (!CATEGORIAS.some((c) => c.id === tab)) tab = 'empresa';
@@ -1277,6 +1308,7 @@
     }
 
     wireShell();
+    void popularSelectEmpresaOperacional();
     atualizarPainelExecutivo();
     if (typeof global.setupBackupManualListener === 'function') {
       global.setupBackupManualListener();

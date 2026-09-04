@@ -1210,9 +1210,12 @@ function tipoImplantacaoPermiteConfigFiscal(tipo) {
 }
 
 function carregarConfigFiscalAvancadas() {
+    const $form = $('#fiscal-config-form-area-avancadas');
+    if (!$form.length) {
+        return;
+    }
     const tipo = obterTipoImplantacaoSelecionado();
     const $secao = $('#secaoConfigFiscalAvancadas');
-    const $form = $('#fiscal-config-form-area-avancadas');
     const $msg = $('#msgConfigFiscalIndisponivel');
 
     if (!tipoImplantacaoPermiteConfigFiscal(tipo)) {
@@ -1366,20 +1369,42 @@ async function salvarConfiguracoesAvancadas() {
 
     try {
         const servidorAtual = window.configuracaoAvancadaServidor || {};
+        const radioModo = document.querySelector('input[name="modoOperacionalGlobal"]:checked');
+        const hiddenAnterior = document.getElementById('cfgModoOperacionalAnterior');
         const modoOperacionalGlobal = String(
-            $('input[name="modoOperacionalGlobal"]:checked').val() || servidorAtual.modo_operacional_global || 'EMPRESA_SIMPLES'
+            (radioModo && radioModo.value)
+            || servidorAtual.modo_operacional_global
+            || 'EMPRESA_SIMPLES'
         ).toUpperCase();
         const modoAnterior = String(
-            $('#cfgModoOperacionalAnterior').val() || servidorAtual.modo_operacional_global || 'EMPRESA_SIMPLES'
+            (hiddenAnterior && hiddenAnterior.value)
+            || servidorAtual.modo_operacional_global
+            || 'EMPRESA_SIMPLES'
         ).toUpperCase();
         const empresaOperacionalRaw = $('#cfgEmpresaOperacionalId').length
             ? String($('#cfgEmpresaOperacionalId').val() || '').trim()
             : String(servidorAtual.empresa_operacional_id || '').trim();
         let confirmacaoModoOperacional = false;
 
+        if (modoOperacionalGlobal === 'EMPRESA_SIMPLES') {
+            const qtdEmpresas = Number(document.getElementById('cfgEmpresaOperacionalId')?.getAttribute('data-qtd-empresas') || 0);
+            if (!empresaOperacionalRaw && qtdEmpresas !== 1) {
+                showNotification(
+                    'Modo Empresa Simples com várias empresas ativas exige escolher a empresa operacional. Selecione o CNPJ no campo e salve novamente.',
+                    'warning'
+                );
+                if (typeof ativarCategoriaCentroCfg === 'function') ativarCategoriaCentroCfg('empresa');
+                document.getElementById('cfgEmpresaOperacionalId')?.focus();
+                return;
+            }
+        }
+
         if (modoOperacionalGlobal !== modoAnterior) {
+            const textoSimples = modoOperacionalGlobal === 'EMPRESA_SIMPLES'
+                ? 'O modo Empresa Simples opera com um único CNPJ. Se houver várias empresas ativas, escolha a empresa operacional no campo da tela Empresa.\n\n'
+                : '';
             const confirmou = confirm(
-                'Alterar o modo operacional pode modificar a forma como os módulos organizam os dados empresariais.\n\nDeseja continuar?'
+                `${textoSimples}Alterar o modo operacional pode modificar a forma como os módulos organizam os dados empresariais.\n\nDeseja continuar?`
             );
             if (!confirmou) {
                 showNotification('Alteração do modo operacional cancelada.', 'warning');
@@ -1549,6 +1574,8 @@ async function salvarPadraoFiscalEmpresa() {
     }
 }
 window.salvarPadraoFiscalEmpresa = salvarPadraoFiscalEmpresa;
+window.salvarConfiguracoesAvancadas = salvarConfiguracoesAvancadas;
+window.loadConfiguracoesAvancadas = loadConfiguracoesAvancadas;
 window.setupBackupManualListener = setupBackupManualListener;
 window.carregarPastaBackup = carregarPastaBackup;
 

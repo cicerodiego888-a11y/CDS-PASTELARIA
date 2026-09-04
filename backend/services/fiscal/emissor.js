@@ -1,12 +1,18 @@
 const fs = require('fs');
 const path = require('path');
 const db = require('../../database');
-const { getFiscalConfig, incrementaNumeroFiscal, setConfiguracao, resolverUrlsEmissao, logFiscalConfigSeguro } = require('./configService');
+const { incrementaNumeroFiscal, setConfiguracao, resolverUrlsEmissao, logFiscalConfigSeguro } = require('./configService');
 const {
   normalizarEmpresaId,
   garantirSchemaFiscalEmpresaAsync,
   atualizarNumeroAtualEmpresa
 } = require('./empresasConfiguracaoFiscal');
+const {
+  exigirEmpresaFiscalDaVenda,
+  resolverCredenciaisNfceDaEmpresa,
+  obterCertificadoDaEmpresa,
+  coerenciaDocumentoComVenda
+} = require('./FiscalEmpresaContextoService');
 const { carregarCertificadoPfx } = require('./certificateService');
 const {
   buildNfceXml
@@ -33,18 +39,23 @@ function salvarDebug(nome, conteudo) {
   fs.writeFileSync(path.join(pasta, nome), String(conteudo ?? ''), 'utf8');
 }
 
-function carregarVenda(vendaId) {
+function carregarVenda(vendaId, conn = db) {
   return new Promise((resolve, reject) => {
-    db.get(`
+    conn.get(`
       SELECT v.*, c.nome as cliente_nome, c.cpf_cnpj as cliente_cpf
       FROM vendas v
       LEFT JOIN clientes c ON c.id = v.cliente_id
       WHERE v.id = ?
     `, [vendaId], (err, venda) => {
       if (err) return reject(err);
-      if (!venda) return reject(new Error('Venda não encontrada.'));
+      if (!venda) {
+        const notFound = new Error('Venda não encontrada.');
+        notFound.code = 'VENDA_NAO_ENCONTRADA';
+        notFound.statusCode = 404;
+        return reject(notFound);
+      }
 
-      db.all(`
+      conn.all(`
         SELECT
           vi.*,
           p.nome as produto_nome,
@@ -65,7 +76,7 @@ function carregarVenda(vendaId) {
         if (itErr) return reject(itErr);
 
         const carregarTefEVoltar = () => {
-          db.get(
+          conn.get(
             "SELECT * FROM tef_transacoes WHERE venda_id = ? LIMIT 1",
             [vendaId],
             (tefErr, tef) => {
@@ -82,7 +93,7 @@ function carregarVenda(vendaId) {
 
         const carregarPagamentosComerciaisEVoltar = () => {
           // Valores pagos pelo cliente (visão comercial do DANFE)
-          db.all(
+          conn.all(
             'SELECT forma_pagamento, valor FROM venda_pagamentos WHERE venda_id = ? ORDER BY id',
             [vendaId],
             (pgErr, pagamentosComerciais) => {
@@ -99,7 +110,7 @@ function carregarVenda(vendaId) {
           );
         };
 
-        db.all(`
+        conn.all(`
           SELECT
             forma_pagamento,
             valor,
@@ -209,13 +220,15 @@ function salvarNota(payload) {
 
 async function emitirPorVendaId(vendaId, opcoes = {}) {
   console.log('ENTROU NO EMISSOR FISCAL');
-  const empresaId = normalizarEmpresaId(opcoes && opcoes.empresaId);
-  const fiscalOpts = empresaId ? { empresaId, db: opcoes.db } : { db: opcoes.db };
+  const conn = opcoes.db || db;
   try {
-    await garantirSchemaFiscalEmpresaAsync(opcoes.db || db);
+    await garantirSchemaFiscalEmpresaAsync(conn);
   } catch (_) { /* schema auxiliar; emissão legado segue */ }
-  const { venda, itens } = await carregarVenda(vendaId);
-  const persistirNota = (payload) => salvarNota({ ...payload, empresa_id: empresaId || null });
+  const { venda, itens } = await carregarVenda(vendaId, conn);
+  const empresaIdContexto = opcoes.empresaIdContexto != null ? opcoes.empresaIdContexto : opcoes.empresaId;
+  const empresaId = exigirEmpresaFiscalDaVenda({ venda, empresaIdContexto });
+  const fiscalOpts = { empresaId, db: conn };
+  const persistirNota = (payload) => salvarNota({ ...payload, empresa_id: empresaId });
 
   if (
     venda.status_pagamento &&
@@ -240,7 +253,7 @@ async function emitirPorVendaId(vendaId, opcoes = {}) {
   }
 
   const notaAutorizada = await new Promise((resolve, reject) => {
-    db.get(`
+    conn.get(`
       SELECT *
       FROM nfce_notas
       WHERE venda_id = ?
@@ -266,7 +279,7 @@ async function emitirPorVendaId(vendaId, opcoes = {}) {
   }
 
   const notaPendenteAnterior = await new Promise((resolve, reject) => {
-    db.get(`
+    conn.get(`
       SELECT *
       FROM nfce_notas
       WHERE venda_id = ?
@@ -279,7 +292,18 @@ async function emitirPorVendaId(vendaId, opcoes = {}) {
     });
   });
 
-  const config = await getFiscalConfig(fiscalOpts);
+  const credenciais = await resolverCredenciaisNfceDaEmpresa({
+    empresaId,
+    db: conn,
+    validarUrls: true,
+    getFiscalConfigFn: opcoes.getFiscalConfig
+  });
+  const config = credenciais.config;
+  await obterCertificadoDaEmpresa({
+    empresaId,
+    db: conn,
+    getFiscalConfigFn: opcoes.getFiscalConfig
+  });
 
   let numero;
 
@@ -655,14 +679,19 @@ async function emitirPorVendaId(vendaId, opcoes = {}) {
  * Regenera o DANFE com pagamentos atuais (F+NF),
  * para a impressão não ficar presa ao HTML gerado só com a fatia fiscal.
  */
-async function obterDanfeHtmlAtualizado(vendaId) {
+async function obterDanfeHtmlAtualizado(vendaId, opcoes = {}) {
   const id = Number(vendaId);
   if (!id) {
     throw new Error('Venda inválida para DANFE.');
   }
+  const conn = opcoes.db || db;
+
+  const { venda, itens } = await carregarVenda(id, conn);
+  const empresaIdContexto = opcoes.empresaIdContexto != null ? opcoes.empresaIdContexto : opcoes.empresaId;
+  const empresaFiscal = exigirEmpresaFiscalDaVenda({ venda, empresaIdContexto });
 
   const nota = await new Promise((resolve, reject) => {
-    db.get(
+    conn.get(
       `SELECT *
        FROM nfce_notas
        WHERE venda_id = ?
@@ -676,10 +705,15 @@ async function obterDanfeHtmlAtualizado(vendaId) {
   if (!nota) {
     throw new Error('NFC-e não encontrada para esta venda.');
   }
+  coerenciaDocumentoComVenda({ nota, empresaFiscal });
 
-  const { venda, itens } = await carregarVenda(id);
-  const empresaNota = normalizarEmpresaId(nota.empresa_id);
-  const config = await getFiscalConfig(empresaNota ? { empresaId: empresaNota } : {});
+  const credenciais = await resolverCredenciaisNfceDaEmpresa({
+    empresaId: empresaFiscal,
+    db: conn,
+    validarUrls: false,
+    getFiscalConfigFn: opcoes.getFiscalConfig
+  });
+  const config = credenciais.config;
   const ambiente = Number(nota.ambiente || config.ambiente || 1);
 
   const danfeHtml = await gerarDanfeHtml({

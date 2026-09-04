@@ -88,6 +88,7 @@ async function setupDb(opts = {}) {
       pedido_item_id INTEGER,
       produto_id INTEGER NOT NULL,
       quantidade_fiscal REAL NOT NULL DEFAULT 0,
+      empresa_id INTEGER,
       status TEXT NOT NULL DEFAULT 'ATIVA',
       criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
       atualizado_em DATETIME
@@ -110,6 +111,17 @@ async function setupDb(opts = {}) {
       data_hora DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  await run(db, `
+    CREATE TABLE pedidos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER,
+      status TEXT DEFAULT 'PEDIDO'
+    )
+  `);
+  for (let i = 0; i < 110; i += 1) {
+    await run(db, `INSERT INTO pedidos (empresa_id, status) VALUES (1, 'PEDIDO')`);
+  }
 
   const sf = opts.saldo_fiscal != null ? opts.saldo_fiscal : 100;
   const snf = opts.saldo_nao_fiscal != null ? opts.saldo_nao_fiscal : 50;
@@ -159,7 +171,7 @@ async function testFiscalInsuficienteRequerSupervisor() {
   const { db, produtoId } = await setupDb({ saldo_fiscal: 10, saldo_nao_fiscal: 90 });
   const analise = await MotorComercial.analisarDisponibilidadeFiscal(
     [{ produto_id: produtoId, quantidade: 40 }],
-    { db }
+    { db, empresaId: 1 }
   );
   assert.strictEqual(analise.requerAutorizacao, true);
   assert.strictEqual(analise.bloqueado, false);

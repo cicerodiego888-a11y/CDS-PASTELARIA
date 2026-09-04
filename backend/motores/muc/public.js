@@ -1,5 +1,5 @@
 /**
- * MUC RC2.1 — Superfície pública oficial (única entrada permitida para consumidores)
+ * MUC RC3.0 — Superfície pública oficial (única entrada permitida para consumidores)
  * @module motores/muc/public
  */
 'use strict';

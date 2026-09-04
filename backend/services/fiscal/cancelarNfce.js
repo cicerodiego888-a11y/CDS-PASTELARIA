@@ -1,13 +1,33 @@
-const db = require('../../database');
-const { getFiscalConfig } = require('./configService');
+const dbDefault = require('../../database');
 const { assinarEvento } = require('./signer');
 const { carregarCertificadoPfx } = require('./certificateService');
 const { compactarXml, extrairChaveEProtocoloAutorizados } = require('./utils');
 const { validarMotivoTexto } = require('../validacao/validarMotivoTexto');
 const { enviarCancelamento } = require('./cancelamentoRuntime');
+const {
+  exigirEmpresaFiscalDaVenda,
+  exigirContextoFiscalDaEmpresa,
+  obterCertificadoDaEmpresa,
+  coerenciaDocumentoComVenda
+} = require('./FiscalEmpresaContextoService');
 
-async function cancelarNfce(vendaId, justificativa) {
-  const config = await getFiscalConfig();
+function dbGet(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
+  });
+}
+
+function dbRun(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function onRun(err) {
+      if (err) return reject(err);
+      resolve(this);
+    });
+  });
+}
+
+async function cancelarNfce(vendaId, justificativa, opcoes = {}) {
+  const db = opcoes.db || dbDefault;
 
   if (!vendaId) {
     throw new Error('venda_id é obrigatório para cancelar NFC-e.');
@@ -18,8 +38,24 @@ async function cancelarNfce(vendaId, justificativa) {
     throw new Error(validacaoJustificativa.erro);
   }
 
-  const notaAutorizada = await new Promise((resolve, reject) => {
-    db.get(`
+  const venda = await dbGet(db, `SELECT * FROM vendas WHERE id = ?`, [vendaId]);
+  const empresaIdContexto = opcoes.empresaIdContexto != null ? opcoes.empresaIdContexto : opcoes.empresaId;
+  const empresaFiscal = exigirEmpresaFiscalDaVenda({ venda, empresaIdContexto });
+
+  const getFiscalConfigFn = opcoes.getFiscalConfig;
+  const config = await exigirContextoFiscalDaEmpresa({
+    empresaId: empresaFiscal,
+    db,
+    validarUrls: false,
+    getFiscalConfigFn
+  });
+  const certificadoInfo = await obterCertificadoDaEmpresa({
+    empresaId: empresaFiscal,
+    db,
+    getFiscalConfigFn
+  });
+
+  const notaAutorizada = await dbGet(db, `
       SELECT *
       FROM nfce_notas
       WHERE venda_id = ?
@@ -30,15 +66,12 @@ async function cancelarNfce(vendaId, justificativa) {
         )
       ORDER BY id DESC
       LIMIT 1
-    `, [vendaId], (err, row) => {
-      if (err) return reject(err);
-      resolve(row);
-    });
-  });
+    `, [vendaId]);
 
   if (!notaAutorizada) {
     throw new Error('Nenhuma NFC-e autorizada encontrada para cancelar.');
   }
+  coerenciaDocumentoComVenda({ nota: notaAutorizada, empresaFiscal });
 
   const authSefaz = extrairChaveEProtocoloAutorizados(notaAutorizada.xml_retorno);
   const chaveAcesso = authSefaz?.chaveAcesso || notaAutorizada.chave_acesso;
@@ -53,8 +86,7 @@ async function cancelarNfce(vendaId, justificativa) {
       `[CANCELAMENTO] Corrigindo chave no banco: ${notaAutorizada.chave_acesso} -> ${authSefaz.chaveAcesso}`
     );
 
-    await new Promise((resolve, reject) => {
-      db.run(`
+    await dbRun(db, `
         UPDATE nfce_notas
         SET
           chave_acesso = ?,
@@ -62,11 +94,7 @@ async function cancelarNfce(vendaId, justificativa) {
           status = 'autorizada',
           updated_at = datetime('now', 'localtime')
         WHERE id = ?
-      `, [authSefaz.chaveAcesso, authSefaz.protocolo, notaAutorizada.id], (updateErr) => {
-        if (updateErr) return reject(updateErr);
-        resolve();
-      });
-    });
+      `, [authSefaz.chaveAcesso, authSefaz.protocolo, notaAutorizada.id]);
   }
 
   function formatarDataHoraEvento(date = new Date()) {
@@ -106,9 +134,10 @@ async function cancelarNfce(vendaId, justificativa) {
     </evento>
   `;
 
-  const certificado = carregarCertificadoPfx(
-    config.certificadoPath,
-    config.certificadoSenha
+  const carregarPfx = opcoes.carregarCertificadoPfx || carregarCertificadoPfx;
+  const certificado = carregarPfx(
+    certificadoInfo.certificadoPath,
+    certificadoInfo.certificadoSenha
   );
 
   const assinatura = assinarEvento(
@@ -128,7 +157,7 @@ async function cancelarNfce(vendaId, justificativa) {
 
   const soap = `<?xml version="1.0" encoding="utf-8"?>
     <soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                     xmlns:xsd="http://www.w3.org/2001/XMLSchema"
+                     xmlns:xsd="http://www.w3.org/2003/XMLSchema"
                      xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
       <soap12:Header>
         <nfeCabecMsg xmlns="http://www.portalfiscal.inf.br/nfe/wsdl/NFeRecepcaoEvento4">
@@ -143,16 +172,16 @@ async function cancelarNfce(vendaId, justificativa) {
       </soap12:Body>
     </soap12:Envelope>`;
 
-  // Sprint F9 — transporte via Plataforma Fiscal (fallback automático para legado)
-  const envio = await enviarCancelamento({
+  const enviar = opcoes.enviarCancelamento || enviarCancelamento;
+  const envio = await enviar({
     envelope: soap,
     ambiente: config.ambiente,
     cUF: config.codigoUf,
     chave: chaveAcesso,
     protocolo,
     xJust: justificativa.trim(),
-    certificadoPath: config.certificadoPath,
-    certificadoSenha: config.certificadoSenha
+    certificadoPath: certificadoInfo.certificadoPath,
+    certificadoSenha: certificadoInfo.certificadoSenha
   });
 
   if (!envio.success) {
@@ -165,7 +194,8 @@ async function cancelarNfce(vendaId, justificativa) {
     chaveAcesso,
     protocolo,
     source: envio.source,
-    fallbackUtilizado: envio.fallbackUtilizado
+    fallbackUtilizado: envio.fallbackUtilizado,
+    empresaId: empresaFiscal
   };
 }
 

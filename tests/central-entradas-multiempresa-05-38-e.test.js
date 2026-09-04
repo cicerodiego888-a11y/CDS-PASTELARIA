@@ -266,7 +266,7 @@ async function test07e08DocumentoContexto() {
 async function test09DocumentoANaoGeraCompraB() {
   assert.throws(
     () => exigirDocumentoCompraMesmaEmpresa(EMP_A.id, EMP_B.id),
-    (err) => err && err.code === 'DOCUMENTO_EMPRESA_INCOMPATIVEL'
+    (err) => err && err.code === 'OPERACAO_EMPRESA_DIVERGENTE'
   );
   assert.strictEqual(exigirDocumentoCompraMesmaEmpresa(EMP_A.id, EMP_A.id), EMP_A.id);
 }

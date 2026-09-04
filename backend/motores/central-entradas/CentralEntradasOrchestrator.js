@@ -156,7 +156,8 @@ class CentralEntradasOrchestrator {
 
     /** @private */
     this._configuracaoService = deps.configuracaoService ?? new CentralConfiguracaoService({
-      configuracaoRepository: deps.configuracaoRepository
+      configuracaoRepository: deps.configuracaoRepository,
+      db: deps.db ?? null
     });
     /** @private @deprecated RC5 — use _configuracaoService; mantido só se injetado em testes legados */
     this._configService = deps.configService ?? this._configuracaoService;
@@ -358,6 +359,28 @@ class CentralEntradasOrchestrator {
 
   async listarAlertasSaude(filtros = {}) {
     const health = require('./health');
+    const empresaId = Number(filtros.empresaId);
+    if (Number.isInteger(empresaId) && empresaId > 0) {
+      const painel = await health.obterMonitor().obterPainel({
+        exigirEmpresa: true,
+        empresaId,
+        forcar: true,
+        persistirEstado: false,
+        atualizarCacheGlobal: false,
+        autoRecuperar: false
+      });
+      let lista = painel.alertas || [];
+      if (filtros.nivel) {
+        lista = lista.filter((a) => a.nivel === filtros.nivel);
+      }
+      return {
+        total: lista.length,
+        alertas: lista,
+        contadores: painel.contadores || null,
+        geradoEm: painel.geradoEm || null,
+        empresaId
+      };
+    }
     await health.obterMonitor().obterPainel({});
     return health.obterMonitor().listarAlertas(filtros);
   }
@@ -376,19 +399,35 @@ class CentralEntradasOrchestrator {
 
   /**
    * Processa documentos SINCRONIZADA sem parse (pipeline único Parser + MIIP).
+   * Fila filtrada por empresaId da operação (05.74).
    *
    * @param {Object} [opcoes]
    * @returns {Promise<Object[]>}
    */
   async processarDocumentosPendentes(opcoes = {}) {
     const limite = Math.min(Number(opcoes.limite) || 100, 200);
-    const pendentes = await this._documentosRepository.listarPendentesProcessamento(limite);
+    const empresaId = Number(opcoes.empresaId ?? opcoes.empresaIdContexto);
+    if (!Number.isInteger(empresaId) || empresaId <= 0) {
+      const erro = new Error(
+        'Modo MULTIEMPRESA exige empresa explícita para processar pendências.'
+      );
+      erro.code = 'EMPRESA_CENTRAL_AUSENTE';
+      erro.statusCode = 400;
+      throw erro;
+    }
+
+    const pendentes = await this._documentosRepository.listarPendentesProcessamento(
+      limite,
+      empresaId
+    );
     const resultados = [];
 
     for (const doc of pendentes) {
       // eslint-disable-next-line no-await-in-loop
       const resultado = await this._processamentoService.processar(doc.id, {
-        usuarioId: opcoes.usuarioId
+        usuarioId: opcoes.usuarioId,
+        empresaIdContexto: empresaId,
+        empresaId
       });
       resultados.push({
         documentoId: doc.id,
@@ -436,10 +475,20 @@ class CentralEntradasOrchestrator {
     }
 
     if (resultado.sucesso && !resultado.ignorado) {
-      const processamentos = await this.processarDocumentosPendentes({
-        usuarioId: opcoes.usuarioId,
-        limite: opcoes.limiteProcessamento
-      });
+      const {
+        listarAlvosSincronizacaoCentral
+      } = require('../../services/central-entradas/CentralEntradasEmpresaContextoService');
+      const { alvos } = await listarAlvosSincronizacaoCentral();
+      const processamentos = [];
+      for (const alvo of alvos) {
+        // eslint-disable-next-line no-await-in-loop
+        const lote = await this.processarDocumentosPendentes({
+          usuarioId: opcoes.usuarioId,
+          limite: opcoes.limiteProcessamento,
+          empresaId: alvo.empresaId
+        });
+        processamentos.push(...lote);
+      }
       resultado.processamentosAutomaticos = processamentos;
       resultado.documentosProcessados = processamentos.filter((p) => p.sucesso).length;
     }
@@ -465,11 +514,14 @@ class CentralEntradasOrchestrator {
     return this._uploadService.processarUpload(arquivos, opcoes);
   }
 
-  async buscarPorChave(chave) {
-    const resultado = await this._sincronizacaoService.buscarPorChave(chave);
+  async buscarPorChave(chave, opcoes = {}) {
+    const resultado = await this._sincronizacaoService.buscarPorChave(chave, opcoes);
 
     if (resultado.novo && resultado.documento?.id) {
-      const processamentos = await this.processarDocumentosPendentes({ limite: 5 });
+      const processamentos = await this.processarDocumentosPendentes({
+        limite: 5,
+        empresaId: opcoes.empresaId
+      });
       resultado.processamentosAutomaticos = processamentos;
     }
 
@@ -557,9 +609,16 @@ class CentralEntradasOrchestrator {
     }
 
     if (resultado.xmlCompleto) {
+      const emp = Number(
+        opcoes.empresaId
+        ?? opcoes.empresaIdContexto
+        ?? resultado.documento?.empresaId
+        ?? resultado.documento?.empresa_id
+      );
       resultado.processamentosAutomaticos = await this.processarDocumentosPendentes({
         usuarioId: opcoes.usuarioId,
-        limite: 5
+        limite: 5,
+        empresaId: emp
       });
     }
     return resultado;
@@ -569,8 +628,8 @@ class CentralEntradasOrchestrator {
     return this._comprasBridgeService.concluirRevisao(id, dados);
   }
 
-  async obterPayloadCompra(id) {
-    return this._comprasBridgeService.montarPayloadAbrirCompra(id);
+  async obterPayloadCompra(id, opcoes = {}) {
+    return this._comprasBridgeService.montarPayloadAbrirCompra(id, opcoes);
   }
 
   async abrirCompra(id, opcoes = {}) {
@@ -633,7 +692,9 @@ class CentralEntradasOrchestrator {
         mes: opcoes.mes,
         competencia: opcoes.competencia,
         dataEmissaoInicio: opcoes.dataEmissaoInicio || opcoes.data_emissao_inicio || null,
-        dataEmissaoFim: opcoes.dataEmissaoFim || opcoes.data_emissao_fim || null
+        dataEmissaoFim: opcoes.dataEmissaoFim || opcoes.data_emissao_fim || null,
+        empresaId: opcoes.empresaId ?? opcoes.empresa_id,
+        empresaIds: opcoes.empresaIds || opcoes.empresa_ids
       }),
       this._atencaoService.obterItensAtencao({
         alertasResultado: alertas,
@@ -780,7 +841,27 @@ class CentralEntradasOrchestrator {
     if (!documento) {
       const erro = new Error('Documento não encontrado');
       erro.statusCode = 404;
+      erro.code = 'DOCUMENTO_NAO_ENCONTRADO';
       throw erro;
+    }
+
+    if (opcoes.empresaIdContexto != null || opcoes.req) {
+      const {
+        exigirDocumentoDaEmpresa,
+        resolverEmpresaParaCentral
+      } = require('../../services/central-entradas/CentralEntradasEmpresaContextoService');
+      let empresaId = opcoes.empresaIdContexto;
+      if (empresaId == null && opcoes.req) {
+        const ctx = await resolverEmpresaParaCentral({
+          req: opcoes.req,
+          empresaId: opcoes.req.empresaId
+        }, opcoes);
+        empresaId = ctx.empresaId;
+      }
+      await exigirDocumentoDaEmpresa(
+        { documento, documentoId: id, empresaId },
+        { documentosRepository: this._documentosRepository }
+      );
     }
 
     await this._transitionService.transicionar(id, documento.status, novoStatus, {

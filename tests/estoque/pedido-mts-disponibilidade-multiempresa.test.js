@@ -121,6 +121,13 @@ async function setup() {
   await EstoqueEmpresaService.criarRegistro({
     produtoId: p.lastID, empresaId: b.id, saldo_fiscal: 3, estoque_atual: 3
   }, { db });
+  await run(db, `
+    CREATE TABLE pedidos (
+      id INTEGER PRIMARY KEY,
+      empresa_id INTEGER,
+      status TEXT DEFAULT 'PEDIDO'
+    )
+  `);
   return { db, produtoId: p.lastID, empresaA: a, empresaB: b };
 }
 
@@ -220,6 +227,9 @@ async function test05PedidoEncadeiaMts() {
   const depsSup = {
     verificarSupervisorToken: async () => ({ id: 99, username: 'sup', perfil: 'SUPERVISOR' })
   };
+
+  await run(db, `INSERT INTO pedidos (id, empresa_id, status) VALUES (35, ?, 'PEDIDO')`, [empresaB.id]);
+  await run(db, `INSERT INTO pedidos (id, empresa_id, status) VALUES (36, ?, 'PEDIDO')`, [empresaA.id]);
 
   await assertRejects(
     MotorComercial.confirmarPedidoFiscal({

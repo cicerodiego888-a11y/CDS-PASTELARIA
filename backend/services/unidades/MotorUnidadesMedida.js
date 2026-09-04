@@ -1,7 +1,10 @@
 /**
  * RC8.4.0 — Motor de Unidades de Medida Inteligente.
- * Conversão embalagem comercial → unidade de estoque + formação de preço.
- * Não altera XML, MIIP matching nem regras fiscais.
+ * Formação de preço e catálogo comercial.
+ *
+ * @deprecated MUC-02/MUC-04 — conversão SI/ficha/consumo: use obterMuc(db).converterQuantidade.
+ * Este módulo permanece para formação de preço, catálogo UC e compatibilidade.
+ * Ficha/consumo não usam este módulo como autoridade de conversão.
  *
  * @module services/unidades/MotorUnidadesMedida
  */
@@ -28,6 +31,7 @@ const UNIDADES_COMERCIAIS = Object.freeze([
   'ML',
   'M',
   'CM',
+  'MM',
   'M2',
   'M3'
 ]);
@@ -48,6 +52,7 @@ const LABELS_UNIDADE_COMERCIAL = Object.freeze({
   ML: 'Mililitro',
   M: 'Metro',
   CM: 'Centímetro',
+  MM: 'Milímetro',
   M2: 'Metro Quadrado',
   M3: 'Metro Cúbico'
 });
@@ -88,6 +93,7 @@ const MAPA_UCOM_XML = Object.freeze({
   M: 'M',
   MT: 'M',
   CM: 'CM',
+  MM: 'MM',
   M2: 'M2',
   'M²': 'M2',
   M3: 'M3',
@@ -105,6 +111,16 @@ function moeda(v) {
   return num(v, 2);
 }
 
+function isUnidadeComercialConhecida(valor) {
+  const raw = String(valor || '').trim().toUpperCase()
+    .replace('²', '2')
+    .replace('³', '3')
+    .replace(/\s+/g, '');
+  if (!raw) return false;
+  if (MAPA_UCOM_XML[raw]) return true;
+  return UNIDADES_COMERCIAIS.includes(raw);
+}
+
 function normalizarUnidadeComercial(valor) {
   const raw = String(valor || 'UN').trim().toUpperCase()
     .replace('²', '2')
@@ -115,6 +131,7 @@ function normalizarUnidadeComercial(valor) {
   return 'UN';
 }
 
+/** Uso interno da formação de preço (não exportado — MUC-08). */
 function exigeQuantidadePorEmbalagem(unidadeComercial) {
   const uc = normalizarUnidadeComercial(unidadeComercial);
   return uc !== 'UN';
@@ -243,24 +260,16 @@ function identificarUnidadeDoXml(uCom) {
   return normalizarUnidadeComercial(uCom);
 }
 
-function listarUnidadesComerciais() {
-  return UNIDADES_COMERCIAIS.map((codigo) => ({
-    codigo,
-    label: LABELS_UNIDADE_COMERCIAL[codigo] || codigo
-  }));
-}
-
 module.exports = {
   UNIDADES_COMERCIAIS,
   LABELS_UNIDADE_COMERCIAL,
   MAPA_UCOM_XML,
+  isUnidadeComercialConhecida,
   normalizarUnidadeComercial,
-  exigeQuantidadePorEmbalagem,
   produtoUsaCompraPorEmbalagem,
   calcularCompraEmbalagem,
   calcularFormacaoPrecoCadastro,
   identificarUnidadeDoXml,
-  listarUnidadesComerciais,
   num,
   moeda
 };

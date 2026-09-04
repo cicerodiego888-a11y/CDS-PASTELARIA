@@ -1,0 +1,35 @@
+# PDV UNIVERSAL
+
+============
+
+STATUS:  
+CONGELADO
+
+PAPEL:  
+LEGADO
+
+PDV OFICIAL EM EVOLUÇÃO:  
+PDV NORMAL (`/pdv`, `frontend/pdv`)
+
+NOVAS FUNCIONALIDADES:  
+NÃO
+
+NOVAS INTEGRAÇÕES:  
+NÃO
+
+NOVAS REGRAS DE NEGÓCIO:  
+NÃO
+
+MULTIEMPRESA:  
+NÃO EVOLUIR NO UNIVERSAL
+
+CORREÇÕES CRÍTICAS:  
+somente para preservar funcionamento ou impedir impacto no restante do sistema
+
+REMOÇÃO:  
+FASE FINAL
+
+PRÉ-REQUISITO PARA REMOÇÃO:  
+AUDITORIA FINAL DE DEPENDÊNCIAS E CHAMADORES
+
+Detalhamento: `docs/arquitetura/ISOLAMENTO_PDV_UNIVERSAL_05_75.md`

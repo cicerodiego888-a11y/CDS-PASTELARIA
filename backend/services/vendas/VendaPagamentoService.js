@@ -23,6 +23,7 @@ const {
   montarOpcoesBaixaEstoqueVenda
 } = require('./debitoEstoqueVendaViaPorta');
 const { aplicarSaldosDisponibilidadeVenda } = require('../estoque/leituraEstoqueEmpresaProduto');
+const { exigirProdutosVendaveisNaVenda } = require('../produtos/tipoOperacionalProduto');
 const {
   exigirEmpresaDaOperacao,
   exigirCaixaCompativelComVenda,
@@ -133,14 +134,19 @@ function atualizarSaldoProdutoAposBaixa(produtoId, quantidade, itemFiscal, callb
 }
 
 function reduzirEstoqueComFEFO(vendaItemId, produtoId, quantidade, itemFiscal, callback, opcoes = {}) {
-  lotesService.produtoControlaValidade(produtoId, (err, controlaValidade) => {
+    lotesService.produtoControlaValidade(produtoId, (err, controlaValidade) => {
     if (err) return callback(err);
 
     if (!controlaValidade) {
       return atualizarSaldoProdutoAposBaixa(produtoId, quantidade, itemFiscal, callback, opcoes);
     }
 
-    // Produto controla validade - usar FEFO
+    const opcoesLote = {
+      db: opcoes.db || db,
+      empresaId: opcoes.empresaId ?? opcoes.empresa_id
+    };
+
+    // Produto controla validade - usar FEFO empresarial
     lotesService.consumirLotesFEFO(produtoId, quantidade, (consumoErr, consumoLotes) => {
       if (consumoErr) return callback(consumoErr);
 
@@ -154,13 +160,14 @@ function reduzirEstoqueComFEFO(vendaItemId, produtoId, quantidade, itemFiscal, c
         return aposRegistro(null);
       }
 
-      db.get('SELECT id FROM vendas_itens WHERE id = ?', [vendaItemId], (itemLookupErr, itemRow) => {
+      const dbConn = opcoes.db || db;
+      dbConn.get('SELECT id FROM vendas_itens WHERE id = ?', [vendaItemId], (itemLookupErr, itemRow) => {
         if (itemLookupErr) return callback(itemLookupErr);
         if (!itemRow) return aposRegistro(null);
-        lotesService.registrarConsumoVenda(vendaItemId, consumoLotes, aposRegistro);
+        lotesService.registrarConsumoVenda(vendaItemId, consumoLotes, aposRegistro, opcoesLote);
       });
-    });
-  });
+    }, opcoesLote);
+  }, { db: opcoes.db || db });
 }
 
 function reduzirEstoqueDistribuido(
@@ -545,7 +552,8 @@ db.all(`
     nome,
     saldo_fiscal,
     saldo_nao_fiscal,
-    COALESCE(controla_estoque, 1) AS controla_estoque
+    COALESCE(controla_estoque, 1) AS controla_estoque,
+    COALESCE(tipo_operacional, 'COMERCIAL') AS tipo_operacional
   FROM produtos
   WHERE id IN (${produtoIds.map(() => '?').join(',')})
 `, produtoIds, async (err, produtos) => {
@@ -565,6 +573,16 @@ db.all(`
       sucesso: false,
       error: isoErr && isoErr.message ? isoErr.message : 'Erro ao consultar estoque da empresa.',
       code: isoErr && isoErr.code ? isoErr.code : undefined
+    });
+  }
+
+  try {
+    exigirProdutosVendaveisNaVenda(produtosEstoque);
+  } catch (insumoErr) {
+    return res.status(insumoErr.statusCode || 400).json({
+      sucesso: false,
+      error: insumoErr.message,
+      code: insumoErr.code
     });
   }
 
@@ -694,7 +712,10 @@ try {
   });
 }
 req.empresaIdVenda = empresaIdVenda;
-const opcoesBaixaEstoque = montarOpcoesBaixaEstoqueVenda(req, 'baixa_venda', db);
+const opcoesBaixaEstoque = {
+  ...montarOpcoesBaixaEstoqueVenda(req, 'baixa_venda', db),
+  exigirEmpresa: true
+};
 const tipoVendaCanal = String(req.body?.tipo_venda || 'BALCAO').toUpperCase();
 if (tipoVendaCanal === 'ENTREGA') {
   const { criarVendaEntrega } = require('../entrega/CriarVendaEntregaService');
@@ -836,7 +857,8 @@ db.all(`
     estoque_atual,
     COALESCE(reservado_fiscal, 0) AS reservado_fiscal,
     COALESCE(reservado_nao_fiscal, 0) AS reservado_nao_fiscal,
-    COALESCE(controla_estoque, 1) AS controla_estoque
+    COALESCE(controla_estoque, 1) AS controla_estoque,
+    COALESCE(tipo_operacional, 'COMERCIAL') AS tipo_operacional
   FROM produtos
   WHERE id IN (${produtoIds.map(() => '?').join(',')})
 `, produtoIds, async (err, produtos) => {
@@ -856,6 +878,15 @@ db.all(`
     return res.status(500).json({
       error: isoErr && isoErr.message ? isoErr.message : 'Erro ao consultar estoque da empresa.',
       code: isoErr && isoErr.code ? isoErr.code : undefined
+    });
+  }
+
+  try {
+    exigirProdutosVendaveisNaVenda(produtosEstoque);
+  } catch (insumoErr) {
+    return res.status(insumoErr.statusCode || 400).json({
+      error: insumoErr.message,
+      code: insumoErr.code
     });
   }
 
@@ -975,6 +1006,27 @@ db.all(`
       empresaId: opcoesBaixaEstoque.empresaId,
       usuarioId: opcoesBaixaEstoque.usuarioId,
       contexto: req
+    });
+  }
+
+  function aposBaixaItensDaVenda(vendaId, continuar) {
+    const { consumirFichaTecnicaDaVendaCb } = require('../produtos/FichaTecnicaConsumoService');
+    consumirFichaTecnicaDaVendaCb({
+      vendaId,
+      empresaId: empresaIdVenda,
+      itens: distribuicaoItens,
+      db,
+      usuarioId: opcoesBaixaEstoque.usuarioId
+    }, (fichaErr) => {
+      if (fichaErr) {
+        db.run('ROLLBACK');
+        res.status(fichaErr.statusCode || 400).json({
+          error: fichaErr.message,
+          code: fichaErr.code
+        });
+        return;
+      }
+      consumirReservaPedidoAposBaixa(vendaId, continuar);
     });
   }
 
@@ -1202,7 +1254,7 @@ db.all(`
               }
               itensProcessados++;
               if (itensProcessados === itens.length) {
-                consumirReservaPedidoAposBaixa(vendaId, () => {
+                aposBaixaItensDaVenda(vendaId, () => {
                 if (pagamentosVenda.length > 0) {
                   const stmtPagamentos = db.prepare(`
                     INSERT INTO venda_pagamentos (
@@ -1265,7 +1317,7 @@ db.all(`
                   db.run(`
                     INSERT INTO contas_receber (venda_id, cliente_id, numero_parcela, total_parcelas, valor_parcela, valor_restante, data_vencimento, status, empresa_id)
                     VALUES (?, ?, ?, ?, ?, ?, ?, 'aberto', ?)
-                  `, [vendaId, cliente_id, i, qtdParcelas, valorParcela, valorParcela, vencimento.format('YYYY-MM-DD'), req.empresaId || null]);
+                  `, [vendaId, cliente_id, i, qtdParcelas, valorParcela, valorParcela, vencimento.format('YYYY-MM-DD'), empresaIdVenda]);
                   vencimento = avancarVencimentoParcela(vencimento, intervaloParcelasBody);
                 }
                 buscarNomeCliente((clienteErr, clienteNome, clienteCpf) => {
@@ -1563,7 +1615,7 @@ const executarVenda = async () => {
             }
             itensProcessados++;
             if (itensProcessados === itens.length) {
-              consumirReservaPedidoAposBaixa(vendaId, () => {
+              aposBaixaItensDaVenda(vendaId, () => {
               if (pagamentosVenda.length > 0) {
                 const stmtPagamentos = db.prepare(`
                   INSERT INTO venda_pagamentos (
@@ -1640,7 +1692,7 @@ const executarVenda = async () => {
                       venda_id, cliente_id, numero_parcela, total_parcelas, valor_parcela,
                       valor_restante, data_vencimento, status, empresa_id
                     ) VALUES (?, ?, ?, ?, ?, ?, date('now', '+30 day'), 'aberto', ?)
-                  `, [vendaId, cliente_id, 1, 1, valorParcela, valorParcela, req.empresaId || null], (crErr) => {
+                  `, [vendaId, cliente_id, 1, 1, valorParcela, valorParcela, empresaIdVenda], (crErr) => {
                     if (crErr) {
                       db.run('ROLLBACK');
                       res.status(500).json({ error: crErr.message });

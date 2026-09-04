@@ -1,5 +1,7 @@
 /**
  * Fachada HTTP do PDV Universal (05.01 contexto + 05.02 seleção).
+ * STATUS: CONGELADO (legado). PDV oficial em evolução: /pdv (PDV Normal).
+ * Novas funcionalidades, integrações e regras: PROIBIDAS.
  */
 'use strict';
 

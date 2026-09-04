@@ -11,6 +11,7 @@
 const ProdutoIdentidadeService = require('./ProdutoIdentidadeService');
 const IdentidadeResultadoDTO = require('../contracts/IdentidadeResultadoDTO');
 const { FLAG_CHAVE } = require('../config/produtoIdentidadeFlags');
+const { produtoIdEhVendavelPdv } = require('../../../services/produtos/tipoOperacionalProduto');
 
 class PdvProdutoIdentificacaoService {
   /**
@@ -60,16 +61,31 @@ class PdvProdutoIdentificacaoService {
       ctx
     );
 
-    const encontrado = resultado && resultado.encontrado === true;
+    let resultadoFinal = resultado;
+    const encontradoBruto = resultado && resultado.encontrado === true;
+    if (encontradoBruto) {
+      const vendavel = await produtoIdEhVendavelPdv(
+        this._db,
+        resultado.produtoId || resultado.produto?.id
+      );
+      if (!vendavel) {
+        resultadoFinal = IdentidadeResultadoDTO.naoEncontrado({
+          codigoOriginal: bruto,
+          meta: { motivo: 'INSUMO_NAO_VENDAVEL' }
+        });
+      }
+    }
+
+    const encontrado = resultadoFinal && resultadoFinal.encontrado === true;
     console.log('[MIP DEBUG] Resultado resolve:', {
       encontrado,
-      produtoId: resultado?.produtoId,
-      strategy: resultado?.strategy,
-      metodo: resultado?.metodo,
-      nome: resultado?.produto?.nome || null
+      produtoId: resultadoFinal?.produtoId,
+      strategy: resultadoFinal?.strategy,
+      metodo: resultadoFinal?.metodo,
+      nome: resultadoFinal?.produto?.nome || null
     });
 
-    return this._toPayload(resultado, {
+    return this._toPayload(resultadoFinal, {
       modo: 'mip',
       fallbackLegado: !encontrado
     });

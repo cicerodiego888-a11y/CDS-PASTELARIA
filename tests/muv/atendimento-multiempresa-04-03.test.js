@@ -427,25 +427,23 @@ async function test18EmpresaUnicaFluxoAtual() {
   }
 }
 
-async function test19MultiempresaNaoChamaPagamento() {
-  const { db, produtoId, empresaA } = await setupBase();
+async function test19MultiempresaChamaPagamento() {
   const { app, getPagamentoChamado, restore } = loadAppWithFakePagamento();
   try {
     const req = {
       body: {
         origem: 'PDV',
-        itens: [item(produtoId, empresaA.id, 1, 10)]
+        itens: []
       }
     };
     const res = mockRes();
-    await app.criarVenda(req, res, {
-      obterModoOperacaoVenda: () => 'MULTIEMPRESA',
-      db
+    const result = await app.criarVenda(req, res, {
+      obterModoOperacaoVenda: () => 'MULTIEMPRESA'
     });
-    assert.strictEqual(getPagamentoChamado(), 0);
+    assert.strictEqual(result, 'DELEGATED_PDV');
+    assert.strictEqual(getPagamentoChamado(), 1);
   } finally {
     restore();
-    await closeDb(db);
   }
 }
 
@@ -459,23 +457,19 @@ async function test20MultiempresaNaoCriaVendas() {
   await closeDb(db);
 }
 
-async function test21VendaNaoConcluida() {
-  const { db, produtoId, empresaA } = await setupBase();
-  const { app, restore } = loadAppWithFakePagamento();
+async function test21VendaConcluidaNoNucleo() {
+  const { app, getPagamentoChamado, restore } = loadAppWithFakePagamento();
   try {
-    const req = { body: { itens: [item(produtoId, empresaA.id, 1, 8)] } };
+    const req = { body: { itens: [] } };
     const res = mockRes();
-    await app.criarVenda(req, res, {
-      obterModoOperacaoVenda: () => 'MULTIEMPRESA',
-      db
+    const result = await app.criarVenda(req, res, {
+      obterModoOperacaoVenda: () => 'MULTIEMPRESA'
     });
-    assert.strictEqual(res.state.statusCode, 200);
-    assert.strictEqual(res.state.body.venda_concluida, false);
-    assert.strictEqual(res.state.body.pagamento_pendente, true);
-    assert.strictEqual(res.state.body.status, 'VALIDADO');
+    assert.strictEqual(result, 'DELEGATED_PDV');
+    assert.strictEqual(getPagamentoChamado(), 1);
+    assert.notStrictEqual(res.state.body && res.state.body.venda_concluida, false);
   } finally {
     restore();
-    await closeDb(db);
   }
 }
 
@@ -556,9 +550,9 @@ async function main() {
     ['16 não aceita empresa_id como substituto', test16NaoAceitaEmpresaSnake],
     ['17 não assume empresa 1', test17NaoAssumeEmpresa1],
     ['18 EMPRESA_UNICA continua fluxo atual', test18EmpresaUnicaFluxoAtual],
-    ['19 MULTIEMPRESA não chama VendaPagamentoService', test19MultiempresaNaoChamaPagamento],
-    ['20 MULTIEMPRESA não cria vendas', test20MultiempresaNaoCriaVendas],
-    ['21 MULTIEMPRESA retorna venda_concluida=false', test21VendaNaoConcluida],
+    ['19 MULTIEMPRESA PDV chama VendaPagamentoService', test19MultiempresaChamaPagamento],
+    ['20 criarAtendimento não cria vendas', test20MultiempresaNaoCriaVendas],
+    ['21 MULTIEMPRESA PDV conclui no núcleo', test21VendaConcluidaNoNucleo],
     ['22 múltiplas empresas funcionam simultaneamente', test22TresEmpresasSimultaneas],
     ['23 mesmo produto em empresas diferentes', test23MesmoProdutoEmpresasDiferentes],
     ['24 total do atendimento = soma das operações', test24TotalIgualSomaOperacoes],

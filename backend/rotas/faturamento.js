@@ -45,7 +45,9 @@ router.use(criarMiddlewareContextoEmpresa(db));
 /** Fila de pedidos aguardando faturamento */
 router.get('/pedidos/aguardando-faturamento', async (req, res) => {
   try {
-    const out = await PedidoService.listarFilaFaturamento();
+    const out = await PedidoService.listarFilaFaturamento({
+      empresaId: empresaIdDoReqPedido(req)
+    });
     res.json(out);
   } catch (err) {
     responderErro(res, err);
@@ -54,7 +56,9 @@ router.get('/pedidos/aguardando-faturamento', async (req, res) => {
 
 router.get('/pedidos/:id', async (req, res) => {
   try {
-    const out = await PedidoService.obterPedido(req.params.id);
+    const out = await PedidoService.obterPedido(req.params.id, {
+      empresaId: empresaIdDoReqPedido(req)
+    });
     res.json(out);
   } catch (err) {
     responderErro(res, err);

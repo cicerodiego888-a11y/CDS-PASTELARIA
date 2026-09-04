@@ -202,10 +202,55 @@ function finalizarTelemetriaEnvio(envio, extra = {}) {
 }
 
 /**
+ * Resolve empresa da ingestão DistDFe sem ler `deps` fora de escopo.
+ * Ordem: contexto da chamada → persistencia._empresaId → null.
+ *
+ * @param {Object|null} ctxAudit
+ * @param {Object|null} persistencia
+ * @returns {number|string|null}
+ */
+function resolverEmpresaIdPersistenciaDfe(ctxAudit, persistencia) {
+  if (ctxAudit != null && ctxAudit.empresaId != null && ctxAudit.empresaId !== '') {
+    return ctxAudit.empresaId;
+  }
+  if (persistencia != null && persistencia._empresaId != null && persistencia._empresaId !== '') {
+    return persistencia._empresaId;
+  }
+  return null;
+}
+
+/**
+ * Falha estrutural de persistência DistDFe: não pode virar "ignorado" nem sucesso falso.
+ *
+ * @param {Error} err
+ * @returns {boolean}
+ */
+function isFalhaEstruturalPersistenciaDfe(err) {
+  if (!err) return false;
+  if (err.code === 'DISTDFE_PERSISTENCIA_AUSENTE' || err.code === 'DISTDFE_DEPS_INVALIDAS') {
+    return true;
+  }
+  return err instanceof ReferenceError;
+}
+
+/**
+ * @param {Object|null} persistencia
+ * @throws {Error} DISTDFE_PERSISTENCIA_AUSENTE
+ */
+function exigirPersistenciaDocumentoDfe(persistencia) {
+  if (!persistencia || typeof persistencia.persistirDocumentoDfe !== 'function') {
+    const err = new Error('Persistência DistDFe indisponível para ingestão de documentos.');
+    err.code = 'DISTDFE_PERSISTENCIA_AUSENTE';
+    throw err;
+  }
+}
+
+/**
  * @param {string} xmlRetorno
  * @param {CentralDfePersistenciaService} persistencia
  * @param {string} origem
  * @param {Object} [ctxAudit]
+ * @param {string|number|null} [ctxAudit.empresaId]
  * @returns {Promise<{ notasNovas: number, notasDuplicadas: number, ignorados: number, atualizados: number, eventos: number, errosZip: number, errosSchema: number, recebidosZip: number }>}
  */
 async function persistirDocumentosRetorno(xmlRetorno, persistencia, origem, ctxAudit = null) {
@@ -239,7 +284,8 @@ async function persistirDocumentosRetorno(xmlRetorno, persistencia, origem, ctxA
           xml: evt.xml,
           nsu: evt.nsu,
           chave: evt.chave,
-          origem
+          origem,
+          empresaId: empresaIdPersistencia
         });
         if (aplicado?.aplicado && auditoria) {
           await auditoria.registrar({
@@ -282,6 +328,24 @@ async function persistirDocumentosRetorno(xmlRetorno, persistencia, origem, ctxA
   let ignorados = 0;
   let atualizados = 0;
 
+  if (documentos.length > 0) {
+    try {
+      exigirPersistenciaDocumentoDfe(persistencia);
+    } catch (err) {
+      console.error('[DistDFe] Falha estrutural na persistência', {
+        etapa: 'exigirPersistenciaDocumentoDfe',
+        codigo: err.code || err.name,
+        nsu: documentos[0] && documentos[0].nsu ? documentos[0].nsu : null,
+        recebidos: documentos.length,
+        origem,
+        mensagem: err.message
+      });
+      throw err;
+    }
+  }
+
+  const empresaIdPersistencia = resolverEmpresaIdPersistenciaDfe(ctxAudit, persistencia);
+
   for (const doc of documentos) {
     recebidosZip += 1;
     const tParser = Date.now();
@@ -320,12 +384,27 @@ async function persistirDocumentosRetorno(xmlRetorno, persistencia, origem, ctxA
         xml: doc.xml,
         nsu: doc.nsu,
         origem,
-        empresaId: deps.contextoCentral?.empresaId
-          ?? persistencia._empresaId
-          ?? null
+        empresaId: empresaIdPersistencia
       });
     } catch (err) {
+      if (isFalhaEstruturalPersistenciaDfe(err)) {
+        console.error('[DistDFe] Falha estrutural na persistência', {
+          etapa: 'persistirDocumentoDfe',
+          codigo: err.code || err.name,
+          nsu: doc.nsu,
+          origem,
+          mensagem: err.message
+        });
+        throw err;
+      }
       ignorados += 1;
+      console.error('[DistDFe] Falha ao persistir documento DF-e', {
+        etapa: 'persistirDocumentoDfe',
+        codigo: err.code || null,
+        nsu: doc.nsu,
+        origem,
+        mensagem: err.message
+      });
       if (auditoria) {
         await auditoria.registrar({
           correlation_id: correlationId,
@@ -595,7 +674,8 @@ async function sincronizarDistribuicaoDFe(deps = {}) {
         auditoria,
         correlationId,
         cnpj,
-        ambiente
+        ambiente,
+        empresaId: deps.contextoCentral?.empresaId ?? persistencia._empresaId ?? null
       });
       notasNovasTotal += persistidos.notasNovas;
       notasDuplicadasTotal += persistidos.notasDuplicadas;
@@ -787,7 +867,11 @@ async function consultarNotaPorChave(chave, deps = {}) {
       throw new Error(metadados.xMotivo || `SEFAZ retornou cStat ${metadados.cStat}`);
     }
 
-    const persistidos = await persistirDocumentosRetorno(envio.body, persistencia, 'consulta_chave');
+    const persistidos = await persistirDocumentosRetorno(envio.body, persistencia, 'consulta_chave', {
+      cnpj,
+      ambiente,
+      empresaId: deps.contextoCentral?.empresaId ?? persistencia._empresaId ?? null
+    });
 
     finalizarTelemetriaEnvio(envio, {
       sucesso: true,
@@ -859,5 +943,6 @@ module.exports = {
   extrairMetadadosRetorno,
   extrairDocumentosZip,
   persistirDocumentosRetorno,
+  resolverEmpresaIdPersistenciaDfe,
   enviarConsultaDfe
 };

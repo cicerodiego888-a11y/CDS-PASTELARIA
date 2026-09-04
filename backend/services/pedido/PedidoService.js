@@ -12,6 +12,10 @@ const repo = require('./PedidoRepository');
 const VendaFinanceiroService = require('../vendas/VendaFinanceiroService');
 const MotorComercial = require('../../motores/comercial');
 const { empresaIdDoReqPedido } = require('./empresaIdDoReqPedido');
+const {
+  exigirEmpresaDaCriacao,
+  exigirPedidoDaEmpresa
+} = require('../pedidos/PedidoEmpresaContextoService');
 
 const { agoraLocalBrasil } = VendaFinanceiroService;
 
@@ -59,14 +63,20 @@ function normalizarItens(itensBrutos) {
   });
 }
 
-async function listarFilaFaturamento() {
+async function listarFilaFaturamento(opcoes = {}) {
   assertModuloHabilitado();
-  const itens = await repo.listarAguardandoFaturamento();
+  const empresaId = exigirEmpresaDaCriacao({
+    empresaId: empresaIdDoReqPedido({ empresaId: opcoes.empresaId })
+  });
+  const itens = await repo.listarAguardandoFaturamento({ empresaId });
   return { success: true, itens };
 }
 
-async function obterPedido(pedidoId) {
+async function obterPedido(pedidoId, opcoes = {}) {
   assertModuloHabilitado();
+  const empresaId = exigirEmpresaDaCriacao({
+    empresaId: empresaIdDoReqPedido({ empresaId: opcoes.empresaId })
+  });
   const id = Number(pedidoId);
   if (!Number.isInteger(id) || id <= 0) {
     const err = new Error('Pedido inválido.');
@@ -77,14 +87,18 @@ async function obterPedido(pedidoId) {
   if (!pedido) {
     const err = new Error('Pedido não encontrado.');
     err.statusCode = 404;
+    err.codigo = 'PEDIDO_NAO_ENCONTRADO';
     throw err;
   }
+  exigirPedidoDaEmpresa(pedido, empresaId);
   return { success: true, pedido };
 }
 
 async function criarPedido(body = {}, operadorId = null, opcoes = {}) {
   assertModuloHabilitado();
-  const empresaId = empresaIdDoReqPedido({ empresaId: opcoes.empresaId });
+  const empresaId = exigirEmpresaDaCriacao({
+    empresaId: empresaIdDoReqPedido({ empresaId: opcoes.empresaId })
+  });
   const itens = normalizarItens(body.itens);
   const totalCalculado = Number(itens.reduce((s, i) => s + Number(i.subtotal || 0), 0).toFixed(2));
   const total = body.total != null ? Number(body.total) : totalCalculado;
@@ -137,6 +151,7 @@ async function criarPedido(body = {}, operadorId = null, opcoes = {}) {
       : null,
     observacao: body.observacao || null,
     operadorId,
+    empresaId,
     itens
   });
 
@@ -157,7 +172,7 @@ async function criarPedido(body = {}, operadorId = null, opcoes = {}) {
     try {
       await repo.atualizarStatus(pedidoId, PedidoStatus.CANCELADO, [
         PedidoStatus.AGUARDANDO_FATURAMENTO
-      ]);
+      ], { empresaId });
     } catch (_) { /* ignore */ }
     if (!err.statusCode) err.statusCode = 409;
     if (!err.codigo && err.code) err.codigo = err.code;

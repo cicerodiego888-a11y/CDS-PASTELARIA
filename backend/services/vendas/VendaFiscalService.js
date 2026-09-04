@@ -57,8 +57,8 @@ function buscarNfceAutorizadaVenda(vendaId, callback) {
   `, [vendaId], callback);
 }
 
-async function cancelarNfceAutorizadaVenda(vendaId, justificativa) {
-  const cancelamento = await cancelarNfce(vendaId, justificativa.trim());
+async function cancelarNfceAutorizadaVenda(vendaId, justificativa, opcoes = {}) {
+  const cancelamento = await cancelarNfce(vendaId, justificativa.trim(), opcoes);
   const retornoTexto = typeof cancelamento.sefaz === 'string'
     ? cancelamento.sefaz
     : JSON.stringify(cancelamento.sefaz);
@@ -138,7 +138,9 @@ async function emitirFiscalSeSolicitado(vendaId, emitirFiscal, venda) {
   }
 
   try {
-    const fiscal = await emitirPorVendaId(vendaId);
+    const fiscal = await emitirPorVendaId(vendaId, {
+      empresaIdContexto: venda && venda.empresa_id
+    });
 
     if (fiscal?.status === 'sem_itens_fiscais') {
       return fiscal;
@@ -208,7 +210,9 @@ async function responderVendaComFiscal(res, payload) {
   });
 
   try {
-    const fiscal = await emitirPorVendaId(payload.vendaId);
+    const fiscal = await emitirPorVendaId(payload.vendaId, {
+      empresaIdContexto: payload.empresaId != null ? payload.empresaId : payload.empresa_id
+    });
 
     if (fiscal?.status === 'sem_itens_fiscais') {
       return res.json({

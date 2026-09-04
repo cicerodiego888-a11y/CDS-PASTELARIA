@@ -83,8 +83,8 @@ class CentralEntradasService {
     return this._orchestrator.uploadDocumentos(arquivos, opcoes);
   }
 
-  buscarPorChave(chave) {
-    return this._orchestrator.buscarPorChave(chave);
+  buscarPorChave(chave, opcoes = {}) {
+    return this._orchestrator.buscarPorChave(chave, opcoes);
   }
 
   obterXmlDocumento(id) {
@@ -124,8 +124,8 @@ class CentralEntradasService {
     return this._orchestrator.concluirRevisao(id, dados);
   }
 
-  obterPayloadCompra(id) {
-    return this._orchestrator.obterPayloadCompra(id);
+  obterPayloadCompra(id, opcoes = {}) {
+    return this._orchestrator.obterPayloadCompra(id, opcoes);
   }
 
   abrirCompra(id, opcoes = {}) {

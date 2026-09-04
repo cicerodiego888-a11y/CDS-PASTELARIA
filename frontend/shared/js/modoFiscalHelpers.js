@@ -99,6 +99,8 @@ function recarregarModulosModoFiscal() {
         loadPDV();
     } else if (page === 'dashboard' && typeof carregarDashboardComFiltro === 'function') {
         carregarDashboardComFiltro();
+    } else if (page === 'mis' && typeof carregarResumoMis === 'function') {
+        carregarResumoMis();
     } else if (page === 'monitoring' && typeof atualizarMonitoringModoFiscal === 'function') {
         atualizarMonitoringModoFiscal();
     } else if (page === 'financeiro' && typeof initFinanceiro === 'function') {

@@ -18,7 +18,6 @@ const {
   resolverPrecosCadastroAposCompra,
   obterTotalConvertidoItemCompra,
   obterQuantidadeComercial,
-  obterQuantidadeConvertida,
   validarConsistenciaQuantidadesItemCompra,
   validarDistribuicaoConversaoUnidadesItem,
   resolverQuantidadesEstoqueCompraItem,
@@ -26,6 +25,7 @@ const {
   resolverQuantidadesCompraItem
 } = require('../lib/motorConversaoUnidades');
 const { obterMuc, resultadoParaJson } = require('../motores/muc');
+const { simularConversaoCompraPreview } = require('../services/compras/simularConversaoCompraPreview');
 const {
   emitirNFeDevolucaoCompra,
   prepararNfeDevolucaoCompra,
@@ -86,7 +86,11 @@ const {
   resolverEmpresaDaCompra,
   resolverEmpresaContextoCompra,
   exigirCompraDaEmpresa,
-  statusDeErroCompraEmpresa
+  exigirCompraParaMutacaoOpaca,
+  atualizarChaveNfeFornecedorCompra,
+  jsonErroCompraOpaca,
+  statusDeErroCompraEmpresa,
+  carregarCompraAutorizadaP
 } = require('../services/compras/ComprasEmpresaContextoService');
 const { ModoOperacionalGlobal } = require('../core/modo-operacional');
 
@@ -136,7 +140,7 @@ async function vincularDocumentoCentralAposCompra(centralDocumentoId, compraId, 
   try {
     await centralOrchestrator.vincularCompra(centralDocumentoId, compraId, {
       usuarioId,
-      empresaId: empresaId != null ? Number(empresaId) : null
+      empresaIdContexto: empresaId != null ? Number(empresaId) : null
     });
   } catch (err) {
     logCentralErro('COMPRAS', err, { documentoId: centralDocumentoId, compraId, empresaId });
@@ -570,10 +574,7 @@ function processarItensCompra(compraId, itens, fornecedor, opcoes, done) {
     if (!Number(item.quantidade_embalagens) && Number(item.quantidade_comercial) > 0) {
       item.quantidade_embalagens = Number(item.quantidade_comercial);
     }
-    if (!Number(item.quantidade_convertida)) {
-      item.quantidade_convertida = obterQuantidadeConvertida(item);
-    }
-    item.peso_total_compra = obterQuantidadeConvertida(item);
+    // MUC-06: quantidade oficial só após processarItemCompra (sem pré-fill legado).
 
     const itemComContexto = {
       ...item,
@@ -793,7 +794,9 @@ function processarItensCompra(compraId, itens, fornecedor, opcoes, done) {
                   data_validade: itemProcessado.data_validade,
                   data_entrada: hoje,
                   origem: 'COMPRA',
-                  compra_id: compraId
+                  compra_id: compraId,
+                  empresaId: opcoes.empresaId ?? opcoes.empresa_id,
+                  db
                 }, (loteErr) => {
                   if (loteErr) {
                     console.error('Erro ao criar lote para compra:', loteErr.message);
@@ -888,22 +891,13 @@ router.post('/:id/devolver', validarCaixaAberto, async (req, res) => {
           return res.status(500).json({ error: compraErr.message });
         }
 
-        if (!compra) {
-          db.run('ROLLBACK');
-          return res.status(404).json({ error: 'Compra não encontrada.' });
-        }
-
         try {
-          exigirCompraDaEmpresa(compra, ctxEmp.empresaId, {
-            modo: ctxEmp.modo,
-            permitirLegadoSimples: false
+          exigirCompraParaMutacaoOpaca(compra, ctxEmp.empresaId, {
+            tratarInexistenteComoNaoEncontrada: true
           });
         } catch (ownErr) {
           db.run('ROLLBACK');
-          return res.status(statusDeErroCompraEmpresa(ownErr)).json({
-            error: ownErr.message,
-            code: ownErr.code
-          });
+          return res.status(statusDeErroCompraEmpresa(ownErr)).json(jsonErroCompraOpaca(ownErr));
         }
 
         const empresaCompraId = Number(compra.empresa_id);
@@ -1155,18 +1149,26 @@ router.get('/relatorio/uso-consumo', async (req, res) => {
   db.all(`
     SELECT
       c.*,
-      (SELECT COUNT(*) FROM financeiro f WHERE f.compra_id = c.id) AS total_financeiro,
-      (SELECT COUNT(*) FROM financeiro f WHERE f.compra_id = c.id AND f.status = 'pendente') AS parcelas_pendentes,
+      (SELECT COUNT(*) FROM financeiro f
+         WHERE f.compra_id = c.id AND f.empresa_id = c.empresa_id) AS total_financeiro,
+      (SELECT COUNT(*) FROM financeiro f
+         WHERE f.compra_id = c.id AND f.status = 'pendente' AND f.empresa_id = c.empresa_id) AS parcelas_pendentes,
       (SELECT GROUP_CONCAT(f.status || ':' || COALESCE(f.vencimento, ''), '|')
-         FROM financeiro f WHERE f.compra_id = c.id) AS financeiro_resumo,
+         FROM financeiro f WHERE f.compra_id = c.id AND f.empresa_id = c.empresa_id) AS financeiro_resumo,
       d.id AS central_documento_id,
       d.chave AS central_chave,
       (SELECT usuario_nome FROM auditoria a
          WHERE a.modulo = 'compras' AND a.referencia_tipo = 'compra' AND a.referencia_id = c.id
          AND a.acao IN ('criar_compra', 'criar_uso_consumo', 'criar_nota_fiscal_avulsa')
+         AND (
+           json_extract(a.detalhes, '$.empresa_id') IS NULL
+           OR CAST(json_extract(a.detalhes, '$.empresa_id') AS INTEGER) = c.empresa_id
+         )
          ORDER BY a.id DESC LIMIT 1) AS usuario_nome
     FROM compras c
-    LEFT JOIN central_entradas_documentos d ON d.compra_id = c.id
+    LEFT JOIN central_entradas_documentos d
+           ON d.compra_id = c.id
+          AND d.empresa_id = c.empresa_id
     ${where}
     ORDER BY COALESCE(c.data_emissao, c.data_entrada, c.data_compra) DESC, c.id DESC
   `, params, (err, rows) => {
@@ -1232,19 +1234,19 @@ router.post('/classificar-entrada', async (req, res) => {
   }
 });
 
-/** RC4.31.12 — Simulação MUC para compra manual (sem persistência). */
-router.post('/simular-conversao-muc', (req, res) => {
+/** MUC-06 — Preview oficial (converterQuantidade). Sem persistência. Sem multiplicador legado. */
+router.post('/simular-conversao-muc', async (req, res) => {
   try {
-    const body = req.body || {};
-    const muc = obterMuc(db);
-    const resultado = muc.simular({
-      quantidadeCompra: Number(body.quantidadeCompra ?? body.quantidade_embalagens ?? 0),
-      quantidadePorApresentacao: Number(body.quantidadePorApresentacao ?? body.quantidade_por_embalagem ?? 0),
-      valorTotal: Number(body.valorTotal ?? body.valor_total_embalagem ?? 0)
-    });
-    return res.json({ success: true, resultado: { ...resultado } });
+    const resultado = await simularConversaoCompraPreview(db, req.body || {});
+    return res.json({ success: true, resultado });
   } catch (err) {
-    return res.status(400).json({ success: false, error: err.message || String(err) });
+    const status = err.statusCode || 400;
+    return res.status(status).json({
+      success: false,
+      codigo: err.code || 'CONVERSAO_INVALIDA',
+      error: err.message || String(err),
+      mensagem: err.message || String(err)
+    });
   }
 });
 
@@ -1281,7 +1283,7 @@ router.get('/', async (req, res) => {
     db.all(`
       SELECT c.*, 
         (SELECT COUNT(*) FROM compras_itens WHERE compra_id = c.id) as total_itens,
-        (SELECT COUNT(*) FROM financeiro f WHERE f.compra_id = c.id AND f.status = 'pendente') as parcelas_pendentes,
+        (SELECT COUNT(*) FROM financeiro f WHERE f.compra_id = c.id AND f.status = 'pendente' AND f.empresa_id = c.empresa_id) as parcelas_pendentes,
         (SELECT d.id FROM nfe_devolucoes_compra d
           WHERE d.compra_id = c.id AND d.status = 'autorizada'
           ORDER BY d.id DESC LIMIT 1) as nfe_devolucao_autorizada_id,
@@ -1323,18 +1325,13 @@ router.get('/:id', async (req, res) => {
 
     db.get('SELECT * FROM compras WHERE id = ?', [id], (err, compra) => {
       if (err) return res.status(500).json({ error: err.message });
-      if (!compra) return res.status(404).json({ error: 'Compra não encontrada.' });
 
       try {
-        exigirCompraDaEmpresa(compra, ctxEmp.empresaId, {
-          modo: ctxEmp.modo,
-          permitirLegadoSimples: ctxEmp.modo === ModoOperacionalGlobal.EMPRESA_SIMPLES
+        exigirCompraParaMutacaoOpaca(compra, ctxEmp.empresaId, {
+          tratarInexistenteComoNaoEncontrada: true
         });
       } catch (ownErr) {
-        return res.status(statusDeErroCompraEmpresa(ownErr)).json({
-          error: ownErr.message,
-          code: ownErr.code
-        });
+        return res.status(statusDeErroCompraEmpresa(ownErr)).json(jsonErroCompraOpaca(ownErr));
       }
 
       db.all(`
@@ -1353,7 +1350,7 @@ router.get('/:id', async (req, res) => {
         ORDER BY ci.id
       `, [id], (itErr, itens) => {
         if (itErr) return res.status(500).json({ error: itErr.message });
-        db.all('SELECT * FROM financeiro WHERE compra_id = ? ORDER BY numero_parcela, vencimento', [id], (finErr, financeiro) => {
+        db.all('SELECT * FROM financeiro WHERE compra_id = ? AND empresa_id = ? ORDER BY numero_parcela, vencimento', [id, compra.empresa_id], (finErr, financeiro) => {
           if (finErr) return res.status(500).json({ error: finErr.message });
           res.json({ ...compra, itens, financeiro });
         });
@@ -1814,7 +1811,25 @@ router.post('/', (req, res) => {
       centralDocumentoId,
       empresaIdBody: req.body && (req.body.empresa_id != null ? req.body.empresa_id : req.body.empresaId)
     }, { db })
-      .then((resolvida) => continuarGravacao(resolvida))
+      .then((resolvida) => {
+        const empresaIdOperacao = resolvida.empresaId;
+        if (!chaveLimpa) {
+          return continuarGravacao(resolvida);
+        }
+        db.get(
+          'SELECT id, status FROM compras WHERE chave_acesso = ? AND empresa_id = ? LIMIT 1',
+          [chaveLimpa, empresaIdOperacao],
+          (dupErr, existente) => {
+            if (dupErr) return res.status(500).json({ error: dupErr.message });
+            if (existente) {
+              return res.status(400).json({
+                error: `Esta nota já foi lançada na compra #${existente.id}. Não é permitido lançar a mesma chave de acesso duas vezes.`
+              });
+            }
+            return continuarGravacao(resolvida);
+          }
+        );
+      })
       .catch((err) => res.status(statusDeErroCompraEmpresa(err)).json({
         error: err.message,
         code: err.code,
@@ -1824,45 +1839,19 @@ router.post('/', (req, res) => {
       }));
   };
 
-  if (chaveLimpa) {
-    db.get('SELECT id, status FROM compras WHERE chave_acesso = ? LIMIT 1', [chaveLimpa], (dupErr, existente) => {
-      if (dupErr) return res.status(500).json({ error: dupErr.message });
-
-      if (existente) {
-        return res.status(400).json({
-          error: `Esta nota já foi lançada na compra #${existente.id}. Não é permitido lançar a mesma chave de acesso duas vezes.` 
-        });
-      }
-
-      garantirFornecedorCompra({
-        fornecedor,
-        fornecedor_cnpj,
-        fornecedor_rua,
-        fornecedor_numero,
-        fornecedor_bairro,
-        fornecedor_cidade,
-        fornecedor_uf,
-        fornecedor_cep
-      }, (fornErr) => {
-        if (fornErr) return res.status(500).json({ error: fornErr.message });
-        iniciarGravacaoComEmpresa();
-      });
-    });
-  } else {
-    garantirFornecedorCompra({
-      fornecedor,
-      fornecedor_cnpj,
-      fornecedor_rua,
-      fornecedor_numero,
-      fornecedor_bairro,
-      fornecedor_cidade,
-      fornecedor_uf,
-      fornecedor_cep
-    }, (fornErr) => {
-      if (fornErr) return res.status(500).json({ error: fornErr.message });
-      iniciarGravacaoComEmpresa();
-    });
-  }
+  garantirFornecedorCompra({
+    fornecedor,
+    fornecedor_cnpj,
+    fornecedor_rua,
+    fornecedor_numero,
+    fornecedor_bairro,
+    fornecedor_cidade,
+    fornecedor_uf,
+    fornecedor_cep
+  }, (fornErr) => {
+    if (fornErr) return res.status(500).json({ error: fornErr.message });
+    iniciarGravacaoComEmpresa();
+  });
 });
 
 router.post('/:id/cancelar', async (req, res) => {
@@ -1888,22 +1877,13 @@ router.post('/:id/cancelar', async (req, res) => {
         return res.status(500).json({ error: compraErr.message });
       }
 
-      if (!compra) {
-        db.run('ROLLBACK');
-        return res.status(404).json({ error: 'Compra não encontrada.' });
-      }
-
       try {
-        exigirCompraDaEmpresa(compra, ctxEmp.empresaId, {
-          modo: ctxEmp.modo,
-          permitirLegadoSimples: false
+        exigirCompraParaMutacaoOpaca(compra, ctxEmp.empresaId, {
+          tratarInexistenteComoNaoEncontrada: true
         });
       } catch (ownErr) {
         db.run('ROLLBACK');
-        return res.status(statusDeErroCompraEmpresa(ownErr)).json({
-          error: ownErr.message,
-          code: ownErr.code
-        });
+        return res.status(statusDeErroCompraEmpresa(ownErr)).json(jsonErroCompraOpaca(ownErr));
       }
 
       const empresaCompraId = Number(compra.empresa_id);
@@ -2056,11 +2036,55 @@ router.post('/parse-xml', async (req, res) => {
 });
 
 /** RC1 — pré-preenchimento Central NF-e modo DEVOLUÇÃO */
+function responderSeErroOwnershipCompra(res, error) {
+  const codes = new Set([
+    'COMPRA_NAO_ENCONTRADA',
+    'COMPRA_AUSENTE',
+    'EMPRESA_OWNERSHIP_REQUIRED',
+    'EMPRESA_COMPRA_AUSENTE',
+    'EMPRESA_OPERACIONAL_AUSENTE',
+    'EMPRESA_INATIVA',
+    'EMPRESA_INEXISTENTE'
+  ]);
+  if (!error || !codes.has(error.code)) return false;
+  const status = statusDeErroCompraEmpresa(error);
+  if (error.code === 'COMPRA_NAO_ENCONTRADA' || error.code === 'COMPRA_AUSENTE' || error.code === 'EMPRESA_OWNERSHIP_REQUIRED') {
+    res.status(status).json(jsonErroCompraOpaca(error));
+    return true;
+  }
+  res.status(status).json({ error: error.message, code: error.code });
+  return true;
+}
+
+async function autorizarCompraParaNfeDevolucao(req, compraId) {
+  const ctxEmp = await resolverEmpresaContextoCompra(req, { db });
+  await carregarCompraAutorizadaP(db, { compraId, empresaId: ctxEmp.empresaId });
+  return ctxEmp;
+}
+
+async function autorizarNotaNfeDevolucaoCompra(req, notaId) {
+  const ctxEmp = await resolverEmpresaContextoCompra(req, { db });
+  const nota = await obterNfeDevolucaoPorId(Number(notaId));
+  if (!nota || nota.compra_id == null) {
+    const err = new Error('Compra não encontrada.');
+    err.statusCode = 404;
+    err.code = 'COMPRA_NAO_ENCONTRADA';
+    throw err;
+  }
+  await carregarCompraAutorizadaP(db, {
+    compraId: nota.compra_id,
+    empresaId: ctxEmp.empresaId
+  });
+  return { ctxEmp, nota };
+}
+
 router.get('/:id/nfe-devolucao/preparar', async (req, res) => {
   try {
+    await autorizarCompraParaNfeDevolucao(req, Number(req.params.id));
     const prep = await prepararNfeDevolucaoCompra(Number(req.params.id));
     res.json({ success: true, ...prep });
   } catch (error) {
+    if (responderSeErroOwnershipCompra(res, error)) return;
     console.error('Erro ao preparar NF-e de devolução:', error);
     res.status(error.statusCode || 500).json({
       success: false,
@@ -2072,19 +2096,20 @@ router.get('/:id/nfe-devolucao/preparar', async (req, res) => {
 
 router.get('/:id/nfe-devolucao/historico', async (req, res) => {
   try {
+    await autorizarCompraParaNfeDevolucao(req, Number(req.params.id));
     const historico = await listarHistoricoDevolucaoCompra(Number(req.params.id));
     res.json({ success: true, ...historico });
   } catch (error) {
+    if (responderSeErroOwnershipCompra(res, error)) return;
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
 });
 
 router.get('/nfe-devolucao/:notaId/xml', async (req, res) => {
   try {
+    const { nota } = await autorizarNotaNfeDevolucaoCompra(req, req.params.notaId);
     const tipo = String(req.query.tipo || 'assinado').toLowerCase();
     const xml = await obterXmlVersionado(Number(req.params.notaId), tipo);
-    const nota = await obterNfeDevolucaoPorId(Number(req.params.notaId));
-    if (!nota) return res.status(404).json({ error: 'NF-e de devolução não encontrada.' });
     if (!xml) return res.status(404).json({ error: `XML (${tipo}) não disponível.` });
     res.setHeader('Content-Type', 'application/xml; charset=utf-8');
     res.setHeader(
@@ -2093,14 +2118,14 @@ router.get('/nfe-devolucao/:notaId/xml', async (req, res) => {
     );
     res.send(xml);
   } catch (error) {
+    if (responderSeErroOwnershipCompra(res, error)) return;
     res.status(500).json({ error: error.message });
   }
 });
 
 router.get('/nfe-devolucao/:notaId/danfe', async (req, res) => {
   try {
-    const nota = await obterNfeDevolucaoPorId(Number(req.params.notaId));
-    if (!nota) return res.status(404).json({ error: 'NF-e de devolução não encontrada.' });
+    const { nota } = await autorizarNotaNfeDevolucaoCompra(req, req.params.notaId);
     const cancelado = String(req.query.tipo || '').toLowerCase() === 'cancelado';
     const html = cancelado ? nota.danfe_html_cancelado : nota.danfe_html;
     if (!html) {
@@ -2111,31 +2136,37 @@ router.get('/nfe-devolucao/:notaId/danfe', async (req, res) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(html);
   } catch (error) {
+    if (responderSeErroOwnershipCompra(res, error)) return;
     res.status(500).json({ error: error.message });
   }
 });
 
 router.get('/nfe-devolucao/:notaId/status', async (req, res) => {
   try {
+    await autorizarNotaNfeDevolucaoCompra(req, req.params.notaId);
     const painel = await obterPainelStatus(Number(req.params.notaId));
     if (!painel) return res.status(404).json({ success: false, error: 'NF-e de devolução não encontrada.' });
     res.json({ success: true, ...painel });
   } catch (error) {
+    if (responderSeErroOwnershipCompra(res, error)) return;
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
 });
 
 router.get('/nfe-devolucao/:notaId/eventos', async (req, res) => {
   try {
+    await autorizarNotaNfeDevolucaoCompra(req, req.params.notaId);
     const eventos = await listarEventosDevolucao(Number(req.params.notaId));
     res.json({ success: true, eventos });
   } catch (error) {
+    if (responderSeErroOwnershipCompra(res, error)) return;
     res.status(error.statusCode || 500).json({ success: false, error: error.message });
   }
 });
 
 router.post('/nfe-devolucao/:notaId/consultar', async (req, res) => {
   try {
+    await autorizarNotaNfeDevolucaoCompra(req, req.params.notaId);
     const out = await consultarSituacaoDevolucao(Number(req.params.notaId), {
       usuarioId: req.usuario?.id || req.user?.id || null,
       usuarioNome: req.usuario?.nome || req.user?.nome || req.usuario?.username || null,
@@ -2144,6 +2175,7 @@ router.post('/nfe-devolucao/:notaId/consultar', async (req, res) => {
     });
     res.json(out);
   } catch (error) {
+    if (responderSeErroOwnershipCompra(res, error)) return;
     res.status(error.statusCode || 500).json({
       success: false,
       error: error.message,
@@ -2154,6 +2186,7 @@ router.post('/nfe-devolucao/:notaId/consultar', async (req, res) => {
 
 router.post('/nfe-devolucao/:notaId/reenviar', async (req, res) => {
   try {
+    await autorizarNotaNfeDevolucaoCompra(req, req.params.notaId);
     const out = await reenviarNfeDevolucao(Number(req.params.notaId), {
       usuarioId: req.usuario?.id || req.user?.id || null,
       usuarioNome: req.usuario?.nome || req.user?.nome || req.usuario?.username || null,
@@ -2162,6 +2195,7 @@ router.post('/nfe-devolucao/:notaId/reenviar', async (req, res) => {
     });
     res.json(out);
   } catch (error) {
+    if (responderSeErroOwnershipCompra(res, error)) return;
     res.status(error.statusCode || 500).json({
       success: false,
       error: error.message,
@@ -2172,6 +2206,7 @@ router.post('/nfe-devolucao/:notaId/reenviar', async (req, res) => {
 
 router.post('/nfe-devolucao/:notaId/cancelar', async (req, res) => {
   try {
+    await autorizarNotaNfeDevolucaoCompra(req, req.params.notaId);
     const out = await cancelarNfeDevolucaoOficial(Number(req.params.notaId), {
       motivo: req.body?.motivo || req.body?.justificativa,
       usuarioId: req.usuario?.id || req.user?.id || null,
@@ -2182,6 +2217,7 @@ router.post('/nfe-devolucao/:notaId/cancelar', async (req, res) => {
     });
     res.status(out.success ? 200 : 422).json(out);
   } catch (error) {
+    if (responderSeErroOwnershipCompra(res, error)) return;
     res.status(error.statusCode || 500).json({
       success: false,
       error: error.message,
@@ -2193,6 +2229,7 @@ router.post('/nfe-devolucao/:notaId/cancelar', async (req, res) => {
 router.post('/:id/emitir-nfe-devolucao', async (req, res) => {
   try {
     const compraId = Number(req.params.id);
+    await autorizarCompraParaNfeDevolucao(req, compraId);
     const body = req.body || {};
 
     const resultado = await emitirNFeDevolucaoCompra(compraId, {
@@ -2242,6 +2279,7 @@ router.post('/:id/emitir-nfe-devolucao', async (req, res) => {
       serie: resultado.serie
     });
   } catch (error) {
+    if (responderSeErroOwnershipCompra(res, error)) return;
     console.error('Erro ao emitir NF-e de devolução:', error);
     res.status(error.statusCode || 500).json({
       error: error.message,
@@ -2251,22 +2289,29 @@ router.post('/:id/emitir-nfe-devolucao', async (req, res) => {
   }
 });
 
-router.put('/:id/chave-nfe-fornecedor', (req, res) => {
-  const id = Number(req.params.id);
-  const chave = String(req.body?.chave || '').replace(/\D/g, '');
-
-  if (chave.length !== 44) {
-    return res.status(400).json({ error: 'A chave da NF-e deve ter 44 dígitos.' });
+router.put('/:id/chave-nfe-fornecedor', async (req, res) => {
+  let ctxEmp;
+  try {
+    ctxEmp = await resolverEmpresaContextoCompra(req, { db });
+  } catch (err) {
+    return res.status(statusDeErroCompraEmpresa(err)).json({
+      error: err.message,
+      code: err.code
+    });
   }
 
-  db.run(`
-    UPDATE compras
-    SET chave_acesso = ?
-    WHERE id = ?
-  `, [chave, id], function(err) {
-    if (err) return res.status(500).json({ error: err.message });
-
-    res.json({
+  atualizarChaveNfeFornecedorCompra(db, {
+    compraId: req.params.id,
+    chave: req.body && req.body.chave,
+    empresaId: ctxEmp.empresaId
+  }, (err) => {
+    if (err) {
+      const status = err.statusCode || statusDeErroCompraEmpresa(err) || 500;
+      const body = { error: err.message };
+      if (err.code) body.code = err.code;
+      return res.status(status).json(body);
+    }
+    return res.json({
       success: true,
       message: 'Chave da NF-e original salva com sucesso.'
     });

@@ -1,5 +1,7 @@
 /**
- * RC4.31.19 — Função canônica comercial × convertida (espelho de backend/lib/motorConversaoUnidades.js)
+ * RC4.31.19 / MUC-06 — Identidade comercial na UI.
+ * Não converte CAIXA→UN, SI nem encadeamento. Quantidade de estoque vem do preview MUC
+ * (quantidade_convertida já preenchida pelo backend).
  */
 (function (global) {
     'use strict';
@@ -20,24 +22,10 @@
 
     function obterQuantidadeConvertida(item = {}) {
         const convertidaExplicita = Number(item.quantidade_convertida || 0);
-        if (convertidaExplicita > 0) return convertidaExplicita;
-
-        const qtdEmb = Number(item.quantidade_embalagens || 0);
-        const qtdPorEmb = Number(item.quantidade_por_embalagem || 0);
-        const comercial = obterQuantidadeComercial(item);
-
-        if (qtdPorEmb > 0) {
-            const baseEmb = qtdEmb > 0 ? qtdEmb : comercial;
-            if (baseEmb > 0) return baseEmb * qtdPorEmb;
+        if (Number.isFinite(convertidaExplicita) && convertidaExplicita > 0) {
+            return convertidaExplicita;
         }
-
-        const peso = Number(item.peso_total_compra || 0);
-        if (peso > 0) {
-            if (qtdPorEmb <= 0 || Math.abs(peso - comercial) > 0.001) return peso;
-            if (comercial > 0 && qtdPorEmb > 0) return comercial * qtdPorEmb;
-        }
-
-        return comercial > 0 ? comercial : Number(item.quantidade || 0);
+        return Number(item.quantidade || 0);
     }
 
     global.obterQuantidadeComercial = obterQuantidadeComercial;

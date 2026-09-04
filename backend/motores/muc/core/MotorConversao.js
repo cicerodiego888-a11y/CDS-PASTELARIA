@@ -50,22 +50,58 @@ function calcularFormacaoPrecoCadastro(input = {}) {
   return MotorUM.calcularFormacaoPrecoCadastro(input);
 }
 
-function simularConversao({ quantidadeCompra, quantidadePorApresentacao, valorTotal }) {
-  const conv = LegacyMotor.simularConversaoEmbalagem({
+function simularConversao({
+  quantidadeCompra,
+  quantidadePorApresentacao,
+  valorTotal,
+  unidadeOrigem,
+  unidadeDestino,
+  relacoes
+} = {}) {
+  const convLegado = LegacyMotor.simularConversaoEmbalagem({
     qtdEmbalagens: quantidadeCompra,
     qtdPorEmbalagem: quantidadePorApresentacao,
     valorTotal
   });
+
+  let quantidadeEstoque = convLegado.qtdTotal;
+  let fatorConversao = quantidadePorApresentacao;
+  let unidadeEstoque = 'un';
+  let tipoConversao = 'MULTIPLICADOR';
+
+  if (unidadeOrigem && unidadeDestino) {
+    const { converterQuantidade } = require('./MotorConversaoQuantidade');
+    const rel = Array.isArray(relacoes) ? [...relacoes] : [];
+    const fatorEmb = Number(quantidadePorApresentacao);
+    if (fatorEmb > 0) {
+      const { normalizarUnidade } = require('./unidadesSi');
+      const de = normalizarUnidade(unidadeOrigem);
+      const para = 'UN';
+      if (de && de !== para) rel.push({ de, para, fator: fatorEmb });
+    }
+    const conv = converterQuantidade({
+      quantidade: quantidadeCompra,
+      unidadeOrigem,
+      unidadeDestino,
+      relacoes: rel
+    });
+    quantidadeEstoque = conv.quantidade;
+    fatorConversao = conv.fatorTotal;
+    unidadeEstoque = conv.unidade;
+  }
+
   return criarResultadoConversaoDTO({
     quantidadeCompra,
-    fatorConversao: quantidadePorApresentacao,
-    quantidadeEstoque: conv.qtdTotal,
-    custoUnitario: conv.custoUnitario,
-    custoTotal: conv.valorTotal,
-    subtotal: conv.valorTotal,
-    tipoConversao: 'MULTIPLICADOR',
+    fatorConversao,
+    quantidadeEstoque,
+    unidadeCompra: unidadeOrigem || 'UN',
+    unidadeEstoque,
+    custoUnitario: convLegado.custoUnitario,
+    custoTotal: convLegado.valorTotal,
+    subtotal: convLegado.valorTotal,
+    tipoConversao,
     confianca: 100,
-    metodoInferencia: 'SIMULACAO',
+    metodoInferencia: unidadeDestino ? 'MUC_02_ENCADEAMENTO' : 'SIMULACAO',
     regraAplicada: 'EMBALAGEM_MULTIPLICADOR',
     origemDados: 'SIMULACAO'
   });
@@ -86,6 +122,7 @@ module.exports = {
   resolverQuantidadesCompraItem: LegacyMotor.resolverQuantidadesCompraItem,
   obterTotalConvertidoItemCompra: LegacyMotor.obterTotalConvertidoItemCompra,
   obterQuantidadeComercial: LegacyMotor.obterQuantidadeComercial,
+  /** @deprecated MUC-08 — leitura de item para custo/F-NF. Estoque: obterMuc().converterQuantidade */
   obterQuantidadeConvertida: LegacyMotor.obterQuantidadeConvertida,
   resolverCustoUnitarioCadastro: LegacyMotor.resolverCustoUnitarioCadastro,
   resolverCustoUnitarioProdutoCadastro: LegacyMotor.resolverCustoUnitarioProdutoCadastro

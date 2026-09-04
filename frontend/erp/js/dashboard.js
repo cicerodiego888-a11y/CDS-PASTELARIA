@@ -309,7 +309,12 @@ function preencherDashboard(data) {
 }
 
 function mostrarErroDashboard(mensagem) {
-    const msg = `<div class="text-danger">${escapeHtmlDashboard(mensagem)}</div>`;
+    const precisaEmpresaOperacional = /empresa_operacional_id|EMPRESA_SIMPLES com múltiplas/i.test(String(mensagem || ''));
+    const extra = precisaEmpresaOperacional
+        ? `<p class="small mt-2 mb-0">Abra Configurações, em Empresa escolha a <strong>empresa operacional</strong> e salve.</p>
+           <p class="mb-0"><button type="button" class="btn btn-sm btn-primary" onclick="typeof loadPage==='function'&&loadPage('configuracoes-avancadas')">Abrir Configurações</button></p>`
+        : '';
+    const msg = `<div class="text-danger">${escapeHtmlDashboard(mensagem)}${extra}</div>`;
     [
         'dashboardMaisVendidos',
         'dashboardMenosVendidos',

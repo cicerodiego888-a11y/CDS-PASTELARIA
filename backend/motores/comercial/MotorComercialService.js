@@ -12,35 +12,112 @@
 
 const fxnfSaldos = require('../../services/fiscalNaoFiscal/estoqueSaldosPublico');
 const fxnfReservas = require('../../services/fiscalNaoFiscal/reservasPublico');
+const { resolverEmpresaId } = require('../../services/fiscalNaoFiscal/empresaContexto');
 const {
-  resolverEmpresaId,
-  COMPAT_CERTIFICADA_PRE_MULTIEMPRESA
-} = require('../../services/fiscalNaoFiscal/empresaContexto');
+  exigirEmpresaDoPedido,
+  exigirEmpresaDaCriacao,
+  CODIGO_PEDIDO_EMPRESA_DIVERGENTE,
+  CODIGO_RESERVA_EMPRESA_DIVERGENTE,
+  CODIGO_PEDIDO_NAO_ENCONTRADO,
+  CODIGO_EMPRESA_OWNERSHIP_REQUIRED,
+  CODIGO_EMPRESA_CONTEXT_REQUIRED
+} = require('../../services/pedidos/PedidoEmpresaContextoService');
 const mts = require('../mts');
 const auditoria = require('./PedidoEstoqueAuditoria');
 const { TipoSaldo } = require('../../services/fiscalNaoFiscal/constants');
 
+function dbGet(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
+  });
+}
+
+async function carregarPedido(db, pedidoId) {
+  const tentativas = [
+    `SELECT id, empresa_id, status, venda_id FROM pedidos WHERE id = ?`,
+    `SELECT id, empresa_id, status FROM pedidos WHERE id = ?`,
+    `SELECT id, status FROM pedidos WHERE id = ?`
+  ];
+  for (const sql of tentativas) {
+    try {
+      return await dbGet(db, sql, [pedidoId]);
+    } catch (err) {
+      const msg = String(err && err.message || '');
+      if (msg.includes('no such table')) return null;
+      if (msg.includes('no such column')) continue;
+      throw err;
+    }
+  }
+  return null;
+}
+
 /**
- * Contexto de empresa para a porta F×NF.
- * Se empresaId ainda não existir no pedido (pré-multiempresa), usa flag
- * EXPLÍCITA COMPAT_CERTIFICADA_PRE_MULTIEMPRESA — nunca inventa empresa.
+ * Pedido existente → pedidos.empresa_id.
+ * Sem pedido (pré-criação) → empresaId explícito do caller.
+ * COMPAT não é fonte de ownership.
  */
-function optsPortaSaldos(opts = {}) {
-  const empresaId = resolverEmpresaId(opts)
+async function resolverEmpresaMotor(opts = {}) {
+  const db = getDb(opts.db);
+  const pedidoId = Number(opts.pedidoId || opts.pedido_id);
+  const caller = resolverEmpresaId(opts)
     ?? resolverEmpresaId(opts.contexto)
     ?? resolverEmpresaId(opts.pedido);
-  if (empresaId != null) {
-    return {
-      db: opts.db,
-      empresaId,
-      usuarioId: opts.usuarioId,
-      validarEmpresa: opts.validarEmpresa
-    };
+
+  if (Number.isInteger(pedidoId) && pedidoId > 0) {
+    const pedido = await carregarPedido(db, pedidoId);
+    if (!pedido) {
+      throw erro(CODIGO_PEDIDO_NAO_ENCONTRADO, 'Pedido não encontrado.', { statusCode: 404 });
+    }
+    let empresaPedido;
+    try {
+      empresaPedido = exigirEmpresaDoPedido(pedido);
+    } catch (err) {
+      throw erro(
+        err.code || CODIGO_EMPRESA_OWNERSHIP_REQUIRED,
+        err.message || 'Empresa é obrigatória para operar o pedido.',
+        { statusCode: err.statusCode || 400, pedido_id: pedidoId }
+      );
+    }
+    if (caller != null && caller !== empresaPedido) {
+      throw erro(
+        CODIGO_PEDIDO_EMPRESA_DIVERGENTE,
+        'empresaId do Motor diverge de pedidos.empresa_id.',
+        {
+          statusCode: 409,
+          pedido_empresa_id: empresaPedido,
+          empresa_id: caller
+        }
+      );
+    }
+    return { empresaId: empresaPedido, pedido };
+  }
+
+  try {
+    const empresaId = exigirEmpresaDaCriacao({ empresaId: caller });
+    return { empresaId, pedido: null };
+  } catch (err) {
+    throw erro(
+      err.code || CODIGO_EMPRESA_CONTEXT_REQUIRED,
+      err.message || 'Empresa do contexto é obrigatória.',
+      { statusCode: err.statusCode || 400 }
+    );
+  }
+}
+
+function optsPortaSaldos(opts = {}, empresaId) {
+  const id = empresaId != null ? Number(empresaId) : resolverEmpresaId(opts);
+  if (!Number.isInteger(id) || id <= 0) {
+    throw erro(
+      CODIGO_EMPRESA_CONTEXT_REQUIRED,
+      'Empresa é obrigatória para a porta F×NF do pedido.',
+      { statusCode: 400 }
+    );
   }
   return {
     db: opts.db,
+    empresaId: id,
     usuarioId: opts.usuarioId,
-    ...COMPAT_CERTIFICADA_PRE_MULTIEMPRESA
+    validarEmpresa: opts.validarEmpresa
   };
 }
 
@@ -149,6 +226,8 @@ function montarEscopoAutorizacao(pedidoId, analise) {
  */
 async function analisarDisponibilidadeFiscal(itensBrutos, opts = {}) {
   const db = getDb(opts.db);
+  const resolved = await resolverEmpresaMotor({ ...opts, db });
+  const portaOpts = optsPortaSaldos({ ...opts, db }, resolved.empresaId);
   const itens = agregarPorProduto(normalizarItens(itensBrutos));
   const consultas = [];
   const plano = [];
@@ -160,7 +239,7 @@ async function analisarDisponibilidadeFiscal(itensBrutos, opts = {}) {
     const disp = await fxnfReservas.consultarDisponibilidadeParaPedido(
       item.produto_id,
       opts.pedidoId || null,
-      optsPortaSaldos({ ...opts, db })
+      portaOpts
     );
     await auditoria.registrar(db, {
       pedido_id: opts.pedidoId || null,
@@ -257,13 +336,15 @@ async function executarConfirmacaoFiscal(params = {}, deps = {}) {
   const itens = params.itens;
   const usuarioId = params.usuarioId != null ? Number(params.usuarioId) : null;
   const motivo = params.motivo || `Reserva fiscal pedido #${pedidoId}`;
+  const resolved = await resolverEmpresaMotor({ ...params, ...deps, db, pedidoId });
+  const empresaIdPedido = resolved.empresaId;
 
   if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
     throw erro('PEDIDO_INVALIDO', 'Pedido inválido.', { statusCode: 400 });
   }
 
   const analise = params.analise
-    || await analisarDisponibilidadeFiscal(itens, { db, pedidoId, usuarioId });
+    || await analisarDisponibilidadeFiscal(itens, { db, pedidoId, usuarioId, empresaId: empresaIdPedido });
 
   if (analise.bloqueado) {
     throw erro(
@@ -311,7 +392,7 @@ async function executarConfirmacaoFiscal(params = {}, deps = {}) {
         db: txDb,
         pedidoId,
         usuarioId,
-        empresaId: resolverEmpresaId(params) ?? resolverEmpresaId(deps),
+        empresaId: empresaIdPedido,
         validarEmpresa: deps.validarEmpresa || params.validarEmpresa
       });
 
@@ -341,8 +422,9 @@ async function executarConfirmacaoFiscal(params = {}, deps = {}) {
         ...params,
         ...deps,
         db: txDb,
-        usuarioId
-      });
+        usuarioId,
+        empresaId: empresaIdPedido
+      }, empresaIdPedido);
 
       // Libera reservas anteriores do mesmo pedido (reativação / edição)
       await fxnfReservas.liberarReservasPedido(pedidoId, portaOpts);
@@ -362,12 +444,10 @@ async function executarConfirmacaoFiscal(params = {}, deps = {}) {
               autorizado: true,
               supervisor_id: supervisor?.id || supervisor?.usuario_id || null,
               usuario_id: usuarioId
-            },
-            ...(portaOpts.modoLegadoSemEmpresa ? COMPAT_CERTIFICADA_PRE_MULTIEMPRESA : {})
+            }
           }, {
             db: txDb,
             jaEmTransacao: true,
-            modoLegadoSemEmpresa: portaOpts.modoLegadoSemEmpresa === true,
             estoque: {
               ...fxnfSaldos,
               executarEmTransacao: async (work) => work(txDb)
@@ -396,9 +476,15 @@ async function executarConfirmacaoFiscal(params = {}, deps = {}) {
             produtoId: linha.produto_id,
             quantidade: linha.quantidade,
             pedidoItemId: linha.pedido_item_id,
-            empresaId: portaOpts.empresaId,
-            ...(portaOpts.modoLegadoSemEmpresa ? COMPAT_CERTIFICADA_PRE_MULTIEMPRESA : {})
+            empresaId: empresaIdPedido
           }, portaOpts);
+          if (res && res.empresa_id != null && Number(res.empresa_id) !== empresaIdPedido) {
+            throw erro(
+              CODIGO_RESERVA_EMPRESA_DIVERGENTE,
+              'empresa_id da reserva diverge da empresa persistida do pedido.',
+              { statusCode: 409 }
+            );
+          }
           reservas.push(res);
           await auditoria.registrar(txDb, {
             pedido_id: pedidoId,
@@ -461,6 +547,13 @@ async function confirmarPedidoFiscal(params = {}, deps = {}) {
     validarEmpresa: deps.validarEmpresa || params.validarEmpresa
   });
 
+  const resolved = await resolverEmpresaMotor({
+    ...params,
+    ...deps,
+    db,
+    pedidoId
+  });
+
   return executarConfirmacaoFiscal({
     pedidoId,
     itens,
@@ -468,7 +561,7 @@ async function confirmarPedidoFiscal(params = {}, deps = {}) {
     supervisorToken: params.supervisorToken || params.supervisor_token || null,
     usuarioId,
     motivo: params.motivo,
-    empresaId: resolverEmpresaId(params) ?? resolverEmpresaId(deps),
+    empresaId: resolved.empresaId,
     validarEmpresa: deps.validarEmpresa || params.validarEmpresa
   }, deps);
 }
@@ -478,9 +571,10 @@ async function confirmarPedidoFiscal(params = {}, deps = {}) {
  */
 async function liberarReservasDoPedido(pedidoId, deps = {}) {
   const db = getDb(deps.db);
+  const resolved = await resolverEmpresaMotor({ ...deps, db, pedidoId });
   return fxnfReservas.liberarReservasPedido(
     pedidoId,
-    optsPortaSaldos({ ...deps, db })
+    optsPortaSaldos({ ...deps, db }, resolved.empresaId)
   );
 }
 
@@ -489,5 +583,6 @@ module.exports = {
   executarConfirmacaoFiscal,
   confirmarPedidoFiscal,
   liberarReservasDoPedido,
+  resolverEmpresaMotor,
   EventoAuditoria: auditoria.Evento
 };

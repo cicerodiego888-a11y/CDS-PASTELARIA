@@ -428,6 +428,7 @@ class CentralImportacaoXmlLegadoService {
     const agora = new Date();
 
     let cnpjEmpresa = ctx.cnpjEmpresa;
+    let empresaIdLookup = Number(ctx.empresaId) > 0 ? Number(ctx.empresaId) : null;
     try {
       const participantes = this._extrairParticipantes(xml || '');
       const {
@@ -441,6 +442,9 @@ class CentralImportacaoXmlLegadoService {
         req: ctx.req || null
       }, { db: ctx.db || null });
       cnpjEmpresa = resolvido.cnpj || cnpjEmpresa;
+      if (Number.isInteger(Number(resolvido.empresaId)) && Number(resolvido.empresaId) > 0) {
+        empresaIdLookup = Number(resolvido.empresaId);
+      }
     } catch (err) {
       if (err && (
         err.code === 'EMPRESA_CENTRAL_INVALIDA'
@@ -543,7 +547,7 @@ class CentralImportacaoXmlLegadoService {
       };
     }
 
-    const documento = await this._documentosRepository.buscarPorChave(validacao.chave);
+    const documento = await this._documentosRepository.buscarPorChave(validacao.chave, empresaIdLookup);
     if (!documento) {
       await this._emitir(TIPOS_EVENTO.XML_REJEITADO, {
         descricao: `Documento não encontrado na Central: ${validacao.chave}`,
@@ -764,7 +768,9 @@ class CentralImportacaoXmlLegadoService {
         });
 
         const processado = await this._processamento.processar(docAtual.id, {
-          usuarioId: ctx.usuarioId
+          usuarioId: ctx.usuarioId,
+          empresaId: empresaIdLookup,
+          empresaIdContexto: empresaIdLookup
         });
 
         base.parserExecutado = true;

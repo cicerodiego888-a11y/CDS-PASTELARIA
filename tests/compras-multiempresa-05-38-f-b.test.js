@@ -283,7 +283,7 @@ async function testDocumentoAContextoBBloqueado() {
           buscarDocumentoCentral: async () => ({ id: 77, empresaId: EMP_A.id, status: 'PRONTA_PARA_COMPRA' })
         }
       ),
-      (err) => err && err.code === 'EMPRESA_COMPRA_INCOMPATIVEL'
+      (err) => err && err.code === 'DOCUMENTO_NAO_ENCONTRADO'
     );
     db.close();
   });

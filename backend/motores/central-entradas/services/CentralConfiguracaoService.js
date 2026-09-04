@@ -99,10 +99,42 @@ class CentralConfiguracaoService {
     this._flags = deps.flags ?? centralEntradasFlags;
     /** @private */
     this._getFiscalConfig = deps.getFiscalConfig
-      || (() => require('../../../services/fiscal/configService').getFiscalConfig({ validarUrls: false }));
+      || ((opts = {}) => require('../../../services/fiscal/configService').getFiscalConfig({
+        validarUrls: false,
+        ...opts
+      }));
+    /** @private — testes: loader por empresaId + conexão SQLite */
+    this._obterFiscalEmpresa = typeof deps.obterFiscalEmpresa === 'function'
+      ? deps.obterFiscalEmpresa
+      : null;
     /** @private */
     this._carregarCertificado = deps.carregarCertificado
       || ((p, s) => require('../../../services/fiscal/certificateService').carregarCertificadoPfx(p, s));
+  }
+
+  /**
+   * Conexão SQLite para ler empresas_configuracao_fiscal.
+   * Não é um banco por CNPJ: é a conexão do ERP (mesma tabela, filtro empresa_id).
+   * Ordem: db da chamada → db do serviço → resolver oficial da Central (database.js).
+   * Não reutiliza conexão de outra iteração armazenada no serviço.
+   */
+  _resolverConexaoSqlite(opcoes = {}) {
+    if (opcoes.db) return opcoes.db;
+    if (this._db) return this._db;
+    const { resolverDb } = require('../repositories/dbHelpers');
+    return resolverDb(null);
+  }
+
+  async _carregarFiscalDaEmpresa(empresaId, opcoes = {}) {
+    const db = this._resolverConexaoSqlite(opcoes);
+    if (typeof this._obterFiscalEmpresa === 'function') {
+      return this._obterFiscalEmpresa({ empresaId, db });
+    }
+    return this._getFiscalConfig({
+      empresaId,
+      db,
+      validarUrls: false
+    });
   }
 
   /**
@@ -237,11 +269,7 @@ class CentralConfiguracaoService {
 
     if (empresaIdContexto) {
       try {
-        const { obterConfiguracaoFiscalEmpresa } = require('../../../services/fiscal/empresasConfiguracaoFiscal');
-        const cfgEmp = await obterConfiguracaoFiscalEmpresa(empresaIdContexto, {
-          db: this._db || null,
-          validarUrls: false
-        });
+        const cfgEmp = await this._carregarFiscalDaEmpresa(empresaIdContexto, opcoes);
         const cnpjEmp = String(cfgEmp.cnpj || '').replace(/\D/g, '');
         const certOk = !!(cfgEmp.certificadoPath && cfgEmp.certificadoSenha && cnpjEmp.length === 14);
         if (certOk) {
@@ -268,7 +296,7 @@ class CentralConfiguracaoService {
         if (!permitirFallbackGlobal) {
           return {
             ok: false,
-            codigoErro: 'CONFIG_FISCAL',
+            codigoErro: error.code || 'CONFIG_FISCAL',
             mensagem: this._mensagemAmigavel(error.message)
           };
         }

@@ -1,66 +1,18 @@
 /**
  * CaixaProvider — indicadores de sessão fiscal / não fiscal (somente leitura).
+ * Sprint 05.45 — sessão ativa e totais filtrados por caixa_sessoes.empresa_id.
  */
 
 const db = require('../../database');
 const { FILTRO_VENDA_VALIDA, getExprValorVendaFiscal, getExprValorVendaNaoFiscal } = require('../../services/reportFiscalHelpers');
 const { criarMonitoringResult } = require('../MonitoringResult');
 const { num, dbGetFactory } = require('../monitoringDateHelpers');
-
-const dbGet = dbGetFactory(db);
-
-async function obterSessaoAberta() {
-  const sessao = await dbGet(
-    `SELECT * FROM caixa_sessoes WHERE status = 'aberto' ORDER BY id DESC LIMIT 1`
-  );
-  if (sessao && sessao.id) return { tipo: 'sessao', row: sessao };
-
-  const caixa = await dbGet(
-    `SELECT * FROM caixa WHERE status = 'aberto' ORDER BY id DESC LIMIT 1`
-  );
-  if (caixa && caixa.id) return { tipo: 'caixa', row: caixa };
-  return null;
-}
-
-async function sumVendasSessao(exprValor, sessaoId, caixaId) {
-  if (sessaoId) {
-    return dbGet(
-      `SELECT COALESCE(SUM(${exprValor}), 0) AS total
-       FROM vendas v
-       WHERE ${FILTRO_VENDA_VALIDA} AND v.caixa_sessao_id = ?`,
-      [sessaoId]
-    );
-  }
-  if (caixaId) {
-    return dbGet(
-      `SELECT COALESCE(SUM(${exprValor}), 0) AS total
-       FROM vendas v
-       WHERE ${FILTRO_VENDA_VALIDA} AND v.caixa_id = ?`,
-      [caixaId]
-    );
-  }
-  return { total: 0 };
-}
-
-async function sumMovimentacoes(tipo, sessaoId, caixaId) {
-  if (sessaoId) {
-    return dbGet(
-      `SELECT COALESCE(SUM(valor), 0) AS total
-       FROM caixa_movimentacoes
-       WHERE sessao_id = ? AND tipo = ?`,
-      [sessaoId, tipo]
-    );
-  }
-  if (caixaId) {
-    return dbGet(
-      `SELECT COALESCE(SUM(valor), 0) AS total
-       FROM caixa_movimentacoes
-       WHERE caixa_id = ? AND tipo = ?`,
-      [caixaId, tipo]
-    );
-  }
-  return { total: 0 };
-}
+const {
+  empresaIdOperacionalCaixa,
+  obterSessaoAtivaDaEmpresa,
+  montarSqlSomaMovimentacaoDaSessaoDaEmpresa
+} = require('../../utils/caixaSessaoHelpers');
+const { resolverEmpresaIdParaCaixa } = require('../../services/caixa/CaixaEmpresaContextoService');
 
 function montarBlocoCaixa({ abertura, entradas, sangrias, suprimentos, fechamento, status, sessaoId, abertoEm, fechadoEm }) {
   const saidas = num(sangrias);
@@ -80,60 +32,130 @@ function montarBlocoCaixa({ abertura, entradas, sangrias, suprimentos, fechament
   };
 }
 
+function blocoVazio(status = 'fechado') {
+  return montarBlocoCaixa({
+    abertura: 0,
+    entradas: 0,
+    sangrias: 0,
+    suprimentos: 0,
+    fechamento: null,
+    status
+  });
+}
+
+async function resolverEmpresaIdDoContextoCaixa(context = {}, deps = {}) {
+  const direto = empresaIdOperacionalCaixa(context.empresaId);
+  if (direto) return direto;
+  try {
+    const resolved = await resolverEmpresaIdParaCaixa({
+      empresaId: context.empresaId,
+      headers: context.headers || {},
+      user: context.user || (context.usuarioId ? { id: context.usuarioId } : null)
+    }, {
+      exigirAutorizacaoUsuario: false,
+      db: deps.db || context.db || null
+    });
+    return empresaIdOperacionalCaixa(resolved && resolved.empresaId);
+  } catch (err) {
+    const code = err && err.code;
+    if (
+      code === 'CAIXA_EMPRESA_OBRIGATORIA'
+      || code === 'EMPRESA_OPERACIONAL_AUSENTE'
+      || code === 'EMPRESA_OPERACIONAL_AMBIGUA'
+      || code === 'EMPRESA_CONTEXT_REQUIRED'
+    ) {
+      return null;
+    }
+    throw err;
+  }
+}
+
+async function sumVendasSessaoDaEmpresa(dbGet, exprValor, sessaoId, empresaId) {
+  if (!sessaoId || !empresaId) return { total: 0 };
+  return dbGet(
+    `SELECT COALESCE(SUM(${exprValor}), 0) AS total
+     FROM vendas v
+     INNER JOIN caixa_sessoes cs ON cs.id = v.caixa_sessao_id
+     WHERE ${FILTRO_VENDA_VALIDA}
+       AND v.caixa_sessao_id = ?
+       AND cs.empresa_id = ?`,
+    [sessaoId, empresaId]
+  );
+}
+
+async function sumMovimentacoesDaEmpresa(dbConn, tipo, sessaoId, empresaId) {
+  const q = montarSqlSomaMovimentacaoDaSessaoDaEmpresa({ sessaoId, empresaId, tipo });
+  return new Promise((resolve, reject) => {
+    dbConn.get(q.sql, q.params, (err, row) => {
+      if (err) reject(err);
+      else resolve(row || { total: 0 });
+    });
+  });
+}
+
 const CaixaProvider = {
   id: 'caixa',
 
-  async collect() {
+  async collect(context = {}) {
     const inicio = Date.now();
     const warnings = [];
     const errors = [];
+    const dbConn = context.db || db;
+    const dbGet = dbGetFactory(dbConn);
+
+    const resultadoVazio = (status, warning, extra = {}) => criarMonitoringResult({
+      success: true,
+      source: 'CaixaProvider',
+      metrics: { tempoConsultaMs: Date.now() - inicio },
+      data: {
+        caixa: {
+          empresaId: extra.empresaId != null ? extra.empresaId : null,
+          fiscal: blocoVazio(status),
+          naoFiscal: { ...blocoVazio(status), abertura: 0 }
+        }
+      },
+      warnings,
+      errors
+    });
+
     try {
-      const aberto = await obterSessaoAberta();
-      if (!aberto) {
-        const vazio = montarBlocoCaixa({
-          abertura: 0, entradas: 0, sangrias: 0, suprimentos: 0,
-          fechamento: null, status: 'fechado'
-        });
-        warnings.push('caixa: nenhuma sessão aberta');
-        return criarMonitoringResult({
-          success: true,
-          source: 'CaixaProvider',
-          metrics: { tempoConsultaMs: Date.now() - inicio },
-          data: { caixa: { fiscal: vazio, naoFiscal: { ...vazio, abertura: 0 } } },
-          warnings,
-          errors
-        });
+      const empresaId = await resolverEmpresaIdDoContextoCaixa(context, { db: dbConn });
+      if (empresaId == null) {
+        warnings.push('caixa: contexto empresarial obrigatório');
+        return resultadoVazio('fechado', null, { empresaId: null });
       }
 
-      const row = aberto.row;
-      const sessaoId = aberto.tipo === 'sessao' ? row.id : (row.sessao_id || null);
-      const caixaId = aberto.tipo === 'caixa' ? row.id : (row.caixa_turno_id || row.caixa_id || null);
-      const abertura = num(row.valor_abertura != null ? row.valor_abertura : row.valor_inicial);
-      const fechamento = row.valor_fechamento != null ? num(row.valor_fechamento) : null;
+      const sessao = await obterSessaoAtivaDaEmpresa(dbConn, { empresaId });
+      if (!sessao || !sessao.id) {
+        warnings.push('CAIXA_SESSAO_NAO_ENCONTRADA');
+        return resultadoVazio('fechado', null, { empresaId });
+      }
 
+      const sessaoId = sessao.id;
+      const abertura = num(sessao.valor_abertura);
+      const fechamento = sessao.valor_fechamento != null ? num(sessao.valor_fechamento) : null;
       const exprF = getExprValorVendaFiscal();
       const exprNf = getExprValorVendaNaoFiscal();
 
       const [vendasF, vendasNf, sangrias, suprimentos] = await Promise.all([
-        sumVendasSessao(exprF, sessaoId, caixaId),
-        sumVendasSessao(exprNf, sessaoId, caixaId),
-        sumMovimentacoes('sangria', sessaoId, caixaId),
-        sumMovimentacoes('suprimento', sessaoId, caixaId)
+        sumVendasSessaoDaEmpresa(dbGet, exprF, sessaoId, empresaId),
+        sumVendasSessaoDaEmpresa(dbGet, exprNf, sessaoId, empresaId),
+        sumMovimentacoesDaEmpresa(dbConn, 'sangria', sessaoId, empresaId),
+        sumMovimentacoesDaEmpresa(dbConn, 'suprimento', sessaoId, empresaId)
       ]);
 
       const sang = num(sangrias.total);
       const supr = num(suprimentos.total);
-      // Movimentos de dinheiro físico atribuídos ao caixa fiscal; NF só vendas NF
       const fiscal = montarBlocoCaixa({
         abertura,
         entradas: num(vendasF.total),
         sangrias: sang,
         suprimentos: supr,
         fechamento,
-        status: row.status,
-        sessaoId: sessaoId || caixaId,
-        abertoEm: row.aberto_em || null,
-        fechadoEm: row.fechado_em || null
+        status: sessao.status,
+        sessaoId,
+        abertoEm: sessao.aberto_em || null,
+        fechadoEm: sessao.fechado_em || null
       });
       const naoFiscal = montarBlocoCaixa({
         abertura: 0,
@@ -141,30 +163,28 @@ const CaixaProvider = {
         sangrias: 0,
         suprimentos: 0,
         fechamento: null,
-        status: row.status,
-        sessaoId: sessaoId || caixaId,
-        abertoEm: row.aberto_em || null,
-        fechadoEm: row.fechado_em || null
+        status: sessao.status,
+        sessaoId,
+        abertoEm: sessao.aberto_em || null,
+        fechadoEm: sessao.fechado_em || null
       });
 
       return criarMonitoringResult({
         success: true,
         source: 'CaixaProvider',
         metrics: { tempoConsultaMs: Date.now() - inicio },
-        data: { caixa: { fiscal, naoFiscal } },
+        data: { caixa: { empresaId, fiscal, naoFiscal } },
         warnings,
         errors
       });
     } catch (err) {
       errors.push(err.message || String(err));
-      const vazio = montarBlocoCaixa({
-        abertura: 0, entradas: 0, sangrias: 0, suprimentos: 0, fechamento: null, status: 'erro'
-      });
+      const vazio = blocoVazio('erro');
       return criarMonitoringResult({
         success: false,
         source: 'CaixaProvider',
         metrics: { tempoConsultaMs: Date.now() - inicio },
-        data: { caixa: { fiscal: vazio, naoFiscal: vazio } },
+        data: { caixa: { empresaId: null, fiscal: vazio, naoFiscal: vazio } },
         warnings,
         errors
       });
@@ -173,3 +193,4 @@ const CaixaProvider = {
 };
 
 module.exports = CaixaProvider;
+module.exports.resolverEmpresaIdDoContextoCaixa = resolverEmpresaIdDoContextoCaixa;

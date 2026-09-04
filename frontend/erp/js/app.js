@@ -23,6 +23,7 @@ const CDS_ERP_PAGE_SCRIPTS = Object.freeze({
         '/erp/js/dashboard-command.js',
         '/erp/js/dashboard.js'
     ],
+    mis: ['/erp/js/mis.js'],
     monitoring: ['/erp/js/cds-monitoring-engine.js'],
     produtos: ['/shared/js/SearchSDK.js', '/erp/js/categorias.js', '/erp/js/subcategorias.js', '/erp/js/motor-unidades-medida.js', '/erp/js/produto-apresentacao-resolver.js', '/erp/js/produto-embalagens.js', '/shared/js/motor-preco-atacado.js', '/erp/js/formacao-preco-margem.js', '/erp/js/produtos.js'],
     clientes: ['/erp/js/clientes.js'],
@@ -358,6 +359,10 @@ async function loadPage(page) {
         case 'dashboard':
             return carregarPaginaHtml('dashboard.html', function () {
                 if (typeof initDashboard === 'function') initDashboard();
+            });
+        case 'mis':
+            return carregarPaginaHtml('mis.html', function () {
+                if (typeof initMis === 'function') initMis();
             });
         case 'monitoring':
             return typeof loadMonitoringEngine === 'function'

@@ -67,11 +67,12 @@ test('Entrypoint public.js exporta somente superfície permitida', () => {
   assert.deepStrictEqual(chaves, esperadas);
 });
 
-test('Versão pública RC2.1 congelada', () => {
-  assert.strictEqual(PUBLIC.VERSAO.VERSAO, 'RC2.1');
-  assert.strictEqual(PUBLIC.VERSAO.STATUS, 'ARQUITETURA_CONGELADA');
-  assert.strictEqual(PUBLIC.VERSAO.TAG, 'MUC_RC2.1_ENTERPRISE');
+test('Versão pública RC3.0 consolidada (contrato DTO 1.0.0)', () => {
+  assert.strictEqual(PUBLIC.VERSAO.VERSAO, 'RC3.0');
+  assert.strictEqual(PUBLIC.VERSAO.STATUS, 'CONSOLIDADO');
+  assert.strictEqual(PUBLIC.VERSAO.TAG, 'MUC_RC3.0_CONSOLIDADO');
   assert.strictEqual(PUBLIC.VERSAO.CONTRATO, '1.0.0');
+  assert.strictEqual(PUBLIC.VERSAO.VERSAO_RC2_1, 'RC2.1');
 });
 
 test('API pública — assinaturas dos 7 métodos', () => {
@@ -90,7 +91,7 @@ test('API pública — assinaturas dos 7 métodos', () => {
 test('obterVersao() retorna objeto imutável', () => {
   const muc = PUBLIC.obterMuc(mockDb);
   const v = muc.obterVersao();
-  assert.strictEqual(v.VERSAO, 'RC2.1');
+  assert.strictEqual(v.VERSAO, 'RC3.0');
   assert.ok(Object.isFrozen(v));
   assert.throws(() => { v.VERSAO = 'X'; });
 });
@@ -166,7 +167,7 @@ test('DTO ProdutoApresentacaoDTO — factory pública', () => {
 test('DTO RegraConversaoDTO — factory pública', () => {
   const regra = PUBLIC.criarRegraConversaoDTO('MULTIPLICADOR');
   assert.strictEqual(regra.regraAplicada, 'EMBALAGEM_MULTIPLICADOR');
-  assert.strictEqual(regra.versaoContrato, 'RC2.1');
+  assert.strictEqual(regra.versaoContrato, 'RC3.0');
   assert.ok(Object.isFrozen(regra));
 });
 

@@ -165,18 +165,82 @@ class CentralDocumentosRepository extends IRepository {
   }
 
   /**
+   * Identidade empresarial: chave + empresa do alvo.
+   * Sem empresaId válido não consulta globalmente.
    * @param {string} chave
+   * @param {number} empresaId
    * @returns {Promise<Object|null>}
    */
-  async buscarPorChave(chave) {
+  async buscarPorChave(chave, empresaId) {
+    if (!chave) return null;
+    const emp = Number(empresaId);
+    if (!Number.isInteger(emp) || emp <= 0) return null;
+
     const sql = this._obterSql();
     await sql.whenReady();
 
     const row = await sql.get(
-      `SELECT * FROM ${CentralDocumentosRepository.TABELA} WHERE chave = ?`,
-      [chave]
+      `SELECT * FROM ${CentralDocumentosRepository.TABELA} WHERE chave = ? AND empresa_id = ?`,
+      [chave, emp]
     );
     return this._mapearRow(row);
+  }
+
+  /**
+   * Isolamento empresarial: um ID, IN de IDs autorizados, ou vazio (1=0).
+   * String `'todas'` sem `empresaIds` não libera SELECT global.
+   * @private
+   */
+  _idsEmpresaFiltro(filtros = {}) {
+    const rawLista = filtros.empresaIds || filtros.empresa_ids;
+    if (Array.isArray(rawLista)) {
+      return [...new Set(rawLista.map(Number).filter((n) => Number.isInteger(n) && n > 0))];
+    }
+    const empresaFiltro = filtros.empresaId ?? filtros.empresa_id;
+    if (empresaFiltro === 'todas') {
+      return [];
+    }
+    if (empresaFiltro != null && empresaFiltro !== '') {
+      const n = Number(empresaFiltro);
+      return Number.isInteger(n) && n > 0 ? [n] : [];
+    }
+    return null;
+  }
+
+  /**
+   * @private
+   */
+  _aplicarFiltroEmpresa(where, params, filtros = {}) {
+    const ids = this._idsEmpresaFiltro(filtros);
+    if (ids === null) {
+      return;
+    }
+    if (!ids.length) {
+      where.push('1 = 0');
+      return;
+    }
+    if (ids.length === 1) {
+      where.push('empresa_id = ?');
+      params.push(ids[0]);
+    } else {
+      where.push(`empresa_id IN (${ids.map(() => '?').join(', ')})`);
+      params.push(...ids);
+    }
+    where.push('empresa_id IS NOT NULL');
+  }
+
+  /**
+   * @private
+   * @returns {{ sql: string, params: *[] }}
+   */
+  _fragmentoSqlEmpresa(filtros = {}) {
+    const where = [];
+    const params = [];
+    this._aplicarFiltroEmpresa(where, params, filtros);
+    return {
+      sql: where.length ? ` AND ${where.join(' AND ')}` : '',
+      params
+    };
   }
 
   /**
@@ -204,11 +268,7 @@ class CentralDocumentosRepository extends IRepository {
       params.push(filtros.origem);
     }
 
-    const empresaFiltro = filtros.empresaId ?? filtros.empresa_id;
-    if (empresaFiltro != null && empresaFiltro !== '' && empresaFiltro !== 'todas') {
-      where.push('empresa_id = ?');
-      params.push(Number(empresaFiltro));
-    }
+    this._aplicarFiltroEmpresa(where, params, filtros);
 
     // RC3.6.C — busca inteligente (CNPJ máscara, zeros NF, &amp;, acentos)
     if (filtros.busca) {
@@ -277,20 +337,39 @@ class CentralDocumentosRepository extends IRepository {
   }
 
   /**
-   * @param {number} [limite]
+   * Fila de mutação: SINCRONIZADA sem parse, somente da empresa do alvo (05.74).
+   * Sem empresaId válido não consulta globalmente.
+   *
+   * @param {number|{ limite?: number, empresaId?: number }} [limite=100]
+   * @param {number} [empresaId]
    * @returns {Promise<Object[]>}
    */
-  async listarPendentesProcessamento(limite = 100) {
+  async listarPendentesProcessamento(limite = 100, empresaId) {
+    if (limite && typeof limite === 'object') {
+      empresaId = limite.empresaId;
+      limite = limite.limite ?? 100;
+    }
+    const emp = Number(empresaId);
+    if (!Number.isInteger(emp) || emp <= 0) {
+      const erro = new Error(
+        'Modo MULTIEMPRESA exige empresa explícita para listar pendências de processamento.'
+      );
+      erro.code = 'EMPRESA_CENTRAL_AUSENTE';
+      erro.statusCode = 400;
+      throw erro;
+    }
+
     const sql = this._obterSql();
     await sql.whenReady();
 
     const rows = await sql.all(
       `SELECT * FROM ${CentralDocumentosRepository.TABELA}
        WHERE status = ?
+         AND empresa_id = ?
          AND (parse_json IS NULL OR parse_json = '')
        ORDER BY created_at ASC
        LIMIT ?`,
-      [DocumentoFiscalStatus.SINCRONIZADA, limite]
+      [DocumentoFiscalStatus.SINCRONIZADA, emp, limite]
     );
 
     return rows.map((row) => this._mapearRow(row));
@@ -303,7 +382,7 @@ class CentralDocumentosRepository extends IRepository {
   static get COLUNAS_LISTAGEM() {
     return `id, chave, numero, serie, modelo, fornecedor, cnpj_fornecedor,
       data_emissao, data_entrada, valor_total, nsu, origem, status, status_detalhe, tipo_documento,
-      miip_sessao_id, miip_resumo_json, compra_id, usuario_id, processado_em, created_at, updated_at,
+      miip_sessao_id, miip_resumo_json, compra_id, usuario_id, processado_em, empresa_id, created_at, updated_at,
       CASE WHEN tipo_documento IN ('PROC_NFE', 'NFE') THEN 1 ELSE 0 END AS xml_completo_flag,
       CASE
         WHEN parse_json IS NOT NULL AND TRIM(parse_json) != '' THEN 1
@@ -384,6 +463,7 @@ class CentralDocumentosRepository extends IRepository {
       compraId: row.compra_id,
       usuarioId: row.usuario_id,
       processadoEm: row.processado_em,
+      empresaId: row.empresa_id != null ? Number(row.empresa_id) : null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       parseJson: null,
@@ -765,7 +845,14 @@ class CentralDocumentosRepository extends IRepository {
     await sql.whenReady();
 
     const indicadoresFiscaisService = require('../../../services/IndicadoresFiscaisService');
-    const indicadores = await indicadoresFiscaisService.obterIndicadoresCentral(opcoes);
+    const indicadores = await indicadoresFiscaisService.obterIndicadoresCentral({
+      ...opcoes,
+      db: opcoes.db || this._db
+    });
+
+    const fragEmp = this._fragmentoSqlEmpresa(opcoes);
+    const sqlEmpresa = fragEmp.sql;
+    const paramsAvg = [DocumentoFiscalStatus.GRAVADA, ...fragEmp.params];
 
     const row = await sql.get(
       `SELECT
@@ -776,13 +863,17 @@ class CentralDocumentosRepository extends IRepository {
          COALESCE(SUM(CASE
            WHEN status = ? AND date(updated_at) = date('now', 'localtime')
            THEN 1 ELSE 0 END), 0) AS compras_concluidas_hoje
-       FROM ${CentralDocumentosRepository.TABELA}`,
-      [DocumentoFiscalStatus.GRAVADA]
+       FROM ${CentralDocumentosRepository.TABELA}
+       WHERE 1=1${sqlEmpresa}`,
+      paramsAvg
     );
 
+    const paramsMiip = [...fragEmp.params];
+    const sqlMiipEmpresa = fragEmp.sql;
     const comMiip = await sql.all(
       `SELECT miip_resumo_json, status FROM ${CentralDocumentosRepository.TABELA}
-       WHERE miip_resumo_json IS NOT NULL AND miip_resumo_json != ''`
+       WHERE miip_resumo_json IS NOT NULL AND miip_resumo_json != ''${sqlMiipEmpresa}`,
+      paramsMiip
     );
 
     let somaIdentificacao = 0;

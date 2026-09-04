@@ -274,7 +274,8 @@ async function c13() {
 async function c14() {
   assert.ok(src('backend/services/vendas/VendaPagamentoService.js').includes('empresa_id'));
   assert.ok(src('backend/services/vendas/VendaPagamentoService.js').includes('resolverEmpresaIdParaFinanceiro'));
-  assert.ok(src('backend/services/vendas/VendaPagamentoService.js').includes('req.empresaId || null'));
+  assert.ok(src('backend/services/vendas/VendaPagamentoService.js').includes('empresaIdVenda'));
+  assert.ok(!src('backend/services/vendas/VendaPagamentoService.js').includes('req.empresaId || null'));
 }
 
 async function c15() {

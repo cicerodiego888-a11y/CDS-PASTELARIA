@@ -66,6 +66,13 @@
     }
     global.localStorage.setItem(STORAGE_ID, String(empresa.id));
     global.localStorage.setItem(STORAGE_JSON, JSON.stringify(empresa));
+    try {
+      if (typeof document !== 'undefined' && document.dispatchEvent) {
+        document.dispatchEvent(new CustomEvent('cds-empresa-contexto-alterado', {
+          detail: { empresaId: Number(empresa.id) }
+        }));
+      }
+    } catch (_e) { /* ignore */ }
   }
 
   function limpar() {
@@ -200,10 +207,10 @@
       atualId = null;
     }
 
-    if (!atualId && disponiveis.length === 1) {
+    if (!atualId && disponiveis.length >= 1) {
       try {
         await selecionar(disponiveis[0].id);
-        atualId = disponiveis[0].id;
+        atualId = Number(disponiveis[0].id);
       } catch (e) {
         renderLista(host, disponiveis, null);
         return;

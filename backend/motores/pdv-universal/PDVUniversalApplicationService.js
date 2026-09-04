@@ -1,6 +1,8 @@
 /**
  * Porta oficial do PDV Universal (Sprint 05.01).
+ * STATUS: CONGELADO (legado). PDV oficial em evolução: frontend/pdv (PDV Normal).
  * Orquestra modo + contexto. Não duplica estoque, pagamento, fiscal ou TEF.
+ * Novas funcionalidades, integrações e regras: PROIBIDAS.
  */
 'use strict';
 

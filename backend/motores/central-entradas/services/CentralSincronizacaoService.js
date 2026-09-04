@@ -23,6 +23,10 @@ const {
   listarAlvosSincronizacaoCentral
 } = require('../../../services/central-entradas/CentralEntradasEmpresaContextoService');
 const { ModoOperacionalGlobal } = require('../../../core/modo-operacional');
+const {
+  enriquecerMensagemSefazDfeHttp,
+  codigoErroSincronizacaoDfe
+} = require('../utils/mensagemSefazDfeHttp');
 
 class CentralSincronizacaoService {
   /**
@@ -32,7 +36,9 @@ class CentralSincronizacaoService {
     /** @private */
     this._documentosRepository = deps.documentosRepository ?? new CentralDocumentosRepository();
     /** @private */
-    this._configuracao = deps.configuracaoService ?? new CentralConfiguracaoService();
+    this._configuracao = deps.configuracaoService ?? new CentralConfiguracaoService({
+      db: deps.db ?? null
+    });
     /** @private */
     this._nsuRepository = deps.nsuRepository
       ?? new CentralNsuRepository({ db: deps.db ?? null });
@@ -41,6 +47,10 @@ class CentralSincronizacaoService {
       ?? new CentralNsuService({ nsuRepository: this._nsuRepository });
     /** @private */
     this._deps = deps;
+    /** @private */
+    this._consultarNotaPorChave = deps.consultarNotaPorChave || consultarNotaPorChave;
+    /** @private */
+    this._sincronizarDfe = deps.sincronizarDistribuicaoDFe || sincronizarDistribuicaoDFe;
   }
 
   /**
@@ -57,7 +67,8 @@ class CentralSincronizacaoService {
 
     const ctxResult = await this._configuracao.obterContextoOperacional({
       empresaId,
-      permitirFallbackGlobal
+      permitirFallbackGlobal,
+      db: opcoes.db || this._deps.db
     });
 
     if (!ctxResult.ok) {
@@ -108,22 +119,47 @@ class CentralSincronizacaoService {
       empresaId
     });
 
-    const resultado = await sincronizarDistribuicaoDFe({
-      maxIteracoes: opcoes.maxIteracoes ?? contexto.syncMaxDocumentos,
-      contextoCentral: contexto,
-      nsuRepository: this._nsuRepository,
-      nsuService: this._nsuService,
-      persistenciaService: persistencia,
-      correlationId: opcoes.correlationId || null
-    });
+    try {
+      const resultado = await this._sincronizarDfe({
+        maxIteracoes: opcoes.maxIteracoes ?? contexto.syncMaxDocumentos,
+        contextoCentral: contexto,
+        nsuRepository: this._nsuRepository,
+        nsuService: this._nsuService,
+        persistenciaService: persistencia,
+        correlationId: opcoes.correlationId || null
+      });
 
-    return {
-      ...resultado,
-      sucesso: resultado.sucesso !== false,
-      empresaId,
-      cnpj: contexto.cnpj,
-      ambiente: contexto.ambiente
-    };
+      const mensagem = enriquecerMensagemSefazDfeHttp(
+        resultado.mensagem || (resultado.erros && resultado.erros[0]) || '',
+        { ambiente: contexto.ambiente }
+      );
+
+      return {
+        ...resultado,
+        sucesso: resultado.sucesso !== false,
+        empresaId,
+        cnpj: contexto.cnpj,
+        ambiente: contexto.ambiente,
+        mensagem: mensagem || resultado.mensagem,
+        mensagemAmigavel: mensagem || resultado.mensagemAmigavel || resultado.mensagem
+      };
+    } catch (error) {
+      const mensagem = enriquecerMensagemSefazDfeHttp(error.message, {
+        ambiente: contexto.ambiente
+      });
+      return {
+        sucesso: false,
+        empresaId,
+        cnpj: contexto.cnpj,
+        ambiente: contexto.ambiente,
+        notasNovas: 0,
+        notasDuplicadas: 0,
+        erros: [mensagem],
+        mensagem,
+        mensagemAmigavel: mensagem,
+        codigoErro: error.code || codigoErroSincronizacaoDfe(mensagem)
+      };
+    }
   }
 
   /**
@@ -191,6 +227,15 @@ class CentralSincronizacaoService {
           ? `Sincronização multiempresa: ${porEmpresa.length} empresa(s)`
           : (ultimoOk && ultimoOk.mensagem) || 'Sincronização concluída')
         : (erros[0] || 'Falha na sincronização');
+      const codigosFalha = porEmpresa
+        .filter((p) => p.sucesso === false)
+        .map((p) => p.codigoErro)
+        .filter(Boolean);
+      const codigoErro = sucesso
+        ? null
+        : (codigosFalha.find((c) => c === 'CERTIFICADO' || c === 'CNPJ' || c === 'CONFIG_FISCAL')
+          || codigosFalha[0]
+          || codigoErroSincronizacaoDfe(mensagem));
 
       return {
         ...SincronizacaoResultadoDTO.create({
@@ -205,39 +250,55 @@ class CentralSincronizacaoService {
           mensagem,
           mensagemAmigavel: mensagem,
           ultimaSincronizacao: ultimoOk ? ultimoOk.ultimaSincronizacao : null,
-          erros
+          erros,
+          codigoErro
         }).toJSON(),
         modoOperacional: plano.modo,
         porEmpresa
       };
     } catch (error) {
       const mensagem = error.message || String(error);
-      const codigoErro = error.code
-        || (/certificado/i.test(mensagem)
-          ? 'CERTIFICADO'
-          : /cnpj/i.test(mensagem)
-            ? 'CNPJ'
-            : /timeout|ECONN/i.test(mensagem)
-              ? 'SEFAZ'
-              : 'SEFAZ');
+      const mensagemEnriquecida = enriquecerMensagemSefazDfeHttp(mensagem);
+      const codigoErro = error.code || codigoErroSincronizacaoDfe(mensagemEnriquecida);
       return SincronizacaoResultadoDTO.create({
         sucesso: false,
         notasNovas: 0,
         notasDuplicadas: 0,
-        erros: [mensagem],
-        mensagem,
-        mensagemAmigavel: mensagem,
+        erros: [mensagemEnriquecida],
+        mensagem: mensagemEnriquecida,
+        mensagemAmigavel: mensagemEnriquecida,
         codigoErro
       }).toJSON();
     }
   }
 
   /**
+   * Lookup documental: chave + empresa do contexto HTTP (05.72).
+   * Sem empresaId válido não consulta SQL nem SEFAZ.
+   *
    * @param {string} chave
+   * @param {{ empresaId?: number|string, modo?: string }} [opcoes]
    * @returns {Promise<Object>}
    */
-  async buscarPorChave(chave) {
-    const ctxResult = await this._configuracao.obterContextoOperacional();
+  async buscarPorChave(chave, opcoes = {}) {
+    const empresaId = Number(opcoes.empresaId);
+    if (!Number.isInteger(empresaId) || empresaId <= 0) {
+      const erro = new Error(
+        'Modo MULTIEMPRESA exige empresa explícita (X-Empresa-Id) para consultar a chave.'
+      );
+      erro.code = 'EMPRESA_CENTRAL_AUSENTE';
+      erro.statusCode = 400;
+      throw erro;
+    }
+
+    const chaveLimpa = String(chave || '').replace(/\D/g, '');
+    const permitirFallbackGlobal = opcoes.modo === ModoOperacionalGlobal.EMPRESA_SIMPLES;
+
+    const ctxResult = await this._configuracao.obterContextoOperacional({
+      empresaId,
+      permitirFallbackGlobal,
+      db: opcoes.db || this._deps.db
+    });
     if (!ctxResult.ok) {
       const erro = new Error(ctxResult.mensagem);
       erro.statusCode = 422;
@@ -245,41 +306,41 @@ class CentralSincronizacaoService {
       throw erro;
     }
 
-    const chaveLimpa = String(chave || '').replace(/\D/g, '');
-
     // RC3.4.1 — Gate único também cobre consChNFe (buscar-chave).
-    try {
-      const gate = require('./CentralSefazOperationalGate');
-      const auth = await gate.autorizarConsultaDistDfe({
-        chave: chaveLimpa,
-        motivo: 'buscar_chave_consChNFe',
-        origem: 'api'
-      });
-      if (!auth.permitido) {
-        const erro = new Error(auth.mensagem || 'Consulta bloqueada pelo Gate SEFAZ.');
-        erro.statusCode = 429;
-        erro.codigoErro = auth.codigo;
-        erro.detalhe = auth;
-        throw erro;
+    if (this._deps.pularGateConsultaChave !== true) {
+      try {
+        const gate = require('./CentralSefazOperationalGate');
+        const auth = await gate.autorizarConsultaDistDfe({
+          chave: chaveLimpa,
+          motivo: 'buscar_chave_consChNFe',
+          origem: 'api'
+        });
+        if (!auth.permitido) {
+          const erro = new Error(auth.mensagem || 'Consulta bloqueada pelo Gate SEFAZ.');
+          erro.statusCode = 429;
+          erro.codigoErro = auth.codigo;
+          erro.detalhe = auth;
+          throw erro;
+        }
+      } catch (gateErr) {
+        if (gateErr.statusCode) throw gateErr;
+        // Gate indisponível: não bloqueia busca manual pontual (compat).
       }
-    } catch (gateErr) {
-      if (gateErr.statusCode) throw gateErr;
-      // Gate indisponível: não bloqueia busca manual pontual (compat).
     }
 
-    const resultado = await consultarNotaPorChave(chaveLimpa, {
-      contextoCentral: ctxResult.contexto
+    const resultado = await this._consultarNotaPorChave(chaveLimpa, {
+      contextoCentral: { ...ctxResult.contexto, empresaId }
     });
 
     try {
-      if (resultado?.cStat) {
+      if (this._deps.pularGateConsultaChave !== true && resultado?.cStat) {
         await require('./CentralSefazOperationalGate').processarRespostaSefaz(resultado, {
           chave: chaveLimpa
         });
       }
     } catch { /* ignore */ }
 
-    const documento = await this._documentosRepository.buscarPorChave(chaveLimpa);
+    const documento = await this._documentosRepository.buscarPorChave(chaveLimpa, empresaId);
 
     return {
       ...resultado,

@@ -1,6 +1,8 @@
 /**
  * Sprint 05.03 — tela principal do PDV Universal.
- * Consome GET /api/pdv-universal/contexto. Sem carrinho, checkout ou venda.
+ * STATUS: CONGELADO (legado). PDV oficial em evolução: /pdv (PDV Normal).
+ * Consome GET /api/pdv-universal/contexto.
+ * Novas funcionalidades, integrações e regras: PROIBIDAS.
  */
 (function (root, factory) {
     const api = factory();

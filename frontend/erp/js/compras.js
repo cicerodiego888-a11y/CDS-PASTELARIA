@@ -1281,8 +1281,16 @@ function atualizarPainelResumoConversaoMuc(resultado, modo) {
 function agendarSimulacaoMucCompra() {
     if (timerSimulacaoMucCompra) clearTimeout(timerSimulacaoMucCompra);
     timerSimulacaoMucCompra = setTimeout(() => {
-        simularConversaoMucCompra().catch(() => { /* UI silenciosa */ });
+        simularConversaoMucCompra().catch((err) => {
+            exibirErroPreviewMucCompra(err);
+        });
     }, 120);
+}
+
+function exibirErroPreviewMucCompra(err) {
+    const msg = (err && (err.message || err.mensagem)) || 'Não foi possível converter a quantidade.';
+    $('#resultado_formula_conversao').text(msg);
+    ultimaSimulacaoMucCompra = null;
 }
 
 async function simularConversaoMucCompra(forcar = false) {
@@ -1296,11 +1304,21 @@ async function simularConversaoMucCompra(forcar = false) {
     const qtdEmb = Number($('#quantidade_embalagens_item').val() || 0);
     const qtdPorEmb = Number($('#quantidade_por_embalagem_item').val() || 0);
     const valorTotal = obterValorTotalCompraMuc();
-    const unidade = String($('#unidade_fracionada_item').val() || produto?.unidade || 'UN').toUpperCase();
+    const unidadeDestino = String(
+        $('#unidade_fracionada_item').val()
+        || produto?.unidade_estoque
+        || produto?.unidade
+        || 'UN'
+    ).toUpperCase();
+    const unidadeOrigem = String(
+        $('#compra_em_item').val()
+        || produto?.unidade_comercial
+        || 'UN'
+    ).toUpperCase();
 
-    if (qtdEmb <= 0 || qtdPorEmb <= 0) {
+    if (qtdEmb <= 0) {
         $('#resultado_formula_conversao').text('');
-        $('#resultado_qtd_total_fracionado').text(`0 ${unidade}`);
+        $('#resultado_qtd_total_fracionado').text(`0 ${unidadeDestino}`);
         $('#resultado_custo_unitario_fracionado').text('R$ 0,0000');
         atualizarPainelResumoConversaoMuc(null, modo);
         ultimaSimulacaoMucCompra = null;
@@ -1312,24 +1330,37 @@ async function simularConversaoMucCompra(forcar = false) {
         throw new Error('Cliente MUC indisponível');
     }
 
-    const resultado = await CompraMucClient.simularConversao({
-        quantidade_embalagens: qtdEmb,
-        quantidade_por_embalagem: qtdPorEmb,
-        valor_total_embalagem: valorTotal
-    });
+    let resultado;
+    try {
+        resultado = await CompraMucClient.simularConversao({
+            produtoId: produto?.id || null,
+            quantidade: qtdEmb,
+            unidadeOrigem,
+            unidadeDestino,
+            quantidade_por_embalagem: qtdPorEmb,
+            valor_total_embalagem: valorTotal
+        });
+    } catch (err) {
+        exibirErroPreviewMucCompra(err);
+        if (forcar) throw err;
+        return null;
+    }
 
     ultimaSimulacaoMucCompra = resultado;
-    const qtdTotal = Number(resultado.quantidadeEstoque || 0);
+    const qtdTotal = Number(resultado.quantidadeConvertida || resultado.quantidadeEstoque || 0);
     const custoUnitario = Number(resultado.custoUnitario || 0);
     const compraEm = obterRotuloCompraEmAtual();
+    const unidade = String(resultado.unidadeDestino || resultado.unidade || unidadeDestino).toUpperCase();
 
     $('#resultado_qtd_total_fracionado').text(`${formatQuantidadeExibicao(qtdTotal, 3)} ${unidade}`);
     $('#resultado_custo_unitario_fracionado').text(`R$ ${formatarCustoUnitarioVenda(custoUnitario)}`);
 
-    if (qtdEmb > 0 && qtdPorEmb > 0) {
+    if (resultado.caminhoTexto) {
+        $('#resultado_formula_conversao').text(resultado.caminhoTexto);
+    } else if (qtdEmb > 0 && qtdPorEmb > 0) {
         const tipoPlural = pluralizarTipoEmbalagem(compraEm, qtdEmb);
         $('#resultado_formula_conversao').text(
-            `${formatQuantidadeExibicao(qtdEmb, 3)} ${tipoPlural} × ${formatQuantidadeExibicao(qtdPorEmb, 3)} ${unidade} = ${formatQuantidadeExibicao(qtdTotal, 3)} ${unidade}`
+            `${formatQuantidadeExibicao(qtdEmb, 3)} ${tipoPlural} → ${formatQuantidadeExibicao(qtdTotal, 3)} ${unidade}`
         );
     }
 
@@ -2218,8 +2249,9 @@ function obterQuantidadeComercialItemCompra(item = {}) {
 
 function obterQuantidadeConvertidaItemCompra(item = {}) {
     if (typeof obterQuantidadeConvertida === 'function') return obterQuantidadeConvertida(item);
-    const emb = Number(item.quantidade_embalagens || 0) * Number(item.quantidade_por_embalagem || 0);
-    return Number(item.quantidade_convertida || item.peso_total_compra || 0) || emb || Number(item.quantidade || 0);
+    const convertida = Number(item.quantidade_convertida || 0);
+    if (Number.isFinite(convertida) && convertida > 0) return convertida;
+    return Number(item.quantidade || 0);
 }
 
 /** @deprecated RC4.31.19 — use obterQuantidadeConvertidaItemCompra */
@@ -2499,15 +2531,19 @@ function toggleModoEntradaF7Compra() {
 function obterTotalConvertidoItemCompra() {
     if (!isModoConversaoUnidadesCompraAtivo()) return null;
 
-    const unidade = String($('#unidade_fracionada_item').val() || 'UN').toUpperCase();
-    const qtdTotal = obterQuantidadeConvertidaItemCompra({
-        quantidade_comercial: Number($('#quantidade_embalagens_item').val() || 0),
-        quantidade_embalagens: Number($('#quantidade_embalagens_item').val() || 0),
-        quantidade_por_embalagem: Number($('#quantidade_por_embalagem_item').val() || 0)
-    });
+    const unidade = String(
+        (ultimaSimulacaoMucCompra && (ultimaSimulacaoMucCompra.unidadeDestino || ultimaSimulacaoMucCompra.unidade))
+        || $('#unidade_fracionada_item').val()
+        || 'UN'
+    ).toUpperCase();
+    const qtdPreview = Number(
+        ultimaSimulacaoMucCompra
+        && (ultimaSimulacaoMucCompra.quantidadeConvertida || ultimaSimulacaoMucCompra.quantidadeEstoque)
+        || 0
+    );
+    if (qtdPreview > 0) return { qtdTotal: qtdPreview, unidade };
 
-    if (qtdTotal <= 0) return null;
-    return { qtdTotal, unidade };
+    return null;
 }
 
 function validarDistribuicaoFiscalCompra(qtdFiscal, qtdNaoFiscal, totalConvertido, unidade = '') {
@@ -4144,9 +4180,15 @@ async function adicionarItemCompraAsync() {
     let embalagemIdSelecionada = null;
 
     if (painelEmb) {
-        const conv = await simularConversaoMucCompra(true);
+        let conv;
+        try {
+            conv = await simularConversaoMucCompra(true);
+        } catch (previewErr) {
+            showNotification(previewErr.message || 'Não foi possível converter a quantidade.', 'warning');
+            return;
+        }
         if (!conv || conv.qtdTotal <= 0) {
-            showNotification('Informe quantidade comprada e quantidade por embalagem.', 'warning');
+            showNotification('Informe a quantidade e as unidades de origem e destino.', 'warning');
             return;
         }
         if (conv.valorTotal <= 0) {
@@ -5505,18 +5547,10 @@ function saveCompra() {
 
     if (centralDocumentoIdAtual) {
         data.central_documento_id = centralDocumentoIdAtual;
-    }
-
-    // 05.38.F.B — preservar empresa do documento Central / payload (backend é autoridade)
-    const empCentral = centralEmpresaIdAtual
-        ?? data.empresa_id
-        ?? data.empresaId
-        ?? (typeof CdsEmpresaContexto !== 'undefined' && CdsEmpresaContexto.lerEmpresaId
-            ? CdsEmpresaContexto.lerEmpresaId()
-            : null);
-    if (empCentral != null && Number(empCentral) > 0) {
-        data.empresa_id = Number(empCentral);
-        data.empresaId = Number(empCentral);
+        if (centralEmpresaIdAtual != null && Number(centralEmpresaIdAtual) > 0) {
+            data.empresa_id = Number(centralEmpresaIdAtual);
+            data.empresaId = Number(centralEmpresaIdAtual);
+        }
     }
 
     if (data.chave_acesso && data.chave_acesso.length !== 44) {

@@ -112,7 +112,29 @@ async function setup(opts = {}) {
   );
   const a = await EmpresaService.criarEmpresa({ cnpj: CNPJ_A, razao_social: 'A' }, { db });
   const b = await EmpresaService.criarEmpresa({ cnpj: CNPJ_B, razao_social: 'B' }, { db });
+  await run(db, `
+    CREATE TABLE pedidos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER,
+      status TEXT DEFAULT 'PEDIDO'
+    )
+  `);
   return { db, produtoId: p.lastID, empresaA: a, empresaB: b };
+}
+
+async function seedPedido(db, empresaId) {
+  const r = await run(db, `INSERT INTO pedidos (empresa_id, status) VALUES (?, 'PEDIDO')`, [empresaId]);
+  return r.lastID;
+}
+
+async function assertRejects(promise, code) {
+  try {
+    await promise;
+    throw new Error(`Esperava ${code}`);
+  } catch (err) {
+    if (err.message === `Esperava ${code}`) throw err;
+    assert.strictEqual(err.code || err.codigo, code, err.message);
+  }
 }
 
 async function seedAB(db, produtoId, empresaA, empresaB, saldos = {}) {
@@ -157,8 +179,9 @@ async function test01PedidoChegaAoMotorComercial() {
   const { db, produtoId, empresaA, empresaB } = await setup();
   await seedAB(db, produtoId, empresaA, empresaB, { aF: 100, aNF: 50, bF: 20, bNF: 8 });
   const empresaId = empresaIdDoReqPedido(reqPedido(empresaA.id));
+  const pedidoId = await seedPedido(db, empresaA.id);
   const r = await confirmarEstoqueViaMotorComercial({
-    pedidoId: 1,
+    pedidoId,
     itens: [{ produto_id: produtoId, quantidade: 10 }],
     usuarioId: 1,
     motivo: 'pedido-03-30',
@@ -177,8 +200,9 @@ async function test01PedidoChegaAoMotorComercial() {
 async function test02PedidoChegaAoMts() {
   const { db, produtoId, empresaA, empresaB } = await setup({ saldo_fiscal: 10, saldo_nao_fiscal: 90 });
   await seedAB(db, produtoId, empresaA, empresaB, { aF: 10, aNF: 90, bF: 20, bNF: 8 });
+  const pedidoId = await seedPedido(db, empresaA.id);
   const r = await confirmarEstoqueViaMotorComercial({
-    pedidoId: 2,
+    pedidoId,
     itens: [{ produto_id: produtoId, quantidade: 40 }],
     supervisorToken: 'tok',
     usuarioId: 1,
@@ -206,8 +230,9 @@ async function test03ExpedicaoChegaAoMotorComercial() {
   assert.ok(rota.includes('criarMiddlewareContextoEmpresa'));
   const { db, produtoId, empresaA, empresaB } = await setup();
   await seedAB(db, produtoId, empresaA, empresaB, { aF: 100, aNF: 50, bF: 20, bNF: 8 });
+  const pedidoId = await seedPedido(db, empresaA.id);
   const r = await MotorComercial.confirmarPedidoFiscal({
-    pedidoId: 3,
+    pedidoId,
     itens: [{ produto_id: produtoId, quantidade: 8 }],
     motivo: 'expedicao-03-30',
     empresaId: empresaIdDoReqPedido(reqPedido(empresaA.id))
@@ -219,8 +244,9 @@ async function test03ExpedicaoChegaAoMotorComercial() {
 async function test04ExpedicaoChegaAoMts() {
   const { db, produtoId, empresaA, empresaB } = await setup({ saldo_fiscal: 10, saldo_nao_fiscal: 90 });
   await seedAB(db, produtoId, empresaA, empresaB, { aF: 10, aNF: 90, bF: 20, bNF: 8 });
+  const pedidoId = await seedPedido(db, empresaA.id);
   const r = await MotorComercial.confirmarPedidoFiscal({
-    pedidoId: 4,
+    pedidoId,
     itens: [{ produto_id: produtoId, quantidade: 40 }],
     supervisorToken: 'tok',
     motivo: 'expedicao-mts',
@@ -254,8 +280,9 @@ async function test07IsolamentoAB() {
     saldo_nao_fiscal: 90
   });
   await seedAB(db, produtoId, empresaA, empresaB, { aF: 10, aNF: 90, bF: 20, bNF: 8 });
+  const pedidoId = await seedPedido(db, empresaA.id);
   await confirmarEstoqueViaMotorComercial({
-    pedidoId: 7,
+    pedidoId,
     itens: [{ produto_id: produtoId, quantidade: 40 }],
     supervisorToken: 'tok',
     empresaId: empresaA.id
@@ -283,18 +310,15 @@ async function test08PortaPublica() {
 
 async function test09Compat() {
   const { db, produtoId } = await setup({ saldo_fiscal: 10, saldo_nao_fiscal: 90 });
-  const r = await confirmarEstoqueViaMotorComercial({
-    pedidoId: 9,
-    itens: [{ produto_id: produtoId, quantidade: 40 }],
-    supervisorToken: 'tok',
-    empresaId: empresaIdDoReqPedido({ empresaId: null, body: { empresaId: 1 } })
-  }, { db, ...depsSup });
-  assert.ok(r.transferencias[0].empresa_id == null);
-  const n = await get(db, 'SELECT COUNT(*) AS c FROM estoque_empresa');
-  assert.strictEqual(n.c, 0);
-  const prod = await get(db, 'SELECT saldo_fiscal, saldo_nao_fiscal FROM produtos WHERE id = ?', [produtoId]);
-  assert.strictEqual(prod.saldo_fiscal, 40);
-  assert.strictEqual(prod.saldo_nao_fiscal, 60);
+  await assertRejects(
+    confirmarEstoqueViaMotorComercial({
+      pedidoId: 9,
+      itens: [{ produto_id: produtoId, quantidade: 40 }],
+      supervisorToken: 'tok',
+      empresaId: empresaIdDoReqPedido({ empresaId: null, body: { empresaId: 1 } })
+    }, { db, ...depsSup }),
+    'PEDIDO_NAO_ENCONTRADO'
+  );
   await closeDb(db);
 }
 
@@ -310,9 +334,10 @@ async function test11Rollback() {
     saldo_nao_fiscal: 90
   });
   await seedAB(db, produtoId, empresaA, empresaB, { aF: 10, aNF: 90, bF: 20, bNF: 8 });
+  const pedidoId = await seedPedido(db, empresaA.id);
   await run(db, 'BEGIN');
   await confirmarEstoqueViaMotorComercial({
-    pedidoId: 11,
+    pedidoId,
     itens: [{ produto_id: produtoId, quantidade: 40 }],
     supervisorToken: 'tok',
     empresaId: empresaA.id
@@ -364,7 +389,7 @@ async function main() {
     ['06 query nao substitui req.empresaId', test06QueryNaoSubstitui],
     ['07 empresa A nao altera B', test07IsolamentoAB],
     ['08 operacao chega a porta publica', test08PortaPublica],
-    ['09 COMPAT sem contexto', test09Compat],
+    ['09 pedido inexistente nao usa COMPAT', test09Compat],
     ['10 contrato MTS homologado intacto', test10ContratoMts],
     ['11 rollback restaura ambos', test11Rollback],
     ['12 nenhum SQL direto novo', test12SemSqlDireto]

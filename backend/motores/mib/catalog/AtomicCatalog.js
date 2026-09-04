@@ -22,7 +22,8 @@ const SQL_CATALOGO = `
     COALESCE(c.nome, '') AS categoria,
     COALESCE(m.nome, '') AS marca,
     COALESCE(p.ativo, 1) AS status,
-    COALESCE(p.item_fiscal, 1) AS item_fiscal
+    COALESCE(p.item_fiscal, 1) AS item_fiscal,
+    COALESCE(p.tipo_operacional, 'COMERCIAL') AS tipo_operacional
   FROM produtos p
   LEFT JOIN categorias c ON c.id = p.categoria_id
   LEFT JOIN marcas m ON m.id = p.marca_id

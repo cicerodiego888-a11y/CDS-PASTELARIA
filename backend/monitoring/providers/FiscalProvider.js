@@ -33,12 +33,23 @@ async function agregarVendasNaoFiscais(inicio, fim) {
   return { valor: num(row.valor), quantidade: num(row.quantidade) };
 }
 
-async function ultimaEntradaFiscal() {
-  const row = await dbGet(
-    `SELECT numero, chave, fornecedor, valor_total, data_emissao, data_entrada, created_at
+/**
+ * Última NF de entrada da empresa já resolvida pelo chamador (MonitoringContext.empresaId).
+ * Sem empresa válida: não executa SELECT. Sem COALESCE de ownership.
+ */
+async function ultimaEntradaFiscal(empresaId, deps = {}) {
+  const emp = Number(empresaId);
+  if (!Number.isInteger(emp) || emp <= 0) {
+    return { ultimaNf: null, fornecedor: null };
+  }
+  const get = deps.dbGet || dbGet;
+  const row = await get(
+    `SELECT numero, chave, fornecedor, valor_total, data_emissao, data_entrada, created_at, empresa_id
      FROM central_entradas_documentos
+     WHERE empresa_id = ?
      ORDER BY datetime(COALESCE(data_entrada, data_emissao, created_at)) DESC, id DESC
-     LIMIT 1`
+     LIMIT 1`,
+    [emp]
   );
   if (!row || (!row.chave && !row.numero)) {
     return { ultimaNf: null, fornecedor: null };
@@ -48,7 +59,8 @@ async function ultimaEntradaFiscal() {
       numero: row.numero || null,
       chave: row.chave || null,
       valor: num(row.valor_total),
-      data: row.data_entrada || row.data_emissao || row.created_at || null
+      data: row.data_entrada || row.data_emissao || row.created_at || null,
+      empresaId: row.empresa_id != null ? Number(row.empresa_id) : null
     },
     fornecedor: row.fornecedor || null
   };
@@ -143,7 +155,7 @@ const FiscalProvider = {
         agregarVendasNaoFiscais(hoje.inicio, hoje.fim),
         agregarVendasNaoFiscais(periodoComp.inicio, periodoComp.fim),
         agregarVendasNaoFiscais(ano.inicio, ano.fim),
-        ultimaEntradaFiscal(),
+        ultimaEntradaFiscal(context.empresaId),
         agregarEntradasNaoFiscais(hoje.inicio, hoje.fim),
         agregarEntradasNaoFiscais(periodoComp.inicio, periodoComp.fim),
         agregarEntradasNaoFiscais(ano.inicio, ano.fim),
@@ -223,4 +235,7 @@ const FiscalProvider = {
   }
 };
 
+FiscalProvider.ultimaEntradaFiscal = ultimaEntradaFiscal;
+
 module.exports = FiscalProvider;
+module.exports.ultimaEntradaFiscal = ultimaEntradaFiscal;

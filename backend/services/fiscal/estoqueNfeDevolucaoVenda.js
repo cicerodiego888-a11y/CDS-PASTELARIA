@@ -142,7 +142,7 @@ async function retornarEstoqueNfeDevolucaoVenda(nfeDevolucaoId, opcoes = {}) {
             devolverLotesParcialItem(item.venda_item_id, qtd, (loteErr) => {
               if (loteErr) return reject(loteErr);
               aplicar();
-            });
+            }, optsCredito);
             return;
           }
         }

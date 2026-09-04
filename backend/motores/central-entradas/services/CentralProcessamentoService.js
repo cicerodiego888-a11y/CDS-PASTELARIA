@@ -61,8 +61,38 @@ class CentralProcessamentoService {
       if (!documento) {
         const erro = new Error('Documento não encontrado');
         erro.statusCode = 404;
+        erro.code = 'DOCUMENTO_NAO_ENCONTRADO';
         throw erro;
       }
+
+      const {
+        exigirDocumentoDaEmpresa,
+        resolverEmpresaParaCentral
+      } = require('../../../services/central-entradas/CentralEntradasEmpresaContextoService');
+
+      let empresaId = Number(opcoes.empresaId ?? opcoes.empresaIdContexto);
+      if (!Number.isInteger(empresaId) || empresaId <= 0) {
+        if (opcoes.req) {
+          const ctx = await resolverEmpresaParaCentral({
+            req: opcoes.req,
+            empresaId: opcoes.req.empresaId
+          }, opcoes);
+          empresaId = ctx.empresaId;
+        }
+      }
+      if (!Number.isInteger(empresaId) || empresaId <= 0) {
+        const erro = new Error(
+          'Modo MULTIEMPRESA exige empresa explícita para processar o documento.'
+        );
+        erro.code = 'EMPRESA_CENTRAL_AUSENTE';
+        erro.statusCode = 400;
+        throw erro;
+      }
+
+      await exigirDocumentoDaEmpresa(
+        { documento, documentoId, empresaId },
+        { documentosRepository: this._documentosRepository }
+      );
 
       if (documento.parseJson && !opcoes.forcarReprocessamento) {
         const atualizado = await this._documentosRepository.buscarPorId(documentoId);
@@ -212,7 +242,15 @@ class CentralProcessamentoService {
           : 'Processamento concluído — pronto para Compras'
       }).toJSON();
     } catch (error) {
-      if (error.statusCode === 404 || error.statusCode === 409) {
+      const code = error && error.code;
+      if (
+        error.statusCode === 404
+        || error.statusCode === 409
+        || code === 'EMPRESA_CENTRAL_AUSENTE'
+        || code === 'EMPRESA_DOCUMENTO_NAO_RESOLVIDA'
+        || code === 'DOCUMENTO_NAO_ENCONTRADO'
+        || code === 'OPERACAO_EMPRESA_DIVERGENTE'
+      ) {
         throw error;
       }
 

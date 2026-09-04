@@ -198,7 +198,9 @@ class CentralUploadService {
 
     const documentoId = persistido.documento?.id;
     const processado = await this._processamento.processar(documentoId, {
-      usuarioId: opcoes.usuarioId
+      usuarioId: opcoes.usuarioId,
+      empresaId: empresaResolvida.empresaId,
+      empresaIdContexto: empresaResolvida.empresaId
     });
 
     if (!processado.sucesso) {

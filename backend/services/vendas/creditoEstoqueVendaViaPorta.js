@@ -46,6 +46,22 @@ function montarOpcoesRetornoEstoqueVenda(req, origem, dbConn) {
   };
 }
 
+/**
+ * Retorno de estoque de cancelamento/devolução (05.42).
+ * Empresa vem EXCLUSIVAMENTE de vendas.empresa_id — ignora req.empresaId.
+ */
+function montarOpcoesRetornoEstoqueDaVenda(venda, req, origem, dbConn) {
+  const { resolverEmpresaDaVenda } = require('./VendaEmpresaContextoService');
+  const empresaId = resolverEmpresaDaVenda(venda);
+  return {
+    db: dbConn,
+    empresaId,
+    usuarioId: req?.operadorId || req?.user?.id || req?.user?.usuarioId || null,
+    origem: origem || null,
+    exigirEmpresa: true
+  };
+}
+
 function montarOptsPortaCreditoVenda(db, opcoes = {}) {
   const empresaId = resolverEmpresaId(opcoes.empresaId);
 
@@ -168,6 +184,7 @@ module.exports = {
   empresaIdDoReqCreditoVenda,
   extrairEmpresaIdDeReq,
   montarOpcoesRetornoEstoqueVenda,
+  montarOpcoesRetornoEstoqueDaVenda,
   montarOptsPortaCreditoVenda,
   creditarEstoqueItemVenda
 };

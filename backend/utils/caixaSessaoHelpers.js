@@ -4,40 +4,195 @@ function obterCaixaTurnoId(sessao) {
   return sessao.caixa_id || null;
 }
 
+function empresaIdOperacionalCaixa(empresaId) {
+  const n = Number(empresaId);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+function erroEmpresaObrigatoriaCaixa(mensagem) {
+  const err = new Error(mensagem || 'Empresa é obrigatória para localizar sessão de caixa.');
+  err.code = 'CAIXA_EMPRESA_OBRIGATORIA';
+  return err;
+}
+
 /**
- * SQL helpers — sessão aberta isolada por empresa (05.38.C).
- * Preserva o escopo existente (terminal_id) e acrescenta empresa_id.
+ * SQL — sessão aberta DA EMPRESA (05.38.C / 05.44).
+ * Sempre filtra `empresa_id` na consulta. Não há LIMIT 1 global.
  */
 function montarSqlSessaoAberta({ terminalId, empresaId, sessaoId } = {}) {
+  const emp = empresaIdOperacionalCaixa(empresaId);
+  if (emp == null) {
+    throw erroEmpresaObrigatoriaCaixa();
+  }
+
   if (sessaoId) {
     return {
-      sql: `SELECT * FROM caixa_sessoes WHERE id = ? AND status = 'aberto'`,
-      params: [sessaoId]
+      sql: `SELECT * FROM caixa_sessoes WHERE id = ? AND status = 'aberto' AND empresa_id = ?`,
+      params: [sessaoId, emp]
     };
   }
-  const temEmpresa = empresaId != null && Number.isInteger(Number(empresaId)) && Number(empresaId) > 0;
+
   if (terminalId) {
-    if (temEmpresa) {
-      return {
-        sql: `SELECT * FROM caixa_sessoes WHERE status = 'aberto' AND terminal_id = ? AND empresa_id = ? ORDER BY id DESC LIMIT 1`,
-        params: [terminalId, Number(empresaId)]
-      };
-    }
     return {
-      sql: `SELECT * FROM caixa_sessoes WHERE status = 'aberto' AND terminal_id = ? ORDER BY id DESC LIMIT 1`,
-      params: [terminalId]
+      sql: `SELECT * FROM caixa_sessoes WHERE status = 'aberto' AND terminal_id = ? AND empresa_id = ? ORDER BY id DESC LIMIT 1`,
+      params: [terminalId, emp]
     };
   }
-  if (temEmpresa) {
-    return {
-      sql: `SELECT * FROM caixa_sessoes WHERE status = 'aberto' AND empresa_id = ? ORDER BY id DESC LIMIT 1`,
-      params: [Number(empresaId)]
-    };
+
+  return {
+    sql: `SELECT * FROM caixa_sessoes WHERE status = 'aberto' AND empresa_id = ? ORDER BY id DESC LIMIT 1`,
+    params: [emp]
+  };
+}
+
+/**
+ * Caminho público: sessão ativa da empresa. O filtro de empresa está no SQL.
+ */
+function obterSessaoAtivaDaEmpresa(db, { empresaId, terminalId, sessaoId } = {}, callback) {
+  let query;
+  try {
+    query = montarSqlSessaoAberta({ empresaId, terminalId, sessaoId });
+  } catch (err) {
+    if (typeof callback === 'function') return callback(err);
+    return Promise.reject(err);
+  }
+  if (!db || typeof db.get !== 'function') {
+    const err = new Error('Conexão de banco indisponível para sessão de caixa.');
+    if (typeof callback === 'function') return callback(err);
+    return Promise.reject(err);
+  }
+  if (typeof callback === 'function') {
+    return db.get(query.sql, query.params, callback);
+  }
+  return dbGet(db, query.sql, query.params);
+}
+
+function montarSqlHistoricoTurnosDaEmpresa(empresaId, { limite = 100, data = null } = {}) {
+  const emp = empresaIdOperacionalCaixa(empresaId);
+  if (emp == null) {
+    throw erroEmpresaObrigatoriaCaixa('Empresa é obrigatória para listar turnos de caixa.');
+  }
+  const params = [emp];
+  let filtroData = '';
+  if (data) {
+    filtroData = ' AND c.data = ?';
+    params.push(data);
+  }
+  params.push(limite);
+  return {
+    sql: `SELECT c.*, ua.nome AS aberto_por_nome, uf.nome AS fechado_por_nome
+     FROM caixa c
+     LEFT JOIN usuarios ua ON ua.id = c.aberto_por
+     LEFT JOIN usuarios uf ON uf.id = c.fechado_por
+     WHERE EXISTS (
+       SELECT 1 FROM caixa_sessoes s
+       WHERE s.empresa_id = ?
+         AND (s.caixa_turno_id = c.id OR (s.caixa_turno_id IS NULL AND s.caixa_id = c.id))
+     )${filtroData}
+     ORDER BY c.id DESC
+     LIMIT ?`,
+    params
+  };
+}
+
+function montarSqlUltimaSessaoDoTurnoDaEmpresa({ caixaTurnoId, empresaId } = {}) {
+  const emp = empresaIdOperacionalCaixa(empresaId);
+  if (emp == null) {
+    throw erroEmpresaObrigatoriaCaixa();
   }
   return {
-    sql: `SELECT * FROM caixa_sessoes WHERE status = 'aberto' ORDER BY id DESC LIMIT 1`,
-    params: []
+    sql: `SELECT id FROM caixa_sessoes
+     WHERE empresa_id = ?
+       AND (caixa_turno_id = ? OR (caixa_turno_id IS NULL AND caixa_id = ?))
+     ORDER BY id DESC LIMIT 1`,
+    params: [emp, caixaTurnoId, caixaTurnoId]
   };
+}
+
+function erroCaixaLeituraNaoEncontrada(code, mensagem) {
+  const err = new Error(mensagem);
+  err.code = code;
+  err.statusCode = 404;
+  return err;
+}
+
+function montarSqlSessaoPorIdDaEmpresa({ sessaoId, empresaId } = {}) {
+  const emp = empresaIdOperacionalCaixa(empresaId);
+  if (emp == null) {
+    throw erroEmpresaObrigatoriaCaixa();
+  }
+  return {
+    sql: `SELECT * FROM caixa_sessoes WHERE id = ? AND empresa_id = ?`,
+    params: [sessaoId, emp]
+  };
+}
+
+function montarSqlMovimentacoesDaSessaoDaEmpresa({ sessaoId, empresaId } = {}) {
+  const emp = empresaIdOperacionalCaixa(empresaId);
+  if (emp == null) {
+    throw erroEmpresaObrigatoriaCaixa();
+  }
+  return {
+    sql: `SELECT cm.*, u.nome AS usuario_nome
+     FROM caixa_movimentacoes cm
+     INNER JOIN caixa_sessoes cs ON cs.id = cm.sessao_id
+     LEFT JOIN usuarios u ON u.id = cm.usuario_id
+     WHERE cm.sessao_id = ? AND cs.empresa_id = ?
+     ORDER BY cm.id DESC`,
+    params: [sessaoId, emp]
+  };
+}
+
+function montarSqlMovimentacaoPorIdDaEmpresa({ movimentacaoId, empresaId } = {}) {
+  const emp = empresaIdOperacionalCaixa(empresaId);
+  if (emp == null) {
+    throw erroEmpresaObrigatoriaCaixa();
+  }
+  return {
+    sql: `SELECT cm.*
+     FROM caixa_movimentacoes cm
+     INNER JOIN caixa_sessoes cs ON cs.id = cm.sessao_id
+     WHERE cm.id = ? AND cs.empresa_id = ?`,
+    params: [movimentacaoId, emp]
+  };
+}
+
+function montarSqlSomaMovimentacaoDaSessaoDaEmpresa({ sessaoId, empresaId, tipo } = {}) {
+  const emp = empresaIdOperacionalCaixa(empresaId);
+  if (emp == null) {
+    throw erroEmpresaObrigatoriaCaixa();
+  }
+  return {
+    sql: `SELECT COALESCE(SUM(cm.valor), 0) AS total
+     FROM caixa_movimentacoes cm
+     INNER JOIN caixa_sessoes cs ON cs.id = cm.sessao_id
+     WHERE cs.empresa_id = ? AND cm.sessao_id = ? AND cm.tipo = ?`,
+    params: [emp, sessaoId, tipo]
+  };
+}
+
+async function obterSessaoDaEmpresaPorId(db, { sessaoId, empresaId } = {}) {
+  const q = montarSqlSessaoPorIdDaEmpresa({ sessaoId, empresaId });
+  const row = await dbGet(db, q.sql, q.params);
+  if (!row) {
+    throw erroCaixaLeituraNaoEncontrada(
+      'CAIXA_SESSAO_NAO_ENCONTRADA',
+      'Sessão de caixa não encontrada.'
+    );
+  }
+  return row;
+}
+
+async function obterMovimentacaoDaEmpresaPorId(db, { movimentacaoId, empresaId } = {}) {
+  const q = montarSqlMovimentacaoPorIdDaEmpresa({ movimentacaoId, empresaId });
+  const row = await dbGet(db, q.sql, q.params);
+  if (!row) {
+    throw erroCaixaLeituraNaoEncontrada(
+      'CAIXA_MOVIMENTACAO_NAO_ENCONTRADA',
+      'Movimentação de caixa não encontrada.'
+    );
+  }
+  return row;
 }
 
 function dbGet(db, sql, params = []) {
@@ -179,7 +334,17 @@ function migrarDadosCaixaSessoes(db, callback) {
 
 module.exports = {
   obterCaixaTurnoId,
+  empresaIdOperacionalCaixa,
   montarSqlSessaoAberta,
+  obterSessaoAtivaDaEmpresa,
+  montarSqlHistoricoTurnosDaEmpresa,
+  montarSqlUltimaSessaoDoTurnoDaEmpresa,
+  montarSqlSessaoPorIdDaEmpresa,
+  montarSqlMovimentacoesDaSessaoDaEmpresa,
+  montarSqlMovimentacaoPorIdDaEmpresa,
+  montarSqlSomaMovimentacaoDaSessaoDaEmpresa,
+  obterSessaoDaEmpresaPorId,
+  obterMovimentacaoDaEmpresaPorId,
   migrarDadosCaixaSessoes,
   migrarEmpresaIdCaixaSessoes,
   resolverEmpresaIdBackfill
