@@ -1557,6 +1557,17 @@ function criarTabelas() {
       console.error('Erro ao carregar schema empresas:', requireErr.message);
     }
 
+    try {
+      const { garantirSchemaBancario } = require('./motores/bancario/schema/bancarioSchema');
+      garantirSchemaBancario(db, (schemaErr) => {
+        if (schemaErr) {
+          console.error('Erro ao garantir schema MBC:', schemaErr.message);
+        }
+      });
+    } catch (requireErr) {
+      console.error('Erro ao carregar schema MBC:', requireErr.message);
+    }
+
     // Fase 2 / 03.3 — vínculo usuário ↔ empresa
     try {
       const { garantirSchemaUsuarioEmpresas } = require('./services/empresas/usuarioEmpresasSchema');

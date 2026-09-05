@@ -202,11 +202,10 @@ describe('MBC-01 fundação', () => {
     assert.equal(semId, null);
   });
 
-  it('fundação não cria Open Finance nem SQL na rota inexistente', () => {
+  it('fundação não cria Open Finance', () => {
     const idx = src('backend/motores/bancario/index.js');
     assert.match(idx, /MBC-01/);
-    assert.doesNotMatch(src('backend/motores/bancario/MotorBancarioService.js'), /oauth|consentimento/i);
-    const server = src('backend/server.js');
-    assert.doesNotMatch(server, /\/api\/bancario/);
+    assert.doesNotMatch(src('backend/motores/bancario/MotorBancarioService.js'), /oauth/i);
+    assert.doesNotMatch(src('backend/rotas/bancario.js'), /oauth/i);
   });
 });

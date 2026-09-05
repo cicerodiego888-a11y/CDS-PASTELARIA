@@ -11,6 +11,8 @@
     "start:recuperar": "node scripts/criar-flag-modo-local.js && .\\node_modules\\.bin\\electron.cmd .",
     "start:pdv": ".\\node_modules\\.bin\\electron.cmd electron-pdv.js",
     "start:erp": ".\\node_modules\\.bin\\electron.cmd electron-erp.js",
+    "start:mercado-pago-oauth": "node backend/mercado-pago/oauth-callback-server.js",
+    "start:cloudflare-tunnel": "node backend/mercado-pago/iniciar-cloudflare-tunnel.js",
     "build": "node scripts/prebuild-electron.js && electron-builder",
     "manifest:electron": "node build/electron/gerar-manifest.js",
     "verify-build": "node build/electron/verificar-build.js",

@@ -1,0 +1,252 @@
+<div class="mis-page">
+  <style>
+    .mis-page { max-width: 1080px; overflow-x: hidden; }
+    .mbc-toolbar { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0 0 1rem; }
+    .mbc-ctx { font-size: 0.875rem; color: #374151; margin-bottom: 0.5rem; }
+    .mbc-table { width: 100%; font-size: 0.9rem; background: #fff; }
+    .mbc-table th, .mbc-table td { padding: 0.45rem 0.4rem; border-bottom: 1px solid #f3f4f6; text-align: left; }
+    .mbc-table th { font-size: 0.72rem; text-transform: uppercase; color: #6b7280; }
+    .mbc-actions { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+    .mbc-empty { color: #6b7280; }
+    .mbc-form { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
+    @media (max-width: 768px) { .mbc-form { grid-template-columns: 1fr; } }
+  </style>
+  <div id="mbcShell"></div>
+  <p class="mbc-ctx" id="mbcEmpresa">Empresa do contexto operacional</p>
+  <div id="mbcAlerta"></div>
+  <div class="mbc-toolbar">
+    <button type="button" class="btn btn-sm btn-primary" id="mbcBtnNovaConta">Nova conta</button>
+    <button type="button" class="btn btn-sm btn-outline-secondary" id="mbcBtnNovaInst">Nova instituição</button>
+  </div>
+  <div id="mbcLoading" class="text-muted mb-3" hidden><span class="spinner-border spinner-border-sm me-2"></span>Carregando…</div>
+  <div id="mbcLista"></div>
+
+  <section id="mbcPainelConfig" class="mbc-tx-painel" hidden>
+    <h3>Configuração de Integração</h3>
+    <p class="mbc-tx-conta" id="mbcCfgContaNome"></p>
+    <p class="mbc-empty">Provider de teste. Não conecta banco real. Sem senha, token ou secret nesta tela.</p>
+    <div class="mbc-toolbar">
+      <button type="button" class="btn btn-sm btn-outline-primary" id="mbcCfgCriar">Criar configuração MOCK (TESTE)</button>
+    </div>
+    <table class="mbc-table">
+      <thead>
+        <tr>
+          <th>Provider</th>
+          <th>Ambiente</th>
+          <th>Status</th>
+          <th>Credencial configurada</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="mbcCfgBody"></tbody>
+    </table>
+
+    <h3 class="mt-4">Open Finance</h3>
+    <p class="mbc-empty">Você será direcionado ao ambiente da instituição/provedor para autorizar o compartilhamento de dados.</p>
+    <p class="mbc-empty">Fluxo de teste MOCK. Provider real ainda não homologável. Este provider ainda não está habilitado para operação real. AGUARDANDO PROVIDER REAL / AMBIENTE OFICIAL. Sem senha bancária, token ou certificado nesta tela.</p>
+    <div class="mbc-toolbar">
+      <button type="button" class="btn btn-sm btn-outline-primary" id="mbcOfCfgCriar">Criar configuração MOCK Open Finance (TESTE)</button>
+      <button type="button" class="btn btn-sm btn-outline-primary" id="mbcOfAutorizar">Autorizar</button>
+    </div>
+    <table class="mbc-table">
+      <thead>
+        <tr>
+          <th>Instituição</th>
+          <th>Conta</th>
+          <th>Provider</th>
+          <th>Status</th>
+          <th>Escopos</th>
+          <th>Validade</th>
+          <th>Autorizado em</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="mbcOfBody"></tbody>
+    </table>
+
+    <h3 class="mt-4">Sincronização</h3>
+    <p class="mbc-empty">Saldo bancário é o informado pelo provider. Saldo conceitual é o calculado pelas transações do MBC. A diferença é apenas informativa.</p>
+    <p id="mbcSyncIndicador" class="mbc-empty">Nunca sincronizado.</p>
+    <p><strong>Saldo bancário:</strong> <span id="mbcSyncSaldoBancario">—</span></p>
+    <p><strong>Saldo conceitual:</strong> <span id="mbcSyncSaldoConceitual">—</span></p>
+    <p><strong>Diferença:</strong> <span id="mbcSyncDiferenca">—</span></p>
+    <p><strong>Transações importadas:</strong> <span id="mbcSyncQtd">—</span></p>
+    <div class="mbc-toolbar">
+      <button type="button" class="btn btn-sm btn-outline-primary" id="mbcSyncAgora">Sincronizar agora</button>
+    </div>
+
+    <h3 class="mt-4">Extrato bancário</h3>
+    <p class="mbc-empty">Somente leitura. Sem edição, exclusão ou alteração de valor.</p>
+    <table class="mbc-table">
+      <thead>
+        <tr>
+          <th>Data</th>
+          <th>Descrição</th>
+          <th>Tipo</th>
+          <th>Valor</th>
+          <th>Saldo após transação</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody id="mbcExtratoBody"></tbody>
+    </table>
+  </section>
+
+  <section id="mbcPainelTransacoes" class="mbc-tx-painel" hidden>
+    <h3>Transações</h3>
+    <p class="mbc-tx-conta" id="mbcTxContaNome"></p>
+    <p class="mbc-empty">Saldo conceitual = saldo calculado pelas transações armazenadas no MBC. Não é o saldo atual do banco.</p>
+    <p><strong>Saldo conceitual:</strong> <span id="mbcSaldoConceitual">—</span></p>
+    <div class="mbc-toolbar">
+      <label class="form-label mb-0" for="mbcTxInicio">Período</label>
+      <input type="date" id="mbcTxInicio" class="form-control form-control-sm" style="max-width:11rem">
+      <input type="date" id="mbcTxFim" class="form-control form-control-sm" style="max-width:11rem">
+      <button type="button" class="btn btn-sm btn-outline-secondary" id="mbcTxFiltrar">Filtrar</button>
+    </div>
+    <table class="mbc-table">
+      <thead>
+        <tr>
+          <th>Data</th>
+          <th>Descrição</th>
+          <th>Tipo</th>
+          <th>Entrada</th>
+          <th>Saída</th>
+          <th>Direção</th>
+          <th>Status</th>
+          <th>Conciliação</th>
+        </tr>
+      </thead>
+      <tbody id="mbcTxBody"></tbody>
+    </table>
+
+    <h3 class="mt-4">Conciliações sugeridas</h3>
+    <p class="mbc-empty">O matching apenas sugere. A conciliação oficial ocorre ao aceitar, pelo fluxo do MBC-04.</p>
+    <div class="mbc-toolbar">
+      <button type="button" class="btn btn-sm btn-outline-primary" id="mbcSugAnalisar">Analisar conciliações</button>
+    </div>
+    <table class="mbc-table">
+      <thead>
+        <tr>
+          <th>Data</th>
+          <th>Descrição</th>
+          <th>Valor</th>
+          <th>Candidato</th>
+          <th>Tipo</th>
+          <th>Score</th>
+          <th>Confiança</th>
+          <th>Motivos</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="mbcSugBody"></tbody>
+    </table>
+  </section>
+
+  <div class="modal fade" id="mbcModalConciliar" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Conciliação</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" id="mbcConcTxId">
+          <h6>Transação bancária</h6>
+          <p id="mbcConcTxResumo" class="mbc-empty"></p>
+          <h6>Registro financeiro</h6>
+          <select id="mbcConcRegistro" class="form-control form-control-sm mb-2"></select>
+          <p id="mbcConcFinResumo" class="mbc-empty"></p>
+          <h6>Resumo</h6>
+          <p id="mbcConcDiff"></p>
+          <label class="form-label" for="mbcConcObs">Observação</label>
+          <input id="mbcConcObs" class="form-control form-control-sm">
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-sm btn-primary" id="mbcConcConfirmar">Confirmar conciliação</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="mbcModalConta" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title" id="mbcModalContaTitulo">Conta bancária</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" id="mbcContaId">
+          <div class="mbc-form">
+            <div>
+              <label class="form-label" for="mbcInst">Instituição</label>
+              <select id="mbcInst" class="form-control form-control-sm"></select>
+            </div>
+            <div>
+              <label class="form-label" for="mbcNome">Nome</label>
+              <input id="mbcNome" class="form-control form-control-sm">
+            </div>
+            <div>
+              <label class="form-label" for="mbcTipo">Tipo</label>
+              <select id="mbcTipo" class="form-control form-control-sm">
+                <option value="CORRENTE">Corrente</option>
+                <option value="POUPANCA">Poupança</option>
+                <option value="PAGAMENTO">Pagamento</option>
+                <option value="OUTRA">Outra</option>
+              </select>
+            </div>
+            <div>
+              <label class="form-label" for="mbcAgencia">Agência</label>
+              <input id="mbcAgencia" class="form-control form-control-sm">
+            </div>
+            <div>
+              <label class="form-label" for="mbcNumero">Número</label>
+              <input id="mbcNumero" class="form-control form-control-sm">
+            </div>
+            <div>
+              <label class="form-label" for="mbcDigito">Dígito</label>
+              <input id="mbcDigito" class="form-control form-control-sm">
+            </div>
+            <div>
+              <label class="form-label" for="mbcTitular">Titular</label>
+              <input id="mbcTitular" class="form-control form-control-sm">
+            </div>
+            <div>
+              <label class="form-label" for="mbcDoc">Documento do titular</label>
+              <input id="mbcDoc" class="form-control form-control-sm">
+            </div>
+          </div>
+          <div class="form-check mt-2">
+            <input class="form-check-input" type="checkbox" id="mbcPrincipal">
+            <label class="form-check-label" for="mbcPrincipal">Conta principal da empresa</label>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-sm btn-primary" id="mbcSalvarConta">Salvar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="mbcModalInst" tabindex="-1">
+    <div class="modal-dialog">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Instituição financeira</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <label class="form-label" for="mbcInstNome">Nome</label>
+          <input id="mbcInstNome" class="form-control form-control-sm mb-2">
+          <label class="form-label" for="mbcInstCod">Código (opcional)</label>
+          <input id="mbcInstCod" class="form-control form-control-sm mb-2">
+          <label class="form-label" for="mbcInstRed">Nome reduzido</label>
+          <input id="mbcInstRed" class="form-control form-control-sm">
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-sm btn-primary" id="mbcSalvarInst">Salvar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

@@ -114,6 +114,7 @@ const CATALOGO_PESQUISA_PAGINAS = Object.freeze([
     { page: 'compras', titulo: 'Compras', keywords: 'compra entrada' },
     { page: 'central-entradas', titulo: 'Central de Entradas', keywords: 'dfe xml manifestação destinatário', fiscal: true },
     { page: 'financeiro', titulo: 'Financeiro', keywords: 'receber pagar' },
+    { page: 'contas-bancarias', titulo: 'Contas Bancárias', keywords: 'banco conta corrente instituição' },
     { page: 'clientes', titulo: 'Clientes', keywords: 'cliente' },
     { page: 'fornecedores', titulo: 'Fornecedores', keywords: 'fornecedor' },
     { page: 'fiscal', titulo: 'NFC-e Emitidas', keywords: 'nfc-e nfce nota consumidor emissão', fiscal: true },

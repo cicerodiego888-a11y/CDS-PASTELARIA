@@ -126,6 +126,7 @@ const tefRoutes = require('./rotas/tef');
 const pixRoutes = require('./rotas/pix');
 const dashboardRoutes = require('./rotas/dashboard');
 const misRoutes = require('./rotas/mis');
+const bancarioRoutes = require('./rotas/bancario');
 const contasReceberRoutes = require('./rotas/contas_receber');
 const alertasRoutes = require('./rotas/alertas');
 const licencaRoutes = require('./rotas/licenca');
@@ -207,6 +208,7 @@ app.get(['/pdv-universal', '/pdv-universal/'], verificarToken, (req, res) => {
 });
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/mis', verificarToken, misRoutes);
+app.use('/api/bancario', verificarToken, bancarioRoutes());
 app.use('/api/financeiro', verificarToken, financeiroRoutes);
 app.use('/api/condicoes-pagamento', verificarToken, condicoesPagamentoRoutes);
 app.use('/api/mie', verificarToken, require('./rotas/mie'));
