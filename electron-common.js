@@ -31,6 +31,25 @@ process.env.DB_DIR = process.env.DB_DIR || path.join(
   'dados'
 );
 
+try {
+  const {
+    bootstrapAmbienteOperacionalMbc
+  } = require('./backend/motores/bancario/secrets/bootstrapAmbienteOperacionalMbc');
+  const mbcBoot = bootstrapAmbienteOperacionalMbc({ exigirRedirectUri: false });
+  if (mbcBoot.secret_store_disponivel) {
+    console.log('[MBC] SecretStore local disponível (origem=' + mbcBoot.secret_store_origem + ').');
+  } else {
+    console.warn('[MBC] SecretStore local indisponível — configure MBC_SECRET_STORE_KEY.');
+  }
+  if (mbcBoot.redirect_uri_configurado) {
+    console.log('[MBC] Redirect URI OAuth disponível.');
+  } else {
+    console.warn('[MBC] MERCADO_PAGO_OAUTH_REDIRECT_URI ausente — autorização Mercado Pago ficará bloqueada.');
+  }
+} catch (e) {
+  console.warn('[MBC] Não foi possível inicializar ambiente MBC:', e && e.message ? e.message : e);
+}
+
 let mainWindow;
 let appModuloAtual = 'erp';
 

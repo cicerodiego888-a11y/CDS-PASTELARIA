@@ -216,7 +216,7 @@ describe('MBC-14.1 state e sanitização', () => {
     const gw = await listenGateway(ctx);
     const ok = await gw.get(ROTA_CALLBACK + '?state=' + encodeURIComponent(state) + '&code=AUTH-CODE-1');
     assert.equal(ok.status, 200);
-    assert.match(ok.text, /Autorização recebida/);
+    assert.match(ok.text, /Autorização concluída/);
     assert.equal(ok.text.includes('AUTH-CODE-1'), false);
     assert.equal(ok.text.includes(state), false);
     const replay = await gw.get(ROTA_CALLBACK + '?state=' + encodeURIComponent(state) + '&code=AUTH-CODE-1');

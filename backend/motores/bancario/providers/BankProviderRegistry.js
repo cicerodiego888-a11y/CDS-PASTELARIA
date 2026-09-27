@@ -8,6 +8,7 @@ const { ERROS, erroMbc, CODIGO_PROVIDER } = require('../contracts/constantes');
 const { MockBankProvider } = require('./MockBankProvider');
 const { MockOpenFinanceProvider } = require('./MockOpenFinanceProvider');
 const { OpenFinanceRealBankProvider } = require('./openfinance-real/OpenFinanceRealBankProvider');
+const { ItauBankProvider } = require('./itau/ItauBankProvider');
 
 class BankProviderRegistry {
   constructor() {
@@ -50,6 +51,7 @@ function criarRegistryPadrao() {
   registry.registrar(new MockBankProvider());
   registry.registrar(new MockOpenFinanceProvider());
   registry.registrar(new OpenFinanceRealBankProvider());
+  registry.registrar(new ItauBankProvider());
   return registry;
 }
 

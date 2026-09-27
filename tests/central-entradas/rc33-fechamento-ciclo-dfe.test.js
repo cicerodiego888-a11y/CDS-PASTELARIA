@@ -69,7 +69,8 @@ function criarCenario(opcoes = {}) {
     chave: CHAVE,
     status: DocumentoFiscalStatus.AGUARDANDO_XML_COMPLETO,
     tipoDocumento: DocumentoDfeTipo.RES_NFE,
-    xml: '<resNFe/>',
+    // CENTRAL-XML-02: resNFe real traz dhEmi (hora + offset); sem ele não há ciência automática.
+    xml: '<resNFe><dhEmi>2026-07-14T10:00:00-03:00</dhEmi></resNFe>',
     nsu: '000000000000001'
   };
   const eventos = [];

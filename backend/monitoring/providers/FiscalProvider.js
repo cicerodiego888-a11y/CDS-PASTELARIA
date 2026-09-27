@@ -135,6 +135,16 @@ const FiscalProvider = {
 
       const hoje = periodoHoje();
       const ano = periodoAnoCompetencia(periodoComp.ano);
+      const ctxEmpresa = context.contextoEmpresa || null;
+      const empresaIdFiscal = ctxEmpresa && ctxEmpresa.empresaId != null
+        ? ctxEmpresa.empresaId
+        : context.empresaId;
+      const ambienteContexto = ctxEmpresa
+        ? {
+          ambiente: ctxEmpresa.ambienteFiscal != null ? ctxEmpresa.ambienteFiscal : null,
+          origem: (ctxEmpresa.origens && ctxEmpresa.origens.origemAmbiente) || null
+        }
+        : undefined;
 
       const [
         resumoFiscal,
@@ -150,12 +160,13 @@ const FiscalProvider = {
         indicadoresFiscaisService.obterResumo({
           ano: periodoComp.ano,
           mes: periodoComp.mes,
-          competencia: periodoComp.competencia
+          competencia: periodoComp.competencia,
+          ambienteContexto
         }),
         agregarVendasNaoFiscais(hoje.inicio, hoje.fim),
         agregarVendasNaoFiscais(periodoComp.inicio, periodoComp.fim),
         agregarVendasNaoFiscais(ano.inicio, ano.fim),
-        ultimaEntradaFiscal(context.empresaId),
+        ultimaEntradaFiscal(empresaIdFiscal),
         agregarEntradasNaoFiscais(hoje.inicio, hoje.fim),
         agregarEntradasNaoFiscais(periodoComp.inicio, periodoComp.fim),
         agregarEntradasNaoFiscais(ano.inicio, ano.fim),
@@ -170,7 +181,9 @@ const FiscalProvider = {
           valorTotalComprado: resumoFiscal.valorTotalComprado,
           quantidadeNfeEmitidas: resumoFiscal.quantidadeNfeEmitidas,
           ambiente: resumoFiscal.ambiente,
-          ambienteLabel: resumoFiscal.ambienteLabel
+          ambienteLabel: resumoFiscal.ambienteLabel,
+          ambienteOrigem: resumoFiscal.ambienteOrigem,
+          empresaId: empresaIdFiscal != null ? empresaIdFiscal : null
         },
         vendas: montarBlocoPeriodo(resumoFiscal.vendas.hoje, resumoFiscal.vendas.mes, resumoFiscal.vendas.ano),
         entradas: {
@@ -210,8 +223,13 @@ const FiscalProvider = {
             valorTotalVendido: 0,
             valorTotalComprado: 0,
             quantidadeNfeEmitidas: 0,
-            ambiente: 2,
-            ambienteLabel: 'Homologação'
+            ambiente: context.contextoEmpresa ? context.contextoEmpresa.ambienteFiscal ?? null : null,
+            ambienteLabel: context.contextoEmpresa && context.contextoEmpresa.ambienteLabel
+              ? context.contextoEmpresa.ambienteLabel
+              : 'Não configurado',
+            ambienteOrigem: context.contextoEmpresa && context.contextoEmpresa.origens
+              ? context.contextoEmpresa.origens.origemAmbiente || null
+              : null
           },
           vendas: montarBlocoPeriodo(vazio, vazio, vazio),
           entradas: {

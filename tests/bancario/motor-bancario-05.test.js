@@ -525,10 +525,12 @@ describe('MBC-05 provider e secrets', () => {
 });
 
 describe('MBC-05 invariantes', () => {
-  it('sem OAuth/Open Finance; UI sem secret; teste HTTP não persiste', () => {
-    assert.doesNotMatch(src('backend/rotas/bancario.js'), /oauth/i);
-    assert.doesNotMatch(src('frontend/erp/js/contas-bancarias.js'), /client_secret|Conectar Banco|Sincronizar Banco/i);
-    assert.match(src('frontend/erp/pages/contas-bancarias.html'), /Provider de teste/);
+  it('MOCK sem OAuth próprio; teste HTTP não persiste; secret não é regra do MockBankProvider', () => {
+    // OAuth/Open Finance existem em sprints posteriores (MP/OF); o invariante do MBC-05
+    // original aplica-se ao provider MOCK, não à API inteira após MBC-06+.
+    assert.doesNotMatch(src('backend/motores/bancario/providers/MockBankProvider.js'), /oauth/i);
+    assert.doesNotMatch(src('backend/motores/bancario/providers/MockBankProvider.js'), /client_secret/i);
     assert.match(src('backend/rotas/bancario.js'), /persistiu: false/);
+    assert.match(src('frontend/erp/pages/contas-bancarias.html'), /Provider de teste|MOCK|mock/i);
   });
 });

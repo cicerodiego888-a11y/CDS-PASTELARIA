@@ -184,7 +184,9 @@ class CentralSyncExecucaoService {
         const duracaoMs = Date.now() - inicio;
         this._ultimoResultado = resultado;
 
-        if (String(resultado.cStat) === '656' || String(resultado.cStat) === '593') {
+        // Sincronização por empresa já entrega cada cStat ao Gate da respectiva empresa.
+        const gateJaProcessado = resultado.gateProcessado === true;
+        if (!gateJaProcessado && (String(resultado.cStat) === '656' || String(resultado.cStat) === '593')) {
           try {
             await require('./CentralSefazOperationalGate').processarRespostaSefaz(resultado, {
               correlationId,
@@ -192,7 +194,7 @@ class CentralSyncExecucaoService {
             });
             resultado.gateProcessado = true;
           } catch { /* ignore */ }
-        } else if (resultado.cStat) {
+        } else if (!gateJaProcessado && resultado.cStat) {
           try {
             await require('./CentralSefazOperationalGate').processarRespostaSefaz(resultado, {
               correlationId,

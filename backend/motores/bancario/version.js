@@ -10,5 +10,5 @@ module.exports = {
   VERSAO: '0.1.0',
   STATUS: 'FUNDACAO',
   TAG: 'MBC_01_FUNDACAO',
-  SPRINT: 'MBC-14.2'
+  SPRINT: 'MBC-05.4'
 };

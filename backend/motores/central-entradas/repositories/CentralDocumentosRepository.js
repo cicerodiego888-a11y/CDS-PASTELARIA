@@ -672,6 +672,30 @@ class CentralDocumentosRepository extends IRepository {
   }
 
   /**
+   * CE-06 P01 — pendentes de XML completo dos mais recentes por emissão
+   * (os únicos que ainda podem estar dentro do prazo da ciência).
+   * @param {number} [limite]
+   * @returns {Promise<Object[]>}
+   */
+  async listarPendentesManifestacao(limite = 500) {
+    const sql = this._obterSql();
+    await sql.whenReady();
+    const pag = paginacao({ limite });
+    // CENTRAL-XML-02 P0 — dhEmi (hora + offset) é o relógio da ciência; data_emissao é só a data.
+    const rows = await sql.all(
+      `SELECT ${CentralDocumentosRepository.COLUNAS_LISTAGEM},
+         CASE WHEN instr(xml, '<dhEmi>') > 0 AND instr(xml, '</dhEmi>') > instr(xml, '<dhEmi>')
+           THEN substr(xml, instr(xml, '<dhEmi>') + 7, instr(xml, '</dhEmi>') - instr(xml, '<dhEmi>') - 7)
+         END AS dh_emi
+       FROM ${CentralDocumentosRepository.TABELA}
+       WHERE status = ?
+       ORDER BY data_emissao DESC, id DESC${pag.sql}`,
+      [DocumentoFiscalStatus.AGUARDANDO_XML_COMPLETO, ...pag.params]
+    );
+    return rows.map((row) => ({ ...this._mapearRowListagem(row), dhEmi: row.dh_emi || null }));
+  }
+
+  /**
    * Fornecedores com exatamente uma nota na Central (primeira nota).
    *
    * @returns {Promise<Object[]>}

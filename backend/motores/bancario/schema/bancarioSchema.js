@@ -72,6 +72,7 @@ const DDL_CONCILIACAO = `
     registro_financeiro_id INTEGER,
     status TEXT NOT NULL,
     valor_conciliado REAL,
+    origem_conciliacao TEXT NOT NULL DEFAULT 'MANUAL',
     observacao TEXT,
     ativo INTEGER NOT NULL DEFAULT 1,
     conciliado_em TEXT,
@@ -152,6 +153,7 @@ const DDL_SINCRONIZACAO = `
     ultima_sincronizacao_em TEXT,
     ultimo_sucesso_em TEXT,
     ultimo_erro TEXT,
+    lock_iniciado_em TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (empresa_id) REFERENCES empresas(id),
@@ -217,8 +219,12 @@ const INDICES = [
      ON conciliacao_bancaria(transacao_bancaria_id)`,
   `CREATE INDEX IF NOT EXISTS idx_conciliacao_bancaria_status
      ON conciliacao_bancaria(empresa_id, status)`,
-  `CREATE UNIQUE INDEX IF NOT EXISTS idx_conciliacao_bancaria_ativa_por_transacao
-     ON conciliacao_bancaria(transacao_bancaria_id) WHERE ativo = 1`,
+  `CREATE INDEX IF NOT EXISTS idx_conciliacao_bancaria_alvo
+     ON conciliacao_bancaria(origem_financeira, registro_financeiro_id)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_conciliacao_bancaria_vinculo_ativo
+     ON conciliacao_bancaria(empresa_id, transacao_bancaria_id, origem_financeira, registro_financeiro_id)
+     WHERE ativo = 1 AND status = 'conciliada'
+       AND origem_financeira IS NOT NULL AND registro_financeiro_id IS NOT NULL`,
   `CREATE INDEX IF NOT EXISTS idx_config_integracao_empresa
      ON config_integracao_bancaria(empresa_id)`,
   `CREATE INDEX IF NOT EXISTS idx_config_integracao_conta
@@ -277,6 +283,50 @@ function garantirColunasConfig(db, cb) {
   });
 }
 
+function garantirColunasSincronizacao(db, cb) {
+  db.all('PRAGMA table_info(sincronizacao_bancaria)', (err, cols) => {
+    if (err) return cb(err);
+    const names = (cols || []).map((c) => c.name);
+    const adds = [];
+    if (!names.includes('lock_iniciado_em')) {
+      adds.push('ALTER TABLE sincronizacao_bancaria ADD COLUMN lock_iniciado_em TEXT');
+    }
+    if (!adds.length) return cb(null);
+    runSeq(db, adds, cb);
+  });
+}
+
+function garantirColunasConciliacao(db, cb) {
+  db.all('PRAGMA table_info(conciliacao_bancaria)', (err, cols) => {
+    if (err) return cb(err);
+    const names = (cols || []).map((c) => c.name);
+    const adds = [];
+    if (!names.includes('origem_conciliacao')) {
+      adds.push(`ALTER TABLE conciliacao_bancaria ADD COLUMN origem_conciliacao TEXT NOT NULL DEFAULT 'MANUAL'`);
+    }
+    if (!adds.length) return migrarIndicesConciliacao(db, cb);
+    runSeq(db, adds, (err2) => {
+      if (err2) return cb(err2);
+      migrarIndicesConciliacao(db, cb);
+    });
+  });
+}
+
+/** MBC-05: 1 TX → N alvos; unicidade por vínculo ativo, não por transação. */
+function migrarIndicesConciliacao(db, cb) {
+  db.run('DROP INDEX IF EXISTS idx_conciliacao_bancaria_ativa_por_transacao', (err) => {
+    if (err) return cb(err);
+    runSeq(db, [
+      `CREATE INDEX IF NOT EXISTS idx_conciliacao_bancaria_alvo
+         ON conciliacao_bancaria(origem_financeira, registro_financeiro_id)`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_conciliacao_bancaria_vinculo_ativo
+         ON conciliacao_bancaria(empresa_id, transacao_bancaria_id, origem_financeira, registro_financeiro_id)
+         WHERE ativo = 1 AND status = 'conciliada'
+           AND origem_financeira IS NOT NULL AND registro_financeiro_id IS NOT NULL`
+    ], cb);
+  });
+}
+
 function garantirSchemaBancario(db, callback) {
   const done = typeof callback === 'function' ? callback : () => {};
   if (!db) return done(new Error('db obrigatório para schema bancário'));
@@ -302,7 +352,19 @@ function garantirSchemaBancario(db, callback) {
         console.error('Erro ao garantir schema MBC:', err2.message);
         return done(err2);
       }
-      done(null);
+      garantirColunasSincronizacao(db, (err3) => {
+        if (err3) {
+          console.error('Erro ao garantir schema MBC:', err3.message);
+          return done(err3);
+        }
+        garantirColunasConciliacao(db, (err4) => {
+          if (err4) {
+            console.error('Erro ao garantir schema MBC:', err4.message);
+            return done(err4);
+          }
+          done(null);
+        });
+      });
     });
   });
 }

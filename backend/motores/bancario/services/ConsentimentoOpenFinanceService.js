@@ -192,19 +192,20 @@ async function persistirState(db, dados) {
   );
 }
 
-async function criarFluxoAutorizacao(params, row) {
-  const { db, registry } = depsDe(params);
+async function criarFluxoAutorizacao(params, row, cfg) {
+  const { db, registry, secretStore } = depsDe(params);
   const provider = registry.obter(row.provider);
   if (!provider.suportaAutorizacao) {
     throw erroMbc(ERROS.PROVIDER_NAO_EXECUTAVEL, 'Provider incompatível com autorização.', 400);
   }
   const state = gerarState();
   const expiraState = maisMs(STATE_TTL_MS);
+  const configId = cfg && cfg.id != null ? cfg.id : params.config_id;
   await persistirState(db, {
     state,
     empresa_id: row.empresa_id,
     conta_bancaria_id: row.conta_bancaria_id,
-    config_id: params.config_id,
+    config_id: configId,
     consentimento_id: row.id,
     usuario_id: params.usuarioId,
     expira_em: expiraState
@@ -212,14 +213,20 @@ async function criarFluxoAutorizacao(params, row) {
   const out = await provider.iniciarAutorizacao({
     consentimentoId: row.id,
     state,
-    escopos: String(row.escopos || '').split(',').filter(Boolean)
+    escopos: String(row.escopos || '').split(',').filter(Boolean),
+    configId,
+    clientId: cfg && cfg.aplicacao_ref ? cfg.aplicacao_ref : null,
+    secretStore,
+    ambiente: cfg && cfg.ambiente ? cfg.ambiente : null,
+    env: params.env,
+    fetchImpl: params.fetchImpl
   });
   return { authorization_url: out.authorization_url, expira_em: expiraState, state };
 }
 
 async function iniciar(params = {}) {
   const empresaId = exigirEmpresaId(params.empresaId);
-  const { db, registry } = depsDe(params);
+  const { db, registry, secretStore } = depsDe(params);
   const conta = await obterContaValida({ ...params, empresaId, db });
   const providerCodigo = String(params.provider || '').trim().toUpperCase();
   if (!registry.existe(providerCodigo)) {
@@ -242,9 +249,12 @@ async function iniciar(params = {}) {
           const fluxo = await criarFluxoAutorizacao({
             db,
             registry,
+            secretStore,
             config_id: cfg.id,
-            usuarioId: params.usuarioId
-          }, atualizado);
+            usuarioId: params.usuarioId,
+            env: params.env,
+            fetchImpl: params.fetchImpl
+          }, atualizado, cfg);
           return respostaInicio(atualizado, fluxo.authorization_url, fluxo.expira_em);
         }
         return respostaInicio(atualizado, null, atualizado.expira_em);
@@ -287,9 +297,12 @@ async function iniciar(params = {}) {
     const fluxo = await criarFluxoAutorizacao({
       db,
       registry,
+      secretStore,
       config_id: cfg.id,
-      usuarioId: params.usuarioId
-    }, row);
+      usuarioId: params.usuarioId,
+      env: params.env,
+      fetchImpl: params.fetchImpl
+    }, row, cfg);
     return respostaInicio(row, fluxo.authorization_url, fluxo.expira_em);
   });
 }
@@ -361,6 +374,7 @@ async function processarCallback(params = {}) {
   const { db, registry, secretStore } = depsDe(params);
 
   let rejeitarAposCommit = false;
+  let erroAposCommit = null;
   const resultadoPublico = await withTx(db, async () => {
     const st = await dbGet(db, `SELECT * FROM consentimento_of_state WHERE state = ?`, [state]);
     if (!st) throw autorizacaoInvalida();
@@ -386,12 +400,36 @@ async function processarCallback(params = {}) {
       throw autorizacaoInvalida();
     }
 
+    const cfgRow = st.config_id
+      ? await dbGet(db, `SELECT * FROM config_integracao_bancaria WHERE id = ?`, [st.config_id])
+      : null;
+    const providerCodigoCfg = String((row && row.provider) || '').toUpperCase();
+    if (providerCodigoCfg === 'OPEN_FINANCE_REAL' && cfgRow && Number(cfgRow.ativo) !== 1) {
+      throw autorizacaoInvalida();
+    }
+
     const provider = registry.obter(row.provider);
-    const resultado = await provider.processarCallback({
-      query: params.query || {},
-      consentimentoId: row.id,
-      secretStore
-    });
+    let resultado;
+    try {
+      resultado = await provider.processarCallback({
+        query: params.query || {},
+        consentimentoId: row.id,
+        configId: st.config_id,
+        clientId: cfgRow && cfgRow.aplicacao_ref ? cfgRow.aplicacao_ref : null,
+        ambiente: cfgRow && cfgRow.ambiente ? cfgRow.ambiente : null,
+        secretStore,
+        env: params.env,
+        fetchImpl: params.fetchImpl
+      });
+    } catch (err) {
+      await atualizarStatus(db, row.id, {
+        status: STATUS_CONSENTIMENTO.ERRO,
+        estado_integracao: STATUS_CONSENTIMENTO.ERRO,
+        ultimo_erro: String(err.oauth_error || err.code || 'erro_autorizacao').slice(0, 120)
+      });
+      erroAposCommit = err;
+      return mapPublico(await dbGet(db, `SELECT * FROM consentimento_open_finance WHERE id = ?`, [row.id]));
+    }
 
     if (resultado.status === STATUS_CONSENTIMENTO.NEGADO) {
       await atualizarStatus(db, row.id, {
@@ -420,6 +458,7 @@ async function processarCallback(params = {}) {
     return mapPublico(ok);
   });
   if (rejeitarAposCommit) throw autorizacaoInvalida();
+  if (erroAposCommit) throw erroAposCommit;
   return resultadoPublico;
 }
 
@@ -437,7 +476,18 @@ async function revogar(params = {}) {
     throw erroMbc(ERROS.CONSENTIMENTO_INVALIDO, 'Consentimento não pode ser revogado neste estado.', 409);
   }
   const provider = registry.obter(atual.provider);
-  await provider.revogarAutorizacao({ consentimentoId: atual.id, secretStore });
+  const cfgAtiva = await dbGet(
+    db,
+    `SELECT id FROM config_integracao_bancaria
+     WHERE empresa_id = ? AND conta_bancaria_id = ? AND provider = ? AND ativo = 1
+     ORDER BY id DESC`,
+    [atual.empresa_id, atual.conta_bancaria_id, atual.provider]
+  );
+  await provider.revogarAutorizacao({
+    consentimentoId: atual.id,
+    configId: cfgAtiva ? cfgAtiva.id : null,
+    secretStore
+  });
   await atualizarStatus(db, atual.id, {
     status: STATUS_CONSENTIMENTO.REVOGADO,
     estado_integracao: STATUS_CONSENTIMENTO.REVOGADO,

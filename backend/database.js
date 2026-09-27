@@ -91,6 +91,19 @@ db.insertSafe = function(table, data, callback) {
   });
 };
 
+// Também executado no início do bloco serialize do módulo, que roda antes de criarTabelas()
+// e grava em configuracoes: em banco vazio a tabela precisa existir antes desses INSERTs.
+const SQL_CRIAR_TABELA_CONFIGURACOES = `
+  CREATE TABLE IF NOT EXISTS configuracoes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chave VARCHAR(100) UNIQUE NOT NULL,
+    valor TEXT,
+    tipo VARCHAR(50),
+    descricao TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )
+`;
+
 function aplicarAlteracaoSegura(tabela, sql) {
   db.run(sql, (err) => {
     if (err) {
@@ -1424,11 +1437,12 @@ function criarTabelas() {
       if (err) console.error('Erro ao criar tabela configuracoes_validade:', err);
       else console.log('Tabela configuracoes_validade criada/verificada');
       
-      // Inserir configuração padrão se não existir
+      // Inserir configuração padrão se não existir (tabela sem UNIQUE: OR IGNORE não evitava duplicar)
       if (!err) {
         db.run(`
-          INSERT OR IGNORE INTO configuracoes_validade (dias_aviso_vencimento, bloquear_venda_vencido, alertar_venda_proximo_vencimento)
-          VALUES (30, 0, 1)
+          INSERT INTO configuracoes_validade (dias_aviso_vencimento, bloquear_venda_vencido, alertar_venda_proximo_vencimento)
+          SELECT 30, 0, 1
+          WHERE NOT EXISTS (SELECT 1 FROM configuracoes_validade)
         `, (insertErr) => {
           if (insertErr && !insertErr.message.includes('UNIQUE')) {
             console.error('Erro ao inserir configuração padrão de validade:', insertErr);
@@ -1566,6 +1580,17 @@ function criarTabelas() {
       });
     } catch (requireErr) {
       console.error('Erro ao carregar schema MBC:', requireErr.message);
+    }
+
+    try {
+      const { garantirSchemaMcf } = require('./motores/mcf/schema/mcfSchema');
+      garantirSchemaMcf(db, (schemaErr) => {
+        if (schemaErr) {
+          console.error('Erro ao garantir schema MCF:', schemaErr.message);
+        }
+      });
+    } catch (requireErr) {
+      console.error('Erro ao carregar schema MCF:', requireErr.message);
     }
 
     // Fase 2 / 03.3 — vínculo usuário ↔ empresa
@@ -2507,16 +2532,7 @@ function criarTabelas() {
     });
 
     // Tabela de configurações (criar por último)
-    db.run(`
-      CREATE TABLE IF NOT EXISTS configuracoes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        chave VARCHAR(100) UNIQUE NOT NULL,
-        valor TEXT,
-        tipo VARCHAR(50),
-        descricao TEXT,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `, (err) => {
+    db.run(SQL_CRIAR_TABELA_CONFIGURACOES, (err) => {
       if (err) {
         console.error('Erro ao criar tabela configuracoes:', err);
       } else {
@@ -3215,6 +3231,10 @@ function seedUsuarioAdmin() {
 
 
 db.serialize(() => {
+  db.run(SQL_CRIAR_TABELA_CONFIGURACOES, (err) => {
+    if (err) console.error('Erro ao garantir tabela configuracoes:', err);
+  });
+
   db.run(`
     CREATE TABLE IF NOT EXISTS caixas (
       id INTEGER PRIMARY KEY AUTOINCREMENT,

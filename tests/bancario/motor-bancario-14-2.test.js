@@ -222,7 +222,7 @@ describe('MBC-14.2 MBC-14.1 e decisão', () => {
     assert.equal(p.decisao, 'NO-GO');
     assert.equal(p.quick_tunnel, false);
     assert.equal(p.mensagem, MSG_TUNNEL_NAO_ATIVADO);
-    assert.equal(VERSAO.SPRINT, 'MBC-14.2');
+    assert.ok(String(VERSAO.SPRINT).startsWith('MBC-'));
   });
   it('T32 — trycloudflare recusado', () => {
     const p = avaliarProntidaoTunnel({

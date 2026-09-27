@@ -208,12 +208,12 @@ class CentralEntradasService {
     return this._orchestrator.executarHealthCheckDiagnostico();
   }
 
-  testarCertificadoDiagnostico() {
-    return this._orchestrator.testarCertificadoDiagnostico();
+  testarCertificadoDiagnostico(opcoes = {}) {
+    return this._orchestrator.testarCertificadoDiagnostico(opcoes);
   }
 
-  testarSefazDiagnostico() {
-    return this._orchestrator.testarSefazDiagnostico();
+  testarSefazDiagnostico(opcoes = {}) {
+    return this._orchestrator.testarSefazDiagnostico(opcoes);
   }
 
   limparCacheDiagnostico() {

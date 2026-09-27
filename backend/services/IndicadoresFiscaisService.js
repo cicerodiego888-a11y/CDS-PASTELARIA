@@ -59,21 +59,48 @@ const STATUS_NFE_EXCLUIDOS = Object.freeze([
   'inutilizada'
 ]);
 
-async function obterAmbienteConfigurado(opcoes = {}) {
+/**
+ * Ambiente fiscal + origem.
+ * Com empresaId e configuração fiscal própria → empresas_configuracao_fiscal.
+ * Sem empresa (legado EMPRESA_SIMPLES) → configuracoes.fiscal_ambiente, declarado em `origem`.
+ */
+async function obterAmbienteFiscalComOrigem(opcoes = {}) {
+  const empresaId = empresaIdIndicadores(opcoes);
+  if (empresaId != null) {
+    try {
+      const rowEmp = await dbGetDe(opcoes)(
+        `SELECT ambiente FROM empresas_configuracao_fiscal WHERE empresa_id = ? LIMIT 1`,
+        [empresaId]
+      );
+      const ambEmp = Number(rowEmp?.ambiente);
+      if ([1, 2].includes(ambEmp)) {
+        return { ambiente: ambEmp, origem: 'empresas_configuracao_fiscal' };
+      }
+    } catch {
+      /* tabela ausente: segue para a configuração legada */
+    }
+  }
   try {
     const row = await dbGetDe(opcoes)(
       `SELECT valor FROM configuracoes WHERE chave = 'fiscal_ambiente' LIMIT 1`
     );
     const ambiente = Number(row?.valor);
-    if ([1, 2].includes(ambiente)) return ambiente;
+    if ([1, 2].includes(ambiente)) return { ambiente, origem: 'configuracoes.fiscal_ambiente' };
   } catch {
     /* fallback homologação */
   }
-  return 2;
+  return { ambiente: 2, origem: 'padrao_homologacao' };
+}
+
+async function obterAmbienteConfigurado(opcoes = {}) {
+  return (await obterAmbienteFiscalComOrigem(opcoes)).ambiente;
 }
 
 function labelAmbiente(ambiente) {
-  return Number(ambiente) === 1 ? 'Produção' : 'Homologação';
+  const n = Number(ambiente);
+  if (n === 1) return 'Produção';
+  if (n === 2) return 'Homologação';
+  return 'Não configurado';
 }
 
 /**
@@ -205,11 +232,12 @@ async function obterValorTotalComprado(periodo, opcoes = {}) {
  * @param {{ inicio: string, fim: string, vazio?: boolean }} periodo
  * @param {number} ambiente
  */
-async function obterQuantidadeNfeEmitidas(periodo, ambiente) {
+async function obterQuantidadeNfeEmitidas(periodo, ambiente, opcoes = {}) {
   if (!periodo?.inicio || !periodo?.fim || periodo.vazio) return 0;
+  if (![1, 2].includes(Number(ambiente))) return 0;
 
   const excluidos = STATUS_NFE_EXCLUIDOS.map(() => '?').join(', ');
-  const row = await dbGet(
+  const row = await dbGetDe(opcoes)(
     `SELECT COUNT(*) AS quantidade
      FROM nfe_notas n
      INNER JOIN vendas v ON v.id = n.venda_id
@@ -230,7 +258,7 @@ async function obterQuantidadeNfeEmitidas(periodo, ambiente) {
  */
 async function obterIndicadoresCentral(input = {}) {
   const resolvido = resolverPeriodosIndicadores(input);
-  const ambiente = await obterAmbienteConfigurado(input);
+  const { ambiente, origem: ambienteOrigem } = await obterAmbienteFiscalComOrigem(input);
   const opcoesAgregado = {
     excluirInvalidas: false,
     empresaId: input.empresaId ?? input.empresa_id,
@@ -263,20 +291,31 @@ async function obterIndicadoresCentral(input = {}) {
     filtro: resolvido.filtro,
     ambiente,
     ambienteLabel: labelAmbiente(ambiente),
+    ambienteOrigem,
     baseCalculo: 'data_emissao'
   };
 }
 
 /**
  * Resumo consolidado dos indicadores fiscais por competência.
- * @param {Object} [input] — { ano, mes, competencia } ou contexto Monitoring
+ * Competência (período) e ambiente (SEFAZ) são independentes.
+ * @param {Object} [input] — { ano, mes, competencia, ambienteContexto? } ou contexto Monitoring
+ * @param {{ ambiente: number|null, origem: string|null }} [input.ambienteContexto]
+ *   ambiente já resolvido pelo contexto de empresa; sem ele, leitura legada.
  */
 async function obterResumo(input = {}) {
   const competencia = resolverCompetencia(input);
   const periodoHojeStr = periodoHoje();
   const periodoAno = periodoAnoCompetencia(competencia.ano);
 
-  const ambiente = await obterAmbienteConfigurado();
+  const { ambiente, origem: ambienteOrigem } = input.ambienteContexto
+    ? {
+      ambiente: [1, 2].includes(Number(input.ambienteContexto.ambiente))
+        ? Number(input.ambienteContexto.ambiente)
+        : null,
+      origem: input.ambienteContexto.origem || null
+    }
+    : await obterAmbienteFiscalComOrigem();
 
   const [
     vendasCompetencia,
@@ -309,6 +348,7 @@ async function obterResumo(input = {}) {
     },
     ambiente,
     ambienteLabel: labelAmbiente(ambiente),
+    ambienteOrigem,
     valorTotalVendido: vendasCompetencia.valor,
     valorTotalComprado: comprasCompetencia.valor,
     quantidadeNfeEmitidas,
@@ -335,6 +375,7 @@ async function obterResumo(input = {}) {
 
 module.exports = {
   obterAmbienteConfigurado,
+  obterAmbienteFiscalComOrigem,
   obterValorTotalVendido,
   obterValorTotalComprado,
   obterQuantidadeNfeEmitidas,

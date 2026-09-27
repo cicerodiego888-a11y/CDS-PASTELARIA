@@ -596,7 +596,7 @@ class CentralEntradasOrchestrator {
       confirmado: opcoes.confirmado === true
     });
 
-    if (resultado?.cStat) {
+    if (resultado?.cStat && resultado.gateProcessado !== true) {
       try {
         await require('./services/CentralSefazOperationalGate').processarRespostaSefaz(resultado, {
           correlationId: opcoes.correlationId || resultado?.detalhe?.correlationId,
@@ -896,12 +896,12 @@ class CentralEntradasOrchestrator {
     return this._diagnosticoService.executarHealthCheck();
   }
 
-  testarCertificadoDiagnostico() {
-    return this._diagnosticoService.testarCertificado();
+  testarCertificadoDiagnostico(opcoes = {}) {
+    return this._diagnosticoService.testarCertificado(opcoes);
   }
 
-  testarSefazDiagnostico() {
-    return this._diagnosticoService.testarConexaoSefaz();
+  testarSefazDiagnostico(opcoes = {}) {
+    return this._diagnosticoService.testarConexaoSefaz(opcoes);
   }
 
   limparCacheDiagnostico() {

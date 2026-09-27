@@ -46,7 +46,100 @@ class CentralDiagnosticoService {
     /** @private */
     this._syncExecucao = deps.syncExecucao || null;
     /** @private */
+    this._configuracaoServiceDep = deps.configuracaoService || null;
+    /** @private */
+    this._gateDep = deps.gate || null;
+    /** @private */
+    this._enviarDistribuicaoDfe = deps.enviarDistribuicaoDfe || enviarDistribuicaoDfe;
+    /** @private */
+    this._carregarCertificado = deps.carregarCertificado || carregarCertificadoPfx;
+    /** @private */
+    this._obterModoOperacionalGlobal = typeof deps.obterModoOperacionalGlobal === 'function'
+      ? deps.obterModoOperacionalGlobal
+      : null;
+    /** @private */
     this._cache = new Map();
+  }
+
+  /** @private */
+  _obterConfiguracaoService() {
+    if (this._configuracaoServiceDep) return this._configuracaoServiceDep;
+    const CentralConfiguracaoService = require('./CentralConfiguracaoService');
+    return new CentralConfiguracaoService();
+  }
+
+  /** @private */
+  _obterGate() {
+    return this._gateDep || require('./CentralSefazOperationalGate');
+  }
+
+  /** @private */
+  _modoEmpresaSimples() {
+    try {
+      const { resolverModoOperacionalGlobalAtivo, ModoOperacionalGlobal } = require('../../../core/modo-operacional');
+      const opts = this._obterModoOperacionalGlobal
+        ? { obterModoOperacionalGlobal: this._obterModoOperacionalGlobal }
+        : {};
+      return resolverModoOperacionalGlobalAtivo(opts) === ModoOperacionalGlobal.EMPRESA_SIMPLES;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * CE-06 P15 — contexto do diagnóstico pela empresa selecionada.
+   * MULTIEMPRESA sem empresa → não executa (EMPRESA_CENTRAL_AUSENTE); nunca usa a config global.
+   * @private
+   * @param {{ empresa?: { empresaId: number, modo?: string }, empresaErro?: { codigo: string, mensagem: string } }} opcoes
+   */
+  async _resolverContextoDiagnostico(opcoes = {}) {
+    const { ModoOperacionalGlobal } = require('../../../core/modo-operacional');
+    const empresa = opcoes.empresa || null;
+    const empresaId = Number(empresa?.empresaId);
+    const temEmpresa = Number.isInteger(empresaId) && empresaId > 0;
+
+    if (!temEmpresa) {
+      const legadoSimples = !opcoes.empresaErro && !empresa && this._modoEmpresaSimples();
+      if (!legadoSimples) {
+        return {
+          ok: false,
+          resposta: {
+            sucesso: false,
+            tempoMs: 0,
+            codigo: opcoes.empresaErro?.codigo || 'EMPRESA_CENTRAL_AUSENTE',
+            contextoEmpresaNaoSelecionado: true,
+            mensagem: opcoes.empresaErro?.mensagem
+              || 'Selecione uma empresa para executar o diagnóstico da Central.'
+          }
+        };
+      }
+      const ctxLegado = await this._obterConfiguracaoService().obterContextoOperacional();
+      if (!ctxLegado.ok) {
+        return { ok: false, resposta: { sucesso: false, tempoMs: 0, mensagem: ctxLegado.mensagem } };
+      }
+      return { ok: true, contexto: ctxLegado.contexto, empresaId: null, legado: true };
+    }
+
+    const multiempresa = empresa.modo
+      ? empresa.modo === ModoOperacionalGlobal.MULTIEMPRESA
+      : !this._modoEmpresaSimples();
+    const ctxResult = await this._obterConfiguracaoService().obterContextoOperacional({
+      empresaId,
+      permitirFallbackGlobal: !multiempresa
+    });
+    if (!ctxResult.ok) {
+      return {
+        ok: false,
+        resposta: {
+          sucesso: false,
+          tempoMs: 0,
+          empresaId,
+          codigo: ctxResult.codigoErro || 'CONTEXTO_NAO_RESOLVIDO',
+          mensagem: ctxResult.mensagem
+        }
+      };
+    }
+    return { ok: true, contexto: { ...ctxResult.contexto, empresaId }, empresaId, legado: false };
   }
 
   /**
@@ -150,21 +243,20 @@ class CentralDiagnosticoService {
   /**
    * @returns {Promise<Object>}
    */
-  async testarCertificado() {
-    const CentralConfiguracaoService = require('./CentralConfiguracaoService');
-    const cfgSvc = new CentralConfiguracaoService();
-    const ctx = await cfgSvc.obterContextoOperacional();
+  async testarCertificado(opcoes = {}) {
+    const resolvido = await this._resolverContextoDiagnostico(opcoes);
     const inicio = Date.now();
 
-    if (!ctx.ok) {
-      return { sucesso: false, tempoMs: 0, mensagem: ctx.mensagem };
-    }
+    if (!resolvido.ok) return resolvido.resposta;
+    const ctx = resolvido.contexto;
 
     try {
-      const cert = carregarCertificadoPfx(ctx.contexto.certificadoPath, ctx.contexto.certificadoSenha);
+      const cert = this._carregarCertificado(ctx.certificadoPath, ctx.certificadoSenha);
       return {
         sucesso: true,
         tempoMs: Date.now() - inicio,
+        empresaId: resolvido.empresaId,
+        cnpj: ctx.cnpj || null,
         mensagem: 'Certificado carregado com sucesso.',
         certBase64Length: cert.certBase64?.length ?? 0
       };
@@ -172,28 +264,33 @@ class CentralDiagnosticoService {
       return {
         sucesso: false,
         tempoMs: Date.now() - inicio,
+        empresaId: resolvido.empresaId,
         mensagem: this._sanitizarTexto(error.message)
       };
     }
   }
 
   /**
+   * @param {Object} [opcoes]  { empresa, empresaErro } — ver _resolverContextoDiagnostico
    * @returns {Promise<Object>}
    */
-  async testarConexaoSefaz() {
-    const CentralConfiguracaoService = require('./CentralConfiguracaoService');
-    const cfgSvc = new CentralConfiguracaoService();
-    const ctxResult = await cfgSvc.obterContextoOperacional();
+  async testarConexaoSefaz(opcoes = {}) {
+    const resolvido = await this._resolverContextoDiagnostico(opcoes);
     const inicio = Date.now();
 
-    if (!ctxResult.ok) {
-      return { sucesso: false, tempoMs: 0, mensagem: ctxResult.mensagem };
-    }
+    if (!resolvido.ok) return resolvido.resposta;
 
-    // RC7.4.2 — probe DistDFe também passa pelo Gate operacional.
+    const ctxGate = {
+      empresaId: resolvido.contexto?.empresaId,
+      cnpj: resolvido.contexto?.cnpj,
+      ambiente: resolvido.contexto?.ambiente
+    };
+    const gate = this._obterGate();
+
+    // RC7.4.2 — probe DistDFe também passa pelo Gate operacional (da empresa, CE-06).
     try {
-      const gate = require('./CentralSefazOperationalGate');
       const auth = await gate.autorizarConsultaDistDfe({
+        ...ctxGate,
         correlationId: `diag-${Date.now()}`,
         motivo: 'diagnostico_testar_sefaz'
       });
@@ -201,9 +298,11 @@ class CentralDiagnosticoService {
         return {
           sucesso: false,
           tempoMs: Date.now() - inicio,
+          empresaId: resolvido.empresaId,
           mensagem: auth.mensagem,
           codigo: auth.codigo,
           cStat: auth.cStat,
+          escopoGate: auth.escopo || null,
           bloqueadoPeloGate: true,
           tempoRestanteLabel: auth.tempoRestanteLabel || null,
           proximaConsultaEm: auth.proximaConsultaEm || null,
@@ -212,11 +311,13 @@ class CentralDiagnosticoService {
       }
     } catch { /* segue probe se gate indisponível */ }
 
-    const ctx = ctxResult.contexto;
+    const ctx = resolvido.contexto;
     const ambiente = ctx.ambiente;
     const codigoUf = ctx.codigoUf;
     const cnpj = ctx.cnpj;
-    const ultimoNsu = await this._nsuRepository.obterUltimaSincronizacao();
+    const ultimoNsu = resolvido.legado
+      ? await this._nsuRepository.obterUltimaSincronizacao()
+      : await this._nsuRepository.buscarPorCnpjAmbiente(cnpj, Number(ambiente) === 1 ? 1 : 2);
     const ultNsu = String(ultimoNsu?.ultNsu || '000000000000000').padStart(15, '0');
 
     const xmlConsulta = `
@@ -230,7 +331,7 @@ class CentralDiagnosticoService {
 </distDFeInt>`;
 
     try {
-      const executarProbe = async () => enviarDistribuicaoDfe({
+      const executarProbe = async () => this._enviarDistribuicaoDfe({
         xmlConsulta,
         ambiente,
         cUF: codigoUf,
@@ -269,22 +370,24 @@ class CentralDiagnosticoService {
 
       try {
         if (meta.cStat) {
-          await require('./CentralSefazOperationalGate').processarRespostaSefaz(
+          await gate.processarRespostaSefaz(
             { cStat: meta.cStat, mensagem: meta.xMotivo, ultNsu },
-            { correlationId: `diag-${Date.now()}`, nsu: ultNsu }
+            { ...ctxGate, correlationId: `diag-${Date.now()}`, nsu: ultNsu }
           );
         }
       } catch { /* ignore */ }
 
       let sefazOperacional = null;
       try {
-        sefazOperacional = require('./CentralSefazOperationalGate').obterPainelOperacional();
+        sefazOperacional = gate.obterPainelOperacional();
       } catch { /* ignore */ }
 
       return {
         sucesso,
         tempoMs,
-        ambiente: ambiente === 1 ? 'Produção' : 'Homologação',
+        empresaId: resolvido.empresaId,
+        cnpj,
+        ambiente: Number(ambiente) === 1 ? 'Produção' : 'Homologação',
         cStat: meta.cStat,
         xMotivo: this._sanitizarTexto(meta.xMotivo || runtimeResult.error),
         ultNsuConsultado: ultNsu,

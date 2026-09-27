@@ -53,6 +53,34 @@ class CentralSincronizacaoService {
     this._sincronizarDfe = deps.sincronizarDistribuicaoDFe || sincronizarDistribuicaoDFe;
   }
 
+  /** Gate SEFAZ oficial (singleton), ou o injetado; `gate: null` desliga (somente testes legados). */
+  _obterGate() {
+    if (this._deps.gate === null || this._deps.gate === false) return null;
+    if (this._deps.gate) return this._deps.gate;
+    try {
+      return require('./CentralSefazOperationalGate');
+    } catch {
+      return null;
+    }
+  }
+
+  async _autorizarGateEmpresa(contexto, extra = {}) {
+    const gate = this._obterGate();
+    if (!gate || typeof gate.autorizarConsultaDistDfe !== 'function') return null;
+    try {
+      const auth = await gate.autorizarConsultaDistDfe({
+        empresaId: contexto.empresaId,
+        cnpj: contexto.cnpj,
+        ambiente: contexto.ambiente,
+        origem: 'CentralSincronizacaoService',
+        ...extra
+      });
+      return auth && auth.permitido === false ? auth : null;
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * Sincroniza uma empresa isolada (CNPJ + NSU + persistência com empresa_id).
    * @param {{ empresaId: number, cnpj?: string|null }} alvo
@@ -114,13 +142,37 @@ class CentralSincronizacaoService {
       } catch { /* cooldown indisponível — segue */ }
     }
 
+    const negadoGate = await this._autorizarGateEmpresa(contexto, {
+      correlationId: opcoes.correlationId || null,
+      motivo: 'distNSU_sincronizacao'
+    });
+    if (negadoGate) {
+      return {
+        sucesso: true,
+        ignorado: true,
+        pulado: true,
+        bloqueadoGate: true,
+        empresaId,
+        cnpj: contexto.cnpj,
+        ambiente: contexto.ambiente,
+        codigo: negadoGate.codigo || 'GATE_BLOQUEADO',
+        mensagem: negadoGate.mensagem || 'Consulta DF-e bloqueada pelo Gate SEFAZ da empresa.',
+        proximaConsultaEm: negadoGate.proximaConsultaEm || null,
+        notasNovas: 0,
+        notasDuplicadas: 0
+      };
+    }
+
     const persistencia = new CentralDfePersistenciaService({
       documentosRepository: this._documentosRepository,
       empresaId
     });
 
     try {
+      const gate = this._obterGate();
       const resultado = await this._sincronizarDfe({
+        gateSefaz: gate || undefined,
+        origemGate: 'CentralSincronizacaoService',
         maxIteracoes: opcoes.maxIteracoes ?? contexto.syncMaxDocumentos,
         contextoCentral: contexto,
         nsuRepository: this._nsuRepository,
@@ -201,6 +253,8 @@ class CentralSincronizacaoService {
           sucesso: r.sucesso !== false,
           pulado: !!r.pulado,
           ignorado: !!r.ignorado,
+          bloqueadoGate: !!r.bloqueadoGate,
+          proximaConsultaEm: r.proximaConsultaEm || null,
           notasNovas: r.notasNovas || 0,
           notasDuplicadas: r.notasDuplicadas || 0,
           ultNsu: r.ultNsu || null,
@@ -254,7 +308,8 @@ class CentralSincronizacaoService {
           codigoErro
         }).toJSON(),
         modoOperacional: plano.modo,
-        porEmpresa
+        porEmpresa,
+        gateProcessado: this._obterGate() ? true : undefined
       };
     } catch (error) {
       const mensagem = error.message || String(error);
@@ -307,38 +362,40 @@ class CentralSincronizacaoService {
     }
 
     // RC3.4.1 — Gate único também cobre consChNFe (buscar-chave).
-    if (this._deps.pularGateConsultaChave !== true) {
-      try {
-        const gate = require('./CentralSefazOperationalGate');
-        const auth = await gate.autorizarConsultaDistDfe({
-          chave: chaveLimpa,
-          motivo: 'buscar_chave_consChNFe',
-          origem: 'api'
-        });
-        if (!auth.permitido) {
-          const erro = new Error(auth.mensagem || 'Consulta bloqueada pelo Gate SEFAZ.');
-          erro.statusCode = 429;
-          erro.codigoErro = auth.codigo;
-          erro.detalhe = auth;
-          throw erro;
-        }
-      } catch (gateErr) {
-        if (gateErr.statusCode) throw gateErr;
-        // Gate indisponível: não bloqueia busca manual pontual (compat).
+    const usarGate = this._deps.pularGateConsultaChave !== true;
+    const contextoEmpresa = { ...ctxResult.contexto, empresaId };
+    if (usarGate) {
+      const auth = await this._autorizarGateEmpresa(contextoEmpresa, {
+        chave: chaveLimpa,
+        motivo: 'buscar_chave_consChNFe'
+      });
+      if (auth) {
+        const erro = new Error(auth.mensagem || 'Consulta bloqueada pelo Gate SEFAZ.');
+        erro.statusCode = 429;
+        erro.codigoErro = auth.codigo;
+        erro.detalhe = auth;
+        throw erro;
       }
     }
 
-    const resultado = await this._consultarNotaPorChave(chaveLimpa, {
-      contextoCentral: { ...ctxResult.contexto, empresaId }
-    });
-
+    const gate = usarGate ? this._obterGate() : null;
+    let resultado;
     try {
-      if (this._deps.pularGateConsultaChave !== true && resultado?.cStat) {
-        await require('./CentralSefazOperationalGate').processarRespostaSefaz(resultado, {
-          chave: chaveLimpa
-        });
+      resultado = await this._consultarNotaPorChave(chaveLimpa, {
+        contextoCentral: contextoEmpresa,
+        gateSefaz: gate || undefined,
+        origemGate: 'CentralSincronizacaoService.buscarPorChave'
+      });
+    } catch (error) {
+      if (error?.bloqueadoGate) {
+        const erro = new Error(error.message);
+        erro.statusCode = 429;
+        erro.codigoErro = error.codigo;
+        erro.detalhe = error.gate || null;
+        throw erro;
       }
-    } catch { /* ignore */ }
+      throw error;
+    }
 
     const documento = await this._documentosRepository.buscarPorChave(chaveLimpa, empresaId);
 

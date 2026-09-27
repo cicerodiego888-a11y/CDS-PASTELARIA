@@ -43,6 +43,7 @@
     ambiente: null,
     certificado: null,
     central: null,
+    contextoEmpresa: null,
     versao: '1.0.3',
     usuario: '—',
     ultimaAlteracao: '—'
@@ -90,11 +91,33 @@
       </div>`;
   }
 
+  function formatarCnpjExec(valor) {
+    if (global.CdsEmpresaContexto && typeof global.CdsEmpresaContexto.formatarCnpj === 'function') {
+      return global.CdsEmpresaContexto.formatarCnpj(valor);
+    }
+    return String(valor || '');
+  }
+
+  function renderKpiSefazContexto(ctx, tone) {
+    if (!ctx || ctx.empresaId == null) {
+      return renderKpi('sefaz', 'SEFAZ', badge('Empresa não selecionada', 'warn'),
+        escapeHtml((ctx && ctx.mensagem) || 'Nenhuma matriz válida — selecione a empresa.'), 'warn');
+    }
+    const nome = ctx.razaoSocial || ctx.nomeFantasia || `Empresa #${ctx.empresaId}`;
+    const ambTone = ctx.ambienteFiscal == null ? 'warn' : toneAmbiente(ctx.ambienteFiscal);
+    const detalhe = `CNPJ: ${escapeHtml(formatarCnpjExec(ctx.cnpj) || '—')}${ctx.tipoEmpresa ? ` · ${escapeHtml(ctx.tipoEmpresa === 'MATRIZ' ? 'Matriz' : 'Filial')}` : ''}`;
+    return renderKpi('sefaz', 'SEFAZ',
+      `${escapeHtml(nome)}<br>${badge(ctx.ambienteLabel || '—', ambTone)}`,
+      detalhe,
+      ctx.ambienteFiscal == null ? 'warn' : tone);
+  }
+
   function renderPainelExecutivo() {
     const e = estadoExecutivo;
     const amb = e.ambiente;
     const cert = e.certificado || {};
     const cen = e.central || {};
+    const ctx = e.contextoEmpresa || null;
     const ambCode = amb != null ? Number(amb) : null;
     const certTone = cert.status === 'OK' ? 'ok' : (cert.status === 'A_VENCER' ? 'warn' : (cert.presente ? 'error' : 'neutral'));
     const certLabel = cert.status === 'OK' ? 'Válido' : (cert.status || (cert.presente ? 'Atenção' : 'Ausente'));
@@ -106,8 +129,8 @@
       <div class="cds-cfg-exec" id="cdsCfgExecPanel" aria-label="Painel executivo da plataforma">
         ${renderKpi('empresa', 'Empresa', escapeHtml(e.empresa || '—'), `CNPJ ${escapeHtml(e.cnpj || '—')}`, e.cnpj && e.cnpj !== '—' ? 'ok' : 'warn')}
         ${fiscalUi ? `
-        ${renderKpi('ambiente', 'Ambiente Fiscal', ambCode != null ? escapeHtml(labelAmbiente(ambCode)) : '—', 'Origem: Centro de Configurações', toneAmbiente(ambCode))}
-        ${renderKpi('sefaz', 'SEFAZ', badge(cen.ambiente?.label || '—', sefazOnline === 'ok' ? 'ok' : 'warn'), 'Visão via Central / DF-e', sefazOnline)}
+        ${renderKpi('ambiente', 'Ambiente Fiscal', ambCode != null ? escapeHtml(labelAmbiente(ambCode)) : escapeHtml((ctx && ctx.ambienteLabel) || '—'), ctx && ctx.empresaId != null ? `Origem: configuração fiscal da empresa ${escapeHtml(String(ctx.empresaId))}` : 'Sem empresa resolvida', ambCode != null ? toneAmbiente(ambCode) : 'warn')}
+        ${renderKpiSefazContexto(ctx, sefazOnline)}
         ${renderKpi('cert', 'Certificado Digital', badge(certLabel, certTone), cert.validade ? `Validade: ${escapeHtml(String(cert.validade).slice(0, 10))} · ${cert.diasRestantes != null ? cert.diasRestantes + ' dias' : ''}` : (cert.mensagem || 'Configure em Empresas'), certTone)}
         ${renderKpi('miip', 'MIIP', badge(cen.diagnostico?.versaoMiip || 'RC1', 'info'), 'Health via pipeline Central', 'ok')}
         ${renderKpi('plataforma', 'Motor SEFAZ', badge('RC1.1', 'prep'), 'Registry · Resolver · SoapTransport', 'ok')}
@@ -809,32 +832,33 @@
     });
   }
 
-  async function atualizarPainelExecutivo() {
+  function headersContextoEmpresa() {
+    if (global.CdsEmpresaContexto && typeof global.CdsEmpresaContexto.headersJson === 'function') {
+      return global.CdsEmpresaContexto.headersJson();
+    }
     const token = localStorage.getItem('token');
-    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }
+
+  async function atualizarPainelExecutivo() {
+    const headers = headersContextoEmpresa();
     estadoExecutivo.usuario = obterUsuarioNome();
     const fiscalOn = configPermiteFiscalUi();
 
     if (fiscalOn) {
       try {
-        const fiscalRes = await fetch(`${global.API_URL}/fiscal/config`, { headers });
-        if (fiscalRes.ok) {
-          const cfg = await fiscalRes.json();
-          estadoExecutivo.empresa = cfg.nomeEmpresa || '—';
-          estadoExecutivo.cnpj = cfg.cnpj || '—';
-          estadoExecutivo.ambiente = cfg.ambiente;
-        }
-      } catch { /* ignore */ }
-
-      try {
         const cenRes = await fetch(`${global.API_URL}/central-entradas/configuracao`, { headers });
         if (cenRes.ok) {
           const painel = await cenRes.json();
+          const ctx = painel.contextoEmpresa || null;
           estadoExecutivo.central = painel;
+          estadoExecutivo.contextoEmpresa = ctx;
           estadoExecutivo.certificado = painel.certificado || null;
-          if (painel.ambiente?.codigo != null) {
-            estadoExecutivo.ambiente = painel.ambiente.codigo;
-          }
+          estadoExecutivo.empresa = ctx && ctx.empresaId != null
+            ? (ctx.razaoSocial || ctx.nomeFantasia || `Empresa #${ctx.empresaId}`)
+            : (ctx && ctx.mensagem) || 'Empresa não selecionada';
+          estadoExecutivo.cnpj = ctx && ctx.cnpj ? formatarCnpjExec(ctx.cnpj) : '—';
+          estadoExecutivo.ambiente = ctx ? ctx.ambienteFiscal : null;
           estadoExecutivo.ultimaAlteracao = painel.ambiente?.atualizadoEm
             || painel.diagnostico?.ultimaSincronizacao
             || estadoExecutivo.ultimaAlteracao;
@@ -1325,4 +1349,10 @@
   global.pesquisarConfiguracaoCentroCfg = pesquisarConfiguracao;
   global.focarCardManifestacaoCentroCfg = focarCardManifestacao;
   global.salvarPoliticaManifestacaoCentroCfg = salvarPoliticaManifestacaoCentro;
+
+  if (typeof document !== 'undefined' && document.addEventListener) {
+    document.addEventListener('cds-empresa-contexto-alterado', () => {
+      if (document.getElementById('cdsCfgExecWrap')) atualizarPainelExecutivo();
+    });
+  }
 })(typeof window !== 'undefined' ? window : global);

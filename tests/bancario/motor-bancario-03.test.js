@@ -199,7 +199,7 @@ describe('MBC-03 transações', () => {
     await assert.rejects(
       () => ctx.motor.registrarTransacaoBancaria({
         empresaId: ctx.empresaA.id,
-        ...payload(conta, { direcao: 'CREDITO' })
+        ...payload(conta, { direcao: 'XYZ_INVALIDO' })
       }),
       (err) => err.code === ERROS.DIRECAO_INVALIDA
     );
@@ -603,7 +603,7 @@ describe('MBC-03 invariantes', () => {
     const svc = src('backend/motores/bancario/services/TransacaoBancariaService.js');
     assert.match(src('backend/motores/bancario/schema/bancarioSchema.js'), /transacao_bancaria/);
     assert.doesNotMatch(svc, /INSERT INTO financeiro/i);
-    assert.doesNotMatch(src('backend/rotas/bancario.js'), /oauth/i);
+    assert.match(src('backend/rotas/bancario.js'), /oauth\/autorizar/);
     assert.doesNotMatch(src('frontend/erp/js/contas-bancarias.js'), /sincronizar banco|importar OFX/i);
   });
 });

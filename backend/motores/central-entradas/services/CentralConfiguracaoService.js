@@ -138,19 +138,49 @@ class CentralConfiguracaoService {
   }
 
   /**
+   * @param {Object} [opcoes]
+   * @param {{ empresaId?: number|null, cnpj?: string|null, modo?: string }} [opcoes.empresa]
+   *   empresa resolvida pela rota (CE-06 P04/P09) — painel passa a ser por empresa.
+   * @param {{ codigo: string, mensagem: string }} [opcoes.empresaErro]
+   *   empresa não resolvida (ex.: EMPRESA_CENTRAL_AUSENTE no MULTIEMPRESA).
    * @returns {Promise<Object>}
    */
-  async obterPainelCompleto() {
+  async obterPainelCompleto(opcoes = {}) {
     await this._repository.ensureDefaults();
-    const [sync, mapa, certificado, meta, fiscalSnap] = await Promise.all([
+    const porEmpresa = Boolean(opcoes.empresa || opcoes.empresaErro);
+    const [sync, mapa, certificadoGlobal, meta, fiscalSnap, empresaContexto] = await Promise.all([
       this._syncConfig.obterResumo(),
       this._obterMapaValores(),
-      this._obterVisaoCertificado(),
+      porEmpresa ? null : this._obterVisaoCertificado(),
       this._obterMetadadosAlteracao(),
-      this._obterSnapshotFiscal()
+      porEmpresa ? null : this._obterSnapshotFiscal(),
+      porEmpresa ? this.obterContextoEmpresaPainel(opcoes) : null
     ]);
 
-    const ambienteCode = fiscalSnap.ambiente;
+    const certificado = porEmpresa ? empresaContexto.certificado : certificadoGlobal;
+    const ambienteCode = porEmpresa ? empresaContexto.ambiente.codigo : fiscalSnap.ambiente;
+    const ambientePainel = porEmpresa
+      ? {
+        ...empresaContexto.ambiente,
+        somenteLeitura: true,
+        atualizadoEm: meta.atualizadoEm,
+        ultimaAlteracao: meta.ultimaAlteracao
+      }
+      : {
+        codigo: ambienteCode,
+        label: ambienteCode === 1 ? 'Produção' : 'Homologação',
+        uf: fiscalSnap.uf,
+        codigoUf: fiscalSnap.codigoUf,
+        somenteLeitura: true,
+        origem: 'getFiscalConfig',
+        origemLabel: 'Configuração fiscal global (Centro de Configurações)',
+        atualizadoEm: meta.atualizadoEm,
+        ultimaAlteracao: meta.ultimaAlteracao
+      };
+    const escolherUrl = (urls) => {
+      if (ambienteCode == null) return null;
+      return ambienteCode === 1 ? urls.producao : urls.homologacao;
+    };
     const endpointsDfe = this._resolverEndpointsDfe();
     const endpointsManif = this._resolverEndpointsManifestacao();
     const endpointsConsulta = this._resolverEndpointsConsultaChave();
@@ -161,31 +191,22 @@ class CentralConfiguracaoService {
     return {
       versaoConfiguracao: 'RC4',
       unificacaoFiscal: 'RC3.1',
-      ambiente: {
-        codigo: ambienteCode,
-        label: ambienteCode === 1 ? 'Produção' : 'Homologação',
-        uf: fiscalSnap.uf,
-        codigoUf: fiscalSnap.codigoUf,
-        somenteLeitura: true,
-        origem: 'getFiscalConfig',
-        origemLabel: 'Centro de Configurações (fonte oficial)',
-        atualizadoEm: meta.atualizadoEm,
-        ultimaAlteracao: meta.ultimaAlteracao
-      },
+      ambiente: ambientePainel,
+      empresaContexto,
       sefaz: {
-        urlDistribuicaoDfe: ambienteCode === 1 ? endpointsDfe.producao : endpointsDfe.homologacao,
+        urlDistribuicaoDfe: escolherUrl(endpointsDfe),
         urlDistribuicaoDfeProducao: endpointsDfe.producao,
         urlDistribuicaoDfeHomologacao: endpointsDfe.homologacao,
         origemEndpointDfe: 'UrlResolver',
         endpointsEditaveis: false,
         // RC4.3.1 — Consulta chave somente leitura via Registry → UrlResolver
-        urlConsultaChave: ambienteCode === 1 ? endpointsConsulta.producao : endpointsConsulta.homologacao,
+        urlConsultaChave: escolherUrl(endpointsConsulta),
         urlConsultaChaveProducao: endpointsConsulta.producao,
         urlConsultaChaveHomologacao: endpointsConsulta.homologacao,
         origemEndpointConsulta: 'UrlResolver',
         endpointConsultaResolvido: Boolean(endpointsConsulta.producao && endpointsConsulta.homologacao),
         // RC4.1 — URLs de Manifestação somente leitura, resolvidas via Registry → UrlResolver
-        urlManifestacao: ambienteCode === 1 ? endpointsManif.producao : endpointsManif.homologacao,
+        urlManifestacao: escolherUrl(endpointsManif),
         urlManifestacaoProducao: endpointsManif.producao,
         urlManifestacaoHomologacao: endpointsManif.homologacao,
         origemEndpointManifestacao: 'UrlResolver',
@@ -206,9 +227,9 @@ class CentralConfiguracaoService {
         urlResolver: true,
         soapTransport: true,
         endpointResolvido: Boolean(
-          (ambienteCode === 1 ? endpointsDfe.producao : endpointsDfe.homologacao)
-          && (ambienteCode === 1 ? endpointsManif.producao : endpointsManif.homologacao)
-          && (ambienteCode === 1 ? endpointsConsulta.producao : endpointsConsulta.homologacao)
+          escolherUrl(endpointsDfe)
+          && escolherUrl(endpointsManif)
+          && escolherUrl(endpointsConsulta)
         ),
         modo: this._labelPoliticaManifestacao(politicaManifestacao),
         modoCodigo: politicaManifestacao
@@ -237,9 +258,113 @@ class CentralConfiguracaoService {
         modoDebug: mapa[CHAVES.MODO_DEBUG] === true
       },
       certificadosFiliais: certificado.presente
-        ? [{ id: 'principal', nome: certificado.nome || 'Principal', cnpj: certificado.cnpj, status: certificado.status }]
+        ? [{
+          id: porEmpresa ? `empresa:${empresaContexto.empresaId}` : 'principal',
+          nome: certificado.nome || 'Principal',
+          cnpj: certificado.cnpj,
+          status: certificado.status
+        }]
         : [],
       preparadoPara: ['manifestacao', 'cte', 'mdfe', 'nfse', 'multiplos_cnpjs', 'proxy']
+    };
+  }
+
+  /**
+   * CE-06 P04/P09 — ambiente e certificado da empresa selecionada, via
+   * obterContextoOperacional({ empresaId, permitirFallbackGlobal:false }) no MULTIEMPRESA.
+   * Nunca expõe senha; sem empresa não há fallback para a configuração global.
+   * @param {Object} opcoes  mesmo formato de obterPainelCompleto
+   * @returns {Promise<Object>}
+   */
+  async obterContextoEmpresaPainel(opcoes = {}) {
+    const { ModoOperacionalGlobal } = require('../../../core/modo-operacional');
+    const empresa = opcoes.empresa || {};
+    const empresaId = Number(empresa.empresaId);
+    const multiempresa = empresa.modo
+      ? empresa.modo === ModoOperacionalGlobal.MULTIEMPRESA
+      : true;
+    const semContexto = (estado, codigo, mensagem) => ({
+      estado,
+      codigo,
+      mensagem,
+      selecionada: estado !== 'EMPRESA_NAO_SELECIONADA',
+      empresaId: Number.isInteger(empresaId) && empresaId > 0 ? empresaId : null,
+      cnpj: empresa.cnpj ? String(empresa.cnpj).replace(/\D/g, '') : null,
+      modo: empresa.modo || null,
+      ambiente: {
+        codigo: null,
+        label: estado === 'EMPRESA_NAO_SELECIONADA' ? 'Empresa não selecionada' : 'Contexto não resolvido',
+        uf: null,
+        codigoUf: null,
+        origem: null,
+        origemLabel: mensagem
+      },
+      certificado: {
+        presente: false,
+        empresaId: Number.isInteger(empresaId) && empresaId > 0 ? empresaId : null,
+        nome: null,
+        cnpj: null,
+        validade: null,
+        diasRestantes: null,
+        status: estado,
+        caminho: null,
+        mensagem
+      }
+    });
+
+    if (!Number.isInteger(empresaId) || empresaId <= 0) {
+      const erro = opcoes.empresaErro || {};
+      return semContexto(
+        'EMPRESA_NAO_SELECIONADA',
+        erro.codigo || 'EMPRESA_CENTRAL_AUSENTE',
+        erro.mensagem || 'Selecione uma empresa para visualizar ambiente e certificado da Central.'
+      );
+    }
+
+    const resultado = await this.obterContextoOperacional({
+      empresaId,
+      permitirFallbackGlobal: !multiempresa
+    });
+    if (!resultado?.ok || !resultado.contexto) {
+      return semContexto(
+        'CONTEXTO_NAO_RESOLVIDO',
+        resultado?.codigoErro || 'CONFIG_FISCAL',
+        `Contexto fiscal não resolvido para a empresa ${empresaId}: ${resultado?.mensagem || 'configuração incompleta.'}`
+      );
+    }
+
+    const ctx = resultado.contexto;
+    const ambiente = Number(ctx.ambiente) === 1 ? 1 : 2;
+    const daEmpresa = ctx.origemAmbiente === 'empresas_configuracao_fiscal';
+    const visao = await this._montarVisaoCertificado({
+      certificadoPath: ctx.certificadoPath,
+      certificadoSenha: ctx.certificadoSenha,
+      cnpj: ctx.cnpj
+    });
+    return {
+      estado: 'OK',
+      codigo: null,
+      mensagem: null,
+      selecionada: true,
+      empresaId,
+      cnpj: ctx.cnpj,
+      modo: empresa.modo || null,
+      ambiente: {
+        codigo: ambiente,
+        label: ambiente === 1 ? 'Produção' : 'Homologação',
+        uf: ctx.uf || null,
+        codigoUf: ctx.codigoUf || null,
+        origem: ctx.origemAmbiente,
+        origemLabel: daEmpresa
+          ? `Configuração fiscal da empresa ${empresaId}`
+          : 'Configuração fiscal global (empresa simples)'
+      },
+      certificado: {
+        ...visao,
+        empresaId,
+        caminho: null,
+        arquivo: ctx.certificadoPath ? path.basename(ctx.certificadoPath) : null
+      }
     };
   }
 
@@ -753,6 +878,27 @@ class CentralConfiguracaoService {
   async _obterVisaoCertificado() {
     try {
       const fiscal = await this._getFiscalConfig();
+      return await this._montarVisaoCertificado(fiscal);
+    } catch (error) {
+      return {
+        presente: false,
+        nome: null,
+        cnpj: null,
+        validade: null,
+        diasRestantes: null,
+        status: 'ERRO',
+        caminho: null,
+        mensagem: this._mensagemAmigavel(error.message)
+      };
+    }
+  }
+
+  /**
+   * @private
+   * @param {{ certificadoPath?: string, certificadoSenha?: string, cnpj?: string }} fiscal
+   */
+  async _montarVisaoCertificado(fiscal = {}) {
+    try {
       const certificadoPath = fiscal.certificadoPath;
       if (!certificadoPath) {
         return {

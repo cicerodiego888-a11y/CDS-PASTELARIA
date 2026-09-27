@@ -3,6 +3,21 @@ const path = require('path');
 console.log('SERVER RODANDO DE:', process.cwd());
 console.log('SERVER FILE:', __filename);
 
+// Cofre MBC + DB_DIR alinhados ao Gateway OAuth. Sem logar o valor da chave.
+try {
+  const {
+    bootstrapAmbienteOperacionalMbc
+  } = require('./motores/bancario/secrets/bootstrapAmbienteOperacionalMbc');
+  const mbcBoot = bootstrapAmbienteOperacionalMbc({ exigirRedirectUri: false });
+  if (mbcBoot.secret_store_disponivel) {
+    console.log('[MBC] SecretStore local disponível (origem=' + mbcBoot.secret_store_origem + ').');
+  } else {
+    console.warn('[MBC] SecretStore local indisponível — gravar credenciais bancárias falhará até configurar MBC_SECRET_STORE_KEY.');
+  }
+} catch (e) {
+  console.warn('[MBC] Não foi possível inicializar SecretStore:', e && e.message ? e.message : e);
+}
+
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
@@ -128,6 +143,7 @@ const dashboardRoutes = require('./rotas/dashboard');
 const misRoutes = require('./rotas/mis');
 const bancarioRoutes = require('./rotas/bancario');
 const contasReceberRoutes = require('./rotas/contas_receber');
+const contasPagarRoutes = require('./rotas/contas_pagar');
 const alertasRoutes = require('./rotas/alertas');
 const licencaRoutes = require('./rotas/licenca');
 const dfeRoutes = require('./rotas/dfe');
@@ -213,6 +229,7 @@ app.use('/api/financeiro', verificarToken, financeiroRoutes);
 app.use('/api/condicoes-pagamento', verificarToken, condicoesPagamentoRoutes);
 app.use('/api/mie', verificarToken, require('./rotas/mie'));
 app.use('/api/contas-receber', verificarToken, contasReceberRoutes);
+app.use('/api/contas-pagar', verificarToken, contasPagarRoutes);
 app.use('/api/configuracoes', verificarToken, configuracoesRoutes);
 app.use('/api/configuracao-rede', verificarToken, configuracaoRedeRoutes);
 app.use('/api/configuracoes-avancadas', verificarToken, configuracoesAvancadasRoutes);

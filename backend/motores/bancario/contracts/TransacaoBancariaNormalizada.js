@@ -22,10 +22,10 @@ function num(v) {
 
 function parseDirecao(v) {
   const s = String(v || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-  if (s === 'entrada') return DIRECAO.ENTRADA;
-  if (s === 'saida') return DIRECAO.SAIDA;
+  if (s === 'entrada' || s === 'credit' || s === 'credito' || s === 'c') return DIRECAO.ENTRADA;
+  if (s === 'saida' || s === 'debit' || s === 'debito' || s === 'd') return DIRECAO.SAIDA;
   if (s === 'transferencia') return DIRECAO.TRANSFERENCIA;
-  throw erroMbc(ERROS.DIRECAO_INVALIDA, 'Direção inválida. Use ENTRADA, SAIDA ou TRANSFERENCIA.', 400);
+  throw erroMbc(ERROS.DIRECAO_INVALIDA, 'Direção inválida. Use ENTRADA/CREDIT, SAIDA/DEBIT ou TRANSFERENCIA.', 400);
 }
 
 function parseTipoTransacao(v) {

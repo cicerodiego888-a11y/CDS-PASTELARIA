@@ -298,11 +298,20 @@ describe('MBC-09 providers e secrets', () => {
     await closeDb(db);
     if (prev != null) process.env.MBC_SECRET_STORE_KEY = prev;
   });
-  it('T17 — sem chave o factory cai em memória', () => {
+  it('T17 — sem chave o factory não cai em memória (fail closed)', async () => {
     const prev = process.env.MBC_SECRET_STORE_KEY;
     delete process.env.MBC_SECRET_STORE_KEY;
-    const s = obterSecretStore({});
-    assert.ok(s instanceof MemorySecretStore);
+    assert.throws(
+      () => obterSecretStore({}),
+      (e) => e.code === ERROS.SECRET_KEY_AUSENTE && e.statusCode === 503
+    );
+    const db = await openDb();
+    await garantirSchemaBancarioAsync(db);
+    const s = obterSecretStore({ db });
+    assert.ok(s instanceof EncryptedLocalSecretStore);
+    assert.equal(s instanceof MemorySecretStore, false);
+    await assert.rejects(() => s.set('k', 'segredo'), (e) => e.code === ERROS.SECRET_KEY_AUSENTE);
+    await closeDb(db);
     if (prev != null) process.env.MBC_SECRET_STORE_KEY = prev;
   });
   it('T18 — toJSON do store não vaza valor', async () => {
@@ -781,7 +790,9 @@ describe('MBC-09 UI segurança frontend', () => {
   });
   it('T67 — frontend não é autoridade de empresa_id', () => {
     const js = src('frontend/erp/js/contas-bancarias.js');
-    assert.equal(/body\.empresa_id\s*=/.test(js), false);
+    assert.match(js, /if \(!id && vistaTodas\)/);
+    assert.match(js, /body\.empresa_id = empId/);
+    assert.match(src('backend/rotas/bancario.js'), /resolverEmpresaEscritaConta/);
   });
   it('T68 — rotas de instituições exigem permissão', () => {
     const rotas = src('backend/rotas/bancario.js');

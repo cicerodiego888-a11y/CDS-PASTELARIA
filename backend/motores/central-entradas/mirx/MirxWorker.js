@@ -177,17 +177,20 @@ class MirxWorker {
         return { sucesso: false, codigo: 'DOCUMENTO_INEXISTENTE' };
       }
 
-      if (
-        doc.status === DocumentoFiscalStatus.DESCARTADA
-        || doc.status === DocumentoFiscalStatus.XML_INDISPONIVEL
-      ) {
+      if (doc.status === DocumentoFiscalStatus.DESCARTADA) {
         this._service.remover(documentoId, doc.status);
         return { sucesso: true, codigo: 'CANCELADO', status: doc.status };
       }
 
+      const retryXmlIndisponivel = doc.status === DocumentoFiscalStatus.XML_INDISPONIVEL
+        && doc.tipoDocumento === DocumentoDfeTipo.RES_NFE;
+
       if (
-        doc.status !== DocumentoFiscalStatus.AGUARDANDO_XML_COMPLETO
-        || doc.tipoDocumento !== DocumentoDfeTipo.RES_NFE
+        !retryXmlIndisponivel
+        && (
+          doc.status !== DocumentoFiscalStatus.AGUARDANDO_XML_COMPLETO
+          || doc.tipoDocumento !== DocumentoDfeTipo.RES_NFE
+        )
       ) {
         if (doc.status !== DocumentoFiscalStatus.AGUARDANDO_XML_COMPLETO) {
           await this._service.marcarRecuperado(documentoId, doc, {
@@ -202,7 +205,7 @@ class MirxWorker {
 
       // RC3.4.4 — sem Ciência aceita: não Gate, não DistDFe, não SLEEP.
       // Scan/boot não pode colocar RES_NFE pré-manifestação em cooldown 656.
-      if (!(await this._temCienciaAceita(documentoId))) {
+      if (!retryXmlIndisponivel && !(await this._temCienciaAceita(documentoId))) {
         this._service.remover(documentoId, 'aguardando_ciencia');
         return {
           sucesso: true,

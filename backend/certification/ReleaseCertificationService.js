@@ -238,10 +238,91 @@ class ReleaseCertificationService {
     return okCompras;
   }
 
+  /**
+   * Empresa ativa obrigatória pós-05.70 (chave + empresa_id).
+   * Reusa a primeira ativa; se o banco não tiver cadastro (caso típico de certificação
+   * em ambiente sem implantação multiempresa), cria uma empresa descartável.
+   */
+  async _resolverEmpresaIdCertificacao() {
+    const db = this._ctx.db;
+    const { garantirSchemaEmpresasAsync } = require(path.join(
+      this.rootDir,
+      'backend/services/empresas/empresasSchema'
+    ));
+    await garantirSchemaEmpresasAsync(db);
+
+    const ativa = await dbGet(db, 'SELECT id FROM empresas WHERE ativo = 1 ORDER BY id ASC LIMIT 1');
+    if (ativa?.id) {
+      this._ctx.empresaCertCriada = false;
+      return Number(ativa.id);
+    }
+
+    const cnpjCert = '00000000000191';
+    const razaoCert = 'RC4320 Certificacao';
+    let row = await dbGet(db, 'SELECT id FROM empresas WHERE cnpj = ?', [cnpjCert]);
+    if (!row?.id) {
+      await dbRun(
+        db,
+        `INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
+         VALUES (?, ?, 'RC Cert', 1)`,
+        [cnpjCert, razaoCert]
+      );
+      row = await dbGet(db, 'SELECT id FROM empresas WHERE cnpj = ?', [cnpjCert]);
+    } else {
+      await dbRun(db, 'UPDATE empresas SET ativo = 1 WHERE id = ?', [row.id]);
+    }
+    if (!row?.id) {
+      throw new Error('Nenhuma empresa ativa para certificação de Compras/Central');
+    }
+    this._ctx.empresaCertCriada = true;
+    this._ctx.empresaCertCnpj = cnpjCert;
+    this._ctx.empresaCertId = Number(row.id);
+    return Number(row.id);
+  }
+
+  async _removerEmpresaCertificacaoSeCriada() {
+    const id = this._ctx.empresaCertId;
+    const cnpj = this._ctx.empresaCertCnpj;
+    if (!this._ctx.empresaCertCriada || !id || !cnpj) return;
+    await dbRun(
+      this._ctx.db,
+      'DELETE FROM empresas WHERE id = ? AND cnpj = ?',
+      [id, cnpj]
+    ).catch(() => {});
+  }
+
+  async _limparDocumentoCertificacao(chave, empresaId) {
+    const db = this._ctx.db;
+    const rows = await dbAll(
+      db,
+      `SELECT id FROM central_entradas_documentos
+       WHERE chave = ? AND (empresa_id = ? OR empresa_id IS NULL)`,
+      [chave, empresaId]
+    );
+    for (const row of rows || []) {
+      // sqlite3 db.run NÃO retorna Promise — usar dbRun para aguardar o DELETE
+      // antes do remover (FK: historico.documento_id → documentos.id).
+      await dbRun(db, 'DELETE FROM central_entradas_historico WHERE documento_id = ?', [row.id]);
+      await dbRun(db, 'DELETE FROM central_entradas_eventos WHERE documento_id = ?', [row.id]).catch(() => {});
+      await dbRun(db, 'DELETE FROM central_entradas_notificacoes WHERE documento_id = ?', [row.id]).catch(() => {});
+      await dbRun(db, 'DELETE FROM central_entradas_documentos WHERE id = ?', [row.id]);
+    }
+  }
+
   async _fluxoCentralCompras() {
     const fsLocal = require('fs');
     const fixDir = path.join(this.rootDir, 'tests/central-entradas/fixtures');
     const CHAVE = '35260112345678000199550010000000641000000064';
+    const empresaId = await this._resolverEmpresaIdCertificacao();
+    try {
+      return await this._executarFluxoCentralCompras(CHAVE, empresaId, fsLocal, fixDir);
+    } finally {
+      await this._limparDocumentoCertificacao(CHAVE, empresaId);
+      await this._removerEmpresaCertificacaoSeCriada();
+    }
+  }
+
+  async _executarFluxoCentralCompras(CHAVE, empresaId, fsLocal, fixDir) {
 
     const CentralDfePersistenciaService = require(path.join(
       this.rootDir,
@@ -272,7 +353,7 @@ class ReleaseCertificationService {
     const historicoRepository = new CentralHistoricoRepository();
     const transitionService = new DocumentoTransitionService({ documentosRepository, historicoRepository });
     const persistencia = new CentralDfePersistenciaService({
-      documentosRepository, historicoRepository, transitionService
+      documentosRepository, historicoRepository, transitionService, empresaId
     });
     persistencia.existeCompraComChave = async () => false;
 
@@ -281,47 +362,28 @@ class ReleaseCertificationService {
     });
 
     await documentosRepository._obterSql().whenReady();
-
-    const existente = await documentosRepository.buscarPorChave(CHAVE);
-    if (existente) {
-      // sqlite3 db.run NÃO retorna Promise — usar dbRun para aguardar o DELETE
-      // antes do remover (FK: historico.documento_id → documentos.id).
-      await dbRun(
-        this._ctx.db,
-        'DELETE FROM central_entradas_historico WHERE documento_id = ?',
-        [existente.id]
-      );
-      await dbRun(
-        this._ctx.db,
-        'DELETE FROM central_entradas_eventos WHERE documento_id = ?',
-        [existente.id]
-      ).catch(() => {});
-      await dbRun(
-        this._ctx.db,
-        'DELETE FROM central_entradas_notificacoes WHERE documento_id = ?',
-        [existente.id]
-      ).catch(() => {});
-      await documentosRepository.remover(existente.id);
-    }
+    await this._limparDocumentoCertificacao(CHAVE, empresaId);
 
     const ler = (nome) => fsLocal.readFileSync(path.join(fixDir, nome), 'utf8');
 
     const r1 = await persistencia.persistirDocumentoDfe({
       xml: ler('rc64-res-nfe.xml'),
       nsu: 'RC4320-1',
-      origem: 'release-cert'
+      origem: 'release-cert',
+      empresaId
     });
     if (!r1.documento?.id) throw new Error('RES_NFE não persistido');
 
     const r2 = await persistencia.persistirDocumentoDfe({
       xml: ler('rc64-proc-nfe.xml'),
       nsu: 'RC4320-2',
-      origem: 'release-cert'
+      origem: 'release-cert',
+      empresaId
     });
     if (!r2.documento?.id) throw new Error('PROC_NFE não persistido');
 
     this._ctx.chaveNfe = CHAVE;
-    const proc = await processamento.processar(r2.documento.id);
+    const proc = await processamento.processar(r2.documento.id, { empresaId });
     if (!proc.sucesso) throw new Error(proc.mensagem || 'Processamento Central falhou');
 
     const doc = await documentosRepository.buscarPorId(r2.documento.id);
@@ -333,7 +395,7 @@ class ReleaseCertificationService {
     if (!statusOk) throw new Error(`Status inesperado: ${doc.status}`);
 
     this.metrics.incrementarSql(3);
-    return `NF-e …${CHAVE.slice(-8)} | status=${doc.status}`;
+    return `NF-e …${CHAVE.slice(-8)} | status=${doc.status} | empresa=${empresaId}`;
   }
 
   /** ETAPA 5 — Financeiro */

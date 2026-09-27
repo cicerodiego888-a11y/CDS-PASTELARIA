@@ -21,6 +21,10 @@ function obterXmlWaitScheduler() {
   return require('./CentralXmlWaitScheduler');
 }
 
+function obterManifestacaoScheduler() {
+  return require('./CentralManifestacaoScheduler');
+}
+
 function criarRequestId() {
   return `bg-req-${Date.now().toString(16)}-${Math.random().toString(16).slice(2, 8)}`;
 }
@@ -38,6 +42,8 @@ class CentralSyncBackgroundService {
     /** @private */
     this._xmlWait = deps.xmlWaitScheduler ?? null;
     /** @private */
+    this._manifestacao = deps.manifestacaoScheduler ?? null;
+    /** @private */
     this._timeoutId = null;
     /** @private */
     this._ativo = false;
@@ -48,6 +54,11 @@ class CentralSyncBackgroundService {
   /** @private */
   _xmlWaitScheduler() {
     return this._xmlWait ?? obterXmlWaitScheduler();
+  }
+
+  /** @private */
+  _manifestacaoScheduler() {
+    return this._manifestacao ?? obterManifestacaoScheduler();
   }
 
   /** @private */
@@ -127,6 +138,18 @@ class CentralSyncBackgroundService {
       });
     }
 
+    // CENTRAL-XML-02 — Motor de Manifestação independe da sync automática e da Central aberta.
+    try {
+      this._manifestacaoScheduler().iniciar();
+    } catch (error) {
+      logCentralErro('BACKGROUND', error, {
+        Evento: 'BACKGROUND ERROR',
+        CorrelationId: correlationId,
+        RequestId: requestId,
+        Motivo: 'falha_iniciar_scheduler_manifestacao'
+      });
+    }
+
     if (!this._flags.syncAutomaticaHabilitada()) {
       this._ativo = false;
       this._log('BACKGROUND SLEEP', {
@@ -172,6 +195,9 @@ class CentralSyncBackgroundService {
           correlationId,
           motivo: opcoes.motivo || 'background_stop'
         });
+      } catch { /* ignore */ }
+      try {
+        this._manifestacaoScheduler().parar({ silencioso: true });
       } catch { /* ignore */ }
     }
 

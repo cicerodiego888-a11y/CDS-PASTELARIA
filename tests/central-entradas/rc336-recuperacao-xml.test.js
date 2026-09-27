@@ -316,9 +316,10 @@ async function run() {
     const r = await c.service.processarDocumento(77, { confirmado: true });
     assert.ok(c.getManifestacoes() >= 1);
     assert.strictEqual(c.getConsultasDist(), 0);
+    assert.ok(c.getConsultasChave() >= 1);
     assert.strictEqual(r.encerrado, true);
     assert.strictEqual(c.documento.status, DocumentoFiscalStatus.XML_INDISPONIVEL);
-    console.log('✓ fluxo inicial com 596: ainda encerra XML_INDISPONIVEL');
+    console.log('✓ fluxo inicial com 596: consChNFe e, sem procNFe, encerra XML_INDISPONIVEL');
   }
 
   // 6) Já sincronizado → ignora
@@ -344,10 +345,11 @@ async function run() {
       confirmado: true,
       modoRecuperacaoXml: true
     });
-    assert.strictEqual(r.encerrado, true);
-    assert.strictEqual(c.getConsultasDist(), 0);
     assert.strictEqual(c.getManifestacoes(), 0);
-    console.log('✓ XML_INDISPONIVEL legítimo: não reinicia DistDFe');
+    assert.strictEqual(c.getConsultasDist(), 0);
+    assert.ok(c.getConsultasChave() >= 1);
+    assert.strictEqual(c.documento.status, DocumentoFiscalStatus.XML_INDISPONIVEL);
+    console.log('✓ XML_INDISPONIVEL: não remanifesta DistDFe; tenta consChNFe');
   }
 
   console.log('\nRC3.3.6 homologada com sucesso.\n');

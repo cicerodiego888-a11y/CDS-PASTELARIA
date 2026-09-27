@@ -6,7 +6,9 @@
 
 const express = require('express');
 const {
-  resolverEmpresaIdParaBancario,
+  resolverContextoBancario,
+  resolverEmpresaFiltroLeitura,
+  resolverEmpresaEscritaConta,
   statusDeErroEmpresaBancario
 } = require('../motores/bancario/BancarioEmpresaContextoService');
 const { obterMotorBancario } = require('../motores/bancario/MotorBancarioService');
@@ -16,10 +18,12 @@ function motorDe(req, deps) {
   return deps.obterMotorBancario ? deps.obterMotorBancario({ db }) : obterMotorBancario({ db });
 }
 
-async function resolverEmpresa(req, deps) {
+async function resolverContexto(req, deps) {
   const db = deps.db || require('../database');
-  const resolver = deps.resolverEmpresaIdParaBancario || resolverEmpresaIdParaBancario;
-  return resolver(req, { db, ...deps });
+  if (typeof deps.resolverContextoBancario === 'function') {
+    return deps.resolverContextoBancario(req, { db, ...deps });
+  }
+  return resolverContextoBancario(req, { db, ...deps });
 }
 
 function responderErro(res, err) {
@@ -34,11 +38,11 @@ function responderErro(res, err) {
   return res.status(status).json(body);
 }
 
-async function comEmpresa(req, res, deps, fn) {
+async function comContexto(req, res, deps, fn) {
   try {
     let ctx;
     try {
-      ctx = await resolverEmpresa(req, deps);
+      ctx = await resolverContexto(req, deps);
     } catch (empErr) {
       return res.status(statusDeErroEmpresaBancario(empErr)).json({
         error: empErr.message,
@@ -47,10 +51,43 @@ async function comEmpresa(req, res, deps, fn) {
       });
     }
     const motor = motorDe(req, deps);
-    return await fn(motor, ctx.empresaId);
+    return await fn(motor, ctx);
   } catch (err) {
     return responderErro(res, err);
   }
+}
+
+async function empresaIdDaConta(motor, ctx, contaId) {
+  if (ctx.visao === 'todas') {
+    const conta = await motor.obterConta({ id: contaId, empresaIds: ctx.empresaIds });
+    return conta.empresa_id;
+  }
+  return ctx.empresaId;
+}
+
+async function comEmpresa(req, res, deps, fn) {
+  return comContexto(req, res, deps, async (motor, ctx) => {
+    const contaId = req.params && req.params.id;
+    const empresaId = contaId != null
+      ? await empresaIdDaConta(motor, ctx, contaId)
+      : ctx.empresaId;
+    return fn(motor, empresaId, ctx);
+  });
+}
+
+async function empresaIdDaConfig(motor, ctx, configId) {
+  if (ctx.visao === 'todas') {
+    const cfg = await motor.obterConfiguracaoIntegracao({ id: configId, empresaIds: ctx.empresaIds });
+    return cfg.empresa_id;
+  }
+  return ctx.empresaId;
+}
+
+async function comConfiguracao(req, res, deps, fn) {
+  return comContexto(req, res, deps, async (motor, ctx) => {
+    const empresaId = await empresaIdDaConfig(motor, ctx, req.params.id);
+    return fn(motor, empresaId, ctx);
+  });
 }
 
 function criarRouter(deps = {}) {
@@ -104,9 +141,14 @@ function criarRouter(deps = {}) {
     }
   });
 
-  router.get('/contas', perm, (req, res) => comEmpresa(req, res, deps, async (motor, empresaId) => {
-    const contas = await motor.listarContas({ empresaId });
-    return res.json({ empresa_id: empresaId, contas });
+  router.get('/contas', perm, (req, res) => comContexto(req, res, deps, async (motor, ctx) => {
+    const filtro = resolverEmpresaFiltroLeitura(ctx, req);
+    const contas = filtro.empresaId != null
+      ? await motor.listarContas({ empresaId: filtro.empresaId })
+      : await motor.listarContas({ empresaIds: filtro.empresaIds });
+    const payload = { visao: ctx.visao, contas };
+    if (ctx.visao === 'empresa') payload.empresa_id = ctx.empresaId;
+    return res.json(payload);
   }));
 
   router.get('/contas/:id', perm, (req, res) => comEmpresa(req, res, deps, async (motor, empresaId) => {
@@ -114,7 +156,8 @@ function criarRouter(deps = {}) {
     return res.json(conta);
   }));
 
-  router.post('/contas', perm, (req, res) => comEmpresa(req, res, deps, async (motor, empresaId) => {
+  router.post('/contas', perm, (req, res) => comContexto(req, res, deps, async (motor, ctx) => {
+    const empresaId = resolverEmpresaEscritaConta(ctx, req);
     const body = req.body || {};
     const conta = await motor.criarConta({
       ...body,
@@ -125,7 +168,9 @@ function criarRouter(deps = {}) {
   }));
 
   router.put('/contas/:id', perm, (req, res) => comEmpresa(req, res, deps, async (motor, empresaId) => {
-    const body = req.body || {};
+    const body = Object.assign({}, req.body || {});
+    delete body.empresa_id;
+    delete body.empresaId;
     const conta = await motor.atualizarConta({
       ...body,
       id: req.params.id,
@@ -182,10 +227,15 @@ function criarRouter(deps = {}) {
   }));
 
   router.post('/contas/:id/sincronizar', perm, (req, res) => comEmpresa(req, res, deps, async (motor, empresaId) => {
+    const body = req.body || {};
+    // empresa_id no body/query NÃO altera propriedade — empresaId vem do contexto
     const out = await motor.sincronizarConta({
       empresaId,
       id: req.params.id,
-      conta_bancaria_id: req.params.id
+      conta_bancaria_id: req.params.id,
+      begin_date: body.begin_date,
+      end_date: body.end_date,
+      reprocessarCatalogo: body.reprocessarCatalogo === true
     });
     return res.json(out);
   }));
@@ -200,19 +250,38 @@ function criarRouter(deps = {}) {
     return res.json(out);
   }));
 
+  router.get('/contas/:id/saldo-real', perm, (req, res) => comEmpresa(req, res, deps, async (motor, empresaId) => {
+    try {
+      const out = await motor.consultarSaldoReal({
+        empresaId,
+        id: req.params.id,
+        conta_bancaria_id: req.params.id
+      });
+      return res.json(out);
+    } catch (err) {
+      if (err && err.payload) {
+        return res.status(err.statusCode || 409).json(err.payload);
+      }
+      throw err;
+    }
+  }));
+
   router.get('/contas/:id/extrato', perm, (req, res) => comEmpresa(req, res, deps, async (motor, empresaId) => {
     const q = req.query || {};
-    const transacoes = await motor.listarTransacoes({
+    const out = await motor.consultarExtratoConta({
       empresaId,
+      id: req.params.id,
       conta_bancaria_id: req.params.id,
+      fonte: q.fonte || q.origem,
       data_inicio: q.data_inicio,
       data_fim: q.data_fim,
       direcao: q.direcao,
       tipo: q.tipo,
       limite: q.limite,
-      offset: q.offset
+      offset: q.offset,
+      cursor: q.cursor
     });
-    return res.json({ empresa_id: empresaId, conta_bancaria_id: Number(req.params.id), transacoes });
+    return res.json(out);
   }));
 
   router.get('/transacoes', perm, (req, res) => comEmpresa(req, res, deps, async (motor, empresaId) => {
@@ -255,6 +324,20 @@ function criarRouter(deps = {}) {
     return res.json({ empresa_id: empresaId, registros });
   }));
 
+  router.get('/conciliacoes/pendentes', perm, (req, res) => comEmpresa(req, res, deps, async (motor, empresaId) => {
+    const q = req.query || {};
+    const pendentes = await motor.listarPendentesConciliacao({
+      empresaId,
+      conta_bancaria_id: q.conta_bancaria_id,
+      data_inicio: q.data_inicio,
+      data_fim: q.data_fim,
+      direcao: q.direcao,
+      provider: q.provider || q.origem || q.external_source,
+      status_conciliacao: q.status_conciliacao || q.status
+    });
+    return res.json({ empresa_id: empresaId, pendentes });
+  }));
+
   router.get('/conciliacoes/sugestoes', perm, (req, res) => comEmpresa(req, res, deps, async (motor, empresaId) => {
     const q = req.query || {};
     const sugestoes = await motor.listarSugestoesConciliacao({
@@ -295,6 +378,11 @@ function criarRouter(deps = {}) {
     return res.json(out);
   }));
 
+  router.get('/transacoes/:id/matching', perm, (req, res) => comEmpresa(req, res, deps, async (motor, empresaId) => {
+    const out = await motor.obterMatchingTransacao({ empresaId, id: req.params.id });
+    return res.json(out);
+  }));
+
   router.get('/conciliacoes', perm, (req, res) => comEmpresa(req, res, deps, async (motor, empresaId) => {
     const q = req.query || {};
     const conciliacoes = await motor.listarConciliacoes({
@@ -314,18 +402,57 @@ function criarRouter(deps = {}) {
     return res.json(conc);
   }));
 
+  router.get('/transacoes/:id/conciliacoes', perm, (req, res) => comEmpresa(req, res, deps, async (motor, empresaId) => {
+    const out = await motor.obterConciliacoesPorTransacao({
+      empresaId,
+      id: req.params.id,
+      transacao_bancaria_id: req.params.id
+    });
+    return res.json(out);
+  }));
+
   router.post('/conciliacoes', perm, (req, res) => comEmpresa(req, res, deps, async (motor, empresaId) => {
     const body = req.body || {};
     const conc = await motor.conciliarTransacao({
       ...body,
       empresaId,
-      empresa_id: empresaId
+      empresa_id: empresaId,
+      origem_conciliacao: body.origem_conciliacao || 'MANUAL'
+    });
+    return res.status(201).json(conc);
+  }));
+
+  router.post('/transacoes/:id/conciliacoes', perm, (req, res) => comEmpresa(req, res, deps, async (motor, empresaId) => {
+    const body = req.body || {};
+    const conc = await motor.conciliarTransacao({
+      ...body,
+      empresaId,
+      empresa_id: empresaId,
+      transacao_bancaria_id: req.params.id,
+      origem_conciliacao: body.origem_conciliacao || 'MANUAL'
     });
     return res.status(201).json(conc);
   }));
 
   router.post('/conciliacoes/:id/desconciliar', perm, (req, res) => comEmpresa(req, res, deps, async (motor, empresaId) => {
-    const conc = await motor.desconciliarTransacao({ empresaId, id: req.params.id });
+    const body = req.body || {};
+    const conc = await motor.desconciliarTransacao({
+      empresaId,
+      id: req.params.id,
+      motivo: body.motivo,
+      observacao: body.observacao
+    });
+    return res.json(conc);
+  }));
+
+  router.post('/conciliacoes/:id/cancelar', perm, (req, res) => comEmpresa(req, res, deps, async (motor, empresaId) => {
+    const body = req.body || {};
+    const conc = await motor.desconciliarTransacao({
+      empresaId,
+      id: req.params.id,
+      motivo: body.motivo,
+      observacao: body.observacao
+    });
     return res.json(conc);
   }));
 
@@ -391,6 +518,149 @@ function criarRouter(deps = {}) {
       empresa_id: empresaId
     });
     return res.json(cfg);
+  }));
+
+  router.get('/configuracoes/:id/credenciais', perm, (req, res) => comConfiguracao(req, res, deps, async (motor, empresaId) => {
+    const status = await motor.obterStatusCredenciaisIntegracao({ empresaId, id: req.params.id });
+    return res.json(status);
+  }));
+
+  router.post('/configuracoes/:id/credenciais', perm, (req, res) => comConfiguracao(req, res, deps, async (motor, empresaId) => {
+    const body = req.body || {};
+    const status = await motor.configurarCredenciaisProvider({
+      empresaId,
+      id: req.params.id,
+      client_id: body.client_id,
+      client_secret: body.client_secret,
+      certificate: body.certificate || body.certificado,
+      private_key: body.private_key || body.privateKey,
+      ca: body.ca || body.certificate_authority,
+      ambiente: body.ambiente
+    });
+    return res.json({
+      ok: true,
+      provider: status.provider,
+      ambiente: status.ambiente,
+      client_id: status.client_id,
+      client_id_configurado: status.client_id_configurado,
+      secret_configurado: status.secret_configurado,
+      certificado_configurado: status.certificado_configurado === true,
+      private_key_configurado: status.private_key_configurado === true,
+      ca_configurado: status.ca_configurado === true,
+      status_integracao: status.status_integracao || null,
+      certificado_valido_ate: status.certificado_valido_ate || null,
+      certificado_expirado: status.certificado_expirado === true,
+      certificado_subject_cn: status.certificado_subject_cn || null,
+      mtls_requerido: status.mtls_requerido === true,
+      authentication: status.authentication || null
+    });
+  }));
+
+  router.delete('/configuracoes/:id/credenciais', perm, (req, res) => comConfiguracao(req, res, deps, async (motor, empresaId) => {
+    const status = await motor.removerCredenciaisProvider({ empresaId, id: req.params.id });
+    return res.json({
+      ok: true,
+      provider: status.provider,
+      ambiente: status.ambiente,
+      client_id: status.client_id,
+      client_id_configurado: status.client_id_configurado,
+      secret_configurado: status.secret_configurado,
+      certificado_configurado: status.certificado_configurado === true,
+      private_key_configurado: status.private_key_configurado === true,
+      ca_configurado: status.ca_configurado === true
+    });
+  }));
+
+  router.post('/configuracoes/:id/conexao/testar', perm, (req, res) => comConfiguracao(req, res, deps, async (motor, empresaId) => {
+    const cfg = await motor.obterConfiguracaoIntegracao({ empresaId, id: req.params.id });
+    if (String(cfg.provider || '').toUpperCase() !== 'ITAU') {
+      return res.status(409).json({
+        success: false,
+        provider: cfg.provider,
+        authentication: null,
+        mtls: false,
+        authenticated: false,
+        errorCode: 'PROVIDER_INCOMPATIVEL',
+        message: 'Teste de conexão Itaú exige provider ITAU.'
+      });
+    }
+    const out = await motor.testarConexaoItau({ empresaId, id: req.params.id });
+    const bodyOut = {
+      success: out.success === true,
+      provider: out.provider || 'ITAU',
+      environment: out.environment || null,
+      authentication: out.authentication || 'OAUTH2_CLIENT_CREDENTIALS',
+      mtls: out.mtls === true,
+      authenticated: out.authenticated === true,
+      message: out.message || null,
+      errorCode: out.errorCode || null,
+      token_from_cache: out.token_from_cache === true,
+      mtls_requerido: out.mtls_requerido === true
+    };
+    const statusHttp = out.success ? 200 : (
+      /AUSENTE|INVALIDOS|EXPIRADO|CREDENCIAIS/i.test(String(out.errorCode || '')) ? 409 : 401
+    );
+    return res.status(statusHttp).json(bodyOut);
+  }));
+
+  router.post('/configuracoes/:id/oauth/autorizar', perm, (req, res) => comConfiguracao(req, res, deps, async (motor, empresaId) => {
+    const out = await motor.iniciarOAuthMercadoPago({
+      empresaId,
+      id: req.params.id,
+      usuarioId: req.user && (req.user.id || req.user.usuario_id)
+    });
+    return res.json({
+      ok: true,
+      authorization_url: out.authorization_url
+    });
+  }));
+
+  router.get('/configuracoes/:id/oauth/status', perm, (req, res) => comConfiguracao(req, res, deps, async (motor, empresaId) => {
+    const status = await motor.obterStatusOAuthMercadoPago({ empresaId, id: req.params.id });
+    return res.json({
+      status: status.status,
+      scope: status.scope,
+      expires_at: status.expires_at,
+      live_mode: status.live_mode,
+      autorizado: status.autorizado,
+      client_id_configurado: status.client_id_configurado,
+      secret_configurado: status.secret_configurado
+    });
+  }));
+
+  router.post('/configuracoes/:id/oauth/desconectar', perm, (req, res) => comConfiguracao(req, res, deps, async (motor, empresaId) => {
+    const status = await motor.desconectarOAuthMercadoPago({ empresaId, id: req.params.id });
+    return res.json({
+      ok: true,
+      status: status.status,
+      autorizado: status.autorizado
+    });
+  }));
+
+  router.post('/configuracoes/:id/provider/testar-leitura', perm, (req, res) => comConfiguracao(req, res, deps, async (motor, empresaId) => {
+    const body = req.body || {};
+    // empresa_id no body NÃO altera propriedade — empresaId vem do contexto
+    const out = await motor.testarLeituraProviderMercadoPago({
+      empresaId,
+      id: req.params.id,
+      begin_date: body.begin_date,
+      end_date: body.end_date,
+      persistir: body.persistir === true
+    });
+    return res.json({
+      ok: out.ok === true,
+      provider: out.provider,
+      origem: out.origem,
+      persistiu: out.persistiu === true,
+      status_leitura: out.status_leitura,
+      mensagem: out.mensagem || null,
+      periodo: out.periodo || null,
+      saldo: out.saldo,
+      movimentacoes: out.movimentacoes || [],
+      rejeitadas: out.rejeitadas || [],
+      relatorio: out.relatorio || null,
+      persistencia: out.persistencia || null
+    });
   }));
 
   router.patch('/configuracoes/:id/ativar', perm, (req, res) => comEmpresa(req, res, deps, async (motor, empresaId) => {

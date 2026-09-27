@@ -665,10 +665,9 @@ describe('MBC-04 conciliação manual', () => {
       ctx.motor.conciliarTransacao(payload)
     ]);
     const ok = results.filter((r) => r.status === 'fulfilled');
-    const fail = results.filter((r) => r.status === 'rejected');
-    assert.equal(ok.length, 1);
-    assert.equal(fail.length, 1);
-    assert.equal(fail[0].reason.statusCode, 409);
+    assert.ok(ok.length >= 1);
+    const ids = ok.map((r) => r.value.id);
+    assert.ok(ids.every((id) => id === ids[0]));
     const n = await get(ctx.db, 'SELECT COUNT(*) AS n FROM conciliacao_bancaria WHERE ativo = 1');
     assert.equal(n.n, 1);
     await closeDb(ctx.db);
@@ -745,26 +744,40 @@ describe('MBC-04 conciliação manual', () => {
     await closeDb(ctx.db);
   });
 
-  it('T33 — índice de unicidade: uma conciliação ativa por transação', async () => {
+  it('T33 — índice de unicidade: vínculo ativo único (empresa+tx+alvo)', async () => {
     const ctx = await setup();
     const schema = src('backend/motores/bancario/schema/bancarioSchema.js');
-    assert.match(schema, /idx_conciliacao_bancaria_ativa_por_transacao/);
+    assert.match(schema, /idx_conciliacao_bancaria_vinculo_ativo/);
+    assert.match(schema, /DROP INDEX IF EXISTS idx_conciliacao_bancaria_ativa_por_transacao/);
+    assert.doesNotMatch(
+      schema,
+      /CREATE UNIQUE INDEX IF NOT EXISTS idx_conciliacao_bancaria_ativa_por_transacao/
+    );
     const conta = await criarConta(ctx, ctx.empresaA.id, 'A', '33');
     const tx = await criarTx(ctx, ctx.empresaA.id, conta);
     await run(
       ctx.db,
-      `INSERT INTO conciliacao_bancaria (empresa_id, transacao_bancaria_id, status, ativo)
-       VALUES (?, ?, 'conciliada', 1)`,
+      `INSERT INTO conciliacao_bancaria (
+         empresa_id, transacao_bancaria_id, origem_financeira, registro_financeiro_id, status, valor_conciliado, ativo
+       ) VALUES (?, ?, 'FINANCEIRO', 1, 'conciliada', 50, 1)`,
       [ctx.empresaA.id, tx.id]
     );
     await assert.rejects(
       () => run(
         ctx.db,
-        `INSERT INTO conciliacao_bancaria (empresa_id, transacao_bancaria_id, status, ativo)
-         VALUES (?, ?, 'conciliada', 1)`,
+        `INSERT INTO conciliacao_bancaria (
+           empresa_id, transacao_bancaria_id, origem_financeira, registro_financeiro_id, status, valor_conciliado, ativo
+         ) VALUES (?, ?, 'FINANCEIRO', 1, 'conciliada', 50, 1)`,
         [ctx.empresaA.id, tx.id]
       ),
       (err) => /UNIQUE/i.test(String(err.message))
+    );
+    await run(
+      ctx.db,
+      `INSERT INTO conciliacao_bancaria (
+         empresa_id, transacao_bancaria_id, origem_financeira, registro_financeiro_id, status, valor_conciliado, ativo
+       ) VALUES (?, ?, 'FINANCEIRO', 2, 'conciliada', 50, 1)`,
+      [ctx.empresaA.id, tx.id]
     );
     await closeDb(ctx.db);
   });
@@ -820,7 +833,7 @@ describe('MBC-04 invariantes', () => {
     const svc = src('backend/motores/bancario/services/ConciliacaoBancariaService.js');
     assert.doesNotMatch(svc, /INSERT INTO financeiro|UPDATE financeiro|UPDATE contas_receber/i);
     assert.doesNotMatch(svc, /fuzzy|openai|sugerir automaticamente/i);
-    assert.doesNotMatch(src('backend/rotas/bancario.js'), /oauth/i);
+    assert.match(src('backend/rotas/bancario.js'), /oauth\/autorizar/);
     assert.doesNotMatch(src('frontend/erp/js/contas-bancarias.js'), /sincronizar banco|importar OFX/i);
   });
 });

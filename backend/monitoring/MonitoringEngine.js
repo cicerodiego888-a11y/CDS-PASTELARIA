@@ -55,7 +55,10 @@ class MonitoringEngine {
   async summary(context = {}) {
     const metrics = criarMonitoringMetrics();
     const competenciaKey = context.competencia?.competencia || 'atual';
-    const empresaKey = context.empresaId != null ? String(context.empresaId) : 'none';
+    const empresaCtx = context.contextoEmpresa && context.contextoEmpresa.empresaId != null
+      ? context.contextoEmpresa.empresaId
+      : context.empresaId;
+    const empresaKey = empresaCtx != null ? String(empresaCtx) : 'none';
     const cacheKey = `summary:v5:${competenciaKey}:emp:${empresaKey}`;
     // Cache desabilitado em M1–M4 (estrutura); ações dependem de contexto/usuário
     metrics.markCacheHit(false);
@@ -74,6 +77,7 @@ class MonitoringEngine {
     const indicadoresFiscais = fiscalData.indicadoresFiscais || {};
     const payload = {
       competencia: context.competencia || null,
+      contextoEmpresa: context.contextoEmpresa || null,
       indicadoresFiscais,
       fiscal: {
         vendas: fiscalData.vendas || {},

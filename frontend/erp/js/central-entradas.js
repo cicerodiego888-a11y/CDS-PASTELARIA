@@ -9,6 +9,7 @@ function centralUx() {
 }
 
 const centralEntradasState = {
+    periodoPadrao: null,
     pagina: 1,
     limite: 20,
     total: 0,
@@ -425,7 +426,7 @@ async function garantirEmpresaAtivaParaCentral() {
         }
     }
     if (atual && lista.some((e) => Number(e.id) === Number(atual))) return;
-    const proxima = lista[0];
+    const proxima = (typeof Ctx.empresaPadrao === 'function' ? Ctx.empresaPadrao(lista) : null) || lista[0];
     await Ctx.selecionar(proxima.id);
     if (typeof showNotification === 'function') {
         const nome = proxima.nome_fantasia || proxima.razao_social || ('empresa ' + proxima.id);
@@ -592,6 +593,9 @@ async function aplicarVistaEmpresaCentral(valor) {
     if (Ctx && typeof Ctx.selecionar === 'function' && contextoAtual !== id) {
         await Ctx.selecionar(id);
     }
+    if (contextoAtual !== id) {
+        await aplicarPeriodoPadraoCentral();
+    }
     if (!mesmoContexto) {
         await recarregarDadosCentralAposTrocaEmpresa();
     }
@@ -629,6 +633,26 @@ function invalidarEstadoDadosCentral() {
     try {
         localStorage.removeItem('central_entradas_kpi_snapshot_v1');
     } catch (_e) { /* ignore */ }
+}
+
+/**
+ * CENTRAL-ENTRADAS-03 — período padrão da empresa ativa define apenas o estado
+ * inicial de data_emissao_inicio/fim; o usuário pode alterar as datas livremente.
+ */
+async function aplicarPeriodoPadraoCentral() {
+    const ini = document.getElementById('centralFiltroDataInicio');
+    const fim = document.getElementById('centralFiltroDataFim');
+    if (!ini || !fim) return null;
+    try {
+        const cfg = await centralEntradasFetch('/configuracao/periodo-padrao');
+        centralEntradasState.periodoPadrao = cfg;
+        ini.value = cfg?.intervalo?.dataEmissaoInicio || '';
+        fim.value = cfg?.intervalo?.dataEmissaoFim || '';
+        return cfg;
+    } catch (_e) {
+        centralEntradasState.periodoPadrao = null;
+        return null;
+    }
 }
 
 async function recarregarDadosCentralAposTrocaEmpresa() {
@@ -2085,7 +2109,9 @@ function badgeCertStatusCfg(status) {
         VENCIDO: 'error',
         AUSENTE: 'error',
         ARQUIVO_AUSENTE: 'error',
-        ERRO: 'error'
+        ERRO: 'error',
+        EMPRESA_NAO_SELECIONADA: 'warn',
+        CONTEXTO_NAO_RESOLVIDO: 'error'
     };
     const labels = {
         OK: 'Válido',
@@ -2093,7 +2119,9 @@ function badgeCertStatusCfg(status) {
         VENCIDO: 'Vencido',
         AUSENTE: 'Ausente',
         ARQUIVO_AUSENTE: 'Arquivo ausente',
-        ERRO: 'Erro'
+        ERRO: 'Erro',
+        EMPRESA_NAO_SELECIONADA: 'Empresa não selecionada',
+        CONTEXTO_NAO_RESOLVIDO: 'Contexto não resolvido'
     };
     const codigo = String(status || 'AUSENTE');
     return badgeCfgCentral(labels[codigo] || codigo, mapa[codigo] || 'neutral');
@@ -2107,11 +2135,75 @@ function formatarMsCfgCentral(ms) {
     return `${(valor / 60000).toFixed(1)} min`;
 }
 
+/** CE-06 — EMPRESA / CNPJ / AMBIENTE / CERTIFICADO da empresa selecionada no seletor global. */
+function renderContextoEmpresaCfg(painel) {
+    const ctx = painel.empresaContexto;
+    if (!ctx) return '';
+    const empresaSel = (typeof CdsEmpresaContexto !== 'undefined' && CdsEmpresaContexto.lerEmpresa)
+        ? CdsEmpresaContexto.lerEmpresa()
+        : null;
+    if (ctx.estado === 'EMPRESA_NAO_SELECIONADA') {
+        return `
+            <div class="alert alert-warning py-2 mb-3" id="centralCfgEmpresaContexto">
+                <i class="fas fa-building me-1"></i>
+                ${escapeHtmlCentralEntradas(ctx.mensagem || 'Selecione uma empresa no seletor do topo para visualizar ambiente e certificado.')}
+            </div>`;
+    }
+    const ctxOp = painel.contextoEmpresa && Number(painel.contextoEmpresa.empresaId) === Number(ctx.empresaId)
+        ? painel.contextoEmpresa
+        : null;
+    const nomeEmpresa = ctxOp && (ctxOp.razaoSocial || ctxOp.nomeFantasia)
+        ? (ctxOp.razaoSocial || ctxOp.nomeFantasia)
+        : (empresaSel && Number(empresaSel.id) === Number(ctx.empresaId)
+            ? (empresaSel.nome_fantasia || empresaSel.razao_social || `Empresa ${ctx.empresaId}`)
+            : `Empresa ${ctx.empresaId}`);
+    const amb = ctx.ambiente || {};
+    const cert = ctx.certificado || {};
+    const alerta = ctx.estado !== 'OK'
+        ? `<div class="alert alert-danger py-2 mt-2 mb-0">${escapeHtmlCentralEntradas(ctx.mensagem || 'Contexto fiscal não resolvido.')}</div>`
+        : '';
+    return `
+        <div class="central-cfg-card mb-3" id="centralCfgEmpresaContexto">
+            <div class="row g-3">
+                <div class="col-md-3">
+                    <div class="central-cfg-stat">
+                        <div class="central-cfg-stat__label">Empresa</div>
+                        <div class="central-cfg-stat__value">${escapeHtmlCentralEntradas(nomeEmpresa)}</div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="central-cfg-stat">
+                        <div class="central-cfg-stat__label">CNPJ</div>
+                        <div class="central-cfg-stat__value">${escapeHtmlCentralEntradas(ctx.cnpj || '—')}</div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="central-cfg-stat">
+                        <div class="central-cfg-stat__label">Ambiente</div>
+                        <div class="central-cfg-stat__value">${escapeHtmlCentralEntradas(amb.codigo ? `${amb.label} (${amb.codigo})` : (amb.label || '—'))}</div>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <div class="central-cfg-stat">
+                        <div class="central-cfg-stat__label">Certificado</div>
+                        <div class="central-cfg-stat__value">${badgeCertStatusCfg(cert.status)} ${escapeHtmlCentralEntradas(cert.arquivo || cert.nome || '')}</div>
+                    </div>
+                </div>
+            </div>
+            ${alerta}
+        </div>`;
+}
+
 function renderAbaAmbienteCfg(painel) {
     const amb = painel.ambiente || {};
+    const semContexto = amb.codigo == null && painel.empresaContexto;
     const codigo = Number(amb.codigo) === 1 ? 1 : 2;
-    const origemLabel = amb.origemLabel || 'Centro de Configurações (fonte oficial)';
+    const origemLabel = amb.origemLabel || 'Configuração fiscal';
+    const valorAmbiente = semContexto
+        ? (amb.label || 'Contexto não resolvido')
+        : (codigo === 1 ? 'Produção (1)' : 'Homologação (2)');
     return `
+        ${renderContextoEmpresaCfg(painel)}
         <div class="row g-3">
             <div class="col-lg-7">
                 <div class="central-cfg-card">
@@ -2119,13 +2211,13 @@ function renderAbaAmbienteCfg(painel) {
                         <div class="central-cfg-card__title mb-0"><i class="fas fa-globe me-1"></i> Ambiente SEFAZ</div>
                         <div class="central-cfg-meta">
                             ${badgeCfgCentral('Somente leitura', 'neutral')}
-                            ${badgeCfgCentral('RC3.1 fonte única', 'ok')}
+                            ${badgeCfgCentral(painel.empresaContexto ? 'Por empresa' : 'Configuração global', 'ok')}
                         </div>
                     </div>
                     <div class="central-cfg-disabled-note mb-3">
-                        Ambiente e UF emitente vêm de <strong>Centro de Configurações → Fiscal</strong>
-                        (<span class="text-muted">(${escapeHtmlCentralEntradas(origemLabel)})</span>.
-                        A Central apenas consome — altere a fonte oficial para mudar Produção/Homologação.
+                        Ambiente e UF emitente vêm da configuração fiscal
+                        (<span class="text-muted">${escapeHtmlCentralEntradas(origemLabel)}</span>).
+                        A Central apenas consome — altere a configuração fiscal da empresa para mudar Produção/Homologação.
                     </div>
                     <div class="mb-3">
                         <button type="button" class="btn btn-primary btn-sm" id="btnCentralAbrirConfigFiscal">
@@ -2136,7 +2228,7 @@ function renderAbaAmbienteCfg(painel) {
                         <div class="col-md-4">
                             <label class="central-cfg-label">Ambiente</label>
                             <input type="text" class="form-control" id="cfgAmbienteReadonly" readonly disabled
-                                value="${escapeHtmlCentralEntradas(codigo === 1 ? 'Produção (1)' : 'Homologação (2)')}">
+                                value="${escapeHtmlCentralEntradas(valorAmbiente)}">
                         </div>
                         <div class="col-md-4">
                             <label class="central-cfg-label" for="cfgUf">UF emitente</label>
@@ -2155,12 +2247,12 @@ function renderAbaAmbienteCfg(painel) {
                 <div class="central-cfg-card">
                     <div class="central-cfg-card__title"><i class="fas fa-info-circle me-1"></i> Metadados</div>
                     <div class="central-cfg-meta mb-3">
-                        ${badgeCfgCentral(amb.label || (codigo === 1 ? 'Produção' : 'Homologação'), codigo === 1 ? 'ok' : 'info')}
+                        ${badgeCfgCentral(amb.label || (codigo === 1 ? 'Produção' : 'Homologação'), semContexto ? 'warn' : (codigo === 1 ? 'ok' : 'info'))}
                         ${badgeCfgCentral(painel.unificacaoFiscal || 'RC3.1', 'ok')}
                         ${badgeCfgCentral(painel.versaoConfiguracao || 'RC4', 'prep')}
                     </div>
                     <div class="central-cfg-stat mb-2">
-                        <div class="central-cfg-stat__label">Fonte oficial</div>
+                        <div class="central-cfg-stat__label">Origem do ambiente</div>
                         <div class="central-cfg-stat__value">${escapeHtmlCentralEntradas(origemLabel)}</div>
                     </div>
                     <div class="central-cfg-stat mb-2">
@@ -2829,6 +2921,67 @@ function renderAbaDiagnosticoCfg(painel) {
         </div>`;
 }
 
+function renderAbaPeriodoPadraoCfg() {
+    const cfg = centralEntradasState.periodoPadrao;
+    if (!cfg) {
+        return '<div class="alert alert-warning py-2 mb-0">Não foi possível carregar o período padrão da empresa ativa.</div>';
+    }
+    const emp = empresaPermitidaPorIdCentral(cfg.empresaId);
+    const empNome = emp ? nomeEmpresaUiCentral(emp) : `Empresa #${cfg.empresaId}`;
+    const opcoes = (cfg.opcoes || []).map((o) => `
+        <div class="form-check mb-2">
+            <input class="form-check-input" type="radio" name="cfgPeriodoPadrao"
+                id="cfgPeriodoPadrao_${escapeHtmlCentralEntradas(o.codigo)}"
+                value="${escapeHtmlCentralEntradas(o.codigo)}" ${o.codigo === cfg.periodoPadrao ? 'checked' : ''}>
+            <label class="form-check-label" for="cfgPeriodoPadrao_${escapeHtmlCentralEntradas(o.codigo)}">
+                <span class="fw-semibold">${escapeHtmlCentralEntradas(o.label)}</span>
+                <span class="d-block small text-muted">${escapeHtmlCentralEntradas(o.descricao)}</span>
+            </label>
+        </div>`).join('');
+    return `
+        <div class="row g-3">
+            <div class="col-lg-8">
+                <div class="central-cfg-card">
+                    <div class="central-cfg-card__title"><i class="fas fa-calendar-alt me-1"></i> PERÍODO PADRÃO</div>
+                    <p class="small text-muted mb-3">
+                        Empresa: <strong>${escapeHtmlCentralEntradas(empNome)}</strong><br>
+                        Configuração atual: <strong>${escapeHtmlCentralEntradas(cfg.periodoPadraoLabel || cfg.periodoPadrao)}</strong>${cfg.origem === 'PADRAO_NOVO_CLIENTE' ? ' (padrão para novo cliente)' : ''}
+                    </p>
+                    ${opcoes}
+                    <p class="small text-muted mt-2 mb-3">
+                        Define somente as datas iniciais ao abrir a Central nesta empresa.
+                        Nenhum documento é ocultado ou apagado e as datas podem ser alteradas manualmente.
+                    </p>
+                    <button type="button" class="btn btn-sm btn-primary" id="cfgBtnSalvarPeriodoPadrao">
+                        <i class="fas fa-save me-1"></i> Salvar
+                    </button>
+                    <div id="cfgPeriodoPadraoResultado" class="mt-2"></div>
+                </div>
+            </div>
+        </div>`;
+}
+
+async function salvarPeriodoPadraoCentral() {
+    const selecionado = document.querySelector('input[name="cfgPeriodoPadrao"]:checked');
+    if (!selecionado) return;
+    const esperado = centralEntradasState.periodoPadrao?.empresaId;
+    try {
+        const cfg = await centralEntradasFetch('/configuracao/periodo-padrao', {
+            method: 'PUT',
+            body: JSON.stringify({ periodoPadrao: selecionado.value })
+        });
+        if (esperado && Number(cfg.empresaId) !== Number(esperado)) {
+            throw new Error('A empresa ativa mudou durante o salvamento. Reabra as configurações.');
+        }
+        centralEntradasState.periodoPadrao = cfg;
+        const pane = document.querySelector('[data-cfg-pane="periodo"]');
+        if (pane) pane.innerHTML = renderAbaPeriodoPadraoCfg();
+        exibirResultadoCfg('cfgPeriodoPadraoResultado', { sucesso: true }, `Período padrão salvo: ${cfg.periodoPadraoLabel}.`);
+    } catch (error) {
+        exibirResultadoCfg('cfgPeriodoPadraoResultado', { sucesso: false, mensagem: error.message });
+    }
+}
+
 function renderAbaAvancadoCfg(painel) {
     const a = painel.avancado || {};
     return `
@@ -2895,6 +3048,7 @@ function renderPainelConfigCentral(painel) {
         { id: 'sefaz', icon: 'fa-network-wired', label: 'SEFAZ' },
         { id: 'certificado', icon: 'fa-certificate', label: 'Certificado' },
         { id: 'sincronizacao', icon: 'fa-sync-alt', label: 'Sincronização' },
+        { id: 'periodo', icon: 'fa-calendar-alt', label: 'Período padrão' },
         { id: 'diagnostico', icon: 'fa-stethoscope', label: 'Diagnóstico' },
         { id: 'avancado', icon: 'fa-cogs', label: 'Avançado' }
     ];
@@ -2904,6 +3058,7 @@ function renderPainelConfigCentral(painel) {
         sefaz: renderAbaSefazCfg(painel),
         certificado: renderAbaCertificadoCfg(painel),
         sincronizacao: renderAbaSincronizacaoCfg(painel),
+        periodo: renderAbaPeriodoPadraoCfg(),
         diagnostico: renderAbaDiagnosticoCfg(painel),
         avancado: renderAbaAvancadoCfg(painel)
     };
@@ -3000,12 +3155,17 @@ function exibirResultadoCfg(elId, resultado, okFallback = 'OK') {
 
 async function postConfigAcaoCentral(path) {
     const token = localStorage.getItem('token');
+    const headers = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`
+    };
+    const emp = (typeof CdsEmpresaContexto !== 'undefined' && CdsEmpresaContexto.lerEmpresaId)
+        ? CdsEmpresaContexto.lerEmpresaId()
+        : null;
+    if (emp) headers['X-Empresa-Id'] = String(emp);
     const response = await fetch(`${API_URL}/central-entradas${path}`, {
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`
-        }
+        headers
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok && data.sucesso !== false) {
@@ -3015,6 +3175,13 @@ async function postConfigAcaoCentral(path) {
     return data;
 }
 
+if (typeof document !== 'undefined' && !window.__centralCfgEmpresaListener) {
+    window.__centralCfgEmpresaListener = true;
+    document.addEventListener('cds-empresa-contexto-alterado', () => {
+        if (document.getElementById('centralConfigForm')?.offsetParent) carregarConfigCentral();
+    });
+}
+
 async function carregarConfigCentral() {
     const container = document.getElementById('centralConfigForm');
     if (!container) return;
@@ -3022,8 +3189,12 @@ async function carregarConfigCentral() {
     container.innerHTML = '<div class="text-center py-4"><div class="spinner-border spinner-border-sm text-primary"></div></div>';
 
     try {
-        const painel = await centralEntradasFetch('/configuracao');
+        const [painel, periodo] = await Promise.all([
+            centralEntradasFetch('/configuracao'),
+            centralEntradasFetch('/configuracao/periodo-padrao').catch(() => null)
+        ]);
         centralEntradasState.configuracoes = painel;
+        centralEntradasState.periodoPadrao = periodo;
         container.innerHTML = renderPainelConfigCentral(painel);
         wireBotoesConfigFiscalCentral();
     } catch (error) {
@@ -3338,7 +3509,7 @@ function renderIndicadorFiltrosAtivosCentral() {
 
     wrap.classList.remove('d-none');
     const chipsHtml = chips.map((c) => (
-        `<span class="badge rounded-pill text-bg-light border me-1 mb-1">${escapeHtmlCentralEntradas(c.label)}</span>`
+        `<span class="badge rounded-pill bg-light text-dark border me-1 mb-1">${escapeHtmlCentralEntradas(c.label)}</span>`
     )).join('');
 
     const avisoBusca = busca && chips.length
@@ -3680,11 +3851,13 @@ function renderAbaResumoCentral(doc) {
     const explicacao = UX.explicarStatusCentral?.(doc, wait) || '';
     const modelo = UX.montarEtapasOperacionaisCentral?.(doc, detalhe?.historico, wait, detalhe?.eventosMirx) || null;
     const etapa = modelo?.statusReal || statusOp;
-    const automatico = doc.status === 'AGUARDANDO_XML_COMPLETO'
-        ? 'Sim. O sistema tentará recuperar o XML automaticamente no horário programado.'
-        : (doc.status === 'EM_PROCESSAMENTO' || doc.status === 'EM_COMPRA'
-            ? 'Sim. O processamento continua em segundo plano.'
-            : 'Não neste momento.');
+    const automatico = (doc.status === 'AGUARDANDO_XML_COMPLETO' || doc.status === 'RESUMO_RECEBIDO')
+        ? 'Sim. O sistema envia a ciência (quando ainda couber) e consulta o XML automaticamente.'
+        : (doc.status === 'XML_INDISPONIVEL'
+            ? 'Sim. Sem reenviar ciência: o sistema consulta a SEFAZ pela chave (consChNFe).'
+            : (doc.status === 'EM_PROCESSAMENTO' || doc.status === 'EM_COMPRA'
+                ? 'Sim. O processamento continua em segundo plano.'
+                : 'Não neste momento.'));
     const precisaAcao = acao.acao
         ? ('Sim — ' + acao.label + '.')
         : (doc.status === 'GRAVADA' || doc.status === 'DESCARTADA'
@@ -5636,6 +5809,10 @@ function bindEventosCentralEntradas() {
         salvarConfigCentral();
     });
 
+    $(document).on('click.centralEntradas', '#cfgBtnSalvarPeriodoPadrao', function () {
+        salvarPeriodoPadraoCentral();
+    });
+
     $(document).on('click.centralEntradas', '#centralBtnCancelarConfig', function () {
         carregarConfigCentral();
     });
@@ -5710,7 +5887,7 @@ function loadCentralEntradas() {
                             <div class="central-cfg-header-title">
                                 <i class="fas fa-sliders-h me-2"></i> Configuração Enterprise
                             </div>
-                            <div class="central-cfg-header-sub">Ambiente (somente leitura · fonte oficial), SEFAZ, certificado, sync e diagnóstico</div>
+                            <div class="central-cfg-header-sub">Empresa, ambiente (somente leitura), SEFAZ, certificado, sync e diagnóstico</div>
                         </div>
                         <button type="button" class="btn btn-sm btn-outline-light central-nav-view" data-view="inbox" title="Voltar à Central">
                             <i class="fas fa-arrow-left me-1"></i> Voltar
@@ -5984,6 +6161,7 @@ function loadCentralEntradas() {
             return garantirEmpresaAtivaParaCentral();
         })
         .then(() => carregarEmpresasPermitidasCentral())
+        .then(() => aplicarPeriodoPadraoCentral())
         .then(() => {
             renderAreaEmpresasCentral();
             return Promise.all([

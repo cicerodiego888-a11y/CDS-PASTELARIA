@@ -304,17 +304,37 @@ function preencherDashboard(data) {
     if (alertsEl) alertsEl.innerHTML = montarListaAlerts(data.alerts || {});
 
     if (typeof atualizarCommandCenter === 'function') {
-        atualizarCommandCenter(data);
+        try {
+            atualizarCommandCenter(data);
+        } catch (err) {
+            console.error('Erro ao atualizar Command Center:', err);
+            mostrarErroDashboard(err.message || 'Erro ao montar o painel de status.');
+        }
     }
 }
 
+function headersDashboard(extra = {}) {
+    if (typeof CdsEmpresaContexto !== 'undefined' && typeof CdsEmpresaContexto.headersJson === 'function') {
+        return Object.assign({}, CdsEmpresaContexto.headersJson(), extra);
+    }
+    const h = {
+        Authorization: 'Bearer ' + (localStorage.getItem('token') || '')
+    };
+    return Object.assign(h, extra);
+}
+
 function mostrarErroDashboard(mensagem) {
-    const precisaEmpresaOperacional = /empresa_operacional_id|EMPRESA_SIMPLES com múltiplas/i.test(String(mensagem || ''));
-    const extra = precisaEmpresaOperacional
-        ? `<p class="small mt-2 mb-0">Abra Configurações, em Empresa escolha a <strong>empresa operacional</strong> e salve.</p>
-           <p class="mb-0"><button type="button" class="btn btn-sm btn-primary" onclick="typeof loadPage==='function'&&loadPage('configuracoes-avancadas')">Abrir Configurações</button></p>`
-        : '';
-    const msg = `<div class="text-danger">${escapeHtmlDashboard(mensagem)}${extra}</div>`;
+    const precisaEmpresaOperacional = /empresa_operacional_id|EMPRESA_SIMPLES com múltiplas|empresa operacional válida|EMPRESA_OPERACIONAL_AUSENTE/i.test(String(mensagem || ''));
+    const precisaContextoEmpresa = /X-Empresa-Id|Contexto empresarial obrigatório|EMPRESA_CONTEXT/i.test(String(mensagem || ''));
+    const texto = String(mensagem || 'Erro ao carregar dashboard.');
+    let extra = '';
+    if (precisaEmpresaOperacional) {
+        extra = `<p class="small mt-2 mb-0">Abra Configurações, em Empresa escolha a <strong>empresa operacional</strong> e salve.</p>
+           <p class="mb-0"><button type="button" class="btn btn-sm btn-primary" onclick="typeof loadPage==='function'&&loadPage('configuracoes-avancadas')">Abrir Configurações</button></p>`;
+    } else if (precisaContextoEmpresa) {
+        extra = `<p class="small mt-2 mb-0">Selecione a <strong>empresa</strong> no seletor da barra lateral e tente novamente.</p>`;
+    }
+    const msg = `<div class="text-danger">${escapeHtmlDashboard(texto)}${extra}</div>`;
     [
         'dashboardMaisVendidos',
         'dashboardMenosVendidos',
@@ -324,6 +344,55 @@ function mostrarErroDashboard(mensagem) {
         const el = document.getElementById(id);
         if (el) el.innerHTML = msg;
     });
+
+    // Command Center: não deixar "Carregando…" eterno após falha
+    const labelPeriodo = document.getElementById('dashboardPeriodoLabel');
+    if (labelPeriodo) {
+        labelPeriodo.textContent = (precisaEmpresaOperacional || precisaContextoEmpresa)
+            ? 'Selecione a empresa'
+            : 'Não foi possível carregar o período';
+    }
+    if (typeof DashboardHero === 'function') {
+        DashboardHero({
+            tone: 'warn',
+            statusLabel: (precisaEmpresaOperacional || precisaContextoEmpresa)
+                ? 'Empresa pendente'
+                : 'Falha ao carregar status'
+        });
+    } else {
+        const elStatus = document.getElementById('ccHeroStatus');
+        if (elStatus) {
+            elStatus.dataset.tone = 'warn';
+            elStatus.innerHTML = '<i class="fas fa-circle" style="font-size:0.45rem"></i> Falha ao carregar status';
+        }
+    }
+    const alerts = document.getElementById('ccAlertsList');
+    if (alerts) {
+        alerts.innerHTML = `<div class="cc-alerts-empty text-danger">${escapeHtmlDashboard(texto)}</div>`;
+    }
+    const timeline = document.getElementById('ccTimeline');
+    if (timeline) {
+        timeline.innerHTML = '<div class="cc-timeline-empty">Dados indisponíveis no momento.</div>';
+    }
+    [
+        'ccOpPdvSummary',
+        'ccOpFinSummary',
+        'ccOpComprasSummary',
+        'ccOpFiscalSummary',
+        'ccOpCentralSummary'
+    ].forEach((id) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = 'Indisponível';
+    });
+}
+
+function fetchDashboardComTimeout(url, options = {}, timeoutMs = 20000) {
+    const ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timer = setTimeout(() => {
+        if (ctrl) ctrl.abort();
+    }, timeoutMs);
+    return fetch(url, Object.assign({}, options, ctrl ? { signal: ctrl.signal } : {}))
+        .finally(() => clearTimeout(timer));
 }
 
 function dataHojeDashboard() {
@@ -412,11 +481,9 @@ async function carregarModoDashboardFiscalPadrao(apiUrl) {
     }
 
     try {
-        const response = await fetch(`${apiUrl}/configuracoes/modo_dashboard_fiscal`, {
-            headers: {
-                Authorization: 'Bearer ' + (localStorage.getItem('token') || '')
-            }
-        });
+        const response = await fetchDashboardComTimeout(`${apiUrl}/configuracoes/modo_dashboard_fiscal`, {
+            headers: headersDashboard()
+        }, 8000);
 
         if (response.ok) {
             const data = await response.json();
@@ -449,16 +516,23 @@ async function carregarDashboard(inicio = null, fim = null) {
 
         const modoFiscalAtivo = modoDashboardFiscalAtivo();
 
-        const response = await fetch(`${apiUrl}/dashboard/resumo?inicio=${dataInicio}&fim=${dataFim}&modo_fiscal=${modoFiscalAtivo ? '1' : '0'}`, {
-            headers: {
-                Authorization: 'Bearer ' + (localStorage.getItem('token') || '')
-            }
-        });
+        const response = await fetchDashboardComTimeout(
+            `${apiUrl}/dashboard/resumo?inicio=${dataInicio}&fim=${dataFim}&modo_fiscal=${modoFiscalAtivo ? '1' : '0'}`,
+            {
+                headers: headersDashboard()
+            },
+            25000
+        );
 
-        const data = await response.json();
+        let data = {};
+        try {
+            data = await response.json();
+        } catch (_) {
+            data = {};
+        }
 
         if (!response.ok) {
-            throw new Error(data.error || 'Erro ao carregar dashboard.');
+            throw new Error(data.error || data.message || ('Erro ao carregar dashboard (' + response.status + ').'));
         }
 
         preencherDashboard(data);
@@ -468,7 +542,10 @@ async function carregarDashboard(inicio = null, fim = null) {
         console.log('Dashboard carregado.');
     } catch (error) {
         console.error('Erro dashboard:', error);
-        mostrarErroDashboard(error.message || 'Erro ao carregar dashboard.');
+        const msg = (error && error.name === 'AbortError')
+            ? 'Tempo esgotado ao carregar o dashboard. Verifique se o servidor está respondendo.'
+            : (error.message || 'Erro ao carregar dashboard.');
+        mostrarErroDashboard(msg);
     } finally {
         if (root) {
             root.dataset.dashboardLoading = '0';
@@ -480,9 +557,7 @@ async function carregarDashboard(inicio = null, fim = null) {
 async function carregarVencimentosDashboard(apiUrl) {
     try {
         const response = await fetch(`${apiUrl}/produtos/vencimentos/alertas?dias=30&modo_fiscal=${modoDashboardFiscalAtivo() ? '1' : '0'}`, {
-            headers: {
-                Authorization: 'Bearer ' + (localStorage.getItem('token') || '')
-            }
+            headers: headersDashboard()
         });
 
         const data = await response.json();
@@ -529,6 +604,16 @@ function initDashboard() {
 
     document.removeEventListener('keydown', window._dashboardModoFiscalF12Handler);
     window._dashboardModoFiscalF12Handler = null;
+
+    if (window._dashboardEmpresaContextoHandler) {
+        document.removeEventListener('cds-empresa-contexto-alterado', window._dashboardEmpresaContextoHandler);
+    }
+    window._dashboardEmpresaContextoHandler = () => {
+        const root = document.getElementById('page-content');
+        if (!root || !document.getElementById('ccHeroStatus')) return;
+        carregarDashboardComFiltro();
+    };
+    document.addEventListener('cds-empresa-contexto-alterado', window._dashboardEmpresaContextoHandler);
 
     prepararFiltroDashboard();
     carregarDashboardComFiltro();

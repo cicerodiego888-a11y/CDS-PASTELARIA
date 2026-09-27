@@ -6,9 +6,12 @@
 
 const PESOS_MATCHING = Object.freeze({
   VALOR_EXATO: 40,
+  VALOR_COMPATIVEL: 30,
+  VALOR_PARCIAL: 25,
   DATA_COMPATIVEL: 25,
   IDENTIFICADOR: 25,
-  DESCRICAO: 10
+  DESCRICAO: 10,
+  TIPO_MOVIMENTO: 15
 });
 
 const PONTOS_DATA = Object.freeze({
@@ -17,6 +20,7 @@ const PONTOS_DATA = Object.freeze({
   DOIS_DIAS: 8
 });
 
+/** Janela determinística em dias (±) entre data da TX e data do candidato. */
 const JANELA_DIAS_MATCHING = 2;
 
 const LIMIARES_CONFIANCA = Object.freeze({
@@ -45,6 +49,14 @@ const RESULTADO_MATCHING = Object.freeze({
   JA_CONCILIADA: 'JA_CONCILIADA'
 });
 
+/** Classificação objetiva MBC-05.2 (sem score probabilístico / IA). */
+const COMPATIBILIDADE_MATCHING = Object.freeze({
+  EXATA: 'EXATA',
+  COMPATIVEL: 'COMPATIVEL',
+  PARCIAL: 'PARCIAL',
+  INCOMPATIVEL: 'INCOMPATIVEL'
+});
+
 module.exports = {
   PESOS_MATCHING,
   PONTOS_DATA,
@@ -52,5 +64,6 @@ module.exports = {
   LIMIARES_CONFIANCA,
   NIVEL_CONFIANCA,
   STATUS_SUGESTAO,
-  RESULTADO_MATCHING
+  RESULTADO_MATCHING,
+  COMPATIBILIDADE_MATCHING
 };

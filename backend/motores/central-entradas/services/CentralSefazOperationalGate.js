@@ -66,6 +66,22 @@ function calcularCooldown656Ms(contador) {
   return COOLDOWN_656_MINUTOS[idx] * 60 * 1000;
 }
 
+/**
+ * Contexto fiscal do bloqueio 656 (CENTRAL-ENTRADAS-04): empresa + CNPJ + ambiente.
+ * Sem os três campos válidos o Gate usa o escopo global legado.
+ * @param {Object} ctx
+ * @returns {{ empresaId: number, cnpj: string, ambiente: number, chaveContexto: string }|null}
+ */
+function normalizarContextoGate(ctx = {}) {
+  const src = ctx && ctx.contextoFiscal ? ctx.contextoFiscal : (ctx || {});
+  const empresaId = Number(src.empresaId);
+  const cnpj = String(src.cnpj || '').replace(/\D/g, '');
+  if (!Number.isInteger(empresaId) || empresaId <= 0 || cnpj.length !== 14) return null;
+  if (src.ambiente == null || src.ambiente === '') return null;
+  const ambiente = Number(src.ambiente) === 1 ? 1 : 2;
+  return { empresaId, cnpj, ambiente, chaveContexto: `${empresaId}|${cnpj}|${ambiente}` };
+}
+
 function metaEstado(codigo) {
   const map = {
     NORMAL: { label: 'Normal', indicador: '🟢', severidade: 'ok' },
@@ -77,10 +93,17 @@ function metaEstado(codigo) {
   return map[codigo] || map.NORMAL;
 }
 
-async function fingerprintFiscalDetalhado() {
+/**
+ * @param {{ empresaId?: number }|null} [ctxEmpresa] — com empresaId usa a config fiscal da empresa
+ *   (CENTRAL-ENTRADAS-06); sem ela mantém a leitura global legada.
+ */
+async function fingerprintFiscalDetalhado(ctxEmpresa = null) {
   try {
     const { getFiscalConfig } = require('../../../services/fiscal/configService');
-    const fiscal = await getFiscalConfig({ validarUrls: false });
+    const empresaId = ctxEmpresa && Number(ctxEmpresa.empresaId) > 0 ? Number(ctxEmpresa.empresaId) : null;
+    const fiscal = empresaId
+      ? await getFiscalConfig({ validarUrls: false, empresaId })
+      : await getFiscalConfig({ validarUrls: false });
     const cnpj = String(fiscal?.cnpj || '').replace(/\D/g, '');
     const pathCert = String(fiscal?.certificadoPath || '');
     let serial = '';
@@ -130,8 +153,8 @@ async function fingerprintFiscalDetalhado() {
   }
 }
 
-async function fingerprintFiscalPadrao() {
-  const det = await fingerprintFiscalDetalhado();
+async function fingerprintFiscalPadrao(ctxEmpresa = null) {
+  const det = await fingerprintFiscalDetalhado(ctxEmpresa);
   return det.fingerprint;
 }
 
@@ -162,6 +185,12 @@ class CentralSefazOperationalGate {
     this._persistindo = false;
     /** @private */
     this._documentosAguardandoHint = 0;
+    /** @private — bloqueios 656 por empresa|cnpj|ambiente */
+    this._bloqueiosContexto = {};
+    /** @private — contador progressivo 656 por empresa|cnpj|ambiente */
+    this._contador656Contexto = {};
+    /** @private — erros 593 por empresa|cnpj|ambiente */
+    this._estados593Contexto = {};
     /** @private */
     this._metricas = {
       consultasSOAP: 0,
@@ -304,6 +333,26 @@ class CentralSefazOperationalGate {
       this._estado593 = null;
     }
 
+    this._bloqueiosContexto = {};
+    if (parsed.bloqueios656PorEmpresa && typeof parsed.bloqueios656PorEmpresa === 'object') {
+      for (const [chave, b] of Object.entries(parsed.bloqueios656PorEmpresa)) {
+        if (b && b.bloqueadoAte) this._bloqueiosContexto[chave] = { ...b };
+      }
+    }
+    this._contador656Contexto = {};
+    if (parsed.contador656PorEmpresa && typeof parsed.contador656PorEmpresa === 'object') {
+      for (const [chave, n] of Object.entries(parsed.contador656PorEmpresa)) {
+        const v = Number(n) || 0;
+        if (v > 0) this._contador656Contexto[chave] = v;
+      }
+    }
+    this._estados593Contexto = {};
+    if (parsed.erros593PorEmpresa && typeof parsed.erros593PorEmpresa === 'object') {
+      for (const [chave, e] of Object.entries(parsed.erros593PorEmpresa)) {
+        if (e && e.ativo) this._estados593Contexto[chave] = { ...e };
+      }
+    }
+
     const gm = parsed.gateMetricas || parsed.metricasGate || parsed.telemetria || null;
     if (gm && typeof gm === 'object') {
       this._metricas = {
@@ -341,7 +390,10 @@ class CentralSefazOperationalGate {
       fingerprint: this._estado593?.fingerprint || null,
       historico: this._historico.slice(-HISTORICO_MAX),
       telemetria: this._serializarMetricas(),
-      gateMetricas: this._serializarMetricas()
+      gateMetricas: this._serializarMetricas(),
+      bloqueios656PorEmpresa: { ...this._bloqueiosContexto },
+      contador656PorEmpresa: { ...this._contador656Contexto },
+      erros593PorEmpresa: { ...this._estados593Contexto }
     };
   }
 
@@ -571,7 +623,13 @@ class CentralSefazOperationalGate {
   async autorizarConsultaDistDfe(ctx = {}) {
     await this._ensureLoaded();
     this._avaliarDesbloqueio656();
-    await this._avaliarCorrecao593(ctx);
+    const ctxGate = normalizarContextoGate(ctx);
+    if (ctxGate) {
+      await this._avaliarCorrecao593Contexto(ctxGate, ctx);
+    } else {
+      await this._avaliarCorrecao593(ctx);
+    }
+    const suspenso593 = ctxGate ? this.estaSuspenso593Contexto(ctxGate) : this.estaSuspenso593();
 
     const admin = this._adminBypass(ctx);
     const correlationId = ctx.correlationId || criarCorrelationId();
@@ -588,9 +646,9 @@ class CentralSefazOperationalGate {
       estado: this._circuitState
     });
 
-    if (this.estaSuspenso593() && !admin) {
+    if (suspenso593 && !admin) {
       this._metricas.consultasEvitadas += 1;
-      const e = this.obterEstado593();
+      const e = ctxGate ? this.obterEstado593Contexto(ctxGate) : this.obterEstado593();
       this._logGate('SEFAZ_GATE_BLOCK', {
         correlationId,
         requestId,
@@ -636,13 +694,17 @@ class CentralSefazOperationalGate {
         cStat: '593',
         mensagem: 'Consultas suspensas: CNPJ-base diferente do certificado (cStat 593). Corrija o certificado ou o CNPJ.',
         estado593: e,
+        escopo: ctxGate ? 'EMPRESA' : 'GLOBAL',
+        empresaId: ctxGate ? ctxGate.empresaId : null,
         estadoOperacional: this.obterEstadoOperacional(),
         correlationId,
         requestId
       };
     }
 
-    const bloqueio = this.obterBloqueio656();
+    const bloqueio = ctxGate
+      ? this.obterBloqueio656Contexto(ctxGate)
+      : this.obterBloqueio656();
     if (bloqueio.ativo && !admin) {
       this._metricas.consultasEvitadas += 1;
       this._logGate('SEFAZ_GATE_BLOCK', {
@@ -697,13 +759,15 @@ class CentralSefazOperationalGate {
         tempoRestanteLabel: bloqueio.tempoRestanteLabel,
         bloqueio656: bloqueio,
         backoffAtualMs: bloqueio.intervaloMs,
+        escopo: ctxGate ? 'EMPRESA' : 'GLOBAL',
+        empresaId: ctxGate ? ctxGate.empresaId : null,
         estadoOperacional: this.obterEstadoOperacional(),
         correlationId,
         requestId
       };
     }
 
-    if (admin && (bloqueio.ativo || this.estaSuspenso593())) {
+    if (admin && (bloqueio.ativo || suspenso593)) {
       this._logGate('SEFAZ_GATE_ALLOW', {
         correlationId,
         requestId,
@@ -733,8 +797,15 @@ class CentralSefazOperationalGate {
       correlationId,
       requestId,
       adminBypass: admin,
+      escopo: ctxGate ? 'EMPRESA' : 'GLOBAL',
+      empresaId: ctxGate ? ctxGate.empresaId : null,
       estadoOperacional: this.obterEstadoOperacional()
     };
+  }
+
+  /** Consulta única ao Gate antes de qualquer SOAP da Central (distNSU, consChNFe, 210210). */
+  async autorizarConsultaSefaz(ctx = {}) {
+    return this.autorizarConsultaDistDfe(ctx);
   }
 
   /**
@@ -813,7 +884,26 @@ class CentralSefazOperationalGate {
       categoria: CSTAT_OPERACIONAIS.includes(cStat) ? 'OPERACIONAL_SEFAZ' : 'OPERACIONAL_SEFAZ'
     });
 
+    const ctxGate = normalizarContextoGate(ctx);
+
     if (cStat === '656') {
+      if (ctxGate) {
+        const bloqCtx = this.registrarBloqueio656Contexto(ctxGate, {
+          ...ctx,
+          correlationId,
+          requestId,
+          nsu: ctx.nsu || resultado?.ultNsu,
+          endpoint: ctx.endpoint || resultado?.endpoint,
+          xMotivo: resultado?.xMotivo || resultado?.mensagem || null
+        });
+        return {
+          acao: 'bloquear',
+          cStat: '656',
+          escopo: 'EMPRESA',
+          bloqueio656: bloqCtx,
+          estadoOperacional: this.obterEstadoOperacional()
+        };
+      }
       const bloq = this.registrarBloqueio656({
         ...ctx,
         correlationId,
@@ -822,6 +912,36 @@ class CentralSefazOperationalGate {
         endpoint: ctx.endpoint
       });
       return { acao: 'bloquear', cStat: '656', bloqueio656: bloq, estadoOperacional: this.obterEstadoOperacional() };
+    }
+
+    if (cStat === '593' && ctxGate) {
+      const errCtx = await this.registrarErro593Contexto(ctxGate, {
+        ...ctx,
+        correlationId,
+        requestId,
+        nsu: ctx.nsu || resultado?.ultNsu,
+        cnpjXml: ctx.cnpjXml || resultado?.cnpjXml || null,
+        cnpjCertificado: ctx.cnpjCertificado || resultado?.cnpjCertificado || null,
+        mensagem: resultado?.mensagem || resultado?.xMotivo
+      });
+      return {
+        acao: 'suspender',
+        cStat: '593',
+        escopo: 'EMPRESA',
+        estado593: errCtx,
+        estadoOperacional: this.obterEstadoOperacional()
+      };
+    }
+
+    if (ctxGate && cStat !== '593') {
+      delete this._contador656Contexto[ctxGate.chaveContexto];
+      this._notificar();
+      return {
+        acao: ['137', '108', '109'].includes(cStat) ? 'backoff' : 'continuar',
+        cStat,
+        escopo: 'EMPRESA',
+        estadoOperacional: this.obterEstadoOperacional()
+      };
     }
 
     if (cStat === '593') {
@@ -1006,6 +1126,138 @@ class CentralSefazOperationalGate {
     return this.obterBloqueio656();
   }
 
+  /**
+   * Registra 656 somente no contexto fiscal informado (empresa + CNPJ + ambiente).
+   * Não altera o bloqueio global nem o circuito global.
+   */
+  registrarBloqueio656Contexto(ctx = {}, dados = {}) {
+    const ctxGate = normalizarContextoGate(ctx);
+    if (!ctxGate) return this.registrarBloqueio656(dados);
+    const agora = this._agora();
+    const chave = ctxGate.chaveContexto;
+    const ocorrencia = (Number(this._contador656Contexto[chave]) || 0) + 1;
+    this._contador656Contexto[chave] = ocorrencia;
+    const intervaloMs = Number(dados.intervaloMs) || calcularCooldown656Ms(ocorrencia);
+    const bloqueadoAte = new Date(agora.getTime() + intervaloMs).toISOString();
+
+    this._bloqueiosContexto[chave] = {
+      empresaId: ctxGate.empresaId,
+      cnpj: ctxGate.cnpj,
+      ambiente: ctxGate.ambiente,
+      motivo: 'CONSUMO_INDEVIDO',
+      cStat: '656',
+      xMotivo: dados.xMotivo || null,
+      registradoEm: agora.toISOString(),
+      iniciadoEm: agora.toISOString(),
+      bloqueadoAte,
+      intervaloMs,
+      ocorrencia,
+      correlationId: dados.correlationId || criarCorrelationId(),
+      requestId: dados.requestId || null,
+      documentoId: dados.documentoId != null ? Number(dados.documentoId) : null,
+      chave: dados.chave || null,
+      nsu: dados.nsu || null,
+      endpoint: dados.endpoint || null,
+      origem: dados.origem || null
+    };
+    this._metricas.bloqueios656 += 1;
+
+    this._logGate('SEFAZ_GATE_BLOCK', {
+      correlationId: this._bloqueiosContexto[chave].correlationId,
+      requestId: this._bloqueiosContexto[chave].requestId,
+      documentoId: this._bloqueiosContexto[chave].documentoId,
+      chave: this._bloqueiosContexto[chave].chave,
+      nsu: this._bloqueiosContexto[chave].nsu,
+      endpoint: dados.endpoint,
+      proximaExecucao: bloqueadoAte,
+      tempoMs: intervaloMs,
+      tempoRestanteLabel: formatarDuracao(intervaloMs),
+      motivo: `CONSUMO_INDEVIDO empresa=${ctxGate.empresaId} ambiente=${ctxGate.ambiente} (#${ocorrencia})`,
+      resultado: '656',
+      cStat: '656',
+      estado: ESTADO_OPERACIONAL.BLOCKED
+    });
+
+    this._notificar();
+    return this.obterBloqueio656Contexto(ctxGate);
+  }
+
+  /**
+   * Estado do bloqueio 656 de um contexto fiscal (mesmo formato de obterBloqueio656 +
+   * campos de observabilidade por empresa).
+   */
+  obterBloqueio656Contexto(ctx = {}) {
+    const ctxGate = normalizarContextoGate(ctx);
+    if (!ctxGate) return this.obterBloqueio656();
+    const b = this._bloqueiosContexto[ctxGate.chaveContexto] || null;
+    const base = {
+      empresaId: ctxGate.empresaId,
+      cnpj: ctxGate.cnpj,
+      ambiente: ctxGate.ambiente,
+      ambienteLabel: ctxGate.ambiente === 1 ? 'PRODUCAO' : 'HOMOLOGACAO',
+      escopo: 'EMPRESA'
+    };
+    const restante = b?.bloqueadoAte
+      ? Math.max(0, new Date(b.bloqueadoAte).getTime() - this._agora().getTime())
+      : 0;
+    if (!b || restante <= 0) {
+      return {
+        ...base,
+        ativo: false,
+        estado: 'OPERACIONAL',
+        bloqueadoAte: null,
+        tempoRestanteMs: 0,
+        tempoRestanteLabel: '—',
+        motivo: null,
+        cStat: null,
+        xMotivo: null,
+        correlationId: null,
+        ultimaConsulta: null,
+        ocorrencia: Number(this._contador656Contexto[ctxGate.chaveContexto]) || 0,
+        intervaloMs: 0,
+        backoffAtualMs: 0,
+        ultimoBloqueio: b ? { ...b } : null
+      };
+    }
+    return {
+      ...base,
+      ativo: true,
+      estado: 'BLOQUEADO',
+      bloqueadoAte: b.bloqueadoAte,
+      iniciadoEm: b.iniciadoEm,
+      registradoEm: b.registradoEm,
+      tempoRestanteMs: restante,
+      tempoRestanteLabel: formatarDuracao(restante),
+      motivo: b.motivo,
+      cStat: b.cStat,
+      xMotivo: b.xMotivo,
+      correlationId: b.correlationId,
+      ultimaConsulta: b.registradoEm,
+      documentoId: b.documentoId,
+      chave: b.chave,
+      nsu: b.nsu,
+      ocorrencia: b.ocorrencia,
+      intervaloMs: b.intervaloMs,
+      backoffAtualMs: b.intervaloMs
+    };
+  }
+
+  estaBloqueado656Contexto(ctx = {}) {
+    return this.obterBloqueio656Contexto(ctx).ativo === true;
+  }
+
+  /** Observabilidade: estado 656 de todos os contextos fiscais conhecidos. */
+  listarBloqueios656PorEmpresa() {
+    const chaves = new Set([
+      ...Object.keys(this._bloqueiosContexto),
+      ...Object.keys(this._contador656Contexto)
+    ]);
+    return [...chaves].map((chave) => {
+      const [empresaId, cnpj, ambiente] = chave.split('|');
+      return this.obterBloqueio656Contexto({ empresaId, cnpj, ambiente });
+    });
+  }
+
   limparBloqueio656(motivo = 'limpeza') {
     const anterior = this._bloqueio656;
     if (!anterior) return false;
@@ -1182,6 +1434,177 @@ class CentralSefazOperationalGate {
   limparBloqueiosPorUpload() {
     this.limparBloqueio656('upload');
     this.limparErro593('upload');
+  }
+
+  /**
+   * Registra 593 somente no contexto fiscal informado (empresa + CNPJ + ambiente).
+   * Não altera o estado 593 global nem o circuito global. Contexto incompleto → legado global.
+   */
+  async registrarErro593Contexto(ctx = {}, dados = {}) {
+    const ctxGate = normalizarContextoGate(ctx);
+    if (!ctxGate) return this.registrarErro593(dados);
+    const agora = this._agora();
+    let detalhe = {
+      fingerprint: dados.fingerprint || null,
+      cnpjCertificado: dados.cnpjCertificado || null,
+      path: dados.path || null,
+      serial: dados.serial || null,
+      thumbprint: dados.thumbprint || null,
+      validade: dados.validade || null
+    };
+    if (!detalhe.fingerprint) {
+      try {
+        const d = await this._obterFingerprintDetalhado(ctxGate);
+        detalhe = { ...detalhe, ...(d || {}) };
+        if (dados.cnpjCertificado) detalhe.cnpjCertificado = dados.cnpjCertificado;
+      } catch {
+        try {
+          detalhe.fingerprint = await this._obterFingerprint(ctxGate);
+        } catch { /* ignore */ }
+      }
+    }
+
+    const registro = {
+      ativo: true,
+      escopo: 'EMPRESA',
+      empresaId: ctxGate.empresaId,
+      cnpj: ctxGate.cnpj,
+      ambiente: ctxGate.ambiente,
+      status: 'ERRO_CONFIGURACAO_CERTIFICADO',
+      cStat: '593',
+      motivo: dados.mensagem || dados.motivo || 'CNPJ-base diferente do Certificado (593)',
+      cnpjXml: dados.cnpjXml || null,
+      cnpjCertificado: detalhe.cnpjCertificado || dados.cnpjCertificado || null,
+      fingerprint: detalhe.fingerprint || null,
+      path: detalhe.path || null,
+      serial: detalhe.serial || null,
+      thumbprint: detalhe.thumbprint || null,
+      validade: detalhe.validade || null,
+      correlationId: dados.correlationId || criarCorrelationId(),
+      requestId: dados.requestId || null,
+      documentoId: dados.documentoId != null ? Number(dados.documentoId) : null,
+      chave: dados.chave || null,
+      nsu: dados.nsu || null,
+      registradoEm: agora.toISOString(),
+      ultimaConsulta: agora.toISOString()
+    };
+    this._estados593Contexto[ctxGate.chaveContexto] = registro;
+    this._metricas.erros593 += 1;
+    this._metricas.historicoErros593.push({
+      em: agora.toISOString(),
+      empresaId: ctxGate.empresaId,
+      correlationId: registro.correlationId,
+      cnpjXml: registro.cnpjXml,
+      cnpjCertificado: registro.cnpjCertificado,
+      fingerprint: registro.fingerprint,
+      documentoId: registro.documentoId,
+      chave: registro.chave
+    });
+    if (this._metricas.historicoErros593.length > 50) {
+      this._metricas.historicoErros593.shift();
+    }
+
+    this._logGate('SEFAZ_GATE_CONFIG_ERROR', {
+      correlationId: registro.correlationId,
+      requestId: registro.requestId,
+      documentoId: registro.documentoId,
+      chave: registro.chave,
+      nsu: registro.nsu,
+      motivo: `${registro.motivo} empresa=${ctxGate.empresaId} ambiente=${ctxGate.ambiente}`,
+      resultado: '593',
+      cStat: '593',
+      cnpjXml: registro.cnpjXml,
+      cnpjCertificado: registro.cnpjCertificado,
+      estado: ESTADO_OPERACIONAL.CONFIG_ERROR
+    });
+
+    this._notificar();
+    return this.obterEstado593Contexto(ctxGate);
+  }
+
+  obterEstado593Contexto(ctx = {}) {
+    const ctxGate = normalizarContextoGate(ctx);
+    if (!ctxGate) return this.obterEstado593();
+    const e = this._estados593Contexto[ctxGate.chaveContexto];
+    const base = {
+      empresaId: ctxGate.empresaId,
+      cnpj: ctxGate.cnpj,
+      ambiente: ctxGate.ambiente,
+      escopo: 'EMPRESA'
+    };
+    if (!e?.ativo) {
+      return { ...base, ativo: false, status: null, cStat: null, motivo: null };
+    }
+    return { ...e, ...base, ativo: true };
+  }
+
+  estaSuspenso593Contexto(ctx = {}) {
+    return this.obterEstado593Contexto(ctx).ativo === true;
+  }
+
+  limparErro593Contexto(ctx = {}, motivo = 'correcao_configuracao') {
+    const ctxGate = normalizarContextoGate(ctx);
+    if (!ctxGate) return this.limparErro593(motivo);
+    const anterior = this._estados593Contexto[ctxGate.chaveContexto];
+    if (!anterior?.ativo) return false;
+    delete this._estados593Contexto[ctxGate.chaveContexto];
+    this._logGate('SEFAZ_GATE_CONFIG_FIXED', {
+      correlationId: anterior.correlationId || criarCorrelationId(),
+      requestId: anterior.requestId,
+      documentoId: anterior.documentoId,
+      chave: anterior.chave,
+      nsu: anterior.nsu,
+      motivo: `${motivo} empresa=${ctxGate.empresaId} ambiente=${ctxGate.ambiente}`,
+      cnpjXml: anterior.cnpjXml,
+      cnpjCertificado: anterior.cnpjCertificado,
+      estado: this._circuitState
+    });
+    this._notificar();
+    return true;
+  }
+
+  /** Observabilidade: erros 593 ativos por contexto fiscal. */
+  listarErros593PorEmpresa() {
+    return Object.keys(this._estados593Contexto).map((chave) => {
+      const [empresaId, cnpj, ambiente] = chave.split('|');
+      return this.obterEstado593Contexto({ empresaId, cnpj, ambiente });
+    }).filter((e) => e.ativo);
+  }
+
+  /**
+   * Leitura sem efeitos colaterais (sem log/métrica) do bloqueio de um contexto fiscal:
+   * 656 e 593 da empresa. Contexto incompleto → estado global legado.
+   */
+  async avaliarBloqueioContexto(ctx = {}) {
+    await this._ensureLoaded();
+    this._avaliarDesbloqueio656();
+    const ctxGate = normalizarContextoGate(ctx);
+    const e593 = ctxGate ? this.obterEstado593Contexto(ctxGate) : this.obterEstado593();
+    if (e593.ativo) {
+      return { bloqueado: true, cStat: '593', escopo: ctxGate ? 'EMPRESA' : 'GLOBAL', estado593: e593 };
+    }
+    const b656 = ctxGate ? this.obterBloqueio656Contexto(ctxGate) : this.obterBloqueio656();
+    if (b656.ativo) {
+      return { bloqueado: true, cStat: '656', escopo: ctxGate ? 'EMPRESA' : 'GLOBAL', bloqueio656: b656 };
+    }
+    return { bloqueado: false, cStat: null, escopo: ctxGate ? 'EMPRESA' : 'GLOBAL' };
+  }
+
+  async _avaliarCorrecao593Contexto(ctxGate, ctx = {}) {
+    const e = ctxGate ? this._estados593Contexto[ctxGate.chaveContexto] : null;
+    if (!e?.ativo) return false;
+    let atual = ctx.fingerprintAtual || null;
+    if (!atual) {
+      try {
+        atual = await this._obterFingerprint(ctxGate);
+      } catch {
+        return false;
+      }
+    }
+    if (!atual || !e.fingerprint) return false;
+    if (atual === e.fingerprint) return false;
+    this.limparErro593Contexto(ctxGate, 'certificado_ou_cnpj_alterado');
+    return true;
   }
 
   async _avaliarCorrecao593(ctx = {}) {
@@ -1371,7 +1794,9 @@ class CentralSefazOperationalGate {
       backoffAtualLabel: formatarDuracao(this.obterBackoffAtualMs()),
       ultimaRespostaSEFAZ: this._metricas.ultimaRespostaSEFAZ,
       bloqueio656: bloqueio.ativo ? bloqueio : null,
+      bloqueios656PorEmpresa: this.listarBloqueios656PorEmpresa(),
       estado593: e593.ativo ? e593 : null,
+      erros593PorEmpresa: this.listarErros593PorEmpresa(),
       historico: this.obterHistorico(20),
       historicoDesbloqueios: (this._metricas.historicoDesbloqueios || []).slice(-10),
       historicoErros593: (this._metricas.historicoErros593 || []).slice(-10),
@@ -1427,6 +1852,7 @@ module.exports.CentralSefazOperationalGate = CentralSefazOperationalGate;
 module.exports.INTERVALO_BLOQUEIO_656_MS = INTERVALO_BLOQUEIO_656_MS;
 module.exports.COOLDOWN_656_MINUTOS = COOLDOWN_656_MINUTOS;
 module.exports.calcularCooldown656Ms = calcularCooldown656Ms;
+module.exports.normalizarContextoGate = normalizarContextoGate;
 module.exports.ESTADO_OPERACIONAL = ESTADO_OPERACIONAL;
 module.exports.CHAVE_ESTADO = CHAVE_ESTADO;
 module.exports.CSTAT_OPERACIONAIS = CSTAT_OPERACIONAIS;

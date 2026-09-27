@@ -507,7 +507,7 @@
           <i class="fas fa-calendar-alt"></i>
           <span>Competência fiscal</span>
           ${badge(label, 'info')}
-          ${ind.ambienteLabel ? badge(ind.ambienteLabel, ind.ambiente === 1 ? 'ok' : 'warn') : ''}
+          <span class="cds-cfg-hint" style="margin:0;">Período de apuração (independente do ambiente SEFAZ)</span>
         </div>
         <div style="display:flex;flex-wrap:wrap;gap:0.5rem;align-items:flex-end;">
           <label class="cds-cfg-hint" style="margin:0;">
@@ -518,6 +518,63 @@
           <button type="button" class="btn btn-sm btn-primary" id="cdsMonCompAplicar">
             <i class="fas fa-filter"></i> Aplicar competência
           </button>
+        </div>
+      </div>`;
+  }
+
+  function formatarCnpjMon(valor) {
+    if (global.CdsEmpresaContexto && typeof global.CdsEmpresaContexto.formatarCnpj === 'function') {
+      return global.CdsEmpresaContexto.formatarCnpj(valor);
+    }
+    return String(valor || '');
+  }
+
+  function labelCertificadoMon(cert) {
+    if (!cert) return { texto: 'Sem empresa', tone: 'warn' };
+    if (cert.status === 'CONFIGURADO') return { texto: 'Configurado', tone: 'ok' };
+    if (cert.status === 'ARQUIVO_AUSENTE') return { texto: 'Arquivo ausente', tone: 'error' };
+    return { texto: 'Não configurado', tone: 'warn' };
+  }
+
+  /** Contexto fiscal da empresa (mesma cadeia da Central) — separado da competência. */
+  function renderContextoEmpresa(summary) {
+    const ctx = summary?.contextoEmpresa || null;
+    if (!ctx || ctx.empresaId == null) {
+      return `
+      <div class="cds-cfg-card" id="cdsMonContextoEmpresa" style="margin-bottom:0.75rem;">
+        <div class="cds-cfg-card__title"><i class="fas fa-building"></i> <span>Contexto fiscal</span>
+          ${badge('Empresa não selecionada', 'warn')}</div>
+        <p class="cds-cfg-hint" style="margin:0;">${escapeHtml((ctx && ctx.mensagem) || 'Nenhuma matriz válida — selecione a empresa.')}</p>
+      </div>`;
+    }
+    const nome = ctx.razaoSocial || ctx.nomeFantasia || `Empresa #${ctx.empresaId}`;
+    const tipo = ctx.tipoEmpresa === 'MATRIZ' ? 'Matriz' : (ctx.tipoEmpresa === 'FILIAL' ? 'Filial' : '');
+    const ambTone = ctx.ambienteFiscal === 1 ? 'ok' : (ctx.ambienteFiscal === 2 ? 'info' : 'warn');
+    const cert = labelCertificadoMon(ctx.certificado);
+    const certArquivo = ctx.certificado && ctx.certificado.arquivo ? ctx.certificado.arquivo : '—';
+    return `
+      <div class="cds-cfg-card" id="cdsMonContextoEmpresa" style="margin-bottom:0.75rem;">
+        <div class="cds-cfg-card__title" style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+          <i class="fas fa-building"></i>
+          <span>Contexto fiscal</span>
+          ${tipo ? badge(tipo, 'info') : ''}
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.75rem;">
+          <div data-mon-ctx="empresa">
+            <div class="cds-cfg-hint" style="margin:0;">Empresa</div>
+            <strong>${escapeHtml(nome)}</strong>
+            <div class="cds-cfg-hint" style="margin:0;">CNPJ: ${escapeHtml(formatarCnpjMon(ctx.cnpj) || '—')}</div>
+          </div>
+          <div data-mon-ctx="sefaz">
+            <div class="cds-cfg-hint" style="margin:0;">SEFAZ · ambiente fiscal</div>
+            ${badge(ctx.ambienteLabel || 'Não configurado', ambTone)}
+            <div class="cds-cfg-hint" style="margin:0;">UF ${escapeHtml(ctx.uf || '—')}</div>
+          </div>
+          <div data-mon-ctx="certificado">
+            <div class="cds-cfg-hint" style="margin:0;">Certificado digital</div>
+            ${badge(cert.texto, cert.tone)}
+            <div class="cds-cfg-hint" style="margin:0;">${escapeHtml(certArquivo)}</div>
+          </div>
         </div>
       </div>`;
   }
@@ -768,6 +825,7 @@
     const html = `
       <div class="cds-ui cds-cfg" id="cdsMonitoringEngine">
         ${heroHtml}
+        ${renderContextoEmpresa(summary)}
         ${renderSeletorCompetencia(summary)}
         ${renderExecutiveInsights(summary)}
         <div id="cdsMonExecWrap">${renderPainelExecutivo(summary)}</div>
@@ -788,8 +846,11 @@
     estado.erro = null;
     try {
       const token = localStorage.getItem('token');
+      const headers = global.CdsEmpresaContexto && typeof global.CdsEmpresaContexto.headersJson === 'function'
+        ? global.CdsEmpresaContexto.headersJson()
+        : { Authorization: `Bearer ${token}` };
       const resp = await fetch(`${global.API_URL}/monitoring/summary?${montarQueryCompetencia()}`, {
-        headers: { Authorization: `Bearer ${token}` }
+        headers
       });
       const json = await resp.json();
       if (!resp.ok && resp.status !== 207) {
@@ -839,6 +900,12 @@
         aplicarVisibilidadeF12();
       }
     }
+  }
+
+  if (typeof document !== 'undefined' && document.addEventListener) {
+    document.addEventListener('cds-empresa-contexto-alterado', () => {
+      if (typeof currentPage !== 'undefined' && currentPage === 'monitoring') carregarSummary(true);
+    });
   }
 
   global.loadMonitoringEngine = loadMonitoringEngine;

@@ -202,6 +202,72 @@ function finalizarTelemetriaEnvio(envio, extra = {}) {
 }
 
 /**
+ * Contexto do Gate SEFAZ da Central (empresa + CNPJ + ambiente) para a chamada.
+ * @param {Object} deps
+ * @param {string} cnpj
+ * @param {number} ambiente
+ * @param {Object} [extra]
+ * @returns {Object}
+ */
+function montarContextoGateSefaz(deps, cnpj, ambiente, extra = {}) {
+  return {
+    empresaId: deps.contextoCentral?.empresaId ?? null,
+    cnpj,
+    ambiente,
+    documentoId: deps.documentoId ?? null,
+    correlationId: deps.correlationId || null,
+    origem: deps.origemGate || 'distribuicaoDFe',
+    ...extra
+  };
+}
+
+/**
+ * Consulta o Gate SEFAZ injetado (opcional). Retorna a negativa ou null se liberado.
+ * @param {Object} deps
+ * @param {Object} ctxGate
+ * @returns {Promise<Object|null>}
+ */
+async function verificarGateSefaz(deps, ctxGate) {
+  const gate = deps.gateSefaz;
+  if (!gate || typeof gate.autorizarConsultaDistDfe !== 'function') return null;
+  let auth;
+  try {
+    auth = await gate.autorizarConsultaDistDfe(ctxGate);
+  } catch {
+    return null;
+  }
+  return auth && auth.permitido === false ? auth : null;
+}
+
+/**
+ * Informa ao Gate SEFAZ injetado o cStat recebido (inclusive 656).
+ * @param {Object} deps
+ * @param {{ cStat?: string, xMotivo?: string }} metadados
+ * @param {Object} ctxGate
+ */
+async function reportarGateSefaz(deps, metadados, ctxGate) {
+  const gate = deps.gateSefaz;
+  if (!gate || typeof gate.processarRespostaSefaz !== 'function' || !metadados?.cStat) return;
+  try {
+    await gate.processarRespostaSefaz({
+      cStat: String(metadados.cStat),
+      xMotivo: metadados.xMotivo || null,
+      mensagem: metadados.xMotivo || null,
+      ultNsu: metadados.ultNSU || null
+    }, ctxGate);
+  } catch { /* Gate indisponível não interrompe o fluxo fiscal */ }
+}
+
+function erroBloqueioGate(auth) {
+  const erro = new Error(auth.mensagem || 'Consulta bloqueada pelo Gate SEFAZ.');
+  erro.bloqueadoGate = true;
+  erro.codigo = auth.codigo || 'GATE_BLOQUEADO';
+  erro.proximaConsultaEm = auth.proximaConsultaEm || null;
+  erro.gate = auth;
+  return erro;
+}
+
+/**
  * Resolve empresa da ingestão DistDFe sem ler `deps` fora de escopo.
  * Ordem: contexto da chamada → persistencia._empresaId → null.
  *
@@ -270,6 +336,8 @@ async function persistirDocumentosRetorno(xmlRetorno, persistencia, origem, ctxA
       descartes.push(evt);
     }
   });
+
+  const empresaIdPersistencia = resolverEmpresaIdPersistenciaDfe(ctxAudit, persistencia);
 
   for (const evt of descartes) {
     recebidosZip += 1;
@@ -343,8 +411,6 @@ async function persistirDocumentosRetorno(xmlRetorno, persistencia, origem, ctxA
       throw err;
     }
   }
-
-  const empresaIdPersistencia = resolverEmpresaIdPersistenciaDfe(ctxAudit, persistencia);
 
   for (const doc of documentos) {
     recebidosZip += 1;
@@ -503,6 +569,24 @@ async function sincronizarDistribuicaoDFe(deps = {}) {
   const cnpj = String(config.cnpj).replace(/\D/g, '');
   const codigoUf = obterCodigoUf(config);
 
+  const ctxGate = montarContextoGateSefaz(deps, cnpj, ambiente, { motivo: 'distNSU' });
+  const negadoGate = await verificarGateSefaz(deps, ctxGate);
+  if (negadoGate) {
+    return {
+      sucesso: true,
+      ignorado: true,
+      bloqueadoGate: true,
+      codigo: negadoGate.codigo || 'GATE_BLOQUEADO',
+      cStat: null,
+      notasNovas: 0,
+      notasDuplicadas: 0,
+      ignorados: 0,
+      iteracoes: 0,
+      proximaConsultaEm: negadoGate.proximaConsultaEm || null,
+      mensagem: negadoGate.mensagem || 'Consulta DF-e bloqueada pelo Gate SEFAZ.'
+    };
+  }
+
   const nsuRepository = deps.nsuRepository ?? new CentralNsuRepository();
   const nsuService = deps.nsuService
     ?? new CentralNsuService({ nsuRepository });
@@ -532,6 +616,11 @@ async function sincronizarDistribuicaoDFe(deps = {}) {
   while (iteracoes < (deps.maxIteracoes ?? MAX_ITERACOES_SYNC)) {
     iteracoes += 1;
 
+    if (iteracoes > 1) {
+      const negadoIter = await verificarGateSefaz(deps, ctxGate);
+      if (negadoIter) break;
+    }
+
     const xmlConsulta = montarXmlDistNsu({
       ambiente,
       codigoUf,
@@ -545,6 +634,11 @@ async function sincronizarDistribuicaoDFe(deps = {}) {
     try {
       ultimoRetornoIter = extrairMetadadosRetorno(envio.body);
       ultimoRetorno = ultimoRetornoIter;
+      await reportarGateSefaz(deps, ultimoRetornoIter, {
+        ...ctxGate,
+        nsu: ultNsuAtual,
+        endpoint: envio.endpoint || null
+      });
       const tempoConsulta = Date.now() - tConsulta;
       const lotesEstimados = (String(envio.body || '').match(/<docZip/gi) || []).length;
 
@@ -658,6 +752,7 @@ async function sincronizarDistribuicaoDFe(deps = {}) {
           maxNsu: maxNsuAtual,
           iteracoes,
           cStat: '656',
+          xMotivo: ultimoRetorno.xMotivo || null,
           correlationId,
           nsuRecuperado: recuperouNsu,
           proximaConsultaEm: aplicado.proximaConsultaEm,
@@ -844,6 +939,16 @@ async function consultarNotaPorChave(chave, deps = {}) {
 
   const cnpj = String(config.cnpj).replace(/\D/g, '');
   const codigoUf = obterCodigoUf(config);
+
+  const ctxGate = montarContextoGateSefaz(deps, cnpj, ambiente, {
+    chave: chaveLimpa,
+    motivo: 'consChNFe'
+  });
+  const negadoGate = await verificarGateSefaz(deps, ctxGate);
+  if (negadoGate) {
+    throw erroBloqueioGate(negadoGate);
+  }
+
   const persistencia = deps.persistenciaService ?? new CentralDfePersistenciaService();
 
   const xmlConsulta = montarXmlConsChave({
@@ -856,6 +961,7 @@ async function consultarNotaPorChave(chave, deps = {}) {
   const envio = await executarEnvioConsultaDfe(xmlConsulta, config, ambiente, deps);
   try {
     const metadados = extrairMetadadosRetorno(envio.body);
+    await reportarGateSefaz(deps, metadados, { ...ctxGate, endpoint: envio.endpoint || null });
 
     if (!retornoDistSucesso(metadados.cStat) && metadados.cStat !== '138') {
       finalizarTelemetriaEnvio(envio, {
@@ -864,7 +970,11 @@ async function consultarNotaPorChave(chave, deps = {}) {
         xMotivo: metadados.xMotivo,
         resultado: 'ERRO'
       });
-      throw new Error(metadados.xMotivo || `SEFAZ retornou cStat ${metadados.cStat}`);
+      const erroRejeicao = new Error(metadados.xMotivo || `SEFAZ retornou cStat ${metadados.cStat}`);
+      erroRejeicao.cStat = metadados.cStat || null;
+      erroRejeicao.xMotivo = metadados.xMotivo || null;
+      erroRejeicao.rejeicaoSefaz = true;
+      throw erroRejeicao;
     }
 
     const persistidos = await persistirDocumentosRetorno(envio.body, persistencia, 'consulta_chave', {
@@ -887,6 +997,7 @@ async function consultarNotaPorChave(chave, deps = {}) {
       sucesso: true,
       chave: chaveLimpa,
       cStat: metadados.cStat,
+      xMotivo: metadados.xMotivo || null,
       mensagem: metadados.xMotivo,
       notasNovas: persistidos.notasNovas,
       notasDuplicadas: persistidos.notasDuplicadas,

@@ -30,7 +30,7 @@ class EncryptedLocalSecretStore extends ISecretStore {
     if (!key) {
       throw erroMbc(
         ERROS.SECRET_KEY_AUSENTE,
-        'MBC_SECRET_STORE_KEY não definida. SecretStore local recusa gravar sem chave de ambiente.',
+        'Armazenamento seguro de credenciais bancárias indisponível.',
         503
       );
     }
@@ -47,11 +47,23 @@ class EncryptedLocalSecretStore extends ISecretStore {
   }
 
   _decifrar(blob) {
-    const key = this._exigirChave();
-    const [ivH, tagH, dataH] = String(blob).split(':');
-    const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivH, 'hex'));
-    decipher.setAuthTag(Buffer.from(tagH, 'hex'));
-    return Buffer.concat([decipher.update(Buffer.from(dataH, 'hex')), decipher.final()]).toString('utf8');
+    try {
+      const key = this._exigirChave();
+      const [ivH, tagH, dataH] = String(blob).split(':');
+      if (!ivH || !tagH || !dataH) {
+        throw new Error('ciphertext inválido');
+      }
+      const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivH, 'hex'));
+      decipher.setAuthTag(Buffer.from(tagH, 'hex'));
+      return Buffer.concat([decipher.update(Buffer.from(dataH, 'hex')), decipher.final()]).toString('utf8');
+    } catch (err) {
+      if (err && err.code === ERROS.SECRET_KEY_AUSENTE) throw err;
+      throw erroMbc(
+        ERROS.SECRET_KEY_AUSENTE,
+        'Não foi possível ler a credencial cifrada (chave do cofre diferente ou dado corrompido). Salve o Client Secret novamente.',
+        409
+      );
+    }
   }
 
   async set(key, value) {
@@ -79,19 +91,41 @@ class EncryptedLocalSecretStore extends ISecretStore {
   }
 
   async has(key) {
-    const row = await dbGet(this.db, `SELECT chave FROM mbc_secret_store WHERE chave = ?`, [String(key)]);
-    return !!row;
+    const row = await dbGet(this.db, `SELECT ciphertext FROM mbc_secret_store WHERE chave = ?`, [String(key)]);
+    if (!row) return false;
+    try {
+      this._decifrar(row.ciphertext);
+      return true;
+    } catch (_) {
+      // Ciphertext existe mas não abre com a chave atual → tratar como não configurado
+      return false;
+    }
   }
 
   toJSON() {
     return { tipo: 'EncryptedLocalSecretStore', modo: this.modo, valores: '[REDACTED]' };
   }
+
+  [Symbol.for('nodejs.util.inspect.custom')]() {
+    return this.toJSON();
+  }
 }
 
+/**
+ * Factory operacional: EncryptedLocalSecretStore com db.
+ * Sem MBC_SECRET_STORE_KEY: set/get falham com SECRET_KEY_AUSENTE (fail closed).
+ * MemorySecretStore somente por injeção explícita (testes) — sem fallback silencioso.
+ */
 function obterSecretStore(deps = {}) {
   if (deps.secretStore) return deps.secretStore;
-  if (derivarChave() && deps.db) return new EncryptedLocalSecretStore({ db: deps.db });
-  return new (require('./MemorySecretStore').MemorySecretStore)();
+  if (!deps.db) {
+    throw erroMbc(
+      ERROS.SECRET_KEY_AUSENTE,
+      'Armazenamento seguro de credenciais bancárias indisponível.',
+      503
+    );
+  }
+  return new EncryptedLocalSecretStore({ db: deps.db });
 }
 
 module.exports = { EncryptedLocalSecretStore, obterSecretStore, derivarChave };

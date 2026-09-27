@@ -33,11 +33,23 @@ function normalizarTipo(tipo) {
   return mapa[t] || t;
 }
 
+function mascararNumero(numero, digito) {
+  const n = texto(numero);
+  const visivel = n.slice(-4) || n;
+  const prefixo = n.length > 4 ? '••••' : '';
+  const base = prefixo + visivel;
+  const d = texto(digito);
+  return d ? base + '-' + d : base;
+}
+
 function mapRow(row) {
   if (!row) return null;
+  const empresaNome = texto(row.empresa_nome_fantasia) || texto(row.empresa_razao_social) || null;
   return {
     id: row.id,
     empresa_id: row.empresa_id,
+    empresa_nome: empresaNome,
+    empresa_cnpj: row.empresa_cnpj != null ? row.empresa_cnpj : null,
     instituicao_financeira_id: row.instituicao_financeira_id,
     instituicao_nome: row.instituicao_nome || null,
     instituicao_codigo: row.instituicao_codigo != null ? row.instituicao_codigo : null,
@@ -46,6 +58,7 @@ function mapRow(row) {
     agencia: row.agencia,
     numero: row.numero,
     digito: row.digito,
+    numero_mascarado: mascararNumero(row.numero, row.digito),
     titular: row.titular,
     documento_titular: row.documento_titular,
     ativa: Number(row.ativa) === 1,
@@ -56,9 +69,13 @@ function mapRow(row) {
 }
 
 const SELECT_JOIN = `
-  SELECT c.*, i.nome AS instituicao_nome, i.codigo AS instituicao_codigo
+  SELECT c.*, i.nome AS instituicao_nome, i.codigo AS instituicao_codigo,
+    e.razao_social AS empresa_razao_social,
+    e.nome_fantasia AS empresa_nome_fantasia,
+    e.cnpj AS empresa_cnpj
   FROM conta_bancaria c
   INNER JOIN instituicao_financeira i ON i.id = c.instituicao_financeira_id
+  INNER JOIN empresas e ON e.id = c.empresa_id
 `;
 
 async function obterNoContexto(params = {}) {
@@ -86,6 +103,47 @@ async function listarPorEmpresa(params = {}) {
     [empresaId]
   );
   return rows.map(mapRow);
+}
+
+function placeholdersIn(ids) {
+  return ids.map(() => '?').join(', ');
+}
+
+async function listarPorEmpresas(params = {}) {
+  const ids = [...new Set(
+    (Array.isArray(params.empresaIds) ? params.empresaIds : [])
+      .map((n) => Number(n))
+      .filter((n) => Number.isInteger(n) && n > 0)
+  )];
+  if (!ids.length) return [];
+  const rows = await dbAll(
+    params.db,
+    `${SELECT_JOIN} WHERE c.empresa_id IN (${placeholdersIn(ids)})
+     ORDER BY e.razao_social COLLATE NOCASE, c.principal DESC, c.nome COLLATE NOCASE ASC, c.id ASC`,
+    ids
+  );
+  return rows.map(mapRow);
+}
+
+async function obterNoConjunto(params = {}) {
+  const ids = [...new Set(
+    (Array.isArray(params.empresaIds) ? params.empresaIds : [])
+      .map((n) => Number(n))
+      .filter((n) => Number.isInteger(n) && n > 0)
+  )];
+  const id = Number(params.id);
+  if (!ids.length || !Number.isInteger(id) || id <= 0) {
+    throw erroMbc(ERROS.CONTA_NAO_ENCONTRADA, 'Conta bancária não encontrada.', 404);
+  }
+  const row = await dbGet(
+    params.db,
+    `${SELECT_JOIN} WHERE c.id = ? AND c.empresa_id IN (${placeholdersIn(ids)})`,
+    [id, ...ids]
+  );
+  if (!row) {
+    throw erroMbc(ERROS.CONTA_NAO_ENCONTRADA, 'Conta bancária não encontrada.', 404);
+  }
+  return mapRow(row);
 }
 
 async function limparPrincipalEmpresa(db, empresaId, excetoId) {
@@ -282,7 +340,9 @@ async function excluir(params = {}) {
 
 module.exports = {
   listarPorEmpresa,
+  listarPorEmpresas,
   obterNoContexto,
+  obterNoConjunto,
   criar,
   atualizar,
   ativar,

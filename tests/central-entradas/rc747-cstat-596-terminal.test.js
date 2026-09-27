@@ -53,6 +53,7 @@ function criarCenario(cStatCiencia = '135', xMotivo = 'Evento registrado') {
   const historico = [];
   const xmlWaitCancelados = [];
   let consultasDist = 0;
+  let consultasChave = 0;
   let manifestacoes = 0;
 
   const documentosRepository = {
@@ -136,6 +137,15 @@ function criarCenario(cStatCiencia = '135', xMotivo = 'Evento registrado') {
       consultasDist += 1;
       return { sucesso: true, cStat: '137' };
     },
+    consultarNotaPorChave: async () => {
+      consultasChave += 1;
+      return {
+        sucesso: true,
+        cStat: '137',
+        mensagem: 'Nenhum documento localizado',
+        notasNovas: 0
+      };
+    },
     cancelarXmlWait: (id, motivo) => {
       xmlWaitCancelados.push({ id: Number(id), motivo });
       return true;
@@ -151,6 +161,7 @@ function criarCenario(cStatCiencia = '135', xMotivo = 'Evento registrado') {
     historico,
     xmlWaitCancelados,
     getConsultasDist: () => consultasDist,
+    getConsultasChave: () => consultasChave,
     getManifestacoes: () => manifestacoes
   };
 }
@@ -179,7 +190,14 @@ async function run() {
   assert.strictEqual(
     validarTransicao(
       DocumentoFiscalStatus.XML_INDISPONIVEL,
-      DocumentoFiscalStatus.SINCRONIZADA
+      DocumentoFiscalStatus.XML_COMPLETO
+    ).valido,
+    true
+  );
+  assert.strictEqual(
+    validarTransicao(
+      DocumentoFiscalStatus.XML_INDISPONIVEL,
+      DocumentoFiscalStatus.IMPORTADA
     ).valido,
     false
   );
@@ -217,6 +235,7 @@ async function run() {
     assert.strictEqual(r.status, DocumentoFiscalStatus.XML_INDISPONIVEL);
     assert.strictEqual(c.documento.status, DocumentoFiscalStatus.XML_INDISPONIVEL);
     assert.strictEqual(c.getConsultasDist(), 0);
+    assert.ok(c.getConsultasChave() >= 1);
     assert.ok(c.xmlWaitCancelados.some((x) => x.motivo === 'xml_indisponivel'));
     assert.ok(
       c.eventos.some(
@@ -229,7 +248,7 @@ async function run() {
       )
     );
     assert.match(r.mensagem, /prazo|indispon/i);
-    console.log('✓ cStat 596: XML_INDISPONIVEL + auditoria + cancela XML_WAIT + sem DistDFe');
+    console.log('✓ cStat 596: consChNFe sem procNFe → XML_INDISPONIVEL + cancela XML_WAIT');
   }
 
   // Caso 4 — já terminal: nova solicitação não reinicia
@@ -237,12 +256,10 @@ async function run() {
     const c = criarCenario('135');
     c.documento.status = DocumentoFiscalStatus.XML_INDISPONIVEL;
     const r = await c.service.processarDocumento(42, { confirmado: true });
-    assert.strictEqual(r.encerrado, true);
-    assert.strictEqual(r.sucesso, false);
     assert.strictEqual(c.getManifestacoes(), 0);
     assert.strictEqual(c.getConsultasDist(), 0);
-    assert.match(r.mensagem, /indisponível|prazo/i);
-    console.log('✓ documento já terminal: não reinicia ciclo / sem nova Ciência');
+    assert.ok(c.getConsultasChave() >= 1);
+    console.log('✓ documento XML_INDISPONIVEL: não remanifesta; tenta consChNFe');
   }
 
   // Caso 5 — rejeição 596 pré-existente (legado) encerra sem cooldown
@@ -261,8 +278,9 @@ async function run() {
     assert.strictEqual(r.encerrado, true);
     assert.strictEqual(c.documento.status, DocumentoFiscalStatus.XML_INDISPONIVEL);
     assert.strictEqual(c.getManifestacoes(), 0);
+    assert.ok(c.getConsultasChave() >= 1);
     assert.ok(c.xmlWaitCancelados.length >= 1);
-    console.log('✓ legado com 596 já registrado: encerra sem nova tentativa');
+    console.log('✓ legado com 596 já registrado: não remanifesta; tenta consChNFe');
   }
 
   // recuperarPendentes não lista XML_INDISPONIVEL

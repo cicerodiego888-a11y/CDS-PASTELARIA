@@ -1,20 +1,72 @@
 <div class="mis-page">
   <style>
     .mis-page { max-width: 1080px; overflow-x: hidden; }
-    .mbc-toolbar { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0 0 1rem; }
-    .mbc-ctx { font-size: 0.875rem; color: #374151; margin-bottom: 0.5rem; }
+    .mbc-toolbar { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0 0 1rem; align-items: center; }
+    .mbc-ctx { font-size: 0.875rem; color: #374151; margin-bottom: 0.5rem; white-space: pre-line; }
     .mbc-table { width: 100%; font-size: 0.9rem; background: #fff; }
     .mbc-table th, .mbc-table td { padding: 0.45rem 0.4rem; border-bottom: 1px solid #f3f4f6; text-align: left; }
     .mbc-table th { font-size: 0.72rem; text-transform: uppercase; color: #6b7280; }
     .mbc-actions { display: flex; flex-wrap: wrap; gap: 0.25rem; }
-    .mbc-empty { color: #6b7280; }
+    .mbc-empty { color: #6b7280; font-size: 0.875rem; }
     .mbc-form { display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem; }
-    @media (max-width: 768px) { .mbc-form { grid-template-columns: 1fr; } }
+    .mbc-tx-painel {
+      background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+      padding: 1rem 1.1rem; margin: 0 0 1.25rem; min-width: 0;
+    }
+    .mbc-int-header { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.75rem; margin-bottom: 0.85rem; }
+    .mbc-int-header h3 { font-size: 1rem; font-weight: 650; margin: 0 0 0.35rem; color: #111827; }
+    .mbc-int-meta { font-size: 0.875rem; color: #374151; line-height: 1.45; margin: 0; }
+    .mbc-int-meta strong { color: #111827; font-weight: 600; }
+    .mbc-status-row { display: flex; flex-wrap: wrap; gap: 0.45rem; margin: 0.55rem 0 0; }
+    .mbc-badge {
+      display: inline-flex; align-items: center; gap: 0.3rem;
+      font-size: 0.75rem; padding: 0.2rem 0.55rem; border-radius: 999px;
+      border: 1px solid #e5e7eb; background: #f9fafb; color: #374151;
+    }
+    .mbc-badge--ok { border-color: #bbf7d0; background: #f0fdf4; color: #166534; }
+    .mbc-badge--warn { border-color: #fde68a; background: #fffbeb; color: #92400e; }
+    .mbc-badge--muted { border-color: #e5e7eb; background: #f9fafb; color: #6b7280; }
+    .mbc-tabs { display: flex; flex-wrap: wrap; gap: 0.35rem; margin: 0 0 1rem; border-bottom: 1px solid #e5e7eb; padding-bottom: 0.5rem; }
+    .mbc-tab {
+      border: 1px solid transparent; background: transparent; color: #6b7280;
+      font-size: 0.85rem; padding: 0.35rem 0.7rem; border-radius: 6px; cursor: pointer;
+    }
+    .mbc-tab.is-active { background: #eff6ff; border-color: #bfdbfe; color: #1d4ed8; font-weight: 600; }
+    .mbc-tab-panel[hidden] { display: none !important; }
+    .mbc-section-title { font-size: 0.95rem; font-weight: 650; margin: 0 0 0.55rem; color: #111827; }
+    .mbc-field-stack { display: grid; gap: 0.65rem; max-width: 36rem; }
+    .mbc-field-stack .form-label { font-size: 0.75rem; color: #6b7280; margin-bottom: 0.15rem; }
+    .mbc-row-selected { background: #eff6ff; }
+    .mbc-advanced {
+      margin-top: 1rem; border-top: 1px dashed #e5e7eb; padding-top: 0.75rem;
+    }
+    .mbc-advanced summary {
+      cursor: pointer; font-size: 0.85rem; color: #6b7280; font-weight: 600;
+    }
+    .mbc-advanced[open] summary { margin-bottom: 0.55rem; }
+    .mbc-op-grid {
+      display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.75rem; margin-bottom: 0.85rem;
+    }
+    .mbc-op-card {
+      background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px; padding: 0.75rem 0.85rem; min-width: 0;
+    }
+    .mbc-op-card__label { font-size: 0.72rem; text-transform: uppercase; color: #6b7280; letter-spacing: 0.04em; }
+    .mbc-op-card__value { font-size: 1.05rem; font-weight: 650; color: #111827; margin-top: 0.25rem; overflow-wrap: anywhere; }
+    @media (max-width: 768px) {
+      .mbc-form, .mbc-op-grid { grid-template-columns: 1fr; }
+    }
   </style>
   <div id="mbcShell"></div>
   <p class="mbc-ctx" id="mbcEmpresa">Empresa do contexto operacional</p>
   <div id="mbcAlerta"></div>
   <div class="mbc-toolbar">
+    <label class="form-label mb-0" for="mbcVistaEmpresas">Visão</label>
+    <select id="mbcVistaEmpresas" class="form-control form-control-sm" style="max-width:18rem" aria-label="Visão de empresas">
+      <option value="atual">Empresa atual</option>
+      <option value="todas">Todas as empresas</option>
+    </select>
+    <label class="form-label mb-0" for="mbcFiltroEmpresa" id="mbcFiltroEmpresaLabel" hidden>Filtrar empresa</label>
+    <select id="mbcFiltroEmpresa" class="form-control form-control-sm" style="max-width:22rem" hidden aria-label="Filtro por empresa"></select>
     <button type="button" class="btn btn-sm btn-primary" id="mbcBtnNovaConta">Nova conta</button>
     <button type="button" class="btn btn-sm btn-outline-secondary" id="mbcBtnNovaInst">Nova instituição</button>
   </div>
@@ -22,74 +74,246 @@
   <div id="mbcLista"></div>
 
   <section id="mbcPainelConfig" class="mbc-tx-painel" hidden>
-    <h3>Configuração de Integração</h3>
-    <p class="mbc-tx-conta" id="mbcCfgContaNome"></p>
-    <p class="mbc-empty">Provider de teste. Não conecta banco real. Sem senha, token ou secret nesta tela.</p>
-    <div class="mbc-toolbar">
-      <button type="button" class="btn btn-sm btn-outline-primary" id="mbcCfgCriar">Criar configuração MOCK (TESTE)</button>
-    </div>
-    <table class="mbc-table">
-      <thead>
-        <tr>
-          <th>Provider</th>
-          <th>Ambiente</th>
-          <th>Status</th>
-          <th>Credencial configurada</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody id="mbcCfgBody"></tbody>
-    </table>
-
-    <h3 class="mt-4">Open Finance</h3>
-    <p class="mbc-empty">Você será direcionado ao ambiente da instituição/provedor para autorizar o compartilhamento de dados.</p>
-    <p class="mbc-empty">Fluxo de teste MOCK. Provider real ainda não homologável. Este provider ainda não está habilitado para operação real. AGUARDANDO PROVIDER REAL / AMBIENTE OFICIAL. Sem senha bancária, token ou certificado nesta tela.</p>
-    <div class="mbc-toolbar">
-      <button type="button" class="btn btn-sm btn-outline-primary" id="mbcOfCfgCriar">Criar configuração MOCK Open Finance (TESTE)</button>
-      <button type="button" class="btn btn-sm btn-outline-primary" id="mbcOfAutorizar">Autorizar</button>
-    </div>
-    <table class="mbc-table">
-      <thead>
-        <tr>
-          <th>Instituição</th>
-          <th>Conta</th>
-          <th>Provider</th>
-          <th>Status</th>
-          <th>Escopos</th>
-          <th>Validade</th>
-          <th>Autorizado em</th>
-          <th></th>
-        </tr>
-      </thead>
-      <tbody id="mbcOfBody"></tbody>
-    </table>
-
-    <h3 class="mt-4">Sincronização</h3>
-    <p class="mbc-empty">Saldo bancário é o informado pelo provider. Saldo conceitual é o calculado pelas transações do MBC. A diferença é apenas informativa.</p>
-    <p id="mbcSyncIndicador" class="mbc-empty">Nunca sincronizado.</p>
-    <p><strong>Saldo bancário:</strong> <span id="mbcSyncSaldoBancario">—</span></p>
-    <p><strong>Saldo conceitual:</strong> <span id="mbcSyncSaldoConceitual">—</span></p>
-    <p><strong>Diferença:</strong> <span id="mbcSyncDiferenca">—</span></p>
-    <p><strong>Transações importadas:</strong> <span id="mbcSyncQtd">—</span></p>
-    <div class="mbc-toolbar">
-      <button type="button" class="btn btn-sm btn-outline-primary" id="mbcSyncAgora">Sincronizar agora</button>
+    <div class="mbc-int-header">
+      <div>
+        <h3>Integração bancária</h3>
+        <p class="mbc-int-meta" id="mbcCfgContaNome"></p>
+        <p class="mbc-int-meta" id="mbcCfgEmpresaMeta"></p>
+        <div class="mbc-status-row" id="mbcCfgStatusGeral" aria-live="polite"></div>
+      </div>
+      <div>
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="mbcIntVoltar">Voltar para contas</button>
+      </div>
     </div>
 
-    <h3 class="mt-4">Extrato bancário</h3>
-    <p class="mbc-empty">Somente leitura. Sem edição, exclusão ou alteração de valor.</p>
-    <table class="mbc-table">
-      <thead>
-        <tr>
-          <th>Data</th>
-          <th>Descrição</th>
-          <th>Tipo</th>
-          <th>Valor</th>
-          <th>Saldo após transação</th>
-          <th>Status</th>
-        </tr>
-      </thead>
-      <tbody id="mbcExtratoBody"></tbody>
-    </table>
+    <nav class="mbc-tabs" aria-label="Seções da integração">
+      <button type="button" class="mbc-tab is-active" data-mbc-tab="config">Configuração</button>
+      <button type="button" class="mbc-tab" data-mbc-tab="auth">Autorização</button>
+      <button type="button" class="mbc-tab" data-mbc-tab="operacao">Operação</button>
+    </nav>
+
+    <div class="mbc-tab-panel" data-mbc-panel="config">
+      <h4 class="mbc-section-title">Integração bancária</h4>
+      <div class="mbc-field-stack mb-3">
+        <div>
+          <label class="form-label" for="mbcIntInstituicao">Instituição / Banco</label>
+          <input id="mbcIntInstituicao" class="form-control form-control-sm" readonly>
+        </div>
+        <div>
+          <label class="form-label" for="mbcIntProvider">Provider</label>
+          <select id="mbcIntProvider" class="form-control form-control-sm">
+            <option value="OPEN_FINANCE_REAL">Mercado Pago</option>
+            <option value="ITAU">Itaú</option>
+          </select>
+        </div>
+        <div>
+          <label class="form-label" for="mbcMpAmbiente">Ambiente</label>
+          <select id="mbcMpAmbiente" class="form-control form-control-sm">
+            <option value="SANDBOX">Sandbox</option>
+            <option value="HOMOLOGACAO">Homologação</option>
+            <option value="PRODUCAO">Produção</option>
+          </select>
+        </div>
+      </div>
+
+      <h4 class="mbc-section-title">Credenciais</h4>
+      <p class="mbc-empty mb-2">Informe as credenciais do provider selecionado. Credenciais configuradas não significam banco conectado.</p>
+      <input type="hidden" id="mbcMpConfigId">
+
+      <div id="mbcCredPanelMp" class="mbc-cred-panel">
+        <div class="mbc-field-stack">
+          <div>
+            <label class="form-label" for="mbcMpClientId">Application ID / Client ID</label>
+            <input id="mbcMpClientId" class="form-control form-control-sm" autocomplete="off">
+          </div>
+          <div>
+            <label class="form-label" for="mbcMpSecret">Client Secret</label>
+            <input id="mbcMpSecret" type="password" class="form-control form-control-sm" autocomplete="new-password">
+          </div>
+        </div>
+      </div>
+
+      <div id="mbcCredPanelItau" class="mbc-cred-panel" hidden>
+        <div class="mbc-field-stack">
+          <div>
+            <label class="form-label" for="mbcItauClientId">Client ID</label>
+            <input id="mbcItauClientId" class="form-control form-control-sm" autocomplete="off">
+          </div>
+          <div>
+            <label class="form-label" for="mbcItauSecret">Client Secret</label>
+            <input id="mbcItauSecret" type="password" class="form-control form-control-sm" autocomplete="new-password">
+          </div>
+          <div>
+            <label class="form-label" for="mbcItauCert">Certificado (PEM) — produção / mTLS</label>
+            <textarea id="mbcItauCert" class="form-control form-control-sm" rows="3" autocomplete="off" placeholder="Opcional no sandbox. Nunca é exibido após salvar."></textarea>
+          </div>
+          <div>
+            <label class="form-label" for="mbcItauKey">Private key (PEM) — produção / mTLS</label>
+            <textarea id="mbcItauKey" class="form-control form-control-sm" rows="3" autocomplete="off" placeholder="Opcional no sandbox. Nunca é exibido após salvar."></textarea>
+          </div>
+          <div>
+            <label class="form-label" for="mbcItauCa">CA / cadeia (PEM) — opcional</label>
+            <textarea id="mbcItauCa" class="form-control form-control-sm" rows="2" autocomplete="off" placeholder="Somente se o ambiente exigir CA específica do Itaú. Nunca é exibida após salvar."></textarea>
+          </div>
+        </div>
+      </div>
+
+      <div class="mbc-status-row mt-2" id="mbcMpStatusBadges"></div>
+      <p class="mbc-empty mt-2" id="mbcMpStatus" hidden>Client ID configurado: — · Client Secret configurado: —</p>
+      <div class="mbc-toolbar">
+        <button type="button" class="btn btn-sm btn-primary" id="mbcMpSalvar">Salvar credenciais</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="mbcMpRemover">Remover credenciais</button>
+        <button type="button" class="btn btn-sm btn-outline-primary" id="mbcItauTestarConexao" hidden>Testar conexão</button>
+      </div>
+
+      <details class="mbc-advanced">
+        <summary>Avançado / Homologação interna</summary>
+        <p class="mbc-empty">Recursos de teste utilizados pela equipe técnica. Provider de teste. Não conecta banco real. Sem senha, token ou secret nesta tela.</p>
+        <div class="mbc-toolbar">
+          <button type="button" class="btn btn-sm btn-outline-secondary" id="mbcCfgCriar">Configuração MOCK</button>
+          <button type="button" class="btn btn-sm btn-outline-secondary" id="mbcOfCfgCriar">MOCK Open Finance</button>
+        </div>
+        <table class="mbc-table">
+          <thead>
+            <tr>
+              <th>Provider</th>
+              <th>Ambiente</th>
+              <th>Status</th>
+              <th>Credencial configurada</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="mbcCfgBody"></tbody>
+        </table>
+        <p class="mbc-empty mt-2">OPEN_FINANCE_REAL ainda não está habilitado para operação real. Provider real ainda não homologável.</p>
+      </details>
+    </div>
+
+    <div class="mbc-tab-panel" data-mbc-panel="auth" hidden>
+      <h4 class="mbc-section-title">Autorização bancária</h4>
+      <div class="mbc-status-row mb-2" id="mbcAuthStatusBadges"></div>
+      <p class="mbc-empty" id="mbcAuthAjuda">Configure as credenciais na aba Configuração antes de autorizar.</p>
+      <p class="mbc-empty" id="mbcAuthMsg"></p>
+      <div class="mbc-toolbar">
+        <button type="button" class="btn btn-sm btn-primary" id="mbcOfAutorizar">Autorizar acesso</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="mbcOfDesconectar" hidden>Desconectar</button>
+      </div>
+      <details class="mbc-advanced mt-3">
+        <summary>Detalhes do consentimento</summary>
+        <table class="mbc-table">
+          <thead>
+            <tr>
+              <th>Instituição</th>
+              <th>Conta</th>
+              <th>Provider</th>
+              <th>Status</th>
+              <th>Escopos</th>
+              <th>Validade</th>
+              <th>Autorizado em</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="mbcOfBody"></tbody>
+        </table>
+        <p class="mbc-empty mt-2">Open Finance — fluxo de teste disponível em Avançado. Sincronização bancária real permanece fora desta etapa.</p>
+      </details>
+    </div>
+
+    <div class="mbc-tab-panel" data-mbc-panel="operacao" hidden>
+      <h4 class="mbc-section-title">Operação</h4>
+      <p class="mbc-empty" id="mbcOpBloqueio" hidden>Autorize o Mercado Pago para sincronizar esta conta.</p>
+      <div class="mbc-status-row mb-2" id="mbcOpStatusIntegracao"></div>
+
+      <div class="mbc-op-grid">
+        <div class="mbc-op-card">
+          <div class="mbc-op-card__label">Última sincronização</div>
+          <div class="mbc-op-card__value" id="mbcSyncUltima">Nenhuma sincronização realizada.</div>
+        </div>
+        <div class="mbc-op-card">
+          <div class="mbc-op-card__label">Status</div>
+          <div class="mbc-op-card__value" id="mbcSyncStatus">Não executada</div>
+        </div>
+        <div class="mbc-op-card">
+          <div class="mbc-op-card__label">Continuidade</div>
+          <div class="mbc-op-card__value" id="mbcSyncContinuidade">Sem sincronização prévia</div>
+        </div>
+      </div>
+
+      <div class="mbc-op-grid mt-2">
+        <div class="mbc-op-card">
+          <div class="mbc-op-card__label">Recebidas</div>
+          <div class="mbc-op-card__value" id="mbcSyncRecebidas">0</div>
+        </div>
+        <div class="mbc-op-card">
+          <div class="mbc-op-card__label">Criadas</div>
+          <div class="mbc-op-card__value" id="mbcSyncCriadas">0</div>
+        </div>
+        <div class="mbc-op-card">
+          <div class="mbc-op-card__label">Já existentes</div>
+          <div class="mbc-op-card__value" id="mbcSyncJaExistentes">0</div>
+        </div>
+        <div class="mbc-op-card">
+          <div class="mbc-op-card__label">Rejeitadas</div>
+          <div class="mbc-op-card__value" id="mbcSyncRejeitadas">0</div>
+        </div>
+      </div>
+
+      <div class="mbc-op-grid mt-2">
+        <div class="mbc-op-card">
+          <div class="mbc-op-card__label">Saldo bancário (real do provider)</div>
+          <div class="mbc-op-card__value" id="mbcSyncSaldoBancario">Saldo real indisponível neste fluxo.</div>
+        </div>
+        <div class="mbc-op-card">
+          <div class="mbc-op-card__label">Saldo conceitual (MBC)</div>
+          <div class="mbc-op-card__value" id="mbcSyncSaldoConceitual">R$ 0,00</div>
+        </div>
+        <div class="mbc-op-card" hidden>
+          <div class="mbc-op-card__label">Diferença</div>
+          <div class="mbc-op-card__value" id="mbcSyncDiferenca">—</div>
+        </div>
+      </div>
+      <p class="mbc-empty mt-1">Saldo real do banco = informado pelo provider. Saldo conceitual MBC = calculado pelas movimentações armazenadas no CDS.</p>
+      <p class="mbc-empty" id="mbcSyncMsg" hidden></p>
+      <p><strong>Movimentações no extrato:</strong> <span id="mbcSyncQtd">0</span></p>
+      <div class="mbc-toolbar">
+        <button type="button" class="btn btn-sm btn-primary" id="mbcSyncAgora">Sincronizar agora</button>
+        <button type="button" class="btn btn-sm btn-outline-primary" id="mbcItauConsultarSaldo" hidden>Consultar saldo real</button>
+        <button type="button" class="btn btn-sm btn-outline-primary" id="mbcItauConsultarExtrato" hidden>Consultar extrato</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="mbcExtratoAtualizar">Atualizar extrato</button>
+      </div>
+      <details class="mbc-advanced mt-2">
+        <summary>Diagnóstico técnico</summary>
+        <p class="mbc-empty mb-2" id="mbcSyncIndicador">Nenhuma sincronização realizada.</p>
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="mbcTestarLeitura">Testar leitura (sem gravar)</button>
+      </details>
+
+      <h4 class="mbc-section-title mt-3">Extrato bancário</h4>
+      <p class="mbc-empty">Movimentações persistidas em <code>transacao_bancaria</code>. Somente leitura.</p>
+      <div class="mbc-toolbar">
+        <label class="form-label mb-0" for="mbcExtInicio">Período</label>
+        <input type="date" id="mbcExtInicio" class="form-control form-control-sm" style="max-width:11rem">
+        <input type="date" id="mbcExtFim" class="form-control form-control-sm" style="max-width:11rem">
+        <select id="mbcExtDirecao" class="form-select form-select-sm" style="max-width:9rem">
+          <option value="">Todas</option>
+          <option value="entrada">Entrada</option>
+          <option value="saida">Saída</option>
+        </select>
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="mbcExtFiltrar">Filtrar</button>
+      </div>
+      <table class="mbc-table">
+        <thead>
+          <tr>
+            <th>Data</th>
+            <th>Descrição</th>
+            <th>Referência</th>
+            <th>Entrada</th>
+            <th>Saída</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="mbcExtratoBody"></tbody>
+      </table>
+    </div>
   </section>
 
   <section id="mbcPainelTransacoes" class="mbc-tx-painel" hidden>
@@ -103,7 +327,25 @@
       <input type="date" id="mbcTxFim" class="form-control form-control-sm" style="max-width:11rem">
       <button type="button" class="btn btn-sm btn-outline-secondary" id="mbcTxFiltrar">Filtrar</button>
     </div>
+    <h3 class="mt-4">Conciliação pendente</h3>
+    <p class="mbc-empty">Transações com valor ainda disponível para conciliar. Matching automático não está ativo neste sprint.</p>
     <table class="mbc-table">
+      <thead>
+        <tr>
+          <th>Data</th>
+          <th>Descrição</th>
+          <th>Entrada/Saída</th>
+          <th>Valor</th>
+          <th>Conciliado</th>
+          <th>Disponível</th>
+          <th>Status</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="mbcPendBody"></tbody>
+    </table>
+
+    <table class="mbc-table mt-3">
       <thead>
         <tr>
           <th>Data</th>
@@ -112,6 +354,8 @@
           <th>Entrada</th>
           <th>Saída</th>
           <th>Direção</th>
+          <th>Conciliado</th>
+          <th>Disponível</th>
           <th>Status</th>
           <th>Conciliação</th>
         </tr>
@@ -120,7 +364,7 @@
     </table>
 
     <h3 class="mt-4">Conciliações sugeridas</h3>
-    <p class="mbc-empty">O matching apenas sugere. A conciliação oficial ocorre ao aceitar, pelo fluxo do MBC-04.</p>
+    <p class="mbc-empty">Matching determinístico apenas sugere. A conciliação oficial ocorre ao confirmar (MBC-05.1). Sem auto-conciliação.</p>
     <div class="mbc-toolbar">
       <button type="button" class="btn btn-sm btn-outline-primary" id="mbcSugAnalisar">Analisar conciliações</button>
     </div>
@@ -156,10 +400,14 @@
           <h6>Registro financeiro</h6>
           <select id="mbcConcRegistro" class="form-control form-control-sm mb-2"></select>
           <p id="mbcConcFinResumo" class="mbc-empty"></p>
+          <label class="form-label" for="mbcConcValor">Valor a conciliar</label>
+          <input type="number" step="0.01" min="0.01" id="mbcConcValor" class="form-control form-control-sm mb-2">
+          <p class="mbc-empty" id="mbcConcValorHint">Máximo: valor disponível.</p>
           <h6>Resumo</h6>
           <p id="mbcConcDiff"></p>
           <label class="form-label" for="mbcConcObs">Observação</label>
           <input id="mbcConcObs" class="form-control form-control-sm">
+          <p class="mbc-empty mt-2">Use também &quot;Encontrar correspondências&quot; na grade para matching determinístico (somente leitura).</p>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-sm btn-primary" id="mbcConcConfirmar">Confirmar conciliação</button>
@@ -168,7 +416,27 @@
     </div>
   </div>
 
-  <div class="modal fade" id="mbcModalConta" tabindex="-1">
+  <div class="modal fade" id="mbcModalMatching" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Matching da transação</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+        </div>
+        <div class="modal-body">
+          <input type="hidden" id="mbcMatchTxId">
+          <p id="mbcMatchResumo" class="mbc-empty"></p>
+          <h6 class="mt-3">Candidatos encontrados</h6>
+          <div id="mbcMatchCandidatos"></div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">Fechar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal fade" id="mbcModalConta" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
     <div class="modal-dialog">
       <div class="modal-content">
         <div class="modal-header">
@@ -177,6 +445,10 @@
         </div>
         <div class="modal-body">
           <input type="hidden" id="mbcContaId">
+          <div class="mb-2">
+            <label class="form-label" for="mbcEmpresaConta">Empresa / CNPJ *</label>
+            <select id="mbcEmpresaConta" class="form-control form-control-sm"></select>
+          </div>
           <div class="mbc-form">
             <div>
               <label class="form-label" for="mbcInst">Instituição</label>
@@ -228,7 +500,7 @@
     </div>
   </div>
 
-  <div class="modal fade" id="mbcModalInst" tabindex="-1">
+  <div class="modal fade" id="mbcModalInst" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
     <div class="modal-dialog">
       <div class="modal-content">
         <div class="modal-header">

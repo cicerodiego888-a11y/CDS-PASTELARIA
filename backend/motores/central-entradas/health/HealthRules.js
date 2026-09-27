@@ -82,18 +82,26 @@ function avaliarDocumento(doc, wait = {}, ctx = {}) {
   if (!doc?.id) return alertas;
 
   const status = doc.status;
-  if (status === DocumentoFiscalStatus.XML_INDISPONIVEL || status === DocumentoFiscalStatus.ERRO) {
+  if (status === DocumentoFiscalStatus.XML_INDISPONIVEL) {
+    alertas.push({
+      regra: 'XML_INDISPONIVEL_RETENTATIVA',
+      nivel: HealthNiveis.ATENCAO,
+      diagnostico: 'XML ainda não persistido. Ciência 210210 pode ter sido recusada (ex. prazo); a consulta por chave continua.',
+      recomendacao: recuperacaoPortalNacionalHabilitada()
+        ? 'O motor consulta consChNFe automaticamente. Se persistir, use Portal Nacional ou importação de XML.'
+        : 'O motor consulta consChNFe automaticamente, sem reenviar ciência.',
+      tempoParadoMs: tempoDesde(doc.updatedAt || doc.createdAt, agora),
+      autoRecuperavel: true
+    });
+    return alertas;
+  }
+
+  if (status === DocumentoFiscalStatus.ERRO) {
     alertas.push({
       regra: 'DOCUMENTO_BLOQUEADO',
       nivel: HealthNiveis.BLOQUEADO,
-      diagnostico: status === DocumentoFiscalStatus.XML_INDISPONIVEL
-        ? 'Documento encerrado: XML indisponível na SEFAZ (estado terminal).'
-        : 'Documento em erro operacional. Verifique o histórico e a configuração.',
-      recomendacao: status === DocumentoFiscalStatus.XML_INDISPONIVEL
-        ? (recuperacaoPortalNacionalHabilitada()
-          ? 'Recuperar pelo Portal Nacional (CDS) ou Importação de XML Legado. Nenhuma ação MIRX automática.'
-          : 'Documento encerrado: XML indisponível na SEFAZ. Nenhuma ação MIRX automática.')
-        : 'Verificar configuração e histórico do documento.',
+      diagnostico: 'Documento em erro operacional. Verifique o histórico e a configuração.',
+      recomendacao: 'Verificar configuração e histórico do documento.',
       tempoParadoMs: tempoDesde(doc.updatedAt || doc.createdAt, agora),
       autoRecuperavel: false
     });

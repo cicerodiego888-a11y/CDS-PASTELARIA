@@ -138,6 +138,71 @@ class CentralEventosRepository extends IRepository {
   }
 
   /**
+   * Evento único por (tipo, documento) com o detalhe_json bruto, usado como versão no CAS.
+   * @param {string} tipo
+   * @param {number|string} documentoId
+   * @returns {Promise<Object|null>}
+   */
+  async obterUnicoComVersao(tipo, documentoId) {
+    const sql = this._obterSql();
+    await sql.whenReady();
+    const row = await sql.get(
+      `SELECT * FROM ${CentralEventosRepository.TABELA}
+       WHERE tipo = ? AND documento_id = ?
+       ORDER BY id DESC LIMIT 1`,
+      [tipo, documentoId]
+    );
+    if (!row) return null;
+    return { ...this._mapearRow(row), versao: row.detalhe_json ?? null };
+  }
+
+  /**
+   * Compare-and-swap: só atualiza se o detalhe_json ainda for o lido (versao).
+   * @param {Object} dados
+   * @param {number} dados.id
+   * @param {string} dados.tipo
+   * @param {string|null} dados.versao
+   * @param {Object} dados.detalhe
+   * @param {string} [dados.descricao]
+   * @returns {Promise<boolean>} true somente para quem efetivou a troca
+   */
+  async substituirDetalheSeInalterado(dados) {
+    const sql = this._obterSql();
+    await sql.whenReady();
+    const resultado = await sql.run(
+      `UPDATE ${CentralEventosRepository.TABELA}
+       SET detalhe_json = ?, descricao = COALESCE(?, descricao), created_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND tipo = ? AND detalhe_json IS ?`,
+      [
+        serializarJson(dados.detalhe),
+        dados.descricao ?? null,
+        dados.id,
+        dados.tipo,
+        dados.versao ?? null
+      ]
+    );
+    return resultado.changes === 1;
+  }
+
+  /**
+   * Remove o evento (tipo, documento) somente se pertencer ao token informado.
+   * @param {string} tipo
+   * @param {number|string} documentoId
+   * @param {string} token
+   * @returns {Promise<boolean>}
+   */
+  async removerPorTipoDocumentoToken(tipo, documentoId, token) {
+    const sql = this._obterSql();
+    await sql.whenReady();
+    const resultado = await sql.run(
+      `DELETE FROM ${CentralEventosRepository.TABELA}
+       WHERE tipo = ? AND documento_id = ? AND instr(detalhe_json, ?) > 0`,
+      [tipo, documentoId, JSON.stringify({ token }).slice(1, -1)]
+    );
+    return resultado.changes > 0;
+  }
+
+  /**
    * @param {Object} [filtros]
    * @returns {Promise<Object[]>}
    */

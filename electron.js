@@ -22,6 +22,20 @@ process.env.DB_DIR = process.env.DB_DIR || path.join(
 
 console.log('DB_DIR definido para:', process.env.DB_DIR);
 
+try {
+  const {
+    bootstrapAmbienteOperacionalMbc
+  } = require('./backend/motores/bancario/secrets/bootstrapAmbienteOperacionalMbc');
+  const mbcBoot = bootstrapAmbienteOperacionalMbc({ exigirRedirectUri: false });
+  if (mbcBoot.secret_store_disponivel) {
+    console.log('[MBC] SecretStore local disponível (origem=' + mbcBoot.secret_store_origem + ').');
+  } else {
+    console.warn('[MBC] SecretStore local indisponível — configure MBC_SECRET_STORE_KEY.');
+  }
+} catch (e) {
+  console.warn('[MBC] Não foi possível inicializar SecretStore:', e && e.message ? e.message : e);
+}
+
 // 🔥 CORREÇÃO DEFINITIVA GPU - Resolve travamentos no Windows
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('disable-gpu');

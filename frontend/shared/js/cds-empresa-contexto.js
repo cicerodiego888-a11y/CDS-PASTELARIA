@@ -182,6 +182,12 @@
     });
   }
 
+  /** Matriz marcada pelo backend (/empresas/contexto/disponiveis); sem matriz, a primeira da lista. */
+  function empresaPadrao(lista) {
+    const itens = Array.isArray(lista) ? lista : [];
+    return itens.find((e) => e && e.matriz_padrao === true) || itens[0] || null;
+  }
+
   async function inicializar() {
     const host = garantirHost();
     if (!host) return;
@@ -208,9 +214,10 @@
     }
 
     if (!atualId && disponiveis.length >= 1) {
+      const padrao = empresaPadrao(disponiveis);
       try {
-        await selecionar(disponiveis[0].id);
-        atualId = Number(disponiveis[0].id);
+        await selecionar(padrao.id);
+        atualId = Number(padrao.id);
       } catch (e) {
         renderLista(host, disponiveis, null);
         return;
@@ -232,6 +239,7 @@
     headersJson: headersJson,
     anexarHeaderXhr: anexarHeaderXhr,
     listarDisponiveis: listarDisponiveis,
+    empresaPadrao: empresaPadrao,
     selecionar: selecionar,
     inicializar: inicializar
   };

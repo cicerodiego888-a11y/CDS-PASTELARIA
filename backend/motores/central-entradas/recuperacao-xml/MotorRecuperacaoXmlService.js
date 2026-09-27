@@ -23,6 +23,12 @@ const DocumentoTransitionService = require('../services/DocumentoTransitionServi
 const { TIPOS_EVENTO, ORIGENS } = require('../config/centralEventosTipos');
 const { criarCorrelationId } = require('../utils/centralOperacaoLog');
 const { logCentral, logCentralErro } = require('../utils/centralLog');
+const CentralDfePersistenciaService = require('../services/CentralDfePersistenciaService');
+const {
+  obterContextoOperacionalDoDocumento,
+  resolverEmpresaIdDocumento,
+  camposLogContextoDocumento
+} = require('../services/resolverContextoDocumentoCentral');
 const {
   STATUS_MONITORADOS,
   ehElegivelRecuperacaoXml,
@@ -35,6 +41,13 @@ const {
   DEFAULTS,
   lerConfigDeMapa
 } = require('./MotorRecuperacaoXmlConfig');
+
+const {
+  INTERVALO_SEGURO_MS,
+  POLITICAS_MANIFESTACAO,
+  adquirirLockDocumentoSefaz,
+  liberarLockDocumentoSefaz
+} = require('../services/CentralManifestacaoDfeService');
 
 const ORIGEM_MOTOR = 'recuperacao_xml_automatica';
 
@@ -57,10 +70,17 @@ class MotorRecuperacaoXmlService {
       || ((chave, opts) => require('../../../services/fiscal/distribuicaoDFe')
         .consultarNotaPorChave(chave, opts));
     this._obterContexto = deps.obterContextoOperacional
-      || (async () => {
+      || (async (opcoes = {}) => {
         const cfg = new (require('../services/CentralConfiguracaoService'))();
-        return cfg.obterContextoOperacional();
+        return cfg.obterContextoOperacional(opcoes);
       });
+    this._criarPersistencia = deps.criarPersistencia || ((empresaId) => (
+      new CentralDfePersistenciaService({
+        documentosRepository: this._documentosRepository,
+        historicoRepository: this._historicoRepository,
+        empresaId
+      })
+    ));
     this._processarDocumento = deps.processarDocumento
       || (async (id, opcoes) => {
         const orch = require('../CentralEntradasOrchestrator');
@@ -70,6 +90,8 @@ class MotorRecuperacaoXmlService {
         return null;
       });
     this._agora = deps.agora || (() => new Date());
+    this._manifestacaoService = deps.manifestacaoService || null;
+    this._obterPoliticaManifestacao = deps.obterPoliticaManifestacao || null;
 
     /** @private */
     this._timeoutId = null;
@@ -108,6 +130,35 @@ class MotorRecuperacaoXmlService {
       this._gate = null;
     }
     return this._gate;
+  }
+
+  /** @private */
+  _obterServicoManifestacao() {
+    if (this._manifestacaoService) return this._manifestacaoService;
+    const Svc = require('../services/CentralManifestacaoDfeService');
+    return new Svc({
+      documentosRepository: this._documentosRepository,
+      historicoRepository: this._historicoRepository,
+      eventosRepository: this._eventosRepository,
+      consultarNotaPorChave: this._consultarNotaPorChave,
+      gate: this._obterGate() || undefined
+    });
+  }
+
+  /**
+   * CE-05 P08 — política de manifestação configurada; falha de leitura não autoriza envio.
+   * @private
+   */
+  async _obterPoliticaManifestacaoSegura(svcManif) {
+    try {
+      if (this._obterPoliticaManifestacao) {
+        return await this._obterPoliticaManifestacao();
+      }
+      return await svcManif._configuracao.obterPoliticaManifestacao();
+    } catch (error) {
+      logCentralErro('RECUPERACAO_XML', error, { Etapa: 'politica_manifestacao' });
+      return null;
+    }
   }
 
   estaAtivo() {
@@ -199,6 +250,7 @@ class MotorRecuperacaoXmlService {
         numero: doc.numero,
         fornecedor: doc.fornecedor,
         createdAt: doc.createdAt || doc.created_at,
+        empresaId: doc.empresaId || doc.empresa_id || null,
         tentativas: Number(st.tentativas) || 0,
         ultimaConsulta: st.ultimaConsulta || null,
         ultimoRetorno: st.ultimoRetorno || null,
@@ -271,13 +323,20 @@ class MotorRecuperacaoXmlService {
       return { ignorado: true, motivo: 'ciclo_em_execucao' };
     }
 
-    const config = await this.obterConfig();
+    this._cicloEmExecucao = true;
+    let config;
+    try {
+      config = await this.obterConfig();
+    } catch (error) {
+      this._cicloEmExecucao = false;
+      throw error;
+    }
     if (!config.ativa && !opcoes.forcar) {
+      this._cicloEmExecucao = false;
       this._ativo = false;
       return { ignorado: true, motivo: 'desativado' };
     }
 
-    this._cicloEmExecucao = true;
     const correlationId = opcoes.correlationId || criarCorrelationId();
     const inicio = Date.now();
     const relatorio = {
@@ -322,6 +381,19 @@ class MotorRecuperacaoXmlService {
         if (decisao.adiar) continue;
         elegiveis.push(item);
       }
+
+      elegiveis.sort((a, b) => {
+        const sa = a.status === DocumentoFiscalStatus.XML_INDISPONIVEL ? 0 : 1;
+        const sb = b.status === DocumentoFiscalStatus.XML_INDISPONIVEL ? 0 : 1;
+        if (sa !== sb) return sa - sb;
+        const ta = Number(a.tentativas) || 0;
+        const tb = Number(b.tentativas) || 0;
+        if (ta !== tb) return ta - tb;
+        const ea = Number(a.empresaId || a.empresa_id) || 0;
+        const eb = Number(b.empresaId || b.empresa_id) || 0;
+        if (ea !== eb) return ea - eb;
+        return Number(a.id) - Number(b.id);
+      });
 
       const lote = elegiveis.slice(0, config.lotePorCiclo);
 
@@ -442,6 +514,77 @@ class MotorRecuperacaoXmlService {
       return { ...base, mensagem: 'Documento saiu da fila (status alterado)' };
     }
 
+    const statusAtual = normalizarStatus(doc.status);
+    let rejeicao596 = false;
+    if (
+      statusAtual === DocumentoFiscalStatus.RESUMO_RECEBIDO
+      && typeof this._eventosRepository?.listar === 'function'
+    ) {
+      const aceita = await this._eventosRepository.listar({
+        tipo: TIPOS_EVENTO.MANIFESTACAO_ACEITA,
+        documentoId: id,
+        limite: 1
+      });
+      const rejeitada = await this._eventosRepository.listar({
+        tipo: TIPOS_EVENTO.MANIFESTACAO_REJEITADA,
+        documentoId: id,
+        limite: 1
+      });
+      const cStatRej = String(
+        rejeitada?.[0]?.resultado
+        || rejeitada?.[0]?.detalhe?.cStat
+        || ''
+      );
+      rejeicao596 = !aceita?.[0] && cStatRej === '596';
+      if (!aceita?.[0] && cStatRej !== '596') {
+        const svcManif = this._obterServicoManifestacao();
+        const politica = await this._obterPoliticaManifestacaoSegura(svcManif);
+        if (politica !== POLITICAS_MANIFESTACAO.AUTOMATICA_CIENCIA) {
+          const motivo = `Política de manifestação ${politica || 'indisponível'}: `
+            + 'Ciência 210210 aguarda ação do operador (sem envio automático)';
+          this._atualizarEstadoDoc(id, {
+            ultimoRetorno: 'AGUARDANDO_POLITICA_MANIFESTACAO',
+            motivo,
+            politica: politica || null,
+            correlationId
+          });
+          logCentral('RECUPERACAO_XML', {
+            mensagem: motivo,
+            Etapa: 'politica_manifestacao',
+            documentoId: id,
+            politica: politica || null,
+            correlationId
+          });
+          return {
+            ...base,
+            aguardandoPolitica: true,
+            politica: politica || null,
+            mensagem: motivo
+          };
+        }
+        const processarManif = this._processarManifestacao
+          || ((documentoId, opcoes) => svcManif.processarDocumento(documentoId, opcoes));
+        const rManif = await processarManif(id, {
+          origemAutomatica: true,
+          apenasManifestacao: true,
+          correlationId
+        });
+        this._atualizarEstadoDoc(id, {
+          tentativas: (this._estado.docs[String(id)]?.tentativas || 0) + 1,
+          ultimaConsulta: this._agora().toISOString(),
+          ultimoRetorno: rManif?.cStat || (rManif?.sucesso ? 'CIENCIA' : 'CIENCIA_PENDENTE'),
+          motivo: rManif?.mensagem || 'Ciência 210210 (recuperação XML)',
+          correlationId
+        });
+        return {
+          ...base,
+          recuperado: rManif?.xmlCompleto === true,
+          mensagem: rManif?.mensagem || 'Ciência da emissão enviada',
+          cStat: rManif?.cStat || null
+        };
+      }
+    }
+
     if (!doc.chave || String(doc.chave).replace(/\D/g, '').length !== 44) {
       this._atualizarEstadoDoc(id, {
         tentativas: (this._estado.docs[String(id)]?.tentativas || 0) + 1,
@@ -453,6 +596,34 @@ class MotorRecuperacaoXmlService {
       return { ...base, falha: true, mensagem: 'Chave inválida' };
     }
 
+    const proximaConsultaDoc = await this._proximaConsultaDocumento(id);
+    if (proximaConsultaDoc && this._agora() < proximaConsultaDoc) {
+      this._atualizarEstadoDoc(id, {
+        ultimoRetorno: rejeicao596 ? 'AGUARDANDO_JANELA_POS_596' : 'AGUARDANDO_JANELA',
+        motivo: rejeicao596
+          ? 'Ciência rejeitada por prazo (596); consChNFe aguardando próxima janela'
+          : 'Documento já consultado; aguardando próxima janela',
+        proximaConsultaEm: proximaConsultaDoc.toISOString(),
+        correlationId
+      });
+      return {
+        ...base,
+        aguardandoJanela: true,
+        cStat: rejeicao596 ? '596' : undefined,
+        proximaConsultaEm: proximaConsultaDoc.toISOString(),
+        mensagem: 'Aguardando próxima janela de consulta do documento'
+      };
+    }
+
+    let ctxResult = null;
+    let erroContexto = null;
+    try {
+      ctxResult = await obterContextoOperacionalDoDocumento(this._obterContexto, doc);
+    } catch (error) {
+      erroContexto = error;
+    }
+    const contextoGate = ctxResult?.ok ? (ctxResult.contexto || {}) : {};
+
     const gate = this._obterGate();
     if (gate?.autorizarConsultaDistDfe) {
       const auth = await gate.autorizarConsultaDistDfe({
@@ -460,6 +631,9 @@ class MotorRecuperacaoXmlService {
         documentoId: id,
         chave: doc.chave,
         nsu: doc.nsu,
+        empresaId: contextoGate.empresaId,
+        cnpj: contextoGate.cnpj,
+        ambiente: contextoGate.ambiente,
         origem: ORIGEM_MOTOR,
         motivo: 'recuperacao_xml_automatica_consChNFe',
         forcar: false
@@ -477,55 +651,128 @@ class MotorRecuperacaoXmlService {
           descricao: `Consulta bloqueada pelo Gate: ${auth.codigo || 'GATE'}`,
           sucesso: false,
           correlationId,
-          detalhe: { codigo: auth.codigo, cStat: auth.cStat }
+          detalhe: {
+            codigo: auth.codigo,
+            cStat: auth.cStat,
+            escopo: auth.escopo || null,
+            empresa_id: auth.empresaId || null,
+            proximaConsultaEm: auth.proximaConsultaEm || null
+          }
         });
         return {
           ...base,
           gateBloqueado: true,
+          proximaConsultaEm: auth.proximaConsultaEm || null,
           mensagem: auth.mensagem || 'Gate bloqueado'
         };
       }
     }
 
-    await this._emitirEvento({
-      tipo: TIPOS_EVENTO.RECUPERACAO_XML_CONSULTA,
-      documentoId: id,
-      descricao: `Consulta automática consChNFe — documento #${id}`,
-      sucesso: true,
-      correlationId,
-      detalhe: {
-        chave: doc.chave,
-        nsu: doc.nsu,
-        status: doc.status,
-        ciclo: correlationIdCiclo
-      }
-    });
+    if (!adquirirLockDocumentoSefaz(id)) {
+      return {
+        ...base,
+        emAndamento: true,
+        mensagem: 'Documento já em consulta SEFAZ por outro fluxo'
+      };
+    }
 
     let resultadoConsulta = null;
+    let consultaEnviada = false;
     try {
-      const ctxResult = await this._obterContexto();
+      if (erroContexto) throw erroContexto;
       if (!ctxResult?.ok) {
         throw new Error(ctxResult?.mensagem || 'Contexto operacional indisponível');
       }
+      const contexto = ctxResult.contexto || {};
+      const empresaIdPersistencia = Number(contexto.empresaId)
+        || resolverEmpresaIdDocumento(doc);
+      const persistencia = Number.isInteger(empresaIdPersistencia) && empresaIdPersistencia > 0
+        ? this._criarPersistencia(empresaIdPersistencia)
+        : undefined;
+
+      const logCtx = camposLogContextoDocumento(contexto, doc);
+      logCentral('RECUPERACAO_XML', {
+        mensagem: 'Consulta consChNFe',
+        Etapa: 'consChNFe',
+        Tentativa: (this._estado.docs[String(id)]?.tentativas || 0) + 1,
+        CorrelationId: correlationId,
+        ...logCtx
+      });
+
+      await this._emitirEvento({
+        tipo: TIPOS_EVENTO.RECUPERACAO_XML_CONSULTA,
+        documentoId: id,
+        descricao: `Consulta automática consChNFe — documento #${id}`,
+        sucesso: true,
+        correlationId,
+        detalhe: {
+          chave: logCtx.chave,
+          nsu: doc.nsu,
+          status: doc.status,
+          ciclo: correlationIdCiclo,
+          empresa_id: logCtx.empresa_id,
+          cnpj: logCtx.cnpj,
+          ambiente: logCtx.ambiente
+        }
+      });
+
+      consultaEnviada = true;
       resultadoConsulta = await this._consultarNotaPorChave(
         String(doc.chave).replace(/\D/g, ''),
-        { contextoCentral: ctxResult.contexto }
+        {
+          contextoCentral: contexto,
+          persistenciaService: persistencia,
+          gateSefaz: gate || undefined,
+          documentoId: id,
+          correlationId,
+          origemGate: ORIGEM_MOTOR
+        }
       );
 
-      try {
-        if (resultadoConsulta?.cStat && gate?.processarRespostaSefaz) {
-          await gate.processarRespostaSefaz(resultadoConsulta, {
-            chave: doc.chave,
-            documentoId: id,
-            correlationId
-          });
-        }
-      } catch { /* ignore */ }
+      logCentral('RECUPERACAO_XML', {
+        mensagem: 'Retorno consChNFe',
+        Etapa: 'retorno_sefaz',
+        CorrelationId: correlationId,
+        ...logCtx,
+        cStat: resultadoConsulta?.cStat || null,
+        xMotivo: resultadoConsulta?.mensagem || resultadoConsulta?.xMotivo || null,
+        httpStatus: resultadoConsulta?.statusCode || resultadoConsulta?.httpStatus || null,
+        notasNovas: resultadoConsulta?.notasNovas,
+        recuperado: false
+      });
+
+      if (rejeicao596) {
+        await this._registrarConsultaPos596(id, correlationId, {
+          cStat: resultadoConsulta?.cStat || null,
+          xMotivo: resultadoConsulta?.xMotivo || resultadoConsulta?.mensagem || null
+        });
+      }
     } catch (error) {
+      if (error?.bloqueadoGate) {
+        this._atualizarEstadoDoc(id, {
+          ultimaConsulta: this._agora().toISOString(),
+          ultimoRetorno: error.codigo || 'GATE_BLOQUEADO',
+          motivo: error.message,
+          correlationId
+        });
+        return {
+          ...base,
+          gateBloqueado: true,
+          proximaConsultaEm: error.proximaConsultaEm || null,
+          mensagem: error.message
+        };
+      }
+      const cStatErro = error?.cStat ? String(error.cStat) : null;
+      if (rejeicao596 && consultaEnviada) {
+        await this._registrarConsultaPos596(id, correlationId, {
+          cStat: cStatErro,
+          xMotivo: error?.xMotivo || error.message
+        });
+      }
       this._atualizarEstadoDoc(id, {
         tentativas: (this._estado.docs[String(id)]?.tentativas || 0) + 1,
         ultimaConsulta: this._agora().toISOString(),
-        ultimoRetorno: 'ERRO',
+        ultimoRetorno: cStatErro || 'ERRO',
         motivo: error.message,
         correlationId
       });
@@ -535,9 +782,16 @@ class MotorRecuperacaoXmlService {
         descricao: `Falha na consulta automática: ${error.message}`,
         sucesso: false,
         correlationId,
-        detalhe: { erro: error.message }
+        detalhe: {
+          erro: error.message,
+          cStat: cStatErro,
+          xMotivo: error?.xMotivo || null,
+          rejeicaoSefaz: error?.rejeicaoSefaz === true
+        }
       });
-      return { ...base, falha: true, mensagem: error.message };
+      return { ...base, falha: true, cStat: cStatErro, mensagem: error.message };
+    } finally {
+      liberarLockDocumentoSefaz(id);
     }
 
     const atualizado = await this._documentosRepository.buscarPorId(id);
@@ -712,6 +966,47 @@ class MotorRecuperacaoXmlService {
       ...(this._estado.docs[key] || {}),
       ...patch
     };
+  }
+
+  /** @private */
+  async _proximaConsultaDocumento(documentoId) {
+    if (typeof this._eventosRepository?.listar !== 'function') return null;
+    try {
+      const eventos = await this._eventosRepository.listar({
+        tipo: TIPOS_EVENTO.CONSULTA_DFE_POS_MANIFESTACAO,
+        documentoId,
+        limite: 1
+      });
+      const valor = eventos?.[0]?.detalhe?.proximaConsultaEm;
+      if (!valor) return null;
+      const data = new Date(valor);
+      return Number.isNaN(data.getTime()) ? null : data;
+    } catch {
+      return null;
+    }
+  }
+
+  /** @private */
+  async _registrarConsultaPos596(documentoId, correlationId, retorno = {}) {
+    const proximaConsultaEm = new Date(
+      this._agora().getTime() + INTERVALO_SEGURO_MS
+    ).toISOString();
+    await this._emitirEvento({
+      tipo: TIPOS_EVENTO.CONSULTA_DFE_POS_MANIFESTACAO,
+      documentoId,
+      descricao: 'Consulta por chave após ciência rejeitada por prazo (596) — recuperação XML',
+      resultado: retorno.cStat || 'SEM_CSTAT',
+      sucesso: true,
+      correlationId,
+      detalhe: {
+        modo: 'consChNFe',
+        origemDist: { cStat: '596', motivo: 'ciencia_210210_prazo' },
+        cStat: retorno.cStat || null,
+        xMotivo: retorno.xMotivo || null,
+        aguardandoXml: true,
+        proximaConsultaEm
+      }
+    });
   }
 
   /** @private */

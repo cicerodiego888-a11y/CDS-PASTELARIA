@@ -56,7 +56,18 @@ router.get('/contexto/disponiveis', async (req, res) => {
       db,
       user: req.user
     });
-    return res.json(lista);
+    const {
+      classificarTipoEmpresa,
+      escolherMatrizPadrao
+    } = require('../services/empresas/ContextoEmpresaOperacionalService');
+    const itens = Array.isArray(lista) ? lista : [];
+    const padrao = escolherMatrizPadrao(itens);
+    const padraoId = padrao.empresa ? Number(padrao.empresa.id) : null;
+    return res.json(itens.map((e) => ({
+      ...e,
+      tipo_empresa: classificarTipoEmpresa(e.cnpj),
+      matriz_padrao: padraoId != null && Number(e.id) === padraoId
+    })));
   } catch (err) {
     return responderErro(res, err);
   }

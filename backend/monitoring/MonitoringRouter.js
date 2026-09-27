@@ -10,5 +10,6 @@ const router = express.Router();
 
 router.get('/summary', controller.getSummary);
 router.get('/providers', controller.getProviders);
+router.get('/contexto-empresa', controller.getContextoEmpresa);
 
 module.exports = router;

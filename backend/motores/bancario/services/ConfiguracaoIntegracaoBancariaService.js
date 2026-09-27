@@ -15,6 +15,20 @@ function chaveSecret(configId) {
   return 'mbc.config.' + configId;
 }
 
+/** Namespace existente do MBC-05 — credencial da config (Client Secret). */
+function chaveSecretMercadoPago(configId) {
+  return chaveSecret(configId);
+}
+
+function trimExterno(v) {
+  if (v == null) return '';
+  return String(v).replace(/^\s+|\s+$/g, '');
+}
+
+function secretInformado(v) {
+  return v != null && String(v) !== '';
+}
+
 function parseAmbiente(v) {
   const a = String(v || '').trim().toUpperCase();
   if (!Object.values(AMBIENTE_INTEGRACAO).includes(a)) {
@@ -44,6 +58,12 @@ function validarProviderAmbiente(provider, ambiente) {
   ) {
     throw erroMbc(ERROS.AMBIENTE_INVALIDO, 'Provider real não opera no ambiente TESTE do MOCK.', 400);
   }
+  if (
+    provider === CODIGO_PROVIDER.ITAU
+    && ambiente === AMBIENTE_INTEGRACAO.TESTE
+  ) {
+    throw erroMbc(ERROS.AMBIENTE_INVALIDO, 'Provider Itaú não opera no ambiente TESTE do MOCK.', 400);
+  }
 }
 
 async function mapPublico(row, secretStore) {
@@ -61,11 +81,24 @@ async function mapPublico(row, secretStore) {
     config_ref: row.config_ref || null,
     homologacao_status: row.provider === CODIGO_PROVIDER.OPEN_FINANCE_REAL
       ? 'NAO_HOMOLOGAVEL'
-      : 'NAO_APLICAVEL',
+      : (row.provider === CODIGO_PROVIDER.ITAU ? 'OPERACIONAL_PREPARADO' : 'NAO_APLICAVEL'),
     ativo: Number(row.ativo) === 1,
     secret_configurado,
+    client_id_configurado: !!(row.aplicacao_ref && String(row.aplicacao_ref).trim()),
     created_at: row.created_at,
     updated_at: row.updated_at
+  };
+}
+
+async function statusCredenciais(row, secretStore) {
+  const publico = await mapPublico(row, secretStore);
+  return {
+    ok: true,
+    provider: publico.provider,
+    ambiente: publico.ambiente,
+    client_id: publico.aplicacao_ref || null,
+    client_id_configurado: publico.client_id_configurado,
+    secret_configurado: publico.secret_configurado
   };
 }
 
@@ -121,17 +154,48 @@ async function criar(params = {}) {
 }
 
 async function obterNoContexto(params = {}) {
+  const { secretStore } = depsDe(params);
+  const row = await obterRowNoContexto(params);
+  return mapPublico(row, secretStore);
+}
+
+function idsEmpresaValidos(lista) {
+  return [...new Set(
+    (Array.isArray(lista) ? lista : [])
+      .map((n) => Number(n))
+      .filter((n) => Number.isInteger(n) && n > 0)
+  )];
+}
+
+async function obterRowNoContexto(params = {}) {
+  const { db } = depsDe(params);
+  const id = Number(params.id);
+  if (Array.isArray(params.empresaIds)) {
+    const ids = idsEmpresaValidos(params.empresaIds);
+    if (!ids.length || !Number.isInteger(id) || id <= 0) {
+      throw erroMbc(ERROS.CONFIG_NAO_ENCONTRADA, 'Configuração de integração não encontrada.', 404);
+    }
+    const ph = ids.map(() => '?').join(', ');
+    const row = await dbGet(
+      db,
+      `SELECT * FROM config_integracao_bancaria WHERE id = ? AND empresa_id IN (${ph})`,
+      [id, ...ids]
+    );
+    if (!row) {
+      throw erroMbc(ERROS.CONFIG_NAO_ENCONTRADA, 'Configuração de integração não encontrada.', 404);
+    }
+    return row;
+  }
   const empresaId = exigirEmpresaId(params.empresaId);
-  const { db, secretStore } = depsDe(params);
   const row = await dbGet(
     db,
     `SELECT * FROM config_integracao_bancaria WHERE id = ? AND empresa_id = ?`,
-    [Number(params.id), empresaId]
+    [id, empresaId]
   );
   if (!row) {
     throw erroMbc(ERROS.CONFIG_NAO_ENCONTRADA, 'Configuração de integração não encontrada.', 404);
   }
-  return mapPublico(row, secretStore);
+  return row;
 }
 
 async function listar(params = {}) {
@@ -255,6 +319,106 @@ async function executar(params = {}) {
   };
 }
 
+function exigirProviderMercadoPago(provider) {
+  if (provider !== CODIGO_PROVIDER.OPEN_FINANCE_REAL) {
+    throw erroMbc(
+      ERROS.PROVIDER_CREDENCIAL_INCOMPATIVEL,
+      'Credenciais de Mercado Pago só podem ser configuradas no provider OPEN_FINANCE_REAL.',
+      409
+    );
+  }
+}
+
+async function obterStatusCredenciais(params = {}) {
+  const { secretStore } = depsDe(params);
+  const row = await obterRowNoContexto(params);
+  if (String(row.provider || '').toUpperCase() === CODIGO_PROVIDER.ITAU) {
+    const ItauCredenciaisService = require('./ItauCredenciaisService');
+    return ItauCredenciaisService.obterStatus({
+      db: params.db || depsDe(params).db,
+      secretStore,
+      empresaId: params.empresaId,
+      id: row.id
+    });
+  }
+  return statusCredenciais(row, secretStore);
+}
+
+async function configurarCredenciaisMercadoPago(params = {}) {
+  const { db, secretStore } = depsDe(params);
+  const row = await obterRowNoContexto(params);
+  exigirProviderMercadoPago(row.provider);
+  if (params.ambiente != null) {
+    const ambiente = parseAmbiente(params.ambiente);
+    validarProviderAmbiente(row.provider, ambiente);
+    row.ambiente = ambiente;
+  }
+  const clientId = trimExterno(params.client_id);
+  if (!clientId) {
+    throw erroMbc(ERROS.CREDENCIAL_CLIENT_ID_OBRIGATORIO, 'Application ID / Client ID é obrigatório.', 400);
+  }
+  const chave = chaveSecretMercadoPago(row.id);
+  const jaTemSecret = await secretStore.has(chave);
+  if (secretInformado(params.client_secret)) {
+    const secret = trimExterno(params.client_secret);
+    if (!secret) {
+      if (!jaTemSecret) {
+        throw erroMbc(
+          ERROS.CREDENCIAL_SECRET_OBRIGATORIO,
+          'Client Secret é obrigatório na primeira configuração.',
+          400
+        );
+      }
+    } else {
+      await secretStore.set(chave, secret);
+    }
+  } else if (!jaTemSecret) {
+    throw erroMbc(
+      ERROS.CREDENCIAL_SECRET_OBRIGATORIO,
+      'Client Secret é obrigatório na primeira configuração.',
+      400
+    );
+  }
+  await dbRun(
+    db,
+    `UPDATE config_integracao_bancaria
+     SET aplicacao_ref = ?, ambiente = ?, updated_at = datetime('now','localtime')
+     WHERE id = ? AND empresa_id = ?`,
+    [clientId, row.ambiente, row.id, row.empresa_id]
+  );
+  const atual = await dbGet(db, `SELECT * FROM config_integracao_bancaria WHERE id = ?`, [row.id]);
+  return statusCredenciais(atual, secretStore);
+}
+
+async function removerCredenciaisMercadoPago(params = {}) {
+  const { db, secretStore } = depsDe(params);
+  const row = await obterRowNoContexto(params);
+  exigirProviderMercadoPago(row.provider);
+  await secretStore.delete(chaveSecretMercadoPago(row.id));
+  await dbRun(
+    db,
+    `UPDATE config_integracao_bancaria
+     SET aplicacao_ref = NULL, updated_at = datetime('now','localtime')
+     WHERE id = ? AND empresa_id = ?`,
+    [row.id, row.empresa_id]
+  );
+  const atual = await dbGet(db, `SELECT * FROM config_integracao_bancaria WHERE id = ?`, [row.id]);
+  return statusCredenciais(atual, secretStore);
+}
+
+/**
+ * Uso interno do provider (OAuth MP). Não expor no Motor.CONTRATO nem em API/logs.
+ */
+async function obterCredenciaisProvider(params = {}) {
+  const { secretStore } = depsDe(params);
+  const row = await obterRowNoContexto(params);
+  const client_secret = await secretStore.get(chaveSecretMercadoPago(row.id));
+  return {
+    client_id: row.aplicacao_ref || null,
+    client_secret: client_secret || null
+  };
+}
+
 module.exports = {
   criar,
   obterNoContexto,
@@ -263,5 +427,10 @@ module.exports = {
   ativar: (p) => definirAtivo(p, true),
   desativar: (p) => definirAtivo(p, false),
   executar,
-  chaveSecret
+  obterStatusCredenciais,
+  configurarCredenciaisMercadoPago,
+  removerCredenciaisMercadoPago,
+  obterCredenciaisProvider,
+  chaveSecret,
+  chaveSecretMercadoPago
 };

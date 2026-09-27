@@ -1,5 +1,6 @@
 /**
  * Score determinístico. Pesos não são alteráveis pelo frontend.
+ * MBC-05.2: quando valor_disponivel é informado, VALOR_EXATO compara com o disponível.
  * @module motores/bancario/matching/MatchingScoreService
  */
 'use strict';
@@ -18,9 +19,30 @@ const {
   valoresIguais
 } = require('./MatchingNormalizacaoService');
 
-function pontuarValor(tx, candidato) {
-  if (valoresIguais(tx.valor, candidato.valor)) {
+function round2(n) {
+  return Math.round(Number(n) * 100) / 100;
+}
+
+function pontuarValor(tx, candidato, valorDisponivelTx) {
+  const base = round2(valorDisponivelTx != null ? valorDisponivelTx : tx.valor);
+  const cv = round2(candidato.valor);
+  if (valoresIguais(base, cv)) {
     return { pontos: PESOS_MATCHING.VALOR_EXATO, motivo: 'VALOR_EXATO' };
+  }
+  if (
+    valorDisponivelTx != null
+    && cv > 0
+    && cv < base
+  ) {
+    return { pontos: PESOS_MATCHING.VALOR_COMPATIVEL, motivo: 'VALOR_COMPATIVEL' };
+  }
+  if (
+    valorDisponivelTx != null
+    && candidato.permite_parcial === true
+    && cv > base
+    && base > 0
+  ) {
+    return { pontos: PESOS_MATCHING.VALOR_PARCIAL, motivo: 'VALOR_PARCIALMENTE_COMPATIVEL' };
   }
   return { pontos: 0, motivo: null };
 }
@@ -66,9 +88,10 @@ function classificar(score) {
   return null;
 }
 
-function calcularScore(tx, candidato) {
+function calcularScore(tx, candidato, opts = {}) {
+  const valorDisponivel = opts.valor_disponivel != null ? opts.valor_disponivel : undefined;
   const partes = [
-    pontuarValor(tx, candidato),
+    pontuarValor(tx, candidato, valorDisponivel),
     pontuarData(tx, candidato),
     pontuarIdentificador(tx, candidato),
     pontuarDescricao(tx, candidato)

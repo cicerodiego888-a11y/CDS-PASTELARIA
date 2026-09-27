@@ -15,7 +15,7 @@ Instituições: GET/POST `/instituicoes`, GET/PUT/DELETE `/instituicoes/:id`
 
 Contas: GET/POST `/contas`, GET/PUT `/contas/:id`, PATCH ativar/desativar/principal, DELETE `/contas/:id`
 
-Empresa da conta vem do contexto autorizado (`BancarioEmpresaContextoService`). `empresa_id` no body é ignorado.
+Empresa da conta vem do contexto autorizado (`BancarioEmpresaContextoService`). `empresa_id` no body é ignorado no contexto individual. Em `escopo=todas` (MBC-14.3) a empresa escolhida é validada contra o conjunto autorizado.
 
 ## Regras
 

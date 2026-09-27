@@ -378,9 +378,26 @@ router.post('/diagnostico/acoes/reprocessar-pendencias', exigirDiagnosticoCentra
   }
 });
 
+/** CE-06 P15 — diagnóstico sempre pela empresa selecionada (sem fallback global no MULTIEMPRESA). */
+async function empresaDiagnosticoCentral(req) {
+  try {
+    const r = await resolverEmpresaParaCentral({ req, empresaId: req.empresaId });
+    return { empresa: { empresaId: r.empresaId, cnpj: r.cnpj || null, modo: r.modo } };
+  } catch (error) {
+    return {
+      empresaErro: {
+        codigo: error.code || 'EMPRESA_CENTRAL_AUSENTE',
+        mensagem: error.message || 'Empresa não selecionada.'
+      }
+    };
+  }
+}
+
 router.post('/diagnostico/acoes/testar-certificado', exigirDiagnosticoCentral, async (req, res) => {
   try {
-    const resultado = await centralEntradasService.testarCertificadoDiagnostico();
+    const resultado = await centralEntradasService.testarCertificadoDiagnostico(
+      await empresaDiagnosticoCentral(req)
+    );
     return res.json(resultado);
   } catch (error) {
     return res.status(500).json({ error: error.message });
@@ -389,7 +406,9 @@ router.post('/diagnostico/acoes/testar-certificado', exigirDiagnosticoCentral, a
 
 router.post('/diagnostico/acoes/testar-sefaz', exigirDiagnosticoCentral, async (req, res) => {
   try {
-    const resultado = await centralEntradasService.testarSefazDiagnostico();
+    const resultado = await centralEntradasService.testarSefazDiagnostico(
+      await empresaDiagnosticoCentral(req)
+    );
     return res.json(resultado);
   } catch (error) {
     return res.status(500).json({ error: error.message });
@@ -547,6 +566,53 @@ router.post('/configuracao/testar-sefaz', (req, res) => configuracaoController.t
 router.post('/configuracao/testar-certificado', (req, res) => configuracaoController.testarCertificado(req, res));
 router.post('/configuracao/health', (req, res) => configuracaoController.health(req, res));
 router.post('/configuracao/limpar-cache', (req, res) => configuracaoController.limparCache(req, res));
+
+const CentralPeriodoPadraoService = require('../motores/central-entradas/services/CentralPeriodoPadraoService');
+const periodoPadraoService = new CentralPeriodoPadraoService();
+
+function responderErroPeriodoPadrao(res, error) {
+  if (error && error.code === 'PERIODO_PADRAO_INVALIDO') {
+    return res.status(400).json({ sucesso: false, code: error.code, error: error.message });
+  }
+  return responderErroDocumentoCentral(res, error);
+}
+
+router.get('/configuracao/periodo-padrao', async (req, res) => {
+  try {
+    const ctx = await resolverEmpresaParaCentral({ req, empresaId: req.empresaId });
+    return res.json(await periodoPadraoService.obter(ctx.empresaId));
+  } catch (error) {
+    return responderErroPeriodoPadrao(res, error);
+  }
+});
+
+router.put('/configuracao/periodo-padrao', async (req, res) => {
+  try {
+    const ctx = await resolverEmpresaParaCentral({ req, empresaId: req.empresaId });
+    const periodo = req.body?.periodoPadrao ?? req.body?.periodo_padrao;
+    return res.json(await periodoPadraoService.salvar(ctx.empresaId, periodo));
+  } catch (error) {
+    return responderErroPeriodoPadrao(res, error);
+  }
+});
+
+/** CENTRAL-XML-02 P6 — prazo da Ciência por empresa (somente leitura, sem SEFAZ). */
+router.get('/manifestacao/prazos', async (req, res) => {
+  try {
+    const ctx = await resolverEmpresaParaCentral({ req, empresaId: req.empresaId });
+    const CentralManifestacaoDfeService = require('../motores/central-entradas/services/CentralManifestacaoDfeService');
+    const painel = await new CentralManifestacaoDfeService().obterPainelPrazos({
+      empresaId: ctx.empresaId,
+      limiteItens: req.query.limite != null ? Number(req.query.limite) : undefined
+    });
+    return res.json(painel);
+  } catch (error) {
+    if (error && String(error.code || '').startsWith('EMPRESA_')) {
+      return responderErroDocumentoCentral(res, error);
+    }
+    return res.status(500).json({ error: error.message });
+  }
+});
 
 router.get('/servico/status', async (req, res) => {
   try {
