@@ -5,6 +5,9 @@
  * Executar: npm run test:central-entradas-rc4.1
  */
 
+
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-p04-rc41-endpoints-ux-');
 const assert = require('assert');
 const CentralConfiguracaoService = require('../../backend/motores/central-entradas/services/CentralConfiguracaoService');
 const CentralConfiguracaoRepository = require('../../backend/motores/central-entradas/repositories/CentralConfiguracaoRepository');

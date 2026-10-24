@@ -33,7 +33,8 @@ function criarDb() {
           codigo TEXT UNIQUE, codigo_barras TEXT, nome TEXT NOT NULL, nome_busca TEXT,
           preco_venda REAL DEFAULT 0, ativo INTEGER DEFAULT 1, item_fiscal INTEGER DEFAULT 1,
           categoria_id INTEGER, marca_id INTEGER, unidade TEXT DEFAULT 'UN',
-          estoque_atual REAL DEFAULT 0, estoque_minimo REAL DEFAULT 0, controla_estoque INTEGER DEFAULT 1
+          estoque_atual REAL DEFAULT 0, estoque_minimo REAL DEFAULT 0, controla_estoque INTEGER DEFAULT 1,
+          tipo_operacional TEXT NOT NULL DEFAULT 'COMERCIAL'
         )`);
         db.run(`CREATE TABLE produto_identificadores (
           id INTEGER PRIMARY KEY AUTOINCREMENT, produto_id INTEGER, tipo TEXT, codigo TEXT,
@@ -48,15 +49,17 @@ function criarDb() {
         db.run(`INSERT INTO categorias (id, nome) VALUES (1, 'Mercearia')`);
         db.run(`INSERT INTO marcas (id, nome) VALUES (1, 'Tio Joao')`);
         const rows = [
-          ['10', '7891000100101', 'ARROZ TIO JOAO 5KG', 1, 1, 'PLU10'],
-          ['20', '7891000100202', 'FEIJAO CARIOCA', 1, 1, null],
-          ['30', '7891000100303', 'OLEO DE SOJA', 1, 1, null]
+          ['10', '7891000100101', 'ARROZ TIO JOAO 5KG', 1, 1, 'PLU10', 'COMERCIAL'],
+          ['20', '7891000100202', 'FEIJAO CARIOCA', 1, 1, null, 'COMERCIAL'],
+          ['30', '7891000100303', 'OLEO DE SOJA', 1, 1, null, 'COMERCIAL'],
+          ['40', '7891000100404', 'FARINHA DE TRIGO', 1, 1, null, 'INSUMO']
         ];
-        for (const [codigo, barras, nome, cat, marca, plu] of rows) {
+        for (const [codigo, barras, nome, cat, marca, plu, tipoOperacional] of rows) {
           db.run(
-            `INSERT INTO produtos (codigo, codigo_barras, nome, nome_busca, categoria_id, marca_id, preco_venda)
-             VALUES (?,?,?,?,?,?,?)`,
-            [codigo, barras, nome, normalizarNomeBusca(nome), cat, marca, 10]
+            `INSERT INTO produtos (
+              codigo, codigo_barras, nome, nome_busca, categoria_id, marca_id, preco_venda, tipo_operacional
+            ) VALUES (?,?,?,?,?,?,?,?)`,
+            [codigo, barras, nome, normalizarNomeBusca(nome), cat, marca, 10, tipoOperacional]
           );
         }
         db.run(
@@ -113,6 +116,18 @@ async function main() {
     const r = await svc.search({ ...ctx, query: 'ARROZ' });
     assert.ok(r.itens.some((p) => /ARROZ/i.test(p.nome)));
     assert.ok(['memoria', 'hotcache', 'cache', 'fuzzy', 'sql', 'aprendizado', 'incremental'].includes(r.meta?.fonte) || r.meta?.fonte);
+  });
+
+  await test('insumo permanece pesquisável no cadastro e fora do escopo PDV', async () => {
+    const cadastro = await svc.search({ ...ctx, query: 'FARINHA' });
+    assert.ok(cadastro.itens.some((p) => p.tipo_operacional === 'INSUMO'));
+    const pdv = await svc.search({ ...ctx, origem: 'pdv', query: 'FARINHA' });
+    assert.ok(!pdv.itens.some((p) => p.tipo_operacional === 'INSUMO'));
+  });
+
+  await test('produto COMERCIAL continua elegível no escopo PDV', async () => {
+    const pdv = await svc.search({ ...ctx, origem: 'pdv', query: 'ARROZ' });
+    assert.ok(pdv.itens.some((p) => p.tipo_operacional === 'COMERCIAL'));
   });
 
   await test('pesquisa por código', async () => {

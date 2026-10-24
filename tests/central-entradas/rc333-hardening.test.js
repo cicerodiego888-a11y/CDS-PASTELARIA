@@ -2,6 +2,9 @@
  * RC3.3.3 — Hardening: NSU, mutex, idempotência, fallback, E2E e recuperação.
  */
 
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-rc333-');
+
 const assert = require('assert');
 const CentralNsuService = require(
   '../../backend/motores/central-entradas/services/CentralNsuService'
@@ -101,6 +104,7 @@ function criarNsuRepoMemoria(inicial = {}) {
 
 async function main() {
   console.log('\n=== RC3.3.3 — Hardening Central ===\n');
+  isolamento.comprobarSeCarregado();
 
   await test('NSU nunca regrede e 656 preserva checkpoint', async () => {
     const repo = criarNsuRepoMemoria({
@@ -161,8 +165,8 @@ async function main() {
     });
 
     const resultados = await Promise.all([
-      sync.executar({ origem: 'manual', ignorarCooldown: true }),
-      sync.executar({ origem: 'background', ignorarCooldown: true }),
+      sync.executar({ origem: 'manual', ignorarCooldown: true, ignorarBloqueio656: true }),
+      sync.executar({ origem: 'background', ignorarCooldown: true, ignorarBloqueio656: true, ignorarHorario: true }),
       sync.comLockDistDfe('scheduler', async () => ({ sucesso: true, via: 'scheduler' }))
     ]);
 

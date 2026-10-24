@@ -37,14 +37,14 @@ describe('Sprint 3.5 — frontend e rotas', () => {
     assert.match(index, /pedidos\.js/);
     assert.match(app, /case 'pedidos'/);
     assert.match(app, /loadPedidos/);
-    assert.match(core, /page === 'pedidos'/);
+    assert.match(core, /if \(p === 'pedidos'\) return possuiRecurso\('pedidos'\)/);
     assert.match(acl, /pedidos:\s*'vendas'/);
     assert.match(ui, /loadPedidos/);
     assert.match(ui, /btnPedNovo/);
     assert.match(ui, /pedClienteBusca/);
     assert.match(ui, /pedProdutoBusca/);
     assert.match(ui, /itensEditor/);
-    assert.match(ui, /enviar-faturamento/);
+    assert.doesNotMatch(ui, /enviar-faturamento/);
     assert.match(ui, /\$\{API_URL\}\/pedidos/);
   });
 

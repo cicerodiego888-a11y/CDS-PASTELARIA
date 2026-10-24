@@ -36,6 +36,23 @@ const {
 } = require('./controleSaldoDevolucaoCompra');
 const { getCancelamentoUrlNfe, validarPrazoCancelamento } = require('./cancelarNfe');
 const { getUrlNFe55 } = require('./nfeEmissorVenda');
+const { carregarConfigEAplicarGateCertificadoNfe } = require('./nfeCertificadoUso');
+
+async function carregarConfigGateDevolucaoCompra(nota, ctx = {}) {
+  const compra = nota.compra_id
+    ? await dbGet(`SELECT id, empresa_id FROM compras WHERE id = ?`, [nota.compra_id])
+    : null;
+  const gated = await carregarConfigEAplicarGateCertificadoNfe({
+    compra: compra || {},
+    empresaId: ctx.empresaId != null ? ctx.empresaId : (compra && compra.empresa_id),
+    db: ctx.db || db,
+    getFiscalConfigFn: ctx.getFiscalConfig || getFiscalConfig,
+    exigirCertificadoAptoParaUsoFiscal: ctx.exigirCertificadoAptoParaUsoFiscal,
+    certDeps: ctx.certDeps || {},
+    validarUrls: false
+  });
+  return gated.config;
+}
 
 const BACKOFF_MS = [3000, 8000, 15000, 30000, 60000];
 const consultaTimers = new Map();
@@ -606,7 +623,7 @@ async function consultarSituacaoDevolucao(notaId, ctx = {}) {
     });
   }
 
-  const config = await getFiscalConfig();
+  const config = await carregarConfigGateDevolucaoCompra(nota, ctx);
   await atualizarNota(notaId, { fila_estado: 'consulta' });
 
   const consulta = await consultarProtocolo({
@@ -704,14 +721,15 @@ async function executarConsultaAutomatica(notaId, tentativaIndex = 0) {
   }
 }
 
-async function cancelarNfeDevolucaoOficial(notaId, {
-  motivo,
-  usuarioId,
-  usuarioNome,
-  ip,
-  computador,
-  forcarPrazo = false
-} = {}) {
+async function cancelarNfeDevolucaoOficial(notaId, ctx = {}) {
+  const {
+    motivo,
+    usuarioId,
+    usuarioNome,
+    ip,
+    computador,
+    forcarPrazo = false
+  } = ctx;
   await garantirSchemaLifecycle();
   const started = Date.now();
   const nota = await obterNota(notaId);
@@ -746,7 +764,7 @@ async function cancelarNfeDevolucaoOficial(notaId, {
     }
   }
 
-  const config = await getFiscalConfig();
+  const config = await carregarConfigGateDevolucaoCompra(nota, ctx);
   const chaveAcesso = onlyDigits(nota.chave_acesso);
   const protocolo = nota.protocolo;
   if (!chaveAcesso || chaveAcesso.length !== 44 || !protocolo) {
@@ -968,7 +986,7 @@ async function reenviarNfeDevolucao(notaId, ctx = {}) {
     });
   }
 
-  const config = await getFiscalConfig();
+  const config = await carregarConfigGateDevolucaoCompra(nota, ctx);
   const loteXml = montarLote(xmlAssinado, String(nota.numero || Date.now()));
   await atualizarNota(notaId, { status: ESTADOS.ENVIANDO, fila_estado: 'transmitindo' });
   await registrarEvento({

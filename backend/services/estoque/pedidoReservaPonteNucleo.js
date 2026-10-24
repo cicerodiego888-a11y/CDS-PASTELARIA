@@ -13,6 +13,7 @@
  */
 
 'use strict';
+const { roundStockQuantity } = require('./quantityPrecision');
 
 const reservasPublico = require('../fiscalNaoFiscal/reservasPublico');
 const { TipoSaldo } = require('../fiscalNaoFiscal/constants');
@@ -26,9 +27,7 @@ const {
   CODIGO_OPERACAO_EMPRESA_DIVERGENTE
 } = require('../pedidos/PedidoEmpresaContextoService');
 
-function round3(n) {
-  return Math.round(Number(n || 0) * 1000) / 1000;
-}
+
 
 /**
  * Porta de consumo de reserva originada de PEDIDO.
@@ -112,17 +111,68 @@ async function obterCreditoReservaPedido(pedidoId, opts = {}) {
   let total = 0;
   for (const row of rows) {
     const pid = Number(row.produto_id);
-    const q = round3(row.quantidade);
+    const q = roundStockQuantity(row.quantidade);
     if (pid > 0 && q > 0) {
-      porProduto[pid] = q;
-      total = round3(total + q);
+      porProduto[pid] = roundStockQuantity((porProduto[pid] || 0) + q);
+      total = roundStockQuantity(total + q);
+    }
+  }
+
+  let consumoConfirmado = false;
+  let consumoExiste = false;
+  try {
+    consumoExiste = Boolean(await dbGet(
+      db,
+      'SELECT id FROM pedido_estoque_consumos WHERE pedido_id = ?',
+      [id]
+    ));
+  } catch (err) {
+    if (!/no such table/i.test(String(err.message || ''))) throw err;
+  }
+
+  if (consumoExiste) {
+    consumoConfirmado = true;
+    const consumos = await dbAll(
+      db,
+      `SELECT ci.pedido_item_id, ci.produto_id, ci.origem_requisito,
+              SUM(ci.quantidade_fiscal) AS quantidade_fiscal,
+              pi.produto_id AS produto_pedido_id,
+              pi.quantidade AS quantidade_pedido
+         FROM pedido_estoque_consumo_itens ci
+         LEFT JOIN pedidos_itens pi ON pi.id = ci.pedido_item_id
+        WHERE ci.pedido_id = ?
+        GROUP BY ci.pedido_item_id, ci.produto_id, ci.origem_requisito,
+                 pi.produto_id, pi.quantidade`,
+      [id]
+    );
+    const itensFichaCreditados = new Set();
+    for (const row of consumos) {
+      let pid;
+      let quantidade;
+      if (row.origem_requisito === 'PRODUTO_SIMPLES') {
+        pid = Number(row.produto_id);
+        quantidade = roundStockQuantity(row.quantidade_fiscal);
+      } else if (
+        row.origem_requisito === 'FICHA_TECNICA'
+        && Number(row.pedido_item_id) > 0
+        && !itensFichaCreditados.has(Number(row.pedido_item_id))
+      ) {
+        itensFichaCreditados.add(Number(row.pedido_item_id));
+        pid = Number(row.produto_pedido_id);
+        quantidade = roundStockQuantity(row.quantidade_pedido);
+      }
+      if (Number.isInteger(pid) && pid > 0 && quantidade > 0) {
+        porProduto[pid] = roundStockQuantity((porProduto[pid] || 0) + quantidade);
+        total = roundStockQuantity(total + quantidade);
+      }
     }
   }
 
   return Object.freeze({
     pedido_id: id,
     por_produto: Object.freeze(porProduto),
-    total
+    total,
+    consumo_confirmado: consumoConfirmado
   });
 }
 
@@ -131,14 +181,14 @@ async function obterCreditoReservaPedido(pedidoId, opts = {}) {
  * disponivel_outros permanece (saldo - reservado); o crédito só vale para este pedido.
  */
 function creditarDisponibilidadeComReservaPedido(calc, creditoProduto) {
-  const credito = round3(creditoProduto || 0);
-  const disponivelFiscal = round3(Number(calc?.disponivel_fiscal || 0) + credito);
-  const disponivelNaoFiscal = round3(Number(calc?.disponivel_nao_fiscal || 0));
+  const credito = roundStockQuantity(creditoProduto || 0);
+  const disponivelFiscal = roundStockQuantity(Number(calc?.disponivel_fiscal || 0) + credito);
+  const disponivelNaoFiscal = roundStockQuantity(Number(calc?.disponivel_nao_fiscal || 0));
   return {
     ...calc,
     disponivel_fiscal: Math.max(0, disponivelFiscal),
     disponivel_nao_fiscal: Math.max(0, disponivelNaoFiscal),
-    disponivel_total: Math.max(0, round3(disponivelFiscal + disponivelNaoFiscal)),
+    disponivel_total: Math.max(0, roundStockQuantity(disponivelFiscal + disponivelNaoFiscal)),
     credito_reserva_pedido: credito
   };
 }
@@ -226,7 +276,7 @@ async function consumirReservasPedidoNaVenda(pedidoId, vendaId = null, opts = {}
 
   let consumidas = 0;
   for (const row of rows) {
-    const q = round3(row.quantidade_fiscal);
+    const q = roundStockQuantity(row.quantidade_fiscal);
     if (q > 0) {
       await reservasPublico.liberarQuantidadeReservada(
         row.produto_id,
@@ -277,5 +327,5 @@ module.exports = {
   consumirReservasPedidoNaVenda,
   obterCreditoReservaPedidoCb,
   consumirReservasPedidoNaVendaCb,
-  round3
+  round3: roundStockQuantity
 };

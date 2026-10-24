@@ -758,7 +758,18 @@
         setTimeout(() => el.classList.remove('is-highlight'), 4000);
         return;
       }
-      if (tentativa < 12) setTimeout(() => tentar(tentativa + 1), 250);
+      if (tentativa < 12) {
+        setTimeout(() => tentar(tentativa + 1), 250);
+        return;
+      }
+      // Sem ampliar acesso: Diagnóstico é fiscal-gated; informar quando o card não existir no DOM.
+      if (typeof global.showNotification === 'function') {
+        global.showNotification(
+          'A edição da Manifestação do Destinatário fica em Configurações → Diagnóstico '
+          + '(disponível quando a interface fiscal estiver habilitada).',
+          'warning'
+        );
+      }
     };
     setTimeout(() => tentar(0), 200);
   }
@@ -1270,8 +1281,10 @@
     if (legacyTabs[tab]) tab = legacyTabs[tab];
     if (!CATEGORIAS.some((c) => c.id === tab)) tab = 'empresa';
     if (global.__CDS_CFG_FORCE_TAB) {
-      tab = global.__CDS_CFG_FORCE_TAB;
+      let forced = global.__CDS_CFG_FORCE_TAB;
       global.__CDS_CFG_FORCE_TAB = null;
+      if (legacyTabs[forced]) forced = legacyTabs[forced];
+      if (CATEGORIAS.some((c) => c.id === forced)) tab = forced;
     }
     ativarCategoria(tab);
 

@@ -1,12 +1,51 @@
 /**
- * ERP — Módulo Pedidos (Sprint 3.5 + 3.6 UX + 3.14 Orçamento)
+ * ERP — Módulo Pedidos (Sprint 3.5 + 3.6 UX; adaptado ao fluxo operacional da pastelaria)
  * Digitação fluida (teclado) sem alterar regras de negócio.
  * RC2.1 — layout de impressão exposto para reimpressão na Central (sem alterar modelo).
- * Sprint 3.14 — Orçamento é o primeiro estado do Pedido (mesma entidade/tela).
+ * Interface operacional: Pedidos e Cancelados, cliente opcional. Orçamento e Expedição saíram
+ * desta tela; as rotas legadas de conversão, envio à expedição e exclusão seguem no backend.
  */
 
 function _pedFmtMoney(n) {
   return Number(n || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+}
+
+function _pedCalcularTotaisPersonalizacao({
+  precoBase,
+  quantidade,
+  ingredientes,
+  ingredientesSelecionados,
+  desconto
+}) {
+  const selecionados = new Set((ingredientesSelecionados || []).map(Number));
+  const adicionais = Number((ingredientes || []).reduce((total, ingrediente) => (
+    ingrediente.classificacao_comercial === 'OPCIONAL_COM_ADICIONAL'
+      && selecionados.has(Number(ingrediente.insumo_id))
+      ? total + Number(ingrediente.preco_adicional || 0)
+      : total
+  ), 0).toFixed(2));
+  const precoUnitario = Number((Number(precoBase) + adicionais).toFixed(2));
+  const subtotal = Number((
+    Number(quantidade) * precoUnitario * (1 - Number(desconto || 0) / 100)
+  ).toFixed(2));
+  return { precoAdicionais: adicionais, precoUnitario, subtotal };
+}
+
+/** Cabeçalhos com token e X-Empresa-Id (o backend exige o contexto explícito da empresa). */
+function _pedHeaders() {
+  if (typeof CdsEmpresaContexto !== 'undefined' && typeof CdsEmpresaContexto.headersJson === 'function') {
+    return CdsEmpresaContexto.headersJson();
+  }
+  return {
+    'Content-Type': 'application/json',
+    Authorization: 'Bearer ' + (localStorage.getItem('token') || '')
+  };
+}
+
+function _pedEmpresaSelecionada() {
+  return typeof CdsEmpresaContexto !== 'undefined'
+    && typeof CdsEmpresaContexto.lerEmpresaId === 'function'
+    && !!CdsEmpresaContexto.lerEmpresaId();
 }
 
 function _pedFmtData(d) {
@@ -28,15 +67,27 @@ function montarHtmlImpressaoPedido(p) {
   const fmtMoney = _pedFmtMoney;
   const fmtData = _pedFmtData;
   const itens = Array.isArray(p.itens) ? p.itens : [];
-  const linhas = itens.map((i) => `
+  const linhas = itens.map((i) => {
+    const personalizados = Number(i.personalizacao_ingredientes_snapshot) === 1;
+    const selecionados = (i.ingredientes_personalizados || [])
+      .filter((ingrediente) => Number(ingrediente.selecionado) === 1
+        && ingrediente.classificacao_comercial_snapshot !== 'OBRIGATORIO_OCULTO')
+      .map((ingrediente) => ingrediente.insumo_nome_snapshot || '')
+      .filter(Boolean);
+    const resumoPersonalizacao = personalizados
+      ? `<small style="display:block;color:#555;">Opcionais: ${escapeHtml(selecionados.length ? selecionados.join(', ') : 'nenhum')}</small>
+         <small style="display:block;color:#555;">Base ${fmtMoney(i.preco_base_unitario_snapshot)} + adicionais ${fmtMoney(i.preco_adicionais_unitario_snapshot)}</small>`
+      : '';
+    return `
       <tr>
         <td>${escapeHtml(i.produto_codigo || i.produto_id || '')}</td>
-        <td>${escapeHtml(i.produto_nome || '')}</td>
+        <td>${escapeHtml(i.produto_nome || '')}${resumoPersonalizacao}</td>
         <td style="text-align:right;">${Number(i.quantidade || 0)}</td>
         <td style="text-align:right;">${fmtMoney(i.preco_unitario)}</td>
         <td style="text-align:right;">${Number(i.desconto_percentual || 0)}%</td>
         <td style="text-align:right;">${fmtMoney(i.subtotal)}</td>
-      </tr>`).join('');
+      </tr>`;
+  }).join('');
 
   const marca = (typeof BrandService !== 'undefined' && BrandService.meta)
     ? BrandService.meta().nome
@@ -147,11 +198,7 @@ function montarHtmlImpressaoPedido(p) {
 async function imprimirPedidoPorId(pedidoId) {
   const id = Number(pedidoId);
   if (!id) return { ok: false, error: 'Pedido inválido.' };
-  const token = localStorage.getItem('token') || '';
-  const headers = {
-    'Content-Type': 'application/json',
-    Authorization: 'Bearer ' + token
-  };
+  const headers = _pedHeaders();
   try {
     const resp = await fetch(`${API_URL}/pedidos/${id}`, { headers });
     const data = await resp.json().catch(() => ({}));
@@ -180,15 +227,60 @@ async function imprimirPedidoPorId(pedidoId) {
   }
 }
 
+function _pedResolverPrecoSugerido(produto = {}, precoComercial, origemPrecoComercial) {
+  const precoVendaSnapshot = produto.preco_venda == null
+    ? null
+    : Number(produto.preco_venda);
+  if (precoVendaSnapshot != null && (!Number.isFinite(precoVendaSnapshot) || precoVendaSnapshot < 0)) {
+    throw new Error('O produto possui preço comercial inválido.');
+  }
+
+  const temPrecoPedido = produto.preco_pedido !== null && produto.preco_pedido !== undefined;
+  const precoPedidoBruto = temPrecoPedido ? String(produto.preco_pedido).trim() : '';
+  const precoPedido = temPrecoPedido ? Number(precoPedidoBruto) : null;
+  if (temPrecoPedido && (!precoPedidoBruto || !Number.isFinite(precoPedido) || precoPedido < 0)) {
+    throw new Error('O produto possui preço do Pedido inválido.');
+  }
+
+  const precoComercialInicial = Number(
+    precoComercial != null
+      ? precoComercial
+      : (produto.preco_promocional != null ? produto.preco_promocional : produto.preco_venda || 0)
+  );
+  if (!Number.isFinite(precoComercialInicial) || precoComercialInicial < 0) {
+    throw new Error('O produto possui preço comercial inválido.');
+  }
+
+  const origemComercial = origemPrecoComercial
+    || (produto.preco_promocional != null ? 'PROMOCAO' : 'PRECO_VENDA');
+  const precoInicial = temPrecoPedido ? precoPedido : precoComercialInicial;
+  return {
+    precoInicial,
+    snapshot: {
+      preco_venda_snapshot: precoVendaSnapshot,
+      preco_pedido_snapshot: precoPedido,
+      preco_sugerido_snapshot: precoInicial,
+      origem_preco_sugerido: temPrecoPedido ? 'PRECO_PEDIDO' : origemComercial
+    }
+  };
+}
+
 window.montarHtmlImpressaoPedido = montarHtmlImpressaoPedido;
 window.imprimirPedidoPorId = imprimirPedidoPorId;
 
 function loadPedidos() {
-  const token = localStorage.getItem('token') || '';
-  const headers = {
-    'Content-Type': 'application/json',
-    Authorization: 'Bearer ' + token
-  };
+  let headers = _pedHeaders();
+  let chaveCriacaoPendente = null;
+  let assinaturaCriacaoPendente = null;
+  const chavesDuplicacaoPendentes = new Map();
+  const chavesCancelamentoPendentes = new Map();
+
+  function novaChaveIdempotencia() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+      return window.crypto.randomUUID();
+    }
+    throw new Error('Este navegador não oferece suporte a chaves de idempotência.');
+  }
 
   const fmtMoney = _pedFmtMoney;
   const fmtData = _pedFmtData;
@@ -205,10 +297,7 @@ function loadPedidos() {
   };
 
   const ABAS = [
-    { id: 'orcamentos', label: 'Orçamentos', status: 'ORCAMENTO' },
     { id: 'pedidos', label: 'Pedidos', status: 'PEDIDO,ABERTO,EM_SEPARACAO' },
-    { id: 'aguardando', label: 'Aguardando Expedição', status: 'AGUARDANDO_FATURAMENTO' },
-    { id: 'faturados', label: 'Expedidos', status: 'FATURADO' },
     { id: 'cancelados', label: 'Cancelados', status: 'CANCELADO' }
   ];
 
@@ -227,9 +316,13 @@ function loadPedidos() {
   }
 
   let itensEditor = [];
+  let precoSugestaoSelecionada = null;
+  let produtoSelecionadoParaPedido = null;
+  let adicionarPersonalizacaoPendente = null;
   let pedidoEditandoId = null;
   let pedidoEditandoStatus = null;
-  let tipoNovoDocumento = 'pedido';
+  let representanteAtual = null;
+  let freteAtual = 0;
   let clienteSelecionado = null;
   let timerCliente = null;
   let timerProduto = null;
@@ -248,9 +341,14 @@ function loadPedidos() {
             F2 Novo · Ctrl+S Salvar · Ctrl+F Cliente · Enter adiciona · Esc fecha sugestões
           </div>
         </div>
-        <button type="button" class="btn btn-primary" id="btnPedNovo" title="F2">
-          <i class="fas fa-plus"></i> Novo
-        </button>
+        <div class="d-flex gap-2">
+          <button type="button" class="btn btn-outline-secondary" id="btnPedMesas" title="Cadastrar e ativar/desativar mesas">
+            <i class="fas fa-chair"></i> Mesas
+          </button>
+          <button type="button" class="btn btn-primary" id="btnPedNovo" title="F2">
+            <i class="fas fa-plus"></i> Novo
+          </button>
+        </div>
       </div>
       <div id="pedAlert"></div>
 
@@ -266,19 +364,15 @@ function loadPedidos() {
       <div class="card shadow-sm mb-3">
         <div class="card-body">
           <div class="row g-2 align-items-end">
-            <div class="col-md-3">
+            <div class="col-md-4">
               <label class="form-label small mb-0">Cliente</label>
-              <input type="text" class="form-control form-control-sm" id="pedFiltroCliente" placeholder="Nome">
+              <input type="text" class="form-control form-control-sm" id="pedFiltroCliente" placeholder="Nome (opcional)">
             </div>
             <div class="col-md-3">
-              <label class="form-label small mb-0">Representante</label>
-              <input type="text" class="form-control form-control-sm" id="pedFiltroRepresentante">
-            </div>
-            <div class="col-md-2">
               <label class="form-label small mb-0">Data inicial</label>
               <input type="date" class="form-control form-control-sm" id="pedFiltroInicio">
             </div>
-            <div class="col-md-2">
+            <div class="col-md-3">
               <label class="form-label small mb-0">Data final</label>
               <input type="date" class="form-control form-control-sm" id="pedFiltroFim">
             </div>
@@ -297,8 +391,8 @@ function loadPedidos() {
             <thead class="table-light">
               <tr>
                 <th>Número</th>
+                <th>Mesa</th>
                 <th>Cliente</th>
-                <th>Representante</th>
                 <th class="text-end">Valor</th>
                 <th>Status</th>
                 <th>Data</th>
@@ -310,6 +404,33 @@ function loadPedidos() {
               <tr><td colspan="8" class="text-center text-muted py-4">Carregando…</td></tr>
             </tbody>
           </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal fade" id="modalPedMesas" tabindex="-1">
+      <div class="modal-dialog modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title"><i class="fas fa-chair me-2"></i>Mesas</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
+          </div>
+          <div class="modal-body">
+            <div id="pedMesasAlert"></div>
+            <div class="input-group mb-3">
+              <span class="input-group-text">Mesa</span>
+              <input type="number" min="1" step="1" class="form-control" id="pedMesaNovoNumero" placeholder="Número (ex.: 1)">
+              <button type="button" class="btn btn-primary" id="btnPedMesaAdd"><i class="fas fa-plus"></i> Cadastrar</button>
+            </div>
+            <table class="table table-sm align-middle mb-0">
+              <thead class="table-light">
+                <tr><th>Identificação</th><th>Situação</th><th class="text-end">Ações</th></tr>
+              </thead>
+              <tbody id="pedMesasBody">
+                <tr><td colspan="3" class="text-center text-muted py-3">Carregando…</td></tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
@@ -328,42 +449,26 @@ function loadPedidos() {
             </div>
           </div>
           <div class="modal-body">
-            <div class="row g-2 mb-3" id="pedTipoDocumentoRow">
-              <div class="col-12">
-                <label class="form-label mb-1">Tipo</label>
-                <div class="d-flex gap-3">
-                  <div class="form-check">
-                    <input class="form-check-input" type="radio" name="pedTipoDocumento" id="pedTipoOrcamento" value="orcamento">
-                    <label class="form-check-label" for="pedTipoOrcamento">Orçamento</label>
-                  </div>
-                  <div class="form-check">
-                    <input class="form-check-input" type="radio" name="pedTipoDocumento" id="pedTipoPedido" value="pedido" checked>
-                    <label class="form-check-label" for="pedTipoPedido">Pedido</label>
-                  </div>
-                </div>
-              </div>
-            </div>
             <div class="row g-2 mb-3">
-              <div class="col-md-6 position-relative">
-                <label class="form-label">Cliente <small class="text-muted">(Ctrl+F)</small></label>
+              <div class="col-md-3">
+                <label class="form-label">Mesa</label>
+                <select class="form-select" id="pedMesaId">
+                  <option value="">— Sem mesa —</option>
+                </select>
+                <div class="form-text" id="pedMesaAviso"></div>
+              </div>
+              <div class="col-md-5 position-relative">
+                <label class="form-label">Cliente <small class="text-muted">(opcional · Ctrl+F)</small></label>
                 <input type="text" class="form-control" id="pedClienteBusca" placeholder="Pesquisar por nome, CPF ou telefone" autocomplete="off">
                 <input type="hidden" id="pedClienteId">
                 <div id="pedClienteSugestoes" class="list-group position-absolute w-100 shadow" style="z-index:1050;display:none;max-height:220px;overflow:auto;"></div>
                 <div class="form-text" id="pedClienteSelecionadoLabel">Nenhum cliente selecionado</div>
               </div>
               <div class="col-md-3">
-                <label class="form-label">Representante</label>
-                <input type="text" class="form-control" id="pedRepresentante">
-              </div>
-              <div class="col-md-3">
-                <label class="form-label">Frete previsto</label>
-                <input type="number" step="0.01" min="0" class="form-control" id="pedFrete" value="0">
-              </div>
-              <div class="col-md-3">
                 <label class="form-label">Desconto (R$)</label>
                 <input type="number" step="0.01" min="0" class="form-control" id="pedDesconto" value="0">
               </div>
-              <div class="col-md-9">
+              <div class="col-md-12">
                 <label class="form-label">Observação</label>
                 <input type="text" class="form-control" id="pedObservacao">
               </div>
@@ -434,6 +539,59 @@ function loadPedidos() {
         </div>
       </div>
     </div>
+
+    <div class="modal fade" id="pedPersonalizacaoModal" tabindex="-1" aria-labelledby="pedPersonalizacaoTitulo" aria-hidden="true">
+      <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="modal-header">
+            <div>
+              <h5 class="modal-title" id="pedPersonalizacaoTitulo">Personalizar ingredientes</h5>
+              <div class="small text-muted" id="pedPersonalizacaoProduto"></div>
+            </div>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
+          </div>
+          <div class="modal-body">
+            <div id="pedPersonalizacaoErro" class="alert alert-warning py-2 d-none" role="alert"></div>
+            <div class="row g-2 mb-3">
+              <div class="col-sm-6">
+                <label class="form-label" for="pedPersonalizacaoQtd">Quantidade</label>
+                <input type="number" min="0.001" step="0.001" class="form-control" id="pedPersonalizacaoQtd">
+              </div>
+              <div class="col-sm-6">
+                <label class="form-label" for="pedPersonalizacaoPrecoBase">Preço-base por unidade (R$)</label>
+                <input type="number" min="0" step="0.01" class="form-control" id="pedPersonalizacaoPrecoBase">
+              </div>
+            </div>
+            <div class="row g-3">
+              <section class="col-md-6" aria-labelledby="pedIngredientesSemAdicionalTitulo">
+                <h6 id="pedIngredientesSemAdicionalTitulo">Opcionais sem adicional</h6>
+                <div id="pedIngredientesSemAdicional" class="small"></div>
+              </section>
+              <section class="col-md-6" aria-labelledby="pedIngredientesComAdicionalTitulo">
+                <h6 id="pedIngredientesComAdicionalTitulo">Opcionais com adicional</h6>
+                <div id="pedIngredientesComAdicional" class="small"></div>
+              </section>
+            </div>
+            <div class="border-top mt-3 pt-3 d-flex justify-content-between">
+              <span>Adicionais por unidade</span>
+              <strong id="pedPersonalizacaoAdicionais">R$ 0,00</strong>
+            </div>
+            <div class="d-flex justify-content-between mt-2" aria-live="polite">
+              <span>Preço unitário</span>
+              <strong id="pedPersonalizacaoPrecoUnitario">R$ 0,00</strong>
+            </div>
+            <div class="d-flex justify-content-between">
+              <span>Total do item</span>
+              <strong id="pedPersonalizacaoTotalItem">R$ 0,00</strong>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+            <button type="button" class="btn btn-primary" id="btnPedConfirmarPersonalizacao">Confirmar ingredientes</button>
+          </div>
+        </div>
+      </div>
+    </div>
   `);
 
   function alertar(msg, tipo, htmlExtra) {
@@ -448,7 +606,7 @@ function loadPedidos() {
     const subtotal = itensEditor.reduce((s, i) => s + Number(i.subtotal || 0), 0);
     const qtd = itensEditor.reduce((s, i) => s + Number(i.quantidade || 0), 0);
     const desconto = Number($('#pedDesconto').val() || 0);
-    const frete = Number($('#pedFrete').val() || 0);
+    const frete = freteAtual;
     const total = Number((subtotal - desconto + frete).toFixed(2));
     return {
       itens: itensEditor.length,
@@ -505,17 +663,71 @@ function loadPedidos() {
     return true;
   }
 
-  function aplicarProdutoSelecionado(id, nome, codigo, preco) {
-    $('#pedProdutoId').val(id);
-    $('#pedProdutoNome').val(nome);
-    $('#pedProdutoCodigo').val(codigo);
-    $('#pedItemPreco').val(preco);
-    $('#pedProdutoBusca').val((codigo || '') + (codigo ? ' — ' : '') + (nome || ''));
-    fecharSugestoes('produto');
-    $('#pedItemQtd').val($('#pedItemQtd').val() || '1');
-    setTimeout(() => {
-      $('#pedItemQtd').trigger('focus').select();
-    }, 0);
+  async function aplicarProdutoSelecionado(id, nome, codigo, precoComercial, origemPrecoComercial) {
+    precoSugestaoSelecionada = null;
+    produtoSelecionadoParaPedido = null;
+    try {
+      const resp = await fetch(`${API_URL}/produtos/${id}`, { headers });
+      const produto = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(produto.error || 'Falha ao carregar o produto selecionado.');
+      const nomePedido = String(produto.nome_comercial || '').trim() || produto.nome || nome || '';
+      let fichaPersonalizacao = null;
+      if (Number(produto.permite_personalizacao_ingredientes) === 1) {
+        const fichaResp = await fetch(`${API_URL}/produtos/${id}/ficha-tecnica`, { headers });
+        const ficha = await fichaResp.json().catch(() => ({}));
+        if (!fichaResp.ok) {
+          throw new Error(ficha.error || 'Falha ao carregar as opções de ingredientes.');
+        }
+        if (!ficha || Number(ficha.ativo) !== 1 || !Array.isArray(ficha.itens) || !ficha.itens.length) {
+          throw new Error('O produto permite personalização, mas não possui ficha técnica ativa e válida.');
+        }
+        if (!ficha.itens.some((item) => item.classificacao_comercial !== 'OBRIGATORIO_OCULTO')) {
+          throw new Error('A ficha técnica não possui ingredientes opcionais para selecionar.');
+        }
+        fichaPersonalizacao = ficha;
+      }
+      const sugestao = _pedResolverPrecoSugerido(produto, precoComercial, origemPrecoComercial);
+      const existente = itensEditor.find((item) => Number(item.produto_id) === Number(id));
+      const precoInicial = fichaPersonalizacao && existente
+        ? Number(existente.preco_base_unitario_snapshot ?? sugestao.precoInicial)
+        : sugestao.precoInicial;
+      precoSugestaoSelecionada = fichaPersonalizacao && existente
+        ? {
+          preco_venda_snapshot: existente.preco_venda_snapshot ?? null,
+          preco_pedido_snapshot: existente.preco_pedido_snapshot ?? null,
+          preco_sugerido_snapshot: existente.preco_sugerido_snapshot ?? null,
+          origem_preco_sugerido: existente.origem_preco_sugerido ?? null
+        }
+        : sugestao.snapshot;
+      produtoSelecionadoParaPedido = fichaPersonalizacao
+        ? { id: Number(id), ficha: fichaPersonalizacao }
+        : null;
+      $('#pedProdutoId').val(id);
+      $('#pedProdutoNome').val(nomePedido);
+      $('#pedProdutoCodigo').val(codigo);
+      $('#pedItemPreco').val(precoInicial);
+      $('#pedProdutoBusca').val((codigo || '') + (codigo ? ' — ' : '') + nomePedido);
+      fecharSugestoes('produto');
+      $('#pedItemQtd').val($('#pedItemQtd').val() || '1');
+      if (fichaPersonalizacao) {
+        abrirModalPersonalizacao(produtoSelecionadoParaPedido, {
+          produtoId: Number(id),
+          quantidade: Number($('#pedItemQtd').val()),
+          precoBase: Number(precoInicial),
+          precoAdicionais: 0,
+          desconto: Number($('#pedItemDesc').val() || 0),
+          nome: nomePedido,
+          codigo: codigo || '',
+          snapshotPreco: precoSugestaoSelecionada
+        });
+        return;
+      }
+      setTimeout(() => {
+        $('#pedItemQtd').trigger('focus').select();
+      }, 0);
+    } catch (err) {
+      alertar(err.message || 'Falha ao carregar o produto selecionado.', 'danger');
+    }
   }
 
   function aplicarClienteSelecionado(id, nome) {
@@ -532,12 +744,21 @@ function loadPedidos() {
       $('#pedItensBody').html('<tr><td colspan="7" class="text-muted text-center">Nenhum item. Pesquise e adicione produtos.</td></tr>');
       linhaGradeFoco = -1;
     } else {
-      $('#pedItensBody').html(itensEditor.map((it, idx) => `
+      $('#pedItensBody').html(itensEditor.map((it, idx) => {
+        const selecionados = (it.ingredientes_personalizados || [])
+          .filter((ingrediente) => Number(ingrediente.selecionado) === 1
+            && ingrediente.classificacao_comercial_snapshot !== 'OBRIGATORIO_OCULTO')
+          .map((ingrediente) => ingrediente.insumo_nome_snapshot || ingrediente.nome || '')
+          .filter(Boolean);
+        const resumo = Number(it.personalizacao_ingredientes_snapshot) === 1
+          ? `<small class="d-block text-muted">Personalizado${selecionados.length ? `: ${escapeHtml(selecionados.join(', '))}` : ': sem opcionais selecionados'}</small>`
+          : '';
+        return `
         <tr class="ped-item-row ${linhaGradeFoco === idx ? 'table-active' : ''}" data-idx="${idx}" tabindex="0">
           <td>${escapeHtml(it.produto_codigo || it.produto_id)}</td>
-          <td>${escapeHtml(it.produto_nome || ('#' + it.produto_id))}</td>
+          <td>${escapeHtml(it.produto_nome || ('#' + it.produto_id))}${resumo}</td>
           <td style="width:90px"><input type="number" class="form-control form-control-sm ped-edit-qtd" data-idx="${idx}" value="${it.quantidade}" min="0.001" step="0.001"></td>
-          <td style="width:100px"><input type="number" class="form-control form-control-sm ped-edit-preco" data-idx="${idx}" value="${it.preco_unitario}" min="0" step="0.01"></td>
+          <td style="width:100px"><input type="number" class="form-control form-control-sm ped-edit-preco" data-idx="${idx}" value="${it.preco_unitario}" min="0" step="0.01" title="${Number(it.personalizacao_ingredientes_snapshot) === 1 ? 'Preço unitário final (inclui os adicionais)' : 'Preço unitário'}"></td>
           <td style="width:80px"><input type="number" class="form-control form-control-sm ped-edit-desc" data-idx="${idx}" value="${it.desconto_percentual || 0}" min="0" max="100" step="0.01"></td>
           <td class="text-end">${fmtMoney(it.subtotal)}</td>
           <td class="text-end">
@@ -545,13 +766,17 @@ function loadPedidos() {
               <i class="fas fa-trash"></i>
             </button>
           </td>
-        </tr>`).join(''));
+        </tr>`;
+      }).join(''));
     }
     atualizarTotaisBar();
 
-    $('.ped-del-item').off('click').on('click', function (e) {
+    $('#pedItensBody').off('click', '.ped-del-item').on('click', '.ped-del-item', function (e) {
+      e.preventDefault();
       e.stopPropagation();
-      itensEditor.splice(Number($(this).data('idx')), 1);
+      const idx = Number($(this).closest('.ped-item-row').data('idx'));
+      if (!Number.isInteger(idx) || idx < 0 || idx >= itensEditor.length) return;
+      itensEditor.splice(idx, 1);
       linhaGradeFoco = -1;
       renderItens();
       $('#pedProdutoBusca').trigger('focus');
@@ -565,7 +790,14 @@ function loadPedidos() {
       const preco = Number($('.ped-edit-preco[data-idx="' + idx + '"]').val());
       const desc = Number($('.ped-edit-desc[data-idx="' + idx + '"]').val());
       row.quantidade = qtd;
-      row.preco_unitario = preco;
+      if (Number(row.personalizacao_ingredientes_snapshot) === 1) {
+        const adicionais = Number(row.preco_adicionais_unitario_snapshot || 0);
+        row.preco_unitario = Math.max(adicionais, preco);
+        row.preco_base_unitario_snapshot = Number((row.preco_unitario - adicionais).toFixed(2));
+        $(this).filter('.ped-edit-preco').val(row.preco_unitario);
+      } else {
+        row.preco_unitario = preco;
+      }
       row.desconto_percentual = desc;
       row.subtotal = Number((qtd * preco * (1 - desc / 100)).toFixed(2));
       atualizarTotaisBar();
@@ -599,16 +831,19 @@ function loadPedidos() {
   async function carregarLista() {
     const qs = new URLSearchParams();
     const cliente = $('#pedFiltroCliente').val();
-    const representante = $('#pedFiltroRepresentante').val();
     const inicio = $('#pedFiltroInicio').val();
     const fim = $('#pedFiltroFim').val();
-    const aba = ABAS.find((a) => a.id === abaAtual) || ABAS[1];
+    const aba = ABAS.find((a) => a.id === abaAtual) || ABAS[0];
     if (aba.status) qs.set('status', aba.status);
     if (cliente) qs.set('cliente', cliente);
-    if (representante) qs.set('representante', representante);
     if (inicio) qs.set('dataInicio', inicio);
     if (fim) qs.set('dataFim', fim);
 
+    if (!_pedEmpresaSelecionada()) {
+      $('#pedListaBody').html('<tr><td colspan="8" class="text-center text-warning py-4">Selecione a empresa para consultar os pedidos.</td></tr>');
+      return;
+    }
+    headers = _pedHeaders();
     $('#pedListaBody').html('<tr><td colspan="8" class="text-center text-muted py-4">Carregando…</td></tr>');
     try {
       const resp = await fetch(`${API_URL}/pedidos?${qs}`, { headers });
@@ -621,14 +856,11 @@ function loadPedidos() {
       }
       $('#pedListaBody').html(itens.map((p) => {
         const editavel = !['FATURADO', 'CANCELADO'].includes(p.status);
-        const enviavel = ['PEDIDO', 'ABERTO', 'EM_SEPARACAO'].includes(p.status)
-          && (typeof expedicaoHabilitada !== 'function' || expedicaoHabilitada());
-        const ehOrcamento = p.status === 'ORCAMENTO';
         return `
         <tr class="ped-linha" data-id="${p.id}" style="cursor:pointer;" title="Clique para visualizar">
           <td><strong>${escapeHtml(p.codigo || ('#' + p.id))}</strong></td>
-          <td>${escapeHtml(p.cliente_nome || 'Consumidor')}</td>
-          <td>${escapeHtml(p.representante_nome || '—')}</td>
+          <td>${p.mesa_numero != null ? 'Mesa ' + escapeHtml(p.mesa_numero) : '—'}</td>
+          <td>${escapeHtml(p.cliente_nome || '—')}</td>
           <td class="text-end">${fmtMoney(p.total)}</td>
           <td>${badgeStatus(p.status)}</td>
           <td>${fmtData(p.data_pedido)}</td>
@@ -637,10 +869,7 @@ function loadPedidos() {
             ${editavel ? `<button class="btn btn-sm btn-outline-primary ped-editar" data-id="${p.id}" title="Editar"><i class="fas fa-edit"></i></button>` : ''}
             <button class="btn btn-sm btn-outline-dark ped-imprimir" data-id="${p.id}" title="Imprimir"><i class="fas fa-print"></i></button>
             <button class="btn btn-sm btn-outline-secondary ped-duplicar" data-id="${p.id}" title="Duplicar"><i class="fas fa-copy"></i></button>
-            ${ehOrcamento ? `<button class="btn btn-sm btn-primary ped-converter" data-id="${p.id}" title="Converter em Pedido"><i class="fas fa-exchange-alt"></i> Pedido</button>` : ''}
-            ${enviavel ? `<button class="btn btn-sm btn-success ped-enviar" data-id="${p.id}" title="Enviar para Expedição"><i class="fas fa-share"></i> Enviar</button>` : ''}
-            ${ehOrcamento ? `<button class="btn btn-sm btn-outline-danger ped-excluir" data-id="${p.id}" title="Excluir"><i class="fas fa-trash"></i></button>` : ''}
-            ${editavel && !ehOrcamento ? `<button class="btn btn-sm btn-outline-danger ped-cancelar" data-id="${p.id}" title="Cancelar"><i class="fas fa-ban"></i></button>` : ''}
+            ${editavel ? `<button class="btn btn-sm btn-outline-danger ped-cancelar" data-id="${p.id}" title="Cancelar"><i class="fas fa-ban"></i></button>` : ''}
           </td>
         </tr>`;
       }).join(''));
@@ -662,18 +891,6 @@ function loadPedidos() {
         e.stopPropagation();
         duplicarPedido(Number($(this).data('id')));
       });
-      $('.ped-converter').off('click').on('click', function (e) {
-        e.stopPropagation();
-        converterPedido(Number($(this).data('id')));
-      });
-      $('.ped-enviar').off('click').on('click', function (e) {
-        e.stopPropagation();
-        enviarFaturamento(Number($(this).data('id')));
-      });
-      $('.ped-excluir').off('click').on('click', function (e) {
-        e.stopPropagation();
-        excluirOrcamento(Number($(this).data('id')));
-      });
       $('.ped-cancelar').off('click').on('click', function (e) {
         e.stopPropagation();
         cancelarPedido(Number($(this).data('id')));
@@ -683,26 +900,135 @@ function loadPedidos() {
     }
   }
 
+  /* ---- Mesas: apenas cadastro por empresa e seleção no pedido ---- */
+  function alertarMesas(msg, tipo) {
+    $('#pedMesasAlert').html(`<div class="alert alert-${tipo || 'info'} py-2 mb-2">${escapeHtml(msg)}</div>`);
+  }
+
+  async function requisitarMesas(url, method, corpo) {
+    headers = _pedHeaders();
+    const resp = await fetch(`${API_URL}/mesas${url || ''}`, {
+      method: method || 'GET',
+      headers,
+      body: corpo ? JSON.stringify(corpo) : undefined
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.mensagem || data.error || ('HTTP ' + resp.status));
+    return data;
+  }
+
+  async function preencherSelectMesa(mesaIdPedido, mesaNumeroPedido) {
+    const $sel = $('#pedMesaId');
+    $sel.html('<option value="">— Sem mesa —</option>');
+    $('#pedMesaAviso').removeClass('text-danger').text('Carregando mesas…');
+    try {
+      const data = await requisitarMesas('?ativas=1');
+      const mesas = data.itens || [];
+      mesas.forEach((m) => {
+        $sel.append(`<option value="${m.id}">Mesa ${escapeHtml(m.numero)}</option>`);
+      });
+      if (mesaIdPedido && !mesas.some((m) => Number(m.id) === Number(mesaIdPedido))) {
+        $sel.append(`<option value="${mesaIdPedido}">Mesa ${escapeHtml(mesaNumeroPedido != null ? mesaNumeroPedido : mesaIdPedido)} (desativada)</option>`);
+      }
+      $sel.val(mesaIdPedido ? String(mesaIdPedido) : '');
+      $('#pedMesaAviso').text(mesas.length ? '' : 'Nenhuma mesa ativa. Cadastre em "Mesas".');
+    } catch (err) {
+      if (mesaIdPedido) {
+        $sel.append(`<option value="${mesaIdPedido}">Mesa ${escapeHtml(mesaNumeroPedido != null ? mesaNumeroPedido : mesaIdPedido)}</option>`);
+        $sel.val(String(mesaIdPedido));
+      }
+      $('#pedMesaAviso').addClass('text-danger').text('Falha ao carregar mesas: ' + err.message);
+    }
+  }
+
+  async function renderMesas() {
+    $('#pedMesasBody').html('<tr><td colspan="3" class="text-center text-muted py-3">Carregando…</td></tr>');
+    try {
+      const data = await requisitarMesas();
+      const mesas = data.itens || [];
+      if (!mesas.length) {
+        $('#pedMesasBody').html('<tr><td colspan="3" class="text-center text-muted py-3">Nenhuma mesa cadastrada.</td></tr>');
+        return;
+      }
+      $('#pedMesasBody').html(mesas.map((m) => `
+        <tr data-id="${m.id}" data-numero="${escapeHtml(m.numero)}">
+          <td class="ped-mesa-nome">Mesa ${escapeHtml(m.numero)}</td>
+          <td>${m.ativo ? '<span class="badge bg-success">Ativa</span>' : '<span class="badge bg-secondary">Desativada</span>'}</td>
+          <td class="text-end text-nowrap">
+            <button type="button" class="btn btn-sm btn-outline-primary ped-mesa-editar" title="Editar número"><i class="fas fa-edit"></i></button>
+            <button type="button" class="btn btn-sm ${m.ativo ? 'btn-outline-danger' : 'btn-outline-success'} ped-mesa-toggle" data-ativo="${m.ativo ? 1 : 0}" title="${m.ativo ? 'Desativar' : 'Ativar'}">
+              <i class="fas ${m.ativo ? 'fa-ban' : 'fa-check'}"></i>
+            </button>
+          </td>
+        </tr>`).join(''));
+    } catch (err) {
+      $('#pedMesasBody').html(`<tr><td colspan="3" class="text-danger text-center py-3">${escapeHtml(err.message)}</td></tr>`);
+    }
+  }
+
+  async function abrirMesas() {
+    if (!_pedEmpresaSelecionada()) {
+      alertar('Selecione a empresa antes de gerenciar as mesas.', 'warning');
+      return;
+    }
+    $('#pedMesasAlert').empty();
+    $('#pedMesaNovoNumero').val('');
+    new bootstrap.Modal(document.getElementById('modalPedMesas')).show();
+    await renderMesas();
+  }
+
+  async function cadastrarMesa() {
+    const numero = $('#pedMesaNovoNumero').val();
+    try {
+      const data = await requisitarMesas('', 'POST', { numero });
+      $('#pedMesaNovoNumero').val('');
+      alertarMesas(`Mesa ${data.mesa.numero} cadastrada.`, 'success');
+      await renderMesas();
+    } catch (err) {
+      alertarMesas(err.message, 'danger');
+    }
+  }
+
+  async function salvarEdicaoMesa(id, numero) {
+    try {
+      const data = await requisitarMesas(`/${id}`, 'PUT', { numero });
+      alertarMesas(`Mesa ${data.mesa.numero} atualizada.`, 'success');
+    } catch (err) {
+      alertarMesas(err.message, 'danger');
+    }
+    await renderMesas();
+  }
+
+  async function alternarMesa(id, ativoAtual) {
+    try {
+      const data = await requisitarMesas(`/${id}`, 'PUT', { ativo: !ativoAtual });
+      alertarMesas(`Mesa ${data.mesa.numero} ${data.mesa.ativo ? 'ativada' : 'desativada'}.`, 'success');
+    } catch (err) {
+      alertarMesas(err.message, 'danger');
+    }
+    await renderMesas();
+  }
+
   function limparEditor() {
     pedidoEditandoId = null;
     pedidoEditandoStatus = null;
-    tipoNovoDocumento = 'pedido';
+    representanteAtual = null;
+    freteAtual = 0;
     itensEditor = [];
+    precoSugestaoSelecionada = null;
+    produtoSelecionadoParaPedido = null;
+    adicionarPersonalizacaoPendente = null;
     clienteSelecionado = null;
     linhaGradeFoco = -1;
     fecharSugestoes();
     $('#pedEditorTitulo').text('Novo pedido');
     $('#btnPedImprimir').prop('disabled', true);
-    $('#pedTipoDocumentoRow').show();
-    $('#pedTipoPedido').prop('checked', true);
-    $('#pedTipoOrcamento').prop('checked', false);
     $('#pedClienteId').val('');
     $('#pedClienteBusca').val('');
     $('#pedClienteSelecionadoLabel').text('Nenhum cliente selecionado');
-    $('#pedRepresentante').val('');
-    $('#pedFrete').val('0');
     $('#pedDesconto').val('0');
     $('#pedObservacao').val('');
+    $('#pedMesaId').val('');
     $('#pedProdutoBusca').val('');
     $('#pedProdutoId').val('');
     $('#pedProdutoNome').val('');
@@ -716,7 +1042,7 @@ function loadPedidos() {
   function focarAoAbrirModal() {
     const el = document.getElementById('modalPedidoEditor');
     const handler = () => {
-      setTimeout(() => $('#pedClienteBusca').trigger('focus'), 50);
+      setTimeout(() => $('#pedProdutoBusca').trigger('focus'), 50);
       el.removeEventListener('shown.bs.modal', handler);
     };
     el.addEventListener('shown.bs.modal', handler);
@@ -724,17 +1050,17 @@ function loadPedidos() {
 
   async function abrirEditor(id) {
     $('#btn-restaurar-modalPedidoEditor').remove();
+    if (!_pedEmpresaSelecionada()) {
+      alertar('Selecione a empresa antes de abrir um pedido.', 'warning');
+      return;
+    }
+    headers = _pedHeaders();
     limparEditor();
     focarAoAbrirModal();
     if (!id) {
-      if (abaAtual === 'orcamentos') {
-        tipoNovoDocumento = 'orcamento';
-        $('#pedTipoOrcamento').prop('checked', true);
-        $('#pedTipoPedido').prop('checked', false);
-        $('#pedEditorTitulo').text('Novo orçamento');
-      }
       $('#btnPedImprimir').prop('disabled', true);
       new bootstrap.Modal(document.getElementById('modalPedidoEditor')).show();
+      preencherSelectMesa(null, null);
       return;
     }
     try {
@@ -744,19 +1070,18 @@ function loadPedidos() {
       const p = data.pedido;
       pedidoEditandoId = p.id;
       pedidoEditandoStatus = p.status;
+      representanteAtual = p.representante_nome || null;
+      freteAtual = Number(p.frete || 0);
       $('#btnPedImprimir').prop('disabled', false);
-      const rotulo = p.status === 'ORCAMENTO' ? 'Editar orçamento ' : 'Editar pedido ';
-      $('#pedEditorTitulo').text(rotulo + (p.codigo || ('#' + p.id)));
-      $('#pedTipoDocumentoRow').hide();
+      $('#pedEditorTitulo').text('Editar pedido ' + (p.codigo || ('#' + p.id)));
       clienteSelecionado = p.cliente_id ? { id: p.cliente_id, nome: p.cliente_nome } : null;
       $('#pedClienteId').val(p.cliente_id || '');
       $('#pedClienteBusca').val(p.cliente_nome || '');
       $('#pedClienteSelecionadoLabel').text(p.cliente_nome || 'Nenhum cliente selecionado');
-      $('#pedRepresentante').val(p.representante_nome || '');
-      $('#pedFrete').val(p.frete || 0);
       $('#pedDesconto').val(p.desconto || 0);
       $('#pedObservacao').val(p.observacao || '');
       itensEditor = (p.itens || []).map((i) => ({
+        id: i.id,
         produto_id: i.produto_id,
         produto_nome: i.produto_nome,
         produto_codigo: i.produto_codigo,
@@ -764,9 +1089,20 @@ function loadPedidos() {
         preco_unitario: Number(i.preco_unitario),
         desconto_percentual: Number(i.desconto_percentual || 0),
         subtotal: Number(i.subtotal),
-        tipo_venda: i.tipo_venda || 'PESO'
+        tipo_venda: i.tipo_venda || 'PESO',
+        preco_venda_snapshot: i.preco_venda_snapshot ?? null,
+        preco_pedido_snapshot: i.preco_pedido_snapshot ?? null,
+        preco_sugerido_snapshot: i.preco_sugerido_snapshot ?? null,
+        origem_preco_sugerido: i.origem_preco_sugerido ?? null,
+        personalizacao_ingredientes_snapshot: Number(i.personalizacao_ingredientes_snapshot) === 1 ? 1 : 0,
+        preco_base_unitario_snapshot: i.preco_base_unitario_snapshot ?? null,
+        preco_adicionais_unitario_snapshot: i.preco_adicionais_unitario_snapshot ?? null,
+        ingredientes_personalizados: Array.isArray(i.ingredientes_personalizados)
+          ? i.ingredientes_personalizados
+          : []
       }));
       renderItens();
+      await preencherSelectMesa(p.mesa_id, p.mesa_numero);
       new bootstrap.Modal(document.getElementById('modalPedidoEditor')).show();
     } catch (err) {
       alertar(err.message, 'danger');
@@ -853,7 +1189,18 @@ function loadPedidos() {
 
   async function fetchPedidoComSupervisor(url, method, payloadBase) {
     let payload = { ...payloadBase };
-    let resp = await fetch(url, { method, headers, body: JSON.stringify(payload) });
+    const criandoPedido = method === 'POST' && url === `${API_URL}/pedidos`;
+    if (criandoPedido) {
+      const assinatura = JSON.stringify(payloadBase);
+      if (!chaveCriacaoPendente || assinaturaCriacaoPendente !== assinatura) {
+        chaveCriacaoPendente = novaChaveIdempotencia();
+        assinaturaCriacaoPendente = assinatura;
+      }
+    }
+    const headersOperacao = criandoPedido
+      ? { ...headers, 'Idempotency-Key': chaveCriacaoPendente }
+      : headers;
+    let resp = await fetch(url, { method, headers: headersOperacao, body: JSON.stringify(payload) });
     let data = await resp.json().catch(() => ({}));
     if (
       resp.status === 409
@@ -866,7 +1213,7 @@ function loadPedidos() {
         throw err;
       }
       payload = { ...payloadBase, supervisor_token: token };
-      resp = await fetch(url, { method, headers, body: JSON.stringify(payload) });
+      resp = await fetch(url, { method, headers: headersOperacao, body: JSON.stringify(payload) });
       data = await resp.json().catch(() => ({}));
     }
     if (!resp.ok) {
@@ -878,46 +1225,65 @@ function loadPedidos() {
   }
 
   async function salvarPedido() {
+    if (!_pedEmpresaSelecionada()) {
+      alertar('Selecione a empresa antes de salvar o pedido.', 'warning');
+      return;
+    }
     if (!itensEditor.length) {
       alertar('Adicione ao menos um item.', 'warning');
       return;
     }
+    headers = _pedHeaders();
     const t = calcTotaisDetalhe();
-    const tipoSelecionado = $('input[name="pedTipoDocumento"]:checked').val() || tipoNovoDocumento || 'pedido';
     const payload = {
       cliente_id: $('#pedClienteId').val() ? Number($('#pedClienteId').val()) : null,
-      representante_nome: $('#pedRepresentante').val() || null,
+      mesa_id: $('#pedMesaId').val() ? Number($('#pedMesaId').val()) : null,
+      representante_nome: representanteAtual,
       observacao: $('#pedObservacao').val() || null,
       frete: t.frete,
       desconto: t.desconto,
       total: t.total,
       itens: itensEditor.map((i) => ({
+        id: i.id,
         produto_id: i.produto_id,
         quantidade: i.quantidade,
         preco_unitario: i.preco_unitario,
         desconto_percentual: i.desconto_percentual || 0,
         subtotal: i.subtotal,
-        tipo_venda: i.tipo_venda || 'PESO'
+        tipo_venda: i.tipo_venda || 'PESO',
+        preco_venda_snapshot: i.preco_venda_snapshot ?? null,
+        preco_pedido_snapshot: i.preco_pedido_snapshot ?? null,
+        preco_sugerido_snapshot: i.preco_sugerido_snapshot ?? null,
+        origem_preco_sugerido: i.origem_preco_sugerido ?? null,
+        ...(Number(i.personalizacao_ingredientes_snapshot) === 1 ? {
+          preco_base_unitario: i.preco_base_unitario_snapshot,
+          ingredientes_selecionados: (i.ingredientes_personalizados || [])
+            .filter((ingrediente) => Number(ingrediente.selecionado) === 1
+              && ingrediente.classificacao_comercial_snapshot !== 'OBRIGATORIO_OCULTO')
+            .map((ingrediente) => Number(ingrediente.insumo_id))
+        } : {})
       }))
     };
     if (!pedidoEditandoId) {
-      payload.tipo = tipoSelecionado;
-      payload.status = tipoSelecionado === 'orcamento' ? 'ORCAMENTO' : 'PEDIDO';
+      payload.tipo = 'pedido';
+      payload.status = 'PEDIDO';
     }
     try {
       const url = pedidoEditandoId ? `${API_URL}/pedidos/${pedidoEditandoId}` : `${API_URL}/pedidos`;
       const method = pedidoEditandoId ? 'PUT' : 'POST';
       const data = await fetchPedidoComSupervisor(url, method, payload);
       bootstrap.Modal.getInstance(document.getElementById('modalPedidoEditor'))?.hide();
-      const rotulo = data.pedido?.status === 'ORCAMENTO' ? 'Orçamento' : 'Pedido';
-      alertar(`${rotulo} ${data.pedido?.codigo || ''} salvo.`, 'success');
+      alertar(`Pedido ${data.pedido?.codigo || ''} salvo.`, 'success');
       pedidoEditandoId = data.pedido?.id || pedidoEditandoId;
       pedidoEditandoStatus = data.pedido?.status || pedidoEditandoStatus;
       $('#btnPedImprimir').prop('disabled', !pedidoEditandoId);
-      if (data.pedido?.status === 'ORCAMENTO') abaAtual = 'orcamentos';
-      else if (['PEDIDO', 'ABERTO', 'EM_SEPARACAO'].includes(data.pedido?.status)) abaAtual = 'pedidos';
+      abaAtual = 'pedidos';
       sincronizarAbas();
       await carregarLista();
+      if (method === 'POST') {
+        chaveCriacaoPendente = null;
+        assinaturaCriacaoPendente = null;
+      }
     } catch (err) {
       alertar(err.message, 'danger');
     }
@@ -926,11 +1292,21 @@ function loadPedidos() {
   async function cancelarPedido(id) {
     if (!confirm('Cancelar este pedido?')) return;
     try {
-      const resp = await fetch(`${API_URL}/pedidos/${id}/cancelar`, { method: 'POST', headers, body: '{}' });
+      let chave = chavesCancelamentoPendentes.get(Number(id));
+      if (!chave) {
+        chave = novaChaveIdempotencia();
+        chavesCancelamentoPendentes.set(Number(id), chave);
+      }
+      const resp = await fetch(`${API_URL}/pedidos/${id}/cancelar`, {
+        method: 'POST',
+        headers: { ...headers, 'Idempotency-Key': chave },
+        body: '{}'
+      });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data.mensagem || data.error || 'Falha ao cancelar');
       alertar('Pedido cancelado.', 'success');
       await carregarLista();
+      chavesCancelamentoPendentes.delete(Number(id));
     } catch (err) {
       alertar(err.message, 'danger');
     }
@@ -938,38 +1314,21 @@ function loadPedidos() {
 
   async function duplicarPedido(id) {
     try {
-      const resp = await fetch(`${API_URL}/pedidos/${id}/duplicar`, { method: 'POST', headers, body: '{}' });
+      let chave = chavesDuplicacaoPendentes.get(Number(id));
+      if (!chave) {
+        chave = novaChaveIdempotencia();
+        chavesDuplicacaoPendentes.set(Number(id), chave);
+      }
+      const resp = await fetch(`${API_URL}/pedidos/${id}/duplicar`, {
+        method: 'POST',
+        headers: { ...headers, 'Idempotency-Key': chave },
+        body: '{}'
+      });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data.mensagem || data.error || 'Falha ao duplicar');
-      const rotulo = data.pedido?.status === 'ORCAMENTO' ? 'Orçamento' : 'Pedido';
-      alertar(`${rotulo} duplicado: ${data.pedido?.codigo || ''}`, 'success');
+      alertar(`Pedido duplicado: ${data.pedido?.codigo || ''}`, 'success');
       await carregarLista();
-    } catch (err) {
-      alertar(err.message, 'danger');
-    }
-  }
-
-  async function converterPedido(id) {
-    if (!confirm('Converter este orçamento em Pedido? O número e os dados serão mantidos.')) return;
-    try {
-      const data = await fetchPedidoComSupervisor(`${API_URL}/pedidos/${id}/converter`, 'POST', {});
-      alertar(`Convertido em Pedido: ${data.pedido?.codigo || ''}`, 'success');
-      abaAtual = 'pedidos';
-      sincronizarAbas();
-      await carregarLista();
-    } catch (err) {
-      alertar(err.message, 'danger');
-    }
-  }
-
-  async function excluirOrcamento(id) {
-    if (!confirm('Excluir este orçamento permanentemente?')) return;
-    try {
-      const resp = await fetch(`${API_URL}/pedidos/${id}`, { method: 'DELETE', headers });
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok) throw new Error(data.mensagem || data.error || 'Falha ao excluir');
-      alertar('Orçamento excluído.', 'success');
-      await carregarLista();
+      chavesDuplicacaoPendentes.delete(Number(id));
     } catch (err) {
       alertar(err.message, 'danger');
     }
@@ -983,33 +1342,6 @@ function loadPedidos() {
     }
     const out = await imprimirPedidoPorId(pedidoId);
     if (!out.ok) alertar(out.error || 'Erro ao abrir visualização.', 'danger');
-  }
-
-  async function enviarFaturamento(id) {
-    if (typeof expedicaoHabilitada === 'function' && !expedicaoHabilitada()) {
-      alertar('Módulo Expedição não contratado.', 'warning');
-      return;
-    }
-    if (!confirm('Enviar este pedido para a fila de Expedição?')) return;
-    try {
-      const data = await fetchPedidoComSupervisor(
-        `${API_URL}/pedidos/${id}/enviar-faturamento`,
-        'POST',
-        {}
-      );
-      const codigo = data.pedido?.codigo || '';
-      alertar(
-        `<strong>Pedido enviado com sucesso.</strong> ${escapeHtml(codigo)} está na fila de Expedição.`,
-        'success',
-        ` <button type="button" class="btn btn-sm btn-outline-primary ms-2" id="btnIrFaturamento">Ir para Expedição</button>`
-      );
-      $('#btnIrFaturamento').off('click').on('click', () => {
-        if (typeof loadPage === 'function') loadPage('faturamento');
-      });
-      await carregarLista();
-    } catch (err) {
-      alertar(err.message, 'danger');
-    }
   }
 
   function buscarClientes(termo) {
@@ -1059,12 +1391,14 @@ function loadPedidos() {
           return;
         }
         $('#pedProdutoSugestoes').html(rows.map((p, i) => {
-          const preco = Number(p.preco_promocional != null ? p.preco_promocional : p.preco_venda || 0);
+          const precoComercial = Number(p.preco_promocional != null ? p.preco_promocional : p.preco_venda || 0);
+          const origemPreco = p.preco_promocional != null ? 'PROMOCAO' : 'PRECO_VENDA';
+          const preco = _pedResolverPrecoSugerido(p, precoComercial, origemPreco).precoInicial;
           return `
           <button type="button" class="list-group-item list-group-item-action ped-pick-produto ${i === 0 ? 'active' : ''}"
             data-id="${p.id}" data-nome="${escapeHtml(p.nome)}" data-codigo="${escapeHtml(p.codigo || '')}"
-            data-preco="${preco}">
-            <strong>${escapeHtml(p.codigo || p.id)}</strong> — ${escapeHtml(p.nome)}
+            data-preco="${preco}" data-origem-preco="${origemPreco}">
+            <strong>${escapeHtml(p.codigo || p.id)}</strong> — ${escapeHtml(String(p.nome_comercial || '').trim() || p.nome)}
             <span class="float-end">${fmtMoney(preco)}</span>
           </button>`;
         }).join('')).show();
@@ -1074,7 +1408,8 @@ function loadPedidos() {
             $(this).data('id'),
             $(this).data('nome'),
             $(this).data('codigo'),
-            $(this).data('preco')
+            $(this).data('preco'),
+            $(this).data('origem-preco')
           );
         });
       } catch (_) {
@@ -1083,33 +1418,43 @@ function loadPedidos() {
     }, 250);
   }
 
-  function adicionarItem() {
-    const produtoId = Number($('#pedProdutoId').val());
-    const qtd = Number($('#pedItemQtd').val());
-    const preco = Number($('#pedItemPreco').val());
-    const desc = Number($('#pedItemDesc').val() || 0);
-    if (!(produtoId > 0) || !(qtd > 0) || !(preco >= 0)) {
-      alertar('Selecione um produto e informe quantidade/preço.', 'warning');
-      $('#pedProdutoBusca').trigger('focus');
-      return;
-    }
-    const subtotal = Number((qtd * preco * (1 - desc / 100)).toFixed(2));
-    const existente = itensEditor.findIndex((i) => i.produto_id === produtoId);
+  function adicionarItemConfirmado({
+    produtoId,
+    quantidade,
+    precoBase,
+    precoAdicionais,
+    desconto,
+    ingredientes,
+    selecao,
+    personalizado
+  }) {
+    const preco = Number((precoBase + (personalizado ? precoAdicionais : 0)).toFixed(2));
+    const subtotal = Number((quantidade * preco * (1 - desconto / 100)).toFixed(2));
+    const existente = itensEditor.findIndex((i) => Number(i.produto_id) === Number(produtoId));
     const row = {
+      id: existente >= 0 ? itensEditor[existente].id : undefined,
       produto_id: produtoId,
       produto_nome: $('#pedProdutoNome').val(),
       produto_codigo: $('#pedProdutoCodigo').val(),
-      quantidade: qtd,
+      quantidade,
       preco_unitario: preco,
-      desconto_percentual: desc,
+      desconto_percentual: desconto,
       subtotal,
-      tipo_venda: 'PESO'
+      tipo_venda: 'PESO',
+      personalizacao_ingredientes_snapshot: personalizado ? 1 : 0,
+      preco_base_unitario_snapshot: personalizado ? precoBase : null,
+      preco_adicionais_unitario_snapshot: personalizado ? precoAdicionais : null,
+      ingredientes_personalizados: personalizado ? ingredientes : [],
+      ...(precoSugestaoSelecionada || {})
     };
+    if (personalizado) row.ingredientes_selecionados = selecao;
     if (existente >= 0) {
       itensEditor[existente] = row;
     } else {
       itensEditor.push(row);
     }
+    precoSugestaoSelecionada = null;
+    produtoSelecionadoParaPedido = null;
     $('#pedProdutoId, #pedProdutoNome, #pedProdutoCodigo, #pedProdutoBusca').val('');
     $('#pedItemQtd').val('1');
     $('#pedItemPreco').val('');
@@ -1117,6 +1462,167 @@ function loadPedidos() {
     renderItens();
     setTimeout(() => $('#pedProdutoBusca').trigger('focus'), 0);
   }
+
+  function atualizarResumoAdicionaisPersonalizacao() {
+    const pendente = adicionarPersonalizacaoPendente;
+    if (!pendente) return;
+    const selecao = $('#pedPersonalizacaoModal input[type="checkbox"]:checked')
+      .toArray()
+      .map((input) => Number(input.value));
+    const totais = _pedCalcularTotaisPersonalizacao({
+      precoBase: Number($('#pedPersonalizacaoPrecoBase').val()),
+      quantidade: Number($('#pedPersonalizacaoQtd').val()),
+      ingredientes: pendente.produto.ficha.itens,
+      ingredientesSelecionados: selecao,
+      desconto: pendente.desconto
+    });
+    $('#pedPersonalizacaoAdicionais').text(fmtMoney(totais.precoAdicionais));
+    $('#pedPersonalizacaoPrecoUnitario').text(fmtMoney(totais.precoUnitario));
+    $('#pedPersonalizacaoTotalItem').text(fmtMoney(totais.subtotal));
+  }
+
+  function abrirModalPersonalizacao(produto, valores) {
+    const ficha = produto.ficha;
+    const existentes = itensEditor.find((item) => Number(item.produto_id) === Number(produto.id));
+    const selecionadosExistentes = new Set(
+      (existentes?.ingredientes_personalizados || [])
+        .filter((item) => Number(item.selecionado) === 1
+          && item.classificacao_comercial_snapshot !== 'OBRIGATORIO_OCULTO')
+        .map((item) => Number(item.insumo_id))
+    );
+    adicionarPersonalizacaoPendente = { ...valores, produto };
+    $('#pedPersonalizacaoErro').addClass('d-none').text('');
+    $('#pedPersonalizacaoQtd').val(valores.quantidade);
+    $('#pedPersonalizacaoPrecoBase').val(Number(valores.precoBase).toFixed(2));
+    $('#pedPersonalizacaoProduto').text(valores.nome);
+    const opcionaisSemAdicional = ficha.itens.filter((item) => item.classificacao_comercial === 'OPCIONAL');
+    const opcionaisComAdicional = ficha.itens.filter((item) => item.classificacao_comercial === 'OPCIONAL_COM_ADICIONAL');
+    const renderOpcionais = (opcionais) => opcionais.length
+      ? opcionais.map((item) => `
+      <label class="form-check border-bottom py-2">
+        <input class="form-check-input" type="checkbox" value="${Number(item.insumo_id)}"
+          data-preco-adicional="${Number(item.preco_adicional || 0)}"
+          ${selecionadosExistentes.has(Number(item.insumo_id)) ? 'checked' : ''}>
+        <span class="form-check-label">
+          <strong>${escapeHtml(item.insumo_nome || ('#' + item.insumo_id))}</strong>
+          <span class="text-muted">${escapeHtml(item.quantidade)} ${escapeHtml(item.unidade)}</span>
+          ${Number(item.preco_adicional || 0) > 0 ? `<span class="d-block">+ ${fmtMoney(item.preco_adicional)} por unidade</span>` : ''}
+        </span>
+      </label>`).join('')
+      : '<div class="text-muted py-2">Nenhuma opção nesta categoria.</div>';
+    $('#pedIngredientesSemAdicional').html(renderOpcionais(opcionaisSemAdicional));
+    $('#pedIngredientesComAdicional').html(renderOpcionais(opcionaisComAdicional));
+    atualizarResumoAdicionaisPersonalizacao();
+    $('#pedIngredientesSemAdicional, #pedIngredientesComAdicional')
+      .off('change.pedpersonalizacao', 'input[type="checkbox"]')
+      .on('change.pedpersonalizacao', 'input[type="checkbox"]', atualizarResumoAdicionaisPersonalizacao);
+    $('#pedPersonalizacaoModal')
+      .off('input.pedpersonalizacao change.pedpersonalizacao', '#pedPersonalizacaoQtd, #pedPersonalizacaoPrecoBase')
+      .on(
+        'input.pedpersonalizacao change.pedpersonalizacao',
+        '#pedPersonalizacaoQtd, #pedPersonalizacaoPrecoBase',
+        atualizarResumoAdicionaisPersonalizacao
+      );
+
+    const editorEl = document.getElementById('modalPedidoEditor');
+    const personalizacaoEl = document.getElementById('pedPersonalizacaoModal');
+    const modalPersonalizacao = bootstrap.Modal.getOrCreateInstance(personalizacaoEl);
+    if ($(editorEl).hasClass('show')) {
+      $('#modalPedidoEditor').one('hidden.bs.modal.pedpersonalizacao', () => modalPersonalizacao.show());
+      bootstrap.Modal.getInstance(editorEl)?.hide();
+    } else {
+      modalPersonalizacao.show();
+    }
+  }
+
+  function confirmarPersonalizacaoPendente() {
+    const pendente = adicionarPersonalizacaoPendente;
+    if (!pendente) return;
+    const quantidade = Number($('#pedPersonalizacaoQtd').val());
+    const precoBase = Number($('#pedPersonalizacaoPrecoBase').val());
+    if (!(quantidade > 0) || !(precoBase >= 0) || !Number.isFinite(precoBase)) {
+      $('#pedPersonalizacaoErro').removeClass('d-none')
+        .text('Informe uma quantidade positiva e um preço-base válido.');
+      return;
+    }
+    const selecao = $('#pedPersonalizacaoModal input[type="checkbox"]:checked')
+      .toArray()
+      .map((input) => Number(input.value));
+    const componentes = pendente.produto.ficha.itens.map((item) => {
+      const obrigatorio = item.classificacao_comercial === 'OBRIGATORIO_OCULTO';
+      const selecionado = obrigatorio || selecao.includes(Number(item.insumo_id));
+      return {
+        insumo_id: Number(item.insumo_id),
+        insumo_nome_snapshot: String(item.insumo_nome || `#${item.insumo_id}`),
+        quantidade_snapshot: Number(item.quantidade),
+        unidade_snapshot: String(item.unidade),
+        classificacao_comercial_snapshot: item.classificacao_comercial,
+        selecionado: selecionado ? 1 : 0,
+        preco_adicional_snapshot: Number(item.preco_adicional || 0)
+      };
+    });
+    const totais = _pedCalcularTotaisPersonalizacao({
+      precoBase,
+      quantidade,
+      ingredientes: pendente.produto.ficha.itens,
+      ingredientesSelecionados: selecao,
+      desconto: pendente.desconto
+    });
+    adicionarItemConfirmado({
+      ...pendente,
+      quantidade,
+      precoBase: Number(precoBase.toFixed(2)),
+      precoAdicionais: totais.precoAdicionais,
+      ingredientes: componentes,
+      selecao,
+      personalizado: true
+    });
+    adicionarPersonalizacaoPendente = null;
+    bootstrap.Modal.getInstance(document.getElementById('pedPersonalizacaoModal'))?.hide();
+  }
+
+  function adicionarItem() {
+    const produtoId = Number($('#pedProdutoId').val());
+    const quantidade = Number($('#pedItemQtd').val());
+    const precoBase = Number($('#pedItemPreco').val());
+    const desconto = Number($('#pedItemDesc').val() || 0);
+    if (!(produtoId > 0) || !(quantidade > 0) || !(precoBase >= 0)) {
+      alertar('Selecione um produto e informe quantidade/preço.', 'warning');
+      $('#pedProdutoBusca').trigger('focus');
+      return;
+    }
+    const personalizado = produtoSelecionadoParaPedido
+      && Number(produtoSelecionadoParaPedido.id) === produtoId;
+    if (personalizado) {
+      abrirModalPersonalizacao(produtoSelecionadoParaPedido, {
+        produtoId,
+        quantidade,
+        precoBase: Number(precoBase.toFixed(2)),
+        precoAdicionais: 0,
+        desconto,
+        nome: $('#pedProdutoNome').val(),
+        codigo: $('#pedProdutoCodigo').val(),
+        snapshotPreco: precoSugestaoSelecionada
+      });
+      return;
+    }
+    adicionarItemConfirmado({
+      produtoId,
+      quantidade,
+      precoBase,
+      precoAdicionais: 0,
+      desconto,
+      personalizado: false
+    });
+  }
+
+  $('#pedPersonalizacaoModal').off('hidden.bs.modal.pedpersonalizacao')
+    .on('hidden.bs.modal.pedpersonalizacao', function () {
+      if (adicionarPersonalizacaoPendente) adicionarPersonalizacaoPendente = null;
+      if ($('#modalPedidoEditor').length && !$('#modalPedidoEditor').hasClass('show')) {
+        bootstrap.Modal.getOrCreateInstance(document.getElementById('modalPedidoEditor')).show();
+      }
+    });
 
   function modalAberto() {
     return $('#modalPedidoEditor').hasClass('show');
@@ -1148,7 +1654,7 @@ function loadPedidos() {
       e.preventDefault();
       if (visivel && sugClienteIdx >= 0) {
         selecionarClientePorIdx(sugClienteIdx);
-      } else if ($('#pedClienteId').val()) {
+      } else {
         $('#pedProdutoBusca').trigger('focus');
       }
     }
@@ -1249,19 +1755,39 @@ function loadPedidos() {
     carregarLista();
   });
 
-  $('input[name="pedTipoDocumento"]').on('change', function () {
-    tipoNovoDocumento = String($(this).val() || 'pedido');
-    if (!pedidoEditandoId) {
-      $('#pedEditorTitulo').text(tipoNovoDocumento === 'orcamento' ? 'Novo orçamento' : 'Novo pedido');
-    }
-  });
-
   $('#btnPedNovo').on('click', () => abrirEditor(null));
+  $('#btnPedMesas').on('click', abrirMesas);
+  $('#btnPedMesaAdd').on('click', cadastrarMesa);
+  $('#pedMesaNovoNumero').on('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); cadastrarMesa(); }
+  });
+  $('#pedMesasBody').on('click', '.ped-mesa-toggle', function () {
+    const $tr = $(this).closest('tr');
+    alternarMesa(Number($tr.data('id')), Number($(this).data('ativo')) === 1);
+  });
+  $('#pedMesasBody').on('click', '.ped-mesa-editar', function () {
+    const $tr = $(this).closest('tr');
+    $tr.find('.ped-mesa-nome').html(
+      `<input type="number" min="1" step="1" class="form-control form-control-sm ped-mesa-edit-num" value="${escapeHtml($tr.data('numero'))}" style="max-width:110px;">`
+    );
+    $(this).removeClass('ped-mesa-editar btn-outline-primary').addClass('ped-mesa-salvar btn-primary').attr('title', 'Salvar').html('<i class="fas fa-save"></i>');
+    $tr.find('.ped-mesa-edit-num').trigger('focus');
+  });
+  $('#pedMesasBody').on('click', '.ped-mesa-salvar', function () {
+    const $tr = $(this).closest('tr');
+    salvarEdicaoMesa(Number($tr.data('id')), $tr.find('.ped-mesa-edit-num').val());
+  });
   $('#btnPedPesquisar').on('click', carregarLista);
   $('#btnPedSalvar').on('click', salvarPedido);
   $('#btnPedImprimir').on('click', () => imprimirPedido(pedidoEditandoId));
   $('#btnPedAddItem').on('click', adicionarItem);
-  $('#pedFrete, #pedDesconto').on('change input', atualizarTotaisBar);
+  $('#btnPedConfirmarPersonalizacao').on('click', confirmarPersonalizacaoPendente);
+  $('#pedDesconto').on('change input', atualizarTotaisBar);
+  $(document).off('cds-empresa-contexto-alterado.ped').on('cds-empresa-contexto-alterado.ped', () => {
+    if (!$('#pedidosRoot').length) return;
+    headers = _pedHeaders();
+    carregarLista();
+  });
   $('#pedClienteBusca').on('input', function () {
     $('#pedClienteId').val('');
     clienteSelecionado = null;

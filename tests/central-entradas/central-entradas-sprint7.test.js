@@ -3,6 +3,9 @@
  * Executar: npm run test:central-entradas-sprint7
  */
 
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-sprint7-');
+
 const assert = require('assert');
 const CentralEntradasService = require('../../backend/motores/central-entradas/CentralEntradasService');
 const CentralScoreDocumentoService = require('../../backend/motores/central-entradas/services/CentralScoreDocumentoService');
@@ -12,6 +15,7 @@ const { obterPreset, listarPresets } = require('../../backend/motores/central-en
 
 let passou = 0;
 let falhou = 0;
+isolamento.comprobarSeCarregado();
 
 const service = new CentralEntradasService();
 const scoreService = new CentralScoreDocumentoService();
@@ -49,9 +53,10 @@ async function main() {
     assert.ok(listarPresets().some((p) => p.codigo === 'pendentes'));
   });
 
-  await test('score documento GRAVADA com MIIP alto', async () => {
+  await test('score documento IMPORTADA com MIIP alto', async () => {
+    assert.strictEqual(DocumentoFiscalStatus.GRAVADA, DocumentoFiscalStatus.IMPORTADA);
     const score = scoreService.calcular({
-      status: DocumentoFiscalStatus.GRAVADA,
+      status: DocumentoFiscalStatus.IMPORTADA,
       miipResumoJson: {
         resumo: {
           totalItens: 10,
@@ -81,7 +86,7 @@ async function main() {
 
   await test('score documento com pendências MIIP reduz valor', async () => {
     const bom = scoreService.calcular({
-      status: DocumentoFiscalStatus.AGUARDANDO_REVISAO,
+      status: DocumentoFiscalStatus.EM_REVISAO,
       miipResumoJson: {
         resumo: {
           totalItens: 4,
@@ -94,7 +99,7 @@ async function main() {
     });
 
     const ruim = scoreService.calcular({
-      status: DocumentoFiscalStatus.AGUARDANDO_REVISAO,
+      status: DocumentoFiscalStatus.EM_REVISAO,
       miipResumoJson: {
         resumo: {
           totalItens: 4,

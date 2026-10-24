@@ -3,6 +3,9 @@
  * Todos os acessos SEFAZ, certificado e banco são dublês em memória.
  */
 
+
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-p04-rc33-fechamento-ciclo-dfe-');
 const assert = require('assert');
 const CentralManifestacaoDfeService = require(
   '../../backend/motores/central-entradas/services/CentralManifestacaoDfeService'
@@ -24,6 +27,12 @@ const { TIPOS_EVENTO } = require(
 );
 const { CentralSyncExecucaoService } = require(
   '../../backend/motores/central-entradas/services/CentralSyncExecucaoService'
+);
+const CentralSincronizacaoService = require(
+  '../../backend/motores/central-entradas/services/CentralSincronizacaoService'
+);
+const CentralNsuService = require(
+  '../../backend/motores/central-entradas/services/CentralNsuService'
 );
 const CentralConfiguracaoService = require(
   '../../backend/motores/central-entradas/services/CentralConfiguracaoService'
@@ -459,36 +468,34 @@ async function main() {
 
   await test('cooldown persistido bloqueia distNSU quando ultNSU = maxNSU', async () => {
     let chamadasSefaz = 0;
-    const sync = new CentralSyncExecucaoService({
-      sincronizacaoService: {
-        sincronizar: async () => {
-          chamadasSefaz += 1;
-          return { sucesso: true };
-        }
-      },
+    const nsuService = new CentralNsuService({ agora: () => new Date() });
+    nsuService.buscarPorCnpjAmbiente = async () => ({
+      ultNsu: '000000000000100',
+      maxNsu: '000000000000100',
+      ultimoCstat: '138',
+      dataSincronizacao: new Date().toISOString()
+    });
+    const sinc = new CentralSincronizacaoService({
+      gate: null,
+      nsuService,
       configuracaoService: {
         obterContextoOperacional: async () => ({
           ok: true,
-          contexto: { cnpj: '12345678000199', ambiente: 2 }
-        }),
-        obterResumo: async () => ({ syncMaxDocumentos: 10 }),
-        verificarHorarioPermitido: async () => ({ permitido: true })
-      },
-      nsuRepository: {
-        buscarPorCnpjAmbiente: async () => ({
-          ultNsu: '000000000000100',
-          maxNsu: '000000000000100',
-          dataSincronizacao: new Date().toISOString()
+          contexto: { cnpj: '12345678000199', ambiente: 2, syncMaxDocumentos: 10 }
         })
       },
-      notificacoesService: {
-        notificarSyncConcluida: async () => null
-      },
-      emitirEvento: async () => null
+      sincronizarDistribuicaoDFe: async () => {
+        chamadasSefaz += 1;
+        return { sucesso: true };
+      }
     });
-    const resultado = await sync.executar();
+    const resultado = await sinc._sincronizarEmpresa(
+      { empresaId: 1, cnpj: '12345678000199' },
+      { modo: 'EMPRESA_SIMPLES' }
+    );
     assert.strictEqual(resultado.codigo, 'AGUARDAR_JANELA_DFE');
     assert.strictEqual(resultado.ignorado, true);
+    assert.strictEqual(resultado.consultaExecutada, false);
     assert.strictEqual(chamadasSefaz, 0);
   });
 

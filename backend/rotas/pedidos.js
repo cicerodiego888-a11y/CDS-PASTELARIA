@@ -11,6 +11,7 @@ const db = require('../database');
 const { exigirRecurso } = require('../middleware/validarRecursoImplantacao');
 const { criarMiddlewareContextoEmpresa } = require('../services/fiscalNaoFiscal/empresaContexto');
 const PedidoOperacional = require('../services/pedido/PedidoOperacionalService');
+const EntradaPedido = require('../services/pedido/EntradaPedidoService');
 const { empresaIdDoReqPedido } = require('../services/pedido/empresaIdDoReqPedido');
 
 router.use(exigirRecurso('pedidos'));
@@ -65,11 +66,13 @@ router.get('/:id', async (req, res) => {
 
 router.post('/', async (req, res) => {
   try {
-    const out = await PedidoOperacional.criar(
-      req.body || {},
-      req.user?.id || null,
-      { empresaId: empresaIdDoReqPedido(req) }
-    );
+    const out = await EntradaPedido.receber({
+      canal: EntradaPedido.CanalOrigem.EQUIPE,
+      body: req.body || {},
+      operadorId: req.user?.id || null,
+      empresaId: empresaIdDoReqPedido(req),
+      chaveIdempotencia: req.get('Idempotency-Key')
+    });
     res.status(201).json(out);
   } catch (err) {
     responderErro(res, err);
@@ -92,7 +95,9 @@ router.put('/:id', async (req, res) => {
 router.post('/:id/cancelar', async (req, res) => {
   try {
     const out = await PedidoOperacional.cancelar(req.params.id, {
-      empresaId: empresaIdDoReqPedido(req)
+      empresaId: empresaIdDoReqPedido(req),
+      usuarioId: req.user?.id || null,
+      chaveIdempotencia: req.get('Idempotency-Key')
     });
     res.json(out);
   } catch (err) {
@@ -116,7 +121,11 @@ router.post('/:id/duplicar', async (req, res) => {
     const out = await PedidoOperacional.duplicar(
       req.params.id,
       req.user?.id || null,
-      { empresaId: empresaIdDoReqPedido(req) }
+      {
+        empresaId: empresaIdDoReqPedido(req),
+        chaveIdempotencia: req.get('Idempotency-Key'),
+        exigirChaveIdempotencia: true
+      }
     );
     res.status(201).json(out);
   } catch (err) {

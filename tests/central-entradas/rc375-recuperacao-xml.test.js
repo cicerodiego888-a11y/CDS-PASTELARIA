@@ -5,6 +5,9 @@
 
 'use strict';
 
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-p04-rc375-recuperacao-xml-');
+
 const assert = require('assert');
 const {
   DocumentoFiscalStatus
@@ -166,7 +169,7 @@ async function main() {
 
   await test('Config: defaults e intervalos', async () => {
     const cfg = lerConfigDeMapa({});
-    assert.strictEqual(cfg.ativa, true);
+    assert.strictEqual(cfg.ativa, false);
     assert.strictEqual(cfg.intervaloMinutos, DEFAULTS.intervaloMinutos);
     assert.ok(INTERVALOS_PERMITIDOS.includes(60));
     assert.strictEqual(CHAVES.ATIVA, 'recuperacao_xml_ativa');
@@ -272,7 +275,7 @@ async function main() {
     motor.parar({ silencioso: true });
   });
 
-  await test('Scheduler inicia e para', async () => {
+  await test('Scheduler não inicia com recuperacao_xml_ativa legado true', async () => {
     const mem = criarRepoMemoria([]);
     const motor = new MotorRecuperacaoXmlService({
       documentosRepository: mem.documentosRepository,
@@ -285,8 +288,9 @@ async function main() {
     });
     await mem.configRepository.salvar(CHAVES.ATIVA, true, 'boolean');
     const r = await motor.iniciar({ delayMs: 60000 });
-    assert.strictEqual(r.iniciado, true);
-    assert.strictEqual(motor.estaAtivo(), true);
+    assert.strictEqual(r.iniciado, false);
+    assert.strictEqual(r.motivo, 'legado_nao_autoriza_ciclo');
+    assert.strictEqual(motor.estaAtivo(), false);
     motor.parar();
     assert.strictEqual(motor.estaAtivo(), false);
   });

@@ -39,12 +39,23 @@ function obterNotificacoesService() {
  */
 function normalizarEvento(dados = {}) {
   const usuarioId = dados.usuarioId ?? dados.usuario_id ?? null;
+  const empresaId = dados.empresaId ?? dados.empresa_id ?? null;
   const detalheBase = dados.detalhe && typeof dados.detalhe === 'object'
     ? { ...dados.detalhe }
     : (dados.detalhe != null ? { valor: dados.detalhe } : {});
 
   if (usuarioId != null && detalheBase.usuarioId == null) {
     detalheBase.usuarioId = usuarioId;
+  }
+  // Sem coluna empresa_id no CREATE atual: rastreabilidade no detalhe (migração preparada).
+  if (empresaId != null && detalheBase.empresaId == null) {
+    detalheBase.empresaId = Number(empresaId) || empresaId;
+  }
+  if (dados.ambiente != null && detalheBase.ambiente == null) {
+    detalheBase.ambiente = dados.ambiente;
+  }
+  if (dados.correlationId != null && detalheBase.correlationId == null) {
+    detalheBase.correlationId = dados.correlationId;
   }
 
   return {
@@ -72,6 +83,29 @@ async function emitirEvento(dados) {
     logCentralErro('EVENTOS', error, { tipo: dados?.tipo || null });
     return null;
   }
+}
+
+/**
+ * CE-PASTELARIA-04 — emissão fail-closed (não engole erro).
+ * Usada quando o sucesso operacional depende do evento auditável.
+ *
+ * @param {Object} dados
+ * @returns {Promise<Object>}
+ */
+async function emitirEventoObrigatorio(dados) {
+  const payload = normalizarEvento(dados);
+  if (!payload.tipo) {
+    const err = new Error('Tipo de evento obrigatório para emissão auditável.');
+    err.code = 'EVENTO_TIPO_AUSENTE';
+    throw err;
+  }
+  const evento = await obterEventosService().registrar(payload);
+  if (!evento || !evento.id) {
+    const err = new Error('Falha ao persistir evento operacional obrigatório.');
+    err.code = 'EVENTO_PERSISTENCIA_FALHOU';
+    throw err;
+  }
+  return evento;
 }
 
 /**
@@ -227,6 +261,7 @@ async function emitirDocumentoMigrado(documento, opcoes = {}) {
 
 module.exports = {
   emitirEvento,
+  emitirEventoObrigatorio,
   emitirDocumentoRecebido,
   emitirDocumentoProcessado,
   emitirDocumentoAtualizado,
@@ -235,5 +270,9 @@ module.exports = {
   emitirErro,
   normalizarEvento,
   TIPOS_EVENTO,
-  ORIGENS
+  ORIGENS,
+  /** @private testes */
+  _definirEventosServiceParaTeste(svc) {
+    eventosService = svc || null;
+  }
 };

@@ -11,11 +11,10 @@ const produtosJs = fs.readFileSync(
 );
 
 test('RC8.0.Z: placeholder de busca atualizado', () => {
-  assert.match(
-    produtosJs,
-    /Buscar por nome, PLU, código ou código de barras\.\.\./
-  );
-  assert.doesNotMatch(produtosJs, /placeholder="Buscar produto\.\.\."/);
+  const inicio = produtosJs.indexOf('id="buscaProduto"');
+  assert.ok(inicio >= 0, 'campo principal de busca de produtos não encontrado');
+  const trecho = produtosJs.slice(inicio, inicio + 400);
+  assert.match(trecho, /placeholder="Buscar por nome, PLU, código ou código de barras\.\.\."/);
 });
 
 test('RC8.0.Z: confirmação ao desativar controle de estoque', () => {

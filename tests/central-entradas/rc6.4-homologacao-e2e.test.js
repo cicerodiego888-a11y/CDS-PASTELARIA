@@ -5,6 +5,9 @@
  * Executar: npm run test:central-entradas-rc6.4
  */
 
+
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-p04-rc6-4-homologacao-e2e-');
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');

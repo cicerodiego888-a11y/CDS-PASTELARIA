@@ -265,13 +265,20 @@ class MotorRecuperacaoXmlService {
     const config = await this.obterConfig();
     this.parar({ silencioso: true });
 
-    if (!config.ativa && !opcoes.forcar) {
+    if (!config.ativa) {
       this._ativo = false;
       logCentral('RECUPERACAO_XML', {
-        mensagem: 'Motor desativado por configuração',
-        Evento: 'SLEEP'
+        mensagem: config.valorLegadoPersistido
+          ? 'Motor XML não inicia: recuperacao_xml_ativa=true legado não autoriza ciclo nem SOAP'
+          : 'Motor desativado por configuração (ausente, inválida ou false)',
+        Evento: 'SLEEP',
+        valorLegadoPersistido: Boolean(config.valorLegadoPersistido),
+        autorizaTransmissaoSefaz: false
       });
-      return { iniciado: false, motivo: 'desativado' };
+      return {
+        iniciado: false,
+        motivo: config.valorLegadoPersistido ? 'legado_nao_autoriza_ciclo' : 'desativado'
+      };
     }
 
     await this._carregarEstado();
@@ -281,7 +288,8 @@ class MotorRecuperacaoXmlService {
     logCentral('RECUPERACAO_XML', {
       mensagem: 'Motor de recuperação XML iniciado',
       Evento: 'START',
-      IntervaloMin: config.intervaloMinutos
+      IntervaloMin: config.intervaloMinutos,
+      autorizaTransmissaoSefaz: false
     });
     return { iniciado: true, intervaloMinutos: config.intervaloMinutos };
   }
@@ -624,6 +632,48 @@ class MotorRecuperacaoXmlService {
     }
     const contextoGate = ctxResult?.ok ? (ctxResult.contexto || {}) : {};
 
+    // P0.11 — cooldown NSU da empresa também bloqueia consChNFe (mesmo CNPJ/ambiente).
+    if (contextoGate.cnpj && contextoGate.ambiente != null) {
+      try {
+        const CentralNsuService = require('../services/CentralNsuService');
+        const nsuSvc = this._nsuService || new CentralNsuService({ agora: this._agora });
+        this._nsuService = nsuSvc;
+        const ambienteNsu = Number(contextoGate.ambiente) === 1 ? 1 : 2;
+        const controle = await nsuSvc.buscarPorCnpjAmbiente(contextoGate.cnpj, ambienteNsu);
+        const cooldown = nsuSvc.avaliarCooldown(controle);
+        if (cooldown && cooldown.ativo) {
+          const mensagem = CentralNsuService.montarMensagemCooldown(cooldown);
+          this._atualizarEstadoDoc(id, {
+            ultimaConsulta: this._agora().toISOString(),
+            ultimoRetorno: 'COOLDOWN_ATIVO',
+            motivo: mensagem,
+            proximaConsultaEm: cooldown.proximaConsultaEm || null,
+            correlationId
+          });
+          this._estado.metricas.gateBloqueios =
+            (this._estado.metricas.gateBloqueios || 0) + 1;
+          return {
+            ...base,
+            gateBloqueado: true,
+            cooldownAtivo: true,
+            proximaConsultaEm: cooldown.proximaConsultaEm || null,
+            mensagem
+          };
+        }
+      } catch (errCd) {
+        logCentralErro('RECUPERACAO_XML', errCd, {
+          Motivo: 'cooldown_nsu_fail_closed',
+          DocumentoId: id,
+          CorrelationId: correlationId
+        });
+        return {
+          ...base,
+          gateBloqueado: true,
+          mensagem: 'Cooldown/NSU indisponível — recuperação XML bloqueada (fail-closed).'
+        };
+      }
+    }
+
     const gate = this._obterGate();
     if (gate?.autorizarConsultaDistDfe) {
       const auth = await gate.autorizarConsultaDistDfe({
@@ -716,7 +766,6 @@ class MotorRecuperacaoXmlService {
         }
       });
 
-      consultaEnviada = true;
       resultadoConsulta = await this._consultarNotaPorChave(
         String(doc.chave).replace(/\D/g, ''),
         {
@@ -728,6 +777,27 @@ class MotorRecuperacaoXmlService {
           origemGate: ORIGEM_MOTOR
         }
       );
+      if (
+        resultadoConsulta?.bloqueadoAutorizacao === true
+        && resultadoConsulta?.consultaExecutada === false
+      ) {
+        this._atualizarEstadoDoc(id, {
+          ultimaConsulta: this._agora().toISOString(),
+          ultimoRetorno: resultadoConsulta.codigo || 'TRANSMISSAO_SEFAZ_NAO_AUTORIZADA',
+          motivo: resultadoConsulta.mensagem || 'Consulta não executada: sem autorização SOAP',
+          correlationId
+        });
+        return {
+          ...base,
+          ignorado: true,
+          bloqueadoAutorizacao: true,
+          consultaExecutada: false,
+          codigo: resultadoConsulta.codigo || 'TRANSMISSAO_SEFAZ_NAO_AUTORIZADA',
+          mensagem: resultadoConsulta.mensagem
+            || 'Consulta consChNFe não executada: falta autorização operacional explícita.'
+        };
+      }
+      consultaEnviada = resultadoConsulta?.consultaExecutada !== false;
 
       logCentral('RECUPERACAO_XML', {
         mensagem: 'Retorno consChNFe',
@@ -748,6 +818,25 @@ class MotorRecuperacaoXmlService {
         });
       }
     } catch (error) {
+      if (error?.bloqueadoAutorizacao && error?.consultaExecutada !== true) {
+        this._atualizarEstadoDoc(id, {
+          ultimaConsulta: this._agora().toISOString(),
+          ultimoRetorno: error.codigo || 'TRANSMISSAO_SEFAZ_NAO_AUTORIZADA',
+          motivo: error.message,
+          correlationId
+        });
+        return {
+          ...base,
+          ignorado: true,
+          bloqueadoAutorizacao: true,
+          consultaExecutada: false,
+          codigo: error.codigo || 'TRANSMISSAO_SEFAZ_NAO_AUTORIZADA',
+          mensagem: error.message
+        };
+      }
+      if (error?.consultaExecutada === true) {
+        consultaEnviada = true;
+      }
       if (error?.bloqueadoGate) {
         this._atualizarEstadoDoc(id, {
           ultimaConsulta: this._agora().toISOString(),

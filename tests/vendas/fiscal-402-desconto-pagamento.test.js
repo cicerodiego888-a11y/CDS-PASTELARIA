@@ -16,6 +16,7 @@ const {
 } = require('../../backend/services/vendas/valorFiscalLiquido');
 const {
   distribuirItensVendaComValorFiscalEfetivo,
+  calcularValoresFiscaisItem,
   somarPagamentosNaoDinheiro
 } = require('../../backend/services/distribuidorEstoqueVenda');
 const midp = require('../../backend/services/midp');
@@ -101,6 +102,66 @@ describe('FISCAL-4.0.2 — desconto em valor (venda fiscal)', () => {
       assert.equal(r.sucesso, true, r.erro);
     });
   }
+});
+
+describe('Pedido — subtotal líquido do desconto por item', () => {
+  const itemComDesconto = {
+    produto_id: 1,
+    quantidade: 2,
+    preco_unitario: 10,
+    desconto_percentual: 10,
+    subtotal: 18
+  };
+
+  it('distribui o subtotal líquido sem reconstruir o bruto pelo preço unitário', () => {
+    const motor = distribuirItensVendaComValorFiscalEfetivo(
+      [{ item: itemComDesconto, saldoFiscal: 2, saldoNaoFiscal: 0 }],
+      true,
+      {
+        pagamentos: [{ forma_pagamento: 'dinheiro', valor: 18 }],
+        desconto: 0,
+        midpAtivo: false
+      }
+    );
+
+    assert.equal(motor.sucesso, true);
+    assert.equal(motor.totalVendaBruto, 18);
+    assert.equal(motor.valorFiscalBruto, 18);
+    assert.equal(motor.valorFiscalLiquido, 18);
+    assert.equal(motor.itens[0].valor_fiscal, 18);
+  });
+
+  it('rateia o subtotal líquido entre quantidades fiscais e não fiscais', () => {
+    const valores = calcularValoresFiscaisItem(itemComDesconto, 1, 1);
+
+    assert.equal(valores.subtotalVenda, 18);
+    assert.equal(valores.valorFiscal, 9);
+    assert.equal(valores.valorNaoFiscal, 9);
+  });
+
+  it('aplica o desconto de cabeçalho uma vez após o desconto por item', async () => {
+    const motor = distribuirItensVendaComValorFiscalEfetivo(
+      [{ item: itemComDesconto, saldoFiscal: 2, saldoNaoFiscal: 0 }],
+      true,
+      {
+        pagamentos: [{ forma_pagamento: 'dinheiro', valor: 16 }],
+        desconto: 2,
+        midpAtivo: false
+      }
+    );
+
+    assert.equal(motor.sucesso, true);
+    assert.equal(motor.totalVendaBruto, 18);
+    assert.equal(motor.totalVenda, 16);
+    assert.equal(motor.valorFiscalLiquido, 16);
+
+    const pagamento = await orquestrar({
+      fiscal: motor.valorFiscalLiquido,
+      pagamentos: [{ forma_pagamento: 'dinheiro', valor: 16 }],
+      forma: 'dinheiro'
+    });
+    assert.equal(pagamento.sucesso, true, pagamento.erro);
+  });
 });
 
 describe('FISCAL-4.0.2 — canais F / NF / misto', () => {

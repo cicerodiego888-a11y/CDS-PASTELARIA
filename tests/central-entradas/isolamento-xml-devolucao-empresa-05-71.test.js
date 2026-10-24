@@ -4,6 +4,9 @@
  */
 'use strict';
 
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+isolarBancoTeste('ce-p011-isolamento-xml-dev-05-71-');
+
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');

@@ -92,18 +92,34 @@ class MibService {
     const cb = typeof callback === 'function' ? callback : () => {};
     const id = Number(produtoId);
     if (!id) return cb(null);
-    const nb = normalizarNomeBusca(nome);
-    this.db.run(
-      `UPDATE produtos SET nome_busca = ? WHERE id = ?`,
-      [nb, id],
-      (err) => {
-        if (!err) {
-          this.engine.notificarProdutoAlterado(
-            { id, nome, nome_busca: nb },
-            EVENTOS.ProdutoAlterado
-          );
-        }
-        cb(err || null);
+    this.db.get(
+      `SELECT nome, nome_comercial FROM produtos WHERE id = ?`,
+      [id],
+      (selectErr, produto) => {
+        if (selectErr) return cb(selectErr);
+        if (!produto) return cb(null);
+        const nomeProduto = produto.nome || nome || '';
+        const nomeBusca = normalizarNomeBusca(
+          [nomeProduto, produto.nome_comercial].filter(Boolean).join(' ')
+        );
+        this.db.run(
+          `UPDATE produtos SET nome_busca = ? WHERE id = ?`,
+          [nomeBusca, id],
+          (err) => {
+            if (!err) {
+              this.engine.notificarProdutoAlterado(
+                {
+                  id,
+                  nome: nomeProduto,
+                  nome_comercial: produto.nome_comercial || '',
+                  nome_busca: nomeBusca
+                },
+                EVENTOS.ProdutoAlterado
+              );
+            }
+            cb(err || null);
+          }
+        );
       }
     );
   }

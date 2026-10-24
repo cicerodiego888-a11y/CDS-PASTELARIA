@@ -10,10 +10,23 @@ class NfeItemParseadoDTO {
    * @param {Object} [dados]
    */
   constructor(dados = {}) {
-    this.produtoNome = dados.produtoNome ?? dados.produto_nome ?? '';
-    this.codigoFornecedor = dados.codigoFornecedor ?? dados.codigo_fornecedor ?? '';
-    this.codigoBarras = dados.codigoBarras ?? dados.codigo_barras ?? '';
-    this.gtin = dados.gtin ?? dados.codigoBarras ?? dados.codigo_barras ?? '';
+     const nItem = Number(dados.nfeItemN ?? dados.nfe_item_n ?? dados.nItem ?? dados.n_item);
+     this.nfeItemN = Number.isInteger(nItem) && nItem > 0 ? nItem : null;
+     this.cProd = dados.cProd ?? dados.cprod ?? dados.codigoFornecedor ?? dados.codigo_fornecedor ?? '';
+     this.cEAN = dados.cEAN ?? dados.cean ?? '';
+     this.cEANTrib = dados.cEANTrib ?? dados.cean_trib ?? '';
+     this.itemOriginalNfe = dados.itemOriginalNfe
+       ?? dados.item_original_nfe
+       ?? dados.nfe_item_original
+       ?? null;
+     this.produtoNome = dados.produtoNome ?? dados.produto_nome ?? '';
+     this.codigoFornecedor = dados.codigoFornecedor || dados.codigo_fornecedor || this.cProd;
+     this.codigoBarras = dados.codigoBarras
+       || dados.codigo_barras
+       || this.cEAN
+       || this.cEANTrib
+       || '';
+     this.gtin = dados.gtin || this.cEAN || this.cEANTrib || this.codigoBarras;
     this.ncm = dados.ncm ?? '';
     this.cest = dados.cest ?? '';
     this.cfop = dados.cfop ?? '';
@@ -69,6 +82,11 @@ class NfeItemParseadoDTO {
    */
   toJSON() {
     const json = {
+      nfe_item_n: this.nfeItemN,
+      cProd: this.cProd || this.codigoFornecedor,
+      cEAN: this.cEAN,
+      cEANTrib: this.cEANTrib,
+      nfe_item_original: this.itemOriginalNfe,
       produto_nome: this.produtoNome,
       codigo_fornecedor: this.codigoFornecedor,
       codigo_barras: this.codigoBarras,

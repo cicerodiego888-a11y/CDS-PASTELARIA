@@ -8,6 +8,7 @@ const DetectorTipoCodigo = require('../core/DetectorTipoCodigo');
 const StrategyFactory = require('../core/StrategyFactory');
 const IdentidadeResultadoDTO = require('../contracts/IdentidadeResultadoDTO');
 const ProdutoIdentidadeCatalogo = require('./ProdutoIdentidadeCatalogo');
+const { defaultDiagnostics } = require('../../miip/diagnostics/MiipOriginDiagnostics');
 const {
   isProdutoIdentidadeEnabled,
   setProdutoIdentidadeEnabled,
@@ -15,6 +16,14 @@ const {
 } = require('../config/produtoIdentidadeFlags');
 const mipMetrics = require('../observability/MipMetrics');
 const mipLogger = require('../observability/mipLogger');
+
+function logMipDebug(...args) {
+  if (!defaultDiagnostics.isEnabled()) console.log(...args);
+}
+
+function logMipLoggerDebug(...args) {
+  if (!defaultDiagnostics.isEnabled()) mipLogger.debug(...args);
+}
 
 function _nowHr() {
   return process.hrtime.bigint();
@@ -105,8 +114,8 @@ class ProdutoIdentidadeService {
         habilitado: false,
         tempoMs: dto.meta.tempoMs
       });
-      console.log('[MIP DEBUG] INTERRUPÇÃO: ProdutoIdentidadeService desabilitado (flag)', { origem, codigo: bruto });
-      mipLogger.debug('resolve desabilitado', { origem, codigo: bruto });
+      logMipDebug('[MIP DEBUG] INTERRUPÇÃO: ProdutoIdentidadeService desabilitado (flag)', { origem, codigo: bruto });
+      logMipLoggerDebug('resolve desabilitado', { origem, codigo: bruto });
       return dto;
     }
 
@@ -130,7 +139,7 @@ class ProdutoIdentidadeService {
     try {
       const deteccao = this._detector.detectar(bruto, ctx);
       // DEBUG 01 — Detector
-      console.log('[MIP DEBUG] Detector identificou candidatos:', deteccao.candidatos || [], {
+      logMipDebug('[MIP DEBUG] Detector identificou candidatos:', deteccao.candidatos || [], {
         bruto: deteccao.bruto,
         digitos: deteccao.digitos
       });
@@ -138,10 +147,10 @@ class ProdutoIdentidadeService {
       const strategies = this._registry.filtrarCompativeis(bruto, ctx, deteccao);
       const ordenadas = this._ordenarPorCandidatos(strategies, deteccao.candidatos);
 
-      console.log('[MIP DEBUG] Strategies na ordem de tentativa:', ordenadas.map((s) => s.nome));
+      logMipDebug('[MIP DEBUG] Strategies na ordem de tentativa:', ordenadas.map((s) => s.nome));
 
       for (const strategy of ordenadas) {
-        console.log('[MIP DEBUG] Strategy tentando:', strategy.nome);
+        logMipDebug('[MIP DEBUG] Strategy tentando:', strategy.nome);
         const resultado = await strategy.resolve(bruto, ctx, deteccao);
 
         if (resultado && resultado.encontrado) {
@@ -155,13 +164,13 @@ class ProdutoIdentidadeService {
             tempoMs
           });
           // DEBUG 01 — resultado
-          console.log('[MIP DEBUG] Strategy escolhida:', strategy.nome);
-          console.log('[MIP DEBUG] Produto encontrado?', true, {
+          logMipDebug('[MIP DEBUG] Strategy escolhida:', strategy.nome);
+          logMipDebug('[MIP DEBUG] Produto encontrado?', true, {
             id: resultado.produtoId,
             nome: resultado.produto?.nome || null,
             metodo: resultado.metodo
           });
-          mipLogger.debug('resolve ok', {
+          logMipLoggerDebug('resolve ok', {
             origem,
             strategy: resultado.strategy,
             metodo: resultado.metodo,
@@ -171,7 +180,7 @@ class ProdutoIdentidadeService {
           return resultado;
         }
 
-        console.log('[MIP DEBUG] Strategy sem match:', strategy.nome, {
+        logMipDebug('[MIP DEBUG] Strategy sem match:', strategy.nome, {
           retornou: resultado != null,
           encontrado: resultado?.encontrado
         });
@@ -191,7 +200,7 @@ class ProdutoIdentidadeService {
             strategy: resultado.strategy,
             tempoMs
           });
-          console.log('[MIP DEBUG] INTERRUPÇÃO: etiqueta balança sem produto', resultado.meta);
+          logMipDebug('[MIP DEBUG] INTERRUPÇÃO: etiqueta balança sem produto', resultado.meta);
           return resultado;
         }
       }
@@ -200,7 +209,7 @@ class ProdutoIdentidadeService {
         codigoOriginal: bruto,
         meta: { candidatos: deteccao.candidatos }
       });
-      console.log('[MIP DEBUG] Produto encontrado?', false, { codigo: bruto, candidatos: deteccao.candidatos });
+      logMipDebug('[MIP DEBUG] Produto encontrado?', false, { codigo: bruto, candidatos: deteccao.candidatos });
       const tempoMs = _elapsedMs(start);
       _anexarObservabilidade(dto, { tempoMs, flagEnabled: true, origem, fallback: false });
       this._metrics.registrar({
@@ -210,11 +219,13 @@ class ProdutoIdentidadeService {
         strategy: null,
         tempoMs
       });
-      mipLogger.debug('resolve nao encontrado', { origem, codigo: bruto, tempoMs });
+      logMipLoggerDebug('resolve nao encontrado', { origem, codigo: bruto, tempoMs });
       return dto;
     } catch (err) {
       this._metrics.registrar({ erro: true });
-      mipLogger.error('resolve falhou', { origem, codigo: bruto, erro: err.message });
+      mipLogger.error('resolve falhou', defaultDiagnostics.isEnabled()
+        ? { origem, erro: 'erro_redigido' }
+        : { origem, codigo: bruto, erro: err.message });
       throw err;
     }
   }

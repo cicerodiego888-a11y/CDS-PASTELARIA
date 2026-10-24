@@ -40,7 +40,7 @@ router.post('/', (req, res) => {
         return res.status(400).json({ erro: 'Nome é obrigatório' });
     }
 
-    if (tipo && !['produto', 'despesa'].includes(tipo)) {
+    if (tipo && !['produto', 'despesa', 'insumo'].includes(tipo)) {
         return res.status(400).json({ erro: 'Tipo inválido' });
     }
 
@@ -81,7 +81,7 @@ router.put('/:id', (req, res) => {
         return res.status(400).json({ erro: 'Nome é obrigatório' });
     }
 
-    if (tipo && !['produto', 'despesa'].includes(tipo)) {
+    if (tipo && !['produto', 'despesa', 'insumo'].includes(tipo)) {
         return res.status(400).json({ erro: 'Tipo inválido' });
     }
 

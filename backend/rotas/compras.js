@@ -56,6 +56,7 @@ const {
   resolverTratamentoFiscalItem
 } = require('../services/compras/TratamentoFiscalItemCompra');
 const configService = require('../services/configuracaoService');
+const { TipoOperacionalProduto } = require('../services/produtos/tipoOperacionalProduto');
 const { classificarEntrada } = require('../services/compras/ClassificadorEntradaCompra');
 const {
   montarResumoFiscalEntrada,
@@ -439,37 +440,35 @@ function ensureProductForItemLegado(item, callback, opcoes = {}) {
   const nome = item.produto_nome || `Produto ${codigo}`;
   const qtds = resolverQuantidadesCompraItem(item);
   const itemFiscal = qtds.quantidade_fiscal > 0 ? 1 : 0;
+  const tipoOperacional = opcoes.tipoOperacional || TipoOperacionalProduto.COMERCIAL;
+  const ehInsumo = tipoOperacional === TipoOperacionalProduto.INSUMO;
   // Quando MIP já tentou codigo/barras, legado só casa por nome (evita SQL duplicado)
   const apenasNome = opcoes.apenasNome === true;
 
-  const sql = apenasNome
-    ? 'SELECT id FROM produtos WHERE nome = ? LIMIT 1'
-    : 'SELECT id FROM produtos WHERE codigo = ? OR codigo_barras = ? OR nome = ? LIMIT 1';
-  const params = apenasNome ? [nome] : [codigo, codigo, nome];
-
-  db.get(sql, params, (findErr, existente) => {
-    if (findErr) return callback(findErr);
-    if (existente) return callback(null, existente.id);
-
+  const criarProduto = () => {
     const precosCadastro = resolverPrecosCadastroAposCompra(item);
-
+    const precoVenda = ehInsumo
+      ? 0
+      : (precosCadastro.precoVenda ?? precosCadastro.precoCompra);
+    const lucroPercentual = ehInsumo ? 0 : precosCadastro.lucroPercentual;
     db.run(`
         INSERT INTO produtos (
           codigo, codigo_barras, nome, unidade, preco_compra, preco_venda,
           lucro_percentual, estoque_atual, estoque_minimo, fornecedor, ncm,
-          saldo_fiscal, saldo_nao_fiscal, item_fiscal, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, 0, 0, ?, CURRENT_TIMESTAMP)
+          saldo_fiscal, saldo_nao_fiscal, item_fiscal, tipo_operacional, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, 0, 0, ?, ?, CURRENT_TIMESTAMP)
       `, [
       codigo,
       item.codigo_barras || codigo,
       nome,
       item.unidade || 'UN',
       precosCadastro.precoCompra,
-      precosCadastro.precoVenda ?? precosCadastro.precoCompra,
-      precosCadastro.lucroPercentual,
+      precoVenda,
+      lucroPercentual,
       item.fornecedor || null,
       item.ncm || null,
-      itemFiscal
+      itemFiscal,
+      tipoOperacional
     ], function(insertErr) {
       if (insertErr) return callback(insertErr);
       const novoId = this.lastID;
@@ -481,6 +480,21 @@ function ensureProductForItemLegado(item, callback, opcoes = {}) {
       }, { db });
       callback(null, novoId);
     });
+  };
+
+  if (opcoes.criarSemBuscar === true) {
+    return criarProduto();
+  }
+
+  const sql = apenasNome
+    ? 'SELECT id FROM produtos WHERE nome = ? LIMIT 1'
+    : 'SELECT id FROM produtos WHERE codigo = ? OR codigo_barras = ? OR nome = ? LIMIT 1';
+  const params = apenasNome ? [nome] : [codigo, codigo, nome];
+
+  db.get(sql, params, (findErr, existente) => {
+    if (findErr) return callback(findErr);
+    if (existente) return callback(null, existente.id);
+    criarProduto();
   });
 }
 
@@ -488,7 +502,13 @@ function ensureProductForItemLegado(item, callback, opcoes = {}) {
  * Resolve produto do item: produto_id → MIP → MIIP → legado.
  * Sprint 07: MIP elimina busca duplicada codigo/barras quando flag ON.
  */
-function ensureProductForItem(item, callback) {
+function ensureProductForItem(item, callback, opcoes = {}) {
+  if (opcoes.exigirClassificacaoOperacional && item.criar_produto === true) {
+    return ensureProductForItemLegado(item, callback, {
+      criarSemBuscar: true,
+      tipoOperacional: item.tipo_operacional
+    });
+  }
   if (item.produto_id) {
     return callback(null, Number(item.produto_id));
   }
@@ -588,6 +608,22 @@ function processarItensCompra(compraId, itens, fornecedor, opcoes, done) {
       db.get('SELECT * FROM produtos WHERE id = ?', [produtoId], (getProdErr, produtoRow) => {
         if (getProdErr) return done(getProdErr);
 
+        if (opcoes.exigirClassificacaoOperacional && !produtoRow) {
+          const erroVinculo = new Error('O cadastro vinculado ao item da NF-e não foi encontrado.');
+          erroVinculo.code = 'CLASSIFICACAO_ITEM_NFE_DIVERGENTE';
+          return done(erroVinculo);
+        }
+
+        if (opcoes.exigirClassificacaoOperacional
+          && String(produtoRow?.tipo_operacional || TipoOperacionalProduto.COMERCIAL).toUpperCase()
+            !== String(itemComContexto.tipo_operacional || '').toUpperCase()) {
+          const erroTipo = new Error(
+            `O cadastro vinculado ao item "${itemComContexto.produto_nome || produtoId}" não corresponde à classificação operacional selecionada.`
+          );
+          erroTipo.code = 'CLASSIFICACAO_ITEM_NFE_DIVERGENTE';
+          return done(erroTipo);
+        }
+
         const itemComProduto = { ...itemComContexto, produto_id: produtoId };
         const muc = obterMuc(db);
 
@@ -625,7 +661,7 @@ function processarItensCompra(compraId, itens, fornecedor, opcoes, done) {
           }
         );
       });
-    });
+    }, opcoes);
   }
 
   function continuarItem(itemProcessado, qtdsEstoque, produtoId) {
@@ -638,10 +674,13 @@ function processarItensCompra(compraId, itens, fornecedor, opcoes, done) {
       fornecedor_cnpj: itemProcessado.fornecedor_cnpj || fornecedorCnpjLocal || null
     };
 
-    db.get('SELECT preco_compra, preco_venda, controlar_validade FROM produtos WHERE id = ?', [produtoId], (getErr, produto) => {
+    db.get(`SELECT preco_compra, preco_venda, controlar_validade,
+                   COALESCE(tipo_operacional, 'COMERCIAL') AS tipo_operacional
+            FROM produtos WHERE id = ?`, [produtoId], (getErr, produto) => {
         if (getErr) return done(getErr);
 
         const antigo = { preco_compra: produto?.preco_compra, preco_venda: produto?.preco_venda };
+        const ehInsumo = produto?.tipo_operacional === TipoOperacionalProduto.INSUMO;
         const controlarValidade = produto?.controlar_validade === 1;
         const qtdTotal = qtdsEstoque.quantidade;
         let qtdFiscal = qtdsEstoque.quantidade_fiscal;
@@ -661,6 +700,13 @@ function processarItensCompra(compraId, itens, fornecedor, opcoes, done) {
         if (!tratamento.atualizarCusto) {
           precosCadastro.precoCompra = Number(produto?.preco_compra || precosCadastro.precoCompra || 0);
           precosCadastro.atualizarVenda = false;
+        } else if (tratamento.bonificacao && !(Number(precosCadastro.precoCompra) > 0)) {
+          // Bonificação sem valor apurável não define custo: preserva o último custo confirmado.
+          precosCadastro.precoCompra = Number(produto?.preco_compra || 0);
+        }
+        // INSUMO nunca recebe preço de venda/markup a partir de compra.
+        if (ehInsumo) {
+          precosCadastro.atualizarVenda = false;
         }
         const precoUnitarioGravar = fracionado
           ? precosCadastro.precoCompra
@@ -668,7 +714,38 @@ function processarItensCompra(compraId, itens, fornecedor, opcoes, done) {
         const custoFinalGravar = precosCadastro.precoCompra;
         const precoVendaGravar = precosCadastro.atualizarVenda
           ? (precosCadastro.precoVenda ?? Number(itemProcessado.preco_venda_sugerido || 0))
-          : Number(itemProcessado.preco_venda_sugerido || 0);
+          : (ehInsumo ? 0 : Number(itemProcessado.preco_venda_sugerido || 0));
+        const tipoOperacionalPersistido = String(
+          itemProcessado.tipo_operacional || produto?.tipo_operacional || TipoOperacionalProduto.COMERCIAL
+        ).toUpperCase();
+        const mipProdutoId = Number(itemProcessado.mip_resultado?.produtoId);
+        const miipProdutoId = Number(
+          itemProcessado.miip_sugestao?.produtoId
+          ?? itemProcessado.miip_resultado?.produtoEncontrado?.id
+        );
+        const origemCorrespondencia = itemProcessado.mip_resultado?.encontrado === true
+          && mipProdutoId === Number(produtoId)
+          && itemProcessado.mip_resultado?.strategy
+          ? `MIP:${itemProcessado.mip_resultado.strategy}`
+          : (miipProdutoId === Number(produtoId)
+            && (itemProcessado.miip_sugestao?.status === 'confirmado'
+              || itemProcessado.miip_resultado?.associadoAutomaticamente === true)
+            ? `MIIP:${itemProcessado.miip_resultado?.motor || itemProcessado.miip_sugestao?.motor || 'confirmado'}`
+            : 'VINCULO_EXPLICITO');
+        const dadosRoteamento = opcoes.exigirClassificacaoOperacional
+          ? {
+            tipo_operacional: tipoOperacionalPersistido,
+            resolucao: itemProcessado.criar_produto === true
+              ? 'CRIACAO_EXPLICITA'
+              : 'PRODUTO_EXISTENTE',
+            produto_id: Number(produtoId),
+            origem_correspondencia: origemCorrespondencia,
+            mip_resultado: itemProcessado.mip_resultado || null,
+            miip_resultado: itemProcessado.miip_resultado || null,
+            miip_sugestao: itemProcessado.miip_sugestao || null,
+            usuario_confirmacao_id: opcoes.usuarioId ?? opcoes.usuario_id ?? null
+          }
+          : null;
         const subtotalGravar = resultadoMuc
           ? resultadoMuc.subtotal
           : calcularSubtotalFinanceiroItemCompra(itemProcessado);
@@ -687,8 +764,9 @@ function processarItensCompra(compraId, itens, fornecedor, opcoes, done) {
             compra_em, quantidade_embalagens, quantidade_por_embalagem, valor_total_embalagem,
             embalagem_id, produto_apresentacao_id, resultado_conversao_json,
             fator_conversao, tipo_conversao, origem_conversao, confianca_conversao, tipo_origem_compra,
-            cfop, tipo_fiscal_item, bonificacao
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            cfop, tipo_fiscal_item, bonificacao, nfe_item_n, tipo_operacional,
+            nfe_item_original_json, dados_roteamento_json
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `, [
           compraId,
           produtoId,
@@ -726,7 +804,13 @@ function processarItensCompra(compraId, itens, fornecedor, opcoes, done) {
           itemProcessado.tipo_origem_compra || resultadoMuc?.tipoOrigemCompra || null,
           itemFiscal.cfop || null,
           itemFiscal.tipo_fiscal_item || null,
-          Number(itemFiscal.bonificacao || 0)
+          Number(itemFiscal.bonificacao || 0),
+          Number(itemProcessado.nfe_item_n || itemProcessado.nItem) || null,
+          tipoOperacionalPersistido,
+          itemProcessado.nfe_item_original == null
+            ? null
+            : JSON.stringify(itemProcessado.nfe_item_original),
+          dadosRoteamento == null ? null : JSON.stringify(dadosRoteamento)
         ], (insertErr) => {
           if (insertErr) return done(insertErr);
 
@@ -754,9 +838,9 @@ function processarItensCompra(compraId, itens, fornecedor, opcoes, done) {
                 fornecedor = COALESCE(?, fornecedor),
                 ncm = COALESCE(?, ncm),
                 codigo_barras = COALESCE(?, codigo_barras),
-                unidade = COALESCE(?, unidade),
-                produto_fracionado = CASE WHEN ? = 1 THEN 1 ELSE COALESCE(produto_fracionado, 0) END,
-                vendido_por_peso = CASE WHEN ? = 1 THEN 1 ELSE COALESCE(vendido_por_peso, 0) END,
+                unidade = CASE WHEN ? = 1 THEN unidade ELSE COALESCE(?, unidade) END,
+                produto_fracionado = CASE WHEN ? = 1 THEN COALESCE(produto_fracionado, 0) WHEN ? = 1 THEN 1 ELSE COALESCE(produto_fracionado, 0) END,
+                vendido_por_peso = CASE WHEN ? = 1 THEN COALESCE(vendido_por_peso, 0) WHEN ? = 1 THEN 1 ELSE COALESCE(vendido_por_peso, 0) END,
                 updated_at = CURRENT_TIMESTAMP
               WHERE id = ?
             `, [
@@ -771,10 +855,13 @@ function processarItensCompra(compraId, itens, fornecedor, opcoes, done) {
               fornecedor || null,
               itemProcessado.ncm || null,
               itemProcessado.codigo_barras || null,
+              ehInsumo ? 1 : 0,
               itemProcessado.unidade || 'UN',
 
+              ehInsumo ? 1 : 0,
               Number(itemProcessado.produto_fracionado ?? itemProcessado.vendido_por_peso ?? 0),
 
+              ehInsumo ? 1 : 0,
               Number(itemProcessado.produto_fracionado ?? itemProcessado.vendido_por_peso ?? 0),
 
               produtoId
@@ -1395,6 +1482,7 @@ router.post('/', (req, res) => {
     parcelas_detalhe,
     parcelas_importadas_xml,
     nota_fiscal_avulsa,
+    origem_compra,
     tipo_entrada,
     tipo_entrada_sugerido,
     tipo_entrada_confianca,
@@ -1453,13 +1541,43 @@ router.post('/', (req, res) => {
   const isNotaAvulsa = fluxo.isNotaAvulsa;
   const isUsoConsumo = fluxo.tipoEntrada === 'USO_CONSUMO';
   const entradaSimplificada = fluxo.entradaSimplificada;
+  const exigeClassificacaoItensNfe = !entradaSimplificada && (
+    Boolean(centralDocumentoId)
+    || String(origem_compra || '').trim().toUpperCase() === 'CENTRAL_NFE'
+  );
 
   if (!entradaSimplificada) {
     if (!Array.isArray(itens) || itens.length === 0) {
       return res.status(400).json({ error: 'Informe ao menos um item para a compra.' });
     }
 
-    for (const item of itens) {
+    for (let index = 0; index < itens.length; index += 1) {
+      const item = itens[index];
+      if (exigeClassificacaoItensNfe) {
+        const tipoOperacional = String(item.tipo_operacional || '').trim().toUpperCase();
+        if (![TipoOperacionalProduto.COMERCIAL, TipoOperacionalProduto.INSUMO].includes(tipoOperacional)) {
+          return res.status(400).json({
+            error: `Classifique o item ${index + 1} como COMERCIAL ou INSUMO antes de confirmar a entrada.`,
+            code: 'CLASSIFICACAO_ITEM_NFE_OBRIGATORIA'
+          });
+        }
+
+        const produtoId = Number(item.produto_id);
+        const temProdutoVinculado = Number.isInteger(produtoId) && produtoId > 0;
+        const criarProduto = item.criar_produto === true
+          || item.criar_produto === 1
+          || item.criar_produto === '1'
+          || item.criar_produto === 'true';
+        if (temProdutoVinculado === criarProduto) {
+          return res.status(400).json({
+            error: `O item ${index + 1} deve ter um cadastro existente vinculado ou a criação de um novo cadastro explicitamente selecionada.`,
+            code: 'VINCULO_ITEM_NFE_OBRIGATORIO'
+          });
+        }
+        item.tipo_operacional = tipoOperacional;
+        item.criar_produto = criarProduto;
+      }
+
       const erroDistribuicao = validarDistribuicaoFracionadoItem(item);
       if (erroDistribuicao) {
         return res.status(400).json({ error: erroDistribuicao });
@@ -1710,13 +1828,16 @@ router.post('/', (req, res) => {
             tipo_entrada: tipoEntrada,
             empresaId: empresaCompraId,
             exigirEmpresa: exigirEmpresaEstoque,
-            usuarioId: req.user?.id
-          }, (itensErr) => {
+                exigirClassificacaoOperacional: exigeClassificacaoItensNfe,
+                usuarioId: req.user?.id
+              }, (itensErr) => {
             if (itensErr) {
               console.error('Erro ao processar itens da compra:', itensErr);
               db.run('ROLLBACK');
               const status = itensErr.code === 'EMPRESA_OBRIGATORIA'
                 || itensErr.code === 'EMPRESA_NAO_ENCONTRADA'
+                || itensErr.code === 'CLASSIFICACAO_ITEM_NFE_DIVERGENTE'
+                || ['CONVERSAO_NAO_DISPONIVEL', 'CONVERSAO_INVALIDA', 'CONVERSAO_CICLO'].includes(itensErr.code)
                 ? 400
                 : 500;
               return res.status(status).json({

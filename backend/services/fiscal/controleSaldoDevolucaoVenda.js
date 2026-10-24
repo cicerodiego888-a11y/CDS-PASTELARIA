@@ -4,6 +4,7 @@
  */
 
 'use strict';
+const { roundStockQuantityOrZero } = require('../estoque/quantityPrecision');
 
 const db = require('../../database');
 
@@ -42,17 +43,13 @@ function dbAll(sql, params = []) {
   });
 }
 
-function round3(v) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return 0;
-  return Math.round(n * 1000) / 1000;
-}
+
 
 function statusDoSaldo({ quantidadeVendida, quantidadeDevolvida, saldo, solicitada }) {
-  const vendida = round3(quantidadeVendida);
-  const devolvida = round3(quantidadeDevolvida);
-  const disp = round3(saldo != null ? saldo : Math.max(0, vendida - devolvida));
-  if (solicitada != null && round3(solicitada) > disp + 1e-9) {
+  const vendida = roundStockQuantityOrZero(quantidadeVendida);
+  const devolvida = roundStockQuantityOrZero(quantidadeDevolvida);
+  const disp = roundStockQuantityOrZero(saldo != null ? saldo : Math.max(0, vendida - devolvida));
+  if (solicitada != null && roundStockQuantityOrZero(solicitada) > disp + 1e-9) {
     return STATUS.SALDO_INSUFICIENTE;
   }
   if (devolvida <= 0) return STATUS.NAO_DEVOLVIDO;
@@ -129,7 +126,7 @@ async function somarDevolvidoFiscalPorItem(vendaItemId) {
     WHERE i.venda_item_id = ?
       AND LOWER(TRIM(COALESCE(n.status, ''))) = 'autorizada'
   `, [Number(vendaItemId)]);
-  return round3(row?.qtd);
+  return roundStockQuantityOrZero(row?.qtd);
 }
 
 async function carregarSaldosDevolucaoVenda(vendaId) {
@@ -171,9 +168,9 @@ async function carregarSaldosDevolucaoVenda(vendaId) {
   `, [id]);
 
   const mapeados = itens.map((row) => {
-    const vendida = round3(row.quantidade_vendida);
-    const devolvida = round3(row.quantidade_devolvida);
-    const saldo = round3(Math.max(0, vendida - devolvida));
+    const vendida = roundStockQuantityOrZero(row.quantidade_vendida);
+    const devolvida = roundStockQuantityOrZero(row.quantidade_devolvida);
+    const saldo = roundStockQuantityOrZero(Math.max(0, vendida - devolvida));
     const st = statusDoSaldo({
       quantidadeVendida: vendida,
       quantidadeDevolvida: devolvida,
@@ -197,9 +194,9 @@ async function carregarSaldosDevolucaoVenda(vendaId) {
   });
 
   const totais = mapeados.reduce((acc, i) => {
-    acc.vendido = round3(acc.vendido + i.quantidade_vendida);
-    acc.devolvido = round3(acc.devolvido + i.quantidade_devolvida);
-    acc.saldo = round3(acc.saldo + i.saldo);
+    acc.vendido = roundStockQuantityOrZero(acc.vendido + i.quantidade_vendida);
+    acc.devolvido = roundStockQuantityOrZero(acc.devolvido + i.quantidade_devolvida);
+    acc.saldo = roundStockQuantityOrZero(acc.saldo + i.saldo);
     return acc;
   }, { vendido: 0, devolvido: 0, saldo: 0 });
 
@@ -236,7 +233,7 @@ function validarQuantidadesContraSaldo({ saldos, itensSolicitados, vendaCancelad
   const porId = new Map((saldos.itens || []).map((i) => [Number(i.venda_item_id), i]));
   for (const req of itensSolicitados || []) {
     const itemId = Number(req.venda_item_id || req.id);
-    const qtd = round3(req.quantidade);
+    const qtd = roundStockQuantityOrZero(req.quantidade);
     const base = porId.get(itemId);
     if (!base) {
       erros.push(`Item ${itemId} não encontrado na venda.`);
@@ -268,15 +265,15 @@ async function persistirItensNfeDevolucaoVenda({
   let nItem = 0;
 
   for (const item of itens || []) {
-    const qtd = round3(item.quantidade);
+    const qtd = roundStockQuantityOrZero(item.quantidade);
     if (!(qtd > 0)) continue;
     nItem += 1;
     const itemId = Number(item.venda_item_id || item.id);
     const base = porId.get(itemId);
-    const vendida = base ? base.quantidade_vendida : round3(item.quantidade_vendida);
+    const vendida = base ? base.quantidade_vendida : roundStockQuantityOrZero(item.quantidade_vendida);
     const jaDev = base ? base.quantidade_devolvida : 0;
-    const acumulada = round3(jaDev + qtd);
-    const saldoApos = round3(Math.max(0, vendida - acumulada));
+    const acumulada = roundStockQuantityOrZero(jaDev + qtd);
+    const saldoApos = roundStockQuantityOrZero(Math.max(0, vendida - acumulada));
     const vu = Number(item.valor_unitario || base?.valor_unitario || 0);
 
     await dbRun(`
@@ -418,5 +415,5 @@ module.exports = {
   cancelarNfeDevolucaoVenda,
   listarNotasDevolucaoVenda,
   statusDoSaldo,
-  round3
+  roundStockQuantityOrZero
 };

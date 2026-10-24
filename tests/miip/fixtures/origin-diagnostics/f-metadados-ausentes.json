@@ -1,0 +1,23 @@
+{
+  "schema": "cds.miip.origin-fixture.v1",
+  "id": "fixture-f-metadados-ausentes",
+  "cenario": "F",
+  "descricao": "Resultado minimo valido, sem motor, evidencias nem origem; a instrumentacao deve emitir desconhecida.",
+  "sintetico": true,
+  "resultadoPersistido": {
+    "operacaoId": "op-fixture-f",
+    "resultados": [
+      {
+        "operacaoId": "op-fixture-f",
+        "produtoEncontrado": {
+          "id": 606
+        }
+      }
+    ]
+  },
+  "esperado": {
+    "origemResultado": "desconhecida",
+    "fontes": ["desconhecida"],
+    "produtoId": 606
+  }
+}

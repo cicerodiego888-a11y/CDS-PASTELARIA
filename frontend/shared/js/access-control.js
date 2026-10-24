@@ -10,6 +10,7 @@ const PERMISSOES_PAGINAS = {
     caixas: 'caixa',
     'fechamento-caixa': 'caixa',
     produtos: 'produtos',
+    insumos: 'produtos',
     clientes: 'clientes',
     compras: 'compras',
     'central-entradas': 'compras',

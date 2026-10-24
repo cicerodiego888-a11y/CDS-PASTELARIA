@@ -185,7 +185,8 @@ class SearchEngine {
       filial_id: opcoes.filial_id
     };
 
-    const chaveCache = `${modoFiscal ? 'F' : 'N'}|${opcoes.operador_id || 0}|${limite}|${termoNorm}`;
+    const escopoVendaveis = origemPdvExigeVendavel(opcoes.origem) ? 'PDV' : 'ALL';
+    const chaveCache = `${escopoVendaveis}|${modoFiscal ? 'F' : 'N'}|${opcoes.operador_id || 0}|${limite}|${termoNorm}`;
 
     const finalizar = (itens, meta) => {
       if (signal.cancelled) {
@@ -284,6 +285,9 @@ class SearchEngine {
       const cached = this.cache.get(chaveCache);
       if (cached && Array.isArray(cached.itens)) {
         this.metricas.cache += 1;
+        const itensCache = origemPdvExigeVendavel(opcoes.origem)
+          ? filtrarItensVendaveisPdv(cached.itens)
+          : cached.itens;
         const fim = process.hrtime.bigint();
         const ms = Number(fim - inicio) / 1e6;
         this.metricas.temposMs.push(ms);
@@ -295,7 +299,7 @@ class SearchEngine {
           });
         }
         return {
-          itens: cached.itens.slice(0, limite),
+          itens: itensCache.slice(0, limite),
           meta: {
             fonte: 'cache',
             estrategia: cached.meta?.estrategia || null,
@@ -370,6 +374,7 @@ class SearchEngine {
             codigo: p.codigo,
             codigo_barras: p.codigo_barras,
             nome: p.nome,
+            nome_comercial: p.nome_comercial,
             nome_busca: p.nome_busca,
             plu: p.plu,
             preco_venda: p.preco,

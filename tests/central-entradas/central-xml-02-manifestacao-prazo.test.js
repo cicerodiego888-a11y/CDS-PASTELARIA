@@ -14,6 +14,9 @@
  */
 'use strict';
 
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-p04-central-xml-02-manifestacao-prazo-');
+
 const assert = require('assert');
 const os = require('os');
 const fs = require('fs');

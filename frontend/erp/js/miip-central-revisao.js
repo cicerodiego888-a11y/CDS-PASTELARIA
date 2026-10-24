@@ -221,10 +221,18 @@
     `;
   }
 
-  function renderTopCandidatosTabela(pendencia, produtosLista) {
+  function renderTopCandidatosTabela(pendencia, produtosLista, sessao) {
     const I = intel();
     const candidatos = (pendencia?.candidatos || []).slice(0, 8);
     if (candidatos.length <= 1) return '';
+    const documentoId = estado?.opcoes?.documento?.id
+      ?? sessao?.dadosImportacao?.documentoId
+      ?? sessao?.dadosImportacao?.documento_id;
+    const contextoDiagnostico = {
+      documentoId,
+      operacaoId: sessao?.operacaoId,
+      score: pendencia?.score
+    };
     return `
       <div class="miip-v2-top-candidatos">
         <h6>Top candidatos</h6>
@@ -247,7 +255,7 @@
               ${candidatos.map((c) => {
                 const base = c.produto || { id: c.produtoId, nome: c.nome };
                 const p = I?.enriquecerProdutoCds
-                  ? I.enriquecerProdutoCds(base, produtosLista)
+                  ? I.enriquecerProdutoCds(base, produtosLista, contextoDiagnostico)
                   : base;
                 return `
                   <tr>
@@ -428,7 +436,13 @@
       || pendencia.candidatoSelecionado?.produto
       || {};
     const produto = I?.enriquecerProdutoCds
-      ? (I.enriquecerProdutoCds(produtoBase, estado?.opcoes?.produtos || []) || produtoBase)
+      ? (I.enriquecerProdutoCds(produtoBase, estado?.opcoes?.produtos || [], {
+        documentoId: estado?.opcoes?.documento?.id
+          ?? sessao?.dadosImportacao?.documentoId
+          ?? sessao?.dadosImportacao?.documento_id,
+        operacaoId: sessao?.operacaoId,
+        score: pendencia?.score
+      }) || produtoBase)
       : produtoBase;
     const expandido = I?.painelExpandido
       ? I.painelExpandido(obterPaineisUi(), 'identificadores')
@@ -508,7 +522,13 @@
       || pendencia.candidatoSelecionado?.produto
       || null;
     const produto = produtoBase && I?.enriquecerProdutoCds
-      ? I.enriquecerProdutoCds(produtoBase, produtosLista)
+      ? I.enriquecerProdutoCds(produtoBase, produtosLista, {
+        documentoId: estado?.opcoes?.documento?.id
+          ?? sessao?.dadosImportacao?.documentoId
+          ?? sessao?.dadosImportacao?.documento_id,
+        operacaoId: sessao?.operacaoId,
+        score: pendencia?.score
+      })
       : produtoBase;
 
     const comparacao = I?.montarComparacaoVisual
@@ -526,7 +546,7 @@
           ${renderPainelCds(produto, sessao)}
         </div>
         ${renderImagensLadoALado(xml, produto)}
-        ${renderTopCandidatosTabela(pendencia, produtosLista)}
+        ${renderTopCandidatosTabela(pendencia, produtosLista, sessao)}
         <div class="miip-v2-auxiliares">
           ${renderPainelIdentificadores(pendencia, sessao)}
           ${renderPainelSugestaoPreco(linha)}
@@ -1849,6 +1869,7 @@
     return {
       ...doItem,
       ...doXml,
+      tipo_operacional: doItem.tipo_operacional ?? doXml.tipo_operacional ?? null,
       produto_nome: doXml.produto_nome || doXml.produtoNome || doItem.produto_nome
         || doXml.descricao || doItem.descricao || doItem.nome || '',
       descricao: doXml.descricao || doXml.produto_nome || doXml.produtoNome
@@ -2386,7 +2407,12 @@
       await encerrarModalTemporarioCompleto(document.getElementById('miipPerguntaEmbalagemModal'));
 
       // Anexa ao body (não ao #modal-container) e já abre — não mover depois do show.
-      showProdutoModal(null, { origem: 'MIIP', preservarOutrosModais: true });
+      const tipoOperacional = String(item?.tipo_operacional || '').trim().toUpperCase();
+      showProdutoModal(null, {
+        origem: 'MIIP',
+        preservarOutrosModais: true,
+        ...(tipoOperacional ? { tipo_operacional: tipoOperacional } : {})
+      });
 
       const el = document.getElementById('produtoModal');
       if (!el) {

@@ -960,10 +960,13 @@
             && status !== 'AGUARDANDO_XML_COMPLETO';
         const mirxEnfileirado = mirx.find((e) => e.tipoMirx === 'MIRX_ENFILEIRADO');
         const mirxXml = mirx.find((e) => e.tipoMirx === 'MIRX_XML_RECUPERADO');
-        const posParser = ['AGUARDANDO_REVISAO', 'REVISADA', 'PRONTA_PARA_COMPRA', 'EM_COMPRA', 'GRAVADA'].includes(status);
-        const posMiip = ['AGUARDANDO_REVISAO', 'REVISADA', 'PRONTA_PARA_COMPRA', 'EM_COMPRA', 'GRAVADA'].includes(status);
-        const finalizado = status === 'GRAVADA';
-        const emCompra = status === 'EM_COMPRA' || finalizado;
+        const posParser = [
+            'AGUARDANDO_REVISAO', 'REVISADA', 'PRONTA_PARA_COMPRA', 'EM_COMPRA', 'GRAVADA',
+            'EM_REVISAO', 'PRONTA_IMPORTACAO', 'EM_IMPORTACAO', 'IMPORTADA'
+        ].includes(status);
+        const posMiip = posParser;
+        const finalizado = status === 'GRAVADA' || status === 'IMPORTADA' || status === 'FINALIZADA';
+        const emCompra = status === 'EM_COMPRA' || status === 'EM_IMPORTACAO' || finalizado;
 
         const etapas = [
             {

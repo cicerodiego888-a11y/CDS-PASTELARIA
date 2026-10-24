@@ -18,7 +18,8 @@ const {
 } = require('../../backend/services/produto-embalagem/tiposApresentacao');
 const {
   validarListaEmbalagens,
-  normalizarEmbalagemInput
+  normalizarEmbalagemInput,
+  ProdutoEmbalagemService
 } = require('../../backend/services/produto-embalagem/ProdutoEmbalagemService');
 
 let ok = 0;
@@ -96,6 +97,28 @@ test('validarListaEmbalagens exige quantidade para tipo ≠ UN', () => {
   assert.strictEqual(r.ok, false);
 });
 
+test('MUC exige quantidade e unidade de conteúdo explícitas antes de persistir', () => {
+  let chamadasBanco = 0;
+  const db = {
+    all() { chamadasBanco += 1; },
+    run() { chamadasBanco += 1; }
+  };
+  const service = new ProdutoEmbalagemService(db);
+  let erroCapturado;
+
+  service.sincronizarEmbalagensProduto(
+    1,
+    [{ tipo: 'PCT', quantidade: 350, unidade: '' }],
+    'g',
+    null,
+    (err) => { erroCapturado = err; },
+    { exigirConteudoExplicito: true }
+  );
+
+  assert.match(erroCapturado?.message || '', /unidade válida para o conteúdo/i);
+  assert.strictEqual(chamadasBanco, 0, 'a validação deve ocorrer antes de qualquer acesso à persistência');
+});
+
 test('normalizarEmbalagemInput preserva flags compra/venda/estoque', () => {
   const emb = normalizarEmbalagemInput({
     tipo: 'CX',
@@ -130,6 +153,12 @@ test('API produtos inclui embalagens no GET completo', () => {
   assert.match(src, /embalagens/);
   assert.match(src, /salvarEmbalagensProduto/);
   assert.match(src, /\/:id\/embalagens/);
+});
+
+test('rotas de criação e edição exigem conteúdo explícito quando o MUC está ativo', () => {
+  const src = ler('backend/rotas/produtos.js');
+  assert.match(src, /exigirConteudoExplicito: Number\(req\.body\.utiliza_conversao\) === 1/);
+  assert.match(src, /exigirConteudoExplicito: Number\(req\.body\.utiliza_conversao \?\? old\.utiliza_conversao\) === 1/);
 });
 
 test('UI cadastro usa painel apresentações (sem compra_por_embalagem fixo)', () => {

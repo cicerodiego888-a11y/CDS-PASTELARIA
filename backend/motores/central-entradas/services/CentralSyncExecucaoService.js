@@ -19,6 +19,9 @@ const { emitirEvento } = require('../utils/centralEventosEmitter');
 const { logCentral, logCentralErro } = require('../utils/centralLog');
 const { criarCorrelationId, logOperacaoCentral } = require('../utils/centralOperacaoLog');
 const SincronizacaoResultadoDTO = require('../contracts/SincronizacaoResultadoDTO');
+const { emitirSefazConsulta } = require('../observability/SefazConsultaTrace');
+const { obterMutexTransmissaoSefaz } = require('../../../services/fiscal/SefazTransmissaoMutex');
+const CentralConsultaDistDfeDecisaoService = require('./CentralConsultaDistDfeDecisaoService');
 
 class CentralSyncExecucaoService {
   constructor(deps = {}) {
@@ -29,18 +32,32 @@ class CentralSyncExecucaoService {
       nsuRepository: this._nsuRepository,
       nsuService: this._nsuService,
       configuracaoService: deps.configuracaoService ?? deps.configService,
-      db: deps.db ?? null
+      db: deps.db ?? null,
+      mutexTransmissaoSefaz: deps.mutexTransmissaoSefaz,
+      gate: deps.gate,
+      decisaoDistDfe: deps.decisaoDistDfe
     });
     this._config = deps.configuracaoService
       ?? deps.configService
       ?? new CentralConfiguracaoService({ db: deps.db ?? null });
     this._notificacoes = deps.notificacoesService ?? new CentralNotificacoesService();
     this._emitirEvento = deps.emitirEvento || emitirEvento;
+    this._emitirSefazConsulta = deps.emitirSefazConsulta || emitirSefazConsulta;
     this._executando = false;
     this._lockDono = null;
+    this._mutexTransmissao = deps.mutexTransmissaoSefaz || obterMutexTransmissaoSefaz();
     this._ultimaExecucao = null;
     this._proximaExecucao = null;
     this._ultimoResultado = null;
+    this._decisaoDistDfe = deps.decisaoDistDfe
+      ?? new CentralConsultaDistDfeDecisaoService({
+        nsuService: this._nsuService,
+        nsuRepository: this._nsuRepository,
+        mutexTransmissaoSefaz: this._mutexTransmissao,
+        syncExecucao: this,
+        gate: deps.gate
+      });
+    this._listarAlvos = deps.listarAlvosSincronizacaoCentral || null;
   }
 
   estaExecutando() {
@@ -71,11 +88,39 @@ class CentralSyncExecucaoService {
     if (this._executando) {
       return {
         sucesso: false,
+        consultaExecutada: false,
         ignorado: true,
         codigo: 'SYNC_EM_ANDAMENTO',
+        motivoIgnorado: 'SYNC_EM_ANDAMENTO',
         mensagem: `Sincronização já em andamento (${this._lockDono || 'desconhecido'})`,
         erros: ['Sincronização já em andamento']
       };
+    }
+
+    const mutex = this._mutexTransmissao;
+    if (mutex && typeof mutex.comLock === 'function') {
+      const locked = await mutex.comLock(dono || 'dist-dfe', async () => {
+        this._executando = true;
+        this._lockDono = dono || 'dist-dfe';
+        try {
+          return await fn();
+        } finally {
+          this._executando = false;
+          this._lockDono = null;
+        }
+      });
+      if (!locked.ok) {
+        return {
+          sucesso: false,
+          consultaExecutada: false,
+          ignorado: true,
+          codigo: 'SYNC_EM_ANDAMENTO',
+          motivoIgnorado: 'SYNC_EM_ANDAMENTO',
+          mensagem: `Sincronização já em andamento (${locked.lockDono || this._lockDono || 'desconhecido'})`,
+          erros: ['Sincronização já em andamento']
+        };
+      }
+      return locked.valor;
     }
 
     this._executando = true;
@@ -99,40 +144,134 @@ class CentralSyncExecucaoService {
     const usuarioId = opcoes.usuarioId ?? null;
     const correlationId = opcoes.correlationId || criarCorrelationId();
 
-    // RC7.4.2 — Gate operacional único (656/593). forcar NÃO bypassa.
+    this._emitirSefazConsulta('CONSULTA_SOLICITADA', {
+      origem,
+      correlationId,
+      tipoConsulta: 'distNSU',
+      motivo: 'sync_executar',
+      detalhe: forcar
+        ? { forcarSolicitado: true, forcarIgnoradoParaCooldown: true }
+        : undefined
+    });
+
+    // RC7.4.2 / P0.11 — Gate operacional. forcar/ignorarBloqueio656 NÃO bypassam.
+    // Falha do Gate = fail-closed (não engolir exceção).
     if (opcoes.ignorarBloqueio656 !== true) {
       try {
         const gate = require('./CentralSefazOperationalGate');
         const auth = await gate.autorizarConsultaDistDfe({
           correlationId,
           origem,
-          forcar: forcar,
+          empresaId: opcoes.empresaId || null,
+          forcar: false,
           forcarAdminConfirmado: opcoes.forcarAdminConfirmado === true,
           confirmacaoAdmin: opcoes.confirmacaoAdmin === true,
           motivo: 'Aguardando liberação da SEFAZ'
         });
         if (!auth.permitido) {
+          this._emitirSefazConsulta('BLOQUEADA_GATE', {
+            origem,
+            correlationId,
+            empresaId: auth.empresaId || opcoes.empresaId || null,
+            codigo: auth.codigo,
+            cStat: auth.cStat,
+            estadoGate: auth.estadoOperacional || auth.codigo,
+            motivo: auth.mensagem,
+            resultado: 'bloqueada'
+          });
           return {
             ...auth,
+            sucesso: false,
+            consultaExecutada: false,
+            ignorado: true,
             origem,
             correlationId
           };
         }
-      } catch { /* ignore */ }
+      } catch (errorGate) {
+        logCentralErro('SYNC', errorGate, {
+          Motivo: 'gate_falha_pre_sync_fail_closed',
+          Origem: origem,
+          CorrelationId: correlationId,
+          EmpresaId: opcoes.empresaId || null
+        });
+        this._emitirSefazConsulta('BLOQUEADA_GATE', {
+          origem,
+          correlationId,
+          empresaId: opcoes.empresaId || null,
+          codigo: 'GATE_INDISPONIVEL',
+          motivo: errorGate.message,
+          resultado: 'bloqueada'
+        });
+        return {
+          sucesso: false,
+          consultaExecutada: false,
+          ignorado: true,
+          codigo: 'GATE_INDISPONIVEL',
+          motivoIgnorado: 'GATE_INDISPONIVEL',
+          mensagem: `Gate SEFAZ indisponível — sincronização bloqueada: ${errorGate.message}`,
+          mensagemAmigavel: 'Falha ao verificar bloqueio operacional. Consulta DistDFe não enviada.',
+          origem,
+          correlationId
+        };
+      }
     }
 
-    if (!forcar && opcoes.ignorarCooldown !== true) {
+    // P0.11 — cooldown NSU: `forcar` / `ignorarCooldown` NÃO liberam DistDFe.
+    // MULTIEMPRESA: cooldown é por empresa em sincronizarEmpresa (decisão unificada).
+    {
       const cooldown = await this._verificarCooldownDfe();
-      if (cooldown.ativo) {
+      if (cooldown.indisponivel) {
+        this._emitirSefazConsulta('BLOQUEADA_COOLDOWN', {
+          origem,
+          correlationId,
+          codigo: 'NSU_INDISPONIVEL',
+          motivo: cooldown.motivo || 'nsu_indisponivel',
+          resultado: 'bloqueada'
+        });
         return {
-          sucesso: true,
+          sucesso: false,
+          consultaExecutada: false,
+          ignorado: true,
+          codigo: 'NSU_INDISPONIVEL',
+          motivoIgnorado: 'NSU_INDISPONIVEL',
+          mensagem: 'Estado do NSU/cooldown indisponível — sincronização bloqueada (fail-closed).',
+          mensagemAmigavel: 'Não foi possível verificar o cooldown. Consulta não enviada.',
+          correlationId,
+          origem
+        };
+      }
+      if (cooldown.ativo) {
+        const motivo = cooldown.motivo || 'COOLDOWN_EXPLICITO';
+        const mensagemCooldown = CentralNsuService.montarMensagemCooldown(cooldown);
+        const codigoDecisao = motivo === 'FILA_ESGOTADA'
+          ? 'FILA_ESGOTADA'
+          : (motivo === 'ESTADO_NSU_INCONSISTENTE'
+            ? 'ESTADO_NSU_INCONSISTENTE'
+            : 'COOLDOWN_ATIVO');
+        this._emitirSefazConsulta('BLOQUEADA_COOLDOWN', {
+          origem,
+          correlationId,
+          codigo: 'AGUARDAR_JANELA_DFE',
+          motivo,
+          nsuAnterior: cooldown.ultNsu,
+          maxNsu: cooldown.maxNsu,
+          resultado: 'bloqueada'
+        });
+        return {
+          sucesso: false,
+          consultaExecutada: false,
           ignorado: true,
           codigo: 'AGUARDAR_JANELA_DFE',
-          mensagem: 'Consulta DF-e adiada para respeitar a janela de 1 hora da NT 2014.002.',
+          codigoDecisao,
+          motivoIgnorado: motivo,
+          mensagem: mensagemCooldown,
+          mensagemAmigavel: mensagemCooldown,
           proximaConsultaEm: cooldown.proximaConsultaEm,
           ultNsu: cooldown.ultNsu,
           maxNsu: cooldown.maxNsu,
-          correlationId
+          correlationId,
+          origem
         };
       }
     }
@@ -142,15 +281,17 @@ class CentralSyncExecucaoService {
       if (!horario.permitido) {
         return {
           sucesso: false,
+          consultaExecutada: false,
           ignorado: true,
           mensagem: horario.motivo,
           erros: [horario.motivo],
-          correlationId
+          correlationId,
+          origem
         };
       }
     }
 
-    return this.comLockDistDfe(`sync:${origem}`, async () => {
+    const resultadoLock = await this.comLockDistDfe(`sync:${origem}`, async () => {
       const inicio = Date.now();
       this._ultimaExecucao = new Date().toISOString();
 
@@ -169,7 +310,9 @@ class CentralSyncExecucaoService {
         resultado: 'em_andamento',
         sucesso: null,
         usuarioId,
-        detalhe: { correlationId }
+        empresaId: opcoes.empresaId || null,
+        correlationId,
+        detalhe: { correlationId, empresaId: opcoes.empresaId || null }
       });
 
       try {
@@ -178,7 +321,11 @@ class CentralSyncExecucaoService {
 
         const resultado = await this._sincronizacao.sincronizar({
           maxIteracoes,
-          correlationId
+          correlationId,
+          origem,
+          autorizacaoTransmissaoSefaz: opcoes.autorizacaoTransmissaoSefaz || null,
+          empresaIdFiltro: opcoes.empresaId || null,
+          operacaoFiscalRealService: opcoes.operacaoFiscalRealService || null
         });
 
         const duracaoMs = Date.now() - inicio;
@@ -204,11 +351,16 @@ class CentralSyncExecucaoService {
           } catch { /* ignore */ }
         }
 
+        const syncIgnorada = resultado.consultaExecutada === false || resultado.ignorado === true;
         await this._emitirEvento({
-          tipo: resultado.sucesso ? TIPOS_EVENTO.SYNC_CONCLUIDA : TIPOS_EVENTO.SYNC_ERRO,
+          tipo: resultado.sucesso
+            ? TIPOS_EVENTO.SYNC_CONCLUIDA
+            : (syncIgnorada ? TIPOS_EVENTO.SYNC_CONCLUIDA : TIPOS_EVENTO.SYNC_ERRO),
           origem,
-          descricao: resultado.mensagem || (resultado.sucesso ? 'Sincronização concluída' : 'Falha na sincronização'),
-          resultado: resultado.sucesso ? 'sucesso' : 'erro',
+          descricao: resultado.mensagem || (resultado.sucesso
+            ? 'Sincronização concluída'
+            : (syncIgnorada ? 'Consulta DF-e não executada' : 'Falha na sincronização')),
+          resultado: resultado.sucesso ? 'sucesso' : (syncIgnorada ? 'ignorado' : 'erro'),
           sucesso: resultado.sucesso,
           notasNovas: resultado.notasNovas || 0,
           notasDuplicadas: resultado.notasDuplicadas || 0,
@@ -230,7 +382,9 @@ class CentralSyncExecucaoService {
           sucesso: resultado.sucesso,
           mensagem: resultado.mensagem,
           origem,
-          notificarNovas: cfgNotif.notificarNovasNotas
+          notificarNovas: cfgNotif.notificarNovasNotas,
+          ignorado: resultado.ignorado === true,
+          consultaExecutada: resultado.consultaExecutada
         });
 
         logOperacaoCentral({
@@ -276,14 +430,29 @@ class CentralSyncExecucaoService {
         return { ...falha, duracaoMs, origem, correlationId };
       }
     });
+
+    if (resultadoLock && resultadoLock.codigo === 'SYNC_EM_ANDAMENTO') {
+      this._emitirSefazConsulta('ENFILEIRADA', {
+        origem,
+        correlationId,
+        codigo: 'SYNC_EM_ANDAMENTO',
+        motivo: resultadoLock.mensagem,
+        resultado: 'rejeitada_mutex',
+        detalhe: { lockDono: this._lockDono, enfileiradaEfetiva: false }
+      });
+    }
+
+    return resultadoLock;
   }
 
   /** @private */
   async _verificarCooldownDfe() {
     try {
-      const { listarAlvosSincronizacaoCentral } = require('../../../services/central-entradas/CentralEntradasEmpresaContextoService');
       const { ModoOperacionalGlobal } = require('../../../core/modo-operacional');
-      const plano = await listarAlvosSincronizacaoCentral();
+      const listarAlvos = this._listarAlvos
+        || require('../../../services/central-entradas/CentralEntradasEmpresaContextoService')
+          .listarAlvosSincronizacaoCentral;
+      const plano = await listarAlvos();
 
       // MULTIEMPRESA: cooldown é por CNPJ dentro de sincronizarEmpresa — não bloqueia o lote global.
       if (plano.modo === ModoOperacionalGlobal.MULTIEMPRESA) {
@@ -295,7 +464,13 @@ class CentralSyncExecucaoService {
         empresaId: alvo && alvo.empresaId,
         permitirFallbackGlobal: true
       });
-      if (!contexto.ok) return { ativo: false };
+      if (!contexto.ok) {
+        return {
+          ativo: true,
+          indisponivel: true,
+          motivo: contexto.codigoErro || 'CONTEXTO_INVALIDO'
+        };
+      }
 
       const ambiente = Number(contexto.contexto.ambiente) === 1 ? 1 : 2;
       const controle = await this._nsuService.buscarPorCnpjAmbiente(
@@ -303,8 +478,9 @@ class CentralSyncExecucaoService {
         ambiente
       );
       return this._nsuService.avaliarCooldown(controle);
-    } catch {
-      return { ativo: false };
+    } catch (error) {
+      logCentralErro('SYNC', error, { Motivo: 'cooldown_nsu_indisponivel_fail_closed' });
+      return { ativo: true, indisponivel: true, motivo: 'NSU_INDISPONIVEL' };
     }
   }
 }

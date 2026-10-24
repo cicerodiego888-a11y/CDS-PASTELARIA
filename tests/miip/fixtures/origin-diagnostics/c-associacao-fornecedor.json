@@ -1,0 +1,38 @@
+{
+  "schema": "cds.miip.origin-fixture.v1",
+  "id": "fixture-c-associacao-fornecedor",
+  "cenario": "C",
+  "descricao": "Associacao ativa de fornecedor ficticio; codigo do fornecedor distinto do codigo interno.",
+  "sintetico": true,
+  "catalogo": [
+    {
+      "id": 303,
+      "codigo": "SINT-C303",
+      "codigo_barras": "7890000003022",
+      "nome": "Produto Associado Sintetico",
+      "unidade": "UN",
+      "ncm": "22021000",
+      "ativo": 1
+    }
+  ],
+  "associacoes": [
+    {
+      "id": 1,
+      "produto_id": 303,
+      "origem": "manual",
+      "fornecedor_cnpj": "99990000000303",
+      "fornecedor_nome": "Fornecedor Ficticio Sintetico",
+      "codigo_fornecedor": "CPROD-SINT-0303",
+      "nome_item": "Item Associado Sintetico",
+      "status": "ativa"
+    }
+  ],
+  "item": {
+    "fornecedorCnpj": "99990000000303",
+    "codigoFornecedor": "CPROD-SINT-0303"
+  },
+  "esperado": {
+    "fontes": ["associacao_fornecedor"],
+    "produtoId": 303
+  }
+}

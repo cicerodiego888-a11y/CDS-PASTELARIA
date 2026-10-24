@@ -159,7 +159,7 @@ function test14RetryErro() {
 function test15PdvLegadoIntacto() {
   const server = src('backend/server.js');
   assert.ok(server.includes("frontendRoot, 'pdv/index.html'"));
-  assert.ok(server.includes("frontendRoot, 'pdv-universal/index.html'"));
+  assert.ok(server.includes('caminhoDoPdvUniversalBloqueado'));
   assert.ok(src('frontend/pdv/js/pdv.js').includes("url: `${API_URL}/vendas`"));
 }
 

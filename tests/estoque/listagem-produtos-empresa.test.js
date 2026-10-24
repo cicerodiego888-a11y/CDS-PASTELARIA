@@ -273,7 +273,8 @@ async function test14OrdemListagem() {
   assert.strictEqual(rows[1].id, produtoX);
   const src = fs.readFileSync(path.join(ROOT, 'backend/rotas/produtos.js'), 'utf8');
   const idx = src.indexOf("router.get('/',");
-  const trecho = src.slice(idx, idx + 1800);
+  const fim = src.indexOf("router.get('/catalogo/insumos'", idx);
+  const trecho = src.slice(idx, fim);
   assert.ok(trecho.includes('ORDER BY p.id DESC'));
   assert.ok(trecho.includes('fragmentoEstoqueEmpresaListagem(req.empresaId)'));
   assert.ok(trecho.includes('filtroFiscal'));

@@ -4,6 +4,9 @@
  */
 'use strict';
 
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-p04-ownership-documento-compra-05-56-');
+
 const assert = require('assert');
 const sqlite3 = require('sqlite3').verbose();
 

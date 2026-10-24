@@ -10,6 +10,11 @@ const { normalizarCodigoIdentificador } = require('../normalizers/normalizarCodi
 const { TIPOS_IDENTIFICADOR } = require('../constants/tiposIdentificador');
 const { variantesPlu } = require('../utils/normalizarPlu');
 const MipLookupCache = require('../observability/MipLookupCache');
+const { defaultDiagnostics } = require('../../miip/diagnostics/MiipOriginDiagnostics');
+
+function logMipDebug(...args) {
+  if (!defaultDiagnostics.isEnabled()) console.log(...args);
+}
 
 const COLUNAS_PRODUTO = `
   id, codigo, codigo_barras, nome, unidade, preco_venda, ativo
@@ -38,6 +43,8 @@ class ProdutoIdentidadeCatalogo {
   constructor(deps = {}) {
     this._db = deps.db != null ? deps.db : resolverDb(null);
     this._helpers = this._db ? criarDbHelpers(this._db) : null;
+    this._originDiagnostics = deps.originDiagnostics ?? defaultDiagnostics;
+    this._catalogContext = deps.db ? 'sqlite_injetado' : 'sqlite_padrao';
     this._ids = deps.identificadoresRepository
       ?? new ProdutoIdentificadoresRepository({ db: this._db });
     this._cache = deps.cache === false
@@ -62,7 +69,16 @@ class ProdutoIdentidadeCatalogo {
     const key = `id:${id}`;
     if (this._cache) {
       const hit = this._cache.get(key);
-      if (hit !== undefined) return hit;
+      if (hit !== undefined) {
+        this._originDiagnostics.recordLookup({
+          lookup: 'id',
+          cacheHit: true,
+          productId: hit?.id,
+          source: 'produto_cache',
+          catalogContext: this._catalogContext
+        });
+        return hit;
+      }
     }
 
     await this._ready();
@@ -72,6 +88,13 @@ class ProdutoIdentidadeCatalogo {
     );
     const produto = mapProduto(row);
     if (this._cache) this._cache.set(key, produto);
+    this._originDiagnostics.recordLookup({
+      lookup: 'id',
+      cacheHit: false,
+      productId: produto?.id,
+      source: 'sqlite',
+      catalogContext: this._catalogContext
+    });
     return produto;
   }
 
@@ -79,7 +102,16 @@ class ProdutoIdentidadeCatalogo {
     const key = `codigo:${codigo}`;
     if (this._cache) {
       const hit = this._cache.get(key);
-      if (hit !== undefined) return hit;
+      if (hit !== undefined) {
+        this._originDiagnostics.recordLookup({
+          lookup: 'codigo',
+          cacheHit: true,
+          productId: hit?.id,
+          source: 'produto_cache',
+          catalogContext: this._catalogContext
+        });
+        return hit;
+      }
     }
 
     await this._ready();
@@ -89,6 +121,13 @@ class ProdutoIdentidadeCatalogo {
     );
     const produto = mapProduto(row);
     if (this._cache) this._cache.set(key, produto);
+    this._originDiagnostics.recordLookup({
+      lookup: 'codigo',
+      cacheHit: false,
+      productId: produto?.id,
+      source: 'sqlite',
+      catalogContext: this._catalogContext
+    });
     return produto;
   }
 
@@ -96,7 +135,16 @@ class ProdutoIdentidadeCatalogo {
     const key = `barras:${codigoBarras}`;
     if (this._cache) {
       const hit = this._cache.get(key);
-      if (hit !== undefined) return hit;
+      if (hit !== undefined) {
+        this._originDiagnostics.recordLookup({
+          lookup: 'gtin',
+          cacheHit: true,
+          productId: hit?.id,
+          source: 'produto_cache',
+          catalogContext: this._catalogContext
+        });
+        return hit;
+      }
     }
 
     await this._ready();
@@ -106,6 +154,13 @@ class ProdutoIdentidadeCatalogo {
     );
     const produto = mapProduto(row);
     if (this._cache) this._cache.set(key, produto);
+    this._originDiagnostics.recordLookup({
+      lookup: 'gtin',
+      cacheHit: false,
+      productId: produto?.id,
+      source: 'sqlite',
+      catalogContext: this._catalogContext
+    });
     return produto;
   }
 
@@ -124,7 +179,16 @@ class ProdutoIdentidadeCatalogo {
     if (this._cache) {
       const hit = this._cache.get(key);
       if (hit !== undefined) {
-        console.log('[MIP DEBUG] Repository cache hit', { tipo, codigoNorm, hit: !!hit });
+        this._originDiagnostics.recordLookup({
+          lookup: ['GTIN', 'EAN', 'EAN8', 'EAN13', 'EAN14', 'CODIGO_BARRAS'].includes(tipoU)
+            ? 'gtin'
+            : 'identificador',
+          cacheHit: true,
+          productId: hit?.produto?.id,
+          source: 'produto_cache',
+          catalogContext: this._catalogContext
+        });
+        logMipDebug('[MIP DEBUG] Repository cache hit', { tipo, codigoNorm, hit: !!hit });
         return hit;
       }
     }
@@ -135,7 +199,7 @@ class ProdutoIdentidadeCatalogo {
 
     let found = null;
     for (const cand of candidatos) {
-      console.log('[MIP DEBUG] Repository buscarPorTipoCodigo', { tipo, codigo: cand });
+      logMipDebug('[MIP DEBUG] Repository buscarPorTipoCodigo', { tipo, codigo: cand });
       const ident = await this._ids.buscarPorTipoCodigo(tipo, cand, {
         escopo: null,
         escopoValor: null,
@@ -143,7 +207,7 @@ class ProdutoIdentidadeCatalogo {
       });
       if (!ident) continue;
 
-      console.log('[MIP DEBUG] Repository: identificador encontrado', {
+      logMipDebug('[MIP DEBUG] Repository: identificador encontrado', {
         id: ident.id,
         produtoId: ident.produtoId,
         tipo: ident.tipo,
@@ -154,17 +218,17 @@ class ProdutoIdentidadeCatalogo {
 
       const produto = await this.buscarProdutoPorId(ident.produtoId);
       if (!produto) {
-        console.log('[MIP DEBUG] Repository: produto_id sem produto', ident.produtoId);
+        logMipDebug('[MIP DEBUG] Repository: produto_id sem produto', ident.produtoId);
         continue;
       }
 
-      console.log('[MIP DEBUG] Repository → Produto', { id: produto.id, nome: produto.nome });
+      logMipDebug('[MIP DEBUG] Repository → Produto', { id: produto.id, nome: produto.nome });
       found = { produto, identificador: ident };
       break;
     }
 
     if (!found) {
-      console.log('[MIP DEBUG] Repository: nenhum identificador', {
+      logMipDebug('[MIP DEBUG] Repository: nenhum identificador', {
         tipo,
         codigo: codigoNorm,
         variantes: candidatos.length
@@ -172,6 +236,15 @@ class ProdutoIdentidadeCatalogo {
     }
 
     if (this._cache) this._cache.set(key, found);
+    this._originDiagnostics.recordLookup({
+      lookup: ['GTIN', 'EAN', 'EAN8', 'EAN13', 'EAN14', 'CODIGO_BARRAS'].includes(tipoU)
+        ? 'gtin'
+        : 'identificador',
+      cacheHit: false,
+      productId: found?.produto?.id,
+      source: 'sqlite',
+      catalogContext: this._catalogContext
+    });
     return found;
   }
 }

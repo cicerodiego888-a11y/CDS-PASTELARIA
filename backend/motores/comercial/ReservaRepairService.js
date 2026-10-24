@@ -18,6 +18,7 @@
  * @module motores/comercial/ReservaRepairService
  */
 'use strict';
+const { roundStockQuantity } = require('../../services/estoque/quantityPrecision');
 
 const {
   AcaoCorrecao,
@@ -45,9 +46,7 @@ const MOTIVO_COMPAT_RESERVA_REPAIR = 'COMPAT_RESERVA_REPAIR_PRE_MULTIEMPRESA';
 /** Ações conhecidas. */
 const ACOES_CONHECIDAS = Object.freeze(new Set(Object.values(AcaoCorrecao)));
 
-function round3(n) {
-  return Math.round(Number(n || 0) * 1000) / 1000;
-}
+
 
 function getDb(dbInjected) {
   if (dbInjected) return dbInjected;
@@ -372,7 +371,7 @@ async function handlerLiberarReserva(ctx = {}, opts = {}) {
   }
 
   const produtoId = Number(reserva.produto_id);
-  const qtd = round3(reserva.quantidade_fiscal);
+  const qtd = roundStockQuantity(reserva.quantidade_fiscal);
   const produto = await dbGet(
     db,
     `SELECT id,
@@ -395,7 +394,7 @@ async function handlerLiberarReserva(ctx = {}, opts = {}) {
     });
   }
 
-  const reservado = round3(produto.reservado_fiscal);
+  const reservado = roundStockQuantity(produto.reservado_fiscal);
   // Saldo inconsistente: não há reservado suficiente para devolver a disponibilidade
   if (reservado + 1e-9 < qtd) {
     return resultado({
@@ -412,13 +411,13 @@ async function handlerLiberarReserva(ctx = {}, opts = {}) {
         reserva_id: reservaId,
         reservado_fiscal: reservado,
         reserva_quantidade: qtd,
-        saldo_fiscal: round3(produto.saldo_fiscal)
+        saldo_fiscal: roundStockQuantity(produto.saldo_fiscal)
       }
     });
   }
 
   const reservadoAntes = reservado;
-  const reservadoDepois = round3(reservadoAntes - qtd);
+  const reservadoDepois = roundStockQuantity(reservadoAntes - qtd);
 
   // 4–5) Liberar reserva (↓ reservado_fiscal via porta) e cancelar tracking
   const optsPorta = await aplicarDeltaReservadoFiscal(
@@ -441,9 +440,9 @@ async function handlerLiberarReserva(ctx = {}, opts = {}) {
     produto_id: produtoId,
     evento: auditoria.Evento.REPARO_LIBERAR_RESERVA || 'REPARO_LIBERAR_RESERVA',
     quantidade: qtd,
-    saldo_fiscal: round3(produto.saldo_fiscal),
-    saldo_nao_fiscal: round3(produto.saldo_nao_fiscal),
-    disponivel_fiscal: round3(produto.saldo_fiscal - reservadoDepois),
+    saldo_fiscal: roundStockQuantity(produto.saldo_fiscal),
+    saldo_nao_fiscal: roundStockQuantity(produto.saldo_nao_fiscal),
+    disponivel_fiscal: roundStockQuantity(produto.saldo_fiscal - reservadoDepois),
     usuario_id: usuarioId,
     detalhes: {
       acao: AcaoCorrecao.LIBERAR_RESERVA,
@@ -468,7 +467,7 @@ async function handlerLiberarReserva(ctx = {}, opts = {}) {
       quantidade_liberada: qtd,
       reservado_antes: reservadoAntes,
       reservado_depois: reservadoDepois,
-      saldo_fiscal: round3(produto.saldo_fiscal),
+      saldo_fiscal: roundStockQuantity(produto.saldo_fiscal),
       auditoria_id: auditId
     }, optsPorta)
   });
@@ -562,7 +561,7 @@ async function handlerRemoverReserva(ctx = {}, opts = {}) {
   }
 
   const produtoId = Number(reserva.produto_id);
-  const qtd = round3(reserva.quantidade_fiscal);
+  const qtd = roundStockQuantity(reserva.quantidade_fiscal);
   const produto = await dbGet(
     db,
     `SELECT id,
@@ -586,7 +585,7 @@ async function handlerRemoverReserva(ctx = {}, opts = {}) {
   }
 
   // 3) Validar reservado_fiscal >= quantidade
-  const reservado = round3(produto.reservado_fiscal);
+  const reservado = roundStockQuantity(produto.reservado_fiscal);
   if (reservado + 1e-9 < qtd) {
     return resultado({
       sucesso: false,
@@ -602,13 +601,13 @@ async function handlerRemoverReserva(ctx = {}, opts = {}) {
         reserva_id: reservaId,
         reservado_fiscal: reservado,
         reserva_quantidade: qtd,
-        saldo_fiscal: round3(produto.saldo_fiscal)
+        saldo_fiscal: roundStockQuantity(produto.saldo_fiscal)
       }
     });
   }
 
   const reservadoAntes = reservado;
-  const reservadoDepois = round3(reservadoAntes - qtd);
+  const reservadoDepois = roundStockQuantity(reservadoAntes - qtd);
 
   // 4–5) Cancelar reserva órfã (↓ reservado_fiscal via porta) e tracking
   const optsPorta = await aplicarDeltaReservadoFiscal(
@@ -631,9 +630,9 @@ async function handlerRemoverReserva(ctx = {}, opts = {}) {
     produto_id: produtoId,
     evento: auditoria.Evento.REPARO_REMOVER_RESERVA,
     quantidade: qtd,
-    saldo_fiscal: round3(produto.saldo_fiscal),
-    saldo_nao_fiscal: round3(produto.saldo_nao_fiscal),
-    disponivel_fiscal: round3(produto.saldo_fiscal - reservadoDepois),
+    saldo_fiscal: roundStockQuantity(produto.saldo_fiscal),
+    saldo_nao_fiscal: roundStockQuantity(produto.saldo_nao_fiscal),
+    disponivel_fiscal: roundStockQuantity(produto.saldo_fiscal - reservadoDepois),
     usuario_id: usuarioId,
     detalhes: {
       acao: AcaoCorrecao.REMOVER_RESERVA,
@@ -659,7 +658,7 @@ async function handlerRemoverReserva(ctx = {}, opts = {}) {
       quantidade_removida: qtd,
       reservado_antes: reservadoAntes,
       reservado_depois: reservadoDepois,
-      saldo_fiscal: round3(produto.saldo_fiscal),
+      saldo_fiscal: roundStockQuantity(produto.saldo_fiscal),
       auditoria_id: auditId
     }, optsPorta)
   });
@@ -741,7 +740,7 @@ async function handlerCriarReserva(ctx = {}, opts = {}) {
 
   // Quantidade: contexto explícito ou soma dos itens do pedido para o produto
   let quantidade = ctx.pedido_quantidade != null || ctx.quantidade != null
-    ? round3(ctx.pedido_quantidade ?? ctx.quantidade)
+    ? roundStockQuantity(ctx.pedido_quantidade ?? ctx.quantidade)
     : null;
 
   if (quantidade == null) {
@@ -751,7 +750,7 @@ async function handlerCriarReserva(ctx = {}, opts = {}) {
        FROM pedidos_itens WHERE pedido_id = ? AND produto_id = ?`,
       [pedidoId, produtoId]
     );
-    quantidade = round3(item?.q || 0);
+    quantidade = roundStockQuantity(item?.q || 0);
   }
 
   if (!(quantidade > 0)) {
@@ -790,7 +789,7 @@ async function handlerCriarReserva(ctx = {}, opts = {}) {
         pedido_id: pedidoId,
         produto_id: produtoId,
         reserva_id: reservaExistente.id,
-        reserva_quantidade: round3(reservaExistente.quantidade_fiscal)
+        reserva_quantidade: roundStockQuantity(reservaExistente.quantidade_fiscal)
       }
     });
   }
@@ -818,9 +817,9 @@ async function handlerCriarReserva(ctx = {}, opts = {}) {
     });
   }
 
-  const saldoFiscal = round3(produto.saldo_fiscal);
-  const reservadoAntes = round3(produto.reservado_fiscal);
-  const disponivel = round3(saldoFiscal - reservadoAntes);
+  const saldoFiscal = roundStockQuantity(produto.saldo_fiscal);
+  const reservadoAntes = roundStockQuantity(produto.reservado_fiscal);
+  const disponivel = roundStockQuantity(saldoFiscal - reservadoAntes);
 
   if (disponivel + 1e-9 < quantidade) {
     return resultado({
@@ -842,7 +841,7 @@ async function handlerCriarReserva(ctx = {}, opts = {}) {
     });
   }
 
-  const reservadoDepois = round3(reservadoAntes + quantidade);
+  const reservadoDepois = roundStockQuantity(reservadoAntes + quantidade);
 
   let empresaIdPedido;
   try {
@@ -885,8 +884,8 @@ async function handlerCriarReserva(ctx = {}, opts = {}) {
     evento: auditoria.Evento.REPARO_CRIAR_RESERVA,
     quantidade,
     saldo_fiscal: saldoFiscal,
-    saldo_nao_fiscal: round3(produto.saldo_nao_fiscal),
-    disponivel_fiscal: round3(saldoFiscal - reservadoDepois),
+    saldo_nao_fiscal: roundStockQuantity(produto.saldo_nao_fiscal),
+    disponivel_fiscal: roundStockQuantity(saldoFiscal - reservadoDepois),
     usuario_id: usuarioId,
     detalhes: {
       acao: AcaoCorrecao.CRIAR_RESERVA,
@@ -1022,7 +1021,7 @@ async function handlerAjustarReserva(ctx = {}, opts = {}) {
 
   // Quantidade do pedido
   let pedidoQtd = ctx.pedido_quantidade != null
-    ? round3(ctx.pedido_quantidade)
+    ? roundStockQuantity(ctx.pedido_quantidade)
     : null;
   if (pedidoQtd == null) {
     const item = await dbGet(
@@ -1031,7 +1030,7 @@ async function handlerAjustarReserva(ctx = {}, opts = {}) {
        FROM pedidos_itens WHERE pedido_id = ? AND produto_id = ?`,
       [pedidoId, produtoId]
     );
-    pedidoQtd = round3(item?.q || 0);
+    pedidoQtd = roundStockQuantity(item?.q || 0);
   }
 
   if (!(pedidoQtd > 0)) {
@@ -1047,8 +1046,8 @@ async function handlerAjustarReserva(ctx = {}, opts = {}) {
     });
   }
 
-  const reservaQtd = round3(reserva.quantidade_fiscal);
-  const diferenca = round3(pedidoQtd - reservaQtd);
+  const reservaQtd = roundStockQuantity(reserva.quantidade_fiscal);
+  const diferenca = roundStockQuantity(pedidoQtd - reservaQtd);
 
   const produto = await dbGet(
     db,
@@ -1073,8 +1072,8 @@ async function handlerAjustarReserva(ctx = {}, opts = {}) {
     });
   }
 
-  const saldoFiscal = round3(produto.saldo_fiscal);
-  const reservadoAntes = round3(produto.reservado_fiscal);
+  const saldoFiscal = roundStockQuantity(produto.saldo_fiscal);
+  const reservadoAntes = roundStockQuantity(produto.reservado_fiscal);
 
   // Sem alterações
   if (Math.abs(diferenca) <= 1e-9) {
@@ -1104,7 +1103,7 @@ async function handlerAjustarReserva(ctx = {}, opts = {}) {
   let qtdDelta;
   if (diferenca > 0) {
     // Aumento: precisa de disponível suficiente → reservarQuantidade
-    const disponivel = round3(saldoFiscal - reservadoAntes);
+    const disponivel = roundStockQuantity(saldoFiscal - reservadoAntes);
     if (disponivel + 1e-9 < diferenca) {
       return resultado({
         sucesso: false,
@@ -1125,12 +1124,12 @@ async function handlerAjustarReserva(ctx = {}, opts = {}) {
         }
       });
     }
-    reservadoDepois = round3(reservadoAntes + diferenca);
+    reservadoDepois = roundStockQuantity(reservadoAntes + diferenca);
     sentido = 'reservar';
     qtdDelta = diferenca;
   } else {
     // Redução: reservado deve cobrir a diferença absoluta → liberarQuantidadeReservada
-    const reducao = round3(-diferenca);
+    const reducao = roundStockQuantity(-diferenca);
     if (reservadoAntes + 1e-9 < reducao) {
       return resultado({
         sucesso: false,
@@ -1149,7 +1148,7 @@ async function handlerAjustarReserva(ctx = {}, opts = {}) {
         }
       });
     }
-    reservadoDepois = round3(reservadoAntes - reducao);
+    reservadoDepois = roundStockQuantity(reservadoAntes - reducao);
     sentido = 'liberar';
     qtdDelta = reducao;
   }
@@ -1174,8 +1173,8 @@ async function handlerAjustarReserva(ctx = {}, opts = {}) {
     evento: auditoria.Evento.REPARO_AJUSTAR_RESERVA,
     quantidade: pedidoQtd,
     saldo_fiscal: saldoFiscal,
-    saldo_nao_fiscal: round3(produto.saldo_nao_fiscal),
-    disponivel_fiscal: round3(saldoFiscal - reservadoDepois),
+    saldo_nao_fiscal: roundStockQuantity(produto.saldo_nao_fiscal),
+    disponivel_fiscal: roundStockQuantity(saldoFiscal - reservadoDepois),
     usuario_id: usuarioId,
     detalhes: {
       acao: AcaoCorrecao.AJUSTAR_RESERVA,

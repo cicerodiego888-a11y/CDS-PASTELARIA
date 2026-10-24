@@ -17,6 +17,7 @@
         { value: 'BALDE', label: 'Balde (BALDE)' },
         { value: 'GALAO', label: 'Galão (GALAO)' }
     ]);
+    const UNIDADES_CONTEUDO = Object.freeze(['UN', 'G', 'KG', 'ML', 'L', 'M', 'CM', 'MM', 'M2', 'M3']);
 
     function num(valor, casas = 3) {
         const n = parseFloat(String(valor ?? '').replace(',', '.'));
@@ -76,9 +77,43 @@
         ).join('');
     }
 
+    function escaparHtml(valor) {
+        return String(valor ?? '').replace(/[&<>"']/g, (caractere) => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#39;'
+        }[caractere]));
+    }
+
+    function montarOptionsUnidadeConteudo(selecionada) {
+        const raw = String(selecionada ?? '').trim();
+        const atual = raw
+            ? (normalizarUnidadeRelacao(raw) || raw.toUpperCase())
+            : '';
+        const unidades = [...UNIDADES_CONTEUDO];
+        if (atual && !unidades.includes(atual)) unidades.push(atual);
+        return [
+            '<option value="">Selecione...</option>',
+            ...unidades.map((unidade) => {
+                const segura = escaparHtml(unidade);
+                return `<option value="${segura}" ${atual === unidade ? 'selected' : ''}>${segura}</option>`;
+            })
+        ].join('');
+    }
+
+    function unidadePadraoNovaApresentacao() {
+        if (utilizaConversaoAtiva()) return '';
+        return String($('#unidade').val() || 'un').trim().toLowerCase();
+    }
+
     function montarLinhaApresentacao(emb, index) {
         const tipo = normalizarTipo(emb.tipo);
         const qtdReadonly = tipo === 'UN' ? 'readonly' : '';
+        const unidadeInformada = String(emb.unidade ?? '').trim();
+        const unidadeConteudo = unidadeInformada
+            || (utilizaConversaoAtiva() ? '' : String($('#unidade').val() || 'UN').trim());
         return `
             <tr data-apresentacao-index="${index}">
                 <td>
@@ -91,6 +126,11 @@
                 <td>
                     <input type="number" step="0.001" min="0" class="form-control form-control-sm ap-quantidade"
                         value="${num(emb.quantidade, 3) || ''}" placeholder="Ex.: 12" ${qtdReadonly}>
+                </td>
+                <td>
+                    <select class="form-control form-control-sm ap-unidade-conteudo" aria-label="Unidade do conteúdo">
+                        ${montarOptionsUnidadeConteudo(unidadeConteudo)}
+                    </select>
                 </td>
                 <td>
                     <input type="text" class="form-control form-control-sm ap-gtin"
@@ -143,6 +183,7 @@
             $tbody.append(montarLinhaApresentacao(emb, index));
         });
         fixarEventosApresentacoes();
+        atualizarUnidadesOrigemSimulacao();
     }
 
     function obterListaDoModal() {
@@ -157,6 +198,63 @@
         return String($('input[name="utiliza_conversao"]:checked').val() || '0') === '1';
     }
 
+    function capturarApresentacoesConversao() {
+        return coletarApresentacoesDoFormulario().map((ap) => ({
+            tipo: normalizarTipo(ap.tipo),
+            quantidade: Number(ap.quantidade || 0),
+            unidade: String(ap.unidade || '').trim().toUpperCase(),
+            compra: Number(ap.compra ?? 0),
+            ativa: Number(ap.ativa ?? 1)
+        }));
+    }
+
+    function snapshotConfiguracaoMuc(config = null, apresentacoes = null) {
+        const usa = config
+            ? Number(config.utiliza_conversao ?? config.utilizaConversao) === 1
+            : utilizaConversaoAtiva();
+        const relacoes = config
+            ? (config.relacoes || [])
+            : (usa ? coletarRelacoesDoFormulario() : []);
+        return JSON.stringify({
+            utiliza_conversao: usa ? 1 : 0,
+            unidade_estoque: usa
+                ? String(config
+                    ? (config.unidade_estoque || config.unidadeEstoque || '')
+                    : ($('#unidade_estoque').val() || '')).trim().toUpperCase()
+                : null,
+            relacoes: usa ? relacoes.map((rel) => ({
+                unidade_origem: String(rel.unidade_origem || rel.de || '').trim().toUpperCase(),
+                unidade_destino: String(rel.unidade_destino || rel.para || '').trim().toUpperCase(),
+                fator: Number(rel.fator || 0)
+            })) : [],
+            apresentacoes: apresentacoes || capturarApresentacoesConversao()
+        });
+    }
+
+    function marcarConfiguracaoMucPersistida(config = null, apresentacoes = null) {
+        const $modal = $('#produtoModal');
+        const salvas = apresentacoes || capturarApresentacoesConversao();
+        $modal.data('mucApresentacoesPersistidas', salvas);
+        $modal.data('mucConfiguracaoPersistida', snapshotConfiguracaoMuc(config, salvas));
+        atualizarEstadoConfiguracaoMuc();
+    }
+
+    function configuracaoMucPendente() {
+        const inicial = $('#produtoModal').data('mucConfiguracaoPersistida');
+        return typeof inicial === 'string' && inicial !== snapshotConfiguracaoMuc();
+    }
+
+    function atualizarEstadoConfiguracaoMuc() {
+        const pendente = configuracaoMucPendente();
+        $('#statusConfiguracaoMuc').toggleClass('d-none', !pendente);
+        return pendente;
+    }
+
+    function invalidarSimulacaoMuc() {
+        $('#resultado_simular_muc').removeClass('text-danger text-success').empty();
+        atualizarEstadoConfiguracaoMuc();
+    }
+
     function atualizarVisibilidadeConversaoMuc() {
         if (utilizaConversaoAtiva()) {
             $('#bloco_conversao_muc_detalhe').removeClass('d-none');
@@ -164,19 +262,20 @@
             $('#bloco_conversao_muc_detalhe').addClass('d-none');
             $('#resultado_simular_muc').empty();
         }
+            atualizarEstadoConfiguracaoMuc();
     }
 
     function montarLinhaRelacaoMuc(rel, index) {
         const origem = String(rel.unidade_origem || rel.de || 'UN').replace(/"/g, '&quot;');
         const destino = String(rel.unidade_destino || rel.para || 'ML').replace(/"/g, '&quot;');
-        const fator = Number(rel.fator);
+        const fator = num(rel.fator, 6);
         const idAttr = rel.id ? ` data-relacao-id="${rel.id}"` : '';
         return `
             <tr${idAttr} data-relacao-index="${index}">
                 <td class="text-center">1</td>
                 <td><input type="text" class="form-control form-control-sm rel-origem" value="${origem}" placeholder="UN"></td>
                 <td class="text-center">=</td>
-                <td><input type="number" step="0.001" min="0" class="form-control form-control-sm rel-fator" value="${Number.isFinite(fator) && fator > 0 ? fator : ''}" placeholder="2000"></td>
+                <td><input type="text" inputmode="decimal" class="form-control form-control-sm rel-fator" value="${fator > 0 ? fator : ''}" placeholder="2000"></td>
                 <td><input type="text" class="form-control form-control-sm rel-destino" value="${destino}" placeholder="ML"></td>
                 <td class="text-end"><button type="button" class="btn btn-sm btn-outline-danger rel-remover" title="Remover">&times;</button></td>
             </tr>
@@ -191,6 +290,7 @@
             $tbody.append(montarLinhaRelacaoMuc(rel, index));
         });
         fixarEventosRelacoesMuc();
+        atualizarUnidadesOrigemSimulacao(true);
     }
 
     function coletarRelacoesDoFormulario() {
@@ -214,11 +314,105 @@
         return lista;
     }
 
+    function atualizarUnidadesOrigemSimulacao(definirOrigemInicial = false) {
+        const $origem = $('#simular_un_muc');
+        const $opcoes = $('#unidades_origem_simular_muc');
+        if (!$origem.length || !$opcoes.length) return;
+
+        const unidades = new Set();
+        const relacoes = coletarRelacoesDoFormulario();
+        const adicionar = (valor) => {
+            const unidade = String(valor || '').trim().toUpperCase();
+            if (unidade) unidades.add(unidade);
+        };
+        relacoes.forEach((rel) => {
+            adicionar(rel.unidade_origem);
+            adicionar(rel.unidade_destino);
+        });
+        $('#tabelaApresentacoes tbody tr').each(function coletarApresentacao() {
+            const $tr = $(this);
+            if ($tr.find('.ap-ativa').is(':checked')) {
+                adicionar($tr.find('.ap-tipo').val());
+            }
+        });
+        const unidadeEstoque = String($('#unidade_estoque').val() || '').trim().toUpperCase();
+        adicionar(unidadeEstoque);
+
+        $opcoes.empty();
+        unidades.forEach((unidade) => {
+            $('<option>').val(unidade).appendTo($opcoes);
+        });
+
+        if (definirOrigemInicial && !$('#produtoModal').data('simulacaoOrigemPersonalizada')) {
+            const primeiraOrigem = relacoes.find((rel) => String(rel.unidade_origem || '').trim());
+            $origem.val(
+                (primeiraOrigem && String(primeiraOrigem.unidade_origem).trim().toUpperCase())
+                || unidadeEstoque
+                || 'UN'
+            );
+        }
+    }
+
+    const UNIDADES_RELACAO = Object.freeze({
+        UN: 'UN', UND: 'UN', UNI: 'UN', KG: 'KG', G: 'G', L: 'L', LTRO: 'L', ML: 'ML',
+        M: 'M', MT: 'M', CM: 'CM', MM: 'MM', M2: 'M2', M3: 'M3',
+        CX: 'CAIXA', CXA: 'CAIXA', CAIXA: 'CAIXA', FD: 'FARDO', FARDO: 'FARDO',
+        PC: 'PACOTE', PCT: 'PACOTE', PACOTE: 'PACOTE', SC: 'SACO', SACO: 'SACO',
+        LT: 'LATA', LATA: 'LATA', BD: 'BALDE', BALDE: 'BALDE', RL: 'ROLO', ROLO: 'ROLO',
+        BR: 'BARRA', BARRA: 'BARRA', KIT: 'KIT', DISPLAY: 'DISPLAY', BOBINA: 'BOBINA', GALAO: 'GALAO'
+    });
+
+    function normalizarUnidadeRelacao(valor) {
+        const token = String(valor || '').trim().toUpperCase()
+            .normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, '');
+        return UNIDADES_RELACAO[token] || null;
+    }
+
+    // Valida cada relação (origem, fator, destino) com o mesmo critério do backend, indicando o campo.
+    function validarRelacoesFormulario(lista) {
+        const origemLista = Array.isArray(lista) ? lista : coletarRelacoesDoFormulario();
+        const normalizadas = [];
+        for (let i = 0; i < origemLista.length; i += 1) {
+            const rel = origemLista[i];
+            const n = i + 1;
+            const falha = (campo, mensagem) => ({ ok: false, indice: i, campo, mensagem: `Relação ${n}: ${mensagem}`, relacoes: [] });
+            const origemTxt = String(rel.unidade_origem || rel.de || '').trim();
+            const destinoTxt = String(rel.unidade_destino || rel.para || '').trim();
+            if (!origemTxt) return falha('origem', 'informe a unidade de origem.');
+            const origem = normalizarUnidadeRelacao(origemTxt);
+            if (!origem) return falha('origem', `unidade de origem "${origemTxt}" não reconhecida (ex.: UN, G, KG, ML, L).`);
+            const fator = num(rel.fator, 6);
+            if (!(fator > 0) || !Number.isFinite(fator)) {
+                return falha('fator', 'informe um fator maior que zero.');
+            }
+            if (!destinoTxt) return falha('destino', 'informe a unidade de destino.');
+            const destino = normalizarUnidadeRelacao(destinoTxt);
+            if (!destino) return falha('destino', `unidade de destino "${destinoTxt}" não reconhecida (ex.: UN, G, KG, ML, L).`);
+            if (origem === destino) return falha('destino', 'origem e destino devem ser diferentes.');
+            normalizadas.push({
+                id: rel.id || null,
+                unidade_origem: origem,
+                unidade_destino: destino,
+                de: origem,
+                para: destino,
+                fator
+            });
+        }
+        return { ok: true, relacoes: normalizadas };
+    }
+
+    function focarCampoRelacao(indice, campo) {
+        const classe = { origem: '.rel-origem', destino: '.rel-destino', fator: '.rel-fator' }[campo];
+        const $campo = $('#tabelaRelacoesMuc tbody tr').eq(indice).find(classe);
+        if ($campo.length) $campo.trigger('focus');
+    }
+
     function fixarEventosRelacoesMuc() {
         $('#btnAdicionarRelacaoMuc').off('click.relMuc').on('click.relMuc', () => {
             const lista = coletarRelacoesDoFormulario();
             lista.push({ unidade_origem: 'UN', unidade_destino: 'ML', fator: '' });
             renderTabelaRelacoesMuc(lista);
+            invalidarSimulacaoMuc();
         });
         $('#tabelaRelacoesMuc').off('click.relMuc').on('click.relMuc', '.rel-remover', function onRemoverRel() {
             const $tr = $(this).closest('tr');
@@ -235,6 +429,9 @@
                     headers: { Authorization: 'Bearer ' + token },
                     success: function onExcluiu(cfg) {
                         renderTabelaRelacoesMuc(cfg.relacoes || []);
+                        const apresentacoesSalvas = $('#produtoModal').data('mucApresentacoesPersistidas');
+                        marcarConfiguracaoMucPersistida(cfg, apresentacoesSalvas);
+                        invalidarSimulacaoMuc();
                     },
                     error: function onErroExcluir(xhr) {
                         const msg = (xhr.responseJSON && xhr.responseJSON.error)
@@ -249,27 +446,95 @@
                 return;
             }
             $tr.remove();
+            atualizarUnidadesOrigemSimulacao(true);
+            invalidarSimulacaoMuc();
         });
+        $('#produtoModal')
+            .off('.mucDirty')
+            .on(
+                'input.mucDirty change.mucDirty',
+                '#utiliza_conversao_sim, #utiliza_conversao_nao, #unidade_estoque, #tabelaRelacoesMuc input, #tabelaApresentacoes input, #tabelaApresentacoes select, #simular_qtd_muc, #simular_un_muc',
+                function onAlteracaoMuc() {
+                    const $campo = $(this);
+                    const alterouRelacao = $campo.closest('#tabelaRelacoesMuc').length > 0;
+                    if ($campo.is('#simular_un_muc')) {
+                        $('#produtoModal').data('simulacaoOrigemPersonalizada', true);
+                    }
+                    atualizarUnidadesOrigemSimulacao(alterouRelacao);
+                    invalidarSimulacaoMuc();
+                }
+            );
+        $('#produtoModal')
+            .off('click.mucOrigem')
+            .on('click.mucOrigem', '#tabelaApresentacoes .ap-remover', () => {
+                setTimeout(atualizarUnidadesOrigemSimulacao, 0);
+            });
         $('#btnSimularConversaoMuc').off('click.relMuc').on('click.relMuc', function onSimular() {
             const $out = $('#resultado_simular_muc');
             $out.removeClass('text-danger text-success').empty();
             const produtoId = $('#produtoId').val();
-            if (!produtoId) {
-                $out.addClass('text-danger').text('Salve o produto antes de simular a conversão.');
+            const token = localStorage.getItem('token') || '';
+            const apiBase = typeof API_URL !== 'undefined' ? API_URL : '/api';
+            const unidadeOrigem = ($('#simular_un_muc').val() || '').trim();
+            const entrada = {
+                quantidade: num($('#simular_qtd_muc').val(), 6),
+                unidade: unidadeOrigem,
+                unidadeOrigem,
+                unidadeDestino: ($('#unidade_estoque').val() || '').trim()
+            };
+            let url = `${apiBase}/produtos/${produtoId}/conversao/simular`;
+            let payload = entrada;
+            if (!(entrada.quantidade > 0)) {
+                $out.addClass('text-danger').text('Informe uma quantidade maior que zero para simular.');
+                $('#simular_qtd_muc').trigger('focus');
                 return;
             }
-            const token = localStorage.getItem('token') || '';
+            if (!entrada.unidade) {
+                $out.addClass('text-danger').text('Informe a unidade de origem da simulação.');
+                $('#simular_un_muc').trigger('focus');
+                return;
+            }
+            if (!entrada.unidadeDestino) {
+                $out.addClass('text-danger').text('Selecione a unidade de estoque.');
+                return;
+            }
+            if (!produtoId) {
+                const v = validarRelacoesFormulario();
+                if (!v.ok) {
+                    $out.addClass('text-danger').text(v.mensagem);
+                    focarCampoRelacao(v.indice, v.campo);
+                    return;
+                }
+                url = `${apiBase}/produtos/conversao/simular`;
+                payload = {
+                    ...entrada,
+                    unidade_estoque: entrada.unidadeDestino,
+                    relacoes: v.relacoes,
+                    apresentacoes: coletarApresentacoesDoFormulario()
+                };
+            } else if (configuracaoMucPendente()) {
+                const v = validarRelacoesFormulario();
+                if (!v.ok) {
+                    $out.addClass('text-danger').text(v.mensagem);
+                    focarCampoRelacao(v.indice, v.campo);
+                    return;
+                }
+                payload = {
+                    ...entrada,
+                    configuracao: {
+                        utiliza_conversao: utilizaConversaoAtiva() ? 1 : 0,
+                        unidade_estoque: entrada.unidadeDestino,
+                        relacoes: v.relacoes,
+                        apresentacoes: coletarApresentacoesDoFormulario()
+                    }
+                };
+            }
             $.ajax({
-                url: `${typeof API_URL !== 'undefined' ? API_URL : '/api'}/produtos/${produtoId}/conversao/simular`,
+                url,
                 method: 'POST',
                 contentType: 'application/json',
                 headers: { Authorization: 'Bearer ' + token },
-                data: JSON.stringify({
-                    quantidade: num($('#simular_qtd_muc').val(), 6),
-                    unidade: ($('#simular_un_muc').val() || '').trim(),
-                    unidadeOrigem: ($('#simular_un_muc').val() || '').trim(),
-                    unidadeDestino: ($('#unidade_estoque').val() || '').trim()
-                }),
+                data: JSON.stringify(payload),
                 success: function onOk(r) {
                     const caminhoArr = Array.isArray(r.caminho) ? r.caminho : [];
                     const caminho = caminhoArr.length && typeof caminhoArr[0] === 'string'
@@ -282,10 +547,35 @@
                         $out.addClass('text-danger').text('Conversão não disponível.');
                         return;
                     }
-                    $out.addClass('text-success').html(
-                        `<strong>${Number(qtd).toLocaleString('pt-BR')} ${r.unidade || ''}</strong>`
-                        + (caminho ? `<div class="text-muted">Caminho: ${caminho}</div>` : '')
+                    const qtdOrigem = r.quantidade_origem != null ? r.quantidade_origem : entrada.quantidade;
+                    const unOrigem = r.unidade_origem || entrada.unidade.toUpperCase();
+                    const unEstoque = r.unidade_estoque || entrada.unidadeDestino;
+                    $out.addClass('text-success').append(
+                        $('<div class="badge bg-info text-dark mb-1">').text(
+                            r.persistido === false ? 'Simulação — alterações não salvas' : 'Simulação — configuração salva'
+                        ),
+                        $('<div>').text(`Origem: ${Number(qtdOrigem).toLocaleString('pt-BR')} ${unOrigem}`)
                     );
+                    (Array.isArray(r.etapas) ? r.etapas : []).forEach((etapa) => {
+                        const de = String(etapa.de || '').trim().toUpperCase();
+                        const para = String(etapa.para || '').trim().toUpperCase();
+                        const fator = Number(etapa.fator);
+                        if (!de || !para || !Number.isFinite(fator) || fator <= 0) return;
+                        const fatorTexto = fator.toLocaleString('pt-BR', { maximumFractionDigits: 6 });
+                        $out.append(
+                            $('<div>').text(`Relação aplicada: 1 ${de} = ${fatorTexto} ${para}`)
+                        );
+                    });
+                    $out.append(
+                        $('<strong>').text(`Resultado: ${Number(qtd).toLocaleString('pt-BR')} ${r.unidade || ''}`),
+                        $('<div class="text-muted">').text(`Unidade de estoque: ${unEstoque}`)
+                    );
+                    if (caminho) {
+                        $out.append($('<div class="text-muted">').text(`Caminho: ${caminho}`));
+                    }
+                    if (r.mensagem) {
+                        $out.append($('<div class="text-info">').text(r.mensagem));
+                    }
                 },
                 error: function onFail(xhr) {
                     const msg = (xhr.responseJSON && xhr.responseJSON.error)
@@ -299,6 +589,7 @@
 
     function inicializarConversaoMuc(produto) {
         const usa = Number(produto?.utiliza_conversao || 0) === 1;
+        $('#produtoModal').data('simulacaoOrigemPersonalizada', false);
         $('#utiliza_conversao_sim').prop('checked', usa);
         $('#utiliza_conversao_nao').prop('checked', !usa);
         const dest = String(produto?.unidade_estoque || (usa ? produto?.unidade : '') || 'UN').toUpperCase();
@@ -313,19 +604,18 @@
     }
 
     function coletarApresentacoesDoFormulario() {
-        const unidadeBase = utilizaConversaoAtiva()
-            ? 'UN'
-            : String($('#unidade').val() || 'un').trim().toLowerCase();
+        const unidadeBase = String($('#unidade').val() || 'un').trim();
         const lista = [];
         $('#tabelaApresentacoes tbody tr').each(function coletarLinha() {
             const $tr = $(this);
             const tipo = normalizarTipo($tr.find('.ap-tipo').val());
+            const unidadeConteudo = String($tr.find('.ap-unidade-conteudo').val() ?? '').trim();
             lista.push({
                 id: $tr.data('apresentacao-id') || null,
                 tipo,
                 descricao: ($tr.find('.ap-descricao').val() || '').trim() || null,
                 quantidade: tipo === 'UN' ? 1 : num($tr.find('.ap-quantidade').val(), 3),
-                unidade: unidadeBase,
+                unidade: unidadeConteudo || (utilizaConversaoAtiva() ? '' : unidadeBase),
                 gtin: ($tr.find('.ap-gtin').val() || '').trim() || null,
                 codigo_fornecedor: ($tr.find('.ap-codigo-fornecedor').val() || '').trim() || null,
                 fornecedor_nome: ($tr.find('.ap-fornecedor').val() || '').trim() || null,
@@ -437,7 +727,7 @@
                     tipo: 'PCT',
                     descricao: '',
                     quantidade: 0,
-                    unidade: String($('#unidade').val() || 'un').trim().toLowerCase(),
+                    unidade: unidadePadraoNovaApresentacao(),
                     gtin: '',
                     codigo_fornecedor: '',
                     fornecedor_nome: ($('#fornecedor').val() || '').trim(),
@@ -508,7 +798,7 @@
                 tipo: 'PCT',
                 descricao: '',
                 quantidade: 0,
-                unidade: String($('#unidade').val() || 'un').trim().toLowerCase(),
+                unidade: unidadePadraoNovaApresentacao(),
                 gtin: '',
                 codigo_fornecedor: '',
                 fornecedor_nome: ($('#fornecedor').val() || '').trim(),
@@ -556,7 +846,27 @@
                                 <label class="form-check-label" for="utiliza_conversao_sim">Sim</label>
                             </div>
                         </div>
+                        <div id="statusConfiguracaoMuc" class="small text-warning mb-2 d-none" role="status">
+                            Alterações não salvas
+                        </div>
                         <div id="bloco_conversao_muc_detalhe" class="d-none">
+                            <details class="border rounded p-2 mb-3 muc-ajuda">
+                                <summary class="fw-semibold">Como preencher?</summary>
+                                <div class="pt-2">
+                                    <p class="small mb-2"><strong>Origem</strong> é a unidade que será informada na entrada. <strong>Fator</strong> é a quantidade real na unidade de destino para cada 1 unidade de origem. <strong>Destino</strong> é a unidade em que o estoque será controlado.</p>
+                                    <p class="small mb-2">Exemplo de relação do produto:</p>
+                                    <div class="table-responsive">
+                                        <table class="table table-sm table-bordered w-auto mb-2" aria-label="Exemplo de relação MUC">
+                                            <thead class="table-light"><tr><th>1</th><th>Origem</th><th>=</th><th>Fator</th><th>Destino</th></tr></thead>
+                                            <tbody><tr><td>1</td><td>KG</td><td>=</td><td>850</td><td>ML</td></tr></tbody>
+                                        </table>
+                                    </div>
+                                    <img src="/erp/assets/muc-relacao-preenchida.svg" class="img-fluid border rounded mb-2" alt="Tabela de relação preenchida com 1 KG igual a 850 ML" loading="lazy">
+                                    <p class="small mb-2"><strong>Simulação:</strong> entrada de 5 KG → resultado esperado de 4.250 ML.</p>
+                                    <p class="small mb-2">Se preferir controlar em litros, cadastre 1 KG = 0,850 L (ou 0.850 L) e use L como destino; 5 KG resultarão em 4,25 L. Também é possível usar ML como destino com fator 850.</p>
+                                    <div class="alert alert-warning py-2 mb-0 small">O fator deve representar a relação real deste produto. KG e ML não têm equivalência universal: a conversão só será feita quando esta relação explícita estiver cadastrada.</div>
+                                </div>
+                            </details>
                             <div class="mb-2">
                                 <label class="form-label" for="unidade_estoque">Unidade de estoque</label>
                                 <select class="form-control form-control-sm" id="unidade_estoque">
@@ -565,7 +875,9 @@
                                     <option value="L">L</option>
                                     <option value="G">G</option>
                                     <option value="KG">KG</option>
+                                    <option value="PACOTE">PACOTE (PCT)</option>
                                 </select>
+                                <small class="text-muted">Para controlar o saldo em pacotes, selecione PACOTE (PCT). Cadastre 1 PCT = 50 UN em Apresentações Comerciais, não em Relações SI.</small>
                             </div>
                             <div class="mb-2">
                                 <div class="d-flex justify-content-between align-items-center">
@@ -580,15 +892,19 @@
                             </div>
                             <div class="row g-2 align-items-end">
                                 <div class="col-md-3">
-                                    <label class="form-label small" for="simular_qtd_muc">Simular qtd</label>
-                                    <input type="number" class="form-control form-control-sm" id="simular_qtd_muc" min="0" step="0.001" value="12">
+                                    <label class="form-label small" for="simular_qtd_muc">Quantidade de origem</label>
+                                    <input type="number" class="form-control form-control-sm" id="simular_qtd_muc" min="0" step="0.001" value="1">
                                 </div>
                                 <div class="col-md-3">
-                                    <label class="form-label small" for="simular_un_muc">Unidade</label>
-                                    <input type="text" class="form-control form-control-sm" id="simular_un_muc" value="CAIXA">
+                                    <label class="form-label small" for="simular_un_muc">Unidade de origem</label>
+                                    <input type="text" class="form-control form-control-sm" id="simular_un_muc" list="unidades_origem_simular_muc" value="">
+                                    <datalist id="unidades_origem_simular_muc"></datalist>
                                 </div>
                                 <div class="col-md-3">
                                     <button type="button" class="btn btn-sm btn-primary" id="btnSimularConversaoMuc">Simular conversão</button>
+                                </div>
+                                <div class="col-12 small text-muted">
+                                    Simular não grava a configuração nem movimenta o estoque. Use “Salvar” para persistir as alterações.
                                 </div>
                                 <div class="col-12">
                                     <div id="resultado_simular_muc" class="small"></div>
@@ -606,7 +922,7 @@
                     <div class="d-flex justify-content-between align-items-center mb-2">
                         <div>
                             <h6 class="mb-0">Apresentações Comerciais</h6>
-                            <small class="text-muted">Cadastre múltiplas embalagens (UN, CX, FD, PCT…). Com conversão ativa, a quantidade é em UN (ex.: 1 CAIXA = 12 UN).</small>
+                            <small class="text-muted">Informe quantidade e unidade do conteúdo por embalagem (ex.: 1 PCT = 350 G; 1 CAIXA = 12 UN).</small>
                         </div>
                         <button type="button" class="btn btn-sm btn-outline-primary" id="btnAdicionarApresentacao">
                             + Apresentação
@@ -618,7 +934,8 @@
                                 <tr>
                                     <th>Tipo</th>
                                     <th>Descrição</th>
-                                    <th>Qtd conv.</th>
+                                    <th>Qtd. conteúdo</th>
+                                    <th>Un. conteúdo</th>
                                     <th>GTIN</th>
                                     <th>Cód. forn.</th>
                                     <th>Fornecedor</th>
@@ -642,10 +959,25 @@
     function inicializarApresentacoes(produto) {
         const lista = inicializarLista(produto);
         salvarListaNoModal(lista);
-        renderTabelaApresentacoes(lista);
         inicializarCompraPorEmbalagem(produto);
         inicializarConversaoMuc(produto);
+        renderTabelaApresentacoes(lista);
+        marcarConfiguracaoMucPersistida();
         setTimeout(() => sincronizarFormacaoPrecoApresentacaoPrincipal('init'), 0);
+    }
+
+    function recarregarConfiguracaoPersistida(produtoId) {
+        const token = localStorage.getItem('token') || '';
+        const apiBase = typeof API_URL !== 'undefined' ? API_URL : '/api';
+        return $.ajax({
+            url: `${apiBase}/produtos/${produtoId}/conversao`,
+            method: 'GET',
+            headers: { Authorization: 'Bearer ' + token }
+        }).then((config) => {
+            inicializarConversaoMuc(config);
+            marcarConfiguracaoMucPersistida(config);
+            return config;
+        });
     }
 
     function obterApresentacaoCompraProduto(produto) {
@@ -669,11 +1001,15 @@
         inicializarApresentacoes,
         coletarApresentacoesDoFormulario,
         coletarRelacoesDoFormulario,
+        validarRelacoesFormulario,
+        focarCampoRelacao,
+        normalizarUnidadeRelacao,
         utilizaConversaoAtiva,
         obterApresentacaoPrincipal,
         obterApresentacaoCompraProduto,
         obterCompraPorEmbalagemAtiva,
         sincronizarFormacaoPrecoApresentacaoPrincipal,
-        legadoParaApresentacoes
+        legadoParaApresentacoes,
+        recarregarConfiguracaoPersistida
     };
 }(window));

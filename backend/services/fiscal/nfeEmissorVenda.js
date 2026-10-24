@@ -21,6 +21,10 @@ const { gerarDanfeNfeHtml } = require('./danfeNfe');
 const { parseRetornoAutorizacaoNfe } = require('./nfeRetornoAutorizacao');
 const { iniciarAuditoriaXmlNfe } = require('./nfeXmlAuditoria');
 const { traceNfe } = require('./nfeTrace');
+const {
+  carregarConfigEAplicarGateCertificadoNfe,
+  respostaBloqueioCertificadoNfe
+} = require('./nfeCertificadoUso');
 const configService = require('../configuracaoService');
 
 const MSG_CHAVE_PRIVADA =
@@ -338,22 +342,26 @@ async function emitirNfePorVendaId(vendaId, opcoes = {}) {
     };
   }
 
-  const config = await getFiscalConfig();
+  // P0.3 — empresa explícita da venda + gate criptográfico ANTES de numeração/assinatura/SOAP.
+  let config;
+  try {
+    const gated = await carregarConfigEAplicarGateCertificadoNfe({
+      venda,
+      empresaId: opcoes.empresaId != null ? opcoes.empresaId : opcoes.empresaIdContexto,
+      db: opcoes.db || db,
+      getFiscalConfigFn: opcoes.getFiscalConfig || getFiscalConfig,
+      exigirCertificadoAptoParaUsoFiscal: opcoes.exigirCertificadoAptoParaUsoFiscal,
+      certDeps: opcoes.certDeps || {},
+      validarUrls: true
+    });
+    config = gated.config;
+  } catch (certErr) {
+    return respostaBloqueioCertificadoNfe(certErr);
+  }
   config.serieNfe = Number(await getConfiguracao('fiscal_serie_nfe', String(config.serie || 1))) || 1;
 
   if (!config.nomeEmpresa || !config.cnpj || !config.ie) {
     return { success: false, status: 'configuracao_pendente', message: 'Configuração fiscal incompleta.' };
-  }
-  if (!config.certificadoPath || !fs.existsSync(config.certificadoPath)) {
-    return { success: false, status: 'configuracao_pendente', message: 'Certificado A1/PFX não encontrado.' };
-  }
-  if (config.certificadoSenha != null && typeof config.certificadoSenha !== 'string') {
-    return {
-      success: false,
-      status: 'configuracao_pendente',
-      message: 'Senha do certificado digital inválida.',
-      codigo: 'CERT_SENHA_INVALIDA'
-    };
   }
 
   const dadosNfe = opcoes.dadosNfe || {};

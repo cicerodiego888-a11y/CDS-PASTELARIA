@@ -69,10 +69,9 @@ describe('RC8.0.2 — Expedição via licença (não habilitar_faturamento na UI
     assert.match(core, /window\.expedicaoHabilitada\s*=/);
   });
 
-  it('Pedidos: Enviar para Expedição respeita expedicaoHabilitada', () => {
+  it('Pedidos: tela operacional não oferece Enviar para Expedição', () => {
     const ped = read('frontend/erp/js/pedidos.js');
-    assert.match(ped, /expedicaoHabilitada/);
-    assert.match(ped, /Módulo Expedição não contratado/);
+    assert.doesNotMatch(ped, /expedicaoHabilitada|enviar-faturamento/);
   });
 
   it('filtrarMenuPorPermissoes usa possuiRecurso', () => {

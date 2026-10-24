@@ -37,8 +37,11 @@ Característica do **produto**, compartilhada entre empresas:
 
 - `ficha_tecnica`: `id`, `produto_id` (único), `ativo`
 - **Sem `empresa_id`** — não é configuração por CNPJ
+- `produtos.utiliza_ficha_tecnica`: configuração nullable e não destrutiva; `1` exige ficha válida nos fluxos que a utilizam, `0` trata o produto como simples e preserva qualquer ficha antiga.
+- Compatibilidade: `NULL` mantém a semântica legada — ficha existente ou personalização habilitada indica uso; sem ficha e sem personalização, não exige consumo.
 
 Cabeçalho só em produto **comercial** e **ativo**.
+No cadastro ERP, “Utiliza ficha técnica” controla a área de componentes. Desligá-lo não apaga a ficha. Personalização exige ficha habilitada; produto explicitamente configurado para uso deve ter ficha ativa com ao menos um componente válido antes do Pedido/venda.
 
 ## 6. Componentes
 

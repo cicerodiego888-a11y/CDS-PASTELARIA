@@ -9,6 +9,9 @@
  */
 'use strict';
 
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-p04-central-entradas-03-xml-');
+
 const assert = require('assert');
 const zlib = require('zlib');
 const os = require('os');
@@ -20,8 +23,9 @@ if (!process.env.DB_DIR) {
   process.env.DB_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'ce03-xml-'));
 }
 const sqlite3 = require('sqlite3');
+const dbTeste = new sqlite3.Database(':memory:');
 require.cache[require.resolve('../../backend/database')] = {
-  exports: new sqlite3.Database(':memory:')
+  exports: dbTeste
 };
 const enfileiramentosXmlWait = [];
 require.cache[require.resolve('../../backend/motores/central-entradas/services/CentralXmlWaitScheduler')] = {
@@ -43,7 +47,11 @@ const MotorRecuperacaoXmlService = require(
 const CentralDfePersistenciaService = require(
   '../../backend/motores/central-entradas/services/CentralDfePersistenciaService'
 );
-const { consultarNotaPorChave } = require('../../backend/services/fiscal/distribuicaoDFe');
+const { consultarNotaPorChave: consultarNotaPorChaveRaw } = require('../../backend/services/fiscal/distribuicaoDFe');
+const { anexarAutorizacaoTesteSefaz } = require('../../backend/services/fiscal/autorizacaoTransmissaoSefaz');
+function consultarNotaPorChave(chave, deps) {
+  return consultarNotaPorChaveRaw(chave, anexarAutorizacaoTesteSefaz(deps));
+}
 const {
   CentralSefazOperationalGate
 } = require('../../backend/motores/central-entradas/services/CentralSefazOperationalGate');
@@ -67,6 +75,41 @@ const CHAVE = Object.freeze({
 
 let ok = 0;
 let falhas = 0;
+
+function executarSqlTeste(sql, params = []) {
+  return new Promise((resolve, reject) => {
+    dbTeste.run(sql, params, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+async function prepararControleNsuTeste() {
+  await executarSqlTeste(`
+    CREATE TABLE central_entradas_nsu (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      cnpj TEXT NOT NULL,
+      ambiente INTEGER NOT NULL DEFAULT 2,
+      ult_nsu TEXT NOT NULL DEFAULT '000000000000000',
+      max_nsu TEXT NOT NULL DEFAULT '000000000000000',
+      data_sincronizacao DATETIME,
+      cooldown_ate DATETIME,
+      ultimo_cstat TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(cnpj, ambiente)
+    )
+  `);
+
+  for (const cnpj of Object.values(CNPJ)) {
+    await executarSqlTeste(
+      `INSERT INTO central_entradas_nsu
+        (cnpj, ambiente, ult_nsu, max_nsu, data_sincronizacao, cooldown_ate, ultimo_cstat)
+       VALUES (?, 1, '000000000000010', '000000000000011', NULL, NULL, NULL)`,
+      [cnpj]
+    );
+  }
+}
 
 function test(nome, fn) {
   return Promise.resolve()
@@ -634,8 +677,32 @@ async function run() {
     assert.ok(enfileiramentosXmlWait.some((e) => e.documentoId === 11 && e.motivo === 'pos_ciencia_aguardar_janela'));
   });
 
+  await test('NSU indisponível bloqueia a consulta simulada (fail-closed)', async () => {
+    await executarSqlTeste('DROP TABLE central_entradas_nsu');
+    const store = criarStore([docResumo(22, EMP.FILIAL2, { status: S.XML_INDISPONIVEL })]);
+    const transporte = criarTransporte({
+      2: retDist({ cStat: '138', xMotivo: 'Documento localizado', docXml: procNFeXml(2) })
+    });
+    const { motor } = criarMotor(store, transporte);
+    let rel;
+    try {
+      rel = await motor.executarCiclo({ forcar: true });
+    } finally {
+      motor.parar({ silencioso: true });
+    }
+
+    assert.strictEqual(rel.gateBloqueado, true);
+    assert.strictEqual(transporte.chamadas.length, 0, 'nenhuma consulta é enviada sem controle NSU');
+    assert.strictEqual(store.docs.get(22).status, S.XML_INDISPONIVEL);
+  });
+
   console.log(`\n${ok} ok, ${falhas} falha(s)\n`);
   if (falhas) process.exit(1);
 }
 
-run();
+prepararControleNsuTeste()
+  .then(run)
+  .catch((error) => {
+    console.error('Falha ao preparar o banco isolado de controle NSU:', error);
+    process.exitCode = 1;
+  });

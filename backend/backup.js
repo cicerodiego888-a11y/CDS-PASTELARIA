@@ -3,11 +3,17 @@ const path = require('path');
 const { google } = require('googleapis');
 const cron = require('node-cron');
 const db = require('./database');
+const {
+  exigirCaminhosBackup,
+  resolverCaminhoBancoOperacional
+} = require('./lib/sqliteOfficialGuard');
 
-const defaultDbDir = path.resolve(__dirname, '..', 'dados');
-const DB_PATH = process.env.DB_DIR && process.env.DB_DIR.trim()
-  ? path.join(process.env.DB_DIR, 'mercadao.db')
-  : path.join(defaultDbDir, 'mercadao.db');
+function resolverDbPathBackup() {
+  return resolverCaminhoBancoOperacional({
+    dbPathPreferido: (db && db.dbPath) || null
+  });
+}
+
 // Caminho do arquivo de configurações de backup
 const CONFIG_PATH = path.join(__dirname, 'backup-config.json');
 
@@ -138,6 +144,9 @@ function getOAuth2Client(googleConfig) {
 
 // Faz upload do arquivo de backup para o Google Drive
 async function uploadBackupToDrive(googleConfig) {
+  const dbPath = resolverDbPathBackup();
+  // Em teste: origem oficial/legado bloqueada antes de abrir o stream.
+  exigirCaminhosBackup({ origem: dbPath, destino: path.join(path.dirname(dbPath), 'backups', 'probe-upload.db') });
   const oAuth2Client = getOAuth2Client(googleConfig);
   const drive = google.drive({ version: 'v3', auth: oAuth2Client });
   const fileMetadata = {
@@ -145,7 +154,7 @@ async function uploadBackupToDrive(googleConfig) {
   };
   const media = {
     mimeType: 'application/x-sqlite3',
-    body: fs.createReadStream(DB_PATH)
+    body: fs.createReadStream(dbPath)
   };
   try {
     const file = await drive.files.create({

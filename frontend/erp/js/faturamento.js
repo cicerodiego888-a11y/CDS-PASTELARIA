@@ -10,6 +10,12 @@ async function loadFaturamento() {
     'Content-Type': 'application/json',
     Authorization: 'Bearer ' + token
   };
+  function novaChaveIdempotencia() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+      return window.crypto.randomUUID();
+    }
+    throw new Error('Este navegador não oferece suporte a chaves de idempotência.');
+  }
 
   const Nom = (typeof CdsNomenclatura !== 'undefined' && CdsNomenclatura) || null;
   const C = (Nom && Nom.COMERCIAL) || {};
@@ -211,6 +217,15 @@ async function loadFaturamento() {
                 <label class="form-label">Forma de pagamento</label>
                 <select class="form-select" id="fatForma"></select>
               </div>
+              <div class="col-md-3 d-none" id="fatFormaOutrosWrap">
+                <label class="form-label">Pagamento separado de frete/acréscimo</label>
+                <select class="form-select" id="fatFormaOutros">
+                  <option value="" selected>Selecione uma forma</option>
+                  <option value="dinheiro">Dinheiro</option>
+                  <option value="pix">PIX</option>
+                  <option value="outro">Outro</option>
+                </select>
+              </div>
               <div class="col-md-3"><label class="form-label">Valor total</label>
                 <input type="text" class="form-control" id="fatValorTotal" readonly></div>
               <div class="col-12" id="fatPagamentoExtras"></div>
@@ -363,17 +378,25 @@ async function loadFaturamento() {
   }
 
   function celulaDocumento(row) {
+    const nfceStatus = String(row.nfce_status || '').toLowerCase();
     const texto = row.documento || 'Sem Documento Fiscal';
     const tipo = String(row.status_visual || '').toLowerCase();
     let cls = 'text-muted';
     if (tipo === 'com_nfe') cls = 'text-success fw-semibold';
     else if (tipo === 'pendente') cls = 'text-warning fw-semibold';
     else if (tipo === 'cancelada') cls = 'text-danger fw-semibold';
-    return `<span class="${cls}">${escapeHtml(texto)}</span>`;
+    const documento = `<span class="${cls}">${escapeHtml(texto)}</span>`;
+    if (!['cancelamento_em_andamento', 'cancelamento_desconhecido'].includes(nfceStatus)) {
+      return documento;
+    }
+    const numero = row.nfce_numero ? ` #${escapeHtml(row.nfce_numero)}` : '';
+    return `${documento}<div class="small text-warning fw-semibold" title="Não reenvie; aguarde reconciliação fiscal.">NFC-e${numero} · aguardando reconciliação</div>`;
   }
 
   function podeCancelar(row) {
-    return String(row.status || '').toLowerCase() !== 'cancelada';
+    const nfceStatus = String(row.nfce_status || '').toLowerCase();
+    const cancelamentoPendente = ['cancelamento_em_andamento', 'cancelamento_desconhecido'].includes(nfceStatus);
+    return String(row.status || '').toLowerCase() !== 'cancelada' && !cancelamentoPendente;
   }
 
   function temNfeAutorizada(row) {
@@ -510,7 +533,44 @@ async function loadFaturamento() {
     const frete = Number($('#fatFrete').val() || 0);
     const acrescimo = Number($('#fatAcrescimo').val() || 0);
     const desconto = Number($('#fatDesconto').val() || 0);
-    return Number((Number(pedidoSelecionado.total || 0) + frete + acrescimo - desconto).toFixed(2));
+    const itens = Array.isArray(pedidoSelecionado.itens) ? pedidoSelecionado.itens : [];
+    const subtotalProdutos = itens.length
+      ? itens.reduce((soma, item) => {
+        if (item.subtotal != null && item.subtotal !== '') {
+          return soma + Number(Number(item.subtotal).toFixed(2));
+        }
+        const quantidade = Number(item.quantidade || 0);
+        const preco = Number(item.preco_unitario || 0);
+        const descontoItem = Number(item.desconto_percentual || 0);
+        return soma + Number((quantidade * preco * (1 - descontoItem / 100)).toFixed(2));
+      }, 0)
+      : Number(pedidoSelecionado.total || 0)
+        + Number(pedidoSelecionado.desconto || 0)
+        - Number(pedidoSelecionado.frete || 0);
+    return Number((subtotalProdutos - desconto + frete + acrescimo).toFixed(2));
+  }
+
+  function atualizarPagamentoOutrosExpedir() {
+    const forma = String($('#fatForma').val() || '').toLowerCase();
+    const valorOutros = Number((
+      Number($('#fatFrete').val() || 0) + Number($('#fatAcrescimo').val() || 0)
+    ).toFixed(2));
+    const temExtras = valorOutros > 0;
+    const usaTef = forma === 'cartao_debito' || forma === 'cartao_credito';
+    $('#fatFormaOutrosWrap').toggleClass('d-none', !(temExtras && usaTef));
+    $('#fatFormaOutrosWrap label').text(
+      `Pagamento separado de frete/acréscimo (${fmtMoney(valorOutros)})`
+    );
+  }
+
+  function totalPagamentoPrincipalExpedir() {
+    const forma = String($('#fatForma').val() || '').toLowerCase();
+    const total = totalModalExpedir();
+    if (forma !== 'cartao_debito' && forma !== 'cartao_credito') return total;
+    const outros = Number((
+      Number($('#fatFrete').val() || 0) + Number($('#fatAcrescimo').val() || 0)
+    ).toFixed(2));
+    return Number((total - outros).toFixed(2));
   }
 
   function initFormasPagamentoExpedir() {
@@ -520,15 +580,18 @@ async function loadFaturamento() {
     if (!$sel.data('cds-formas-ready')) {
       $sel.html(CdsFormasPagamento.optionsHtml('dinheiro'));
       $('#fatPagamentoExtras').html(CdsFormasPagamento.htmlPaineisExtras('fat'));
-      CdsFormasPagamento.bind('fat', totalModalExpedir);
+      CdsFormasPagamento.bind('fat', totalPagamentoPrincipalExpedir);
       $sel.data('cds-formas-ready', '1');
+      $sel.off('change.cdsOutros').on('change.cdsOutros', atualizarPagamentoOutrosExpedir);
       $('#fatFrete, #fatAcrescimo, #fatDesconto').off('input.cdsPag').on('input.cdsPag', () => {
-        CdsFormasPagamento.atualizarResumo(null, 'fat', totalModalExpedir());
+        CdsFormasPagamento.atualizarResumo(null, 'fat', totalPagamentoPrincipalExpedir());
+        atualizarPagamentoOutrosExpedir();
       });
     } else {
       $sel.val('dinheiro');
-      CdsFormasPagamento.atualizarResumo(null, 'fat', totalModalExpedir());
+      CdsFormasPagamento.atualizarResumo(null, 'fat', totalPagamentoPrincipalExpedir());
     }
+    atualizarPagamentoOutrosExpedir();
   }
 
   function badgeStatusVendaUi(status) {
@@ -1007,6 +1070,9 @@ async function loadFaturamento() {
 
       const btn = document.getElementById('btnFatConfirmarCancelamento');
       btn.disabled = true;
+      btn.dataset.estadoCancelamento = 'processando';
+      btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processando cancelamento...';
+      let resultadoDesconhecido = false;
       try {
         if (temNfe && nfeHabilitado) {
           const nfeResp = await fetch(`${API_URL}/nfe/notas/${row.nfe_id}/cancelar`, {
@@ -1023,18 +1089,28 @@ async function loadFaturamento() {
         const payload = typeof montarPayloadCancelamentoVenda === 'function'
           ? montarPayloadCancelamentoVenda(motivo)
           : { motivo };
-        const resp = await fetch(`${API_URL}/vendas/cancelar/${vendaId}`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(payload)
-        });
+        let resp;
+        try {
+          resp = await fetch(`${API_URL}/vendas/cancelar/${vendaId}`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(payload)
+          });
+        } catch (erroTransporte) {
+          erroTransporte.resultUnknown = true;
+          throw erroTransporte;
+        }
         const dados = await resp.json().catch(() => ({}));
         if (!resp.ok || dados.sucesso === false) {
           const msg = dados.mensagem || dados.error
             || (typeof extrairMensagemErroResposta === 'function'
               ? extrairMensagemErroResposta(dados, resp.status)
               : 'Falha no cancelamento comercial.');
-          throw new Error(msg);
+          const erro = new Error(msg);
+          erro.resultUnknown = dados.resultUnknown === true
+            || dados.code === 'CANCELAMENTO_EM_ANDAMENTO'
+            || dados.code === 'CANCELAMENTO_ESTADO_PERSISTENCIA_FALHOU';
+          throw erro;
         }
 
         modal.hide();
@@ -1046,9 +1122,23 @@ async function loadFaturamento() {
         );
         await carregarVendasFaturadas();
       } catch (err) {
-        alertar(err.message, 'danger');
+        resultadoDesconhecido = err.resultUnknown === true;
+        alertar(
+          resultadoDesconhecido
+            ? `${err.message} Não tente reenviar; aguarde a reconciliação fiscal.`
+            : err.message,
+          resultadoDesconhecido ? 'warning' : 'danger'
+        );
       } finally {
-        btn.disabled = false;
+        if (resultadoDesconhecido) {
+          btn.disabled = true;
+          btn.dataset.estadoCancelamento = 'resultado_desconhecido';
+          btn.innerHTML = 'Aguardando reconciliação fiscal';
+        } else {
+          btn.disabled = false;
+          btn.dataset.estadoCancelamento = '';
+          btn.innerHTML = '<i class="fas fa-ban"></i> Confirmar Cancelamento';
+        }
       }
     });
   }
@@ -1184,14 +1274,44 @@ async function loadFaturamento() {
     const acrescimo = Number($('#fatAcrescimo').val() || 0);
     const desconto = Number($('#fatDesconto').val() || 0);
     const total = totalModalExpedir();
+    const valorOutros = Number((frete + acrescimo).toFixed(2));
+    const totalProdutos = Number((total - valorOutros).toFixed(2));
     const pagPayload = (typeof CdsFormasPagamento !== 'undefined')
-      ? CdsFormasPagamento.montarPayloadPagamento('fat', total)
+      ? CdsFormasPagamento.montarPayloadPagamento('fat', totalProdutos)
       : {
         forma_pagamento: $('#fatForma').val() || 'dinheiro',
-        pagamentos: [{ forma_pagamento: $('#fatForma').val() || 'dinheiro', valor: total }],
+        pagamentos: [{ forma_pagamento: $('#fatForma').val() || 'dinheiro', valor: totalProdutos }],
         valor_recebido: total,
         parcelas: 1
       };
+    const formaPrincipal = String(pagPayload.forma_pagamento || 'dinheiro').toLowerCase();
+    const pagamentoOutrosSeparado =
+      valorOutros > 0
+      && ['cartao_debito', 'cartao_credito'].includes(formaPrincipal);
+    if (pagamentoOutrosSeparado) {
+      const formaOutros = $('#fatFormaOutros').val();
+      if (!formaOutros) {
+        alertar('Selecione uma forma sem TEF para pagar frete/acréscimo separadamente.', 'warning');
+        return;
+      }
+      const pagamentoProduto = (pagPayload.pagamentos || [])
+        .filter((pagamento) => Number(pagamento.valor || 0) > 0);
+      pagamentoProduto.push({
+        forma_pagamento: formaOutros,
+        valor: valorOutros
+      });
+      pagPayload.pagamentos = pagamentoProduto;
+      pagPayload.forma_pagamento = pagamentoProduto.length > 1
+        ? 'misto'
+        : pagamentoProduto[0]?.forma_pagamento || 'dinheiro';
+      pagPayload.valor_recebido = total;
+    } else {
+      pagPayload.pagamentos = [{
+        forma_pagamento: formaPrincipal,
+        valor: total
+      }];
+      pagPayload.valor_recebido = total;
+    }
 
     // Parcelado / boleto / crediário exigem cliente no núcleo
     if (typeof CdsFormasPagamento !== 'undefined'
@@ -1303,6 +1423,7 @@ async function loadFaturamento() {
   });
 
   $('#btnSalvarNovoPedidoFat').off('click').on('click', async function () {
+    const botao = $(this);
     const produtoId = Number($('#fatNovoProdutoId').val());
     const qtd = Number($('#fatNovoQtd').val());
     const preco = Number($('#fatNovoPreco').val());
@@ -1311,22 +1432,31 @@ async function loadFaturamento() {
       return;
     }
     const subtotal = Number((qtd * preco).toFixed(2));
+    const payload = {
+      cliente_id: $('#fatNovoClienteId').val() ? Number($('#fatNovoClienteId').val()) : null,
+      representante_nome: $('#fatNovoRepresentante').val() || null,
+      itens: [{ produto_id: produtoId, quantidade: qtd, preco_unitario: preco, subtotal }],
+      total: subtotal
+    };
     try {
+      const assinatura = JSON.stringify(payload);
+      let chaveIdempotencia = botao.data('chaveIdempotencia');
+      if (!chaveIdempotencia || botao.data('assinaturaPedido') !== assinatura) {
+        chaveIdempotencia = novaChaveIdempotencia();
+        botao.data('chaveIdempotencia', chaveIdempotencia);
+        botao.data('assinaturaPedido', assinatura);
+      }
       const resp = await fetch(`${API_URL}/faturamento/pedidos`, {
         method: 'POST',
-        headers,
-        body: JSON.stringify({
-          cliente_id: $('#fatNovoClienteId').val() ? Number($('#fatNovoClienteId').val()) : null,
-          representante_nome: $('#fatNovoRepresentante').val() || null,
-          itens: [{ produto_id: produtoId, quantidade: qtd, preco_unitario: preco, subtotal }],
-          total: subtotal
-        })
+        headers: { ...headers, 'Idempotency-Key': chaveIdempotencia },
+        body: JSON.stringify(payload)
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data.error || 'Falha ao criar pedido.');
       bootstrap.Modal.getInstance(document.getElementById('modalNovoPedidoFat'))?.hide();
       alertar(`Pedido ${data.pedido?.codigo || ''} na fila.`, 'success');
       await carregarFila();
+      botao.removeData('chaveIdempotencia assinaturaPedido');
     } catch (err) {
       alertar(err.message, 'danger');
     }

@@ -5,12 +5,18 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const { getFiscalConfig, setConfiguracao, dtoPublicoFiscalParaUi, filtrarPayloadConfigFiscalUi, completarUrlsGlobaisVazias } = require('../services/fiscal/configService');
-const { carregarCertificadoPfx } = require('../services/fiscal/certificateService');
+const {
+  substituirCertificadoEmpresa,
+  testarCertificadoEmpresa,
+  pastaTemporaria,
+  rejeitarCaminhoCliente
+} = require('../services/fiscal/CertificadoEmpresaService');
+const { sanitizarTextoCertificado } = require('../services/fiscal/ValidarCertificadoA1Service');
+const { CODIGOS_CERTIFICADO_A1, MENSAGENS_CERTIFICADO_A1 } = require('../services/fiscal/certificadoEstados');
 const { emitirPorVendaId, obterDanfeHtmlAtualizado } = require('../services/fiscal/emissor');
 const cancelarNfce = require('../services/fiscal/cancelarNfce');
 const { gravarAuditoria } = require('../services/auditoria');
 const { validarMotivoTexto } = require('../services/validacao/validarMotivoTexto');
-const { getFiscalSubDir } = require('../services/fiscal/paths');
 const { middlewareResolverEmpresaVenda } = require('../services/vendas/VendaEmpresaContextoService');
 const {
   statusDeErroFiscalEmpresa,
@@ -40,8 +46,40 @@ function carregarPerfilUsuario(req, res, next) {
   );
 }
 
-const pastaCertificados = getFiscalSubDir('certificados');
+const pastaTmpCertificados = pastaTemporaria();
 const anexarEmpresaFiscal = middlewareResolverEmpresaVenda({ db, exigirAutorizacaoUsuario: false });
+
+function exigirAdminFiscal(req, res, next) {
+  carregarPerfilUsuario(req, res, () => {
+    const perfil = String((req.user && req.user.perfil) || '').toUpperCase();
+    const role = String((req.user && req.user.role) || '');
+    if (role === 'admin' || perfil === 'ADMIN' || perfil === 'SUPER_ADMIN') {
+      return next();
+    }
+    return res.status(403).json({
+      error: 'Apenas administradores podem gerenciar o certificado digital.',
+      code: 'ADMIN_OBRIGATORIO'
+    });
+  });
+}
+
+function responderErroCertificado(res, error) {
+  const status = Number(error && error.statusCode) || Number(error && error.status) || 500;
+  const mensagem = sanitizarTextoCertificado(
+    (error && error.message) || MENSAGENS_CERTIFICADO_A1.FALHA_INTERNA
+  );
+  const body = {
+    error: mensagem,
+    code: (error && error.code) || CODIGOS_CERTIFICADO_A1.ERRO,
+    estado: (error && error.estado) || null,
+    diagnostico_id: (error && error.diagnosticoId) || null,
+    sefaz_chamado: false
+  };
+  if (error && error.validacao) {
+    body.validacao = error.validacao;
+  }
+  return res.status(status).json(body);
+}
 
 function agoraLocalBrasil() {
   const agora = new Date();
@@ -59,7 +97,7 @@ function agoraLocalBrasil() {
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, pastaCertificados);
+    cb(null, pastaTmpCertificados);
   },
   filename: (req, file, cb) => {
     cb(null, `upload-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.pfx`);
@@ -79,92 +117,85 @@ const upload = multer({
   }
 });
 
-router.post('/certificado/upload', upload.single('certificado'), async (req, res) => {
+router.post('/certificado/upload', exigirAdminFiscal, upload.single('certificado'), async (req, res) => {
+  const arquivoTmp = req.file && req.file.path ? path.resolve(req.file.path) : '';
   try {
     if (!req.file) {
-      return res.status(400).json({ error: 'Nenhum certificado enviado.' });
-    }
-
-    const fiscalEmpresa = require('../services/fiscal/empresasConfiguracaoFiscal');
-    const empresaId = fiscalEmpresa.normalizarEmpresaId(
-      req.body && (req.body.empresa_id != null ? req.body.empresa_id : req.body.empresaId)
-    );
-    const arquivoTmp = path.resolve(req.file.path);
-
-    if (empresaId) {
-      const destino = path.resolve(pastaCertificados, `certificado-empresa-${empresaId}.pfx`);
-      try {
-        if (fs.existsSync(destino)) fs.unlinkSync(destino);
-        fs.renameSync(arquivoTmp, destino);
-      } catch (moveErr) {
-        fs.copyFileSync(arquivoTmp, destino);
-        try { fs.unlinkSync(arquivoTmp); } catch (_e) { /* ignore */ }
-      }
-      const senha = req.body && (req.body.certificado_senha || req.body.senha);
-      const patch = { certificado_path: destino };
-      if (senha != null && String(senha).trim() !== '') {
-        patch.certificado_senha = String(senha);
-      }
-      await fiscalEmpresa.salvarConfiguracaoFiscalEmpresa(empresaId, patch, { db });
-      const dto = await fiscalEmpresa.obterConfiguracaoFiscalEmpresa(empresaId, { db });
-
-      gravarAuditoria({
-        usuario_id: req.user?.id || null,
-        usuario_nome: req.user?.username || req.user?.nome || null,
-        modulo: 'fiscal',
-        acao: 'upload_certificado_empresa',
-        referencia_tipo: 'empresa',
-        referencia_id: empresaId,
-        detalhes: { empresa_id: empresaId, certificado_nome: dto.certificado_nome, ip: req.ip || null },
-        ip_requisicao: req.ip || null
-      }).catch((auditErr) => console.error('Erro ao gravar auditoria de certificado:', auditErr));
-
-      return res.json({
-        success: true,
-        message: 'Certificado enviado com sucesso.',
-        empresa_id: empresaId,
-        certificado_nome: dto.certificado_nome,
-        certificado_configurado: dto.certificado_configurado
+      return res.status(400).json({
+        error: 'Nenhum certificado enviado.',
+        code: CODIGOS_CERTIFICADO_A1.ARQUIVO_OBRIGATORIO,
+        sefaz_chamado: false
       });
     }
 
-    const caminhoCompleto = path.resolve(pastaCertificados, 'certificado.pfx');
-    try {
-      if (fs.existsSync(caminhoCompleto) && caminhoCompleto !== arquivoTmp) {
-        fs.unlinkSync(caminhoCompleto);
-      }
-      fs.renameSync(arquivoTmp, caminhoCompleto);
-    } catch (moveErr) {
-      fs.copyFileSync(arquivoTmp, caminhoCompleto);
-      try { fs.unlinkSync(arquivoTmp); } catch (_e) { /* ignore */ }
-    }
-
-    await setConfiguracao(
-      'fiscal_certificado_path',
-      caminhoCompleto,
-      'string',
-      'Caminho interno do certificado A1'
-    );
+    rejeitarCaminhoCliente(req.body);
+    const senha = req.body && (req.body.certificado_senha || req.body.senha);
+    const resultado = await substituirCertificadoEmpresa({
+      empresaId: req.body && (req.body.empresa_id != null ? req.body.empresa_id : req.body.empresaId),
+      arquivoTmp,
+      senha,
+      usuario: req.user,
+      deps: { db }
+    });
 
     gravarAuditoria({
       usuario_id: req.user?.id || null,
       usuario_nome: req.user?.username || req.user?.nome || null,
       modulo: 'fiscal',
-      acao: 'upload_certificado',
-      referencia_tipo: 'certificado',
-      referencia_id: null,
-      detalhes: { path: caminhoCompleto, ip: req.ip || null },
+      acao: 'upload_certificado_empresa',
+      referencia_tipo: 'empresa',
+      referencia_id: resultado.empresa_id,
+      detalhes: {
+        empresa_id: resultado.empresa_id,
+        certificado_nome: resultado.certificado_nome,
+        estado: resultado.estado,
+        ip: req.ip || null
+      },
       ip_requisicao: req.ip || null
     }).catch((auditErr) => console.error('Erro ao gravar auditoria de certificado:', auditErr));
 
-    res.json({
+    return res.json({
       success: true,
-      message: 'Certificado enviado com sucesso.',
-      path: caminhoCompleto
+      message: resultado.mensagem,
+      empresa_id: resultado.empresa_id,
+      certificado_nome: resultado.certificado_nome,
+      certificado_configurado: resultado.certificado_configurado,
+      certificado_validado: resultado.certificado_validado,
+      certificado_status: resultado.certificado_status,
+      estado: resultado.estado,
+      codigo: resultado.codigo,
+      titular: resultado.titular,
+      validade_ate: resultado.validade_ate,
+      diagnostico_id: resultado.diagnostico_id,
+      sefaz_chamado: false
     });
   } catch (error) {
-    const status = Number(error && error.statusCode) || Number(error && error.status) || 500;
-    res.status(status).json({ error: error.message, code: error.code });
+    try { if (arquivoTmp && fs.existsSync(arquivoTmp)) fs.unlinkSync(arquivoTmp); } catch (_e) { /* ignore */ }
+    return responderErroCertificado(res, error);
+  }
+});
+
+router.post('/certificado/testar', exigirAdminFiscal, upload.single('certificado'), async (req, res) => {
+  const arquivoTmp = req.file && req.file.path ? path.resolve(req.file.path) : '';
+  try {
+    rejeitarCaminhoCliente(req.body);
+    const senha = req.body && (req.body.certificado_senha || req.body.senha);
+    const resultado = await testarCertificadoEmpresa({
+      empresaId: req.body && (req.body.empresa_id != null ? req.body.empresa_id : req.body.empresaId),
+      arquivoTmp: arquivoTmp || '',
+      senha,
+      usuario: req.user,
+      body: req.body,
+      deps: { db }
+    });
+    const status = resultado.ok ? 200 : 400;
+    return res.status(status).json({
+      success: !!resultado.ok,
+      ...resultado
+    });
+  } catch (error) {
+    try { if (arquivoTmp && fs.existsSync(arquivoTmp)) fs.unlinkSync(arquivoTmp); } catch (_e) { /* ignore */ }
+    return responderErroCertificado(res, error);
   }
 });
 
@@ -251,16 +282,31 @@ router.put('/config', carregarPerfilUsuario, async (req, res) => {
   }
 });
 
-router.post('/config/certificado/testar', async (req, res) => {
+/**
+ * Rota legada — NÃO aceita caminho arbitrário do cliente.
+ * Exige empresa_id e resolve o PFX apenas da configuração persistida da empresa.
+ */
+router.post('/config/certificado/testar', exigirAdminFiscal, async (req, res) => {
   try {
-    const { certificadoPath, senha } = req.body;
-    const certificado = carregarCertificadoPfx(certificadoPath, senha);
-    res.json({
-      success: true,
-      certBase64Length: certificado.certBase64.length
+    rejeitarCaminhoCliente(req.body || {});
+    const empresaId = req.body && (req.body.empresa_id != null ? req.body.empresa_id : req.body.empresaId);
+    const senha = req.body && (req.body.certificado_senha || req.body.senha);
+    const resultado = await testarCertificadoEmpresa({
+      empresaId,
+      arquivoTmp: '',
+      senha: senha || '',
+      usuario: req.user,
+      body: req.body,
+      deps: { db }
+    });
+    const status = resultado.ok ? 200 : 400;
+    return res.status(status).json({
+      success: !!resultado.ok,
+      ...resultado,
+      sefaz_chamado: false
     });
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    return responderErroCertificado(res, error);
   }
 });
 
@@ -387,7 +433,13 @@ router.post('/notas/:id/cancelar', anexarEmpresaFiscal, async (req, res) => {
         SELECT id, status
         FROM nfce_notas
         WHERE venda_id = ?
-          AND status IN ('autorizada', 'cancelamento_rejeitado')
+          AND status IN (
+            'autorizada',
+            'cancelamento_rejeitado',
+            'cancelamento_falha_pre_envio',
+            'cancelamento_em_andamento',
+            'cancelamento_desconhecido'
+          )
           AND (
             (chave_acesso IS NOT NULL AND chave_acesso <> '')
             OR (xml_retorno IS NOT NULL AND xml_retorno LIKE '%<cStat>100</cStat>%')
@@ -416,80 +468,50 @@ router.post('/notas/:id/cancelar', anexarEmpresaFiscal, async (req, res) => {
             : JSON.stringify(cancelamento.sefaz);
 
           const dadosCancelamento = extrairCancelamentoSefaz(retornoTexto);
-
-          const canceladoComSucesso =
-            String(dadosCancelamento.cStatEvento) === '135' ||
-            String(dadosCancelamento.cStatEvento) === '136' ||
-            String(dadosCancelamento.cStatEvento) === '155';
-
-          const novoStatus = canceladoComSucesso ? 'cancelada' : 'autorizada';
-
-          const resumoCancelamento = `
-STATUS CANCELAMENTO: ${novoStatus}
-cStatEvento: ${dadosCancelamento.cStatEvento || ''}
-xMotivoEvento: ${dadosCancelamento.xMotivoEvento || ''}
-protocoloCancelamento: ${dadosCancelamento.protocoloCancelamento || ''}
-dataCancelamento: ${dadosCancelamento.dataCancelamento || ''}
-justificativa: ${justificativa.trim()}
-`;
-
-          db.run(`
-            UPDATE nfce_notas
-            SET status = ?,
-                xml_retorno = COALESCE(xml_retorno, '') || char(10) || ? || char(10) || ?,
-                updated_at = datetime('now', 'localtime')
-            WHERE id = ?
-          `, [novoStatus, resumoCancelamento, retornoTexto, notaIdAutorizada], (updErr) => {
-            if (updErr) {
-              return res.status(500).json({ error: updErr.message });
-            }
-
-            if (!canceladoComSucesso) {
-              const motivoRejeicao = dadosCancelamento.xMotivoEvento || 'Cancelamento rejeitado pela SEFAZ.';
-              return res.status(400).json({
-                success: false,
-                error: motivoRejeicao,
-                message: motivoRejeicao,
-                status: novoStatus,
-                chaveAcesso: cancelamento.chaveAcesso,
-                retorno: cancelamento.sefaz,
-                dadosCancelamento
-              });
-            }
-
-            res.json({
-              success: true,
-              message: 'NFC-e cancelada com sucesso.',
-              status: novoStatus,
-              notaId: notaIdAutorizada,
-              chaveAcesso: cancelamento.chaveAcesso,
-              protocoloCancelamento: dadosCancelamento.protocoloCancelamento,
-              dataCancelamento: dadosCancelamento.dataCancelamento,
-              retorno: cancelamento.sefaz,
-              dadosCancelamento
-            });
-
-            gravarAuditoria({
-              usuario_id: req.user?.id || null,
-              usuario_nome: req.user?.username || req.user?.nome || null,
-              modulo: 'fiscal',
-              acao: 'cancelar_nfce',
-              referencia_tipo: 'nfce',
-              referencia_id: notaIdAutorizada,
-              detalhes: {
-                venda_id: nota.venda_id,
-                justificativa: justificativa.trim(),
-                protocolo: dadosCancelamento.protocoloCancelamento || null,
-                ip: req.ip || null
-              },
-              ip_requisicao: req.ip || null
-            }).catch((auditErr) => console.error('Erro ao gravar auditoria de cancelamento NFC-e:', auditErr));
+          res.json({
+            success: true,
+            message: 'NFC-e cancelada com confirmação fiscal.',
+            status: 'cancelada',
+            notaId: notaIdAutorizada,
+            chaveAcesso: cancelamento.chaveAcesso,
+            protocoloCancelamento: cancelamento.protocoloCancelamento
+              || dadosCancelamento.protocoloCancelamento,
+            dataCancelamento: dadosCancelamento.dataCancelamento,
+            correlationId: cancelamento.correlationId,
+            retorno: cancelamento.sefaz,
+            dadosCancelamento
           });
+
+          gravarAuditoria({
+            usuario_id: req.user?.id || null,
+            usuario_nome: req.user?.username || req.user?.nome || null,
+            modulo: 'fiscal',
+            acao: 'cancelar_nfce',
+            referencia_tipo: 'nfce',
+            referencia_id: notaIdAutorizada,
+            detalhes: {
+              venda_id: nota.venda_id,
+              justificativa: justificativa.trim(),
+              protocolo: cancelamento.protocoloCancelamento
+                || dadosCancelamento.protocoloCancelamento || null,
+              correlation_id: cancelamento.correlationId,
+              ip: req.ip || null
+            },
+            ip_requisicao: req.ip || null
+          }).catch((auditErr) => console.error('Erro ao gravar auditoria de cancelamento NFC-e:', auditErr));
         } catch (cancelErr) {
-          const status = statusDeErroFiscalEmpresa(cancelErr);
+          const status = cancelErr.statusCode || statusDeErroFiscalEmpresa(cancelErr);
           return res.status(status).json({
+            success: false,
             error: status === 404 ? 'NFC-e não encontrada.' : mensagemErroFiscalSanitizada(cancelErr),
-            code: cancelErr && cancelErr.code
+            code: cancelErr && cancelErr.code,
+            resultUnknown: cancelErr.resultUnknown === true,
+            status: cancelErr.resultUnknown
+              ? 'cancelamento_desconhecido'
+              : (cancelErr.code === 'CANCELAMENTO_EM_ANDAMENTO'
+                ? 'cancelamento_em_andamento'
+                : undefined),
+            correlationId: cancelErr.correlationId
           });
         }
       });

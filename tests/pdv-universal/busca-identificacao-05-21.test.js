@@ -183,7 +183,7 @@ function test13CheckoutIntact() {
 function test14PdvLegadoSemRegressao() {
   const server = src('backend/server.js');
   assert.ok(server.includes("app.get(['/pdv', '/pdv/'], verificarToken"));
-  assert.ok(server.includes("app.get(['/pdv-universal', '/pdv-universal/'], verificarToken"));
+  assert.ok(server.includes('caminhoDoPdvUniversalBloqueado'));
   assert.ok(src('frontend/pdv/js/pdv.js').includes('/produtos/identificar'));
 }
 

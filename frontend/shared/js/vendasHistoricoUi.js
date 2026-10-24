@@ -118,6 +118,11 @@ function montarHtmlAcoesHistoricoVenda(venda, opcoes = {}) {
     const dropdownId = `acoesVenda${id}`;
     const cancelada = String(venda.status || '').toLowerCase() === 'cancelada'
         || Number(venda.cancelada || 0) === 1;
+    const nfceStatus = String(venda.nfce_status || '').toLowerCase();
+    const cancelamentoNfceBloqueado = [
+        'cancelamento_em_andamento',
+        'cancelamento_desconhecido'
+    ].includes(nfceStatus);
 
     const temFiscal = vendaHistoricoTemCupomFiscal(venda);
     const temNaoFiscal = vendaHistoricoTemCupomNaoFiscal(venda);
@@ -159,8 +164,10 @@ function montarHtmlAcoesHistoricoVenda(venda, opcoes = {}) {
             </button>
         </li>` : ''}
         <li>
-            <button type="button" class="dropdown-item py-2 text-danger" onclick="cancelarVendaNaoFiscal(${id})">
-                <i class="fas fa-times fa-fw me-2"></i>Cancelar venda
+            <button type="button" class="dropdown-item py-2 ${cancelamentoNfceBloqueado ? 'disabled' : 'text-danger'}"
+                ${cancelamentoNfceBloqueado ? 'disabled aria-disabled="true" title="Aguardando reconciliação fiscal; não tente cancelar novamente."' : `onclick="cancelarVendaNaoFiscal(${id})"`}>
+                <i class="fas ${cancelamentoNfceBloqueado ? 'fa-hourglass-half' : 'fa-times'} fa-fw me-2"></i>
+                ${cancelamentoNfceBloqueado ? 'Cancelamento fiscal aguardando reconciliação' : 'Cancelar venda'}
             </button>
         </li>
     ` : '';

@@ -37,6 +37,10 @@ const {
   proximoNumeroNFeVenda
 } = require('./nfeEmissorVenda');
 const {
+  carregarConfigEAplicarGateCertificadoNfe,
+  respostaBloqueioCertificadoNfe
+} = require('./nfeCertificadoUso');
+const {
   garantirSchemaLifecycle,
   aposPersistirEmissao,
   cancelarNfeDevolucaoOficial,
@@ -224,7 +228,14 @@ async function prepararNfeDevolucaoCompra(compraId) {
   await garantirTabelasSaldoDevolucao();
   const id = Number(compraId);
   const compra = await carregarCompraCabecalho(id);
-  const config = await getFiscalConfig();
+  const empresaIdPrep = compra.empresa_id != null ? Number(compra.empresa_id) : null;
+  if (!empresaIdPrep) {
+    throw Object.assign(
+      new Error('empresa_id da compra é obrigatório para preparar devolução NF-e.'),
+      { code: 'CERTIFICADO_EMPRESA_OBRIGATORIA', statusCode: 400 }
+    );
+  }
+  const config = await getFiscalConfig({ empresaId: empresaIdPrep, validarUrls: false });
   const chave = onlyDigits(compra.chave_acesso);
   const cfopSugerido = sugerirCfop(compra, config);
 
@@ -532,7 +543,21 @@ async function emitirNFeDevolucaoCompra(compraId, opcoes = {}) {
     );
   }
 
-  const config = await getFiscalConfig();
+  let config;
+  try {
+    const gated = await carregarConfigEAplicarGateCertificadoNfe({
+      compra,
+      empresaId: opcoes.empresaId != null ? opcoes.empresaId : (compra.empresa_id || opcoes.empresaIdContexto),
+      db: opcoes.db || db,
+      getFiscalConfigFn: opcoes.getFiscalConfig || getFiscalConfig,
+      exigirCertificadoAptoParaUsoFiscal: opcoes.exigirCertificadoAptoParaUsoFiscal,
+      certDeps: opcoes.certDeps || {},
+      validarUrls: true
+    });
+    config = gated.config;
+  } catch (certErr) {
+    return respostaBloqueioCertificadoNfe(certErr);
+  }
   const cfopPadrao = onlyDigits(opcoes.cfop || sugerirCfop(compra, config)).slice(0, 4)
     || sugerirCfop(compra, config);
 

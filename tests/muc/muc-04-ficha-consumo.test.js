@@ -493,7 +493,7 @@ describe('MUC-04 ficha e consumo', () => {
     const consumo = src('backend/services/produtos/FichaTecnicaConsumoService.js');
     assert.match(consumo, /debitarEstoqueItemVenda/);
     assert.match(consumo, /exigirEmpresa: true/);
-    assert.match(consumo, /quantidade: round3\(conv\.quantidade\)/);
+    assert.match(consumo, /quantidade: roundStockQuantity\(conv\.quantidade\)/);
     await Promise.resolve();
   });
 

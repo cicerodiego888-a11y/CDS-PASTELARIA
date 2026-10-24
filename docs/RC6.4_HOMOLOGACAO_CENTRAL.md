@@ -1,6 +1,6 @@
 # RC6.4 — Homologação do Fluxo Completo da Central Inteligente
 
-**Data:** 2026-09-27T22:02:34.154Z  
+**Data:** 2026-10-22T01:05:25.024Z  
 **Suite:** `npm run test:central-entradas-rc6.4`  
 **Resultado dos testes:** 6 ok / 7 falha(s)  
 **Parecer técnico:** **REPROVADO**

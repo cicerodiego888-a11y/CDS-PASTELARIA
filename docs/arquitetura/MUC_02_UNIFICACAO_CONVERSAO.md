@@ -44,7 +44,7 @@ Contrato RC2.1 (7 métodos) **preservado**. Extensão:
 
 Famílias: MASSA (G, KG), VOLUME (ML, L), COMPRIMENTO (MM, CM, M), UN.
 
-Incompatíveis (KG→L) sem relação explícita: `CONVERSAO_INVALIDA`. Densidade não implementada.
+Massa e volume não têm conversão universal nem densidade implícita. Uma relação explícita e específica do produto (ex.: 1 KG = 850 ML) pode conectar as famílias; sem essa relação, a conversão é rejeitada.
 
 ---
 

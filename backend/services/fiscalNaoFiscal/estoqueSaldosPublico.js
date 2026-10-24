@@ -18,6 +18,7 @@
  * @module services/fiscalNaoFiscal/estoqueSaldosPublico
  */
 'use strict';
+const { roundStockQuantity } = require('../estoque/quantityPrecision');
 
 const { TipoSaldo, normalizarTipoSaldo } = require('./constants');
 const { recalcularEstoqueConsolidado } = require('../estoqueFiscalService');
@@ -29,9 +30,7 @@ const {
   COMPAT_CERTIFICADA_PRE_MULTIEMPRESA
 } = require('./empresaContexto');
 
-function round3(n) {
-  return Math.round(Number(n || 0) * 1000) / 1000;
-}
+
 
 function getDb(dbInjected) {
   if (dbInjected) return dbInjected;
@@ -83,9 +82,9 @@ function empresaIdExplicitoConsulta(opts) {
 }
 
 function montarRetornoConsultarSaldo(id, ctx, campos) {
-  const saldoFiscal = round3(campos.saldoFiscal);
-  const saldoNaoFiscal = round3(campos.saldoNaoFiscal);
-  const estoqueAtual = round3(
+  const saldoFiscal = roundStockQuantity(campos.saldoFiscal);
+  const saldoNaoFiscal = roundStockQuantity(campos.saldoNaoFiscal);
+  const estoqueAtual = roundStockQuantity(
     campos.estoqueAtual != null
       ? campos.estoqueAtual
       : recalcularEstoqueConsolidado({
@@ -263,7 +262,7 @@ async function espelharEfeitoEmEstoqueEmpresa(db, produtoId, empresaId, tipoN, d
 
 async function _ajustarSaldo(produtoId, tipo, delta, opts = {}) {
   const tipoN = normalizarTipoSaldo(tipo);
-  const q = round3(delta);
+  const q = roundStockQuantity(delta);
   if (!Number.isFinite(q) || q === 0) {
     const err = new Error('Quantidade de ajuste inválida.');
     err.code = 'QUANTIDADE_INVALIDA';
@@ -272,15 +271,39 @@ async function _ajustarSaldo(produtoId, tipo, delta, opts = {}) {
 
   const ctx = await resolverContextoEmpresa(opts);
   const db = getDb(opts.db);
+  if (q < 0 && ctx.empresaId != null && ctx.legado !== true) {
+    const EstoqueEmpresaService = require('../estoque/EstoqueEmpresaService');
+    const saldoEmpresa = await EstoqueEmpresaService.consultarSaldoTecnico({
+      produtoId,
+      empresaId: ctx.empresaId,
+      db
+    });
+    const disponivelEmpresa = saldoEmpresa
+      ? (tipoN === TipoSaldo.FISCAL
+        ? saldoEmpresa.saldo_fiscal
+        : saldoEmpresa.saldo_nao_fiscal)
+      : 0;
+    if (disponivelEmpresa + q < -1e-9) {
+      const err = new Error(
+        tipoN === TipoSaldo.FISCAL
+          ? 'Saldo fiscal insuficiente na empresa.'
+          : 'Saldo não fiscal insuficiente na empresa.'
+      );
+      err.code = 'SALDO_INSUFICIENTE';
+      err.saldo_disponivel = roundStockQuantity(disponivelEmpresa);
+      err.empresa_id = ctx.empresaId;
+      throw err;
+    }
+  }
   const saldos = await consultarSaldoEmProdutos(produtoId, { ...opts, db });
 
   let saldoFiscal = saldos.saldo_fiscal;
   let saldoNaoFiscal = saldos.saldo_nao_fiscal;
 
   if (tipoN === TipoSaldo.FISCAL) {
-    saldoFiscal = round3(saldoFiscal + q);
+    saldoFiscal = roundStockQuantity(saldoFiscal + q);
   } else {
-    saldoNaoFiscal = round3(saldoNaoFiscal + q);
+    saldoNaoFiscal = roundStockQuantity(saldoNaoFiscal + q);
   }
 
   if (saldoFiscal < -1e-9 || saldoNaoFiscal < -1e-9) {
@@ -297,7 +320,7 @@ async function _ajustarSaldo(produtoId, tipo, delta, opts = {}) {
   }
 
   // Invariante: estoque_atual = saldo_fiscal + saldo_nao_fiscal
-  const estoqueTotal = round3(saldoFiscal + saldoNaoFiscal);
+  const estoqueTotal = roundStockQuantity(saldoFiscal + saldoNaoFiscal);
 
   await dbRun(
     db,
@@ -347,7 +370,7 @@ async function _ajustarSaldo(produtoId, tipo, delta, opts = {}) {
  * @param {{ empresaId?: number, empresa_id?: number, db?: object, modoLegadoSemEmpresa?: boolean }} [opts]
  */
 async function debitarSaldo(produtoId, tipo, quantidade, opts = {}) {
-  const q = round3(quantidade);
+  const q = roundStockQuantity(quantidade);
   if (!(q > 0)) {
     const err = new Error('Quantidade para débito deve ser maior que zero.');
     err.code = 'QUANTIDADE_INVALIDA';
@@ -360,7 +383,7 @@ async function debitarSaldo(produtoId, tipo, quantidade, opts = {}) {
  * Credita quantidade no tipo informado.
  */
 async function creditarSaldo(produtoId, tipo, quantidade, opts = {}) {
-  const q = round3(quantidade);
+  const q = roundStockQuantity(quantidade);
   if (!(q > 0)) {
     const err = new Error('Quantidade para crédito deve ser maior que zero.');
     err.code = 'QUANTIDADE_INVALIDA';
@@ -379,7 +402,7 @@ async function transferirSaldoEntreTipos(params = {}, opts = {}) {
   const produtoId = Number(params.produtoId || params.produto_id);
   const origem = normalizarTipoSaldo(params.origem);
   const destino = normalizarTipoSaldo(params.destino);
-  const quantidade = round3(params.quantidade);
+  const quantidade = roundStockQuantity(params.quantidade);
   const callOpts = {
     ...opts,
     empresaId: resolverEmpresaId(params) ?? resolverEmpresaId(opts),

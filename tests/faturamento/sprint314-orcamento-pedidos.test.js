@@ -73,7 +73,8 @@ describe('Sprint 3.14 — conversão e exclusão (API operacional)', () => {
       path.join(__dirname, '../../backend/services/pedido/PedidoRepository.js'),
       'utf8'
     );
-    assert.match(repo, /WHERE p\.status IN \('AGUARDANDO_FATURAMENTO'\)/);
+    assert.match(repo, /const where = \[`p\.status IN \('AGUARDANDO_FATURAMENTO'\)`\]/);
+    assert.match(repo, /WHERE \$\{where\.join\(' AND '\)\}/);
     assert.doesNotMatch(repo, /listarAguardandoFaturamento[\s\S]{0,400}ORCAMENTO/);
   });
 });
@@ -84,15 +85,10 @@ describe('Sprint 3.14 — UI mesma tela', () => {
       path.join(__dirname, '../../frontend/erp/js/pedidos.js'),
       'utf8'
     );
-    assert.match(ui, /Orçamentos/);
-    assert.match(ui, /Aguardando Expedição/);
-    assert.match(ui, /Expedidos/);
+    // Tela adaptada: apenas Pedidos e Cancelados; Orçamento/Expedição isolados (backend legado preservado).
     assert.match(ui, /Cancelados/);
-    assert.match(ui, /pedTipoOrcamento/);
-    assert.match(ui, /pedTipoPedido/);
-    assert.match(ui, /converter|\/converter/);
-    assert.match(ui, /tipoDoc.*ORÇAMENTO|ORÇAMENTO.*tipoDoc/);
-    assert.match(ui, /status === 'ORCAMENTO'/);
+    assert.doesNotMatch(ui, /pedTipoOrcamento|pedTipoPedido|\/converter/);
+    assert.doesNotMatch(ui, /data-aba="(orcamentos|expedidos|aguardando)/);
     assert.doesNotMatch(ui, /loadOrcamentos|modulo-orcamento/);
   });
 

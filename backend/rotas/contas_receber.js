@@ -176,9 +176,26 @@ router.post('/pagar/:id', validarCaixaAberto, (req, res) => {
                 UPDATE financeiro
                 SET data_movimento = ?, vencimento = ?, status = 'recebido', baixado_em = ?
                 WHERE referencia_id = ? AND referencia_tipo = 'venda' AND status = 'pendente'
+                  AND numero_parcela = ?
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM contas_receber cr2
+                    WHERE cr2.venda_id = ?
+                      AND cr2.numero_parcela = ?
+                      AND cr2.status NOT IN ('pago', 'recebido')
+                  )
                   AND empresa_id = ?
               `,
-              [data, data, data, conta.venda_id, empresaId],
+              [
+                data,
+                data,
+                data,
+                conta.venda_id,
+                conta.numero_parcela,
+                conta.venda_id,
+                conta.numero_parcela,
+                empresaId
+              ],
               () => {
                 db.run(
                   `
@@ -189,7 +206,7 @@ router.post('/pagar/:id', validarCaixaAberto, (req, res) => {
                     VALUES ('receita', ?, ?, ?, 'contas_receber', ?, ?, 'conta_receber', 'recebido', ?, ?)
                   `,
                   [
-                    `Recebimento parcela ${conta.numero_parcela}/${conta.total_parcelas} - Venda ${conta.venda_codigo || conta.venda_id || '-'}`,
+                    `Recebimento parcela ${conta.numero_parcela}/${conta.total_parcelas} - ${conta.componente === 'outros' ? 'Outros' : 'Produtos'} - Venda ${conta.venda_codigo || conta.venda_id || '-'}`,
                     valorNum,
                     data,
                     forma_pagamento || null,
@@ -204,7 +221,7 @@ router.post('/pagar/:id', validarCaixaAberto, (req, res) => {
                       return;
                     }
 
-                    const finalizar = () => {
+                    const finalizarTransacao = () => {
                       db.run('COMMIT');
 
                       gravarAuditoria({
@@ -230,6 +247,42 @@ router.post('/pagar/:id', validarCaixaAberto, (req, res) => {
                         valor_restante_anterior: restante,
                         valor_restante_novo: restante - valorNum,
                         empresa_id: empresaId
+                      });
+                    };
+
+                    const finalizar = () => {
+                      if (!conta.venda_id) {
+                        finalizarTransacao();
+                        return;
+                      }
+
+                      db.run(`
+                        UPDATE vendas
+                        SET status_pagamento = 'quitada'
+                        WHERE id = ?
+                          AND empresa_id = ?
+                          AND status_pagamento = 'pendente'
+                          AND EXISTS (
+                            SELECT 1 FROM contas_receber
+                            WHERE venda_id = ? AND componente = 'outros'
+                          )
+                          AND NOT EXISTS (
+                            SELECT 1 FROM contas_receber
+                            WHERE venda_id = ?
+                              AND status NOT IN ('pago', 'recebido')
+                          )
+                      `, [
+                        conta.venda_id,
+                        empresaId,
+                        conta.venda_id,
+                        conta.venda_id
+                      ], (statusErr) => {
+                        if (statusErr) {
+                          db.run('ROLLBACK');
+                          res.status(500).json({ error: statusErr.message });
+                          return;
+                        }
+                        finalizarTransacao();
                       });
                     };
 

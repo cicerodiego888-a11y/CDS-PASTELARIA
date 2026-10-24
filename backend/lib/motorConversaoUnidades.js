@@ -259,9 +259,10 @@ function resolverQuantidadesEstoqueCompraItem(item = {}) {
     const quantidade = soma > 0 && Math.abs(soma - quantidadeComercial) > 0.001
       ? soma
       : totalConvertido;
+    // Fallback "tudo fiscal" só quando nenhum split foi informado; fiscal=0 com não fiscal informado é válido.
     return {
       quantidade_comercial: quantidadeComercial,
-      quantidade_fiscal: Number(qtds.quantidade_fiscal || quantidade),
+      quantidade_fiscal: soma > 0 ? Number(qtds.quantidade_fiscal || 0) : quantidade,
       quantidade_nao_fiscal: Number(qtds.quantidade_nao_fiscal || 0),
       quantidade,
       quantidade_convertida: totalConvertido

@@ -110,6 +110,7 @@ const CATALOGO_PESQUISA_PAGINAS = Object.freeze([
     { page: 'central-faturamento', titulo: 'Central de Faturamento', keywords: 'faturamento fiscal nf-e emitir checklist', fiscal: true, recurso: 'nfe' },
     { page: 'caixa', titulo: 'Fechamento de Caixa', keywords: 'caixa fechamento' },
     { page: 'produtos', titulo: 'Produtos', keywords: 'produto estoque' },
+    { page: 'insumos', titulo: 'Insumos', keywords: 'insumo ingrediente matéria-prima' },
     { page: 'categorias', titulo: 'Categorias', keywords: 'categoria' },
     { page: 'compras', titulo: 'Compras', keywords: 'compra entrada' },
     { page: 'central-entradas', titulo: 'Central de Entradas', keywords: 'dfe xml manifestação destinatário', fiscal: true },

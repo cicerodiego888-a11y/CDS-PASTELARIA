@@ -8,7 +8,6 @@
 
 'use strict';
 
-const fs = require('fs');
 const db = require('../../database');
 const configService = require('../configuracaoService');
 const { getFiscalConfig } = require('../fiscal/configService');
@@ -115,30 +114,120 @@ function itemChecklist(codigo, rotulo, nivel, detalhe = '') {
   return { codigo, rotulo, nivel, detalhe: detalhe || '' };
 }
 
-function inspecionarCertificado(config) {
-  const certPath = String(config.certificadoPath || '').trim();
-  if (!certPath || !fs.existsSync(certPath)) {
-    return { instalado: false, valido: false, diasRestantes: null, detalhe: 'Certificado A1/PFX não encontrado' };
-  }
-  try {
-    const { carregarCertificadoPfx } = require('../fiscal/certificateService');
-    const forge = require('node-forge');
-    const pfx = carregarCertificadoPfx(certPath, config.certificadoSenha || '');
-    const cert = forge.pki.certificateFromPem(pfx.certPem);
-    const notAfter = cert.validity.notAfter;
-    const dias = Math.floor((notAfter.getTime() - Date.now()) / 86400000);
-    if (dias < 0) {
-      return { instalado: true, valido: false, diasRestantes: dias, detalhe: `Vencido em ${notAfter.toISOString().slice(0, 10)}` };
-    }
+/**
+ * P0.4 — Checklist usa snapshot criptográfico da empresa (sem abrir PFX por padrão).
+ * Não usa PRONTA nem config global. Não transmite à SEFAZ.
+ */
+async function inspecionarCertificadoEmpresa({ empresaId, db: dbConn, revalidar = false, certDeps = {} } = {}) {
+  const {
+    normalizarEmpresaId,
+    obterConfiguracaoFiscalEmpresa
+  } = require('../fiscal/empresasConfiguracaoFiscal');
+  const {
+    ESTADOS_CERTIFICADO_A1,
+    MENSAGENS_CERTIFICADO_A1
+  } = require('../fiscal/certificadoEstados');
+
+  const id = normalizarEmpresaId(empresaId);
+  if (id == null) {
     return {
-      instalado: true,
-      valido: true,
-      diasRestantes: dias,
-      detalhe: `Válido até ${notAfter.toISOString().slice(0, 10)} (${dias} dias)`
+      instalado: false,
+      valido: false,
+      apto: false,
+      estado: ESTADOS_CERTIFICADO_A1.NAO_CONFIGURADO,
+      codigo: 'CERTIFICADO_EMPRESA_OBRIGATORIA',
+      diasRestantes: null,
+      detalhe: MENSAGENS_CERTIFICADO_A1.EMPRESA_OBRIGATORIA,
+      sefaz_chamado: false
     };
-  } catch (e) {
-    return { instalado: true, valido: false, diasRestantes: null, detalhe: e.message || 'Falha ao ler certificado' };
   }
+
+  let dto;
+  try {
+    dto = await obterConfiguracaoFiscalEmpresa(id, { db: dbConn || db });
+  } catch (e) {
+    return {
+      instalado: false,
+      valido: false,
+      apto: false,
+      estado: ESTADOS_CERTIFICADO_A1.NAO_CONFIGURADO,
+      codigo: e.code || 'CONFIGURACAO_FISCAL_NAO_ENCONTRADA',
+      diasRestantes: null,
+      detalhe: e.message || 'Configuração fiscal da empresa não encontrada.',
+      sefaz_chamado: false
+    };
+  }
+
+  if (revalidar === true) {
+    try {
+      const { exigirCertificadoAptoParaUsoFiscal } = require('../fiscal/CertificadoUsoFiscalGate');
+      await exigirCertificadoAptoParaUsoFiscal({
+        empresaId: id,
+        db: dbConn || db,
+        deps: certDeps,
+        persistirSnapshot: true
+      });
+      dto = await obterConfiguracaoFiscalEmpresa(id, { db: dbConn || db });
+    } catch (e) {
+      return {
+        instalado: !!dto.certificado_configurado,
+        valido: false,
+        apto: false,
+        estado: e.estado || dto.certificado_status || ESTADOS_CERTIFICADO_A1.ERRO_DE_VALIDACAO,
+        codigo: e.code || null,
+        diasRestantes: null,
+        detalhe: e.message || MENSAGENS_CERTIFICADO_A1.FALHA_INTERNA,
+        sefaz_chamado: false
+      };
+    }
+  }
+
+  const estado = dto.certificado_status || ESTADOS_CERTIFICADO_A1.NAO_CONFIGURADO;
+  const apto = !!dto.apto_certificado_criptografico
+    && estado === ESTADOS_CERTIFICADO_A1.VALIDO;
+  let diasRestantes = null;
+  if (dto.certificado_validade_ate) {
+    const ate = new Date(dto.certificado_validade_ate);
+    if (!Number.isNaN(ate.getTime())) {
+      diasRestantes = Math.floor((ate.getTime() - Date.now()) / 86400000);
+    }
+  }
+
+  const detalhePorEstado = {
+    [ESTADOS_CERTIFICADO_A1.NAO_CONFIGURADO]: MENSAGENS_CERTIFICADO_A1.NAO_CONFIGURADO,
+    [ESTADOS_CERTIFICADO_A1.CONFIGURADO_NAO_VALIDADO]: MENSAGENS_CERTIFICADO_A1.CONFIGURADO_NAO_VALIDADO,
+    [ESTADOS_CERTIFICADO_A1.VALIDO]: dto.certificado_mensagem || MENSAGENS_CERTIFICADO_A1.VALIDO,
+    [ESTADOS_CERTIFICADO_A1.SENHA_INVALIDA]: MENSAGENS_CERTIFICADO_A1.SENHA_INVALIDA_USO,
+    [ESTADOS_CERTIFICADO_A1.ARQUIVO_INVALIDO]: MENSAGENS_CERTIFICADO_A1.ARQUIVO_INVALIDO_USO,
+    [ESTADOS_CERTIFICADO_A1.EXPIRADO]: MENSAGENS_CERTIFICADO_A1.EXPIRADO,
+    [ESTADOS_CERTIFICADO_A1.CNPJ_DIVERGENTE]: MENSAGENS_CERTIFICADO_A1.CNPJ_DIVERGENTE
+  };
+
+  return {
+    instalado: !!dto.certificado_configurado,
+    valido: apto,
+    apto,
+    estado,
+    codigo: null,
+    diasRestantes,
+    detalhe: detalhePorEstado[estado] || dto.certificado_mensagem || estado,
+    certificado_nome: dto.certificado_nome || null,
+    status_administrativo: dto.status_administrativo || dto.status || null,
+    sefaz_chamado: false
+  };
+}
+
+/** @deprecated use inspecionarCertificadoEmpresa — mantido só para assinatura antiga sem empresa. */
+function inspecionarCertificado(_config) {
+  return {
+    instalado: false,
+    valido: false,
+    apto: false,
+    estado: 'NÃO_CONFIGURADO',
+    diasRestantes: null,
+    detalhe: 'Use inspecionarCertificadoEmpresa com empresaId explícito.',
+    sefaz_chamado: false
+  };
 }
 
 /**
@@ -177,14 +266,23 @@ async function montarChecklist(pacote, dadosNfe = {}) {
   ).trim();
   const cfop = onlyDigits(dadosNfe.cfop || pedido?.cfop || nota?.cfop || '5102');
 
+  const empresaIdVenda = venda.empresa_id != null ? Number(venda.empresa_id) : null;
   let config = {};
   try {
-    config = await getFiscalConfig({ validarUrls: false });
+    if (!empresaIdVenda) {
+      throw Object.assign(new Error('empresa_id da venda é obrigatório para o checklist fiscal.'), {
+        code: 'CERTIFICADO_EMPRESA_OBRIGATORIA'
+      });
+    }
+    config = await getFiscalConfig({ empresaId: empresaIdVenda, validarUrls: false });
   } catch (e) {
-    config = { _erro: e.message };
+    config = { _erro: e.message, _code: e.code };
   }
 
-  const certInfo = inspecionarCertificado(config);
+  const certInfo = await inspecionarCertificadoEmpresa({
+    empresaId: empresaIdVenda,
+    revalidar: dadosNfe.revalidar_certificado === true
+  });
   const serie = Number(config.serieNfe || config.serie || 0);
   const numero = Number(config.numeroAtual || 0)
     || Number(await dbGet(`SELECT valor FROM configuracoes WHERE chave = 'fiscal_numero_atual_nfe'`).then((r) => r?.valor).catch(() => 0))
@@ -218,7 +316,12 @@ async function montarChecklist(pacote, dadosNfe = {}) {
     itemChecklist('cfg_produtos', 'Produtos com configuração fiscal', cfgRuins.length === 0 && itensFiscais.length > 0 ? 'ok' : (itensFiscais.length ? 'erro' : 'atencao'), cfgRuins.length ? `${cfgRuins.length} sem CSOSN/CFOP` : 'Configuração ok'),
     itemChecklist('itens_fiscais', 'Itens fiscais do Motor', itensFiscais.length > 0 ? 'ok' : 'erro', itensFiscais.length ? `${itensFiscais.length} item(ns)` : 'Sem parcela fiscal'),
     itemChecklist('cert_instalado', 'Certificado Digital instalado', certInfo.instalado ? 'ok' : 'erro', certInfo.detalhe),
-    itemChecklist('cert_valido', 'Certificado válido', certInfo.valido ? 'ok' : 'erro', certInfo.detalhe),
+    itemChecklist(
+      'cert_valido',
+      'Certificado criptograficamente válido',
+      certInfo.apto ? 'ok' : (certInfo.estado === 'CONFIGURADO_NÃO_VALIDADO' ? 'atencao' : 'erro'),
+      `${certInfo.estado || '?'}: ${certInfo.detalhe}`
+    ),
     itemChecklist('serie', 'Série configurada', serie > 0 ? 'ok' : 'atencao', serie > 0 ? String(serie) : 'Usará padrão 1'),
     itemChecklist('numeracao', 'Numeração disponível', 'ok', `Próximo: ${numero || '(auto)'}`),
     itemChecklist('ambiente', 'Ambiente configurado', ambienteOk ? 'ok' : 'erro', ambienteOk ? (ambiente === 1 ? 'Produção' : 'Homologação') : (config._erro || 'Não configurado')),
@@ -717,6 +820,8 @@ module.exports = {
   obterDanfe,
   cancelarNota,
   consultarSituacao,
+  inspecionarCertificadoEmpresa,
+  inspecionarCertificado,
   montarChecklist,
   montarAlertas,
   montarTimeline,

@@ -66,7 +66,8 @@ async function criarDb() {
       codigo_barras TEXT,
       unidade TEXT,
       preco_venda DECIMAL(10,2) DEFAULT 0,
-      ativo INTEGER DEFAULT 1
+      ativo INTEGER DEFAULT 1,
+      tipo_operacional TEXT NOT NULL DEFAULT 'COMERCIAL'
     )
   `);
   await new Promise((resolve, reject) => {
@@ -151,6 +152,18 @@ async function main() {
         plu: '67'
       });
 
+      const idInsumo = (await run(
+        db,
+        `INSERT INTO produtos (codigo, nome, codigo_barras, unidade, preco_venda, tipo_operacional)
+         VALUES (?, ?, ?, ?, ?, 'INSUMO')`,
+        ['INS-01', 'Farinha', '7891000100110', 'KG', 0]
+      )).lastID;
+      await sync.espelharCodigoEBarras(idInsumo, {
+        codigo: 'INS-01',
+        codigo_barras: '7891000100110',
+        plu: '68'
+      });
+
       const pdv = new PdvProdutoIdentificacaoService({ db });
 
       await test('sem configuração — MIP resolve com flag global OFF', async () => {
@@ -185,6 +198,25 @@ async function main() {
         assert.strictEqual(r.encontrado, true);
         assert.strictEqual(r.produtoId, idPlu);
         assert.strictEqual(r.strategy, 'PLU');
+      });
+
+      await test('código interno de insumo não é identificável no PDV', async () => {
+        const r = await pdv.identificar('INS-01');
+        assert.strictEqual(r.encontrado, false);
+        assert.strictEqual(r.fallbackLegado, true);
+        assert.strictEqual(r.meta.motivo, 'INSUMO_NAO_VENDAVEL');
+      });
+
+      await test('código de barras de insumo não é identificável no PDV', async () => {
+        const r = await pdv.identificar('7891000100110');
+        assert.strictEqual(r.encontrado, false);
+        assert.strictEqual(r.meta.motivo, 'INSUMO_NAO_VENDAVEL');
+      });
+
+      await test('PLU de insumo não é identificável no PDV', async () => {
+        const r = await pdv.identificar('68');
+        assert.strictEqual(r.encontrado, false);
+        assert.strictEqual(r.meta.motivo, 'INSUMO_NAO_VENDAVEL');
       });
 
       await test('layout Toledo (etiqueta balança)', async () => {

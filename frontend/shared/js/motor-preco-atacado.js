@@ -1,10 +1,13 @@
 /**
- * RCM-ATACADO-02 — Motor de precisão decimal (espelho browser).
+ * RCM-ATACADO-02 — Motor de precisão decimal.
+ * Fonte única (UMD): carregado via <script> no browser (global MotorPrecoAtacado)
+ * e via require() no backend (backend/services/vendas/MotorPrecoAtacado.js apenas reexporta).
  */
 (function (global) {
     'use strict';
 
     const CASAS_INTERNAS = 6;
+    const NUCLEO_VERSAO = 'motor-preco-atacado/1';
 
     function arredondarInterno(valor, casas) {
         const c = casas == null ? CASAS_INTERNAS : casas;
@@ -111,8 +114,9 @@
         return { totalInterno, total: arredondarMoeda(totalInterno) };
     }
 
-    global.MotorPrecoAtacado = Object.freeze({
+    const api = Object.freeze({
         CASAS_INTERNAS,
+        NUCLEO_VERSAO,
         arredondarInterno,
         arredondarMoeda,
         formatarPrecoExibicao,
@@ -122,4 +126,9 @@
         calcularLinhaAtacadoFaixa,
         calcularSubtotalItem
     });
+
+    global.MotorPrecoAtacado = api;
+    if (typeof module !== 'undefined' && module.exports) {
+        module.exports = api;
+    }
 }(typeof window !== 'undefined' ? window : global));

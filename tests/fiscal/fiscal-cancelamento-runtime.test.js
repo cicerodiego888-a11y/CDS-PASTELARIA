@@ -3,10 +3,55 @@
  * Sem HTTP real.
  *
  * Executar: npm run test:fiscal-cancelamento-runtime
- *           node tests/fiscal/fiscal-cancelamento-runtime.test.js
+ *           node -r ./tests/central-entradas/helpers/preloadIsolamentoBanco.js tests/fiscal/fiscal-cancelamento-runtime.test.js
  */
 
+const { isolarBancoTeste } = require('../central-entradas/helpers/isolarBancoTeste');
+isolarBancoTeste('cds-fiscal-canc-rt-');
+
 const assert = require('assert');
+const http = require('http');
+const https = require('https');
+const http2 = require('http2');
+const net = require('net');
+const tls = require('tls');
+const dgram = require('dgram');
+const dns = require('dns');
+const childProcess = require('child_process');
+const bloquearRede = () => {
+  throw new Error('Rede bloqueada pelo teste unitário de cancelamento.');
+};
+http.request = bloquearRede;
+https.request = bloquearRede;
+http2.connect = bloquearRede;
+net.connect = bloquearRede;
+net.createConnection = bloquearRede;
+net.Socket.prototype.connect = bloquearRede;
+tls.connect = bloquearRede;
+dgram.createSocket = bloquearRede;
+[
+  'lookup',
+  'lookupService',
+  'resolve',
+  'resolve4',
+  'resolve6',
+  'resolveCname',
+  'resolveMx',
+  'resolveNs',
+  'resolveTxt',
+  'reverse'
+].forEach((method) => { dns[method] = bloquearRede; });
+[
+  'spawn',
+  'spawnSync',
+  'exec',
+  'execSync',
+  'execFile',
+  'execFileSync',
+  'fork'
+].forEach((method) => { childProcess[method] = bloquearRede; });
+global.fetch = bloquearRede;
+global.WebSocket = bloquearRede;
 const {
   FiscalWebServices,
   SoapTransport,
@@ -30,6 +75,26 @@ const {
   NS_EVENTO,
   ACTION_EVENTO
 } = require('../../backend/services/fiscal/cancelamentoLegado');
+const {
+  anexarAutorizacaoTesteCancelamento,
+  CODIGOS_AUTORIZACAO_SEFAZ
+} = require('../../backend/services/fiscal/autorizacaoTransmissaoSefaz');
+
+const EMPRESA_TESTE_CANC = 1;
+function comAuthCanc(input = {}) {
+  return anexarAutorizacaoTesteCancelamento({
+    ...input,
+    empresaId: input.empresaId || EMPRESA_TESTE_CANC
+  });
+}
+function runtimeComAuth(options) {
+  const rt = createCancelamentoRuntime(options);
+  return {
+    enviarCancelamento: (input) => rt.enviarCancelamento(comAuthCanc(input)),
+    getMetrics: rt.getMetrics,
+    getPlatform: rt.getPlatform
+  };
+}
 
 let passou = 0;
 let falhou = 0;
@@ -135,9 +200,54 @@ async function main() {
     assert.ok(xml.includes(NS_EVENTO));
   });
 
+  await test('cancelamento sem autorização não chama o transporte SOAP', async () => {
+    let send = 0;
+    const runtime = createCancelamentoRuntime({
+      platform: new FiscalWebServices({
+        transportOptions: {
+          httpClient: async () => {
+            send += 1;
+            return { statusCode: 200, body: SOAP_AUTORIZADO };
+          }
+        }
+      }),
+      metrics: new CancelamentoMetrics()
+    });
+    const result = await runtime.enviarCancelamento({
+      chave: CHAVE,
+      ambiente: 2,
+      empresaId: EMPRESA_TESTE_CANC,
+      certificadoPath: 'C:\\ProgramData\\MercantilFiscal\\certs\\producao.pfx'
+    });
+    assert.strictEqual(send, 0);
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.bloqueadoAutorizacao, true);
+    assert.strictEqual(result.consultaExecutada, false);
+    assert.strictEqual(result.transmissionState, 'NOT_SENT');
+    assert.strictEqual(result.codigo, CODIGOS_AUTORIZACAO_SEFAZ.NAO_AUTORIZADA);
+  });
+
+  await test('legado sem autorização não chama httpClient nem carrega PFX', async () => {
+    let http = 0;
+    const result = await enviarCancelamentoLegado({
+      ambiente: 2,
+      chave: CHAVE,
+      empresaId: EMPRESA_TESTE_CANC,
+      certificadoPath: 'C:\\ProgramData\\MercantilFiscal\\certs\\producao.pfx',
+      httpClient: async () => {
+        http += 1;
+        return { statusCode: 200, body: SOAP_AUTORIZADO };
+      }
+    });
+    assert.strictEqual(http, 0);
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.bloqueadoAutorizacao, true);
+    assert.strictEqual(result.consultaExecutada, false);
+  });
+
   await test('cancelamento autorizado (cStat 135)', async () => {
     const metrics = new CancelamentoMetrics();
-    const runtime = createCancelamentoRuntime({
+    const runtime = runtimeComAuth({
       platform: new FiscalWebServices({
         transportOptions: {
           httpClient: async () => ({ statusCode: 200, body: SOAP_AUTORIZADO })
@@ -172,7 +282,7 @@ async function main() {
   });
 
   await test('evento rejeitado (cStat 501)', async () => {
-    const runtime = createCancelamentoRuntime({
+    const runtime = runtimeComAuth({
       platform: new FiscalWebServices({
         transportOptions: {
           httpClient: async () => ({ statusCode: 200, body: SOAP_REJEITADO })
@@ -187,7 +297,7 @@ async function main() {
   });
 
   await test('evento duplicado (cStat 573)', async () => {
-    const runtime = createCancelamentoRuntime({
+    const runtime = runtimeComAuth({
       platform: new FiscalWebServices({
         transportOptions: {
           httpClient: async () => ({ statusCode: 200, body: SOAP_DUPLICADO })
@@ -202,7 +312,7 @@ async function main() {
 
   await test('resolver fail usa fallback', async () => {
     const platform = new FiscalWebServices({ loadOfficialCatalog: false });
-    const runtime = createCancelamentoRuntime({
+    const runtime = runtimeComAuth({
       platform,
       metrics: new CancelamentoMetrics(),
       legadoSender: async ({ url }) => ({
@@ -224,7 +334,7 @@ async function main() {
 
   await test('transport fail dispara fallback', async () => {
     const metrics = new CancelamentoMetrics();
-    const runtime = createCancelamentoRuntime({
+    const runtime = runtimeComAuth({
       platform: new FiscalWebServices({
         transportOptions: {
           httpClient: async () => {
@@ -245,7 +355,11 @@ async function main() {
         tempo: 0.3
       })
     });
-    const result = await runtime.enviarCancelamento({ chave: CHAVE, ambiente: 2 });
+    const result = await runtime.enviarCancelamento({
+      chave: CHAVE,
+      ambiente: 2,
+      modelo: ModelType.NFE
+    });
     assert.strictEqual(result.source, ResolutionSource.FALLBACK);
     assert.ok(result.warnings.some((w) => w.code === 'PLATFORM_TRANSPORT_FAILED'));
     assert.strictEqual(metrics.snapshot().fallbacks, 1);
@@ -253,7 +367,7 @@ async function main() {
 
   await test('timeout dispara fallback legado', async () => {
     const metrics = new CancelamentoMetrics();
-    const runtime = createCancelamentoRuntime({
+    const runtime = runtimeComAuth({
       platform: new FiscalWebServices({
         transportOptions: {
           httpClient: async () => {
@@ -274,10 +388,114 @@ async function main() {
         tempo: 0.3
       })
     });
-    const result = await runtime.enviarCancelamento({ chave: CHAVE, ambiente: 2 });
+    const result = await runtime.enviarCancelamento({
+      chave: CHAVE,
+      ambiente: 2,
+      modelo: ModelType.NFE
+    });
     assert.strictEqual(result.fallbackUtilizado, true);
     assert.ok(result.warnings.some((w) => w.code === 'FALLBACK'));
     console.log(`         fallbacks: ${metrics.snapshot().fallbacks}`);
+  });
+
+  await test('NFC-e não repete nem usa legado após timeout ambíguo', async () => {
+    let platformCalls = 0;
+    let fallbackCalls = 0;
+    const runtime = runtimeComAuth({
+      platform: new FiscalWebServices({
+        transportOptions: {
+          httpClient: async () => {
+            platformCalls += 1;
+            throw Object.assign(new Error('timeout'), { code: 'ECONNABORTED' });
+          },
+          maxRetries: 2
+        }
+      }),
+      metrics: new CancelamentoMetrics(),
+      legadoSender: async () => {
+        fallbackCalls += 1;
+        return { success: true, body: SOAP_AUTORIZADO, statusCode: 200 };
+      }
+    });
+    const result = await runtime.enviarCancelamento({
+      chave: CHAVE,
+      ambiente: 2,
+      correlationId: 'test-timeout-correlation'
+    });
+    assert.strictEqual(result.success, false);
+    assert.strictEqual(result.resultUnknown, true);
+    assert.strictEqual(result.transmissionState, 'UNKNOWN');
+    assert.strictEqual(result.retries, 0);
+    assert.strictEqual(platformCalls, 1);
+    assert.strictEqual(fallbackCalls, 0);
+  });
+
+  await test('NFC-e só retenta e usa legado após falha pré-envio comprovada', async () => {
+    let platformCalls = 0;
+    let fallbackCalls = 0;
+    const runtime = runtimeComAuth({
+      platform: new FiscalWebServices({
+        transportOptions: {
+          httpClient: async () => {
+            platformCalls += 1;
+            throw Object.assign(new Error('connection refused'), {
+              code: 'ECONNREFUSED',
+              transmissionState: 'NOT_SENT'
+            });
+          },
+          maxRetries: 1
+        }
+      }),
+      metrics: new CancelamentoMetrics(),
+      legadoSender: async () => {
+        fallbackCalls += 1;
+        return {
+          success: true,
+          body: SOAP_AUTORIZADO,
+          statusCode: 200,
+          transmissionState: 'RESPONSE_RECEIVED'
+        };
+      }
+    });
+    const result = await runtime.enviarCancelamento({
+      chave: CHAVE,
+      ambiente: 2,
+      correlationId: 'test-presend-correlation'
+    });
+    assert.strictEqual(platformCalls, 2);
+    assert.strictEqual(fallbackCalls, 1);
+    assert.strictEqual(result.fallbackUtilizado, true);
+    assert.strictEqual(result.transmissionState, 'RESPONSE_RECEIVED');
+  });
+
+  await test('erro sem prova de pré-envio permanece ambíguo mesmo com código de conexão', async () => {
+    let platformCalls = 0;
+    let fallbackCalls = 0;
+    const runtime = runtimeComAuth({
+      platform: new FiscalWebServices({
+        transportOptions: {
+          httpClient: async () => {
+            platformCalls += 1;
+            throw Object.assign(new Error('erro sem estado de transmissão'), {
+              code: 'ECONNREFUSED'
+            });
+          }
+        }
+      }),
+      metrics: new CancelamentoMetrics(),
+      legadoSender: async () => {
+        fallbackCalls += 1;
+        return { success: true, body: SOAP_AUTORIZADO, statusCode: 200 };
+      }
+    });
+    const result = await runtime.enviarCancelamento({
+      chave: CHAVE,
+      ambiente: 2
+    });
+    assert.strictEqual(result.resultUnknown, true);
+    assert.strictEqual(result.transmissionState, 'UNKNOWN');
+    assert.strictEqual(platformCalls, 1);
+    assert.strictEqual(fallbackCalls, 0);
   });
 
   await test('retry contabilizado em transport com maxRetries', async () => {
@@ -290,13 +508,17 @@ async function main() {
       return { statusCode: 200, body: SOAP_AUTORIZADO, headers: {} };
     };
     const metrics = new CancelamentoMetrics();
-    const runtime = createCancelamentoRuntime({
+    const runtime = runtimeComAuth({
       platform: new FiscalWebServices({
         transportOptions: { httpClient, maxRetries: 2 }
       }),
       metrics
     });
-    const result = await runtime.enviarCancelamento({ chave: CHAVE, ambiente: 2 });
+    const result = await runtime.enviarCancelamento({
+      chave: CHAVE,
+      ambiente: 2,
+      modelo: ModelType.NFE
+    });
     assert.strictEqual(result.success, true);
     assert.ok(result.retries >= 1);
     assert.ok(calls >= 2);
@@ -304,11 +526,11 @@ async function main() {
   });
 
   await test('legado direto com httpClient', async () => {
-    const result = await enviarCancelamentoLegado({
+    const result = await enviarCancelamentoLegado(comAuthCanc({
       ambiente: 2,
       chave: CHAVE,
       httpClient: async () => ({ statusCode: 200, body: SOAP_AUTORIZADO })
-    });
+    }));
     assert.strictEqual(result.success, true);
     assert.strictEqual(result.namespace, NS_EVENTO);
   });

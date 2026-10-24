@@ -9,6 +9,7 @@
  * @module motores/comercial/MotorComercialService
  */
 'use strict';
+const { roundStockQuantity } = require('../../services/estoque/quantityPrecision');
 
 const fxnfSaldos = require('../../services/fiscalNaoFiscal/estoqueSaldosPublico');
 const fxnfReservas = require('../../services/fiscalNaoFiscal/reservasPublico');
@@ -121,9 +122,7 @@ function optsPortaSaldos(opts = {}, empresaId) {
   };
 }
 
-function round3(n) {
-  return Math.round(Number(n || 0) * 1000) / 1000;
-}
+
 
 function getDb(dbInjected) {
   if (dbInjected) return dbInjected;
@@ -145,7 +144,7 @@ function normalizarItens(itens) {
   }
   return itens.map((raw, idx) => {
     const produtoId = Number(raw.produto_id || raw.produtoId);
-    const quantidade = round3(raw.quantidade);
+    const quantidade = roundStockQuantity(raw.quantidade);
     if (!Number.isInteger(produtoId) || produtoId <= 0 || !(quantidade > 0)) {
       throw erro('ITENS_INVALIDOS', `Item ${idx + 1}: produto/quantidade inválidos.`, { statusCode: 400 });
     }
@@ -164,7 +163,7 @@ function agregarPorProduto(itens) {
   const map = new Map();
   for (const item of itens) {
     const prev = map.get(item.produto_id) || { produto_id: item.produto_id, quantidade: 0, linhas: [] };
-    prev.quantidade = round3(prev.quantidade + item.quantidade);
+    prev.quantidade = roundStockQuantity(prev.quantidade + item.quantidade);
     prev.linhas.push(item);
     map.set(item.produto_id, prev);
   }
@@ -210,7 +209,7 @@ function montarEscopoAutorizacao(pedidoId, analise) {
     .filter((p) => p.acao === 'TRANSFERIR_E_RESERVAR')
     .map((p) => ({
       produto_id: Number(p.produto_id),
-      quantidade: round3(p.quantidade)
+      quantidade: roundStockQuantity(p.quantidade)
     }))
     .sort((a, b) => a.produto_id - b.produto_id);
 
@@ -255,7 +254,7 @@ async function analisarDisponibilidadeFiscal(itensBrutos, opts = {}) {
 
     consultas.push({ ...disp, quantidade_solicitada: item.quantidade });
 
-    const faltaFiscal = round3(Math.max(0, item.quantidade - disp.disponivel_fiscal));
+    const faltaFiscal = roundStockQuantity(Math.max(0, item.quantidade - disp.disponivel_fiscal));
     if (faltaFiscal <= 0) {
       plano.push({
         produto_id: item.produto_id,

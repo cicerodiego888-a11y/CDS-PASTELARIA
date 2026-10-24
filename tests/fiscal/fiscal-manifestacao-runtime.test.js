@@ -2,9 +2,13 @@
  * Testes — Manifestação do Destinatário runtime (Sprint F7)
  * Infraestrutura apenas. Sem HTTP real.
  *
- * Executar: npm run test:fiscal-manifestacao-runtime
- *           node tests/fiscal/fiscal-manifestacao-runtime.test.js
+ * Executar: node -r ./tests/central-entradas/helpers/preloadIsolamentoBanco.js tests/fiscal/fiscal-manifestacao-runtime.test.js
  */
+
+'use strict';
+
+const { isolarBancoTeste } = require('../central-entradas/helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('cds-fiscal-manif-rt-');
 
 const assert = require('assert');
 const {
@@ -30,6 +34,14 @@ const {
   getManifestacaoUrl,
   NS_EVENTO
 } = require('../../backend/services/fiscal/manifestacaoLegado');
+const {
+  anexarAutorizacaoTesteManifestacao
+} = require('../../backend/services/fiscal/autorizacaoTransmissaoSefaz');
+
+const EMPRESA_TESTE_MANIF = 1;
+function comAuthManif(input = {}) {
+  return anexarAutorizacaoTesteManifestacao({ ...input, empresaId: input.empresaId || EMPRESA_TESTE_MANIF });
+}
 
 let passou = 0;
 let falhou = 0;
@@ -141,14 +153,14 @@ async function main() {
       metrics
     });
 
-    const result = await runtime.enviarManifestacao({
+    const result = await runtime.enviarManifestacao(comAuthManif({
       operacao: OperationType.MANIFESTACAO_CIENCIA,
       ambiente: 2,
       chave: '35260112345678000199550010000000011000000001',
       cnpj: '12345678000199',
       certificadoPath: 'fake.pfx',
       certificadoSenha: 'x'
-    });
+    }));
 
     assert.strictEqual(result.success, true);
     assert.strictEqual(result.source, 'PLATFORM');
@@ -171,10 +183,10 @@ async function main() {
       }),
       metrics: new ManifestacaoMetrics()
     });
-    const ok = await runtimeOk.enviarManifestacao({
+    const ok = await runtimeOk.enviarManifestacao(comAuthManif({
       operacao: OperationType.MANIFESTACAO_CONFIRMACAO,
       ambiente: 2
-    });
+    }));
     assert.ok(ok.body.includes('135'));
 
     const runtimeBad = createManifestacaoRuntime({
@@ -183,10 +195,10 @@ async function main() {
       }),
       metrics: new ManifestacaoMetrics()
     });
-    const bad = await runtimeBad.enviarManifestacao({
+    const bad = await runtimeBad.enviarManifestacao(comAuthManif({
       operacao: OperationType.MANIFESTACAO_DESCONHECIMENTO,
       ambiente: 2
-    });
+    }));
     assert.strictEqual(bad.success, true);
     assert.ok(bad.body.includes('999'));
   });
@@ -214,11 +226,11 @@ async function main() {
       legadoSender
     });
 
-    const result = await runtime.enviarManifestacao({
+    const result = await runtime.enviarManifestacao(comAuthManif({
       operacao: OperationType.MANIFESTACAO_NAO_REALIZADA,
       ambiente: 2,
       xJust: 'Mercadoria nao recebida'
-    });
+    }));
     assert.strictEqual(result.source, ResolutionSource.FALLBACK);
     assert.strictEqual(result.fallbackUtilizado, true);
     assert.ok(result.warnings.some((w) => w.code === 'FALLBACK'));
@@ -242,10 +254,10 @@ async function main() {
         tempo: 0.2
       })
     });
-    const result = await runtime.enviarManifestacao({
+    const result = await runtime.enviarManifestacao(comAuthManif({
       operacao: OperationType.MANIFESTACAO_CIENCIA,
       ambiente: 1
-    });
+    }));
     assert.strictEqual(result.fallbackUtilizado, true);
     assert.ok(result.warnings.some((w) => w.code === 'PLATFORM_RESOLVE_FAILED'));
   });
@@ -266,21 +278,21 @@ async function main() {
       }),
       metrics
     });
-    const result = await runtime.enviarManifestacao({
+    const result = await runtime.enviarManifestacao(comAuthManif({
       operacao: OperationType.MANIFESTACAO_CIENCIA,
       ambiente: 2
-    });
+    }));
     assert.strictEqual(result.success, true);
     assert.ok(result.retries >= 1);
     assert.ok(calls >= 2);
   });
 
   await test('legado direto com httpClient', async () => {
-    const result = await enviarManifestacaoLegado({
+    const result = await enviarManifestacaoLegado(comAuthManif({
       operacao: OperationType.MANIFESTACAO_CIENCIA,
       ambiente: 2,
       httpClient: async () => ({ statusCode: 200, body: SOAP_OK })
-    });
+    }));
     assert.strictEqual(result.success, true);
   });
 

@@ -948,10 +948,52 @@
     return { score: s, barra, tom };
   }
 
-  function enriquecerProdutoCds(produtoBase, produtosLista) {
+  function registrarOrigemIdentidadeUi(produtoBase, produtoCatalogo, contexto = {}) {
+    if (globalThis.CDS_MIIP_ORIGIN_DIAGNOSTICS !== true
+        || typeof console === 'undefined'
+        || typeof console.info !== 'function') return;
+
+    const origemCampo = (valorCandidato, valorCatalogo) => {
+      if (valorCandidato) return 'snapshot_miip';
+      if (valorCatalogo) return 'catalogo_atual';
+      return 'desconhecida';
+    };
+    const operacaoId = String(contexto.operacaoId || '');
+    const operacaoIdInterna = operacaoId.length <= 80 && !/\d{11,}/.test(operacaoId)
+      ? operacaoId || null
+      : null;
+    const produtoId = Number(produtoBase?.id || produtoBase?.produtoId);
+
+    console.info('[MIIP_ORIGIN_DIAG]', JSON.stringify({
+      timestamp: new Date().toISOString(),
+      evento: 'campos_identidade_ui',
+      documentoId: Number.isSafeInteger(Number(contexto.documentoId))
+        && Number(contexto.documentoId) > 0
+        ? Number(contexto.documentoId)
+        : null,
+      operacaoId: operacaoIdInterna,
+      produtoId: Number.isSafeInteger(produtoId) && produtoId > 0
+        ? produtoId
+        : null,
+      scoreOriginal: Number.isFinite(Number(contexto.score))
+        ? Number(contexto.score)
+        : null,
+      origemCamposIdentidade: {
+        nome: origemCampo(produtoBase?.nome, produtoCatalogo?.nome),
+        codigo: origemCampo(produtoBase?.codigo, produtoCatalogo?.codigo),
+        gtin: origemCampo(
+          produtoBase?.codigoBarras || produtoBase?.codigo_barras,
+          produtoCatalogo?.codigoBarras || produtoCatalogo?.codigo_barras
+        )
+      }
+    }));
+  }
+
+  function enriquecerProdutoCds(produtoBase, produtosLista, contextoDiagnostico) {
     if (!produtoBase) return null;
     const id = Number(produtoBase.id || produtoBase.produtoId);
     const full = (produtosLista || []).find((p) => Number(p.id) === id) || {};
+    registrarOrigemIdentidadeUi(produtoBase, full, contextoDiagnostico);
     return {
       ...full,
       ...produtoBase,
@@ -1084,6 +1126,7 @@
     montarComparacaoVisual,
     barraConfianca,
     enriquecerProdutoCds,
+    registrarOrigemIdentidadeUi,
     motivosSemCandidatoPadrao,
     filtrarProdutosBuscaManual,
     motoresUtilizados

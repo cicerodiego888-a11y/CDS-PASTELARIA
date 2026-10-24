@@ -4,6 +4,9 @@
  */
 'use strict';
 
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-p04-todas-empresas-inbox-05-79-');
+
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');

@@ -27,6 +27,7 @@ const { verificarToken } = require('./middleware/auth');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
+const { cspHeadersMiddleware } = require('./middleware/cspHeaders');
 
 // Middleware
 app.use((req, res, next) => {
@@ -40,6 +41,8 @@ app.use((req, res, next) => {
     credentials: true
   })(req, res, next);
 });
+// CSP canônica (sem unsafe-eval) — Electron também injeta via session.
+app.use(cspHeadersMiddleware);
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
@@ -49,6 +52,19 @@ app.get('/ping', (req, res) => {
 
 app.get('/api/ping', (req, res) => {
     res.json({ status: 'ok' });
+});
+
+// PDV Universal congelado: a interface (HTML e assets) não é mais servida; /pdv é o PDV oficial.
+// Deve vir antes do express.static, que serviria /pdv-universal/index.html e seus assets.
+function caminhoDoPdvUniversalBloqueado(rawPath) {
+  let p = String(rawPath || '');
+  try { p = decodeURIComponent(p); } catch (_) { /* caminho malformado: usa o bruto */ }
+  p = p.replace(/\\/g, '/').replace(/\/{2,}/g, '/').toLowerCase();
+  return /^\/pdv-universal(\/|$)/.test(p);
+}
+app.use((req, res, next) => {
+  if (!caminhoDoPdvUniversalBloqueado(req.path)) return next();
+  return res.redirect(302, '/pdv');
 });
 
 app.use(express.static(path.join(__dirname, '../frontend')));
@@ -126,6 +142,7 @@ const entregasRoutes = require('./rotas/entregas');
 const faturamentoRoutes = require('./rotas/faturamento');
 const centralFaturamentoRoutes = require('./rotas/centralFaturamento');
 const pedidosRoutes = require('./rotas/pedidos');
+const mesasRoutes = require('./rotas/mesas');
 const financeiroRoutes = require('./rotas/financeiro');
 const condicoesPagamentoRoutes = require('./rotas/condicoes-pagamento');
 const configuracoesRoutes = require('./rotas/configuracoes');
@@ -207,6 +224,7 @@ app.use('/api/vendas', verificarToken, vendasRoutes);
 app.use('/api/faturamento', verificarToken, exigirRecurso('faturamento'), faturamentoRoutes);
 app.use('/api/central-faturamento', verificarToken, exigirRecurso('nfe'), centralFaturamentoRoutes);
 app.use('/api/pedidos', verificarToken, exigirRecurso('pedidos'), pedidosRoutes);
+app.use('/api/mesas', verificarToken, exigirRecurso('pedidos'), mesasRoutes);
 
 // Sprint 3.9 — PDV só existe se módulo licenciado (princípio da invisibilidade)
 const { responderModuloNaoLicenciado } = require('./middleware/errosLicenciamento');
@@ -215,12 +233,6 @@ app.get(['/pdv', '/pdv/'], verificarToken, (req, res) => {
     return responderModuloNaoLicenciado(res, 'pdv');
   }
   res.sendFile(path.join(frontendRoot, 'pdv/index.html'));
-});
-app.get(['/pdv-universal', '/pdv-universal/'], verificarToken, (req, res) => {
-  if (!configService.recursoHabilitado('pdv')) {
-    return responderModuloNaoLicenciado(res, 'pdv');
-  }
-  res.sendFile(path.join(frontendRoot, 'pdv-universal/index.html'));
 });
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/mis', verificarToken, misRoutes);

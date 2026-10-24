@@ -35,6 +35,8 @@ describe('Sprint 3.6 — grade, totais e atalhos', () => {
     assert.match(ui, /dblclick/);
     assert.match(ui, /Delete/);
     assert.match(ui, /ped-del-item/);
+    assert.match(ui, /\$\('#pedItensBody'\)\.off\('click', '\.ped-del-item'\)\.on\('click', '\.ped-del-item'/);
+    assert.match(ui, /itensEditor\.splice\(idx, 1\)/);
   });
 
   it('barra de totais ao vivo', () => {
@@ -52,11 +54,10 @@ describe('Sprint 3.6 — grade, totais e atalhos', () => {
     assert.match(ui, /e\.ctrlKey && \(e\.key === 'f'/);
   });
 
-  it('pós-envio: mensagem + Ir para Expedição sem auto-navegar', () => {
-    assert.match(ui, /Pedido enviado com sucesso/);
-    assert.match(ui, /btnIrFaturamento/);
-    assert.match(ui, /Ir para Expedição/);
-    assert.doesNotMatch(ui, /enviarFaturamento[\s\S]{0,400}loadPage\('faturamento'\)/);
+  it('tela operacional não envia para expedição nem navega ao faturamento legado', () => {
+    // Fluxo de envio à Expedição removido da tela de Pedidos (adaptação operacional); backend legado preservado.
+    assert.doesNotMatch(ui, /enviarFaturamento|btnIrFaturamento|Pedido enviado com sucesso/);
+    assert.doesNotMatch(ui, /loadPage\('faturamento'\)/);
   });
 });
 

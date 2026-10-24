@@ -24,6 +24,7 @@ const centralEntradasState = {
     carregandoInteligencia: false,
     indicadoresFiscais: null,
     sincronizando: false,
+    syncAoAbrirEmVoo: false,
     ultimaSincronizacao: null,
     sincronizacaoNsu: null,
     notasNovasUltimaSync: 0,
@@ -216,6 +217,27 @@ function formatarDataHoraCentral(data) {
 }
 
 /**
+ * Distingue consulta bloqueada de consulta enviada e inclui o horário de liberação.
+ * @param {Object} [resultado]
+ * @returns {string}
+ */
+function montarMensagemConsultaNaoEnviadaCentral(resultado) {
+    const r = resultado || {};
+    let msg = String(r.mensagemAmigavel || r.mensagem || '').trim();
+    if (!msg) {
+        msg = 'Consulta DF-e não enviada à SEFAZ (cooldown ou Gate). Os documentos já recebidos permanecem na lista.';
+    }
+    if (r.proximaConsultaEm) {
+        const hora = formatarDataHoraCentral(r.proximaConsultaEm);
+        const iso = String(r.proximaConsultaEm);
+        if (hora && hora !== '—' && !msg.includes(hora) && !msg.includes(iso)) {
+            msg += ` Liberação estimada: ${hora}.`;
+        }
+    }
+    return msg;
+}
+
+/**
  * Data de exibição do documento: prioriza dataEmissao, depois dhRecbto.
  * Nunca usa created_at como data principal.
  * @param {Object} doc
@@ -397,7 +419,12 @@ async function centralEntradasFetch(path, options = {}) {
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
         const err = new Error(mensagemErroHttpCentral(data, response.status));
-        err.code = data.code;
+        err.code = data.codigo || data.code;
+        err.codigo = data.codigo || data.code;
+        err.etapa = data.etapa || null;
+        err.proximaConsultaEm = data.proximaConsultaEm || null;
+        err.mensagemAmigavel = data.mensagemAmigavel || err.message;
+        err.preVoo = data.preVoo || null;
         err.status = response.status;
         throw err;
     }
@@ -1338,6 +1365,9 @@ function renderCabecalhoUx1Central() {
                         ${podeDiagnostico ? '<li><button type="button" class="dropdown-item central-nav-view" data-view="importacao-xml-legado"><i class="fas fa-file-import me-2"></i>Importação de XML Legado</button></li>' : ''}
                         <li><hr class="dropdown-divider"></li>
                         <li><button type="button" class="dropdown-item central-nav-view" data-view="config"><i class="fas fa-cog me-2"></i>Configurações</button></li>
+                        <li><button type="button" class="dropdown-item" id="centralBtnOperacaoFiscalReal">
+                            <i class="fas fa-shield-alt me-2"></i>Operação fiscal real (DistDFe)
+                        </button></li>
                         <li><button type="button" class="dropdown-item central-nav-view" data-view="log"><i class="fas fa-list-alt me-2"></i>Log operacional</button></li>
                         <li><button type="button" class="dropdown-item central-nav-view" data-view="ciclo-dfe"><i class="fas fa-project-diagram me-2"></i>Ciclo DF-e</button></li>
                     </ul>
@@ -1398,7 +1428,15 @@ function renderAtencaoBannerUx1() {
             <i class="fas fa-exclamation-circle text-warning"></i>
             <span class="flex-grow-1">${escapeHtmlCentralEntradas(principal.mensagem)}</span>
             ${principal.acao
-                ? `<button type="button" class="btn btn-sm btn-warning central-atencao-acao" data-atencao-idx="0">${escapeHtmlCentralEntradas(principal.acao.label || 'Ver')}</button>`
+                ? `<button type="button" class="btn btn-sm btn-warning central-atencao-acao"
+                    data-atencao-idx="0"
+                    data-filtro-fila="${escapeHtmlCentralEntradas(
+                        principal.acao.fila
+                        || principal.acao.filtroRapido
+                        || mapearStatusParaFilaCentral(principal.acao.status)
+                        || 'em_revisao'
+                    )}"
+                    data-acao-tipo="${escapeHtmlCentralEntradas(principal.acao.tipo || 'filtrar_fila')}">${escapeHtmlCentralEntradas(principal.acao.label || 'Ver')}</button>`
                 : ''}
         </div>`;
 }
@@ -1675,7 +1713,14 @@ function renderPainelAtencaoCentral() {
                         <i class="fas ${escapeHtmlCentralEntradas(item.icone)}"></i>
                         <span class="flex-grow-1">${escapeHtmlCentralEntradas(item.mensagem)}</span>
                         <button type="button" class="btn btn-sm btn-outline-primary central-atencao-acao"
-                            data-atencao-idx="${idx}">
+                            data-atencao-idx="${idx}"
+                            data-filtro-fila="${escapeHtmlCentralEntradas(
+                                item.acao?.fila
+                                || item.acao?.filtroRapido
+                                || mapearStatusParaFilaCentral(item.acao?.status)
+                                || ''
+                            )}"
+                            data-acao-tipo="${escapeHtmlCentralEntradas(item.acao?.tipo || '')}">
                             ${escapeHtmlCentralEntradas(item.acao?.label || 'Ação')}
                         </button>
                     </div>
@@ -1973,17 +2018,37 @@ function renderStatsFornecedorCentral() {
         </div>`;
 }
 
+/** Mapeia status canônico/legado → código de fila UX da Central. */
+function mapearStatusParaFilaCentral(status) {
+    const s = String(status || '').trim().toUpperCase();
+    if (!s) return 'todos';
+    if (s === 'EM_REVISAO' || s === 'AGUARDANDO_REVISAO') return 'em_revisao';
+    if (s === 'PRONTA_IMPORTACAO' || s === 'PRONTA_PARA_COMPRA' || s === 'REVISADA') return 'prontas';
+    if (s === 'IMPORTADA' || s === 'GRAVADA' || s === 'DUPLICADA') return 'importadas';
+    if (s === 'CANCELADA') return 'canceladas';
+    if (s === 'DENEGADA') return 'denegadas';
+    if (s === 'INUTILIZADA') return 'inutilizadas';
+    if (s === 'ERRO') return 'erro';
+    if (s === 'EM_IMPORTACAO' || s === 'EM_COMPRA') return 'em_importacao';
+    if (s === 'NOVA' || s === 'RESUMO_RECEBIDO' || s === 'XML_COMPLETO'
+        || s === 'RECEBIDA' || s === 'SINCRONIZADA' || s === 'EM_PROCESSAMENTO') {
+        return 'pendentes';
+    }
+    if (s === 'REVISAR') return 'em_revisao';
+    return null;
+}
+
 function executarAcaoAtencaoCentral(acao) {
     if (!acao) return;
 
-    if (acao.tipo === 'filtrar_status') {
+    if (acao.tipo === 'filtrar_fila' || acao.tipo === 'filtrar_status') {
         mostrarViewCentral('inbox');
-        const select = document.getElementById('centralFiltroStatus');
-        if (select) select.value = acao.status || '';
-        centralEntradasState.filtroRapidoAtivo = '';
-        centralEntradasState.pagina = 1;
-        renderFiltrosRapidosCentral();
-        carregarDocumentosCentral();
+        const fila = acao.fila
+            || acao.filtroRapido
+            || mapearStatusParaFilaCentral(acao.status)
+            || 'em_revisao';
+        // Usa o mesmo caminho dos chips KPI (filtroRapido), não só o <select> de status.
+        aplicarFiltroFilaCentral(fila);
         return;
     }
 
@@ -2268,6 +2333,70 @@ function renderAbaAmbienteCfg(painel) {
         </div>`;
 }
 
+function usuarioPodeAdminOperacaoFiscalReal() {
+    // Fonte oficial do ERP: access-control.js (localStorage.user).
+    if (typeof isSuperAdminUser === 'function' && isSuperAdminUser()) return true;
+    if (typeof podeAjustarEstoque === 'function' && podeAjustarEstoque()) return true;
+    const u = obterUsuarioLogadoCentral();
+    const perfil = String(u.perfil || u.nivel || '').trim().toUpperCase();
+    const role = String(u.role || '').trim().toLowerCase();
+    return role === 'admin' || perfil === 'SUPER_ADMIN' || perfil === 'ADMIN';
+}
+
+function renderCardOperacaoFiscalRealCfg() {
+    const u = obterUsuarioLogadoCentral();
+    const perfilExibido = String(u.perfil || u.nivel || u.role || '—').trim() || '—';
+    const podeAdmin = usuarioPodeAdminOperacaoFiscalReal();
+    const avisoPerm = podeAdmin
+        ? `<div class="small text-muted mb-2">
+            Administrador autorizado (perfil: <strong>${escapeHtmlCentralEntradas(perfilExibido)}</strong>).
+            Pode habilitar/desabilitar a operação real desta empresa.
+           </div>`
+        : `<div class="alert alert-warning py-2 small mb-2">
+            Seu perfil na sessão (<strong>${escapeHtmlCentralEntradas(perfilExibido)}</strong>) não autoriza habilitar a operação fiscal real.
+            Faça logout/login se o perfil foi alterado, ou solicite a um ADMIN/SUPER_ADMIN.
+            Você ainda pode atualizar o status e ver o pré-voo.
+           </div>`;
+    return `
+        <div class="central-cfg-card central-cfg-card--op-real" id="centralCfgCardOperacaoReal"
+             style="border: 2px solid #c9a227; background: linear-gradient(180deg,#fffbeb 0%,#fff 48%);">
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+                <div class="central-cfg-card__title mb-0">
+                    <i class="fas fa-shield-alt me-1"></i> Operação fiscal real (DistDFe)
+                    ${badgeCfgCentral('Ativação controlada', 'warn')}
+                </div>
+            </div>
+            <p class="small mb-2">
+                Use este painel para habilitar consultas DistDFe de produção.
+                Não confunda com <em>Abrir Configuração Fiscal</em> (manifestação/certificado em outra tela).
+                <strong>Testar comunicação</strong> não envia DistDFe.
+            </p>
+            ${avisoPerm}
+            <div id="centralCfgOperacaoRealStatus" class="small text-muted mb-2">Carregando status…</div>
+            <div class="d-flex flex-wrap gap-2">
+                <button type="button" class="btn btn-outline-secondary btn-sm" id="centralCfgOpRealAtualizar">
+                    <i class="fas fa-sync-alt me-1"></i> Atualizar status
+                </button>
+                <button type="button" class="btn btn-warning btn-sm" id="centralCfgOpRealHabilitar"
+                    ${podeAdmin ? '' : 'disabled aria-disabled="true" title="Requer perfil ADMIN ou SUPER_ADMIN"'}>
+                    <i class="fas fa-unlock me-1"></i> Habilitar operação real
+                </button>
+                <button type="button" class="btn btn-outline-dark btn-sm" id="centralCfgOpRealDesabilitar"
+                    ${podeAdmin ? '' : 'disabled aria-disabled="true" title="Requer perfil ADMIN ou SUPER_ADMIN"'}>
+                    <i class="fas fa-lock me-1"></i> Desabilitar
+                </button>
+                <button type="button" class="btn btn-danger btn-sm" id="centralCfgOpRealConsultar">
+                    <i class="fas fa-cloud-download-alt me-1"></i> Consultar DF-e (produção)
+                </button>
+                <button type="button" class="btn btn-outline-warning btn-sm d-none" id="centralCfgOpRealLiberarFila"
+                    ${podeAdmin ? '' : 'disabled aria-disabled="true" title="Requer perfil ADMIN ou SUPER_ADMIN"'}>
+                    <i class="fas fa-unlock-alt me-1"></i> Liberar fila esgotada
+                </button>
+            </div>
+            <div id="centralCfgResultOpReal" class="central-cfg-result mt-2"></div>
+        </div>`;
+}
+
 function renderAbaSefazCfg(painel) {
     const s = painel.sefaz || {};
     const pf = painel.plataformaFiscal || {};
@@ -2281,6 +2410,9 @@ function renderAbaSefazCfg(painel) {
 
     return `
         <div class="row g-3">
+            <div class="col-12">
+                ${renderCardOperacaoFiscalRealCfg()}
+            </div>
             <div class="col-12">
                 <div class="central-cfg-card">
                     <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
@@ -2296,7 +2428,7 @@ function renderAbaSefazCfg(painel) {
                     </div>
                     <dl class="central-cfg-platform-dl mb-3">
                         <div><dt>Modo atual</dt><dd>${politicaBadge}</dd></div>
-                        <div><dt>Origem</dt><dd>Centro de Configurações → Fiscal</dd></div>
+                        <div><dt>Origem</dt><dd>Centro de Configurações → Diagnóstico → Manifestação do Destinatário</dd></div>
                         <div><dt>Última atualização</dt><dd>${escapeHtmlCentralEntradas(atualizadoEm ? formatarDataHoraCentral(atualizadoEm) : '—')}</dd></div>
                     </dl>
                     <button type="button" class="btn btn-primary btn-sm mb-3" id="btnCentralAbrirConfigManifestacao">
@@ -2433,10 +2565,13 @@ function renderAbaSefazCfg(painel) {
             </div>
             <div class="col-lg-4">
                 <div class="central-cfg-card">
-                    <div class="central-cfg-card__title"><i class="fas fa-plug me-1"></i> Teste</div>
-                    <p class="small text-muted mb-3">Valida comunicação com o endpoint DF-e do ambiente atual (SOAP).</p>
+                    <div class="central-cfg-card__title"><i class="fas fa-plug me-1"></i> Teste local</div>
+                    <p class="small text-muted mb-3">
+                        Valida prontidão local (empresa, certificado A1, ambiente, NSU/cooldown).
+                        <strong>Não</strong> envia DistDFe à SEFAZ.
+                    </p>
                     <button type="button" class="btn btn-outline-primary w-100" id="centralCfgTestarSefaz">
-                        <i class="fas fa-satellite-dish me-1"></i> Testar comunicação
+                        <i class="fas fa-stethoscope me-1"></i> Testar comunicação
                     </button>
                     <div id="centralCfgResultSefaz" class="central-cfg-result"></div>
                 </div>
@@ -2458,7 +2593,7 @@ function renderAbaSefazCfg(painel) {
 }
 
 function abrirConfigFiscalManifestacaoCentral() {
-    window.__CDS_CFG_FORCE_TAB = 'fiscal';
+    window.__CDS_CFG_FORCE_TAB = 'diagnostico';
     window.__CDS_CFG_FORCE_ANCHOR = 'manifestacao';
     if (typeof loadPage === 'function') loadPage('configuracoes-avancadas');
 }
@@ -2493,7 +2628,7 @@ async function carregarStatusManifestacaoCentralCfg() {
                 <div><dt>Eventos enviados</dt><dd>${enviados}</dd></div>
                 <div><dt>Eventos aceitos</dt><dd>${aceitos}</dd></div>
                 <div><dt>Eventos rejeitados</dt><dd>${rejeitados}</dd></div>
-                <div><dt>Origem</dt><dd>Centro de Configurações → Fiscal</dd></div>
+                <div><dt>Origem</dt><dd>Centro de Configurações → Diagnóstico → Manifestação do Destinatário</dd></div>
             </dl>`;
     } catch (err) {
         el.innerHTML = `<span class="text-danger">${escapeHtmlCentralEntradas(err.message || 'Falha ao carregar status')}</span>`;
@@ -2580,6 +2715,7 @@ function wireBotoesConfigFiscalCentral() {
     });
     void carregarStatusManifestacaoCentralCfg();
     void carregarStatusRecuperacaoXmlCentralCfg();
+    void carregarStatusOperacaoFiscalRealCentral();
     document.getElementById('centralCfgRecupXmlRefresh')?.addEventListener('click', () => {
         void carregarStatusRecuperacaoXmlCentralCfg();
     });
@@ -3197,8 +3333,54 @@ async function carregarConfigCentral() {
         centralEntradasState.periodoPadrao = periodo;
         container.innerHTML = renderPainelConfigCentral(painel);
         wireBotoesConfigFiscalCentral();
+        if (centralEntradasState.configAbaAtiva) {
+            ativarAbaConfigCentral(centralEntradasState.configAbaAtiva);
+        }
+        if (centralEntradasState.focarOperacaoFiscalReal) {
+            centralEntradasState.focarOperacaoFiscalReal = false;
+            destacarPainelOperacaoFiscalRealCentral();
+        }
     } catch (error) {
         container.innerHTML = `<div class="alert alert-danger m-3">${escapeHtmlCentralEntradas(error.message)}</div>`;
+    }
+}
+
+function destacarPainelOperacaoFiscalRealCentral() {
+    const el = document.getElementById('centralCfgCardOperacaoReal');
+    if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    el.style.boxShadow = '0 0 0 3px rgba(201,162,39,0.55)';
+    setTimeout(() => {
+        if (el) el.style.boxShadow = '';
+    }, 4000);
+}
+
+/**
+ * Abre Configuração Enterprise → aba SEFAZ e destaca o painel de operação fiscal real.
+ * Não abre "Configuração Fiscal" (configuracoes-avancadas).
+ */
+async function abrirPainelOperacaoFiscalRealCentral() {
+    centralEntradasState.configAbaAtiva = 'sefaz';
+    centralEntradasState.focarOperacaoFiscalReal = true;
+    const config = document.getElementById('centralEntradasViewConfig');
+    const inbox = document.getElementById('centralEntradasViewInbox');
+    const log = document.getElementById('centralEntradasViewLog');
+    const ciclo = document.getElementById('centralEntradasViewCicloDfe');
+    const importacao = document.getElementById('centralEntradasViewImportacaoLegado');
+    if (inbox) inbox.classList.add('d-none');
+    if (log) log.classList.add('d-none');
+    if (ciclo) ciclo.classList.add('d-none');
+    if (importacao) importacao.classList.add('d-none');
+    if (config) config.classList.remove('d-none');
+    centralEntradasState.viewAtiva = 'config';
+    await carregarConfigCentral();
+    ativarAbaConfigCentral('sefaz');
+    destacarPainelOperacaoFiscalRealCentral();
+    if (!document.getElementById('centralCfgOpRealHabilitar')) {
+        showNotification(
+            'Painel de operação fiscal real não foi renderizado. Recarregue a página (Ctrl+F5) para atualizar o script da Central.',
+            'danger'
+        );
     }
 }
 
@@ -3241,18 +3423,411 @@ async function restaurarConfigCentral() {
 
 async function testarSefazConfigCentral(resultElId = 'centralCfgResultSefaz') {
     const el = document.getElementById(resultElId);
-    if (el) el.innerHTML = '<span class="text-muted small"><i class="fas fa-spinner fa-spin me-1"></i> Testando SEFAZ...</span>';
+    if (el) el.innerHTML = '<span class="text-muted small"><i class="fas fa-spinner fa-spin me-1"></i> Testando prontidão local...</span>';
     try {
         const resultado = await postConfigAcaoCentral('/configuracao/testar-sefaz');
-        exibirResultadoCfg(resultElId, resultado, 'Comunicação SEFAZ OK');
-        if (resultado.sucesso === false && resultado.mensagemAmigavel) {
-            showNotification(resultado.mensagemAmigavel, 'warning');
-        } else if (resultado.sucesso !== false) {
-            showNotification(resultado.mensagemAmigavel || 'Comunicação SEFAZ OK', 'success');
+        const tipo = resultado.tipoTeste || (resultado.consultaExecutada === false ? 'PRONTIDAO_LOCAL' : 'DIST_DFE');
+        const okMsg = tipo === 'PRONTIDAO_LOCAL'
+            ? 'Prontidão local OK — nenhuma consulta DistDFe foi enviada.'
+            : 'Comunicação SEFAZ OK';
+        exibirResultadoCfg(resultElId, {
+            ...resultado,
+            mensagemAmigavel: resultado.mensagemAmigavel || resultado.mensagem || okMsg
+        }, okMsg);
+        if (resultado.sucesso === false) {
+            showNotification(
+                classificarMensagemBloqueioFiscalCentral(resultado)
+                    || resultado.mensagemAmigavel
+                    || 'Prontidão incompleta.',
+                'warning'
+            );
+        } else {
+            showNotification(resultado.mensagemAmigavel || okMsg, 'success');
         }
     } catch (error) {
         exibirResultadoCfg(resultElId, { sucesso: false, mensagemAmigavel: error.message });
         showNotification(error.message, 'danger');
+    }
+}
+
+function classificarMensagemBloqueioFiscalCentral(resultado) {
+    const r = resultado || {};
+    const codigo = String(r.codigo || r.codigoErro || r.motivoIgnorado || r.motivoCooldown || '');
+    const motivoNsu = String(r.motivoCooldown || r.preVoo?.nsu?.motivoCooldown || r.detalhe?.cooldownNsu?.motivo || '');
+    // CE-PASTELARIA-02 — FILA sticky ≠ cooldown com timer; mensagem deve ser explícita.
+    if (
+        codigo === 'FILA_ESGOTADA'
+        || motivoNsu === 'FILA_ESGOTADA'
+        || /fila esgotada/i.test(String(r.mensagemAmigavel || r.mensagem || ''))
+    ) {
+        return r.mensagemAmigavel
+            || r.mensagem
+            || 'Consulta DistDFe bloqueada: fila esgotada localmente (ultNSU = maxNSU). '
+                + 'A expiração do cooldown de 1 h não libera a busca. '
+                + 'Use “Liberar fila esgotada” (admin) e então consulte novamente, '
+                + 'ou aguarde evidência de novos documentos no cursor.';
+    }
+    if (codigo === 'ESTADO_NSU_INCONSISTENTE' || motivoNsu === 'ESTADO_NSU_INCONSISTENTE') {
+        return r.mensagemAmigavel
+            || r.mensagem
+            || 'Consulta bloqueada: estado do NSU inconsistente (fail-closed).';
+    }
+    if (codigo === 'COOLDOWN_ATIVO' || r.bloqueadoPeloGate
+        || (r.etapa === 'cooldown' && codigo !== 'FILA_ESGOTADA')) {
+        const liberacao = r.proximaConsultaEm
+            || r.preVoo?.proximaConsultaEm
+            || r.preVoo?.nsu?.proximaConsultaEm
+            || r.nsu?.proximaConsultaEm;
+        const liberacaoLabel = liberacao
+            ? (formatarDataHoraCentral(liberacao) || liberacao)
+            : null;
+        return r.mensagemAmigavel
+            || r.mensagem
+            || (liberacaoLabel
+                ? `Cooldown SEFAZ ativo. Nova consulta a partir de ${liberacaoLabel}.`
+                : 'Consulta em cooldown SEFAZ. Aguarde a liberação.');
+    }
+    if (codigo === 'TRANSMISSAO_SEFAZ_NAO_AUTORIZADA' || codigo === 'OPERACAO_REAL_DESABILITADA'
+        || r.bloqueadoAutorizacao) {
+        return r.mensagemAmigavel || r.mensagem
+            || 'Consulta bloqueada por autorização. Habilite a operação fiscal real e confirme a consulta DistDFe.';
+    }
+    if (codigo === 'AMBIENTE_NAO_PRODUCAO') {
+        return r.mensagem || 'Ambiente de produção não está selecionado.';
+    }
+    if (/CERTIFICADO|CNPJ|EMPRESA/i.test(codigo)) {
+        return r.mensagemAmigavel || r.mensagem || 'Erro de certificado, CNPJ ou empresa.';
+    }
+    if (String(r.cStat) === '137' || codigo === 'SEM_DOCUMENTO') {
+        return r.mensagemAmigavel || 'Consulta concluída sem documentos novos (cStat 137).';
+    }
+    if (String(r.cStat) === '656') {
+        return r.mensagemAmigavel || 'Consumo indevido (cStat 656). Cooldown ativo — NSU não será retrocedido.';
+    }
+    return null;
+}
+
+function atualizarBotaoConsultarDfeRealCentral(st) {
+    const btn = document.getElementById('centralCfgOpRealConsultar');
+    if (!btn) return;
+    const pre = st?.preVoo || {};
+    const liberacao = pre.proximaConsultaEm || pre.nsu?.proximaConsultaEm;
+    const liberacaoLabel = liberacao
+        ? (formatarDataHoraCentral(liberacao) || liberacao)
+        : null;
+    if (!st?.ativa) {
+        btn.disabled = true;
+        btn.setAttribute('aria-disabled', 'true');
+        btn.title = 'Habilite a operação fiscal real antes de consultar.';
+        return;
+    }
+    if (pre.ok === false) {
+        btn.disabled = true;
+        btn.setAttribute('aria-disabled', 'true');
+        if (pre.codigo === 'FILA_ESGOTADA' || pre.nsu?.motivoCooldown === 'FILA_ESGOTADA') {
+            btn.title = pre.mensagemAmigavel || pre.mensagem
+                || 'Fila esgotada localmente. Use “Liberar fila esgotada” (admin) antes de nova consulta.';
+        } else if (pre.codigo === 'COOLDOWN_ATIVO' || pre.etapa === 'cooldown') {
+            btn.title = liberacaoLabel
+                ? `Cooldown SEFAZ ativo. Nova consulta a partir de ${liberacaoLabel}.`
+                : (pre.mensagemAmigavel || pre.mensagem || 'Cooldown SEFAZ ativo.');
+        } else {
+            btn.title = pre.mensagemAmigavel || pre.mensagem || 'Pré-voo bloqueado — consulta indisponível.';
+        }
+        return;
+    }
+    btn.disabled = false;
+    btn.removeAttribute('aria-disabled');
+    btn.title = 'Consultar DistDFe em produção (exige confirmação).';
+}
+
+async function carregarStatusOperacaoFiscalRealCentral() {
+    const el = document.getElementById('centralCfgOperacaoRealStatus');
+    try {
+        const st = await centralEntradasFetch('/operacao-fiscal-real/status');
+        centralEntradasState.operacaoFiscalReal = st;
+        atualizarBotaoConsultarDfeRealCentral(st);
+        if (!el) return st;
+        const pre = st.preVoo || {};
+        const nsu = pre.nsu || {};
+        const liberacao = pre.proximaConsultaEm || nsu.proximaConsultaEm;
+        const liberacaoLabel = liberacao
+            ? (formatarDataHoraCentral(liberacao) || liberacao)
+            : null;
+        const itensFalhos = (pre.itens || []).filter((i) => !i.ok).map((i) => i.mensagem).join(' · ');
+        const ehFila = pre.codigo === 'FILA_ESGOTADA' || nsu.motivoCooldown === 'FILA_ESGOTADA';
+        const ehCooldown = !ehFila && (pre.codigo === 'COOLDOWN_ATIVO' || nsu.cooldownAtivo);
+        const blocoFila = ehFila
+            ? `<div class="text-warning mt-1"><strong>Fila esgotada:</strong> ultNSU = maxNSU. `
+                + `Não é liberada só pelo cooldown de 1 h. Admin: use “Liberar fila esgotada”.</div>`
+            : '';
+        const blocoCooldown = ehCooldown
+            ? `<div class="text-warning mt-1"><strong>Cooldown SEFAZ:</strong> ativo`
+                + (liberacaoLabel ? ` — nova consulta a partir de ${escapeHtmlCentralEntradas(liberacaoLabel)}` : '')
+                + `</div>`
+            : '';
+        const btnLiberar = document.getElementById('centralCfgOpRealLiberarFila');
+        if (btnLiberar) {
+            const mostrarLiberar = !!(st.ativa && ehFila);
+            btnLiberar.classList.toggle('d-none', !mostrarLiberar);
+            btnLiberar.disabled = !mostrarLiberar || !usuarioPodeAdminOperacaoFiscalReal();
+        }
+        el.innerHTML = `
+            <div><strong>Estado:</strong> ${st.ativa ? 'Habilitada' : 'Desabilitada'}</div>
+            <div><strong>Pré-voo:</strong> ${pre.ok ? 'OK' : escapeHtmlCentralEntradas(pre.mensagemAmigavel || pre.mensagem || 'Bloqueado')}</div>
+            <div><strong>Código:</strong> ${escapeHtmlCentralEntradas(String(pre.codigo || (pre.ok ? 'OK' : '—')))}</div>
+            <div><strong>ultNSU / maxNSU:</strong> ${escapeHtmlCentralEntradas(String(nsu.ultNsu || '—'))}
+                / ${escapeHtmlCentralEntradas(String(nsu.maxNsu || '—'))}</div>
+            ${st.ativa && st.ativadaEm ? `<div><strong>Ativada em:</strong> ${escapeHtmlCentralEntradas(formatarDataHoraCentral(st.ativadaEm) || st.ativadaEm)}</div>` : ''}
+            ${blocoFila}
+            ${blocoCooldown}
+            ${itensFalhos && !ehFila && pre.codigo !== 'COOLDOWN_ATIVO' ? `<div class="text-warning mt-1">${escapeHtmlCentralEntradas(itensFalhos)}</div>` : ''}
+            <div class="mt-1">${escapeHtmlCentralEntradas(st.mensagem || '')}</div>`;
+        return st;
+    } catch (error) {
+        if (el) {
+            el.innerHTML = `<span class="text-danger">${escapeHtmlCentralEntradas(error.message || 'Falha ao carregar')}</span>`;
+        }
+        atualizarBotaoConsultarDfeRealCentral(null);
+        throw error;
+    }
+}
+
+async function habilitarOperacaoFiscalRealCentral() {
+    if (!usuarioPodeAdminOperacaoFiscalReal()) {
+        showNotification(
+            'Sem permissão: apenas ADMIN ou SUPER_ADMIN podem habilitar a operação fiscal real.',
+            'warning'
+        );
+        exibirResultadoCfg('centralCfgResultOpReal', {
+            sucesso: false,
+            mensagemAmigavel: 'Perfil sem permissão administrativa. Solicite a um ADMIN/SUPER_ADMIN.'
+        });
+        return;
+    }
+    if (!confirm(
+        'Habilitar OPERAÇÃO FISCAL REAL para a empresa selecionada?\n\n'
+        + 'Isto permite consultas DistDFe de produção após confirmação explícita.\n'
+        + 'Manifestação automática 210210 NÃO será autorizada.\n\n'
+        + 'Confirme que o ambiente da empresa é PRODUÇÃO e que você é administrador autorizado.'
+    )) {
+        return;
+    }
+    try {
+        const data = await centralEntradasFetch('/operacao-fiscal-real/habilitar', {
+            method: 'POST',
+            body: JSON.stringify({
+                confirmarAmbienteProducao: true,
+                confirmarRisco: true
+            })
+        });
+        const msgOk = data.mensagemAmigavel || data.mensagem || 'Operação fiscal real habilitada.';
+        exibirResultadoCfg('centralCfgResultOpReal', {
+            sucesso: true,
+            mensagemAmigavel: msgOk,
+            avisoCooldown: data.avisoCooldown,
+            proximaConsultaEm: data.proximaConsultaEm
+        }, 'Operação real habilitada');
+        showNotification(msgOk, data.avisoCooldown ? 'warning' : 'success');
+        await carregarStatusOperacaoFiscalRealCentral();
+    } catch (error) {
+        const msg = classificarMensagemBloqueioFiscalCentral({
+            codigo: error.codigo || error.code,
+            etapa: error.etapa,
+            mensagemAmigavel: error.mensagemAmigavel || error.message,
+            mensagem: error.message,
+            proximaConsultaEm: error.proximaConsultaEm,
+            preVoo: error.preVoo
+        }) || error.mensagemAmigavel || error.message || 'Falha ao habilitar operação fiscal real.';
+        exibirResultadoCfg('centralCfgResultOpReal', {
+            sucesso: false,
+            mensagemAmigavel: msg,
+            codigo: error.codigo || error.code,
+            etapa: error.etapa
+        });
+        showNotification(msg, 'danger');
+        try { await carregarStatusOperacaoFiscalRealCentral(); } catch (_e) { /* ignore */ }
+    }
+}
+
+async function desabilitarOperacaoFiscalRealCentral() {
+    if (!usuarioPodeAdminOperacaoFiscalReal()) {
+        showNotification(
+            'Sem permissão: apenas ADMIN ou SUPER_ADMIN podem desabilitar a operação fiscal real.',
+            'warning'
+        );
+        return;
+    }
+    if (!confirm('Desabilitar a operação fiscal real desta empresa? Novas consultas DistDFe ficarão bloqueadas.')) {
+        return;
+    }
+    try {
+        const data = await centralEntradasFetch('/operacao-fiscal-real/desabilitar', {
+            method: 'POST',
+            body: JSON.stringify({})
+        });
+        exibirResultadoCfg('centralCfgResultOpReal', data, 'Operação real desabilitada');
+        showNotification(data.mensagem || 'Operação desabilitada.', 'success');
+        await carregarStatusOperacaoFiscalRealCentral();
+    } catch (error) {
+        exibirResultadoCfg('centralCfgResultOpReal', { sucesso: false, mensagemAmigavel: error.message });
+        showNotification(error.message, 'danger');
+    }
+}
+
+async function liberarFilaEsgotadaCentral() {
+    if (!usuarioPodeAdminOperacaoFiscalReal()) {
+        showNotification(
+            'Sem permissão: apenas ADMIN ou SUPER_ADMIN podem liberar a fila esgotada.',
+            'warning'
+        );
+        return;
+    }
+    if (!confirm(
+        'Liberar bloqueio LOCAL de fila esgotada (ultNSU = maxNSU)?\n\n'
+        + '• Não envia consulta à SEFAZ.\n'
+        + '• Não altera o NSU.\n'
+        + '• Não contorna cooldown de cStat 656 ainda ativo.\n'
+        + '• Após liberar, use “Consultar DF-e (produção)” com confirmação.\n\n'
+        + 'A SEFAZ ainda pode rejeitar a próxima consulta.'
+    )) {
+        return;
+    }
+    try {
+        const data = await centralEntradasFetch('/operacao-fiscal-real/liberar-fila-esgotada', {
+            method: 'POST',
+            body: JSON.stringify({
+                confirmacaoLiberacaoFila: true,
+                motivo: 'liberacao_ui_central'
+            })
+        });
+        exibirResultadoCfg('centralCfgResultOpReal', {
+            sucesso: data.sucesso !== false,
+            mensagemAmigavel: data.mensagemAmigavel || data.mensagem
+        });
+        showNotification(
+            data.mensagemAmigavel || data.mensagem || 'Fila liberada localmente.',
+            data.preVoo?.ok === false ? 'warning' : 'success'
+        );
+        await carregarStatusOperacaoFiscalRealCentral();
+    } catch (error) {
+        const msg = classificarMensagemBloqueioFiscalCentral({
+            codigo: error.codigo || error.code,
+            etapa: error.etapa,
+            mensagemAmigavel: error.mensagemAmigavel || error.message,
+            mensagem: error.message,
+            proximaConsultaEm: error.proximaConsultaEm,
+            preVoo: error.preVoo
+        }) || error.mensagemAmigavel || error.message || 'Falha ao liberar fila.';
+        exibirResultadoCfg('centralCfgResultOpReal', { sucesso: false, mensagemAmigavel: msg });
+        showNotification(msg, 'danger');
+    }
+}
+
+async function consultarDfeRealCentral() {
+    let st = centralEntradasState.operacaoFiscalReal;
+    try {
+        st = await carregarStatusOperacaoFiscalRealCentral();
+    } catch (_e) {
+        /* usa cache local se status falhar */
+    }
+    if (!st?.ativa) {
+        showNotification(
+            'Operação fiscal real desabilitada. Um administrador deve habilitá-la antes da consulta DistDFe.',
+            'warning'
+        );
+        return;
+    }
+    const pre = st.preVoo || {};
+    if (pre.ok === false) {
+        const msgBloqueio = classificarMensagemBloqueioFiscalCentral({
+            codigo: pre.codigo,
+            etapa: pre.etapa,
+            mensagemAmigavel: pre.mensagemAmigavel,
+            mensagem: pre.mensagem,
+            motivoCooldown: pre.nsu?.motivoCooldown,
+            proximaConsultaEm: pre.proximaConsultaEm || pre.nsu?.proximaConsultaEm,
+            preVoo: pre
+        }) || pre.mensagemAmigavel || pre.mensagem || 'Pré-voo bloqueou a consulta DistDFe.';
+        exibirResultadoCfg('centralCfgResultOpReal', { sucesso: false, mensagemAmigavel: msgBloqueio });
+        showNotification(msgBloqueio, 'warning');
+        return;
+    }
+    if (!confirm(
+        'Iniciar CONSULTA REAL de DF-e (DistDFe) na SEFAZ de PRODUÇÃO?\n\n'
+        + 'Será usado o certificado A1 e o CNPJ da empresa selecionada.\n'
+        + 'O ultNSU persistido será retomado (sem inventar ou retroceder).\n'
+        + 'Nenhuma manifestação 210210 será enviada automaticamente.\n\n'
+        + 'Confirme empresa e ambiente de produção.'
+    )) {
+        return;
+    }
+    if (centralEntradasState.sincronizando) return;
+    centralEntradasState.sincronizando = true;
+    atualizarIndicadorSyncBotao();
+    try {
+        const resultado = await centralEntradasFetch('/operacao-fiscal-real/consultar-dfe', {
+            method: 'POST',
+            body: JSON.stringify({
+                confirmacaoConsultaReal: true,
+                confirmacaoAmbienteProducao: true
+            })
+        });
+        exibirResultadoCfg('centralCfgResultOpReal', {
+            sucesso: resultado.sucesso !== false && resultado.bloqueadoAutorizacao !== true,
+            mensagemAmigavel: classificarMensagemBloqueioFiscalCentral(resultado)
+                || resultado.mensagemAmigavel
+                || resultado.mensagem
+                || (resultado.notasNovas > 0
+                    ? `${resultado.notasNovas} documento(s) novo(s).`
+                    : 'Consulta real concluída.')
+        });
+        const consultaIgnorada = resultado.consultaExecutada === false || resultado.ignorado === true;
+        if (consultaIgnorada) {
+            showNotification(
+                classificarMensagemBloqueioFiscalCentral(resultado)
+                    || montarMensagemConsultaNaoEnviadaCentral(resultado),
+                'warning'
+            );
+        } else if (resultado.sucesso) {
+            const msg = resultado.notasNovas > 0
+                ? `${resultado.notasNovas} nova(s) nota(s) na distribuição.`
+                : 'Consulta real concluída sem documentos novos.';
+            showNotification(msg, 'success');
+        } else {
+            showNotification(
+                classificarMensagemBloqueioFiscalCentral(resultado)
+                    || resultado.mensagemAmigavel
+                    || 'Falha na consulta real.',
+                'warning'
+            );
+        }
+        await Promise.all([
+            carregarDashboardCentral(),
+            carregarDocumentosCentral({ pagina: 1 }),
+            carregarStatusOperacaoFiscalRealCentral()
+        ]);
+    } catch (error) {
+        const msg = classificarMensagemBloqueioFiscalCentral({
+            codigo: error.codigo || error.code,
+            etapa: error.etapa,
+            mensagemAmigavel: error.mensagemAmigavel || error.message,
+            mensagem: error.message,
+            proximaConsultaEm: error.proximaConsultaEm,
+            preVoo: error.preVoo
+        }) || error.mensagemAmigavel || error.message || 'Consulta DF-e bloqueada.';
+        exibirResultadoCfg('centralCfgResultOpReal', {
+            sucesso: false,
+            mensagemAmigavel: msg,
+            codigo: error.codigo || error.code,
+            etapa: error.etapa
+        });
+        showNotification(msg, 'danger');
+        try { await carregarStatusOperacaoFiscalRealCentral(); } catch (_e) { /* ignore */ }
+    } finally {
+        centralEntradasState.sincronizando = false;
+        atualizarIndicadorSyncBotao();
+        renderCabecalhoUx1Central();
     }
 }
 
@@ -3300,8 +3875,19 @@ async function limparCacheConfigCentral() {
 
 /**
  * Sync ao abrir: não bloqueia a UI; avisa suavemente se houver mensagemAmigavel.
+ * Reentrância: um load/reopen enquanto o POST anterior está no ar não dispara outro.
  */
 function sincronizarAoAbrirCentralSuave() {
+    if (centralEntradasState.syncAoAbrirEmVoo || centralEntradasState.sincronizando) {
+        return Promise.resolve({
+            sucesso: false,
+            ignorado: true,
+            consultaExecutada: false,
+            codigo: 'SYNC_EM_ANDAMENTO'
+        });
+    }
+
+    centralEntradasState.syncAoAbrirEmVoo = true;
     const token = localStorage.getItem('token');
     return fetch(`${API_URL}/central-entradas/sincronizar-ao-abrir`, {
         method: 'POST',
@@ -3312,12 +3898,23 @@ function sincronizarAoAbrirCentralSuave() {
     })
         .then(async (response) => {
             const data = await response.json().catch(() => ({}));
-            if (data && data.sucesso === false && data.mensagemAmigavel) {
-                showNotification(data.mensagemAmigavel, 'warning');
+            const desabilitado = data && (
+                data.codigo === 'SYNC_AO_ABRIR_DESABILITADO'
+                || data.motivo === 'sync_ao_abrir desabilitado'
+            );
+            const consultaIgnorada = data
+                && (data.consultaExecutada === false || data.ignorado === true);
+            const deveAvisar = data && (data.mensagemAmigavel || data.mensagem) && !desabilitado
+                && (data.sucesso === false || consultaIgnorada);
+            if (deveAvisar) {
+                showNotification(montarMensagemConsultaNaoEnviadaCentral(data), 'warning');
             }
             return data;
         })
-        .catch(() => null);
+        .catch(() => null)
+        .finally(() => {
+            centralEntradasState.syncAoAbrirEmVoo = false;
+        });
 }
 
 async function carregarLogCentral() {
@@ -3364,7 +3961,8 @@ async function pollNotificacoesCentral() {
             if (centralEntradasState.notificacoesVistas.has(n.id)) return;
             centralEntradasState.notificacoesVistas.add(n.id);
             const tipo = n.tipo === 'SYNC_ERRO' || n.tipo === 'ERRO' ? 'danger'
-                : (n.tipo === 'NOVAS_NOTAS' ? 'success' : 'info');
+                : (n.tipo === 'NOVAS_NOTAS' ? 'success'
+                    : (n.tipo === 'SYNC_CONSULTA_NAO_ENVIADA' ? 'warning' : 'info'));
             showNotification(n.titulo + (n.mensagem ? ': ' + n.mensagem : ''), tipo);
             centralEntradasFetch(`/notificacoes/${n.id}/lida`, { method: 'PATCH' }).catch(() => {});
         });
@@ -4440,65 +5038,51 @@ async function sincronizarCentralEntradas() {
     const cooldown = UX.resolverCooldownSefaz656Ux?.(centralEntradasState);
     if (cooldown?.ativo) {
         showNotification(
-            `🟡 Aguardando liberação da SEFAZ. Próxima tentativa: ${cooldown.proximaLabel} · Tempo restante: ${cooldown.restanteLabel}`,
+            `Consulta em cooldown SEFAZ. Próxima tentativa: ${cooldown.proximaLabel} · Tempo restante: ${cooldown.restanteLabel}`,
             'warning'
         );
         return;
     }
 
-    centralEntradasState.sincronizando = true;
-    atualizarIndicadorSyncBotao();
-    renderCabecalhoUx1Central();
-
+    // P0.8 — sync do cabeçalho não transmite sem ativação; usa fluxo explícito de consulta real.
     try {
-        const resultado = await centralEntradasFetch('/sincronizar', { method: 'POST' });
-
-        centralEntradasState.notasNovasUltimaSync = resultado.notasNovas || 0;
-        centralEntradasState.ultimaSincronizacao = resultado.ultimaSincronizacao || new Date().toISOString();
-
-        const cStat = String(resultado.cStat || resultado.codigoErro || '');
-        const msgBruta = String(
-            (resultado.erros || []).join('; ')
-            || resultado.mensagemAmigavel
-            || resultado.mensagem
-            || ''
-        );
-        const is656 = cStat === '656' || /656|Consumo Indevido|CONSUMO_INDEVIDO/i.test(msgBruta);
-
-        if (resultado.sucesso) {
-            const msg = resultado.notasNovas > 0
-                ? `${resultado.notasNovas} nova${resultado.notasNovas === 1 ? '' : 's'} nota${resultado.notasNovas === 1 ? '' : 's'} encontrada${resultado.notasNovas === 1 ? '' : 's'}.`
-                : 'Sincronização concluída. Nenhuma nota nova.';
-            showNotification(msg, 'success');
-        } else if (is656) {
-            // RC3.7.5.3 — não tratar cooldown como "erro" na notificação
+        await carregarStatusOperacaoFiscalRealCentral();
+    } catch { /* status opcional */ }
+    const opReal = centralEntradasState.operacaoFiscalReal;
+    if (!opReal?.ativa) {
+        const msg = 'Consulta DistDFe bloqueada: operação fiscal real desabilitada.\n\n'
+            + 'Abrir o painel correto agora?\n'
+            + '(Central → ⋮ → Operação fiscal real / Configurações → aba SEFAZ)\n\n'
+            + 'Não use “Abrir Configuração Fiscal” — essa tela é outra.\n'
+            + '“Testar comunicação” só valida prontidão local.';
+        if (confirm(msg)) {
+            await abrirPainelOperacaoFiscalRealCentral();
+        } else {
             showNotification(
-                '🟡 Aguardando liberação da SEFAZ (cStat 656). O NSU foi sincronizado; novas consultas serão liberadas após o período de espera.',
+                'DistDFe bloqueado. Menu ⋮ → “Operação fiscal real (DistDFe)” ou Configurações → aba SEFAZ.',
                 'warning'
             );
-        } else {
-            const erros = msgBruta || 'Falha na sincronização';
-            showNotification('Sincronização: ' + erros, 'warning');
         }
-
-        await Promise.all([
-            carregarDashboardCentral(),
-            carregarDocumentosCentral({ pagina: 1 })
-        ]);
-    } catch (error) {
-        showNotification('Erro ao sincronizar: ' + error.message, 'danger');
-    } finally {
-        centralEntradasState.sincronizando = false;
-        atualizarIndicadorSyncBotao();
-        renderCabecalhoUx1Central();
-        carregarStatusServicoCentral();
+        return;
     }
+    return consultarDfeRealCentral();
 }
 
 function obterUsuarioLogadoCentral() {
     try {
-        const usuario = JSON.parse(localStorage.getItem('usuario') || 'null');
-        return usuario || { id: null, nome: 'Sistema' };
+        // Login oficial grava em `user` (login.js / access-control.js).
+        // Fallback legado: `usuario`.
+        if (typeof obterUsuarioLogado === 'function') {
+            const viaAccess = obterUsuarioLogado();
+            if (viaAccess && typeof viaAccess === 'object' && (viaAccess.id || viaAccess.perfil || viaAccess.role)) {
+                return viaAccess;
+            }
+        }
+        const bruto = localStorage.getItem('user') || localStorage.getItem('usuario') || 'null';
+        const usuario = JSON.parse(bruto);
+        return usuario && typeof usuario === 'object'
+            ? usuario
+            : { id: null, nome: 'Sistema' };
     } catch {
         return { id: null, nome: 'Sistema' };
     }
@@ -5790,10 +6374,25 @@ function bindEventosCentralEntradas() {
         aplicarFiltroFilaCentral(codigo);
     });
 
-    $(document).on('click.centralEntradas', '.central-atencao-acao', function () {
-        const idx = Number($(this).data('atencao-idx'));
-        const item = centralEntradasState.atencao?.itens?.[idx];
-        if (item?.acao) executarAcaoAtencaoCentral(item.acao);
+    $(document).on('click.centralEntradas', '.central-atencao-acao', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        const btn = this;
+        // attr (não .data) evita falha do jQuery com data-atencao-idx="0"
+        const idxRaw = btn.getAttribute('data-atencao-idx');
+        const idx = idxRaw != null && idxRaw !== '' ? Number(idxRaw) : NaN;
+        const item = Number.isInteger(idx) ? centralEntradasState.atencao?.itens?.[idx] : null;
+        if (item?.acao) {
+            executarAcaoAtencaoCentral(item.acao);
+            return;
+        }
+        // Fallback: botão carrega a fila mesmo se o state de atenção foi limpo
+        const fila = btn.getAttribute('data-filtro-fila');
+        if (fila) {
+            executarAcaoAtencaoCentral({ tipo: 'filtrar_fila', fila });
+            return;
+        }
+        aplicarFiltroFilaCentral('em_revisao');
     });
 
     $(document).on('click.centralEntradas', '.central-alerta-ver, .central-pendencia-ver', function () {
@@ -5828,6 +6427,25 @@ function bindEventosCentralEntradas() {
     $(document).on('click.centralEntradas', '#centralCfgTestarSefaz, #centralCfgTestarSefazDiag', function () {
         const resultId = this.id === 'centralCfgTestarSefazDiag' ? 'centralCfgResultDiag' : 'centralCfgResultSefaz';
         testarSefazConfigCentral(resultId);
+    });
+
+    $(document).on('click.centralEntradas', '#centralCfgOpRealAtualizar', function () {
+        void carregarStatusOperacaoFiscalRealCentral();
+    });
+    $(document).on('click.centralEntradas', '#centralCfgOpRealHabilitar', function () {
+        void habilitarOperacaoFiscalRealCentral();
+    });
+    $(document).on('click.centralEntradas', '#centralCfgOpRealDesabilitar', function () {
+        void desabilitarOperacaoFiscalRealCentral();
+    });
+    $(document).on('click.centralEntradas', '#centralCfgOpRealConsultar', function () {
+        void consultarDfeRealCentral();
+    });
+    $(document).on('click.centralEntradas', '#centralCfgOpRealLiberarFila', function () {
+        void liberarFilaEsgotadaCentral();
+    });
+    $(document).on('click.centralEntradas', '#centralBtnOperacaoFiscalReal', function () {
+        void abrirPainelOperacaoFiscalRealCentral();
     });
 
     $(document).on('click.centralEntradas', '#centralCfgTestarCert, #centralCfgTestarCertDiag', function () {
@@ -5887,7 +6505,7 @@ function loadCentralEntradas() {
                             <div class="central-cfg-header-title">
                                 <i class="fas fa-sliders-h me-2"></i> Configuração Enterprise
                             </div>
-                            <div class="central-cfg-header-sub">Empresa, ambiente (somente leitura), SEFAZ, certificado, sync e diagnóstico</div>
+                            <div class="central-cfg-header-sub">Empresa, ambiente, SEFAZ (operação fiscal real / DistDFe), certificado, sync e diagnóstico</div>
                         </div>
                         <button type="button" class="btn btn-sm btn-outline-light central-nav-view" data-view="inbox" title="Voltar à Central">
                             <i class="fas fa-arrow-left me-1"></i> Voltar

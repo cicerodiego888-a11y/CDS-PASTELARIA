@@ -1,24 +1,34 @@
-const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const { validateInsertAlignment, analisarInsertSql, tabelaMonitorada } = require('./lib/validateInsertAlignment');
 const { aplicarCertificacaoSql } = require('./lib/sqlCertification');
+const { MIGRACOES_SCHEMA: MIGRACOES_VOLUME_COMERCIAL } = require('./services/produtos/VolumeComercialProdutoService');
+const VolumeUnidadeComercialService = require('./services/produtos/VolumeUnidadeComercialService');
+const {
+  exigirAberturaDatabaseModule,
+  instalarGuardiaoSqlite3
+} = require('./lib/sqliteOfficialGuard');
 
-// BANCO OFICIAL DEFINITIVO
-// Prioridade 1: variável DB_DIR
-// Prioridade 2: pasta padrão profissional do Windows
-const DB_DIR = process.env.DB_DIR || path.join(process.env.PROGRAMDATA || 'C:\\ProgramData', 'MercantilFiscal', 'dados');
+// P0.5 — barreira ANTES de mkdir, conexão nativa, ensure ou migração.
+// Em teste/verificação (ex.: node -e sem DB_DIR), recusa o oficial sem fallback.
+const __cdsResolucaoBanco = exigirAberturaDatabaseModule();
+instalarGuardiaoSqlite3();
+
+const sqlite3 = require('sqlite3').verbose();
+
+// Prioridade 1: DB_DIR validado pela barreira
+// Prioridade 2 (só fora de contexto protegido): pasta padrão ProgramData
+const DB_DIR = __cdsResolucaoBanco.dbDir;
+const DB_PATH = __cdsResolucaoBanco.dbPath;
 
 if (!fs.existsSync(DB_DIR)) {
   fs.mkdirSync(DB_DIR, { recursive: true });
 }
 
-const DB_PATH = path.join(DB_DIR, 'mercadao.db');
-
 let bancoPronto = false;
 const filaProntidao = [];
-let inicializacoesPendentes = 2;
+let inicializacoesPendentes = 3;
 
 function marcarBancoPronto(err) {
   if (err) {
@@ -48,7 +58,7 @@ function sinalizarInicializacaoParcial(err) {
 }
 
 console.log('======================================');
-console.log('BANCO OFICIAL EM USO:');
+console.log(`${__cdsResolucaoBanco.rotuloLog}:`);
 console.log(DB_PATH);
 console.log('======================================');
 
@@ -220,6 +230,7 @@ function aplicarAlteracoesPosCriacao() {
   aplicarAlteracaoSegura('vendas_itens', `ALTER TABLE vendas_itens ADD COLUMN quantidade_fiscal REAL DEFAULT 0`);
   aplicarAlteracaoSegura('vendas_itens', `ALTER TABLE vendas_itens ADD COLUMN quantidade_nao_fiscal REAL DEFAULT 0`);
   aplicarAlteracaoSegura('vendas_itens', `ALTER TABLE vendas_itens ADD COLUMN valor_fiscal REAL DEFAULT 0`);
+  aplicarAlteracaoSegura('vendas_itens', `ALTER TABLE vendas_itens ADD COLUMN valor_nao_fiscal REAL DEFAULT 0`);
   aplicarAlteracaoSegura('vendas_itens', `ALTER TABLE vendas_itens ADD COLUMN preco_unitario_interno REAL`);
   // RCM-ATACADO-02 — SQLite REAL preserva precisão > 2 casas (DECIMAL(18,6) lógico)
   aplicarAlteracaoSegura('vendas_itens', `ALTER TABLE vendas_itens ADD COLUMN modo_venda TEXT DEFAULT 'peso'`);
@@ -263,6 +274,10 @@ function aplicarAlteracoesPosCriacao() {
   const alteracoesProdutos = [
     `ALTER TABLE produtos ADD COLUMN categoria_id INTEGER`,
     `ALTER TABLE produtos ADD COLUMN subcategoria_id INTEGER`,
+    `ALTER TABLE produtos ADD COLUMN nome_comercial TEXT`,
+    `ALTER TABLE produtos ADD COLUMN preco_pedido DECIMAL(18,6)`,
+    `ALTER TABLE produtos ADD COLUMN permite_personalizacao_ingredientes INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE produtos ADD COLUMN utiliza_ficha_tecnica INTEGER`,
     `ALTER TABLE produtos ADD COLUMN ncm TEXT`,
     `ALTER TABLE produtos ADD COLUMN cfop TEXT`,
     `ALTER TABLE produtos ADD COLUMN csosn TEXT`,
@@ -290,7 +305,8 @@ function aplicarAlteracoesPosCriacao() {
     `ALTER TABLE produtos ADD COLUMN observacoes TEXT`,
     `ALTER TABLE produtos ADD COLUMN imagem_principal TEXT`,
     // RC8.0.Y — controle opcional de estoque por produto (1 = controla, 0 = não controla)
-    `ALTER TABLE produtos ADD COLUMN controla_estoque INTEGER DEFAULT 1`
+    `ALTER TABLE produtos ADD COLUMN controla_estoque INTEGER DEFAULT 1`,
+    ...MIGRACOES_VOLUME_COMERCIAL
   ];
 
   const alteracoesCompras = [
@@ -388,7 +404,11 @@ function aplicarAlteracoesPosCriacao() {
     `ALTER TABLE compras_itens ADD COLUMN valor_total_embalagem DECIMAL(10,2) DEFAULT 0`,
     `ALTER TABLE compras_itens ADD COLUMN cfop TEXT`,
     `ALTER TABLE compras_itens ADD COLUMN tipo_fiscal_item TEXT`,
-    `ALTER TABLE compras_itens ADD COLUMN bonificacao INTEGER DEFAULT 0`
+    `ALTER TABLE compras_itens ADD COLUMN bonificacao INTEGER DEFAULT 0`,
+    `ALTER TABLE compras_itens ADD COLUMN nfe_item_n INTEGER`,
+    `ALTER TABLE compras_itens ADD COLUMN tipo_operacional TEXT`,
+    `ALTER TABLE compras_itens ADD COLUMN nfe_item_original_json TEXT`,
+    `ALTER TABLE compras_itens ADD COLUMN dados_roteamento_json TEXT`
   ];
 
   const alteracoesVendas = [
@@ -402,6 +422,7 @@ function aplicarAlteracoesPosCriacao() {
     `ALTER TABLE vendas ADD COLUMN desconto_autorizado_em DATETIME`,
     `ALTER TABLE vendas ADD COLUMN valor_fiscal REAL DEFAULT 0`,
     `ALTER TABLE vendas ADD COLUMN valor_nao_fiscal REAL DEFAULT 0`,
+    `ALTER TABLE vendas ADD COLUMN valor_outros REAL NOT NULL DEFAULT 0`,
     // Sprint 1 — Vendas para Entrega (somente estrutura; sem regras)
     `ALTER TABLE vendas ADD COLUMN tipo_venda TEXT DEFAULT 'BALCAO'`,
     `ALTER TABLE vendas ADD COLUMN status_entrega TEXT`,
@@ -420,6 +441,7 @@ function aplicarAlteracoesPosCriacao() {
 
   const alteracoesContasReceber = [
     `ALTER TABLE contas_receber ADD COLUMN observacao TEXT`,
+    `ALTER TABLE contas_receber ADD COLUMN componente TEXT NOT NULL DEFAULT 'produtos'`,
     // Sprint 05.38.D — isolamento empresarial de contas a receber
     `ALTER TABLE contas_receber ADD COLUMN empresa_id INTEGER REFERENCES empresas(id)`
   ];
@@ -521,6 +543,54 @@ function aplicarAlteracoesPosCriacao() {
   aplicarAlteracaoSegura('pedidos', `ALTER TABLE pedidos ADD COLUMN peso REAL DEFAULT 0`);
   aplicarAlteracaoSegura('pedidos', `ALTER TABLE pedidos ADD COLUMN dados_adicionais TEXT`);
   aplicarAlteracaoSegura('pedidos', `ALTER TABLE pedidos ADD COLUMN mod_frete TEXT`);
+  aplicarAlteracaoSegura(
+    'pedidos_itens',
+    `ALTER TABLE pedidos_itens ADD COLUMN classificacao_operacional_snapshot TEXT`
+  );
+  aplicarAlteracaoSegura(
+    'pedidos_itens',
+    `ALTER TABLE pedidos_itens ADD COLUMN produto_codigo_snapshot TEXT`
+  );
+  aplicarAlteracaoSegura(
+    'pedidos_itens',
+    `ALTER TABLE pedidos_itens ADD COLUMN produto_nome_snapshot TEXT`
+  );
+  aplicarAlteracaoSegura(
+    'pedidos_itens',
+    `ALTER TABLE pedidos_itens ADD COLUMN produto_nome_pedido_snapshot TEXT`
+  );
+  aplicarAlteracaoSegura(
+    'pedidos_itens',
+    `ALTER TABLE pedidos_itens ADD COLUMN produto_unidade_snapshot TEXT`
+  );
+  aplicarAlteracaoSegura(
+    'pedidos_itens',
+    `ALTER TABLE pedidos_itens ADD COLUMN preco_venda_snapshot DECIMAL(18,6)`
+  );
+  aplicarAlteracaoSegura(
+    'pedidos_itens',
+    `ALTER TABLE pedidos_itens ADD COLUMN preco_pedido_snapshot DECIMAL(18,6)`
+  );
+  aplicarAlteracaoSegura(
+    'pedidos_itens',
+    `ALTER TABLE pedidos_itens ADD COLUMN preco_sugerido_snapshot DECIMAL(18,6)`
+  );
+  aplicarAlteracaoSegura(
+    'pedidos_itens',
+    `ALTER TABLE pedidos_itens ADD COLUMN origem_preco_sugerido TEXT`
+  );
+  aplicarAlteracaoSegura(
+    'pedidos_itens',
+    `ALTER TABLE pedidos_itens ADD COLUMN personalizacao_ingredientes_snapshot INTEGER NOT NULL DEFAULT 0`
+  );
+  aplicarAlteracaoSegura(
+    'pedidos_itens',
+    `ALTER TABLE pedidos_itens ADD COLUMN preco_base_unitario_snapshot REAL`
+  );
+  aplicarAlteracaoSegura(
+    'pedidos_itens',
+    `ALTER TABLE pedidos_itens ADD COLUMN preco_adicionais_unitario_snapshot REAL`
+  );
 
   // Sprint 3.1 — índices de performance (entregas / reservas / auditoria)
   aplicarAlteracaoSegura(
@@ -1611,11 +1681,15 @@ function criarTabelas() {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         codigo VARCHAR(50) UNIQUE,
         nome VARCHAR(200) NOT NULL,
+        nome_comercial TEXT,
         categoria_id INTEGER,
         subcategoria_id INTEGER,
         unidade VARCHAR(20),
         preco_compra DECIMAL(10,2),
         preco_venda DECIMAL(18,6) NOT NULL,
+        preco_pedido DECIMAL(18,6),
+        permite_personalizacao_ingredientes INTEGER NOT NULL DEFAULT 0,
+        utiliza_ficha_tecnica INTEGER,
         lucro_percentual DECIMAL(10,2),
         estoque_atual DECIMAL(10,2) DEFAULT 0,
         estoque_minimo DECIMAL(10,2) DEFAULT 0,
@@ -1626,6 +1700,10 @@ function criarTabelas() {
         controlar_validade INTEGER DEFAULT 0,
         controla_estoque INTEGER DEFAULT 1,
         tipo_operacional TEXT NOT NULL DEFAULT 'COMERCIAL',
+        utiliza_volume INTEGER NOT NULL DEFAULT 0,
+        volume_valor REAL,
+        volume_unidade TEXT,
+        volume_unidade_id INTEGER REFERENCES unidades_volume_comercial(id),
         permite_venda_unidade INTEGER DEFAULT 0,
         peso_medio_unidade REAL DEFAULT 0,
         preco_unidade REAL DEFAULT 0,
@@ -1966,6 +2044,7 @@ function criarTabelas() {
         data_venda DATE NOT NULL,
         cliente_id INTEGER,
         total DECIMAL(10,2) NOT NULL,
+        valor_outros REAL NOT NULL DEFAULT 0,
         desconto DECIMAL(10,2) DEFAULT 0,
         forma_pagamento VARCHAR(50),
         status VARCHAR(20) DEFAULT 'concluida',
@@ -2105,6 +2184,7 @@ function criarTabelas() {
         empresa_id INTEGER,
         numero_parcela INTEGER,
         total_parcelas INTEGER,
+        componente TEXT NOT NULL DEFAULT 'produtos',
         valor_parcela DECIMAL(10,2) NOT NULL,
         valor_restante DECIMAL(10,2) NOT NULL,
         data_vencimento DATE NOT NULL,
@@ -2702,11 +2782,19 @@ function inicializarBanco() {
   const { migrarEmpresaIdCompras } = require('./utils/comprasEmpresaHelpers');
   const { migrarEmpresaIdVendas, formatarLogMigracaoVendas } = require('./utils/vendasEmpresaHelpers');
   const { migrarEmpresaIdPedidos, formatarLogMigracaoPedidos } = require('./utils/pedidosEmpresaHelpers');
+  const { garantirSchemaMesas } = require('./utils/mesasSchema');
+  const { garantirSchemaOrigemPedidos } = require('./utils/pedidosOrigemSchema');
 
   db.serialize(() => {
     criarTabelas();
     criarTabelasMiip();
     aplicarAlteracoesPosCriacao();
+    VolumeUnidadeComercialService.garantirSchema(db, (unidadeVolumeErr) => {
+      if (unidadeVolumeErr) {
+        console.error('Erro ao garantir schema de unidades de volume comercial:', unidadeVolumeErr.message);
+      }
+      sinalizarInicializacaoParcial(unidadeVolumeErr);
+    });
     migrarDadosCaixaSessoes(db, () => {
       migrarEmpresaIdFinanceiro(db)
         .then((info) => {
@@ -2767,6 +2855,18 @@ function inicializarBanco() {
         .then((infoPed) => {
           if (infoPed && !infoPed.skipped) {
             console.log(`[05.49] ${formatarLogMigracaoPedidos(infoPed).replace(/\n/g, ' | ')}`);
+          }
+          return garantirSchemaMesas(db);
+        })
+        .then((infoMesas) => {
+          if (infoMesas && !infoMesas.skipped) {
+            console.log(`[MESAS] schema garantido | mesa_id adicionada: ${infoMesas.colunaAdicionada}`);
+          }
+          return garantirSchemaOrigemPedidos(db);
+        })
+        .then((infoOrigem) => {
+          if (infoOrigem && !infoOrigem.skipped) {
+            console.log(`[ENTRADA] origem_canal garantida | coluna adicionada: ${infoOrigem.colunaAdicionada}`);
           }
         })
         .catch((err) => console.error('Erro migration 05.38.D/E/F.B/05.40/05.41/05.49:', err.message));
@@ -3673,6 +3773,18 @@ db.serialize(() => {
         desconto_percentual REAL DEFAULT 0,
         subtotal DECIMAL(10,2) NOT NULL,
         tipo_venda TEXT DEFAULT 'PESO',
+        classificacao_operacional_snapshot TEXT,
+        produto_codigo_snapshot TEXT,
+        produto_nome_snapshot TEXT,
+        produto_nome_pedido_snapshot TEXT,
+        produto_unidade_snapshot TEXT,
+        preco_venda_snapshot DECIMAL(18,6),
+        preco_pedido_snapshot DECIMAL(18,6),
+        preco_sugerido_snapshot DECIMAL(18,6),
+        origem_preco_sugerido TEXT,
+        personalizacao_ingredientes_snapshot INTEGER NOT NULL DEFAULT 0,
+        preco_base_unitario_snapshot REAL,
+        preco_adicionais_unitario_snapshot REAL,
         FOREIGN KEY (pedido_id) REFERENCES pedidos(id) ON DELETE CASCADE,
         FOREIGN KEY (produto_id) REFERENCES produtos(id)
       )
@@ -3680,6 +3792,33 @@ db.serialize(() => {
       if (err) console.error('Erro ao criar tabela pedidos_itens:', err);
       else console.log('Tabela pedidos_itens criada/verificada');
     });
+
+    db.run(`
+      CREATE TABLE IF NOT EXISTS pedido_item_ingredientes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pedido_id INTEGER NOT NULL,
+        pedido_item_id INTEGER NOT NULL,
+        empresa_id INTEGER NOT NULL,
+        insumo_id INTEGER NOT NULL,
+        insumo_nome_snapshot TEXT NOT NULL,
+        quantidade_snapshot REAL NOT NULL,
+        unidade_snapshot TEXT NOT NULL,
+        classificacao_comercial_snapshot TEXT NOT NULL,
+        selecionado INTEGER NOT NULL,
+        preco_adicional_snapshot REAL NOT NULL DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE (pedido_item_id, insumo_id),
+        FOREIGN KEY (pedido_id) REFERENCES pedidos(id) ON DELETE CASCADE,
+        FOREIGN KEY (pedido_item_id) REFERENCES pedidos_itens(id) ON DELETE CASCADE,
+        FOREIGN KEY (insumo_id) REFERENCES produtos(id)
+      )
+    `, (err) => {
+      if (err) console.error('Erro ao criar tabela pedido_item_ingredientes:', err);
+    });
+    db.run(`
+      CREATE INDEX IF NOT EXISTS idx_pedido_item_ingredientes_pedido
+        ON pedido_item_ingredientes(pedido_id, pedido_item_id)
+    `);
 
     db.run(`CREATE INDEX IF NOT EXISTS idx_pedidos_status ON pedidos(status)`);
     db.run(`CREATE INDEX IF NOT EXISTS idx_pedidos_itens_pedido ON pedidos_itens(pedido_id)`);
@@ -3770,6 +3909,76 @@ db.whenReady = function whenReady(callback) {
     return;
   }
   filaProntidao.push(callback);
+};
+
+db.openExclusiveConnection = async function openExclusiveConnection() {
+  await new Promise((resolve, reject) => {
+    db.whenReady((readyErr) => {
+      if (readyErr) reject(readyErr);
+      else resolve();
+    });
+  });
+
+  const connection = await new Promise((resolve, reject) => {
+    const exclusiveDb = new sqlite3.Database(DB_PATH, (openErr) => {
+      if (openErr) {
+        reject(openErr);
+        return;
+      }
+      resolve(exclusiveDb);
+    });
+  });
+
+  connection.dbDir = DB_DIR;
+  connection.dbPath = DB_PATH;
+  aplicarCertificacaoSql(connection);
+
+  const run = (sql) => new Promise((resolve, reject) => {
+    connection.run(sql, (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+  const get = (sql) => new Promise((resolve, reject) => {
+    connection.get(sql, (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+  const close = () => new Promise((resolve, reject) => {
+    connection.close((err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+
+  try {
+    await run('PRAGMA busy_timeout=30000');
+    await run('PRAGMA foreign_keys=ON');
+    const busyTimeout = await get('PRAGMA busy_timeout');
+    const foreignKeys = await get('PRAGMA foreign_keys');
+    const journalMode = await get('PRAGMA journal_mode');
+
+    if (Number(busyTimeout?.timeout) < 30000) {
+      throw new Error('A conexão exclusiva não aplicou busy_timeout=30000.');
+    }
+    if (Number(foreignKeys?.foreign_keys) !== 1) {
+      throw new Error('A conexão exclusiva não habilitou foreign_keys.');
+    }
+    if (String(journalMode?.journal_mode || '').toLowerCase() !== 'wal') {
+      throw new Error('A conexão exclusiva não está usando journal_mode=WAL.');
+    }
+  } catch (configurationErr) {
+    try {
+      await close();
+    } catch (closeErr) {
+      configurationErr.closeError = closeErr;
+      console.error('Falha ao fechar conexão exclusiva após erro de configuração:', closeErr);
+    }
+    throw configurationErr;
+  }
+
+  return connection;
 };
 
 db.isReady = function isReady() {

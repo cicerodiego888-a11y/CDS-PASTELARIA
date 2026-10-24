@@ -415,6 +415,114 @@ router.post('/diagnostico/acoes/testar-sefaz', exigirDiagnosticoCentral, async (
   }
 });
 
+/** P0.8 fiscal — ativação controlada DistDFe (sem SOAP neste GET). */
+router.get('/operacao-fiscal-real/status', async (req, res) => {
+  try {
+    const ctx = await resolverEmpresaParaCentral({ req, empresaId: req.empresaId });
+    const status = await centralEntradasService.obterStatusOperacaoFiscalReal(ctx.empresaId);
+    return res.json(status);
+  } catch (error) {
+    return responderErroDocumentoCentral(res, error);
+  }
+});
+
+router.post('/operacao-fiscal-real/habilitar', async (req, res) => {
+  try {
+    const ctx = await resolverEmpresaParaCentral({ req, empresaId: req.empresaId });
+    const body = req.body || {};
+    const resultado = await centralEntradasService.habilitarOperacaoFiscalReal({
+      empresaId: ctx.empresaId,
+      usuario: req.user,
+      confirmarAmbienteProducao: body.confirmarAmbienteProducao === true,
+      confirmarRisco: body.confirmarRisco === true
+    });
+    return res.json({
+      ...resultado,
+      error: resultado.error || resultado.mensagemAmigavel || resultado.mensagem || null
+    });
+  } catch (error) {
+    return responderErroConsultaDfeReal(res, error);
+  }
+});
+
+router.post('/operacao-fiscal-real/desabilitar', async (req, res) => {
+  try {
+    const ctx = await resolverEmpresaParaCentral({ req, empresaId: req.empresaId });
+    const resultado = await centralEntradasService.desabilitarOperacaoFiscalReal({
+      empresaId: ctx.empresaId,
+      usuario: req.user
+    });
+    return res.json(resultado);
+  } catch (error) {
+    const status = error.statusCode || (error.code === 'ADMIN_OBRIGATORIO' ? 403 : 422);
+    return res.status(status).json({
+      sucesso: false,
+      codigo: error.code || error.codigo,
+      mensagem: error.message,
+      mensagemAmigavel: error.message
+    });
+  }
+});
+
+/**
+ * Liberação operacional da FILA_ESGOTADA — sem SOAP, sem alterar NSU.
+ * Admin + confirmação explícita. Não contorna cooldown 656 ativo.
+ */
+router.post('/operacao-fiscal-real/liberar-fila-esgotada', async (req, res) => {
+  try {
+    const ctx = await resolverEmpresaParaCentral({ req, empresaId: req.empresaId });
+    const body = req.body || {};
+    if (body.autorizacaoTransmissaoSefaz != null || body.tokenSeed != null || body.token != null) {
+      return res.status(400).json({
+        sucesso: false,
+        consultaExecutada: false,
+        codigo: 'AUTORIZACAO_CLIENTE_RECUSADA',
+        mensagem: 'Não é permitido enviar autorização/token no body.',
+        mensagemAmigavel: 'Requisição inválida para liberação de fila.'
+      });
+    }
+    const resultado = await centralEntradasService.liberarFilaEsgotadaOperacaoReal({
+      empresaId: ctx.empresaId,
+      usuario: req.user,
+      confirmacaoLiberacaoFila: body.confirmacaoLiberacaoFila === true,
+      motivo: body.motivo || null
+    });
+    return res.json(resultado);
+  } catch (error) {
+    return responderErroConsultaDfeReal(res, error);
+  }
+});
+
+/**
+ * Consulta DistDFe real — exige ativação admin + confirmações no body.
+ * Único caminho HTTP destinado a transmissão OPERACAO_REAL da Central.
+ */
+router.post('/operacao-fiscal-real/consultar-dfe', async (req, res) => {
+  try {
+    const ctx = await resolverEmpresaParaCentral({ req, empresaId: req.empresaId });
+    const body = req.body || {};
+    // P0.9 — rejeita injeção de autorização pelo cliente; só confirmações booleanas.
+    if (body.autorizacaoTransmissaoSefaz != null || body.tokenSeed != null || body.token != null) {
+      return res.status(400).json({
+        sucesso: false,
+        consultaExecutada: false,
+        codigo: 'AUTORIZACAO_CLIENTE_RECUSADA',
+        mensagem: 'Não é permitido enviar autorização/token no body. Use apenas confirmações booleanas.',
+        mensagemAmigavel: 'Requisição inválida: autorização deve ser emitida pelo servidor.'
+      });
+    }
+    const resultado = await centralEntradasService.consultarDfeReal({
+      empresaId: ctx.empresaId,
+      usuario: req.user,
+      confirmacaoConsultaReal: body.confirmacaoConsultaReal === true,
+      confirmacaoAmbienteProducao: body.confirmacaoAmbienteProducao === true
+    });
+    return res.status(statusHttpSync(resultado)).json(jsonSyncCentral(resultado));
+  } catch (error) {
+    return responderErroConsultaDfeReal(res, error);
+  }
+});
+
 router.post('/diagnostico/acoes/limpar-cache', exigirDiagnosticoCentral, async (req, res) => {
   try {
     const resultado = centralEntradasService.limparCacheDiagnostico();
@@ -706,6 +814,52 @@ function jsonSyncCentral(resultado) {
   };
 }
 
+/**
+ * P0.9.3 — Erro estruturado da consulta DF-e real (código estável + etapa + liberação).
+ * Não inclui tokens, seeds ou senhas.
+ * @param {import('express').Response} res
+ * @param {Error & { statusCode?: number, code?: string, codigo?: string, etapa?: string, mensagemAmigavel?: string, preVoo?: object, proximaConsultaEm?: string }} error
+ */
+function responderErroConsultaDfeReal(res, error) {
+  const status = error.statusCode || 422;
+  const codigo = error.codigo || error.code || 'CONSULTA_DFE_BLOQUEADA';
+  const mensagemAmigavel = error.mensagemAmigavel || error.message || 'Consulta DF-e bloqueada.';
+  const proximaConsultaEm = error.proximaConsultaEm
+    || error.preVoo?.proximaConsultaEm
+    || error.preVoo?.nsu?.proximaConsultaEm
+    || null;
+  return res.status(status).json({
+    sucesso: false,
+    consultaExecutada: false,
+    sefazConsultada: false,
+    codigo,
+    etapa: error.etapa || null,
+    mensagem: error.message || mensagemAmigavel,
+    mensagemAmigavel,
+    error: mensagemAmigavel,
+    proximaConsultaEm,
+    preVoo: error.preVoo
+      ? {
+          ok: error.preVoo.ok,
+          codigo: error.preVoo.codigo,
+          etapa: error.preVoo.etapa || null,
+          mensagem: error.preVoo.mensagem,
+          mensagemAmigavel: error.preVoo.mensagemAmigavel || null,
+          proximaConsultaEm: error.preVoo.proximaConsultaEm || error.preVoo.nsu?.proximaConsultaEm || null,
+          nsu: error.preVoo.nsu
+            ? {
+                ultNsu: error.preVoo.nsu.ultNsu,
+                maxNsu: error.preVoo.nsu.maxNsu,
+                cooldownAtivo: error.preVoo.nsu.cooldownAtivo,
+                proximaConsultaEm: error.preVoo.nsu.proximaConsultaEm,
+                motivoCooldown: error.preVoo.nsu.motivoCooldown
+              }
+            : null
+        }
+      : null
+  });
+}
+
 /** RC3.4 — Homologação assistida (somente leitura). */
 router.get('/homologacao/painel', async (req, res) => {
   try {
@@ -756,7 +910,9 @@ router.post('/sincronizar-ao-abrir', async (req, res) => {
     if (!resultado) {
       return res.json({
         ignorado: true,
-        sucesso: true,
+        sucesso: false,
+        consultaExecutada: false,
+        codigo: 'SYNC_AO_ABRIR_DESABILITADO',
         motivo: 'sync_ao_abrir desabilitado',
         mensagemAmigavel: 'Sincronização ao abrir está desabilitada nas configurações.'
       });
@@ -806,6 +962,8 @@ router.get('/', async (req, res) => {
 
 router.post('/sincronizar', async (req, res) => {
   try {
+    // P0.9 — /sincronizar nunca aceita autorização OPERACAO_REAL do cliente.
+    // Consulta real: POST /operacao-fiscal-real/consultar-dfe
     const resultado = await centralEntradasService.sincronizar();
     return res.status(statusHttpSync(resultado)).json(jsonSyncCentral(resultado));
   } catch (error) {
@@ -841,7 +999,15 @@ router.get('/buscar-chave', async (req, res) => {
       || error.code === 'EMPRESA_CENTRAL_INATIVA'
       || error.code === 'EMPRESA_CENTRAL_INVALIDA'
       || error.code === 'EMPRESA_CENTRAL_AMBIGUA'
-      || error.code === 'DOCUMENTO_NAO_ENCONTRADO')) {
+      || error.code === 'DOCUMENTO_NAO_ENCONTRADO'
+      || error.code === 'CNPJ_NAO_CONFIGURADO'
+      || error.code === 'AMBIENTE_NAO_CONFIGURADO'
+      || error.code === 'CERTIFICADO'
+      || error.code === 'IDENTIDADE_FISCAL_AUSENTE'
+      || error.code === 'IDENTIDADE_FISCAL_INCONSISTENTE'
+      || error.code === 'TRANSMISSAO_SEFAZ_NAO_AUTORIZADA'
+      || error.code === 'CONSULTA_SEFAZ_NAO_AUTORIZADA'
+      || error.identidadeFiscalIncompleta === true)) {
       return responderErroDocumentoCentral(res, error);
     }
     const code = error.statusCode || 500;

@@ -2,10 +2,13 @@
  * Testes — Integridade RC3 da Central Inteligente de Entradas
  * Sem HTTP real / sem SEFAZ.
  *
- * Executar: npm run test:central-integridade
- *           node tests/central-entradas/rc3-integridade.test.js
+ * Executar: npm run test:central-entradas-rc3
+ *   (node -r ./tests/central-entradas/helpers/preloadIsolamentoBanco.js tests/central-entradas/rc3-integridade.test.js)
  */
 
+
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-p04-rc3-integridade-');
 const assert = require('assert');
 const path = require('path');
 const fs = require('fs');
@@ -62,9 +65,39 @@ async function main() {
     assert.strictEqual(typeof facade.processarDocumento, 'function');
   });
 
-  await test('máquina: EM_PROCESSAMENTO não vai direto para REVISADA', async () => {
+  await test('máquina: aliases RC3.7.1 — EM_PROCESSAMENTO→REVISADA é XML_COMPLETO→PRONTA_IMPORTACAO', async () => {
+    assert.strictEqual(
+      DocumentoFiscalStatus.EM_PROCESSAMENTO,
+      DocumentoFiscalStatus.XML_COMPLETO
+    );
+    assert.strictEqual(
+      DocumentoFiscalStatus.REVISADA,
+      DocumentoFiscalStatus.PRONTA_IMPORTACAO
+    );
+    assert.strictEqual(
+      DocumentoFiscalStatus.REVISADA,
+      DocumentoFiscalStatus.PRONTA_PARA_COMPRA
+    );
+    assert.strictEqual(
+      podeTransicionar(DocumentoFiscalStatus.XML_COMPLETO, DocumentoFiscalStatus.PRONTA_IMPORTACAO),
+      true
+    );
     assert.strictEqual(
       podeTransicionar(DocumentoFiscalStatus.EM_PROCESSAMENTO, DocumentoFiscalStatus.REVISADA),
+      true
+    );
+  });
+
+  await test('máquina: RESUMO_RECEBIDO não vai direto para REVISADA', async () => {
+    assert.strictEqual(
+      podeTransicionar(DocumentoFiscalStatus.RESUMO_RECEBIDO, DocumentoFiscalStatus.REVISADA),
+      false
+    );
+    assert.strictEqual(
+      podeTransicionar(
+        DocumentoFiscalStatus.AGUARDANDO_XML_COMPLETO,
+        DocumentoFiscalStatus.PRONTA_PARA_COMPRA
+      ),
       false
     );
   });
@@ -147,8 +180,9 @@ async function main() {
     assert.ok(txt.includes('/inteligencia') || txt.includes('CentralConfiguracaoService'));
   });
 
+  isolamento.comprobarSeCarregado();
   console.log(`\nResultado: ${passou} ok, ${falhou} falha(s)\n`);
-  if (falhou > 0) process.exit(1);
+  process.exit(falhou > 0 ? 1 : 0);
 }
 
 main().catch((error) => {

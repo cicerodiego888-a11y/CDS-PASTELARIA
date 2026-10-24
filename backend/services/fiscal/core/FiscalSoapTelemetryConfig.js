@@ -18,6 +18,23 @@ function _parseBool(v) {
  */
 function warmFiscalTelemetryFlagsFromDb() {
   if (_warmStarted) return;
+  // Testes isolados (CDS_FORCAR_LOCAL) nunca inicializam o ERP só para ler flags.
+  if (process.env.CDS_FORCAR_LOCAL === '1') {
+    _warmStarted = true;
+    return;
+  }
+  let resolved;
+  try {
+    resolved = require.resolve('../../../database');
+  } catch {
+    _warmStarted = true;
+    return;
+  }
+  // Contenção P0.10: não fazer require de database.js se o app ainda não o carregou.
+  // Em produção o servidor já abriu o banco antes de qualquer SOAP.
+  if (!require.cache[resolved]) {
+    return;
+  }
   _warmStarted = true;
   try {
     // eslint-disable-next-line global-require

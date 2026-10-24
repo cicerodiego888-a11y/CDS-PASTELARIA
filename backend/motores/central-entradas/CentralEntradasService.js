@@ -79,6 +79,26 @@ class CentralEntradasService {
     return this._orchestrator.sincronizarAoAbrir();
   }
 
+  obterStatusOperacaoFiscalReal(empresaId) {
+    return this._orchestrator.obterStatusOperacaoFiscalReal(empresaId);
+  }
+
+  habilitarOperacaoFiscalReal(params) {
+    return this._orchestrator.habilitarOperacaoFiscalReal(params);
+  }
+
+  desabilitarOperacaoFiscalReal(params) {
+    return this._orchestrator.desabilitarOperacaoFiscalReal(params);
+  }
+
+  liberarFilaEsgotadaOperacaoReal(params) {
+    return this._orchestrator.liberarFilaEsgotadaOperacaoReal(params);
+  }
+
+  consultarDfeReal(params) {
+    return this._orchestrator.consultarDfeReal(params);
+  }
+
   uploadDocumentos(arquivos = [], opcoes = {}) {
     return this._orchestrator.uploadDocumentos(arquivos, opcoes);
   }

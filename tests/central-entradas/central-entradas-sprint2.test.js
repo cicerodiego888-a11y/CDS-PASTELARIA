@@ -3,11 +3,15 @@
  * Executar: npm run test:central-entradas
  */
 
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-sprint2-');
+
 const assert = require('assert');
 const CentralEntradasService = require('../../backend/motores/central-entradas/CentralEntradasService');
 const CentralDocumentosRepository = require('../../backend/motores/central-entradas/repositories/CentralDocumentosRepository');
 const CentralHistoricoRepository = require('../../backend/motores/central-entradas/repositories/CentralHistoricoRepository');
 const { DocumentoFiscalStatus } = require('../../backend/motores/central-entradas/core/DocumentoFiscalStatus');
+const { garantirEmpresaTeste } = require('./helpers/empresaTesteCentral');
 
 let passou = 0;
 let falhou = 0;
@@ -22,6 +26,8 @@ const OPCOES_ADMIN = {
 const service = new CentralEntradasService();
 const documentosRepository = new CentralDocumentosRepository();
 const historicoRepository = new CentralHistoricoRepository();
+const CTX = { empresaId: null };
+isolamento.comprobarSeCarregado();
 
 function test(nome, fn) {
   return Promise.resolve()
@@ -38,7 +44,8 @@ function test(nome, fn) {
 }
 
 async function limparTeste() {
-  const existente = await documentosRepository.buscarPorChave(CHAVE_TESTE);
+  if (!CTX.empresaId) return;
+  const existente = await documentosRepository.buscarPorChave(CHAVE_TESTE, CTX.empresaId);
   if (!existente) return;
 
   await historicoRepository._obterSql().run(
@@ -61,13 +68,14 @@ async function criarDocumentoTeste() {
     valorTotal: 500,
     xml: '<nfeProc><NFe/></nfeProc>',
     origem: 'upload_manual',
-    status: DocumentoFiscalStatus.SINCRONIZADA
+    status: DocumentoFiscalStatus.XML_COMPLETO,
+    empresaId: CTX.empresaId
   });
 
   await historicoRepository.inserir({
     documentoId: documento.id,
     statusAnterior: null,
-    statusNovo: DocumentoFiscalStatus.SINCRONIZADA,
+    statusNovo: DocumentoFiscalStatus.XML_COMPLETO,
     detalhe: 'Registro inicial de teste'
   });
 
@@ -78,6 +86,7 @@ async function main() {
   console.log('\n=== Testes Central de Entradas — Sprint 2 ===\n');
 
   await documentosRepository._obterSql().whenReady();
+  CTX.empresaId = await garantirEmpresaTeste(documentosRepository._obterSql());
 
   await test('health retorna sprint RC2', async () => {
     const health = await service.obterHealth();
@@ -105,7 +114,8 @@ async function main() {
       limite: 5,
       pagina: 1,
       ordenarPor: 'valor_total',
-      ordenarDirecao: 'desc'
+      ordenarDirecao: 'desc',
+      empresaId: CTX.empresaId
     });
 
     assert.ok(Array.isArray(resultado.documentos));
@@ -126,22 +136,26 @@ async function main() {
   await test('PATCH status válido registra histórico', async () => {
     const atualizado = await service.alterarStatus(
       documentoTeste.id,
-      DocumentoFiscalStatus.EM_PROCESSAMENTO,
-      { detalhe: 'Teste de transição', ...OPCOES_ADMIN }
+      DocumentoFiscalStatus.EM_REVISAO,
+      { detalhe: 'Teste de transição', empresaIdContexto: CTX.empresaId, ...OPCOES_ADMIN }
     );
 
-    assert.strictEqual(atualizado.status, DocumentoFiscalStatus.EM_PROCESSAMENTO);
+    assert.strictEqual(atualizado.status, DocumentoFiscalStatus.EM_REVISAO);
 
     const historico = await service.obterHistorico(documentoTeste.id);
-    const transicao = historico.find((h) => h.statusNovo === DocumentoFiscalStatus.EM_PROCESSAMENTO);
+    const transicao = historico.find((h) => h.statusNovo === DocumentoFiscalStatus.EM_REVISAO);
     assert.ok(transicao);
-    assert.strictEqual(transicao.statusAnterior, DocumentoFiscalStatus.SINCRONIZADA);
+    assert.strictEqual(transicao.statusAnterior, DocumentoFiscalStatus.XML_COMPLETO);
   });
 
   await test('PATCH status inválido é rejeitado', async () => {
     let erroCapturado = null;
     try {
-      await service.alterarStatus(documentoTeste.id, DocumentoFiscalStatus.GRAVADA, OPCOES_ADMIN);
+      await service.alterarStatus(
+        documentoTeste.id,
+        DocumentoFiscalStatus.NOVA,
+        { empresaIdContexto: CTX.empresaId, ...OPCOES_ADMIN }
+      );
     } catch (error) {
       erroCapturado = error;
     }
@@ -152,12 +166,13 @@ async function main() {
 
   await test('filtro por status funciona', async () => {
     const resultado = await service.listarDocumentos({
-      status: DocumentoFiscalStatus.EM_PROCESSAMENTO,
-      busca: 'Fornecedor Teste Sprint 2'
+      status: DocumentoFiscalStatus.EM_REVISAO,
+      busca: 'Fornecedor Teste Sprint 2',
+      empresaId: CTX.empresaId
     });
 
     assert.strictEqual(resultado.documentos.length, 1);
-    assert.strictEqual(resultado.documentos[0].status, DocumentoFiscalStatus.EM_PROCESSAMENTO);
+    assert.strictEqual(resultado.documentos[0].status, DocumentoFiscalStatus.EM_REVISAO);
   });
 
   await limparTeste();

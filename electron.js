@@ -799,6 +799,10 @@ function createWindowRemote(remoteUrl, configServidor = {}) {
 
 app.whenReady().then(() => {
   try {
+    // CSP restritiva no renderer (antes de qualquer loadURL).
+    const { aplicarCspElectron } = require('./electron-csp');
+    aplicarCspElectron();
+
     // Garante que os diretórios existam
     if (!fs.existsSync(process.env.DB_DIR)) {
       fs.mkdirSync(process.env.DB_DIR, { recursive: true });

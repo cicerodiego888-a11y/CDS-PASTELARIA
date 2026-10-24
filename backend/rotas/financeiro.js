@@ -494,7 +494,11 @@ router.post('/receber/:id/baixar', validarCaixaAberto, (req, res) => {
     });
   }
 
-  db.get('SELECT id, tipo, status, empresa_id FROM financeiro WHERE id = ?', [id], (err, row) => {
+  db.get(`
+    SELECT id, tipo, status, empresa_id, valor, referencia_id, referencia_tipo, numero_parcela
+    FROM financeiro
+    WHERE id = ?
+  `, [id], (err, row) => {
     if (err) {
       res.status(500).json({ success: false, error: err.message });
       return;
@@ -513,24 +517,165 @@ router.post('/receber/:id/baixar', validarCaixaAberto, (req, res) => {
       return;
     }
     const novoStatus = row.tipo === 'receita' ? 'recebido' : 'pago';
-    db.run(`UPDATE financeiro SET status = ?, baixado_em = DATE('now') WHERE id = ? AND empresa_id = ?`, [novoStatus, id, empresaId], (upErr) => {
-      if (upErr) {
-        res.status(500).json({ success: false, error: upErr.message });
-        return;
-      }
-      // auditoria de baixa/recebimento (associando sessao de caixa quando disponível)
-      gravarAuditoria({
-        usuario_id: req.operadorId || req.user?.id || null,
-        usuario_nome: req.user?.nome || req.user?.username || null,
-        modulo: 'financeiro',
-        acao: 'baixar_movimentacao',
-        referencia_tipo: 'financeiro',
-        referencia_id: id,
-        detalhes: { novo_status: novoStatus, sessao_id: req.caixaSessaoId || null },
-        ip_requisicao: req.ip || null
-      }).catch((auditErr) => console.error('Erro ao gravar auditoria de baixa financeiro:', auditErr));
+    db.serialize(() => {
+      db.run('BEGIN IMMEDIATE');
+      db.run(
+        `UPDATE financeiro SET status = ?, baixado_em = DATE('now') WHERE id = ? AND empresa_id = ? AND status NOT IN ('recebido', 'pago')`,
+        [novoStatus, id, empresaId],
+        function onFinanceiroAtualizado(upErr) {
+          if (upErr || this.changes !== 1) {
+            db.run('ROLLBACK');
+            res.status(upErr ? 500 : 409).json({
+              success: false,
+              error: upErr ? upErr.message : 'Esta movimentação já foi baixada.'
+            });
+            return;
+          }
 
-      res.json({ success: true, message: 'Recebimento baixado com sucesso.', status: novoStatus });
+          const finalizarBaixa = () => {
+            db.run('COMMIT', (commitErr) => {
+              if (commitErr) {
+                res.status(500).json({ success: false, error: commitErr.message });
+                return;
+              }
+              gravarAuditoria({
+                usuario_id: req.operadorId || req.user?.id || null,
+                usuario_nome: req.user?.nome || req.user?.username || null,
+                modulo: 'financeiro',
+                acao: 'baixar_movimentacao',
+                referencia_tipo: 'financeiro',
+                referencia_id: id,
+                detalhes: {
+                  novo_status: novoStatus,
+                  sessao_id: req.caixaSessaoId || null,
+                  componentes_conta_receber: true
+                },
+                ip_requisicao: req.ip || null
+              }).catch((auditErr) => console.error('Erro ao gravar auditoria de baixa financeiro:', auditErr));
+
+              res.json({ success: true, message: 'Recebimento baixado com sucesso.', status: novoStatus });
+            });
+          };
+
+          if (
+            row.tipo !== 'receita'
+            || row.referencia_tipo !== 'venda'
+            || !row.referencia_id
+            || !Number.isInteger(Number(row.numero_parcela))
+          ) {
+            finalizarBaixa();
+            return;
+          }
+
+          db.all(`
+            SELECT id, cliente_id, componente, numero_parcela, total_parcelas,
+              valor_parcela, valor_restante, status
+            FROM contas_receber
+            WHERE venda_id = ? AND numero_parcela = ? AND empresa_id = ?
+            ORDER BY id
+          `, [row.referencia_id, row.numero_parcela, empresaId], (contasErr, contas) => {
+            if (contasErr) {
+              db.run('ROLLBACK');
+              res.status(500).json({ success: false, error: contasErr.message });
+              return;
+            }
+            if (!contas.length) {
+              finalizarBaixa();
+              return;
+            }
+
+            const totalContas = contas.reduce((soma, conta) => soma + Number(conta.valor_parcela || 0), 0);
+            if (Math.abs(totalContas - Number(row.valor || 0)) > 0.01) {
+              db.run('ROLLBACK');
+              res.status(409).json({
+                success: false,
+                error: 'A parcela financeira não confere com a soma dos componentes em contas a receber.'
+              });
+              return;
+            }
+
+            let indice = 0;
+            const liquidarProximoComponente = () => {
+              if (indice >= contas.length) {
+                db.run(`
+                  UPDATE vendas
+                  SET status_pagamento = 'quitada'
+                  WHERE id = ? AND empresa_id = ? AND status_pagamento = 'pendente'
+                    AND NOT EXISTS (
+                      SELECT 1 FROM contas_receber
+                      WHERE venda_id = ?
+                        AND status NOT IN ('pago', 'recebido')
+                    )
+                `, [
+                  row.referencia_id,
+                  empresaId,
+                  row.referencia_id
+                ], (statusErr) => {
+                  if (statusErr) {
+                    db.run('ROLLBACK');
+                    res.status(500).json({ success: false, error: statusErr.message });
+                    return;
+                  }
+                  finalizarBaixa();
+                });
+                return;
+              }
+
+              const conta = contas[indice++];
+              const restante = Number(conta.valor_restante || 0);
+              if (restante <= 0 || ['pago', 'recebido'].includes(conta.status)) {
+                liquidarProximoComponente();
+                return;
+              }
+              if (!conta.cliente_id) {
+                db.run('ROLLBACK');
+                res.status(409).json({
+                  success: false,
+                  error: 'Conta a receber sem cliente; baixa sincronizada bloqueada.'
+                });
+                return;
+              }
+
+              db.run(`
+                UPDATE contas_receber
+                SET valor_restante = 0, status = 'pago', data_pagamento = DATE('now')
+                WHERE id = ? AND empresa_id = ? AND status NOT IN ('pago', 'recebido')
+              `, [conta.id, empresaId], function onContaAtualizada(contaErr) {
+                if (contaErr || this.changes !== 1) {
+                  db.run('ROLLBACK');
+                  res.status(contaErr ? 500 : 409).json({
+                    success: false,
+                    error: contaErr ? contaErr.message : 'A parcela mudou durante a baixa.'
+                  });
+                  return;
+                }
+
+                db.run(`
+                  INSERT INTO contas_receber_pagamentos (
+                    conta_receber_id, cliente_id, valor_pago, data_pagamento,
+                    forma_pagamento, observacao
+                  ) VALUES (?, ?, ?, DATE('now'), ?, ?)
+                `, [
+                  conta.id,
+                  conta.cliente_id,
+                  restante,
+                  req.body?.forma_pagamento || null,
+                  `Baixa sincronizada do financeiro ${id}; componente ${conta.componente || 'produtos'}`
+                ], (pagamentoErr) => {
+                  if (pagamentoErr) {
+                    db.run('ROLLBACK');
+                    res.status(500).json({ success: false, error: pagamentoErr.message });
+                    return;
+                  }
+                  liquidarProximoComponente();
+                });
+              });
+            };
+
+            liquidarProximoComponente();
+          });
+        }
+      );
     });
   });
 });
@@ -1089,6 +1234,7 @@ router.get('/receber/agrupado/:clienteId', async (req, res) => {
         v.total AS valor_total,
         cr.numero_parcela,
         cr.total_parcelas,
+        cr.componente,
         cr.valor_parcela,
         cr.valor_restante,
         cr.data_vencimento,
@@ -1145,6 +1291,7 @@ router.get('/receber/agrupado/:clienteId', async (req, res) => {
       venda.parcelas.push({
         conta_receber_id: conta.conta_receber_id,
         parcela: `${conta.numero_parcela || '-'} / ${conta.total_parcelas || '-'}`,
+        componente: conta.componente || 'produtos',
         valor_parcela: parseNumber(conta.valor_parcela),
         valor_restante: parseNumber(conta.valor_restante),
         vencimento: conta.data_vencimento,
@@ -1257,6 +1404,7 @@ router.get('/receber/agrupado/:clienteId/extrato', async (req, res) => {
         v.total AS valor_total,
         cr.numero_parcela,
         cr.total_parcelas,
+        cr.componente,
         cr.valor_parcela,
         cr.valor_restante,
         cr.data_vencimento,
@@ -1486,13 +1634,36 @@ router.post('/receber/agrupado/:clienteId/pagamento-parcial', async (req, res) =
 
         const processarConta = (index) => {
           if (index >= contas.length || valorRestantePagamento <= 0) {
-            db.run('COMMIT', (err) => {
+            db.run(`
+              UPDATE vendas
+              SET status_pagamento = 'quitada'
+              WHERE empresa_id = ?
+                AND status_pagamento IN ('pendente', 'aguardando_nao_fiscal')
+                AND EXISTS (
+                  SELECT 1 FROM contas_receber cr
+                  WHERE cr.venda_id = vendas.id AND cr.empresa_id = vendas.empresa_id
+                )
+                AND NOT EXISTS (
+                  SELECT 1 FROM contas_receber cr
+                  WHERE cr.venda_id = vendas.id
+                    AND cr.empresa_id = vendas.empresa_id
+                    AND COALESCE(cr.status, 'aberto') NOT IN ('pago', 'recebido')
+                )
+            `, [req.empresaId], (statusErr) => {
+              if (statusErr) {
+                db.run('ROLLBACK');
+                reject(statusErr);
+                return;
+              }
+
+              db.run('COMMIT', (err) => {
               if (err) {
                 db.run('ROLLBACK');
                 reject(err);
               } else {
                 resolve(pagamentos);
               }
+            });
             });
             return;
           }
@@ -1537,10 +1708,22 @@ router.post('/receber/agrupado/:clienteId/pagamento-parcial', async (req, res) =
               UPDATE contas_receber
               SET valor_restante = ?, status = ?, data_pagamento = ?
               WHERE id = ?
-            `, [novoSaldo, novoStatus, dataPagamentoFinal, conta.id], (err) => {
-              if (err) {
+                AND empresa_id = ?
+                AND status IN ('aberto', 'parcial')
+                AND CAST(ROUND(valor_restante * 100) AS INTEGER) = ?
+            `, [
+              novoSaldo,
+              novoStatus,
+              dataPagamentoFinal,
+              conta.id,
+              req.empresaId,
+              Math.round(saldoAtualConta * 100)
+            ], function(err) {
+              if (err || this.changes !== 1) {
                 db.run('ROLLBACK');
-                reject(err);
+                const updateErr = err || new Error('A parcela mudou durante o pagamento.');
+                if (!err) updateErr.statusCode = 409;
+                reject(updateErr);
                 return;
               }
 
@@ -1576,47 +1759,66 @@ router.post('/receber/agrupado/:clienteId/pagamento-parcial', async (req, res) =
                 }
 
                 if (movFinanceiro) {
-                  db.run(`
-                    UPDATE financeiro
-                    SET
-                      status = ?,
-                      forma_pagamento = ?,
-                      observacao = ?,
-                      pessoa_nome = ?,
-                      baixado_em = CASE WHEN ? = 'recebido' THEN ? ELSE NULL END,
-                      data_movimento = CASE WHEN ? = 'recebido' THEN ? ELSE data_movimento END,
-                      vencimento = CASE WHEN ? = 'recebido' THEN ? ELSE vencimento END
-                    WHERE id = ? AND empresa_id = ?
-                  `, [
-                    novoStatus,
-                    forma_pagamento || 'dinheiro',
-                    observacao || `Pagamento parcial registrado em ${data_pagamento}`,
-                    cliente.nome || null,
-                    novoStatus,
-                    data_pagamento,
-                    novoStatus,
-                    data_pagamento,
-                    novoStatus,
-                    data_pagamento,
-                    movFinanceiro.id,
-                    empresaIdFin
-                  ], (err) => {
-                    if (err) {
+                  db.get(`
+                    SELECT CASE
+                      WHEN SUM(CASE WHEN COALESCE(status, 'aberto') NOT IN ('pago', 'recebido') THEN 1 ELSE 0 END) = 0
+                        THEN 'recebido'
+                      WHEN SUM(CASE WHEN valor_restante < valor_parcela THEN 1 ELSE 0 END) > 0
+                        THEN 'parcial'
+                      ELSE 'pendente'
+                    END AS status
+                    FROM contas_receber
+                    WHERE venda_id = ? AND numero_parcela = ? AND empresa_id = ?
+                  `, [conta.venda_id, conta.numero_parcela, empresaIdFin], (statusErr, statusRow) => {
+                    if (statusErr || !statusRow) {
                       db.run('ROLLBACK');
-                      reject(err);
+                      reject(statusErr || new Error('Não foi possível reconciliar a parcela financeira.'));
                       return;
                     }
 
-                    pagamentos.push({
-                      conta_receber_id: conta.id,
-                      venda_id: conta.venda_id,
-                      valor_pago: valorAbater,
-                      saldo_restante: novoSaldo,
-                      status: novoStatus
-                    });
+                    const statusFinanceiro = statusRow.status;
+                    db.run(`
+                      UPDATE financeiro
+                      SET
+                        status = ?,
+                        forma_pagamento = ?,
+                        observacao = ?,
+                        pessoa_nome = ?,
+                        baixado_em = CASE WHEN ? = 'recebido' THEN ? ELSE NULL END,
+                        data_movimento = CASE WHEN ? = 'recebido' THEN ? ELSE data_movimento END,
+                        vencimento = CASE WHEN ? = 'recebido' THEN ? ELSE vencimento END
+                      WHERE id = ? AND empresa_id = ?
+                    `, [
+                      statusFinanceiro,
+                      forma_pagamento || 'dinheiro',
+                      observacao || `Pagamento parcial registrado em ${data_pagamento}`,
+                      cliente.nome || null,
+                      statusFinanceiro,
+                      data_pagamento,
+                      statusFinanceiro,
+                      data_pagamento,
+                      statusFinanceiro,
+                      data_pagamento,
+                      movFinanceiro.id,
+                      empresaIdFin
+                    ], (financeiroErr) => {
+                      if (financeiroErr) {
+                        db.run('ROLLBACK');
+                        reject(financeiroErr);
+                        return;
+                      }
 
-                    valorRestantePagamento -= valorAbater;
-                    processarConta(index + 1);
+                      pagamentos.push({
+                        conta_receber_id: conta.id,
+                        venda_id: conta.venda_id,
+                        valor_pago: valorAbater,
+                        saldo_restante: novoSaldo,
+                        status: novoStatus
+                      });
+
+                      valorRestantePagamento -= valorAbater;
+                      processarConta(index + 1);
+                    });
                   });
                 } else {
                   db.run(`
@@ -2341,6 +2543,3 @@ router.delete('/:id(\\d+)', (req, res) => {
 });
 
 module.exports = router;
-
-
-

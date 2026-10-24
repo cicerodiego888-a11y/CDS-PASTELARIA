@@ -59,9 +59,12 @@ function t03() {
   assert.ok(iso.includes('pdv/index.html'));
   assert.ok(iso.includes('pdv-acesso-oficial.js'));
   assert.ok(iso.includes('server.js'));
-  assert.ok(src('frontend/erp/js/dashboard-command.js').includes('urlPdvUniversalOficial'));
-  assert.ok(src('frontend/erp/index.html').includes('href="/pdv-universal/"'));
-  assert.ok(src('frontend/pdv/index.html').includes('href="/pdv-universal/"'));
+  // Navegação: o PDV Universal (congelado) saiu dos menus e do atalho do dashboard; o /pdv é o oficial.
+  const dash = src('frontend/erp/js/dashboard-command.js');
+  assert.ok(dash.includes('urlPdvLegadoOficial'));
+  assert.ok(!dash.includes('urlPdvUniversalOficial'));
+  assert.ok(!src('frontend/erp/index.html').includes('href="/pdv-universal'));
+  assert.ok(!src('frontend/pdv/index.html').includes('href="/pdv-universal'));
   console.log('  T03 inventário de chamadores disponível');
 }
 
@@ -90,7 +93,8 @@ function t05() {
   assert.ok(rota.includes("router.get('/atendimentos/:id/comprovante'"));
   const server = src('backend/server.js');
   assert.ok(server.includes("app.use('/api/pdv-universal'"));
-  assert.ok(server.includes("app.get(['/pdv-universal', '/pdv-universal/']"));
+  assert.ok(server.includes('caminhoDoPdvUniversalBloqueado'));
+  assert.ok(!server.includes("frontendRoot, 'pdv-universal/index.html'"));
   console.log('  T05 rotas do Universal identificadas');
 }
 

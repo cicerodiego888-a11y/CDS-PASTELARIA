@@ -9,8 +9,7 @@ const { converterQuantidade, CODIGOS } = require('../../motores/muc/core/MotorCo
 const {
   isUnidadeConhecida,
   normalizarUnidade,
-  EMBALAGEM,
-  familiasFisicasIncompativeis
+  EMBALAGEM
 } = require('../../motores/muc/core/unidadesSi');
 const { tipoParaUnidadeComercial } = require('../../motores/muc/constants/tiposApresentacao');
 const { garantirSchemaProdutoConversaoAsync } = require('./produtoConversaoSchema');
@@ -41,6 +40,42 @@ function dbRun(db, sql, params = []) {
       resolve({ lastID: this.lastID, changes: this.changes });
     });
   });
+}
+
+const filasTransacaoConfiguracao = new WeakMap();
+
+function executarTransacaoConfiguracao(db, operacao) {
+  const anterior = filasTransacaoConfiguracao.get(db) || Promise.resolve();
+  const atual = anterior.catch(() => {}).then(async () => {
+    try {
+      await dbRun(db, 'BEGIN IMMEDIATE');
+    } catch (err) {
+      const mensagem = String(err && err.message);
+      if (/within a transaction/i.test(mensagem)) {
+        throw erroConv(
+          'TRANSACAO_EXTERNA_ATIVA',
+          'A conexão já possui uma transação aberta. Salve a configuração fora de uma transação externa.',
+          409
+        );
+      }
+      if (err?.code === 'SQLITE_BUSY' || /SQLITE_BUSY|database is locked/i.test(mensagem)) {
+        throw erroConv('BANCO_OCUPADO', 'Banco ocupado por outra operação. Tente novamente.', 503);
+      }
+      throw err;
+    }
+    try {
+      const resultado = await operacao();
+      await dbRun(db, 'COMMIT');
+      return resultado;
+    } catch (err) {
+      try {
+        await dbRun(db, 'ROLLBACK');
+      } catch (_) { /* preserva o erro original */ }
+      throw err;
+    }
+  });
+  filasTransacaoConfiguracao.set(db, atual);
+  return atual;
 }
 
 function flagUtiliza(valor) {
@@ -82,6 +117,11 @@ function montarRelacoesMuc(apresentacoes, relacoesSi) {
 function validarRelacaoSi(rel) {
   const n = normalizarRelacaoInput(rel);
   if (!n.unidade_origem || !n.unidade_destino) {
+    const lado = !String(rel.unidade_origem ?? rel.de ?? rel.origem ?? '').trim() ? 'origem'
+      : (!String(rel.unidade_destino ?? rel.para ?? rel.destino ?? '').trim() ? 'destino' : null);
+    if (!lado) {
+      throw erroConv('UNIDADE_INVALIDA', 'Unidade da relação desconhecida: use uma unidade válida (ex.: UN, ML, G, KG, L).');
+    }
     throw erroConv('UNIDADE_INVALIDA', 'Unidade da relação inválida ou vazia.');
   }
   if (!isUnidadeConhecida(n.unidade_origem) || !isUnidadeConhecida(n.unidade_destino)) {
@@ -101,9 +141,6 @@ function validarRelacaoSi(rel) {
       'RELACAO_INVALIDA',
       `A apresentação comercial (${n.unidade_origem}) não deve ser gravada como relação SI. Use apresentações (ex.: 1 CAIXA = 12 UN) e uma relação de conteúdo (ex.: 1 UN = 2.000 ML).`
     );
-  }
-  if (familiasFisicasIncompativeis(n.unidade_origem, n.unidade_destino)) {
-    throw erroConv('CONVERSAO_INVALIDA', `Conversão inválida: ${n.unidade_origem} → ${n.unidade_destino}.`);
   }
   try {
     converterQuantidade({
@@ -128,13 +165,26 @@ function validarConfiguracao({ utilizaConversao, unidadeEstoque, apresentacoes, 
   }
 
   const relacoesOk = (relacoes || []).map(validarRelacaoSi);
+  const relacoesPorPar = new Map();
+  for (const relacao of relacoesOk) {
+    const chave = `${relacao.unidade_origem}>${relacao.unidade_destino}`;
+    if (relacoesPorPar.has(chave)) {
+      throw erroConv(
+        relacoesPorPar.get(chave) === relacao.fator ? 'RELACAO_DUPLICADA' : 'RELACAO_AMBIGUA',
+        relacoesPorPar.get(chave) === relacao.fator
+          ? `A relação ${relacao.unidade_origem} → ${relacao.unidade_destino} foi informada mais de uma vez.`
+          : `Relação ambígua: ${relacao.unidade_origem} → ${relacao.unidade_destino} está cadastrada com fatores diferentes.`
+      );
+    }
+    relacoesPorPar.set(chave, relacao.fator);
+  }
   const apresentacoesAtivas = (apresentacoes || []).filter((ap) => Number(ap.ativa ?? 1) === 1);
   for (const ap of apresentacoesAtivas) {
     const fator = Number(ap.quantidade);
-    if (!(fator > 0)) {
+    if (!(fator > 0) || !Number.isFinite(fator)) {
       throw erroConv('FATOR_INVALIDO', 'Quantidade da apresentação deve ser maior que zero.');
     }
-    if (!isUnidadeConhecida(ap.unidade) && !ap.unidade) {
+    if (!ap.unidade || !isUnidadeConhecida(ap.unidade)) {
       throw erroConv('UNIDADE_INVALIDA', 'Unidade da apresentação inválida.');
     }
   }
@@ -220,45 +270,55 @@ async function obterConfiguracao(db, produtoId) {
 
 async function salvarConfiguracao(db, produtoId, payload = {}, opcoes = {}) {
   await garantirSchemaProdutoConversaoAsync(db);
-  const produto = await dbGet(db, 'SELECT id, unidade FROM produtos WHERE id = ?', [Number(produtoId)]);
-  if (!produto) throw erroConv('PRODUTO_INEXISTENTE', 'Produto não encontrado.', 404);
-
-  const utiliza = flagUtiliza(payload.utiliza_conversao ?? payload.utilizaConversao);
   const apresentacoes = payload.apresentacoes || payload.embalagens || [];
   const relacoesIn = payload.relacoes || [];
+  const validado = await executarTransacaoConfiguracao(db, async () => {
+    const produto = await dbGet(db, 'SELECT id, unidade FROM produtos WHERE id = ?', [Number(produtoId)]);
+    if (!produto) throw erroConv('PRODUTO_INEXISTENTE', 'Produto não encontrado.', 404);
 
-  const validado = validarConfiguracao({
-    utilizaConversao: utiliza,
-    unidadeEstoque: payload.unidade_estoque || payload.unidadeEstoque || produto.unidade,
-    apresentacoes,
-    relacoes: relacoesIn
-  });
+    const temUnidadeEstoque = Object.prototype.hasOwnProperty.call(payload, 'unidade_estoque')
+      || Object.prototype.hasOwnProperty.call(payload, 'unidadeEstoque');
+    const unidadeEstoqueEntrada = Object.prototype.hasOwnProperty.call(payload, 'unidade_estoque')
+      ? payload.unidade_estoque
+      : (Object.prototype.hasOwnProperty.call(payload, 'unidadeEstoque')
+        ? payload.unidadeEstoque
+        : produto.unidade);
+    const configuracaoValidada = validarConfiguracao({
+      utilizaConversao: flagUtiliza(payload.utiliza_conversao ?? payload.utilizaConversao),
+      unidadeEstoque: temUnidadeEstoque ? unidadeEstoqueEntrada : produto.unidade,
+      apresentacoes,
+      relacoes: relacoesIn
+    });
 
-  const unidadeEstoqueGravar = validado.utiliza_conversao === 1 ? validado.unidade_estoque : null;
-  const unidadeProduto = validado.utiliza_conversao === 1
-    ? validado.unidade_estoque
-    : (payload.preservarUnidadeProduto ? produto.unidade : (payload.unidade || produto.unidade));
+    const unidadeEstoqueGravar = configuracaoValidada.utiliza_conversao === 1
+      ? configuracaoValidada.unidade_estoque
+      : null;
+    const unidadeProduto = configuracaoValidada.utiliza_conversao === 1
+      ? configuracaoValidada.unidade_estoque
+      : (payload.preservarUnidadeProduto ? produto.unidade : (payload.unidade || produto.unidade));
 
-  await dbRun(
-    db,
-    `UPDATE produtos SET
-       utiliza_conversao = ?,
-       unidade_estoque = ?,
-       unidade = COALESCE(?, unidade),
-       updated_at = datetime('now', 'localtime')
-     WHERE id = ?`,
-    [validado.utiliza_conversao, unidadeEstoqueGravar, unidadeProduto, Number(produtoId)]
-  );
-
-  await dbRun(db, 'DELETE FROM muc_produto_relacoes WHERE produto_id = ?', [Number(produtoId)]);
-  for (const r of validado.relacoes) {
     await dbRun(
       db,
-      `INSERT INTO muc_produto_relacoes (produto_id, unidade_origem, unidade_destino, fator)
-       VALUES (?, ?, ?, ?)`,
-      [Number(produtoId), r.unidade_origem, r.unidade_destino, r.fator]
+      `UPDATE produtos SET
+         utiliza_conversao = ?,
+         unidade_estoque = ?,
+         unidade = COALESCE(?, unidade),
+         updated_at = datetime('now', 'localtime')
+       WHERE id = ?`,
+      [configuracaoValidada.utiliza_conversao, unidadeEstoqueGravar, unidadeProduto, Number(produtoId)]
     );
-  }
+
+    await dbRun(db, 'DELETE FROM muc_produto_relacoes WHERE produto_id = ?', [Number(produtoId)]);
+    for (const r of configuracaoValidada.relacoes) {
+      await dbRun(
+        db,
+        `INSERT INTO muc_produto_relacoes (produto_id, unidade_origem, unidade_destino, fator)
+         VALUES (?, ?, ?, ?)`,
+        [Number(produtoId), r.unidade_origem, r.unidade_destino, r.fator]
+      );
+    }
+    return configuracaoValidada;
+  });
 
   const depois = await obterConfiguracao(db, produtoId);
   return {
@@ -273,31 +333,34 @@ async function salvarConfiguracao(db, produtoId, payload = {}, opcoes = {}) {
 }
 
 async function excluirRelacao(db, produtoId, relacaoId, apresentacoes = []) {
-  const cfg = await obterConfiguracao(db, produtoId);
-  const restantes = (cfg.relacoes || []).filter((r) => Number(r.id) !== Number(relacaoId));
-  if (restantes.length === cfg.relacoes.length) {
-    throw erroConv('RELACAO_INEXISTENTE', 'Relação não encontrada.', 404);
-  }
-  if (Number(cfg.utiliza_conversao) === 1) {
-    try {
-      validarConfiguracao({
-        utilizaConversao: true,
-        unidadeEstoque: cfg.unidade_estoque,
-        apresentacoes,
-        relacoes: restantes
-      });
-    } catch (e) {
-      throw erroConv(
-        'RELACAO_NECESSARIA',
-        e.message || 'Não é possível excluir esta relação: a configuração de conversão ficaria inconsistente.'
-      );
+  await garantirSchemaProdutoConversaoAsync(db);
+  await executarTransacaoConfiguracao(db, async () => {
+    const cfg = await obterConfiguracao(db, produtoId);
+    const restantes = (cfg.relacoes || []).filter((r) => Number(r.id) !== Number(relacaoId));
+    if (restantes.length === cfg.relacoes.length) {
+      throw erroConv('RELACAO_INEXISTENTE', 'Relação não encontrada.', 404);
     }
-  }
-  await dbRun(
-    db,
-    'DELETE FROM muc_produto_relacoes WHERE id = ? AND produto_id = ?',
-    [Number(relacaoId), Number(produtoId)]
-  );
+    if (Number(cfg.utiliza_conversao) === 1) {
+      try {
+        validarConfiguracao({
+          utilizaConversao: true,
+          unidadeEstoque: cfg.unidade_estoque,
+          apresentacoes,
+          relacoes: restantes
+        });
+      } catch (e) {
+        throw erroConv(
+          'RELACAO_NECESSARIA',
+          e.message || 'Não é possível excluir esta relação: a configuração de conversão ficaria inconsistente.'
+        );
+      }
+    }
+    await dbRun(
+      db,
+      'DELETE FROM muc_produto_relacoes WHERE id = ? AND produto_id = ?',
+      [Number(relacaoId), Number(produtoId)]
+    );
+  });
   return obterConfiguracao(db, produtoId);
 }
 
@@ -318,6 +381,9 @@ function simularConversaoProduto(config, entrada = {}) {
       return {
         quantidade,
         unidade: destino,
+        quantidade_origem: quantidade,
+        unidade_origem: origem,
+        unidade_estoque: destino,
         caminho: [],
         mensagem: 'Produto sem conversão: a quantidade permanece na unidade do produto.'
       };
@@ -337,20 +403,29 @@ function simularConversaoProduto(config, entrada = {}) {
     });
     const unidadesCaminho = r.caminho && r.caminho.length
       ? [r.caminho[0].de, ...r.caminho.map((e) => e.para)]
-      : [origem, destino].filter((u, i, arr) => arr.indexOf(u) === i);
+      : [];
     return {
       quantidade: r.quantidade,
       unidade: r.unidade,
+      quantidade_origem: quantidade,
+      unidade_origem: origem,
+      unidade_estoque: destino,
       caminho: unidadesCaminho,
       etapas: r.caminho,
       fatorTotal: r.fatorTotal,
-      estoqueAlterado: false
+      estoqueAlterado: false,
+      mensagem: origem === destino
+        ? 'A entrada já está na unidade de estoque; nenhuma conversão é necessária.'
+        : null
     };
   } catch (e) {
-    if (e.code === CODIGOS.CONVERSAO_NAO_DISPONIVEL) {
+    if (
+      e.code === CODIGOS.CONVERSAO_NAO_DISPONIVEL
+      || (e.code === CODIGOS.CONVERSAO_INVALIDA && relacoes.length === 0)
+    ) {
       throw erroConv(
         'CONVERSAO_NAO_DISPONIVEL',
-        `Não existe uma relação cadastrada para converter ${origem} em ${destino}.`
+        `Não existe um caminho de conversão cadastrado de ${origem} para ${destino}. Confira as unidades e cadastre uma relação aplicável ao produto.`
       );
     }
     throw erroConv(e.code || 'CONVERSAO_INVALIDA', e.message);

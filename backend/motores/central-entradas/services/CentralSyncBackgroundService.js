@@ -355,18 +355,32 @@ class CentralSyncBackgroundService {
         intervaloMs: intervalo
       });
 
+      // CE-PASTELARIA-04 — ciclo BACKGROUND passa pela decisão centralizada com
+      // auth obrigatória; sem OPERACAO_REAL por empresa não há SOAP DistDFe.
       const resultado = await this._orch().executarSincronizacao({
         origem: ORIGENS.BACKGROUND,
         ignorarHorario: false,
-        correlationId
+        correlationId,
+        // forcar/ignorarCooldown deliberadamente omitidos — decisão fail-closed.
+        forcar: false
       });
 
+      const bloqueadoAuth = resultado?.codigoDecisao === 'AUTORIZACAO_AUSENTE'
+        || resultado?.codigo === 'AUTORIZACAO_AUSENTE'
+        || (Array.isArray(resultado?.porEmpresa)
+          && resultado.porEmpresa.every(
+            (p) => p.codigoErro === 'AUTORIZACAO_AUSENTE' || p.ignorado
+          ));
       this._log('BACKGROUND DISTDFE', {
         correlationId,
         requestId,
         tempoMs: Date.now() - inicio,
-        motivo: 'fim_sincronizacao_background',
-        resultado: resultado?.sucesso === false ? 'ERRO' : 'OK',
+        motivo: bloqueadoAuth
+          ? 'sync_background_bloqueada_sem_autorizacao'
+          : 'fim_sincronizacao_background',
+        resultado: resultado?.sucesso === false || resultado?.ignorado
+          ? (bloqueadoAuth ? 'BLOQUEADO_AUTH' : 'ERRO')
+          : 'OK',
         notasNovas: resultado?.notasNovas
       });
     } catch (error) {

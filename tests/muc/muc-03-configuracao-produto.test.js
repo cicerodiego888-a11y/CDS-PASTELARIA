@@ -30,6 +30,9 @@ const AP_CAIXA = Object.freeze([
 const AP_FARDO = Object.freeze([
   { tipo: 'FD', quantidade: 12, unidade: 'UN', ativa: 1, compra: 1 }
 ]);
+const AP_PACOTE = Object.freeze([
+  { tipo: 'PCT', quantidade: 50, unidade: 'UN', ativa: 1, compra: 1 }
+]);
 const REL_UN_ML_2000 = Object.freeze([{ unidade_origem: 'UN', unidade_destino: 'ML', fator: 2000 }]);
 const REL_UN_ML_350 = Object.freeze([{ unidade_origem: 'UN', unidade_destino: 'ML', fator: 350 }]);
 const REL_UN_G_150 = Object.freeze([{ unidade_origem: 'UN', unidade_destino: 'G', fator: 150 }]);
@@ -188,6 +191,52 @@ describe('MUC-03 configuração de produto', () => {
     assert.equal(conv.quantidade, 12);
   });
 
+  it('T04B — PACOTE pode ser estoque e apresentação PCT mantém conversão separada', () => {
+    const r = ProdutoConversaoConfigService.validarConfiguracao({
+      utilizaConversao: true,
+      unidadeEstoque: 'PCT',
+      apresentacoes: AP_PACOTE,
+      relacoes: []
+    });
+    assert.equal(r.unidade_estoque, 'PACOTE');
+
+    const relacoes = ProdutoConversaoConfigService.montarRelacoesMuc(AP_PACOTE, []);
+    const compraEmPacote = converterQuantidade({
+      quantidade: 1,
+      unidadeOrigem: 'PCT',
+      unidadeDestino: 'PACOTE',
+      relacoes
+    });
+    assert.equal(compraEmPacote.quantidade, 1);
+
+    const compraEmUnidades = converterQuantidade({
+      quantidade: 50,
+      unidadeOrigem: 'UN',
+      unidadeDestino: 'PACOTE',
+      relacoes
+    });
+    assert.equal(compraEmUnidades.quantidade, 1);
+  });
+
+  it('T04C — conteúdo PCT de 350 G é validado sem usar relação SI com PCT', () => {
+    const r = ProdutoConversaoConfigService.validarConfiguracao({
+      utilizaConversao: true,
+      unidadeEstoque: 'G',
+      apresentacoes: [{ tipo: 'PCT', quantidade: 350, unidade: 'G', ativa: 1, compra: 1 }],
+      relacoes: []
+    });
+    assert.equal(r.unidade_estoque, 'G');
+    assert.throws(
+      () => ProdutoConversaoConfigService.validarConfiguracao({
+        utilizaConversao: true,
+        unidadeEstoque: 'G',
+        apresentacoes: [{ tipo: 'PCT', quantidade: 0, unidade: '', ativa: 1, compra: 1 }],
+        relacoes: []
+      }),
+      (err) => err.code === 'FATOR_INVALIDO' || err.code === 'UNIDADE_INVALIDA'
+    );
+  });
+
   it('T05 — relação UN → ML', () => {
     ProdutoConversaoConfigService.validarRelacaoSi({ unidade_origem: 'UN', unidade_destino: 'ML', fator: 2000 });
     const conv = converterQuantidade({
@@ -294,10 +343,21 @@ describe('MUC-03 configuração de produto', () => {
     );
   });
 
-  it('T14 — família incompatível rejeitada', () => {
+  it('T14 — massa e volume só se relacionam por regra explícita do produto', () => {
+    const relacao = { unidade_origem: 'KG', unidade_destino: 'ML', fator: 850 };
+    assert.doesNotThrow(() => ProdutoConversaoConfigService.validarRelacaoSi(relacao));
+    assert.equal(converterQuantidade({
+      quantidade: 1,
+      unidadeOrigem: 'KG',
+      unidadeDestino: 'ML',
+      relacoes: [{ de: 'KG', para: 'ML', fator: 850 }]
+    }).quantidade, 850);
     assert.throws(
-      () => ProdutoConversaoConfigService.validarRelacaoSi({
-        unidade_origem: 'KG', unidade_destino: 'ML', fator: 1
+      () => converterQuantidade({
+        quantidade: 1,
+        unidadeOrigem: 'KG',
+        unidadeDestino: 'ML',
+        relacoes: []
       }),
       (e) => e.code === 'CONVERSAO_INVALIDA'
     );
@@ -463,6 +523,88 @@ describe('MUC-03 configuração de produto', () => {
     );
   });
 
+  it('T26 — rejeita unidade inválida em apresentação e relação duplicada', () => {
+    assert.throws(
+      () => ProdutoConversaoConfigService.validarConfiguracao({
+        utilizaConversao: true,
+        unidadeEstoque: 'UN',
+        apresentacoes: [{ tipo: 'CX', quantidade: 12, unidade: 'UNIDADE_DESCONHECIDA', compra: 1 }],
+        relacoes: []
+      }),
+      (e) => e.code === 'UNIDADE_INVALIDA'
+    );
+    assert.throws(
+      () => ProdutoConversaoConfigService.validarConfiguracao({
+        utilizaConversao: true,
+        unidadeEstoque: 'ML',
+        apresentacoes: [],
+        relacoes: [
+          { unidade_origem: 'UN', unidade_destino: 'ML', fator: 1000 },
+          { unidade_origem: 'UN', unidade_destino: 'ML', fator: 1000 }
+        ]
+      }),
+      (e) => e.code === 'RELACAO_DUPLICADA'
+    );
+    assert.throws(
+      () => ProdutoConversaoConfigService.validarConfiguracao({
+        utilizaConversao: true,
+        unidadeEstoque: 'ML',
+        apresentacoes: [],
+        relacoes: [
+          { unidade_origem: 'UN', unidade_destino: 'ML', fator: 1000 },
+          { unidade_origem: 'UN', unidade_destino: 'ML', fator: 500 }
+        ]
+      }),
+      (e) => e.code === 'RELACAO_AMBIGUA'
+    );
+  });
+
+  it('T27 — falha ao inserir relação reverte flag, unidade e relações antigas', async () => {
+    const db = await setupDb();
+    const id = await inserirProduto(db, { nome: 'Produto rollback MUC', unidade: 'UN' });
+    await ProdutoConversaoConfigService.salvarConfiguracao(db, id, {
+      utiliza_conversao: 1,
+      unidade_estoque: 'ML',
+      apresentacoes: [],
+      relacoes: [{ unidade_origem: 'UN', unidade_destino: 'ML', fator: 1000 }]
+    });
+    await run(db, `
+      CREATE TRIGGER falhar_nova_relacao_muc
+      BEFORE INSERT ON muc_produto_relacoes
+      WHEN NEW.fator = 5
+      BEGIN
+        SELECT RAISE(ABORT, 'falha injetada no teste de rollback MUC');
+      END
+    `);
+
+    await assert.rejects(
+      () => ProdutoConversaoConfigService.salvarConfiguracao(db, id, {
+        utiliza_conversao: 1,
+        unidade_estoque: 'KG',
+        apresentacoes: [],
+        relacoes: [{ unidade_origem: 'UN', unidade_destino: 'KG', fator: 5 }]
+      }),
+      /falha injetada no teste de rollback MUC/
+    );
+
+    const produto = await get(db, 'SELECT unidade, utiliza_conversao, unidade_estoque FROM produtos WHERE id = ?', [id]);
+    const relacoes = await get(db, `
+      SELECT unidade_origem, unidade_destino, fator
+      FROM muc_produto_relacoes WHERE produto_id = ?
+    `, [id]);
+    assert.deepEqual(produto, {
+      unidade: 'ML',
+      utiliza_conversao: 1,
+      unidade_estoque: 'ML'
+    });
+    assert.deepEqual(relacoes, {
+      unidade_origem: 'UN',
+      unidade_destino: 'ML',
+      fator: 1000
+    });
+    await closeDb(db);
+  });
+
   it('T24 — auditoria registra alteração', async () => {
     const rotas = src('backend/rotas/produtos.js');
     assert.match(rotas, /configurar_conversao_produto/);
@@ -612,6 +754,9 @@ describe('MUC-03 configuração de produto', () => {
     const save = src('frontend/erp/js/produtos.js');
     assert.match(ui, /Utiliza conversão/);
     assert.match(ui, /unidade_estoque/);
+    assert.match(ui, /ap-unidade-conteudo/);
+    assert.match(ui, /<option value="PACOTE">PACOTE \(PCT\)<\/option>/);
+    assert.match(ui, /1 PCT = 50 UN em Apresentações Comerciais, não em Relações SI/);
     assert.match(ui, /Simular conversão/);
     assert.match(ui, /btnSimularConversaoMuc/);
     assert.doesNotMatch(ui, /Cadastro de MUC/);

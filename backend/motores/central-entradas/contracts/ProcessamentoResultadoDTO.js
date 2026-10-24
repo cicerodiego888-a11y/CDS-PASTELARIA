@@ -18,6 +18,8 @@ class ProcessamentoResultadoDTO {
     this.etapas = dados.etapas ?? [];
     this.possuiPendencias = dados.possuiPendencias ?? dados.possui_pendencias ?? false;
     this.reutilizado = dados.reutilizado ?? false;
+    this.recuperado = dados.recuperado ?? false;
+    this.etapasPuladas = Array.isArray(dados.etapasPuladas) ? dados.etapasPuladas : [];
     this.mensagem = dados.mensagem ?? null;
     this.erros = dados.erros ?? [];
   }
@@ -44,6 +46,8 @@ class ProcessamentoResultadoDTO {
       etapas: this.etapas,
       possuiPendencias: this.possuiPendencias,
       reutilizado: this.reutilizado,
+      recuperado: this.recuperado,
+      etapasPuladas: this.etapasPuladas,
       mensagem: this.mensagem,
       erros: this.erros
     };

@@ -245,8 +245,12 @@ class CentralNsuRepository extends IRepository {
     const cooldownAte = dados.cooldownAte !== undefined ? dados.cooldownAte : undefined;
 
     if (dados.preservarNsu) {
-      const sets = ["data_sincronizacao = ?", "updated_at = datetime('now')"];
-      const params = [dataSync];
+      const sets = ["updated_at = datetime('now')"];
+      const params = [];
+      if (dados.manterDataSincronizacao !== true) {
+        sets.unshift('data_sincronizacao = ?');
+        params.push(dataSync);
+      }
       if (ultimoCstat !== undefined) {
         sets.push('ultimo_cstat = ?');
         params.push(ultimoCstat);
@@ -270,13 +274,28 @@ class CentralNsuRepository extends IRepository {
     }
 
     // Comparação lexicográfica funciona para NSU zero-padded (15 dígitos).
+    // ult só avança com par consistente (max informado, não zero, max >= ult).
+    // max nunca é zerado depois de progresso: candidato 0 preserva o valor atual.
+    const nsuZero = '000000000000000';
     const sets = [
-      'ult_nsu = CASE WHEN ? >= ult_nsu THEN ? ELSE ult_nsu END',
-      'max_nsu = CASE WHEN ? >= ult_nsu THEN ? ELSE max_nsu END',
+      `ult_nsu = CASE
+         WHEN ? >= ult_nsu AND ? != ? AND ? >= ? THEN ?
+         ELSE ult_nsu
+       END`,
+      `max_nsu = CASE
+         WHEN ? = ? THEN max_nsu
+         WHEN ? >= max_nsu THEN ?
+         ELSE max_nsu
+       END`,
       'data_sincronizacao = ?',
       "updated_at = datetime('now')"
     ];
-    const params = [ultNsu, ultNsu, ultNsu, maxNsu, dataSync];
+    const params = [
+      ultNsu, maxNsu, nsuZero, maxNsu, ultNsu, ultNsu,
+      maxNsu, nsuZero,
+      maxNsu, maxNsu,
+      dataSync
+    ];
 
     if (ultimoCstat !== undefined) {
       sets.push('ultimo_cstat = ?');

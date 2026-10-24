@@ -27,6 +27,7 @@ const {
 } = require('./distribuicaoDfeLegado');
 const { DistribuicaoDfeMetrics } = require('./distribuicaoDfeMetrics');
 const { fiscalSoapTelemetry } = require('./core/FiscalSoapTelemetry');
+const { avaliarAutorizacaoTransmissao } = require('./autorizacaoTransmissaoSefaz');
 
 const defaultMetrics = new DistribuicaoDfeMetrics();
 const OP = 'DISTRIBUICAO_DFE';
@@ -68,6 +69,45 @@ function createDistribuicaoDfeRuntime(options = {}) {
     const certificadoSenha = input.certificadoSenha || null;
     const xmlConsulta = input.xmlConsulta;
     const warnings = [];
+
+    // CE-ENCERRAMENTO-01 — barreira no ponto de transporte DistDFe (fail-closed).
+    // Sem autorização válida o SOAP não é iniciado (probe/legado inclusos).
+    {
+      const tipoConsulta = input.tipoConsulta || 'distNSU';
+      const auth = avaliarAutorizacaoTransmissao({
+        autorizacao: input.autorizacaoTransmissaoSefaz,
+        empresaId: input.empresaId,
+        tipoConsulta,
+        cnpjEmpresa: input.cnpj || null
+      });
+      if (!auth.ok) {
+        return buildRuntimeResult({
+          success: false,
+          source: null,
+          operacao: OperationType.DISTRIBUICAO_DFE,
+          modelo: ModelType.NFE,
+          ambiente,
+          uf: UF_AN,
+          error: auth.mensagem || 'Transmissão DistDFe não autorizada.',
+          body: null,
+          fallbackUtilizado: false,
+          tempoResolverMs: 0,
+          tempoTransporteMs: 0,
+          tempoXmlMs: 0,
+          tempoSoapMs: 0,
+          tempoPlataformaMs: 0,
+          tempoLegadoMs: 0,
+          tempoTotalMs: nowMs(),
+          retries: 0,
+          telemetryRequestId: null,
+          correlationId: input.correlationId || null,
+          codigo: auth.codigo,
+          consultaExecutada: false,
+          sefazConsultada: false,
+          bloqueadoAutorizacao: true
+        });
+      }
+    }
 
     const { correlationId, requestId } = fiscalSoapTelemetry.iniciar({
       correlationId: input.correlationId || null,

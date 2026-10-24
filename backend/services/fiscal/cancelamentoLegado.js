@@ -10,6 +10,11 @@
 const axios = require('axios');
 const https = require('https');
 const { carregarCertificadoPfx } = require('./certificateService');
+const {
+  exigirAutorizacaoTransmissao,
+  resultadoCancelamentoNaoExecutado,
+  TIPOS_CONSULTA_SEFAZ
+} = require('./autorizacaoTransmissaoSefaz');
 
 const NS_EVENTO = 'http://www.portalfiscal.inf.br/nfe/wsdl/NFeRecepcaoEvento4';
 const ACTION_EVENTO = `${NS_EVENTO}/nfeRecepcaoEvento`;
@@ -103,6 +108,27 @@ async function enviarCancelamentoLegado(params = {}) {
   const started = process.hrtime.bigint();
   const elapsedMs = () => Number(process.hrtime.bigint() - started) / 1e6;
 
+  const empresaId = params.empresaId
+    || (params.contextoCentral && params.contextoCentral.empresaId)
+    || null;
+  try {
+    exigirAutorizacaoTransmissao({
+      autorizacao: params.autorizacaoTransmissaoSefaz,
+      empresaId,
+      tipoConsulta: TIPOS_CONSULTA_SEFAZ.CANCELAMENTO_110111
+    });
+  } catch (err) {
+    return {
+      ...resultadoCancelamentoNaoExecutado({
+        codigo: err.codigo || err.code,
+        mensagem: err.message
+      }),
+      tempoXmlMs: 0,
+      tempoSoapMs: 0,
+      tempo: elapsedMs()
+    };
+  }
+
   const ambiente = Number(params.ambiente) === 1 ? 1 : 2;
   const url = params.url || getCancelamentoUrl(ambiente);
   const versao = params.versao || '1.00';
@@ -126,6 +152,7 @@ async function enviarCancelamentoLegado(params = {}) {
       success: false,
       body: null,
       statusCode: null,
+      transmissionState: 'NOT_SENT',
       message: 'URL de cancelamento não configurada (legado).',
       endpoint: null,
       namespace: NS_EVENTO,
@@ -137,9 +164,12 @@ async function enviarCancelamentoLegado(params = {}) {
     };
   }
 
+  let requestStarted = false;
+  let nativeRequestStarted = false;
   try {
     if (typeof params.httpClient === 'function') {
       const soapStarted = process.hrtime.bigint();
+      requestStarted = true;
       const result = await params.httpClient({
         url,
         envelope,
@@ -152,6 +182,7 @@ async function enviarCancelamentoLegado(params = {}) {
         success: true,
         body: result.body,
         statusCode: result.statusCode || 200,
+        transmissionState: 'RESPONSE_RECEIVED',
         endpoint: url,
         namespace: NS_EVENTO,
         soapAction: ACTION_EVENTO,
@@ -167,6 +198,7 @@ async function enviarCancelamentoLegado(params = {}) {
         success: false,
         body: null,
         statusCode: null,
+        transmissionState: 'NOT_SENT',
         message: 'Certificado não configurado (legado).',
         endpoint: url,
         namespace: NS_EVENTO,
@@ -193,6 +225,8 @@ async function enviarCancelamentoLegado(params = {}) {
     }
 
     const soapStarted = process.hrtime.bigint();
+    requestStarted = true;
+    nativeRequestStarted = true;
     const response = await axios.post(url, envelope, {
       httpsAgent,
       proxy: false,
@@ -213,6 +247,7 @@ async function enviarCancelamentoLegado(params = {}) {
       success: true,
       body: response.data,
       statusCode: response.status,
+      transmissionState: 'RESPONSE_RECEIVED',
       endpoint: url,
       namespace: NS_EVENTO,
       soapAction: ACTION_EVENTO,
@@ -226,6 +261,13 @@ async function enviarCancelamentoLegado(params = {}) {
       success: false,
       body: error.response?.data || null,
       statusCode: error.response?.status || null,
+      transmissionState: error.response
+        ? 'RESPONSE_RECEIVED'
+        : error.transmissionState === 'NOT_SENT'
+          || !requestStarted
+          || (nativeRequestStarted && definitelyPreSendSocketError(error))
+          ? 'NOT_SENT'
+          : 'UNKNOWN',
       message: error.message || String(error),
       code: error.code || null,
       endpoint: url,
@@ -237,6 +279,16 @@ async function enviarCancelamentoLegado(params = {}) {
       tempo: elapsedMs()
     };
   }
+}
+
+function definitelyPreSendSocketError(error) {
+  return new Set([
+    'ECONNREFUSED',
+    'ENOTFOUND',
+    'EAI_AGAIN',
+    'ENETUNREACH',
+    'EHOSTUNREACH'
+  ]).has(error && error.code);
 }
 
 function escapeXml(value) {

@@ -53,7 +53,12 @@ class CentralAtencaoService {
           ? 'Existe 1 documento aguardando revisão.'
           : `Existem ${revisao.length} documentos aguardando revisão.`,
         quantidade: revisao.length,
-        acao: { tipo: 'filtrar_status', status: DocumentoFiscalStatus.AGUARDANDO_REVISAO, label: 'Ver revisões' }
+        acao: {
+          tipo: 'filtrar_fila',
+          fila: 'em_revisao',
+          status: DocumentoFiscalStatus.EM_REVISAO,
+          label: 'Ver revisões'
+        }
       });
     }
 
@@ -68,8 +73,9 @@ class CentralAtencaoService {
           : `Existem ${compras.length} compras abertas.`,
         quantidade: compras.length,
         acao: {
-          tipo: 'filtrar_status',
-          status: DocumentoFiscalStatus.EM_COMPRA,
+          tipo: 'filtrar_fila',
+          fila: 'em_importacao',
+          status: DocumentoFiscalStatus.EM_IMPORTACAO,
           label: 'Ver compras abertas'
         }
       });

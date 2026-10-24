@@ -1,0 +1,30 @@
+{
+  "schema": "cds.miip.origin-fixture.v1",
+  "id": "fixture-e-catalogo-alterado",
+  "cenario": "E",
+  "descricao": "Produto lido (snapshot anterior) e depois alterado no catalogo; cenarios separados para cache por ID e por GTIN.",
+  "sintetico": true,
+  "catalogo": [
+    {
+      "id": 505,
+      "codigo": "SINT-E505",
+      "codigo_barras": "7890000005012",
+      "nome": "Produto Cache Sintetico Antigo",
+      "unidade": "UN",
+      "ncm": "22021000",
+      "ativo": 1
+    }
+  ],
+  "catalogoAtualizado": [
+    {
+      "id": 505,
+      "codigo": "SINT-E505N",
+      "codigo_barras": "7890000005029",
+      "nome": "Produto Cache Sintetico Atualizado"
+    }
+  ],
+  "esperado": {
+    "cacheHitEsperado": true,
+    "estadoSnapshot": "desatualizado"
+  }
+}

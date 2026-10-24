@@ -47,6 +47,7 @@ function relacaoApresentacao(ap) {
 function montarRelacoes(dto, inferido, input) {
   const rel = [];
   const vistas = new Set();
+  const exigeConfiguracaoPersistida = Number(dto.produto?.utiliza_conversao) === 1;
   const push = (r) => {
     if (!r) return;
     const k = `${r.de}|${r.para}|${r.fator}`;
@@ -66,7 +67,9 @@ function montarRelacoes(dto, inferido, input) {
   for (const ap of lista) {
     push(relacaoApresentacao(ap));
   }
-  push(relacaoApresentacao(inferido.apresentacao));
+  if (!exigeConfiguracaoPersistida) {
+    push(relacaoApresentacao(inferido.apresentacao));
+  }
 
   const deCompra = tipoParaUnidadeComercial(inferido.tipoApresentacao);
   const fator = Number(inferido.fator);
@@ -77,7 +80,13 @@ function montarRelacoes(dto, inferido, input) {
       || tiposConteudoUn.has(deCompra)
       ? 'UN'
       : (normalizarUnidade(dto.produto?.unidade || dto.unidadeEstoque) || deCompra));
-  if (fator > 0 && deCompra && paraConteudo && deCompra !== paraConteudo && tipoAp !== 'UN' && deCompra !== 'UN') {
+  if (!exigeConfiguracaoPersistida
+    && fator > 0
+    && deCompra
+    && paraConteudo
+    && deCompra !== paraConteudo
+    && tipoAp !== 'UN'
+    && deCompra !== 'UN') {
     push({ de: deCompra, para: paraConteudo, fator });
   }
 

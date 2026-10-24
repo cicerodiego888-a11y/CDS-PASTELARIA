@@ -76,6 +76,16 @@ async function setup() {
     )
   `);
   await run(db, `
+    CREATE TABLE pedidos (
+      id INTEGER PRIMARY KEY,
+      codigo TEXT,
+      data_pedido DATE NOT NULL,
+      total REAL NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'PEDIDO',
+      empresa_id INTEGER
+    )
+  `);
+  await run(db, `
     CREATE TABLE movimentos_transferencia_saldos (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       produto_id INTEGER NOT NULL,
@@ -127,8 +137,18 @@ async function setup() {
   return { db, produtoId: p.lastID, empresaA: a, empresaB: b };
 }
 
+async function seedPedido(db, pedidoId, empresaId) {
+  await run(
+    db,
+    `INSERT INTO pedidos (id, codigo, data_pedido, total, status, empresa_id)
+     VALUES (?, ?, '2026-10-21', 1, 'PEDIDO', ?)`,
+    [pedidoId, `PED-${pedidoId}`, empresaId]
+  );
+}
+
 async function test01PedidoBBloqueado() {
   const { db, produtoId, empresaB } = await setup();
+  await seedPedido(db, 36, empresaB.id);
   await assertRejects(
     confirmarEstoqueViaMotorComercial({
       pedidoId: 36,
@@ -145,6 +165,7 @@ async function test01PedidoBBloqueado() {
 
 async function test02PedidoAPermitido() {
   const { db, produtoId, empresaA, empresaB } = await setup();
+  await seedPedido(db, 36, empresaA.id);
   const r = await confirmarEstoqueViaMotorComercial({
     pedidoId: 36,
     itens: [{ produto_id: produtoId, quantidade: 5 }],
@@ -165,6 +186,8 @@ async function test02PedidoAPermitido() {
 
 async function test03AnaliseMotorComercial() {
   const { db, produtoId, empresaA, empresaB } = await setup();
+  await seedPedido(db, 1, empresaB.id);
+  await seedPedido(db, 2, empresaA.id);
   const analiseB = await MotorComercial.analisarDisponibilidadeFiscal(
     [{ produto_id: produtoId, quantidade: 5 }],
     { db, pedidoId: 1, empresaId: empresaB.id }

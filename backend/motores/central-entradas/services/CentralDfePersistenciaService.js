@@ -21,6 +21,50 @@ const { logCentral } = require('../utils/centralLog');
 
 const DETALHE_RES_NFE = 'Resumo DF-e recebido. Aguardando XML completo.';
 
+/**
+ * Quando o XML não traz dhEmi, deriva YYYY-MM-01 da chave (AAMM).
+ * Evita que o filtro "mês vigente" oculte documentos já recebidos.
+ */
+function completarDataEmissaoFromChave(metadados = {}) {
+  if (metadados.dataEmissao) {
+    return {
+      ...metadados,
+      dataEmissaoOrigem: metadados.dataEmissaoOrigem || 'xml'
+    };
+  }
+  const chave = String(metadados.chave || '').replace(/\D/g, '');
+  if (chave.length !== 44) {
+    return { ...metadados, dataEmissaoOrigem: metadados.dataEmissaoOrigem || 'ausente' };
+  }
+  const aamm = chave.slice(2, 6);
+  const aa = Number(aamm.slice(0, 2));
+  const mm = Number(aamm.slice(2, 4));
+  if (!Number.isInteger(aa) || !Number.isInteger(mm) || mm < 1 || mm > 12) {
+    return { ...metadados, dataEmissaoOrigem: metadados.dataEmissaoOrigem || 'ausente' };
+  }
+  const yyyy = aa >= 90 ? 1900 + aa : 2000 + aa;
+  return {
+    ...metadados,
+    dataEmissao: `${yyyy}-${String(mm).padStart(2, '0')}-01`,
+    dataEmissaoOrigem: 'chave_aamm'
+  };
+}
+
+/**
+ * Distingue dhEmi comprovado no XML de data estimada (AAMM da chave).
+ * Não substitui data_emissao usada nos filtros.
+ */
+function classificarOrigemDataEmissao({ xml, chave, dataEmissao, dataEmissaoOrigem } = {}) {
+  if (dataEmissaoOrigem) return dataEmissaoOrigem;
+  const comprovada = extrairMetadadosNota(xml || '').dataEmissao;
+  if (comprovada) return 'xml';
+  const preenchido = completarDataEmissaoFromChave({
+    chave: chave || extrairChave(xml || ''),
+    dataEmissao: dataEmissao || ''
+  });
+  return preenchido.dataEmissaoOrigem || 'ausente';
+}
+
 const TIPOS_XML_COMPLETO = Object.freeze([
   DocumentoDfeTipo.PROC_NFE,
   DocumentoDfeTipo.NFE
@@ -163,7 +207,7 @@ class CentralDfePersistenciaService {
       Tipo: tipoDfe
     });
 
-    const metadados = extrairMetadadosNota(dados.xml);
+    const metadados = completarDataEmissaoFromChave(extrairMetadadosNota(dados.xml));
     const chave = metadados.chave;
 
     if (!chave) {
@@ -339,13 +383,18 @@ class CentralDfePersistenciaService {
       atualizado: false,
       duplicado: status === DocumentoFiscalStatus.IMPORTADA && jaComprada,
       ignorado: false,
-      documento,
-      tipoDfe
+      documento: documento
+        ? { ...documento, dataEmissaoOrigem: metadados.dataEmissaoOrigem || 'xml' }
+        : documento,
+      tipoDfe,
+      dataEmissaoOrigem: metadados.dataEmissaoOrigem || 'xml'
     };
   }
 }
 
 CentralDfePersistenciaService.DETALHE_RES_NFE = DETALHE_RES_NFE;
 CentralDfePersistenciaService.TIPOS_XML_COMPLETO = TIPOS_XML_COMPLETO;
+CentralDfePersistenciaService.completarDataEmissaoFromChave = completarDataEmissaoFromChave;
+CentralDfePersistenciaService.classificarOrigemDataEmissao = classificarOrigemDataEmissao;
 
 module.exports = CentralDfePersistenciaService;

@@ -2,33 +2,36 @@
 
 const CatalogSnapshot = require('./CatalogSnapshot');
 
-const SQL_CATALOGO = `
-  SELECT
-    p.id,
-    p.nome,
-    COALESCE(NULLIF(TRIM(p.nome_busca), ''), '') AS nome_busca,
-    p.codigo,
-    p.codigo_barras,
-    (
-      SELECT pi.codigo FROM produto_identificadores pi
-      WHERE pi.produto_id = p.id
-        AND pi.tipo = 'PLU'
-        AND COALESCE(pi.ativo, 1) = 1
-        AND COALESCE(pi.principal, 0) = 1
-      ORDER BY pi.id DESC
-      LIMIT 1
-    ) AS plu,
-    COALESCE(p.preco_venda, 0) AS preco,
-    COALESCE(c.nome, '') AS categoria,
-    COALESCE(m.nome, '') AS marca,
-    COALESCE(p.ativo, 1) AS status,
-    COALESCE(p.item_fiscal, 1) AS item_fiscal,
-    COALESCE(p.tipo_operacional, 'COMERCIAL') AS tipo_operacional
-  FROM produtos p
-  LEFT JOIN categorias c ON c.id = p.categoria_id
-  LEFT JOIN marcas m ON m.id = p.marca_id
-  WHERE COALESCE(p.ativo, 1) = 1
-`;
+function montarSqlCatalogo(temNomeComercial) {
+  return `
+    SELECT
+      p.id,
+      p.nome,
+      ${temNomeComercial ? 'p.nome_comercial' : 'NULL AS nome_comercial'},
+      COALESCE(NULLIF(TRIM(p.nome_busca), ''), '') AS nome_busca,
+      p.codigo,
+      p.codigo_barras,
+      (
+        SELECT pi.codigo FROM produto_identificadores pi
+        WHERE pi.produto_id = p.id
+          AND pi.tipo = 'PLU'
+          AND COALESCE(pi.ativo, 1) = 1
+          AND COALESCE(pi.principal, 0) = 1
+        ORDER BY pi.id DESC
+        LIMIT 1
+      ) AS plu,
+      COALESCE(p.preco_venda, 0) AS preco,
+      COALESCE(c.nome, '') AS categoria,
+      COALESCE(m.nome, '') AS marca,
+      COALESCE(p.ativo, 1) AS status,
+      COALESCE(p.item_fiscal, 1) AS item_fiscal,
+      COALESCE(p.tipo_operacional, 'COMERCIAL') AS tipo_operacional
+    FROM produtos p
+    LEFT JOIN categorias c ON c.id = p.categoria_id
+    LEFT JOIN marcas m ON m.id = p.marca_id
+    WHERE COALESCE(p.ativo, 1) = 1
+  `;
+}
 
 /**
  * Catálogo atômico Copy-On-Write.
@@ -89,7 +92,7 @@ class AtomicCatalog {
     const inicio = process.hrtime.bigint();
 
     return new Promise((resolve, reject) => {
-      this.db.all(SQL_CATALOGO, [], (err, rows) => {
+      const falhar = (err) => {
         if (err) {
           this._reconstruindo = false;
           this.ultimoErro = err.message;
@@ -98,7 +101,10 @@ class AtomicCatalog {
           this._limparFila();
           return reject(err);
         }
+      };
 
+      const finalizar = (err, rows) => {
+        if (err) return falhar(err);
         const tempoMs = Number(process.hrtime.bigint() - inicio) / 1e6;
         const novaVersao = this._versao + 1;
         const novo = CatalogSnapshot.fromRows(rows || [], {
@@ -153,6 +159,12 @@ class AtomicCatalog {
         resolve(result);
         if (this._pendenteResolve) this._pendenteResolve(result);
         this._limparFila();
+      };
+
+      this.db.all('PRAGMA table_info(produtos)', [], (schemaErr, columns) => {
+        if (schemaErr) return falhar(schemaErr);
+        const temNomeComercial = (columns || []).some((column) => column.name === 'nome_comercial');
+        this.db.all(montarSqlCatalogo(temNomeComercial), [], finalizar);
       });
     });
   }
@@ -194,10 +206,20 @@ class AtomicCatalog {
 
     if (upsert && upsert.id != null) {
       const id = Number(upsert.id);
+      const existente = this._ativo.get(id);
+      const nome = upsert.nome != null ? String(upsert.nome) : (existente?.nome || '');
+      const nomeComercial = Object.prototype.hasOwnProperty.call(upsert, 'nome_comercial')
+        ? String(upsert.nome_comercial || '')
+        : (existente?.nome_comercial || '');
       const item = {
         id,
-        nome: upsert.nome != null ? String(upsert.nome) : '',
-        nome_busca: upsert.nome_busca || '',
+        nome,
+        nome_comercial: nomeComercial,
+        nome_busca: CatalogSnapshot.normalizarNomeBuscaProduto({
+          nome,
+          nome_comercial: nomeComercial,
+          nome_busca: upsert.nome_busca != null ? upsert.nome_busca : existente?.nome_busca
+        }),
         codigo: upsert.codigo != null ? String(upsert.codigo) : '',
         codigo_barras: upsert.codigo_barras != null ? String(upsert.codigo_barras) : '',
         plu: upsert.plu != null ? String(upsert.plu) : '',

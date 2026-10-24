@@ -2,6 +2,9 @@
  * RC3.7.5.2 — Preservação do estado do NSU (null vs zero).
  */
 
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-rc3752-');
+
 const assert = require('assert');
 const fs = require('fs');
 const {
@@ -80,6 +83,7 @@ function criarNsuRepoMemoria(inicial = {}) {
 
 async function main() {
   console.log('\n=== RC3.7.5.2 — Preservação estado NSU ===\n');
+  isolamento.comprobarSeCarregado();
   NsuRecoveryService.limparCacheEventos();
 
   await test('656 sem ultNSU → NULL no parser', async () => {
@@ -133,12 +137,14 @@ async function main() {
       correlationId: 'rc3752-fallback'
     });
 
-    assert.strictEqual(r.atualizou, true);
+    assert.strictEqual(r.atualizou, false);
+    assert.strictEqual(r.motivo, 'AVANCO_656_BLOQUEADO');
     assert.strictEqual(r.nsuRemoto, '000000000000428');
     assert.strictEqual(r.origemUltNsu, 'Fallback XML');
     assert.ok(auditorias.some((a) => a.tipo === TIPOS_EVENTO.NSU_RECOVERED_FROM_XML));
-    assert.ok(auditorias.some((a) => a.tipo === TIPOS_EVENTO.AUTO_SYNC_NSU));
-    assert.strictEqual(repo._peek().ultNsu, '000000000000428');
+    assert.ok(auditorias.some((a) => a.tipo === TIPOS_EVENTO.NSU_PRESERVADO_656));
+    assert.strictEqual(auditorias.some((a) => a.tipo === TIPOS_EVENTO.AUTO_SYNC_NSU), false);
+    assert.strictEqual(repo._peek().ultNsu, '000000000000000');
   });
 
   await test('NSU inexistente → não atualizar', async () => {
@@ -183,9 +189,11 @@ async function main() {
         + '<ultNSU>000000000000428</ultNSU><maxNSU>000000000000500</maxNSU></retDistDFeInt>',
       correlationId: 'rc3752-restore'
     });
-    assert.strictEqual(consumo.atualizouNsu, true);
-    assert.strictEqual(consumo.ultNsu, '000000000000428');
+    assert.strictEqual(consumo.atualizouNsu, false);
+    assert.strictEqual(consumo.preservado, true);
+    assert.strictEqual(consumo.ultNsu, '000000000000000');
     assert.strictEqual(consumo.recuperacaoNsu.origemUltNsu, 'Parser');
+    assert.strictEqual(consumo.recuperacaoNsu.motivo, 'AVANCO_656_BLOQUEADO');
     assert.strictEqual(consumo.cooldownAtivo, true);
   });
 

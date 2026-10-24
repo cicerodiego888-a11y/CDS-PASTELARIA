@@ -6,6 +6,9 @@
  *           node tests/fiscal/webservice-registry.test.js
  */
 
+const { isolarBancoTeste } = require('../central-entradas/helpers/isolarBancoTeste');
+isolarBancoTeste('cds-fiscal-wsreg-');
+
 const assert = require('assert');
 const {
   WebServiceRegistry,

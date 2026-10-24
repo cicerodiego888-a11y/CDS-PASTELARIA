@@ -50,6 +50,42 @@ test('showProdutoModal preserva modal-container quando origem=COMPRA', () => {
   assert.match(produtosJs, /origemCadastroProduto/);
 });
 
+test('classificação explícita do item seleciona e bloqueia o tipo inicial do modal', () => {
+  const modal = produtosJs.match(/function showProdutoModal\([\s\S]*?\nfunction /);
+  assert.ok(modal);
+  assert.match(modal[0], /tipoOperacionalSolicitado\s*=\s*String\(opcoes\?\.tipo_operacional/);
+  assert.match(modal[0], /tipoOperacionalForcado\s*=\s*!isEdit\s*&&\s*tipoOperacionalSolicitado/);
+  assert.match(modal[0], /tipoOperacionalInicial/);
+  assert.match(modal[0], /tipoOperacionalInicial\s*===\s*'INSUMO'/);
+  assert.match(modal[0], /if\s*\(tipoOperacionalForcado\)[\s\S]*?\.val\(tipoOperacionalForcado\)\.prop\('disabled',\s*true\)/);
+  assert.match(modal[0], /Tipo operacional inválido/);
+});
+
+test('fluxo MIIP da Central encaminha somente a classificação explícita do item', () => {
+  const centralMiipJs = fs.readFileSync(
+    path.join(ROOT, 'frontend/erp/js/miip-central-revisao.js'),
+    'utf8'
+  );
+  const abrirModal = centralMiipJs.match(/async function abrirCadastroProdutoPadrao\([\s\S]*?\n  async function cadastrarNovo/);
+  assert.ok(abrirModal);
+  assert.match(abrirModal[0], /item\?\.tipo_operacional/);
+  assert.match(abrirModal[0], /tipo_operacional:\s*tipoOperacional/);
+  assert.doesNotMatch(abrirModal[0], /classificar.*produto_nome|inferir.*unidade/i);
+  const montarItem = centralMiipJs.match(/function montarItemCadastroXml\([\s\S]*?\n  function /);
+  assert.ok(montarItem);
+  assert.match(montarItem[0], /tipo_operacional:\s*doItem\.tipo_operacional\s*\?\?\s*doXml\.tipo_operacional/);
+});
+
+test('cadastro iniciado pelo item da Compra encaminha a classificação do próprio item', () => {
+  const abrir = comprasJs.match(/function abrirCadastroProdutoDesdeCompra\([\s\S]*?\nfunction /);
+  const novo = comprasJs.match(/function miipNovoProdutoItemCompra\([\s\S]*?\nfunction /);
+  assert.ok(abrir);
+  assert.ok(novo);
+  assert.match(abrir[0], /itemContextual\?\.tipo_operacional/);
+  assert.match(abrir[0], /tipo_operacional:\s*tipoOperacionalInformado/);
+  assert.match(novo[0], /tipo_operacional:\s*item\.tipo_operacional/);
+});
+
 test('Cancelar/Salvar retornam via retornarAoLancamentoCompraAposCadastroProduto', () => {
   assert.match(comprasJs, /function retornarAoLancamentoCompraAposCadastroProduto/);
   assert.match(comprasJs, /function restaurarModalCompraAposCadastroProduto/);

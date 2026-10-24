@@ -1,7 +1,10 @@
 const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
-const db = require("../database");
+const {
+  exigirCaminhosBackup,
+  exigirRestauracaoBanco
+} = require("../lib/sqliteOfficialGuard");
 
 function formatarDataArquivo() {
   const agora = new Date();
@@ -17,23 +20,41 @@ function formatarDataArquivo() {
   );
 }
 
+/**
+ * Copia o banco para pasta de backup.
+ * Em contexto de teste, origem e destino não podem ser produção sensível.
+ * Não abre conexão SQLite — apenas filesystem após a barreira.
+ */
 function fazerBackupManual(dbPath, pastaDestino = null) {
-  if (!dbPath || !fs.existsSync(dbPath)) {
-    throw new Error("Banco de dados não encontrado: " + dbPath);
+  if (!dbPath) {
+    throw new Error("Banco de dados não informado.");
   }
 
   const pastaBackup = pastaDestino || path.join(path.dirname(dbPath), "backups");
+  const caminhoBackupPrevisto = path.join(
+    pastaBackup,
+    `backup_pdv_${formatarDataArquivo()}.db`
+  );
+
+  // Barreira ANTES de existsSync/copy (evita tocar o oficial em teste).
+  exigirCaminhosBackup({
+    origem: dbPath,
+    destino: caminhoBackupPrevisto
+  });
+
+  if (!fs.existsSync(dbPath)) {
+    throw new Error("Banco de dados não encontrado: " + path.basename(dbPath));
+  }
 
   if (!fs.existsSync(pastaBackup)) {
     fs.mkdirSync(pastaBackup, { recursive: true });
   }
 
-  const nomeBackup = `backup_pdv_${formatarDataArquivo()}.db`;
+  const nomeBackup = path.basename(caminhoBackupPrevisto);
   const caminhoBackup = path.join(pastaBackup, nomeBackup);
 
   fs.copyFileSync(dbPath, caminhoBackup);
 
-  // Criar versão compactada .gz para economia de espaço e redundância
   const caminhoBackupCompactado = `${caminhoBackup}.gz`;
   try {
     const conteudo = fs.readFileSync(caminhoBackup);
@@ -55,8 +76,19 @@ function obterPastaBackup(dbPath) {
   return path.join(path.dirname(dbPath), 'backups');
 }
 
-function listarHistoricoBackups(pastaBackup = null, limite = 20) {
-  const folder = pastaBackup || obterPastaBackup(db.dbPath);
+function listarHistoricoBackups(pastaBackup = null, limite = 20, dbPathRef = null) {
+  let folder = pastaBackup;
+  if (!folder) {
+    let ref = dbPathRef;
+    if (!ref) {
+      // Compat: dashboard e callers legados. database.js já passou pela barreira P0.5.
+      const db = require('../database');
+      ref = db.dbPath;
+    }
+    folder = obterPastaBackup(ref);
+  }
+  // Em teste, pasta sob produção sensível é recusada antes de readdir.
+  exigirCaminhosBackup({ destino: path.join(folder, 'probe.db') });
   if (!fs.existsSync(folder)) {
     return [];
   }
@@ -76,8 +108,8 @@ function listarHistoricoBackups(pastaBackup = null, limite = 20) {
   return arquivos.slice(0, limite);
 }
 
-function aplicarRetencaoBackups(pastaBackup = null, limite = 30) {
-  const arquivos = listarHistoricoBackups(pastaBackup, 1000);
+function aplicarRetencaoBackups(pastaBackup = null, limite = 30, dbPathRef = null) {
+  const arquivos = listarHistoricoBackups(pastaBackup, 1000, dbPathRef);
   if (arquivos.length <= limite) return;
   const paraExcluir = arquivos.slice(limite);
   paraExcluir.forEach((arquivo) => {
@@ -89,8 +121,18 @@ function aplicarRetencaoBackups(pastaBackup = null, limite = 30) {
   });
 }
 
+/**
+ * Validação de restauração de arquivo de banco (sem executar restauração).
+ * Em teste, destino de produção sensível é bloqueado.
+ */
+function validarRestauracaoBancoArquivo(origem, destino) {
+  return exigirRestauracaoBanco({ origem, destino });
+}
+
 module.exports = {
-  fazerBackupManual
-  , listarHistoricoBackups
-  , aplicarRetencaoBackups
+  fazerBackupManual,
+  listarHistoricoBackups,
+  aplicarRetencaoBackups,
+  validarRestauracaoBancoArquivo,
+  obterPastaBackup
 };

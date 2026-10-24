@@ -6,6 +6,8 @@
 
 const MotorConversao = require('./core/MotorConversao');
 const PipelineMuc = require('./pipeline/PipelineMuc');
+const { tipoParaUnidadeComercial, normalizarTipoApresentacao } = require('./constants/tiposApresentacao');
+const { EMBALAGEM, isUnidadeConhecida } = require('./core/unidadesSi');
 const { criarConversaoDTO } = require('./dto/ConversaoDTO');
 const { criarResultadoConversaoDTO, resultadoParaJson, resultadoFromJson } = require('./dto/ResultadoConversaoDTO');
 const {
@@ -66,31 +68,84 @@ class MotorUniversalConversao {
     const self = this;
     const produtoId = item.produto_id || produto?.id;
     const apresentacaoId = item.produto_apresentacao_id || item.embalagem_id;
+    const tipoCompraInformado = String(
+      item.compra_em || item.unidade_comercial || item.unidadeCompra || ''
+    ).trim();
+    const tipoCompra = tipoCompraInformado
+      ? normalizarTipoApresentacao(tipoCompraInformado)
+      : '';
+    const unidadeComercialCompra = tipoCompra ? tipoParaUnidadeComercial(tipoCompra) : '';
+    const compraEmEmbalagem = EMBALAGEM.includes(unidadeComercialCompra);
 
     const executar = (apresentacao, apresentacoes, relacoesDb) => {
-      const resultado = self.converter({
-        produtoId,
-        apresentacaoId: apresentacao?.id ?? apresentacaoId,
-        apresentacao,
-        apresentacoes: apresentacoes || [],
-        relacoes: [
+      const apresentacaoCompra = apresentacao || (tipoCompra && (apresentacoes || []).find((ap) => (
+        normalizarTipoApresentacao(ap.tipo) === tipoCompra
+        && ap.ativa !== false
+        && ap.compra !== false
+      ))) || null;
+      const relacoesCompra = Number(produto?.utiliza_conversao) === 1
+        ? (relacoesDb || [])
+        : [
           ...(Array.isArray(item.relacoes) ? item.relacoes : []),
           ...(Array.isArray(opcoes.relacoes) ? opcoes.relacoes : []),
           ...(relacoesDb || [])
-        ],
+        ];
+      let resultado;
+      try {
+          if (Number(produto?.utiliza_conversao) === 1) {
+            if (apresentacaoId && !apresentacao) {
+              const err = new Error('A apresentação de compra selecionada não foi encontrada para este produto.');
+              err.code = 'APRESENTACAO_COMPRA_NAO_ENCONTRADA';
+              throw err;
+            }
+            if (compraEmEmbalagem && !apresentacaoCompra) {
+              const err = new Error(
+                `Cadastre uma apresentação comercial válida para a unidade ${tipoCompra} antes de lançar a compra.`
+              );
+              err.code = 'APRESENTACAO_COMPRA_NAO_ENCONTRADA';
+              throw err;
+            }
+            if (apresentacaoCompra && (
+              apresentacaoCompra.conteudoConfigurado !== true
+              || !(Number(apresentacaoCompra.quantidade) > 0)
+            )) {
+              const err = new Error(
+                `A apresentação ${apresentacaoCompra.tipo} está sem quantidade ou unidade de conteúdo válida. Corrija o cadastro antes de lançar a compra.`
+              );
+              err.code = 'APRESENTACAO_CONTEUDO_INVALIDO';
+              throw err;
+            }
+            if (apresentacaoCompra && !isUnidadeConhecida(apresentacaoCompra.unidade)) {
+              const err = new Error(
+                `A unidade de conteúdo da apresentação ${apresentacaoCompra.tipo} é inválida.`
+              );
+              err.code = 'APRESENTACAO_CONTEUDO_INVALIDO';
+              throw err;
+            }
+          }
+          resultado = self.converter({
+          produtoId,
+          apresentacaoId: apresentacaoCompra?.id ?? apresentacaoId,
+          apresentacao: apresentacaoCompra,
+        apresentacoes: apresentacoes || [],
+        relacoes: relacoesCompra,
         produto,
         item,
         origem: item.origem_conversao || opcoes.origem || 'MANUAL',
         origemDados: 'COMPRA_ITEM'
-      }, {
-        fornecedorCnpj: opcoes.fornecedorCnpj || item.fornecedor_cnpj,
-        gtin: item.codigo_barras,
-        codigoFornecedor: item.codigo_fornecedor,
-        descricao: item.produto_nome,
-        usuarioId: opcoes.usuarioId,
-        usuarioNome: opcoes.usuarioNome,
-        correlationId: opcoes.correlationId
-      });
+        }, {
+          fornecedorCnpj: opcoes.fornecedorCnpj || item.fornecedor_cnpj,
+          gtin: item.codigo_barras,
+          codigoFornecedor: item.codigo_fornecedor,
+          descricao: item.produto_nome,
+          usuarioId: opcoes.usuarioId,
+          usuarioNome: opcoes.usuarioNome,
+          correlationId: opcoes.correlationId
+        });
+      } catch (err) {
+        if (callback) return callback(err);
+        throw err;
+      }
 
       self.auditoria.registrar(resultado, {
         gtin: item.codigo_barras,

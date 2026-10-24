@@ -10,9 +10,9 @@ const {
 const {
   exigirEmpresaFiscalDaVenda,
   resolverCredenciaisNfceDaEmpresa,
-  obterCertificadoDaEmpresa,
   coerenciaDocumentoComVenda
 } = require('./FiscalEmpresaContextoService');
+const { exigirCertificadoAptoParaUsoFiscal } = require('./CertificadoUsoFiscalGate');
 const { carregarCertificadoPfx } = require('./certificateService');
 const {
   buildNfceXml
@@ -299,11 +299,21 @@ async function emitirPorVendaId(vendaId, opcoes = {}) {
     getFiscalConfigFn: opcoes.getFiscalConfig
   });
   const config = credenciais.config;
-  await obterCertificadoDaEmpresa({
+
+  // P0.2 — gate criptográfico antes de assinatura / cliente SEFAZ.
+  // Não usa PRONTA nem path+senha como prova de validade.
+  const exigirCert = typeof opcoes.exigirCertificadoAptoParaUsoFiscal === 'function'
+    ? opcoes.exigirCertificadoAptoParaUsoFiscal
+    : exigirCertificadoAptoParaUsoFiscal;
+  const certApto = await exigirCert({
     empresaId,
     db: conn,
-    getFiscalConfigFn: opcoes.getFiscalConfig
+    config,
+    getFiscalConfigFn: opcoes.getFiscalConfig,
+    deps: opcoes.certDeps || {}
   });
+  config.certificadoPath = certApto.certificadoPath;
+  config.certificadoSenha = certApto.certificadoSenha;
 
   let numero;
 

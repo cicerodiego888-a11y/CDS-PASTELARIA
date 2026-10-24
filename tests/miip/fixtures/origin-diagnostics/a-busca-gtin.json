@@ -1,0 +1,27 @@
+{
+  "schema": "cds.miip.origin-fixture.v1",
+  "id": "fixture-a-busca-gtin",
+  "cenario": "A",
+  "descricao": "Busca atual por identificador: item com GTIN que existe no catalogo sintetico.",
+  "sintetico": true,
+  "catalogo": [
+    {
+      "id": 101,
+      "codigo": "SINT-A101",
+      "codigo_barras": "7890000001018",
+      "nome": "Bebida Sintetica Alfa 2L",
+      "unidade": "UN",
+      "ncm": "22021000",
+      "ativo": 1
+    }
+  ],
+  "item": {
+    "codigoBarras": "7890000001018"
+  },
+  "esperado": {
+    "origemResultado": "novo_processamento",
+    "fontes": ["busca_gtin"],
+    "produtoId": 101,
+    "cacheHitEsperado": false
+  }
+}

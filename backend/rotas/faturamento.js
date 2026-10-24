@@ -72,7 +72,11 @@ router.post('/pedidos', async (req, res) => {
     const out = await PedidoService.criarPedido(
       req.body || {},
       operadorId,
-      { empresaId: empresaIdDoReqPedido(req) }
+      {
+        empresaId: empresaIdDoReqPedido(req),
+        chaveIdempotencia: req.get('Idempotency-Key'),
+        exigirChaveIdempotencia: true
+      }
     );
     res.status(201).json(out);
   } catch (err) {

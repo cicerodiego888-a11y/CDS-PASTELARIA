@@ -7,12 +7,11 @@
 'use strict';
 
 const fs = require('fs');
+const path = require('path');
 const dns = require('dns').promises;
 const https = require('https');
-const forge = require('node-forge');
 const db = require('../../database');
 const { getFiscalConfig } = require('./configService');
-const { carregarCertificadoPfx } = require('./certificateService');
 const { consultarStatusServico } = require('./statusServico');
 const { ModelType } = require('./core/ModelType');
 const { OperationType } = require('./core/OperationType');
@@ -27,6 +26,16 @@ const {
 } = require('./nfeErros');
 const { parseRetornoAutorizacaoNfe } = require('./nfeRetornoAutorizacao');
 const { registrarHistoricoNfe, obterNfeNotaPorId, consultarSituacaoNfe, garantirColunasNfeCentral } = require('./nfeCentralService');
+const { normalizarEmpresaId, obterConfiguracaoFiscalEmpresa } = require('./empresasConfiguracaoFiscal');
+const {
+  ESTADOS_CERTIFICADO_A1,
+  CODIGOS_CERTIFICADO_A1,
+  MENSAGENS_CERTIFICADO_A1
+} = require('./certificadoEstados');
+const {
+  TIPOS_CONSULTA_SEFAZ,
+  exigirAutorizacaoTransmissao
+} = require('./autorizacaoTransmissaoSefaz');
 
 const BACKOFF_MS = [5000, 15000, 30000, 60000, 120000];
 const consultaTimers = new Map();
@@ -453,56 +462,86 @@ async function pingHttps(hostname, timeoutMs = 8000) {
   });
 }
 
-async function executarDiagnosticoFiscal() {
+/**
+ * P0.4 — Diagnóstico local (padrão) vs remoto (exige autorização TESTE_ISOLADO + gate).
+ * Local: NÃO abre PFX, NÃO cria SOAP, NÃO consulta SEFAZ.
+ * Remoto: empresaId + autorizacaoTransmissaoSefaz + exigirCertificadoAptoParaUsoFiscal.
+ *
+ * @param {{ empresaId?: *, remoto?: boolean, autorizacaoTransmissaoSefaz?: object, db?: *, certDeps?: object, consultarStatusServicoFn?: function }} [opcoes]
+ */
+async function executarDiagnosticoFiscal(opcoes = {}) {
   await garantirSchemaOperacional();
   const itens = [];
+  const empresaId = normalizarEmpresaId(
+    opcoes.empresaId != null ? opcoes.empresaId : opcoes.empresa_id
+  );
+  const remoto = opcoes.remoto === true || opcoes.incluirSefaz === true;
+  let sefazChamado = false;
+
+  if (empresaId == null) {
+    itens.push(checkItem(
+      'Empresa',
+      'erro',
+      MENSAGENS_CERTIFICADO_A1.EMPRESA_OBRIGATORIA,
+      CODIGOS_CERTIFICADO_A1.EMPRESA_OBRIGATORIA_USO
+    ));
+    return {
+      success: false,
+      modo: 'local',
+      sefaz_chamado: false,
+      consulta_remota_executada: false,
+      itens,
+      resumo: { ok: 0, alerta: 0, erro: 1 },
+      code: CODIGOS_CERTIFICADO_A1.EMPRESA_OBRIGATORIA_USO
+    };
+  }
+
   let config = null;
-
+  let dtoCert = null;
   try {
-    config = await getFiscalConfig({ validarUrls: false });
+    config = await getFiscalConfig({
+      empresaId,
+      db: opcoes.db || db,
+      validarUrls: false
+    });
+    dtoCert = await obterConfiguracaoFiscalEmpresa(empresaId, { db: opcoes.db || db });
   } catch (err) {
-    itens.push(checkItem('Configuração', 'erro', 'Não foi possível carregar a configuração fiscal.', err.message));
-    return { success: false, itens, resumo: { ok: 0, alerta: 0, erro: 1 } };
+    itens.push(checkItem('Configuração', 'erro', 'Não foi possível carregar a configuração fiscal da empresa.', err.message));
+    return {
+      success: false,
+      modo: remoto ? 'remoto' : 'local',
+      sefaz_chamado: false,
+      consulta_remota_executada: false,
+      empresa_id: empresaId,
+      itens,
+      resumo: { ok: 0, alerta: 0, erro: 1 }
+    };
   }
 
-  // Certificado instalado
-  if (config.certificadoPath && fs.existsSync(config.certificadoPath)) {
-    itens.push(checkItem('Certificado instalado', 'ok', 'Arquivo do certificado encontrado.', config.certificadoPath));
+  const estadoCert = dtoCert?.certificado_status || ESTADOS_CERTIFICADO_A1.NAO_CONFIGURADO;
+  const nomeCert = dtoCert?.certificado_nome
+    || (config.certificadoPath ? path.basename(String(config.certificadoPath)) : null);
+
+  if (dtoCert?.certificado_configurado) {
+    itens.push(checkItem('Certificado instalado', 'ok', 'Certificado associado à empresa.', nomeCert));
   } else {
-    itens.push(checkItem('Certificado instalado', 'erro', 'Certificado Digital não encontrado.', config.certificadoPath || null));
+    itens.push(checkItem('Certificado instalado', 'erro', 'Certificado Digital não configurado para a empresa.', null));
   }
 
-  // Senha + validade
-  try {
-    if (!config.certificadoPath || !config.certificadoSenha) {
-      itens.push(checkItem('Senha do certificado', 'erro', 'Senha do certificado não configurada.'));
-      itens.push(checkItem('Validade do certificado', 'erro', 'Não foi possível validar a validade.'));
-    } else {
-      const pfx = carregarCertificadoPfx(config.certificadoPath, config.certificadoSenha);
-      itens.push(checkItem('Senha do certificado', 'ok', 'Senha aceita pelo certificado.'));
-      const cert = forge.pki.certificateFromPem(pfx.certPem);
-      const notAfter = cert.validity.notAfter;
-      const notBefore = cert.validity.notBefore;
-      const agora = new Date();
-      const dias = Math.floor((notAfter.getTime() - agora.getTime()) / 86400000);
-      if (agora > notAfter) {
-        itens.push(checkItem('Validade do certificado', 'erro', 'Certificado Digital vencido.', notAfter.toISOString()));
-      } else if (dias <= 30) {
-        itens.push(checkItem('Validade do certificado', 'alerta', `Certificado vence em ${dias} dia(s).`, notAfter.toISOString()));
-      } else {
-        itens.push(checkItem('Validade do certificado', 'ok', `Válido até ${notAfter.toLocaleDateString('pt-BR')}.`, {
-          notBefore: notBefore.toISOString(),
-          notAfter: notAfter.toISOString()
-        }));
-      }
+  // Snapshot persistido — sem abrir PKCS#12 no diagnóstico local.
+  if (estadoCert === ESTADOS_CERTIFICADO_A1.VALIDO && dtoCert?.apto_certificado_criptografico) {
+    itens.push(checkItem('Estado criptográfico', 'ok', 'Certificado validado criptograficamente.', estadoCert));
+    if (dtoCert.certificado_validade_ate) {
+      itens.push(checkItem('Validade do certificado', 'ok', `Validade registrada: ${dtoCert.certificado_validade_ate}`, dtoCert.certificado_validade_ate));
     }
-  } catch (err) {
-    const amigavel = classificarErro({ erro: err.message });
-    itens.push(checkItem('Senha do certificado', 'erro', amigavel.mensagem, amigavel.sugestao));
-    itens.push(checkItem('Validade do certificado', 'erro', 'Não foi possível ler o certificado.', amigavel.codigo));
+  } else if (estadoCert === ESTADOS_CERTIFICADO_A1.CONFIGURADO_NAO_VALIDADO) {
+    itens.push(checkItem('Estado criptográfico', 'alerta', MENSAGENS_CERTIFICADO_A1.CONFIGURADO_NAO_VALIDADO, estadoCert));
+  } else if (estadoCert === ESTADOS_CERTIFICADO_A1.NAO_CONFIGURADO) {
+    itens.push(checkItem('Estado criptográfico', 'erro', MENSAGENS_CERTIFICADO_A1.NAO_CONFIGURADO, estadoCert));
+  } else {
+    itens.push(checkItem('Estado criptográfico', 'erro', dtoCert?.certificado_mensagem || estadoCert, estadoCert));
   }
 
-  // Ambiente / UF
   const amb = Number(config.ambiente) === 1 ? 'Produção' : 'Homologação';
   itens.push(checkItem('Ambiente', Number(config.ambiente) === 1 ? 'alerta' : 'ok', `Ambiente: ${amb} (${config.ambiente}).`));
   if (config.codigoUf || config.uf) {
@@ -511,7 +550,6 @@ async function executarDiagnosticoFiscal() {
     itens.push(checkItem('UF', 'erro', 'UF não configurada.'));
   }
 
-  // WebService (registry)
   try {
     const platform = new FiscalWebServices();
     const ambiente = Number(config.ambiente) === 1 ? EnvironmentType.PRODUCAO : EnvironmentType.HOMOLOGACAO;
@@ -531,11 +569,10 @@ async function executarDiagnosticoFiscal() {
     itens.push(checkItem('WebService', 'erro', 'Falha ao resolver WebService.', err.message));
   }
 
-  // Data/Hora
   const agora = new Date();
   itens.push(checkItem('Data/Hora', 'ok', `Horário do servidor: ${agora.toLocaleString('pt-BR')}.`, agora.toISOString()));
 
-  // DNS + Internet
+  // Connectivity checks (sem certificado / sem SOAP fiscal).
   const host = Number(config.ambiente) === 1 ? 'nfe.svrs.rs.gov.br' : 'nfe-homologacao.svrs.rs.gov.br';
   try {
     const addrs = await dns.lookup(host);
@@ -543,7 +580,6 @@ async function executarDiagnosticoFiscal() {
   } catch (err) {
     itens.push(checkItem('DNS', 'erro', `Falha de DNS para ${host}.`, err.message));
   }
-
   const ping = await pingHttps(host);
   if (ping.ok) {
     itens.push(checkItem('Internet', 'ok', `Conectividade HTTPS com ${host}.`, `HTTP ${ping.statusCode}`));
@@ -551,29 +587,57 @@ async function executarDiagnosticoFiscal() {
     itens.push(checkItem('Internet', 'erro', `Sem conectividade com ${host}.`, ping.error));
   }
 
-  // Comunicação SEFAZ (status serviço — SVRS; runtime NFCE compartilhado no SVRS)
-  try {
-    const started = Date.now();
-    const st = await consultarStatusServico({
-      ambiente: config.ambiente,
-      cUF: config.codigoUf || '23',
-      certificadoPath: config.certificadoPath,
-      certificadoSenha: config.certificadoSenha
-    });
-    const ms = Date.now() - started;
-    const body = String(st.body || '');
-    const cStat = (body.match(/<cStat>(\d+)<\/cStat>/) || [])[1] || st.cStat;
-    if (st.success && (cStat === '107' || cStat === '100')) {
-      itens.push(checkItem('Comunicação SEFAZ', 'ok', `Serviço em operação (cStat ${cStat}).`, `${ms} ms`));
-    } else if (st.success) {
-      itens.push(checkItem('Comunicação SEFAZ', 'alerta', `SEFAZ respondeu com cStat ${cStat || '-'}.`, `${ms} ms`));
-    } else {
-      const amigavel = classificarErro({ erro: st.error || st.message, body });
-      itens.push(checkItem('Comunicação SEFAZ', 'erro', amigavel.mensagem, amigavel.sugestao));
+  if (remoto) {
+    try {
+      exigirAutorizacaoTransmissao({
+        autorizacao: opcoes.autorizacaoTransmissaoSefaz,
+        empresaId,
+        tipoConsulta: TIPOS_CONSULTA_SEFAZ.STATUS_SERVICO
+      });
+      const { exigirCertificadoAptoParaUsoFiscal } = require('./CertificadoUsoFiscalGate');
+      const certApto = await exigirCertificadoAptoParaUsoFiscal({
+        empresaId,
+        db: opcoes.db || db,
+        config,
+        deps: opcoes.certDeps || {},
+        persistirSnapshot: false
+      });
+      const consultar = opcoes.consultarStatusServicoFn || consultarStatusServico;
+      const started = Date.now();
+      sefazChamado = true;
+      const st = await consultar({
+        ambiente: config.ambiente,
+        cUF: config.codigoUf || '23',
+        certificadoPath: certApto.certificadoPath,
+        certificadoSenha: certApto.certificadoSenha
+      });
+      const ms = Date.now() - started;
+      const body = String(st.body || '');
+      const cStat = (body.match(/<cStat>(\d+)<\/cStat>/) || [])[1] || st.cStat;
+      if (st.success && (cStat === '107' || cStat === '100')) {
+        itens.push(checkItem('Comunicação SEFAZ', 'ok', `Serviço em operação (cStat ${cStat}).`, `${ms} ms`));
+      } else if (st.success) {
+        itens.push(checkItem('Comunicação SEFAZ', 'alerta', `SEFAZ respondeu com cStat ${cStat || '-'}.`, `${ms} ms`));
+      } else {
+        const amigavel = classificarErro({ erro: st.error || st.message, body });
+        itens.push(checkItem('Comunicação SEFAZ', 'erro', amigavel.mensagem, amigavel.sugestao));
+      }
+    } catch (err) {
+      sefazChamado = false;
+      itens.push(checkItem(
+        'Comunicação SEFAZ',
+        'erro',
+        err.message || 'Consulta remota não executada.',
+        err.code || err.codigo || null
+      ));
     }
-  } catch (err) {
-    const amigavel = classificarErro({ erro: err.message });
-    itens.push(checkItem('Comunicação SEFAZ', 'erro', amigavel.mensagem, amigavel.sugestao));
+  } else {
+    itens.push(checkItem(
+      'Comunicação SEFAZ',
+      'alerta',
+      'Consulta remota não executada. Diagnóstico local — sem SOAP/SEFAZ.',
+      { sefaz_chamado: false }
+    ));
   }
 
   const resumo = { ok: 0, alerta: 0, erro: 0 };
@@ -586,11 +650,24 @@ async function executarDiagnosticoFiscal() {
   await registrarLogOperacional({
     acao: 'diagnostico',
     sucesso: resumo.erro === 0,
-    detalhes: resumo,
+    detalhes: { ...resumo, modo: remoto ? 'remoto' : 'local', sefaz_chamado: sefazChamado },
     empresa: config.nomeEmpresa || config.cnpj
   });
 
-  return { success: true, itens, resumo, ambiente: amb, empresa: config.nomeEmpresa, cnpj: config.cnpj };
+  return {
+    success: true,
+    modo: remoto ? 'remoto' : 'local',
+    sefaz_chamado: sefazChamado,
+    consulta_remota_executada: sefazChamado,
+    empresa_id: empresaId,
+    itens,
+    resumo,
+    ambiente: amb,
+    empresa: config.nomeEmpresa,
+    cnpj: config.cnpj,
+    certificado_status: estadoCert,
+    apto_certificado_criptografico: !!dtoCert?.apto_certificado_criptografico
+  };
 }
 
 async function reenviarNfe(notaId, ctx = {}) {

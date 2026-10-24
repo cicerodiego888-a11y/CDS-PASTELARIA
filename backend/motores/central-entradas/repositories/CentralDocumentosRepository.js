@@ -101,6 +101,10 @@ class CentralDocumentosRepository extends IRepository {
       fornecedor: row.fornecedor,
       cnpjFornecedor: row.cnpj_fornecedor,
       dataEmissao: row.data_emissao,
+      dataEmissaoOrigem: row.data_emissao_origem
+        || (row.xml && (String(row.xml).includes('<dhEmi>') || String(row.xml).includes('<dhEmi '))
+          ? 'xml'
+          : (row.data_emissao ? 'chave_aamm' : 'ausente')),
       dataEntrada: row.data_entrada,
       valorTotal: row.valor_total,
       xml: row.xml,
@@ -181,6 +185,30 @@ class CentralDocumentosRepository extends IRepository {
 
     const row = await sql.get(
       `SELECT * FROM ${CentralDocumentosRepository.TABELA} WHERE chave = ? AND empresa_id = ?`,
+      [chave, emp]
+    );
+    return this._mapearRow(row);
+  }
+
+  /**
+   * Detecta a mesma chave persistida em outra empresa (conflito, não fallback).
+   * Sem empresaId válido não pesquisa.
+   * @param {string} chave
+   * @param {number} empresaId
+   * @returns {Promise<Object|null>}
+   */
+  async buscarPorChaveExcetoEmpresa(chave, empresaId) {
+    if (!chave) return null;
+    const emp = Number(empresaId);
+    if (!Number.isInteger(emp) || emp <= 0) return null;
+
+    const sql = this._obterSql();
+    await sql.whenReady();
+
+    const row = await sql.get(
+      `SELECT * FROM ${CentralDocumentosRepository.TABELA}
+       WHERE chave = ? AND empresa_id IS NOT NULL AND empresa_id != ?
+       LIMIT 1`,
       [chave, emp]
     );
     return this._mapearRow(row);
@@ -337,7 +365,8 @@ class CentralDocumentosRepository extends IRepository {
   }
 
   /**
-   * Fila de mutação: SINCRONIZADA sem parse, somente da empresa do alvo (05.74).
+   * Fila de mutação: XML_COMPLETO da empresa do alvo (05.74 / Microsprint 2.6).
+   * Inclui processamento incompleto (parse/MIIP persistidos sem avanço de status).
    * Sem empresaId válido não consulta globalmente.
    *
    * @param {number|{ limite?: number, empresaId?: number }} [limite=100]
@@ -366,7 +395,6 @@ class CentralDocumentosRepository extends IRepository {
       `SELECT * FROM ${CentralDocumentosRepository.TABELA}
        WHERE status = ?
          AND empresa_id = ?
-         AND (parse_json IS NULL OR parse_json = '')
        ORDER BY created_at ASC
        LIMIT ?`,
       [DocumentoFiscalStatus.SINCRONIZADA, emp, limite]
@@ -388,7 +416,12 @@ class CentralDocumentosRepository extends IRepository {
         WHEN parse_json IS NOT NULL AND TRIM(parse_json) != '' THEN 1
         WHEN tipo_documento IN ('PROC_NFE', 'NFE') THEN 1
         ELSE 0
-      END AS parse_disponivel_flag`;
+      END AS parse_disponivel_flag,
+      CASE
+        WHEN xml IS NOT NULL AND (instr(xml, '<dhEmi>') > 0 OR instr(xml, '<dhEmi ') > 0) THEN 'xml'
+        WHEN data_emissao IS NOT NULL AND TRIM(data_emissao) != '' THEN 'chave_aamm'
+        ELSE 'ausente'
+      END AS data_emissao_origem`;
   }
 
   /**
@@ -451,6 +484,8 @@ class CentralDocumentosRepository extends IRepository {
       fornecedor: row.fornecedor,
       cnpjFornecedor: row.cnpj_fornecedor,
       dataEmissao: row.data_emissao,
+      dataEmissaoOrigem: row.data_emissao_origem || null,
+      dataEmissaoEstimada: row.data_emissao_origem === 'chave_aamm',
       dataEntrada: row.data_entrada,
       valorTotal: row.valor_total,
       nsu: row.nsu,

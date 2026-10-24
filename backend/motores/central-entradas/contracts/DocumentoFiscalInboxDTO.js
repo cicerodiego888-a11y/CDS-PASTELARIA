@@ -16,6 +16,9 @@ class DocumentoFiscalInboxDTO {
     this.fornecedor = dados.fornecedor ?? null;
     this.cnpjFornecedor = dados.cnpjFornecedor ?? dados.cnpj_fornecedor ?? null;
     this.dataEmissao = dados.dataEmissao ?? dados.data_emissao ?? null;
+    this.dataEmissaoOrigem = dados.dataEmissaoOrigem ?? dados.data_emissao_origem ?? null;
+    this.dataEmissaoEstimada = dados.dataEmissaoEstimada === true
+      || this.dataEmissaoOrigem === 'chave_aamm';
     this.valorTotal = dados.valorTotal ?? dados.valor_total ?? null;
     this.status = dados.status ?? null;
     this.tipoDocumento = dados.tipoDocumento ?? dados.tipo_documento ?? null;
@@ -45,6 +48,8 @@ class DocumentoFiscalInboxDTO {
       fornecedor: this.fornecedor,
       cnpjFornecedor: this.cnpjFornecedor,
       dataEmissao: this.dataEmissao,
+      dataEmissaoOrigem: this.dataEmissaoOrigem,
+      dataEmissaoEstimada: this.dataEmissaoEstimada,
       valorTotal: this.valorTotal,
       status: this.status,
       tipoDocumento: this.tipoDocumento,

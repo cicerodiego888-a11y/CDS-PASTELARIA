@@ -2896,6 +2896,88 @@ function encontrarProdutoPorCodigoOuNome(termo) {
     });
 }
 
+// Aplica preço atacado se ativo: obtém faixas e escolhe maior faixa atendida.
+// Escopo de módulo: usada por adicionarItemNoCarrinho e atualizarQuantidade.
+function obterPrecoAtacado(produtoId, quantidadeTotal, precoBase, produto) {
+    try {
+        let faixas = [];
+        $.ajax({ url: `${API_URL}/produtos/${produtoId}/atacado`, method: 'GET', async: false, headers: { Authorization: 'Bearer ' + (localStorage.getItem('token') || '') }, success: function(res) { faixas = res || []; } });
+
+        if (!Array.isArray(faixas) || faixas.length === 0) {
+            return { preco: precoBase, descontoAtacado: 0, isAtacado: false };
+        }
+
+        let escolhida = null;
+        faixas.forEach(f => {
+            const qmin = Number(f.quantidade_minima || 0);
+            if (quantidadeTotal >= qmin) {
+                if (!escolhida || qmin > Number(escolhida.quantidade_minima || 0)) escolhida = f;
+            }
+        });
+
+        if (!escolhida) return { preco: precoBase, descontoAtacado: 0, isAtacado: false };
+
+        const precoAtacado = Number(escolhida.preco_atacado || 0);
+        if (precoAtacado <= 0) return { preco: precoBase, descontoAtacado: 0, isAtacado: false };
+
+        if (!motorPrecoAtacadoDisponivel()) {
+            return { preco: precoBase, descontoAtacado: 0, isAtacado: false };
+        }
+
+        const calc = MotorPrecoAtacado.calcularLinhaAtacadoFaixa({
+            precoVenda: Number(produto.preco_venda || precoBase),
+            precoAtacado,
+            quantidade: quantidadeTotal
+        });
+        const precoAplicado = Math.min(Number(precoBase), calc.precoUnitarioInterno);
+        const linha = MotorPrecoAtacado.calcularLinhaPrecoUnitarioInformado({
+            precoOriginal: Number(produto.preco_venda || precoBase),
+            quantidade: quantidadeTotal,
+            precoUnitarioInformado: precoAplicado
+        });
+
+        return {
+            preco: precoAplicado,
+            descontoAtacado: calc.descontoAtacado,
+            isAtacado: precoAplicado < Number(precoBase),
+            subtotal: linha.total
+        };
+    } catch (err) {
+        return { preco: precoBase, descontoAtacado: 0, isAtacado: false };
+    }
+}
+
+// Preço fixado pelo operador: somente edição explícita do preço unitário (atualizarPrecoUnitario).
+// Descontos (motor/atacado/promoção ou percentual/valor informados) não congelam o preço.
+function itemTemPrecoManualPdv(item) {
+    return Number(item.preco_editado_manual || 0) === 1;
+}
+
+// Preço comercial automático do item para a quantidade informada, partindo da ORIGEM do preço
+// (item.preco_origem: promoção ou varejo, antes do atacado) e reaplicando a faixa por obterPrecoAtacado.
+// Itens legados sem preco_origem: se já havia atacado aplicado, a origem não é recuperável com segurança
+// (o preço atual já está reduzido) e o preço é mantido; caso contrário o preço atual é a própria origem.
+function resolverPrecoComercialItemPdv(item, produto, quantidade) {
+    const origem = Number(item.preco_origem);
+    const origemConhecida = origem > 0;
+    const legadoComAtacado = !origemConhecida
+        && (Number(item.desconto_atacado || 0) > 0 || Number(item.desconto_percentual || 0) > 0
+            || String(item.tipo_preco || '') === 'atacado');
+    if (legadoComAtacado) {
+        return { preco: Number(item.preco_unitario || 0), descontoAtacado: Number(item.desconto_atacado || 0), tipoPreco: item.tipo_preco };
+    }
+    const precoBase = origemConhecida ? origem : Number(item.preco_unitario || 0);
+    if (itemVendaPorUnidade(item) || Number(produto.venda_atacado || 0) !== 1) {
+        return { preco: precoBase, descontoAtacado: Number(item.desconto_atacado || 0), tipoPreco: item.tipo_preco };
+    }
+    const atac = obterPrecoAtacado(produto.id, quantidade, precoBase, produto);
+    return {
+        preco: atac.preco,
+        descontoAtacado: atac.descontoAtacado,
+        tipoPreco: atac.isAtacado ? 'atacado' : 'varejo'
+    };
+}
+
 function adicionarItemNoCarrinho(produto, quantidade, precoUnitario, mensagemExtra = '', promocao = null, opcoes = {}) {
     const tipoVenda = normalizarTipoVendaItem(opcoes);
     const etiquetaBalanca = opcoes && opcoes.etiquetaBalanca && typeof opcoes.etiquetaBalanca === 'object'
@@ -2940,56 +3022,6 @@ function adicionarItemNoCarrinho(produto, quantidade, precoUnitario, mensagemExt
         ? Number(promocao.desconto_percentual || 0)
         : 0;
 
-    // Aplica preço atacado se ativo: obtém faixas e escolhe maior faixa atendida
-    function obterPrecoAtacado(produtoId, quantidadeTotal, precoBase) {
-        try {
-            let faixas = [];
-            $.ajax({ url: `${API_URL}/produtos/${produtoId}/atacado`, method: 'GET', async: false, headers: { Authorization: 'Bearer ' + (localStorage.getItem('token') || '') }, success: function(res) { faixas = res || []; } });
-
-            if (!Array.isArray(faixas) || faixas.length === 0) {
-                return { preco: precoBase, descontoAtacado: 0, isAtacado: false };
-            }
-
-            let escolhida = null;
-            faixas.forEach(f => {
-                const qmin = Number(f.quantidade_minima || 0);
-                if (quantidadeTotal >= qmin) {
-                    if (!escolhida || qmin > Number(escolhida.quantidade_minima || 0)) escolhida = f;
-                }
-            });
-
-            if (!escolhida) return { preco: precoBase, descontoAtacado: 0, isAtacado: false };
-
-            const precoAtacado = Number(escolhida.preco_atacado || 0);
-            if (precoAtacado <= 0) return { preco: precoBase, descontoAtacado: 0, isAtacado: false };
-
-            if (!motorPrecoAtacadoDisponivel()) {
-                return { preco: precoBase, descontoAtacado: 0, isAtacado: false };
-            }
-
-            const calc = MotorPrecoAtacado.calcularLinhaAtacadoFaixa({
-                precoVenda: Number(produto.preco_venda || precoBase),
-                precoAtacado,
-                quantidade: quantidadeTotal
-            });
-            const precoAplicado = Math.min(Number(precoBase), calc.precoUnitarioInterno);
-            const linha = MotorPrecoAtacado.calcularLinhaPrecoUnitarioInformado({
-                precoOriginal: Number(produto.preco_venda || precoBase),
-                quantidade: quantidadeTotal,
-                precoUnitarioInformado: precoAplicado
-            });
-
-            return {
-                preco: precoAplicado,
-                descontoAtacado: calc.descontoAtacado,
-                isAtacado: precoAplicado < Number(precoBase),
-                subtotal: linha.total
-            };
-        } catch (err) {
-            return { preco: precoBase, descontoAtacado: 0, isAtacado: false };
-        }
-    }
-
     // calcula preco final considerando promoção primeiro, depois atacado (se mais vantajoso)
     let precoFinal = precoPromocional;
     let descontoAtacadoItem = 0;
@@ -3011,13 +3043,17 @@ function adicionarItemNoCarrinho(produto, quantidade, precoUnitario, mensagemExt
             return;
         }
 
-        // reavaliar preço atacado com a nova quantidade total (nunca em etiqueta de balança)
-            if (!etiquetaBalanca && !tipoVendaEhUnidade(tipoVenda) && Number(produto.venda_atacado || 0) === 1) {
-                const atac = obterPrecoAtacado(produto.id, novaQuantidade, precoFinal);
-                precoFinal = atac.preco;
-                descontoAtacadoItem = atac.descontoAtacado;
-                itemExistente.tipo_preco = atac.isAtacado ? 'atacado' : 'varejo';
-            }
+        if (itemTemPrecoManualPdv(itemExistente)) {
+            // preço/desconto definido pelo operador é preservado (sem reaplicar atacado/promoção)
+            precoFinal = Number(itemExistente.preco_unitario || precoFinal);
+            descontoAtacadoItem = Number(itemExistente.desconto_atacado || 0);
+        } else if (!etiquetaBalanca && !tipoVendaEhUnidade(tipoVenda) && Number(produto.venda_atacado || 0) === 1) {
+            // reavaliar preço atacado com a nova quantidade total (nunca em etiqueta de balança)
+            const atac = obterPrecoAtacado(produto.id, novaQuantidade, precoFinal, produto);
+            precoFinal = atac.preco;
+            descontoAtacadoItem = atac.descontoAtacado;
+            itemExistente.tipo_preco = atac.isAtacado ? 'atacado' : 'varejo';
+        }
 
         const precoBase = tipoVendaEhUnidade(tipoVenda)
             ? Number(produto.preco_unidade || precoFinal)
@@ -3036,6 +3072,8 @@ function adicionarItemNoCarrinho(produto, quantidade, precoUnitario, mensagemExt
 
         itemExistente.quantidade = novaQuantidade;
         itemExistente.promocao_id = promocao?.id || null;
+        itemExistente.preco_origem = precoPromocional;
+        if (!itemTemPrecoManualPdv(itemExistente)) itemExistente.desconto_manual = 0;
         itemExistente.desconto_atacado = descontoAtacadoItem;
         itemExistente.tipo_venda = tipoVenda;
         if (subtotalEtiquetaFixo != null && Number.isFinite(subtotalEtiquetaFixo)) {
@@ -3044,7 +3082,7 @@ function adicionarItemNoCarrinho(produto, quantidade, precoUnitario, mensagemExt
     } else {
         // avaliar atacado para quantidade inicial (nunca em etiqueta de balança)
             if (!etiquetaBalanca && !tipoVendaEhUnidade(tipoVenda) && Number(produto.venda_atacado || 0) === 1) {
-                const atac = obterPrecoAtacado(produto.id, quantidade, precoFinal);
+                const atac = obterPrecoAtacado(produto.id, quantidade, precoFinal, produto);
                 precoFinal = atac.preco;
                 descontoAtacadoItem = atac.descontoAtacado;
             }
@@ -3063,6 +3101,8 @@ function adicionarItemNoCarrinho(produto, quantidade, precoUnitario, mensagemExt
                 quantidade: qtdCarrinho,
                 preco_unitario: precoFinal,
                 preco_base: precoBase,
+                preco_origem: precoPromocional,
+                preco_editado_manual: 0,
                 desconto_percentual: 0,
                 desconto_valor: 0,
                 desconto_manual: 0,
@@ -3624,13 +3664,17 @@ function atualizarQuantidade(index, quantidade) {
         return;
     }
 
-    // reavaliar preço atacado quando a quantidade mudar
+    // reavaliar o preço comercial a partir da origem (promoção/varejo) quando a quantidade mudar;
+    // preço editado manualmente é preservado
     let precoAplicado = Number(item.preco_unitario || 0);
     let descontoAtacadoItem = Number(item.desconto_atacado || 0);
-    if (!vendaUnidade && Number(produto.venda_atacado || 0) === 1) {
-        const atac = obterPrecoAtacado(produto.id, novaQuantidade, precoAplicado);
-        precoAplicado = atac.preco;
-        descontoAtacadoItem = atac.descontoAtacado;
+    if (!itemTemPrecoManualPdv(item)) {
+        const comercial = resolverPrecoComercialItemPdv(item, produto, novaQuantidade);
+        precoAplicado = comercial.preco;
+        descontoAtacadoItem = comercial.descontoAtacado;
+        if (comercial.tipoPreco) item.tipo_preco = comercial.tipoPreco;
+        // o motor volta a ser a autoridade do desconto: desconto informado antes não sobrevive à nova quantidade
+        if (Number(item.preco_origem) > 0) item.desconto_manual = 0;
     }
 
     item.quantidade = novaQuantidade;
@@ -3654,6 +3698,23 @@ function atualizarQuantidade(index, quantidade) {
     focarCampoCodigo({ limpar: true });
 }
 
+// Remove a edição manual e volta ao preço comercial calculado a partir da origem (promoção/varejo + faixa).
+function restaurarPrecoComercialItemPdv(item, produto) {
+    if (!(Number(item.preco_origem) > 0)) {
+        item.preco_origem = obterPrecoBaseItemPdv({ ...item, preco_unitario: 0 }, produto);
+    }
+    item.preco_editado_manual = 0;
+    item.desconto_manual = 0;
+    const comercial = resolverPrecoComercialItemPdv(item, produto, Number(item.quantidade || 0));
+    if (comercial.tipoPreco) item.tipo_preco = comercial.tipoPreco;
+    item.desconto_atacado = Number((comercial.descontoAtacado || 0).toFixed(2));
+    aplicarCalculoMotorItemPdv(item, {
+        precoOriginal: obterPrecoBaseItemPdv(item, produto),
+        quantidade: item.quantidade,
+        precoUnitarioInformado: comercial.preco
+    });
+}
+
 function atualizarPercentual(index, percentual) {
     const item = carrinho[index];
     if (!item) return;
@@ -3661,6 +3722,14 @@ function atualizarPercentual(index, percentual) {
     const produto = produtosDisponiveis.find(p => Number(p.id) === Number(item.id));
     const precoBase = obterPrecoBaseItemPdv(item, produto);
     if (precoBase <= 0) return;
+
+    if (!(Number(percentual || 0) > 0) && produto && motorPrecoAtacadoDisponivel()) {
+        restaurarPrecoComercialItemPdv(item, produto);
+        animarTotalLinhaCarrinho(index);
+        atualizarCarrinho();
+        focarCampoCodigo({ limpar: true });
+        return;
+    }
 
     if (motorPrecoAtacadoDisponivel()) {
         aplicarCalculoMotorItemPdv(item, {
@@ -3681,6 +3750,8 @@ function atualizarPercentual(index, percentual) {
         item.subtotal = Number((item.preco_unitario * qtd).toFixed(2));
     }
 
+    // o desconto substitui o preço digitado; a flag só vale para a edição explícita do preço unitário
+    item.preco_editado_manual = 0;
     animarTotalLinhaCarrinho(index);
     atualizarCarrinho();
     focarCampoCodigo({ limpar: true });
@@ -3697,6 +3768,14 @@ function atualizarDescontoValor(index, valorDesconto) {
     const qtd = Number(item.quantidade || 0);
     const bruto = precoBase * qtd;
     const desc = Math.min(Math.max(0, Number(valorDesconto || 0)), bruto);
+
+    if (!(desc > 0) && produto && motorPrecoAtacadoDisponivel()) {
+        restaurarPrecoComercialItemPdv(item, produto);
+        animarTotalLinhaCarrinho(index);
+        atualizarCarrinho();
+        focarCampoCodigo({ limpar: true });
+        return;
+    }
 
     if (motorPrecoAtacadoDisponivel() && typeof MotorPrecoAtacado.calcularLinhaDescontoValor === 'function') {
         const calc = MotorPrecoAtacado.calcularLinhaDescontoValor({
@@ -3721,6 +3800,7 @@ function atualizarDescontoValor(index, valorDesconto) {
     }
 
     item.desconto_manual = desc > 0 ? 1 : 0;
+    item.preco_editado_manual = 0;
     animarTotalLinhaCarrinho(index);
     atualizarCarrinho();
     focarCampoCodigo({ limpar: true });
@@ -3772,6 +3852,7 @@ function atualizarPrecoUnitario(index, valor) {
         item.subtotal = Number((precoUnitario * Number(item.quantidade || 0)).toFixed(2));
     }
 
+    item.preco_editado_manual = 1;
     animarTotalLinhaCarrinho(index);
     atualizarCarrinho();
     focarCampoCodigo({ limpar: true });

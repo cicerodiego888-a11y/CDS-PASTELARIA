@@ -2,6 +2,9 @@
  * RC3.3.6 — Recuperação XML: Scheduler não remanifesta; DistDFe direto.
  */
 
+
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-p04-rc336-recuperacao-xml-');
 const assert = require('assert');
 const CentralManifestacaoDfeService = require(
   '../../backend/motores/central-entradas/services/CentralManifestacaoDfeService'

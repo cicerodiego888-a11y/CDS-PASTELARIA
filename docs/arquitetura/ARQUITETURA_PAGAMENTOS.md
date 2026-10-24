@@ -269,6 +269,11 @@ if (Array.isArray(pagamentosMistos) && pagamentosMistos.length > 0) {
 
 ## Regras de Negócio
 
+O campo `codigo` da venda usa `VND-YYYYMMDDHHmmss`. Se outra venda já tiver
+ocupado o mesmo código no mesmo segundo, o backend acrescenta um sufixo numérico
+(`-01`, `-02`, ...). Consumidores devem tratar `codigo` como identificador opaco,
+sem pressupor que termina nos 14 dígitos do timestamp.
+
 ### Separação Fiscal e Não-Fiscal
 
 - **Regra:** Sempre criar recebimentos separados para fiscal e não fiscal, independentemente da forma de pagamento.

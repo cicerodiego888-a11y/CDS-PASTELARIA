@@ -11,6 +11,7 @@
  * @module services/fiscalNaoFiscal/reservasPublico
  */
 'use strict';
+const { roundStockQuantity } = require('../estoque/quantityPrecision');
 
 const { calcularEstoqueProduto } = require('../estoque/EstoqueDisponivelService');
 const {
@@ -25,9 +26,7 @@ const {
   COMPAT_CERTIFICADA_PRE_MULTIEMPRESA
 } = require('./empresaContexto');
 
-function round3(n) {
-  return Math.round(Number(n || 0) * 1000) / 1000;
-}
+
 
 function getDb(dbInjected) {
   if (dbInjected) return dbInjected;
@@ -290,14 +289,14 @@ async function consultarDisponibilidadeParaPedido(produtoId, pedidoId, opts = {}
       ? [pid, Number(disp.produto_id), empresaId]
       : [pid, Number(disp.produto_id)]
   );
-  const propria = round3(row?.q || 0);
+  const propria = roundStockQuantity(row?.q || 0);
   if (propria <= 0) return disp;
 
   return Object.freeze({
     ...disp,
-    reservado_fiscal: Math.max(0, round3(disp.reservado_fiscal - propria)),
-    disponivel_fiscal: round3(disp.disponivel_fiscal + propria),
-    disponivel_total: round3(disp.disponivel_total + propria)
+    reservado_fiscal: Math.max(0, roundStockQuantity(disp.reservado_fiscal - propria)),
+    disponivel_fiscal: roundStockQuantity(disp.disponivel_fiscal + propria),
+    disponivel_total: roundStockQuantity(disp.disponivel_total + propria)
   });
 }
 
@@ -305,7 +304,7 @@ async function _criarReservaTipo(params = {}, opts = {}, tipoSaldo) {
   const tipo = normalizarTipoSaldo(tipoSaldo);
   const pedidoId = Number(params.pedidoId || params.pedido_id);
   const produtoId = Number(params.produtoId || params.produto_id);
-  const quantidade = round3(
+  const quantidade = roundStockQuantity(
     params.quantidade
     ?? params.quantidade_fiscal
     ?? params.quantidade_nao_fiscal
@@ -493,7 +492,7 @@ async function liberarReservasPedido(pedidoId, opts = {}) {
   for (const row of rows) {
     const dona = resolverEmpresaId(row.empresa_id);
     empresaUsada = dona;
-    const q = round3(row.quantidade_fiscal);
+    const q = roundStockQuantity(row.quantidade_fiscal);
     if (q > 0) {
       await _aplicarDeltaReservado(db, row.produto_id, TipoSaldo.FISCAL, -q);
       await espelharReservadoEmEstoqueEmpresa(
@@ -527,7 +526,7 @@ async function liberarReservasPedido(pedidoId, opts = {}) {
  */
 async function _aplicarDeltaReservado(db, produtoId, tipo, delta) {
   const tipoN = normalizarTipoSaldo(tipo);
-  const d = round3(delta);
+  const d = roundStockQuantity(delta);
   if (d === 0) return { changes: 0 };
 
   const id = Number(produtoId);
@@ -595,7 +594,7 @@ async function ajustarReservado(produtoIdOrParams, tipo, delta, opts = {}) {
   const normalized = mesclarOptsEmpresa(produtoIdOrParams, opts);
   const produtoId = Number(normalized.produtoId);
   const callOpts = normalized.opts;
-  const d = round3(delta);
+  const d = roundStockQuantity(delta);
   const tipoN = normalizarTipoSaldo(tipo);
 
   const ctx = await resolverContextoEmpresa(callOpts);
@@ -655,7 +654,7 @@ async function cancelarReservaPedidoDaEmpresa(reservaId, empresaId, opts = {}) {
   if (String(row.status).toUpperCase() !== 'ATIVA') {
     return { id: row.id, status: row.status, alterada: false };
   }
-  const q = round3(row.quantidade_fiscal);
+  const q = roundStockQuantity(row.quantidade_fiscal);
   const dona = resolverEmpresaId(row.empresa_id);
   if (dona == null) {
     const err = new Error('Reserva sem ownership empresarial identificável.');
@@ -677,7 +676,7 @@ async function cancelarReservaPedidoDaEmpresa(reservaId, empresaId, opts = {}) {
 }
 
 async function reservarQuantidade(produtoId, tipo, quantidade, opts = {}) {
-  const q = round3(quantidade);
+  const q = roundStockQuantity(quantidade);
   if (!(q > 0)) {
     const err = new Error('Quantidade de reserva inválida.');
     err.code = 'QUANTIDADE_INVALIDA';
@@ -687,7 +686,7 @@ async function reservarQuantidade(produtoId, tipo, quantidade, opts = {}) {
 }
 
 async function liberarQuantidadeReservada(produtoId, tipo, quantidade, opts = {}) {
-  const q = round3(quantidade);
+  const q = roundStockQuantity(quantidade);
   if (!(q > 0)) {
     const err = new Error('Quantidade de reserva inválida.');
     err.code = 'QUANTIDADE_INVALIDA';

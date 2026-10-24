@@ -455,12 +455,17 @@ function calcularValoresFiscaisItem(item, quantidadeFiscal, quantidadeNaoFiscal)
     ? Number(item.quantidade_estoque)
     : qtdVenda;
   const precoUnitario = Number(item.preco_unitario || 0);
-  const subtotalVenda = Number((qtdVenda * precoUnitario).toFixed(2));
+  const subtotalBruto = Number((qtdVenda * precoUnitario).toFixed(2));
+  const temSubtotalInformado = item.subtotal != null && item.subtotal !== '';
+  const subtotalVenda = temSubtotalInformado
+    ? Number(item.subtotal)
+    : subtotalBruto;
+  const subtotalDiferenteDoBruto = round2(subtotalVenda) !== subtotalBruto;
 
   let valorFiscal;
   let valorNaoFiscal;
 
-  if (qtdEstoque > 0 && qtdEstoque !== qtdVenda) {
+  if (qtdEstoque > 0 && (qtdEstoque !== qtdVenda || subtotalDiferenteDoBruto)) {
     const ratioFiscal = quantidadeFiscal / qtdEstoque;
     valorFiscal = Number((subtotalVenda * ratioFiscal).toFixed(2));
     valorNaoFiscal = Number((subtotalVenda - valorFiscal).toFixed(2));

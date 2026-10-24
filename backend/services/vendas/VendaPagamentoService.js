@@ -11,12 +11,12 @@ const lotesService = require('../lotesService');
 const { normalizarTipoVendaItem } = require('../vendaUnidadeHelpers');
 const { separarItensDistribuidos } = require('../fiscalNaoFiscalService');
 const OrquestradorPagamento = require('../OrquestradorPagamento');
+const { montarParcelasReceber } = require('./ParcelasReceber');
 const { parseVendaFiscalFlag, distribuirItensVendaComValorFiscalEfetivo } = require('../distribuidorEstoqueVenda');
 const mpfc = require('../mpfc');
 const {
   obterCreditoReservaPedidoCb,
-  creditarDisponibilidadeComReservaPedido,
-  consumirReservasPedidoNaVendaCb
+  creditarDisponibilidadeComReservaPedido
 } = require('../estoque/pedidoReservaPonteNucleo');
 const {
   debitarEstoqueItemVenda,
@@ -180,6 +180,9 @@ function reduzirEstoqueDistribuido(
 ) {
   const { produtoControlaEstoque } = require('../estoque/produtoControlaEstoque');
   const dbConn = opcoes.db || db;
+  if (opcoes.pedidoJaConsumido) {
+    return callback(null);
+  }
 
   dbConn.get(
     `SELECT COALESCE(controla_estoque, 1) AS controla_estoque FROM produtos WHERE id = ?`,
@@ -254,7 +257,186 @@ function flattenRecebimentos(recebimentos) {
   return recebimentos.flatMap((item) => (Array.isArray(item) ? item : [item]));
 }
 
-function gravarRecebimentos(vendaId, recebimentos, callback) {
+function runSqlite(dbConnection, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    dbConnection.run(sql, params, function onRun(err) {
+      if (err) {
+        reject(err);
+        return;
+      }
+      resolve({ lastID: this.lastID, changes: this.changes });
+    });
+  });
+}
+
+function getSqlite(dbConnection, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    dbConnection.get(sql, params, (err, row) => {
+      if (err) reject(err);
+      else resolve(row);
+    });
+  });
+}
+
+function allSqlite(dbConnection, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    dbConnection.all(sql, params, (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows || []);
+    });
+  });
+}
+
+function valorEmCentavos(valor) {
+  const numero = Number(valor);
+  return Number.isFinite(numero) ? Math.round(numero * 100) : null;
+}
+
+async function obterVendaExistenteDaOperacaoPedido(
+  transacaoDb,
+  distribuicaoItens,
+  total,
+  empresaId,
+  req,
+  pedidoIdVenda
+) {
+  const operacaoId = Number(req.pedidoFaturamentoOperacaoId || 0);
+  if (!Number.isInteger(operacaoId) || operacaoId <= 0) return null;
+
+  const operacao = await getSqlite(transacaoDb, `
+    SELECT id, pedido_id, empresa_id, venda_id
+    FROM pedido_faturamento_operacoes
+    WHERE id = ?
+  `, [operacaoId]);
+  if (
+    !operacao
+    || Number(operacao.pedido_id) !== Number(pedidoIdVenda)
+    || Number(operacao.empresa_id) !== Number(empresaId)
+  ) {
+    const err = new Error('Operação idempotente do Pedido ausente ou incompatível.');
+    err.statusCode = 409;
+    err.codigo = 'FATURAMENTO_PEDIDO_CONFLITANTE';
+    throw err;
+  }
+  if (operacao.venda_id == null) return null;
+
+  const venda = await getSqlite(transacaoDb, `
+    SELECT id, codigo, empresa_id, status, status_venda, total, pedido_id
+    FROM vendas
+    WHERE id = ?
+  `, [operacao.venda_id]);
+  const itensVenda = await allSqlite(transacaoDb, `
+    SELECT produto_id, quantidade, preco_unitario, subtotal
+    FROM vendas_itens
+    WHERE venda_id = ?
+    ORDER BY id
+  `, [operacao.venda_id]);
+
+  const erro = new Error('A venda existente da operação não corresponde ao Pedido; faturamento bloqueado.');
+  erro.statusCode = 409;
+  erro.codigo = 'FATURAMENTO_PEDIDO_CONFLITANTE';
+  erro.pedido_id = pedidoIdVenda;
+  erro.venda_id = operacao.venda_id;
+
+  if (
+    !venda
+    || Number(venda.empresa_id) !== Number(empresaId)
+    || String(venda.status || '').toLowerCase() !== 'concluida'
+    || String(venda.status_venda || '').toUpperCase() === 'CANCELADA'
+    || (venda.pedido_id != null && Number(venda.pedido_id) !== Number(pedidoIdVenda))
+    || valorEmCentavos(venda.total) !== valorEmCentavos(total)
+    || itensVenda.length !== distribuicaoItens.length
+  ) {
+    throw erro;
+  }
+
+  for (let indice = 0; indice < distribuicaoItens.length; indice += 1) {
+    const esperado = distribuicaoItens[indice];
+    const persistido = itensVenda[indice];
+    if (
+      Number(persistido.produto_id) !== Number(esperado.produto_id)
+      || Math.round(Number(persistido.quantidade) * 1000) !== Math.round(Number(esperado.quantidade) * 1000)
+      || valorEmCentavos(persistido.preco_unitario) !== valorEmCentavos(esperado.preco_unitario)
+      || valorEmCentavos(persistido.subtotal) !== valorEmCentavos(esperado.subtotal)
+    ) {
+      throw erro;
+    }
+  }
+
+  return { id: Number(venda.id), codigo: venda.codigo };
+}
+
+async function registrarVendaDaOperacaoPedido(transacaoDb, vendaId, empresaId, req, pedidoIdVenda) {
+  const operacaoId = Number(req.pedidoFaturamentoOperacaoId || 0);
+  if (!Number.isInteger(operacaoId) || operacaoId <= 0) return;
+
+  const PedidoFaturamentoOperacaoRepository = require('../faturamento/PedidoFaturamentoOperacaoRepository');
+  await PedidoFaturamentoOperacaoRepository.registrarVendaCriada(
+    transacaoDb,
+    operacaoId,
+    pedidoIdVenda,
+    empresaId,
+    vendaId
+  );
+}
+
+async function gerarCodigoVendaUnico(dbConnection, codigoBase) {
+  let codigo = codigoBase;
+  let sufixo = 1;
+
+  while (await getSqlite(dbConnection, 'SELECT 1 FROM vendas WHERE codigo = ?', [codigo])) {
+    codigo = `${codigoBase}-${String(sufixo).padStart(2, '0')}`;
+    sufixo += 1;
+  }
+
+  return codigo;
+}
+
+async function executarTransacaoVendaExclusiva(operacao) {
+  const transacaoDb = await db.openExclusiveConnection();
+  let transacaoIniciada = false;
+  let resultado;
+  let erroOperacao = null;
+
+  try {
+    await runSqlite(transacaoDb, 'BEGIN IMMEDIATE');
+    transacaoIniciada = true;
+    resultado = await operacao(transacaoDb);
+    await runSqlite(transacaoDb, 'COMMIT');
+    transacaoIniciada = false;
+  } catch (err) {
+    erroOperacao = err instanceof Error ? err : new Error(String(err));
+    if (transacaoIniciada) {
+      try {
+        await runSqlite(transacaoDb, 'ROLLBACK');
+        transacaoIniciada = false;
+      } catch (rollbackErr) {
+        erroOperacao.rollbackError = rollbackErr;
+        console.error('Falha no rollback da transação exclusiva da venda:', rollbackErr);
+      }
+    }
+  }
+
+  try {
+    await new Promise((resolve, reject) => {
+      transacaoDb.close((closeErr) => {
+        if (closeErr) reject(closeErr);
+        else resolve();
+      });
+    });
+  } catch (closeErr) {
+    if (erroOperacao) {
+      erroOperacao.closeError = closeErr;
+    } else {
+      console.error('Falha ao fechar conexão exclusiva após commit da venda:', closeErr);
+    }
+  }
+
+  if (erroOperacao) throw erroOperacao;
+  return resultado;
+}
+
+function gravarRecebimentos(vendaId, recebimentos, callback, dbConnection = db) {
   const lista = flattenRecebimentos(recebimentos);
   let index = 0;
 
@@ -266,7 +448,7 @@ function gravarRecebimentos(vendaId, recebimentos, callback) {
 
     const r = lista[index++];
 
-    db.run(`
+    dbConnection.run(`
       INSERT INTO venda_recebimentos
       (
         venda_id,
@@ -292,6 +474,15 @@ function gravarRecebimentos(vendaId, recebimentos, callback) {
   }
 
   next();
+}
+
+function gravarRecebimentosAsync(vendaId, recebimentos, dbConnection) {
+  return new Promise((resolve, reject) => {
+    gravarRecebimentos(vendaId, recebimentos, (err) => {
+      if (err) reject(err);
+      else resolve();
+    }, dbConnection);
+  });
 }
 
 // TEF exclusivo para recebimentos fiscais (conta empresa)
@@ -406,6 +597,45 @@ function calcularSaldoNaoFiscal(venda, recebimentosNaoFiscal) {
   };
 }
 
+function verificarSaldoOutrosVenda(vendaId, valorOutros, callback) {
+  const valorEsperado = Number(valorOutros || 0);
+  if (valorEsperado <= 0) {
+    callback(null, 0);
+    return;
+  }
+
+  db.get(`
+    SELECT
+      COALESCE((
+        SELECT SUM(valor)
+        FROM venda_recebimentos
+        WHERE venda_id = ? AND tipo_recebimento = 'outros' AND status = 'aprovado'
+      ), 0) AS valor_recebido,
+      COALESCE((
+        SELECT SUM(valor_parcela)
+        FROM contas_receber
+        WHERE venda_id = ? AND componente = 'outros'
+      ), 0) AS valor_parcelado,
+      COALESCE((
+        SELECT SUM(valor_restante)
+        FROM contas_receber
+        WHERE venda_id = ? AND componente = 'outros'
+      ), 0) AS saldo_parcelado
+  `, [vendaId, vendaId, vendaId], (err, row) => {
+    if (err) {
+      callback(err);
+      return;
+    }
+
+    const valorConfirmado = Number(row?.valor_recebido || 0)
+      + Number(row?.valor_parcelado || 0)
+      - Number(row?.saldo_parcelado || 0);
+    callback(null, Math.max(0, Math.round(
+      (valorEsperado - valorConfirmado + Number.EPSILON) * 100
+    ) / 100));
+  });
+}
+
 function filtrarRecebimentosNaoFiscal(recebimentos) {
   return (Array.isArray(recebimentos) ? recebimentos : []).filter(
     (recebimento) => String(recebimento.tipo_recebimento || '').toLowerCase() === 'nao_fiscal'
@@ -454,16 +684,23 @@ function resolverStatusPagamentoVenda(
 function aplicarRegraStatusPagamentoVenda({
   valorFiscal,
   valorNaoFiscal,
+  valorOutros = 0,
   statusPagamento,
   recebimentos
 }) {
   const recebimentosNaoFiscal = filtrarRecebimentosNaoFiscal(recebimentos);
-  const statusFinal = resolverStatusPagamentoVenda(
+  let statusFinal = resolverStatusPagamentoVenda(
     valorNaoFiscal,
     recebimentosNaoFiscal,
     statusPagamento,
     { valorFiscal }
   );
+  const outrosRecebidos = (Array.isArray(recebimentos) ? recebimentos : [])
+    .filter((recebimento) => String(recebimento.tipo_recebimento || '').toLowerCase() === 'outros')
+    .reduce((soma, recebimento) => soma + Number(recebimento.valor || 0), 0);
+  if (statusFinal === 'quitada' && Number(valorOutros || 0) - outrosRecebidos > 0.01) {
+    statusFinal = 'pendente';
+  }
 
   let recebimentosFinal = Array.isArray(recebimentos) ? [...recebimentos] : [];
 
@@ -756,7 +993,8 @@ const {
   tef,
   pedido_id: pedidoIdBody,
   valor_fiscal: _valorFiscalBody,
-  valor_nao_fiscal: _valorNaoFiscalBody
+  valor_nao_fiscal: _valorNaoFiscalBody,
+  valor_outros: valorOutrosBody
 } = req.body;
 
 /** RC4.1.2 — ponte reserva do pedido (Expedição → Núcleo). Já vem em FaturamentoService. */
@@ -785,6 +1023,11 @@ void _valorFiscalBody;
 void _valorNaoFiscalBody;
 
 const totalNum = Number(total);
+const valorOutrosInformado = valorOutrosBody != null;
+const valorOutros = valorOutrosInformado ? Number(valorOutrosBody) : 0;
+if (valorOutrosInformado && (!Number.isFinite(valorOutros) || valorOutros < 0)) {
+  return res.status(400).json({ error: 'Valor de Outros inválido.' });
+}
 const formasPendentes = ['prazo', 'parcelado', 'crediario', 'boleto', 'boleto_bancario'];
 const formaPagamentoNormalizada = String(forma_pagamento || '').toLowerCase().trim();
 const vendaFicaPendente = formasPendentes.includes(formaPagamentoNormalizada);
@@ -805,13 +1048,13 @@ function avancarVencimentoParcela(baseMoment, intervalo) {
 const intervaloParcelasBody = req.body?.intervalo_parcelas || req.body?.intervalo || 'mensal';
 
 
-const buscarNomeCliente = (callback) => {
+const buscarNomeCliente = (callback, dbConnection = db) => {
   if (!cliente_id) {
     callback(null, null, null);
     return;
   }
 
-  db.get(
+  dbConnection.get(
     'SELECT nome, cpf_cnpj FROM clientes WHERE id = ?',
     [cliente_id],
     (err, cliente) => {
@@ -913,7 +1156,17 @@ db.all(`
 
   // RC4.1.2 — carrega crédito da reserva do pedido antes da distribuição
   obterCreditoReservaPedidoCb(pedidoIdVenda, db, (_credErr, creditoReserva) => {
+    if (_credErr) {
+      db.run('ROLLBACK');
+      res.status(_credErr.statusCode || 500).json({
+        error: _credErr.message || 'Falha ao consultar consumo de estoque do pedido.',
+        code: _credErr.code || 'CONSULTA_CONSUMO_PEDIDO_FALHOU'
+      });
+      return;
+    }
     const creditoPorProduto = (creditoReserva && creditoReserva.por_produto) || {};
+    const pedidoJaConsumido = Boolean(creditoReserva && creditoReserva.consumo_confirmado);
+    opcoesBaixaEstoque.pedidoJaConsumido = pedidoJaConsumido;
 
   const distribuicaoItens = [];
   const entradasMotor = [];
@@ -943,7 +1196,6 @@ db.all(`
       saldoNaoFiscal: saldos.saldoNaoFiscal
     });
   }
-
   const { politica: politicaMpfc, snapshot: snapshotMpfc } = carregarPoliticaFiscalComercialPassiva();
   const midpAtivo = Boolean(politicaMpfc.preservarDinheiro);
   const snapshotJson = mpfc.snapshotParaJson(politicaMpfc);
@@ -986,7 +1238,6 @@ db.all(`
         `Disponível: ${resultadoMotor.erro?.estoqueTotal}`
     });
   }
-
   for (const row of resultadoMotor.itens) {
     distribuicaoItens.push({
       ...row,
@@ -996,37 +1247,147 @@ db.all(`
       valor_nao_fiscal: row.valor_nao_fiscal
     });
   }
-
-  /** RC4.1.2 — após baixa de estoque, consome reserva do pedido (idempotente). */
-  function consumirReservaPedidoAposBaixa(vendaId, next) {
-    if (!pedidoIdVenda) return next();
-    consumirReservasPedidoNaVendaCb(pedidoIdVenda, vendaId, db, () => {
-      next();
-    }, {
-      empresaId: opcoesBaixaEstoque.empresaId,
-      usuarioId: opcoesBaixaEstoque.usuarioId,
-      contexto: req
+  async function aposBaixaItensDaVenda(vendaId, transacaoDb) {
+    if (pedidoJaConsumido) {
+      return;
+    }
+    const { consumirFichaTecnicaDaVendaCb } = require('../produtos/FichaTecnicaConsumoService');
+    await new Promise((resolve, reject) => {
+      consumirFichaTecnicaDaVendaCb({
+        vendaId,
+        empresaId: empresaIdVenda,
+        itens: distribuicaoItens,
+        db: transacaoDb,
+        usuarioId: opcoesBaixaEstoque.usuarioId
+      }, (fichaErr) => {
+        if (fichaErr) reject(fichaErr);
+        else resolve();
+      });
     });
   }
 
-  function aposBaixaItensDaVenda(vendaId, continuar) {
-    const { consumirFichaTecnicaDaVendaCb } = require('../produtos/FichaTecnicaConsumoService');
-    consumirFichaTecnicaDaVendaCb({
-      vendaId,
-      empresaId: empresaIdVenda,
-      itens: distribuicaoItens,
-      db,
-      usuarioId: opcoesBaixaEstoque.usuarioId
-    }, (fichaErr) => {
-      if (fichaErr) {
-        db.run('ROLLBACK');
-        res.status(fichaErr.statusCode || 400).json({
-          error: fichaErr.message,
-          code: fichaErr.code
-        });
-        return;
+  async function inserirItensDaVenda(transacaoDb, vendaId) {
+    for (const item of distribuicaoItens) {
+      const quantidadeFiscal = Number(item.quantidade_fiscal || 0);
+      const quantidadeNaoFiscal = Number(item.quantidade_nao_fiscal || 0);
+      const itemFiscal = quantidadeFiscal > 0 ? 1 : 0;
+      const valorFiscal = Number((item.valor_fiscal || 0).toFixed(2));
+      const valorNaoFiscal = Number((item.valor_nao_fiscal || 0).toFixed(2));
+      const tipoVenda = normalizarTipoVendaItem(item);
+      const insercao = await runSqlite(transacaoDb, `
+        INSERT INTO vendas_itens (
+          venda_id, produto_id, quantidade, preco_unitario, preco_unitario_interno,
+          desconto_percentual, desconto_valor, desconto_manual, promocao_id,
+          desconto_atacado, tipo_preco, subtotal, item_fiscal, quantidade_fiscal,
+          quantidade_nao_fiscal, valor_fiscal, valor_nao_fiscal, tipo_venda
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
+        vendaId,
+        item.produto_id,
+        item.quantidade,
+        item.preco_unitario,
+        item.preco_unitario_interno ?? item.preco_unitario,
+        item.desconto_percentual || 0,
+        item.desconto_valor || 0,
+        Number(item.desconto_manual || 0) === 1 ? 1 : 0,
+        item.promocao_id || null,
+        item.desconto_atacado || 0,
+        item.tipo_preco || 'varejo',
+        item.subtotal,
+        itemFiscal,
+        quantidadeFiscal,
+        quantidadeNaoFiscal,
+        valorFiscal,
+        valorNaoFiscal,
+        tipoVenda
+      ]);
+
+      await new Promise((resolve, reject) => {
+        reduzirEstoqueDistribuido(
+          insercao.lastID,
+          item.produto_id,
+          item.quantidade_fiscal,
+          item.quantidade_nao_fiscal,
+          (err) => {
+            if (err) reject(err);
+            else resolve();
+          },
+          { ...opcoesBaixaEstoque, db: transacaoDb }
+        );
+      });
+    }
+
+    await aposBaixaItensDaVenda(vendaId, transacaoDb);
+  }
+
+  async function vincularTransacoesTef(transacaoDb, vendaId, resultadoFiscal) {
+    const transacoesTefParaVincular = resultadoFiscal?.transacoes || [];
+    if (tef && tef.transacao_id) {
+      transacoesTefParaVincular.push(tef.transacao_id);
+    }
+    pagamentosVenda.forEach((pagamento) => {
+      const idTef = pagamento.tef_transacao_id || pagamento.tef?.transacao_id;
+      if (idTef) transacoesTefParaVincular.push(idTef);
+    });
+
+    for (const transacaoId of new Set(transacoesTefParaVincular)) {
+      try {
+        await runSqlite(transacaoDb, `
+          UPDATE tef_transacoes SET venda_id = ? WHERE id = ?
+        `, [vendaId, transacaoId]);
+      } catch (tefErr) {
+        console.error('Erro ao vincular TEF à venda:', tefErr);
       }
-      consumirReservaPedidoAposBaixa(vendaId, continuar);
+    }
+  }
+
+  async function inserirPagamentosDaVenda(transacaoDb, vendaId) {
+    const sql = `
+      INSERT INTO venda_pagamentos (
+        venda_id, forma_pagamento, valor, tef_transacao_id, tef_nsu,
+        tef_autorizacao, tef_bandeira, tef_adquirente,
+        tef_comprovante_cliente, tef_comprovante_estabelecimento
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+
+    if (pagamentosVenda.length > 0) {
+      for (const pagamento of pagamentosVenda) {
+        await runSqlite(transacaoDb, sql, [
+          vendaId,
+          pagamento.forma_pagamento,
+          Number(pagamento.valor || 0),
+          pagamento.tef_transacao_id || pagamento.tef?.transacao_id || null,
+          pagamento.nsu || pagamento.tef?.nsu || null,
+          pagamento.autorizacao || pagamento.tef?.autorizacao || null,
+          pagamento.bandeira || pagamento.tef?.bandeira || null,
+          pagamento.adquirente || pagamento.tef?.adquirente || null,
+          pagamento.tef?.comprovante_cliente || null,
+          pagamento.tef?.comprovante_estabelecimento || null
+        ]);
+      }
+      return;
+    }
+
+    await runSqlite(transacaoDb, sql, [
+      vendaId,
+      formaPagamentoFinal,
+      Number(total || 0),
+      tef?.transacao_id || null,
+      tef?.nsu || null,
+      tef?.autorizacao || null,
+      tef?.bandeira || null,
+      tef?.adquirente || null,
+      tef?.comprovante_cliente || null,
+      tef?.comprovante_estabelecimento || null
+    ]);
+  }
+
+  async function obterNomeCliente(transacaoDb) {
+    return new Promise((resolve, reject) => {
+      buscarNomeCliente((err, nome, cpf) => {
+        if (err) reject(err);
+        else resolve({ nome, cpf });
+      }, transacaoDb);
     });
   }
 
@@ -1069,7 +1430,8 @@ db.all(`
   // Função para executar venda a prazo
   executarVendaPrazo();
   async function executarVendaPrazo() {
-    const codigo = `VND-${agoraLocalBrasil().replace(/[- :]/g, '').slice(0, 14)}`;
+    const codigoBase = `VND-${agoraLocalBrasil().replace(/[- :]/g, '').slice(0, 14)}`;
+    let codigo;
     const data_venda = agoraLocalBrasil().slice(0, 10);
 
     // HOTFIX FISCAL-4.0.2 — validação sempre sobre Valor Fiscal Líquido do Motor
@@ -1082,7 +1444,8 @@ db.all(`
 
     const erroSomaPagamentosMotor = validarSomaPagamentosVenda(pagamentosVenda, total, {
       valor_fiscal: totalFiscal,
-      valor_nao_fiscal: totalNaoFiscal
+      valor_nao_fiscal: totalNaoFiscal,
+      valor_outros: valorOutrosInformado ? valorOutros : undefined
     });
     if (erroSomaPagamentosMotor) {
       return res.status(400).json({ error: erroSomaPagamentosMotor });
@@ -1114,6 +1477,7 @@ db.all(`
       midpAtivo,
       desconto: Number(desconto || 0),
       acrescimo: Number(acrescimo || 0),
+      totalOutros: valorOutros,
       subtotalBruto: Number(resultadoMotor.totalVendaBruto || 0),
       debugDescontoFiscal: process.env.CDS_DEBUG_DESCONTO_FISCAL === '1'
     });
@@ -1129,261 +1493,154 @@ db.all(`
     const resultadoStatus = aplicarRegraStatusPagamentoVenda({
       valorFiscal: totalFiscal,
       valorNaoFiscal: totalNaoFiscal,
+      valorOutros,
       statusPagamento: resultadoPagamento.statusPagamento,
       recebimentos: resultadoPagamento.recebimentos
     });
     const { statusPagamento, recebimentos } = resultadoStatus;
 
-    db.serialize(() => {
-      db.run('BEGIN IMMEDIATE');
-      db.run(`
-        INSERT INTO vendas (codigo, data_venda, cliente_id, total, desconto, forma_pagamento, status, caixa_sessao_id, caixa_id, terminal_id, operador_id, valor_fiscal, valor_nao_fiscal, status_pagamento, tef_transacao_id, mpfc_politica_snapshot, empresa_id)
-          VALUES (?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `, [codigo, data_venda, cliente_id || null, totalNum, desconto || 0, formaPagamentoFinal, req.caixaSessaoId || null, req.caixaId || null, req.terminalId || null, req.operadorId || null, totalFiscal, totalNaoFiscal, statusPagamento, resultadoFiscal?.transacoes?.[0] || null, snapshotJson, empresaIdVenda], function(err) {
-        if (err) {
-          db.run('ROLLBACK');
-          res.status(500).json(erroPersistenciaVenda(err, 'insert_vendas_prazo', {
-            caixa_sessao_id: req.caixaSessaoId,
-            caixa_id: req.caixaId,
-            terminal_id: req.terminalId,
-            operador_id: req.operadorId,
-            cliente_id
-          }));
-          return;
-        }
-        const vendaId = this.lastID;
-
-        gravarRecebimentos(
-          vendaId,
-          recebimentos,
-          (err) => {
-            if (err) {
-              db.run('ROLLBACK');
-              res.status(500).json({ error: err.message });
-              return;
-            }
-          }
+    let vendaId;
+    try {
+      vendaId = await executarTransacaoVendaExclusiva(async (transacaoDb) => {
+        const vendaExistente = await obterVendaExistenteDaOperacaoPedido(
+          transacaoDb,
+          distribuicaoItens,
+          totalNum,
+          empresaIdVenda,
+          req,
+          pedidoIdVenda
         );
-
-        const transacoesTefParaVincular = resultadoFiscal?.transacoes || [];
-
-        if (tef && tef.transacao_id) {
-          transacoesTefParaVincular.push(tef.transacao_id);
+        if (vendaExistente) {
+          codigo = vendaExistente.codigo;
+          return vendaExistente.id;
         }
 
-        pagamentosVenda.forEach((p) => {
-          const idTef = p.tef_transacao_id || p.tef?.transacao_id;
-          if (idTef) {
-            transacoesTefParaVincular.push(idTef);
+        codigo = await gerarCodigoVendaUnico(transacaoDb, codigoBase);
+        const venda = await runSqlite(transacaoDb, `
+          INSERT INTO vendas (
+            codigo, data_venda, cliente_id, total, valor_outros, desconto,
+            forma_pagamento, status, caixa_sessao_id, caixa_id, terminal_id,
+            operador_id, valor_fiscal, valor_nao_fiscal, status_pagamento,
+            tef_transacao_id, mpfc_politica_snapshot, empresa_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `, [
+          codigo,
+          data_venda,
+          cliente_id || null,
+          totalNum,
+          valorOutros,
+          desconto || 0,
+          formaPagamentoFinal,
+          req.caixaSessaoId || null,
+          req.caixaId || null,
+          req.terminalId || null,
+          req.operadorId || null,
+          totalFiscal,
+          totalNaoFiscal,
+          statusPagamento,
+          resultadoFiscal?.transacoes?.[0] || null,
+          snapshotJson,
+          empresaIdVenda
+        ]);
+        const id = venda.lastID;
+
+        await gravarRecebimentosAsync(id, recebimentos, transacaoDb);
+        await vincularTransacoesTef(transacaoDb, id, resultadoFiscal);
+        await inserirItensDaVenda(transacaoDb, id);
+        await inserirPagamentosDaVenda(transacaoDb, id);
+
+        const qtdParcelas = Math.max(1, parseInt(parcelas || 1, 10) || 1);
+        const parcelasReceber = montarParcelasReceber(totalNum, valorOutros, qtdParcelas);
+        let vencimento = moment(primeiro_vencimento || undefined, 'YYYY-MM-DD');
+        if (!vencimento.isValid()) vencimento = moment().add(30, 'days');
+        for (const parcela of parcelasReceber) {
+          for (const componente of parcela.componentes) {
+            await runSqlite(transacaoDb, `
+              INSERT INTO contas_receber (
+                venda_id, cliente_id, numero_parcela, total_parcelas,
+                valor_parcela, valor_restante, data_vencimento, status,
+                empresa_id, componente
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, 'aberto', ?, ?)
+            `, [
+              id,
+              cliente_id,
+              parcela.numero_parcela,
+              parcela.total_parcelas,
+              componente.valor_parcela,
+              componente.valor_parcela,
+              vencimento.format('YYYY-MM-DD'),
+              empresaIdVenda,
+              componente.componente
+            ]);
           }
-        });
+          vencimento = avancarVencimentoParcela(vencimento, intervaloParcelasBody);
+        }
 
-        [...new Set(transacoesTefParaVincular)].forEach((transacaoId) => {
-          db.run(`
-            UPDATE tef_transacoes
-            SET venda_id = ?
-            WHERE id = ?
+        const cliente = await obterNomeCliente(transacaoDb);
+        let vencimentoFinanceiro = moment(primeiro_vencimento || undefined, 'YYYY-MM-DD');
+        if (!vencimentoFinanceiro.isValid()) {
+          vencimentoFinanceiro = moment().add(30, 'days');
+        }
+        for (let indice = 1; indice <= qtdParcelas; indice += 1) {
+          const valorParcela = parcelasReceber[indice - 1].componentes
+            .reduce((soma, componente) => soma + componente.valor_parcela, 0);
+          await runSqlite(transacaoDb, `
+            INSERT INTO financeiro (
+              tipo, descricao, valor, data_movimento, categoria, forma_pagamento,
+              referencia_id, referencia_tipo, status, origem, documento, vencimento,
+              numero_parcela, total_parcelas, venda_id, pessoa_nome, baixado_em, empresa_id
+            ) VALUES ('receita', ?, ?, ?, 'vendas', ?, ?, 'venda', 'pendente', 'venda', ?, ?, ?, ?, ?, ?, NULL, ?)
           `, [
-            vendaId,
-            transacaoId
-          ], (tefErr) => {
-            if (tefErr) {
-              console.error('Erro ao vincular TEF à venda:', tefErr);
-            }
-          });
-        });
+            `Venda ${codigo} - Parcela ${indice}/${qtdParcelas}`,
+            valorParcela,
+            data_venda,
+            forma_pagamento,
+            id,
+            cliente.cpf,
+            vencimentoFinanceiro.format('YYYY-MM-DD'),
+            indice,
+            qtdParcelas,
+            id,
+            cliente.nome,
+            empresaIdVenda
+          ]);
+          vencimentoFinanceiro = avancarVencimentoParcela(
+            vencimentoFinanceiro,
+            intervaloParcelasBody
+          );
+        }
 
-        let itensProcessados = 0;
-        distribuicaoItens.forEach(item => {
-          const quantidadeFiscal =
-            Number(
-              item.quantidade_fiscal || 0
-            );
-
-          const quantidadeNaoFiscal =
-            Number(
-              item.quantidade_nao_fiscal || 0
-            );
-
-          const itemFiscal =
-            quantidadeFiscal > 0
-              ? 1
-              : 0;
-
-          const precoUnitario =
-            Number(
-              item.preco_unitario || 0
-            );
-
-          const valorFiscal =
-            Number(
-              (item.valor_fiscal || 0).toFixed(2)
-            );
-
-          const valorNaoFiscal =
-            Number(
-              (item.valor_nao_fiscal || 0).toFixed(2)
-            );
-
-          const tipoVenda = normalizarTipoVendaItem(item);
-
-          db.run(`
-            INSERT INTO vendas_itens (venda_id, produto_id, quantidade, preco_unitario, preco_unitario_interno, desconto_percentual, desconto_valor, desconto_manual, promocao_id, desconto_atacado, tipo_preco, subtotal, item_fiscal, quantidade_fiscal, quantidade_nao_fiscal, valor_fiscal, valor_nao_fiscal, tipo_venda)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `, [vendaId, item.produto_id, item.quantidade, item.preco_unitario, item.preco_unitario_interno ?? item.preco_unitario, item.desconto_percentual || 0, item.desconto_valor || 0, Number(item.desconto_manual || 0) === 1 ? 1 : 0, item.promocao_id || null, item.desconto_atacado || 0, item.tipo_preco || 'varejo', item.subtotal, itemFiscal, quantidadeFiscal, quantidadeNaoFiscal, valorFiscal, valorNaoFiscal, tipoVenda], (itemErr) => {
-            if (itemErr) {
-              db.run('ROLLBACK');
-              res.status(500).json(erroPersistenciaVenda(itemErr, 'insert_vendas_itens_prazo', {
-                venda_id: vendaId,
-                produto_id: item.produto_id
-              }));
-              return;
-            }
-
-            const vendaItemIdPrazo = this.lastID;
-            // Usar FEFO para reduzir estoque
-            reduzirEstoqueDistribuido(vendaItemIdPrazo, item.produto_id, item.quantidade_fiscal, item.quantidade_nao_fiscal, (estErr) => {
-              if (estErr) {
-                db.run('ROLLBACK');
-                res.status(500).json(erroPersistenciaVenda(estErr, 'baixa_estoque_fefo_prazo', {
-                  venda_id: vendaId,
-                  venda_item_id: vendaItemIdPrazo,
-                  produto_id: item.produto_id
-                }));
-                return;
-              }
-              itensProcessados++;
-              if (itensProcessados === itens.length) {
-                aposBaixaItensDaVenda(vendaId, () => {
-                if (pagamentosVenda.length > 0) {
-                  const stmtPagamentos = db.prepare(`
-                    INSERT INTO venda_pagamentos (
-                      venda_id, forma_pagamento, valor,
-                      tef_transacao_id, tef_nsu, tef_autorizacao,
-                      tef_bandeira, tef_adquirente,
-                      tef_comprovante_cliente, tef_comprovante_estabelecimento
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                  `);
-
-                  pagamentosVenda.forEach((p) => {
-                    stmtPagamentos.run(
-                      vendaId,
-                      p.forma_pagamento,
-                      Number(p.valor || 0),
-                      p.tef_transacao_id || p.tef?.transacao_id || null,
-                      p.nsu || p.tef?.nsu || null,
-                      p.autorizacao || p.tef?.autorizacao || null,
-                      p.bandeira || p.tef?.bandeira || null,
-                      p.adquirente || p.tef?.adquirente || null,
-                      p.tef?.comprovante_cliente || null,
-                      p.tef?.comprovante_estabelecimento || null
-                    );
-                  });
-
-                  stmtPagamentos.finalize();
-                } else {
-                  db.run(
-                    `
-                    INSERT INTO venda_pagamentos (
-                      venda_id, forma_pagamento, valor,
-                      tef_transacao_id, tef_nsu, tef_autorizacao,
-                      tef_bandeira, tef_adquirente,
-                      tef_comprovante_cliente, tef_comprovante_estabelecimento
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    `,
-                    [
-                      vendaId,
-                      formaPagamentoFinal,
-                      Number(total || 0),
-                      tef?.transacao_id || null,
-                      tef?.nsu || null,
-                      tef?.autorizacao || null,
-                      tef?.bandeira || null,
-                      tef?.adquirente || null,
-                      tef?.comprovante_cliente || null,
-                      tef?.comprovante_estabelecimento || null
-                    ]
-                  );
-                }
-
-                // Gerar parcelas (caminho financeiro existente)
-                const qtdParcelas = Number(parcelas) || 1;
-                const valorParcela = Math.round((totalNum / qtdParcelas) * 100) / 100;
-                let vencimento = moment(primeiro_vencimento || undefined, 'YYYY-MM-DD');
-                if (!vencimento.isValid()) {
-                  vencimento = moment().add(30, 'days');
-                }
-                for (let i = 1; i <= qtdParcelas; i++) {
-                  db.run(`
-                    INSERT INTO contas_receber (venda_id, cliente_id, numero_parcela, total_parcelas, valor_parcela, valor_restante, data_vencimento, status, empresa_id)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'aberto', ?)
-                  `, [vendaId, cliente_id, i, qtdParcelas, valorParcela, valorParcela, vencimento.format('YYYY-MM-DD'), empresaIdVenda]);
-                  vencimento = avancarVencimentoParcela(vencimento, intervaloParcelasBody);
-                }
-                buscarNomeCliente((clienteErr, clienteNome, clienteCpf) => {
-                  if (clienteErr) {
-                    db.run('ROLLBACK');
-                    res.status(500).json({ error: clienteErr.message });
-                    return;
-                  }
-
-                  let vencFinBase = moment(primeiro_vencimento || undefined, 'YYYY-MM-DD');
-                  if (!vencFinBase.isValid()) vencFinBase = moment().add(30, 'days');
-                  const inserirFinanceiroPrazo = (indice = 1, venc = vencFinBase.clone()) => {
-                    if (indice > qtdParcelas) {
-                      db.run('COMMIT');
-
-                      responderVendaComFiscal(res, {
-                        vendaId,
-                        codigo,
-                        message: 'Venda a prazo registrada com sucesso',
-                        emitirFiscal: !!emitir_fiscal,
-                        valorFiscal: totalFiscal,
-                        valorNaoFiscal: totalNaoFiscal,
-                        statusPagamento: statusPagamento,
-                        pagamentosTef: pagamentosVenda
-                      });
-                      return;
-                    }
-
-                    db.run(`
-                      INSERT INTO financeiro (
-                        tipo, descricao, valor, data_movimento, categoria, forma_pagamento,
-                        referencia_id, referencia_tipo, status, origem, documento, vencimento,
-                        numero_parcela, total_parcelas, venda_id, pessoa_nome, baixado_em, empresa_id
-                      ) VALUES ('receita', ?, ?, ?, 'vendas', ?, ?, 'venda', 'pendente', 'venda', ?, ?, ?, ?, ?, ?, NULL, ?)
-                    `, [
-                      `Venda ${codigo} - Parcela ${indice}/${qtdParcelas}`,
-                      valorParcela,
-                      data_venda,
-                      forma_pagamento,
-                      vendaId,
-                      clienteCpf,
-                      venc.format('YYYY-MM-DD'),
-                      indice,
-                      qtdParcelas,
-                      vendaId,
-                      clienteNome,
-                      empresaIdVenda
-                    ], (finErr) => {
-                      if (finErr) {
-                        db.run('ROLLBACK');
-                        res.status(500).json({ error: finErr.message });
-                        return;
-                      }
-
-                      inserirFinanceiroPrazo(indice + 1, avancarVencimentoParcela(venc, intervaloParcelasBody));
-                    });
-                  };
-
-                  inserirFinanceiroPrazo();
-                });
-              });
-              }
-            }, opcoesBaixaEstoque);
-          });
-        });
+        await registrarVendaDaOperacaoPedido(
+          transacaoDb,
+          id,
+          empresaIdVenda,
+          req,
+          pedidoIdVenda
+        );
+        return id;
       });
+    } catch (err) {
+      const respostaErro = erroPersistenciaVenda(err, 'persistencia_venda_prazo', {
+        caixa_sessao_id: req.caixaSessaoId,
+        caixa_id: req.caixaId,
+        terminal_id: req.terminalId,
+        operador_id: req.operadorId,
+        cliente_id
+      });
+      if (err.rollbackError) respostaErro.rollback_error = err.rollbackError.message;
+      if (err.closeError) respostaErro.close_error = err.closeError.message;
+      return res.status(err.statusCode || 500).json(respostaErro);
+    }
+
+    responderVendaComFiscal(res, {
+      vendaId,
+      codigo,
+      message: 'Venda a prazo registrada com sucesso',
+      emitirFiscal: !!emitir_fiscal,
+      valorFiscal: totalFiscal,
+      valorNaoFiscal: totalNaoFiscal,
+      statusPagamento,
+      pagamentosTef: pagamentosVenda
     });
   }
   return;
@@ -1391,7 +1648,8 @@ db.all(`
 
 // Venda à vista ou crédito antigo
 const executarVenda = async () => {
-  const codigo = `VND-${agoraLocalBrasil().replace(/[- :]/g, '').slice(0, 14)}`;
+  const codigoBase = `VND-${agoraLocalBrasil().replace(/[- :]/g, '').slice(0, 14)}`;
+  let codigo;
   const data_venda = agoraLocalBrasil().slice(0, 10);
 
   // HOTFIX FISCAL-4.0.2 — validação sempre sobre Valor Fiscal Líquido do Motor
@@ -1404,7 +1662,8 @@ const executarVenda = async () => {
 
   const erroSomaPagamentosMotor = validarSomaPagamentosVenda(pagamentosVenda, total, {
     valor_fiscal: totalFiscal,
-    valor_nao_fiscal: totalNaoFiscal
+    valor_nao_fiscal: totalNaoFiscal,
+    valor_outros: valorOutrosInformado ? valorOutros : undefined
   });
   if (erroSomaPagamentosMotor) {
     return res.status(400).json({ error: erroSomaPagamentosMotor });
@@ -1436,6 +1695,7 @@ const executarVenda = async () => {
     midpAtivo,
     desconto: Number(desconto || 0),
     acrescimo: Number(acrescimo || 0),
+    totalOutros: valorOutros,
     subtotalBruto: Number(resultadoMotor.totalVendaBruto || 0),
     debugDescontoFiscal: process.env.CDS_DEBUG_DESCONTO_FISCAL === '1'
   });
@@ -1451,322 +1711,133 @@ const executarVenda = async () => {
   const resultadoStatus = aplicarRegraStatusPagamentoVenda({
     valorFiscal: totalFiscal,
     valorNaoFiscal: totalNaoFiscal,
+    valorOutros,
     statusPagamento: resultadoPagamento.statusPagamento,
     recebimentos: resultadoPagamento.recebimentos
   });
   const { statusPagamento, recebimentos } = resultadoStatus;
 
-  db.serialize(() => {
-    db.run('BEGIN IMMEDIATE');
-    db.run(`
-      INSERT INTO vendas (
+  let vendaId;
+  try {
+    vendaId = await executarTransacaoVendaExclusiva(async (transacaoDb) => {
+      const vendaExistente = await obterVendaExistenteDaOperacaoPedido(
+        transacaoDb,
+        distribuicaoItens,
+        totalNum,
+        empresaIdVenda,
+        req,
+        pedidoIdVenda
+      );
+      if (vendaExistente) {
+        codigo = vendaExistente.codigo;
+        return vendaExistente.id;
+      }
+
+      codigo = await gerarCodigoVendaUnico(transacaoDb, codigoBase);
+      const venda = await runSqlite(transacaoDb, `
+        INSERT INTO vendas (
+          codigo, data_venda, cliente_id, total, valor_outros, desconto,
+          forma_pagamento, status, valor_recebido, caixa_sessao_id, caixa_id,
+          terminal_id, cpf_cnpj_nota, operador_id, valor_fiscal, valor_nao_fiscal,
+          status_pagamento, tef_transacao_id, mpfc_politica_snapshot, empresa_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
         codigo,
         data_venda,
-        cliente_id,
-        total,
-        desconto,
+        cliente_id || null,
+        totalNum,
+        valorOutros,
+        desconto || 0,
+        formaPagamentoFinal,
+        valor_recebido || null,
+        req.caixaSessaoId || null,
+        req.caixaId,
+        req.terminalId || null,
+        emitir_fiscal ? cpfCnpjNotaLimpo || null : null,
+        req.operadorId,
+        totalFiscal,
+        totalNaoFiscal,
+        statusPagamento,
+        resultadoFiscal?.transacoes?.[0] || null,
+        snapshotJson,
+        empresaIdVenda
+      ]);
+      const id = venda.lastID;
+
+      await gravarRecebimentosAsync(id, recebimentos, transacaoDb);
+      await vincularTransacoesTef(transacaoDb, id, resultadoFiscal);
+      await inserirItensDaVenda(transacaoDb, id);
+      await inserirPagamentosDaVenda(transacaoDb, id);
+
+      const statusFinanceiro = vendaFicaPendente ? 'pendente' : 'recebido';
+      const baixadoEm = statusFinanceiro === 'recebido' ? data_venda : null;
+      const cliente = await obterNomeCliente(transacaoDb);
+      await runSqlite(transacaoDb, `
+        INSERT INTO financeiro (
+          tipo, descricao, valor, data_movimento, categoria, forma_pagamento,
+          referencia_id, referencia_tipo, status, origem, documento, vencimento,
+          numero_parcela, total_parcelas, venda_id, pessoa_nome, baixado_em, empresa_id
+        ) VALUES ('receita', ?, ?, ?, 'vendas', ?, ?, 'venda', ?, 'venda', ?, ?, 1, 1, ?, ?, ?, ?)
+      `, [
+        `Venda ${codigo}`,
+        totalNum,
+        data_venda,
         forma_pagamento,
-        status,
-        valor_recebido,
-        caixa_sessao_id,
-        caixa_id,
-        terminal_id,
-        cpf_cnpj_nota,
-        operador_id,
-        valor_fiscal,
-        valor_nao_fiscal,
-        status_pagamento,
-        tef_transacao_id,
-        mpfc_politica_snapshot,
-        empresa_id
-      )
-      VALUES (?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [
-      codigo,
-      data_venda,
-      cliente_id || null,
-      totalNum,
-      desconto || 0,
-      formaPagamentoFinal,
-      valor_recebido || null,
-      req.caixaSessaoId || null,
-      req.caixaId,
-      req.terminalId || null,
-      emitir_fiscal ? cpfCnpjNotaLimpo || null : null,
-      req.operadorId,
-      totalFiscal,
-      totalNaoFiscal,
-      statusPagamento,
-      resultadoFiscal?.transacoes?.[0] || null,
-      snapshotJson,
-      empresaIdVenda
-    ], function(err) {
-      if (err) {
-        db.run('ROLLBACK');
-        res.status(500).json(erroPersistenciaVenda(err, 'insert_vendas', {
-          caixa_sessao_id: req.caixaSessaoId,
-          caixa_id: req.caixaId,
-          terminal_id: req.terminalId,
-          operador_id: req.operadorId,
-          cliente_id
-        }));
-        return;
-      }
-      const vendaId = this.lastID;
+        id,
+        statusFinanceiro,
+        cliente.cpf,
+        data_venda,
+        id,
+        cliente.nome,
+        baixadoEm,
+        empresaIdVenda
+      ]);
 
-      gravarRecebimentos(
-        vendaId,
-        recebimentos,
-        (err) => {
-          if (err) {
-            db.run('ROLLBACK');
-            res.status(500).json(erroPersistenciaVenda(err, 'insert_venda_recebimentos', { venda_id: vendaId }));
-            return;
-          }
-        }
-      );
-
-      const transacoesTefParaVincular = resultadoFiscal?.transacoes || [];
-
-      if (tef && tef.transacao_id) {
-        transacoesTefParaVincular.push(tef.transacao_id);
-      }
-
-      pagamentosVenda.forEach((p) => {
-        const idTef = p.tef_transacao_id || p.tef?.transacao_id;
-        if (idTef) {
-          transacoesTefParaVincular.push(idTef);
-        }
-      });
-
-      [...new Set(transacoesTefParaVincular)].forEach((transacaoId) => {
-        db.run(`
-          UPDATE tef_transacoes
-          SET venda_id = ?
+      if (formaGeraParcelasFinanceiras(forma_pagamento) && cliente_id) {
+        await runSqlite(transacaoDb, `
+          INSERT INTO contas_receber (
+            venda_id, cliente_id, numero_parcela, total_parcelas, valor_parcela,
+            valor_restante, data_vencimento, status, empresa_id
+          ) VALUES (?, ?, ?, ?, ?, ?, date('now', '+30 day'), 'aberto', ?)
+        `, [id, cliente_id, 1, 1, totalNum, totalNum, empresaIdVenda]);
+        await runSqlite(transacaoDb, `
+          UPDATE clientes
+          SET credito_atual = COALESCE(credito_atual, 0) + ?
           WHERE id = ?
-        `, [
-          vendaId,
-          transacaoId
-        ], (tefErr) => {
-          if (tefErr) {
-            console.error('Erro ao vincular TEF à venda:', tefErr);
-          }
-        });
-      });
+        `, [totalNum, cliente_id]);
+      }
 
-      let itensProcessados = 0;
-      distribuicaoItens.forEach(item => {
-        const quantidadeFiscal =
-          Number(
-            item.quantidade_fiscal || 0
-          );
-
-        const quantidadeNaoFiscal =
-          Number(
-            item.quantidade_nao_fiscal || 0
-          );
-
-        const itemFiscal =
-          quantidadeFiscal > 0
-            ? 1
-            : 0;
-
-        const precoUnitario =
-          Number(
-            item.preco_unitario || 0
-          );
-
-        const valorFiscal =
-          Number(
-            (item.valor_fiscal || 0).toFixed(2)
-          );
-
-        const valorNaoFiscal =
-          Number(
-            (item.valor_nao_fiscal || 0).toFixed(2)
-          );
-
-        const tipoVenda = normalizarTipoVendaItem(item);
-
-        db.run(`
-          INSERT INTO vendas_itens (venda_id, produto_id, quantidade, preco_unitario, preco_unitario_interno, desconto_percentual, desconto_valor, desconto_manual, promocao_id, desconto_atacado, tipo_preco, subtotal, item_fiscal, quantidade_fiscal, quantidade_nao_fiscal, valor_fiscal, valor_nao_fiscal, tipo_venda)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `, [vendaId, item.produto_id, item.quantidade, item.preco_unitario, item.preco_unitario_interno ?? item.preco_unitario, item.desconto_percentual || 0, item.desconto_valor || 0, Number(item.desconto_manual || 0) === 1 ? 1 : 0, item.promocao_id || null, item.desconto_atacado || 0, item.tipo_preco || 'varejo', item.subtotal, itemFiscal, quantidadeFiscal, quantidadeNaoFiscal, valorFiscal, valorNaoFiscal, tipoVenda], (itemErr) => {
-          if (itemErr) {
-            db.run('ROLLBACK');
-            res.status(500).json(erroPersistenciaVenda(itemErr, 'insert_vendas_itens', {
-              venda_id: vendaId,
-              produto_id: item.produto_id
-            }));
-            return;
-          }
-
-          const vendaItemId = this.lastID;
-          // Usar FEFO para reduzir estoque
-          reduzirEstoqueDistribuido(vendaItemId, item.produto_id, item.quantidade_fiscal, item.quantidade_nao_fiscal, (estErr) => {
-            if (estErr) {
-              db.run('ROLLBACK');
-              res.status(500).json(erroPersistenciaVenda(estErr, 'baixa_estoque_fefo', {
-                venda_id: vendaId,
-                venda_item_id: vendaItemId,
-                produto_id: item.produto_id
-              }));
-              return;
-            }
-            itensProcessados++;
-            if (itensProcessados === itens.length) {
-              aposBaixaItensDaVenda(vendaId, () => {
-              if (pagamentosVenda.length > 0) {
-                const stmtPagamentos = db.prepare(`
-                  INSERT INTO venda_pagamentos (
-                    venda_id, forma_pagamento, valor,
-                    tef_transacao_id, tef_nsu, tef_autorizacao,
-                    tef_bandeira, tef_adquirente,
-                    tef_comprovante_cliente, tef_comprovante_estabelecimento
-                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                `);
-
-                pagamentosVenda.forEach((p) => {
-                  stmtPagamentos.run(
-                    vendaId,
-                    p.forma_pagamento,
-                    Number(p.valor || 0),
-                    p.tef_transacao_id || p.tef?.transacao_id || null,
-                    p.nsu || p.tef?.nsu || null,
-                    p.autorizacao || p.tef?.autorizacao || null,
-                    p.bandeira || p.tef?.bandeira || null,
-                    p.adquirente || p.tef?.adquirente || null,
-                    p.tef?.comprovante_cliente || null,
-                    p.tef?.comprovante_estabelecimento || null
-                  );
-                });
-
-                stmtPagamentos.finalize();
-              } else {
-                db.run(
-                  `
-                  INSERT INTO venda_pagamentos (
-                    venda_id, forma_pagamento, valor,
-                    tef_transacao_id, tef_nsu, tef_autorizacao,
-                    tef_bandeira, tef_adquirente,
-                    tef_comprovante_cliente, tef_comprovante_estabelecimento
-                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                  `,
-                  [
-                    vendaId,
-                    formaPagamentoFinal,
-                    Number(total || 0),
-                    tef?.transacao_id || null,
-                    tef?.nsu || null,
-                    tef?.autorizacao || null,
-                    tef?.bandeira || null,
-                    tef?.adquirente || null,
-                    tef?.comprovante_cliente || null,
-                    tef?.comprovante_estabelecimento || null
-                  ]
-                );
-              }
-
-              const statusFinanceiro = vendaFicaPendente ? 'pendente' : 'recebido';
-              const baixadoEm = statusFinanceiro === 'recebido' ? data_venda : null;
-              const finalizarResposta = () => {
-                db.run('COMMIT');
-
-                responderVendaComFiscal(res, {
-                  vendaId,
-                  codigo,
-                  message: 'Venda registrada com sucesso',
-                  emitirFiscal: !!emitir_fiscal,
-                  valorFiscal: totalFiscal,
-                  valorNaoFiscal: totalNaoFiscal,
-                  statusPagamento: statusPagamento,
-                  pagamentosTef: pagamentosVenda
-                });
-              };
-
-              const inserirContasReceberSeNecessario = (callback) => {
-                if (formaGeraParcelasFinanceiras(forma_pagamento) && cliente_id) {
-                  const valorParcela = totalNum;
-                  db.run(`
-                    INSERT INTO contas_receber (
-                      venda_id, cliente_id, numero_parcela, total_parcelas, valor_parcela,
-                      valor_restante, data_vencimento, status, empresa_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, date('now', '+30 day'), 'aberto', ?)
-                  `, [vendaId, cliente_id, 1, 1, valorParcela, valorParcela, empresaIdVenda], (crErr) => {
-                    if (crErr) {
-                      db.run('ROLLBACK');
-                      res.status(500).json({ error: crErr.message });
-                      return;
-                    }
-                    callback();
-                  });
-                } else {
-                  callback();
-                }
-              };
-
-              buscarNomeCliente((clienteErr, clienteNome, clienteCpf) => {
-                if (clienteErr) {
-                  db.run('ROLLBACK');
-                  res.status(500).json({ error: clienteErr.message });
-                  return;
-                }
-
-                db.run(`
-                  INSERT INTO financeiro (
-                    tipo, descricao, valor, data_movimento, categoria, forma_pagamento,
-                    referencia_id, referencia_tipo, status, origem, documento, vencimento,
-                    numero_parcela, total_parcelas, venda_id, pessoa_nome, baixado_em, empresa_id
-                  ) VALUES ('receita', ?, ?, ?, 'vendas', ?, ?, 'venda', ?, 'venda', ?, ?, 1, 1, ?, ?, ?, ?)
-                `, [
-                  `Venda ${codigo}`,
-                  totalNum,
-                  data_venda,
-                  forma_pagamento,
-                  vendaId,
-                  statusFinanceiro,
-                  clienteCpf,
-                  data_venda,
-                  vendaId,
-                  clienteNome,
-                  baixadoEm,
-                  empresaIdVenda
-                ], (finErr) => {
-                  if (finErr) {
-                    db.run('ROLLBACK');
-                    res.status(500).json({ error: finErr.message });
-                    return;
-                  }
-
-                  const aposFinanceiro = () => {
-                    if (formaGeraParcelasFinanceiras(forma_pagamento) && cliente_id) {
-                      db.run(`
-                        UPDATE clientes
-                        SET credito_atual = COALESCE(credito_atual, 0) + ?
-                        WHERE id = ?
-                      `, [totalNum, cliente_id], (credErr) => {
-                        if (credErr) {
-                          db.run('ROLLBACK');
-                          res.status(500).json({ error: credErr.message });
-                          return;
-                        }
-
-                        finalizarResposta();
-                      });
-                    } else {
-                      finalizarResposta();
-                    }
-                  };
-
-                  inserirContasReceberSeNecessario(aposFinanceiro);
-                });
-              });
-              });
-            }
-          }, opcoesBaixaEstoque);
-        });
-      });
+      await registrarVendaDaOperacaoPedido(
+        transacaoDb,
+        id,
+        empresaIdVenda,
+        req,
+        pedidoIdVenda
+      );
+      return id;
     });
+  } catch (err) {
+    const respostaErro = erroPersistenciaVenda(err, 'persistencia_venda', {
+      caixa_sessao_id: req.caixaSessaoId,
+      caixa_id: req.caixaId,
+      terminal_id: req.terminalId,
+      operador_id: req.operadorId,
+      cliente_id
+    });
+    if (err.rollbackError) respostaErro.rollback_error = err.rollbackError.message;
+    if (err.closeError) respostaErro.close_error = err.closeError.message;
+    return res.status(err.statusCode || 500).json(respostaErro);
+  }
+
+  responderVendaComFiscal(res, {
+    vendaId,
+    codigo,
+    message: 'Venda registrada com sucesso',
+    emitirFiscal: !!emitir_fiscal,
+    valorFiscal: totalFiscal,
+    valorNaoFiscal: totalNaoFiscal,
+    statusPagamento,
+    pagamentosTef: pagamentosVenda
   });
 };
 
@@ -1919,25 +1990,34 @@ return resolverEmpresaIdParaVenda(req, { db, exigirAutorizacaoUsuario: false })
 
       const saldoExistente = calcularSaldoNaoFiscal(venda, recebimentosExistentes);
       if (saldoExistente.saldoPendente <= 0 && saldoExistente.valorRecebido > 0) {
-        db.run(
-          `UPDATE vendas SET status_pagamento = 'quitada' WHERE id = ?`,
-          [id],
-          (updErr) => {
-            if (updErr) {
-              res.status(500).json({ error: updErr.message });
-              return;
-            }
-            res.json({
-              id: Number(id),
-              codigo: venda.codigo,
-              status_pagamento: 'quitada',
-              message: 'Venda não fiscal já finalizada.',
-              saldo_pendente: 0,
-              fiscal: null,
-              idempotente: true
-            });
+        verificarSaldoOutrosVenda(id, venda.valor_outros, (outrosErr, saldoOutros) => {
+          if (outrosErr) {
+            res.status(500).json({ error: outrosErr.message });
+            return;
           }
-        );
+          const statusFinal = saldoOutros > 0.01 ? 'pendente' : 'quitada';
+          db.run(
+            `UPDATE vendas SET status_pagamento = ? WHERE id = ?`,
+            [statusFinal, id],
+            (updErr) => {
+              if (updErr) {
+                res.status(500).json({ error: updErr.message });
+                return;
+              }
+              res.json({
+                id: Number(id),
+                codigo: venda.codigo,
+                status_pagamento: statusFinal,
+                message: statusFinal === 'quitada'
+                  ? 'Venda não fiscal já finalizada.'
+                  : 'Pagamento não fiscal registrado; há saldo de Outros pendente.',
+                saldo_pendente: saldoOutros,
+                fiscal: null,
+                idempotente: true
+              });
+            }
+          );
+        });
         return;
       }
 
@@ -1945,7 +2025,9 @@ return resolverEmpresaIdParaVenda(req, { db, exigirAutorizacaoUsuario: false })
         (acc, p) => acc + Number(p.valor || 0),
         0
       );
-      const totalEsperado = Number(venda.total || valorNaoFiscalVenda || 0);
+      const totalEsperado = Number(venda.valor_outros || 0) > 0
+        ? valorNaoFiscalVenda
+        : Number(venda.total || valorNaoFiscalVenda || 0);
 
       if (Math.abs(totalInformado - totalEsperado) > 0.01) {
         res.status(400).json({
@@ -1982,33 +2064,43 @@ return resolverEmpresaIdParaVenda(req, { db, exigirAutorizacaoUsuario: false })
             return;
           }
 
-          db.run(
-            `UPDATE vendas SET status_pagamento = 'quitada' WHERE id = ?`,
-            [id],
-            (updateErr) => {
-              if (updateErr) {
-                db.run('ROLLBACK');
-                res.status(500).json({ error: updateErr.message });
-                return;
-              }
-
-              db.run('COMMIT', async (commitErr) => {
-                if (commitErr) {
-                  res.status(500).json({ error: commitErr.message });
+          verificarSaldoOutrosVenda(id, venda.valor_outros, (outrosErr, saldoOutros) => {
+            if (outrosErr) {
+              db.run('ROLLBACK');
+              res.status(500).json({ error: outrosErr.message });
+              return;
+            }
+            const statusFinal = saldoOutros > 0.01 ? 'pendente' : 'quitada';
+            db.run(
+              `UPDATE vendas SET status_pagamento = ? WHERE id = ?`,
+              [statusFinal, id],
+              (updateErr) => {
+                if (updateErr) {
+                  db.run('ROLLBACK');
+                  res.status(500).json({ error: updateErr.message });
                   return;
                 }
 
-                res.json({
-                  id: Number(id),
-                  codigo: venda.codigo,
-                  status_pagamento: 'quitada',
-                  message: 'Venda não fiscal finalizada com sucesso.',
-                  saldo_pendente: 0,
-                  fiscal: null
+                db.run('COMMIT', async (commitErr) => {
+                  if (commitErr) {
+                    res.status(500).json({ error: commitErr.message });
+                    return;
+                  }
+
+                  res.json({
+                    id: Number(id),
+                    codigo: venda.codigo,
+                    status_pagamento: statusFinal,
+                    message: statusFinal === 'quitada'
+                      ? 'Venda não fiscal finalizada com sucesso.'
+                      : 'Pagamento não fiscal registrado; há saldo de Outros pendente.',
+                    saldo_pendente: saldoOutros,
+                    fiscal: null
+                  });
                 });
-              });
-            }
-          );
+              }
+            );
+          });
         });
       });
     });
@@ -2073,25 +2165,34 @@ return resolverEmpresaIdParaVenda(req, { db, exigirAutorizacaoUsuario: false })
     const saldo = calcularSaldoNaoFiscal(venda, recebimentosAtuais);
 
     if (saldo.saldoPendente <= 0) {
-      db.run(
-        `UPDATE vendas SET status_pagamento = 'quitada' WHERE id = ? AND status_pagamento = 'aguardando_nao_fiscal'`,
-        [id],
-        (updErr) => {
-          if (updErr) {
-            res.status(500).json({ error: updErr.message });
-            return;
-          }
-          res.json({
-            id: Number(id),
-            codigo: venda.codigo,
-            status_pagamento: 'quitada',
-            message: 'Pagamento não fiscal já registrado.',
-            saldo_pendente: 0,
-            fiscal: null,
-            idempotente: true
-          });
+      verificarSaldoOutrosVenda(id, venda.valor_outros, (outrosErr, saldoOutros) => {
+        if (outrosErr) {
+          res.status(500).json({ error: outrosErr.message });
+          return;
         }
-      );
+        const statusFinal = saldoOutros > 0.01 ? 'pendente' : 'quitada';
+        db.run(
+          `UPDATE vendas SET status_pagamento = ? WHERE id = ? AND status_pagamento = 'aguardando_nao_fiscal'`,
+          [statusFinal, id],
+          (updErr) => {
+            if (updErr) {
+              res.status(500).json({ error: updErr.message });
+              return;
+            }
+            res.json({
+              id: Number(id),
+              codigo: venda.codigo,
+              status_pagamento: statusFinal,
+              message: statusFinal === 'quitada'
+                ? 'Pagamento não fiscal já registrado.'
+                : 'Pagamento não fiscal registrado; há saldo de Outros pendente.',
+              saldo_pendente: saldoOutros,
+              fiscal: null,
+              idempotente: true
+            });
+          }
+        );
+      });
       return;
     }
 
@@ -2139,52 +2240,62 @@ return resolverEmpresaIdParaVenda(req, { db, exigirAutorizacaoUsuario: false })
           ...(Array.isArray(recebimentosAtuais) ? recebimentosAtuais : []),
           ...recebimentos
         ];
-        const statusFinal = resolverStatusPagamentoVenda(
+        const statusFinanceiro = resolverStatusPagamentoVenda(
           venda.valor_nao_fiscal,
           recebimentosNaoFiscalRegistrados,
           'quitada',
           { valorFiscal: valorFiscalVenda }
         );
 
-        if (statusFinal !== 'quitada') {
+        if (statusFinanceiro !== 'quitada') {
           db.run('ROLLBACK');
           res.status(400).json({
             error: 'Recebimento insuficiente para quitar a venda.',
-            status_pagamento: statusFinal,
+            status_pagamento: statusFinanceiro,
             saldo_pendente: calcularSaldoNaoFiscal(venda, recebimentosNaoFiscalRegistrados).saldoPendente
           });
           return;
         }
 
-        db.run(
-          `UPDATE vendas SET status_pagamento = ? WHERE id = ?`,
-          [statusFinal, id],
-          (updateErr) => {
-            if (updateErr) {
-              db.run('ROLLBACK');
-              res.status(500).json({ error: updateErr.message });
-              return;
-            }
-
-            db.run('COMMIT', async (commitErr) => {
-              if (commitErr) {
-                res.status(500).json({ error: commitErr.message });
+        verificarSaldoOutrosVenda(id, venda.valor_outros, (outrosErr, saldoOutros) => {
+          if (outrosErr) {
+            db.run('ROLLBACK');
+            res.status(500).json({ error: outrosErr.message });
+            return;
+          }
+          const statusFinal = saldoOutros > 0.01 ? 'pendente' : statusFinanceiro;
+          db.run(
+            `UPDATE vendas SET status_pagamento = ? WHERE id = ?`,
+            [statusFinal, id],
+            (updateErr) => {
+              if (updateErr) {
+                db.run('ROLLBACK');
+                res.status(500).json({ error: updateErr.message });
                 return;
               }
 
-              const fiscal = await emitirFiscalSeSolicitado(id, req.body.emitir_fiscal, venda);
+              db.run('COMMIT', async (commitErr) => {
+                if (commitErr) {
+                  res.status(500).json({ error: commitErr.message });
+                  return;
+                }
 
-              res.json({
-                id: Number(id),
-                codigo: venda.codigo,
-                status_pagamento: statusFinal,
-                message: 'Pagamento não fiscal registrado com sucesso.',
-                saldo_pendente: 0,
-                fiscal
+                const fiscal = await emitirFiscalSeSolicitado(id, req.body.emitir_fiscal, venda);
+
+                res.json({
+                  id: Number(id),
+                  codigo: venda.codigo,
+                  status_pagamento: statusFinal,
+                  message: saldoOutros > 0.01
+                    ? 'Pagamento não fiscal registrado; há saldo de Outros pendente.'
+                    : 'Pagamento não fiscal registrado com sucesso.',
+                  saldo_pendente: saldoOutros,
+                  fiscal
+                });
               });
-            });
-          }
-        );
+            }
+          );
+        });
       });
     });
   });

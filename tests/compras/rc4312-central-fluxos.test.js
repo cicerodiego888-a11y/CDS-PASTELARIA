@@ -43,10 +43,20 @@ test('BUG1: aplicarMiipImportacaoXml cria miip_sugestao mesmo sem draft prévio'
   );
 });
 
-test('BUG1: confirmarAssociacaoMiip não retorna silenciosamente', () => {
+test('BUG1: confirmarAssociacaoMiip delega confirmação e notificação de sucesso', () => {
   const src = ler('frontend/erp/js/compras.js');
-  assert.match(src, /function confirmarAssociacaoMiip[\s\S]*showNotification\('Associação confirmada\./);
-  assert.match(src, /function confirmarAssociacaoMiip[\s\S]*Não há sugestão de produto válida/);
+  const confirmar = src.match(/function confirmarAssociacaoMiip\(index\) \{([\s\S]*?)\n\}/)?.[1];
+  const confirmarComProduto = src.match(
+    /function confirmarAssociacaoMiipComProduto\(index, produtoIdInformado, opcoes = \{\}\) \{([\s\S]*?)\n\}/
+  )?.[1];
+  assert.ok(confirmar, 'função de confirmação MIIP presente');
+  assert.ok(confirmarComProduto, 'helper de confirmação MIIP presente');
+  assert.match(confirmar, /confirmarAssociacaoMiipComProduto\(index, produtoId, \{/);
+  assert.match(confirmar, /Não há sugestão de produto válida para confirmar/);
+  assert.match(
+    confirmarComProduto,
+    /showNotification\(opcoes\.mensagemSucesso \|\| 'Associação confirmada\.', 'success'\)/
+  );
   assert.match(src, /extrairProdutoIdSugestaoMiip/);
 });
 
@@ -73,6 +83,14 @@ test('BUG2: limparDraftCompra reseta modoEntradaF7Compra', () => {
   assert.match(src, /function limparFormularioItemCompra[\s\S]*modoEntradaF7Compra = false/);
   assert.match(src, /atualizarRotuloBotaoItemCompra/);
   assert.match(src, /id="btnAdicionarItemCompra"/);
+});
+
+test('Central / Compras preserva nItem, códigos originais e decisão de vínculo', () => {
+  const src = ler('frontend/erp/js/compras.js');
+  assert.match(src, /nfe_item_n:\s*Number\(item\.nfe_item_n \|\| item\.nItem\)/);
+  assert.match(src, /clonarDadosItemCompra\(item\.nfe_item_original\)/);
+  assert.match(src, /cEANTrib:\s*sincronizado\.cEANTrib/);
+  assert.match(src, /miip_resultado:\s*sincronizado\.miip_resultado/);
 });
 
 console.log(`\n${ok} ok, ${falhas} falha(s)\n`);

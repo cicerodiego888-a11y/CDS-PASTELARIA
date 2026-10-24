@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const db = require('../../database');
 const { gravarAuditoria } = require('../auditoria');
 const { validarMotivoTexto } = require('../validacao/validarMotivoTexto');
@@ -17,6 +18,7 @@ const {
 const {
   resolverEmpresaDaOrigemFinanceira
 } = require('../financeiro/FinanceiroEmpresaContextoService');
+const { logFiscalRuntime } = require('../fiscal/core/FiscalRuntimeLog');
 
 const { devolverEstoqueItensVenda } = VendaDevolucaoService;
 const {
@@ -223,12 +225,18 @@ db.get('SELECT * FROM vendas WHERE id = ?', [id], (err, venda) => {
 
     cancelarNfceAutorizadaVenda(id, motivo, { empresaIdContexto: req.empresaId })
       .then(() => executarCancelamentoVenda())
-      .catch((cancelErr) => res.status(400).json({ error: cancelErr.message }));
+      .catch((cancelErr) => res.status(cancelErr.statusCode || 400).json({
+        success: false,
+        error: cancelErr.message,
+        code: cancelErr.code,
+        resultUnknown: cancelErr.resultUnknown === true
+      }));
   });
 });
 }
 
 function cancelarVendaPost(vendaId, motivo, req, res) {
+const correlationId = crypto.randomUUID();
 db.get(
   'SELECT * FROM vendas WHERE id = ?',
   [vendaId],
@@ -258,6 +266,27 @@ db.get(
       });
     }
 
+    const estornarTefFiscal = () => {
+      if (
+        venda.status_pagamento !== 'fiscal_pago'
+        && venda.status_pagamento !== 'aguardando_nao_fiscal'
+      ) {
+        return Promise.resolve();
+      }
+      if (!venda.tef_transacao_id) return Promise.resolve();
+
+      const started = process.hrtime.bigint();
+      return cancelarFiscal(venda.tef_transacao_id, motivo || 'Cancelamento de venda')
+        .then((result) => {
+          logFiscalRuntime('CANCELAMENTO_COMERCIAL', {
+            correlationId,
+            etapa: 'estorno_tef',
+            duracaoMs: Number(process.hrtime.bigint() - started) / 1e6
+          });
+          return result;
+        });
+    };
+
     const prosseguirCancelamento = () => {
       buscarNfceAutorizadaVenda(vendaId, (errNfce, nfceAutorizada) => {
         if (errNfce) {
@@ -268,6 +297,7 @@ db.get(
         }
 
         const executarCancelamentoLocal = () => {
+          const started = process.hrtime.bigint();
           db.serialize(() => {
             db.run('BEGIN IMMEDIATE');
 
@@ -284,6 +314,12 @@ db.get(
                 }
 
                 devolverEstoqueEEstornarFichaDaVenda(itens, venda, req, db, (estErr) => {
+                  logFiscalRuntime('CANCELAMENTO_COMERCIAL', {
+                    correlationId,
+                    etapa: 'estoque',
+                    duracaoMs: Number(process.hrtime.bigint() - started) / 1e6,
+                    resultado: estErr ? 'falha' : 'concluido'
+                  });
                   if (estErr) {
                     db.run('ROLLBACK');
                     return res.status(500).json({
@@ -292,7 +328,14 @@ db.get(
                     });
                   }
 
+                  const recebimentosStarted = process.hrtime.bigint();
                   cancelarRecebimentosVenda(vendaId, (recErr) => {
+                    logFiscalRuntime('CANCELAMENTO_COMERCIAL', {
+                      correlationId,
+                      etapa: 'recebimentos',
+                      duracaoMs: Number(process.hrtime.bigint() - recebimentosStarted) / 1e6,
+                      resultado: recErr ? 'falha' : 'concluido'
+                    });
                     if (recErr) {
                       db.run('ROLLBACK');
                       return res.status(500).json({
@@ -335,27 +378,47 @@ db.get(
                           ]
                         );
 
+                        const financeiroStarted = process.hrtime.bigint();
                         cancelarFinanceiroVenda(vendaId, { gerenciarTransacao: false })
                           .then(() => {
-                            db.run('COMMIT');
-                            gravarAuditoria({
-                              usuario_id: req.operadorId || req.user?.id || null,
-                              usuario_nome: req.user?.username || req.user?.nome || null,
-                              modulo: 'vendas',
-                              acao: 'cancelar_venda',
-                              referencia_tipo: 'venda',
-                              referencia_id: vendaId,
-                              detalhes: {
-                                motivo: motivo || null,
-                                ip: req.ip || null,
-                                sessao_id: req.caixaSessaoId || null,
-                                ...anexarPoliticaSnapshotAuditoria(venda, 'cancelamento')
-                              },
-                              ip_requisicao: req.ip || null
-                            }).catch((auditErr) => console.error('Erro ao gravar auditoria de cancelamento de venda:', auditErr));
-                            res.json({
-                              sucesso: true,
-                              mensagem: 'Venda cancelada com sucesso.'
+                            logFiscalRuntime('CANCELAMENTO_COMERCIAL', {
+                              correlationId,
+                              etapa: 'financeiro',
+                              duracaoMs: Number(process.hrtime.bigint() - financeiroStarted) / 1e6,
+                              resultado: 'concluido'
+                            });
+                            db.run('COMMIT', (commitErr) => {
+                              if (commitErr) {
+                                db.run('ROLLBACK');
+                                return res.status(500).json({
+                                  sucesso: false,
+                                  mensagem: commitErr.message
+                                });
+                              }
+                              logFiscalRuntime('CANCELAMENTO_COMERCIAL', {
+                                correlationId,
+                                etapa: 'pos_cancelamento_fiscal_total',
+                                duracaoMs: Number(process.hrtime.bigint() - started) / 1e6
+                              });
+                              gravarAuditoria({
+                                usuario_id: req.operadorId || req.user?.id || null,
+                                usuario_nome: req.user?.username || req.user?.nome || null,
+                                modulo: 'vendas',
+                                acao: 'cancelar_venda',
+                                referencia_tipo: 'venda',
+                                referencia_id: vendaId,
+                                detalhes: {
+                                  motivo: motivo || null,
+                                  ip: req.ip || null,
+                                  sessao_id: req.caixaSessaoId || null,
+                                  ...anexarPoliticaSnapshotAuditoria(venda, 'cancelamento')
+                                },
+                                ip_requisicao: req.ip || null
+                              }).catch((auditErr) => console.error('Erro ao gravar auditoria de cancelamento de venda:', auditErr));
+                              res.json({
+                                sucesso: true,
+                                mensagem: 'Venda cancelada com sucesso.'
+                              });
                             });
                           })
                           .catch((finCancelErr) => {
@@ -375,7 +438,13 @@ db.get(
         };
 
         if (!nfceAutorizada) {
-          return executarCancelamentoLocal();
+          return estornarTefFiscal()
+            .then(() => executarCancelamentoLocal())
+            .catch((tefErr) => res.status(500).json({
+              sucesso: false,
+              mensagem: 'Erro ao estornar pagamento fiscal.',
+              code: tefErr.code
+            }));
         }
 
         const justificativa = motivo || '';
@@ -387,35 +456,26 @@ db.get(
           });
         }
 
-        cancelarNfceAutorizadaVenda(vendaId, justificativa, { empresaIdContexto: req.empresaId })
+        cancelarNfceAutorizadaVenda(vendaId, justificativa, {
+          empresaIdContexto: req.empresaId,
+          correlationId
+        })
+          .then(() => estornarTefFiscal())
           .then(() => executarCancelamentoLocal())
-          .catch((cancelErr) => res.status(400).json({
+          .catch((cancelErr) => res.status(cancelErr.statusCode || 400).json({
             sucesso: false,
             mensagem: cancelErr.message,
-            code: cancelErr.code
+            code: cancelErr.code,
+            resultUnknown: cancelErr.resultUnknown === true,
+            status: cancelErr.resultUnknown
+              ? 'cancelamento_desconhecido'
+              : (cancelErr.code === 'CANCELAMENTO_EM_ANDAMENTO'
+                ? 'cancelamento_em_andamento'
+                : undefined),
+            correlationId: cancelErr.correlationId || correlationId
           }));
       });
     };
-
-    if (
-      venda.status_pagamento === 'fiscal_pago' ||
-      venda.status_pagamento === 'aguardando_nao_fiscal'
-    ) {
-      const estornarFiscal = venda.tef_transacao_id
-        ? cancelarFiscal(venda.tef_transacao_id, motivo || 'Cancelamento de venda')
-        : Promise.resolve();
-
-      estornarFiscal
-        .then(() => prosseguirCancelamento())
-        .catch((tefErr) => {
-          console.error('Erro ao cancelar pagamento fiscal TEF:', tefErr);
-          return res.status(500).json({
-            sucesso: false,
-            mensagem: 'Erro ao estornar pagamento fiscal.'
-          });
-        });
-      return;
-    }
 
     prosseguirCancelamento();
   }

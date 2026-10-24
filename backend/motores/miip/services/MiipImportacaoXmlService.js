@@ -9,6 +9,7 @@
 const MiipImportacaoResultado = require('../core/MiipImportacaoResultado');
 const { mapearDecisaoPipelineParaImportacao } = require('../utils/MiipResultadoImportacaoMapper');
 const { mapearItemCompraParaIdentificavel } = require('../utils/mapearItemCompra');
+const { defaultDiagnostics } = require('../diagnostics/MiipOriginDiagnostics');
 const Mie = require('../../../services/embalagens');
 
 const MOTOR_LABELS = Object.freeze({
@@ -32,6 +33,8 @@ class MiipImportacaoXmlService {
     this._integracaoLog = deps.integracaoLog ?? null;
     /** @private */
     this._db = deps.db ?? null;
+    /** @private */
+    this._originDiagnostics = deps.originDiagnostics ?? defaultDiagnostics;
     /** @private @type {Object|null} */
     this._sessaoAtual = null;
   }
@@ -123,6 +126,7 @@ class MiipImportacaoXmlService {
       const miipResp = await this._miipService.identificar(itemIdentificavel, contexto);
       const resultado = miipResp?.resultado;
       const operacaoId = resultado?.requestId || `${operacaoBase}-${indice}`;
+      this._originDiagnostics.setOperationId(operacaoId);
 
       const classificacao = mapearDecisaoPipelineParaImportacao(miipResp, resultado);
 

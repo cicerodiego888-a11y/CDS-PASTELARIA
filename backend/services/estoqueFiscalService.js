@@ -1,4 +1,5 @@
 'use strict';
+const { roundStockQuantity } = require('./estoque/quantityPrecision');
 
 const estoqueSaldosPublico = require('./fiscalNaoFiscal/estoqueSaldosPublico');
 const { TipoSaldo } = require('./fiscalNaoFiscal/constants');
@@ -106,9 +107,9 @@ function calcularDevolucaoFiscalPrimeiro(qtds, qtdDevolver, jaDevolvido = {}) {
   const qtdNaoFiscal = Math.min(qtdEfetiva - qtdFiscal, naoFiscalRestante);
 
   return {
-    qtdFiscal: Number(qtdFiscal.toFixed(3)),
-    qtdNaoFiscal: Number(qtdNaoFiscal.toFixed(3)),
-    qtdTotal: Number(qtdEfetiva.toFixed(3))
+    qtdFiscal: Number(qtdFiscal.toFixed(6)),
+    qtdNaoFiscal: Number(qtdNaoFiscal.toFixed(6)),
+    qtdTotal: Number(qtdEfetiva.toFixed(6))
   };
 }
 
@@ -176,9 +177,7 @@ function montarOptsPortaRecalculo(db, opcoes = {}) {
   };
 }
 
-function round3(n) {
-  return Math.round(Number(n || 0) * 1000) / 1000;
-}
+
 
 /**
  * Calcula saldos-alvo a partir do histórico (compras concluídas − vendas não
@@ -208,26 +207,26 @@ function calcularSaldosAlvoRecalculo(comprasItens, vendasItens, devolucoes) {
     if (totalComprado <= 0 || qtdDevolver <= 0) return;
 
     const proporcaoFiscal = qtds.quantidade_fiscal / totalComprado;
-    const qtdFiscal = Number((proporcaoFiscal * qtdDevolver).toFixed(3));
-    const qtdNaoFiscal = Number((qtdDevolver - qtdFiscal).toFixed(3));
+    const qtdFiscal = Number((proporcaoFiscal * qtdDevolver).toFixed(6));
+    const qtdNaoFiscal = Number((qtdDevolver - qtdFiscal).toFixed(6));
     saldoFiscal -= qtdFiscal;
     saldoNaoFiscal -= qtdNaoFiscal;
   });
 
-  saldoFiscal = Number(Math.max(0, saldoFiscal).toFixed(3));
-  saldoNaoFiscal = Number(Math.max(0, saldoNaoFiscal).toFixed(3));
+  saldoFiscal = Number(Math.max(0, saldoFiscal).toFixed(6));
+  saldoNaoFiscal = Number(Math.max(0, saldoNaoFiscal).toFixed(6));
 
   return {
     saldo_fiscal: saldoFiscal,
     saldo_nao_fiscal: saldoNaoFiscal,
-    estoque_atual: Number((saldoFiscal + saldoNaoFiscal).toFixed(3))
+    estoque_atual: Number((saldoFiscal + saldoNaoFiscal).toFixed(6))
   };
 }
 
 async function aplicarSaldosAlvoViaPorta(produtoId, alvo, optsPorta) {
   const atual = await estoqueSaldosPublico.consultarSaldo(produtoId, optsPorta);
-  const ajusteF = round3(alvo.saldo_fiscal - Number(atual.saldo_fiscal || 0));
-  const ajusteNF = round3(alvo.saldo_nao_fiscal - Number(atual.saldo_nao_fiscal || 0));
+  const ajusteF = roundStockQuantity(alvo.saldo_fiscal - Number(atual.saldo_fiscal || 0));
+  const ajusteNF = roundStockQuantity(alvo.saldo_nao_fiscal - Number(atual.saldo_nao_fiscal || 0));
 
   if (ajusteF > 0) {
     await estoqueSaldosPublico.creditarSaldo(produtoId, TipoSaldo.FISCAL, ajusteF, optsPorta);

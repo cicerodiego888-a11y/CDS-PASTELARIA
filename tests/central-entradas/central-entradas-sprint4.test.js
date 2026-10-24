@@ -3,6 +3,9 @@
  * Executar: npm run test:central-entradas-sprint4
  */
 
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-sprint4-');
+
 const assert = require('assert');
 const CentralEntradasService = require('../../backend/motores/central-entradas/CentralEntradasService');
 const CentralNsuRepository = require('../../backend/motores/central-entradas/repositories/CentralNsuRepository');
@@ -10,6 +13,7 @@ const CentralDocumentosRepository = require('../../backend/motores/central-entra
 const CentralHistoricoRepository = require('../../backend/motores/central-entradas/repositories/CentralHistoricoRepository');
 const CentralDfePersistenciaService = require('../../backend/motores/central-entradas/services/CentralDfePersistenciaService');
 const { DocumentoFiscalStatus } = require('../../backend/motores/central-entradas/core/DocumentoFiscalStatus');
+const { garantirEmpresaTeste } = require('./helpers/empresaTesteCentral');
 
 let passou = 0;
 let falhou = 0;
@@ -23,6 +27,8 @@ const nsuRepository = new CentralNsuRepository();
 const documentosRepository = new CentralDocumentosRepository();
 const historicoRepository = new CentralHistoricoRepository();
 const persistenciaService = new CentralDfePersistenciaService();
+const CTX = { empresaId: null };
+isolamento.comprobarSeCarregado();
 
 function test(nome, fn) {
   return Promise.resolve()
@@ -43,7 +49,8 @@ function criarXmlTeste(chave) {
 }
 
 async function limparDocumentoTeste() {
-  const existente = await documentosRepository.buscarPorChave(CHAVE_SPRINT4);
+  if (!CTX.empresaId) return;
+  const existente = await documentosRepository.buscarPorChave(CHAVE_SPRINT4, CTX.empresaId);
   if (!existente) return;
 
   await historicoRepository._obterSql().run(
@@ -64,6 +71,7 @@ async function main() {
   console.log('\n=== Testes Central de Entradas — Sprint 4 ===\n');
 
   await nsuRepository._obterSql().whenReady();
+  CTX.empresaId = await garantirEmpresaTeste(documentosRepository._obterSql());
 
   await test('NSU obterOuCriar não reinicia do zero', async () => {
     await limparNsuTeste();
@@ -89,11 +97,13 @@ async function main() {
     const resultado = await persistenciaService.persistirDocumentoDfe({
       xml,
       nsu: '000000000000999',
-      origem: 'dfe'
+      origem: 'dfe',
+      empresaId: CTX.empresaId
     });
 
     assert.strictEqual(resultado.novo, true);
-    assert.strictEqual(resultado.documento.status, DocumentoFiscalStatus.SINCRONIZADA);
+    assert.strictEqual(resultado.documento.status, DocumentoFiscalStatus.XML_COMPLETO);
+    assert.strictEqual(resultado.documento.empresaId, CTX.empresaId);
     assert.strictEqual(resultado.documento.chave, CHAVE_SPRINT4);
 
     const sql = documentosRepository._obterSql();
@@ -105,17 +115,32 @@ async function main() {
     const xml = criarXmlTeste(CHAVE_SPRINT4);
     const resultado = await persistenciaService.persistirDocumentoDfe({
       xml,
-      origem: 'dfe'
+      origem: 'dfe',
+      empresaId: CTX.empresaId
     });
 
     assert.strictEqual(resultado.duplicado, true);
     assert.strictEqual(resultado.novo, false);
+
+    const sql = documentosRepository._obterSql();
+    const ddl = await sql.get(
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'central_entradas_documentos'`
+    );
+    assert.ok(/UNIQUE\s*\(\s*chave\s*,\s*empresa_id\s*\)/i.test(ddl.sql || ''));
+    await assert.rejects(
+      () => sql.run(
+        `INSERT INTO central_entradas_documentos (chave, xml, status, empresa_id)
+         VALUES (?, '<nfe/>', ?, ?)`,
+        [CHAVE_SPRINT4, DocumentoFiscalStatus.XML_COMPLETO, CTX.empresaId]
+      ),
+      (err) => /UNIQUE/i.test(String(err && err.message))
+    );
   });
 
   let documentoId;
 
   await test('obterXmlDocumento retorna XML bruto', async () => {
-    const doc = await documentosRepository.buscarPorChave(CHAVE_SPRINT4);
+    const doc = await documentosRepository.buscarPorChave(CHAVE_SPRINT4, CTX.empresaId);
     assert.ok(doc);
     documentoId = doc.id;
 

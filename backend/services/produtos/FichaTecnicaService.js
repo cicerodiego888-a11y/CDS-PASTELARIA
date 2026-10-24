@@ -14,6 +14,13 @@ const {
   normalizarTipoOperacional
 } = require('./tipoOperacionalProduto');
 const { garantirSchemaFichaTecnicaAsync } = require('./fichaTecnicaSchema');
+const { garantirSchemaFichaPersonalizacaoAsync } = require('./personalizacaoIngredientesSchema');
+
+const CLASSIFICACOES_COMERCIAIS = new Set([
+  'OBRIGATORIO_OCULTO',
+  'OPCIONAL',
+  'OPCIONAL_COM_ADICIONAL'
+]);
 
 function erroFicha(code, message, statusCode = 400) {
   const err = new Error(message);
@@ -85,7 +92,10 @@ async function obterProduto(db, id) {
   }
   const row = await dbGet(
     db,
-    `SELECT id, nome, ativo, unidade, COALESCE(tipo_operacional, 'COMERCIAL') AS tipo_operacional
+    `SELECT id, nome, ativo, unidade,
+            COALESCE(tipo_operacional, 'COMERCIAL') AS tipo_operacional,
+            COALESCE(permite_personalizacao_ingredientes, 0) AS permite_personalizacao_ingredientes,
+            utiliza_ficha_tecnica
      FROM produtos WHERE id = ?`,
     [pid]
   );
@@ -93,9 +103,33 @@ async function obterProduto(db, id) {
   return row;
 }
 
+async function consultarUsoFichaTecnica(produtoId, opcoes = {}) {
+  const db = getDb(opcoes.db);
+  await garantirSchemaFichaTecnicaAsync(db);
+  await garantirSchemaFichaPersonalizacaoAsync(db);
+  const produto = await obterProduto(db, produtoId);
+  const ficha = await dbGet(
+    db,
+    'SELECT id, ativo FROM ficha_tecnica WHERE produto_id = ?',
+    [produto.id]
+  );
+  const configuracaoLegada = produto.utiliza_ficha_tecnica == null;
+  const utilizaFichaTecnica = configuracaoLegada
+    ? Boolean(ficha) || Number(produto.permite_personalizacao_ingredientes) === 1
+    : Number(produto.utiliza_ficha_tecnica) === 1;
+  return {
+    produto_id: produto.id,
+    utiliza_ficha_tecnica: utilizaFichaTecnica,
+    configuracao_legada: configuracaoLegada,
+    ficha_existe: Boolean(ficha),
+    ficha_ativa: Boolean(ficha) && Number(ficha.ativo) === 1
+  };
+}
+
 async function listarInsumos(opcoes = {}) {
   const db = getDb(opcoes.db);
   await garantirSchemaFichaTecnicaAsync(db);
+  await garantirSchemaFichaPersonalizacaoAsync(db);
   return dbAll(
     db,
     `SELECT id, codigo, nome, unidade, COALESCE(tipo_operacional, 'COMERCIAL') AS tipo_operacional
@@ -110,21 +144,120 @@ async function listarInsumos(opcoes = {}) {
 async function obterPorProdutoId(produtoId, opcoes = {}) {
   const db = getDb(opcoes.db);
   await garantirSchemaFichaTecnicaAsync(db);
+  await garantirSchemaFichaPersonalizacaoAsync(db);
   const produto = await obterProduto(db, produtoId);
   const cab = await dbGet(db, 'SELECT * FROM ficha_tecnica WHERE produto_id = ?', [produto.id]);
   if (!cab) {
-    return { produto_id: produto.id, ativo: 0, itens: [] };
+    return {
+      produto_id: produto.id,
+      permite_personalizacao_ingredientes: Number(produto.permite_personalizacao_ingredientes) === 1,
+      utiliza_ficha_tecnica: produto.utiliza_ficha_tecnica == null
+        ? Boolean(Number(produto.permite_personalizacao_ingredientes) === 1)
+        : Number(produto.utiliza_ficha_tecnica) === 1,
+      configuracao_legada: produto.utiliza_ficha_tecnica == null,
+      existe: false,
+      ativo: 0,
+      itens: []
+    };
   }
-  const itens = await dbAll(
+  const itensBrutos = await dbAll(
     db,
-    `SELECT i.id, i.insumo_id, i.quantidade, i.unidade, p.nome AS insumo_nome, p.unidade AS insumo_unidade
-     FROM ficha_tecnica_itens i
-     JOIN produtos p ON p.id = i.insumo_id
-     WHERE i.ficha_tecnica_id = ?
-     ORDER BY i.id`,
+    `SELECT id, insumo_id, quantidade, unidade, classificacao_comercial, preco_adicional
+     FROM ficha_tecnica_itens
+     WHERE ficha_tecnica_id = ?
+     ORDER BY id`,
     [cab.id]
   );
-  return { ...cab, itens };
+  const idsInsumos = Array.from(new Set(itensBrutos.map((item) => Number(item.insumo_id))));
+  const produtosInsumos = idsInsumos.length
+    ? await dbAll(
+      db,
+      `SELECT id, nome, unidade, ativo,
+              COALESCE(tipo_operacional, 'COMERCIAL') AS tipo_operacional
+       FROM produtos
+       WHERE id IN (${idsInsumos.map(() => '?').join(',')})`,
+      idsInsumos
+    )
+    : [];
+  const insumosPorId = new Map(produtosInsumos.map((item) => [Number(item.id), item]));
+  const referenciasInvalidas = itensBrutos
+    .filter((item) => !insumosPorId.has(Number(item.insumo_id)))
+    .map((item) => `item ${item.id} → insumo ${item.insumo_id}`);
+  if (referenciasInvalidas.length) {
+    throw erroFicha(
+      'FICHA_TECNICA_INTEGRIDADE',
+      `Ficha técnica ${cab.id} do produto ${produto.id} contém referência(s) de insumo inexistente(s): ${referenciasInvalidas.join(', ')}.`
+    );
+  }
+
+  const vistos = new Set();
+  const itens = itensBrutos.map((item) => {
+    const insumoId = Number(item.insumo_id);
+    const insumo = insumosPorId.get(insumoId);
+    if (Number(insumo.ativo) === 0) {
+      throw erroFicha(
+        'INSUMO_INATIVO',
+        `O insumo ${insumoId} da ficha técnica ${cab.id} está inativo.`
+      );
+    }
+    if (normalizarTipoOperacional(insumo.tipo_operacional) !== TipoOperacionalProduto.INSUMO) {
+      throw erroFicha(
+        'COMPONENTE_NAO_INSUMO',
+        `O produto ${insumoId} da ficha técnica ${cab.id} não está cadastrado como insumo.`
+      );
+    }
+    if (vistos.has(insumoId)) {
+      throw erroFicha(
+        'INSUMO_DUPLICADO',
+        `O insumo ${insumoId} está duplicado na ficha técnica ${cab.id}.`
+      );
+    }
+    vistos.add(insumoId);
+    if (!(Number(item.quantidade) > 0) || !Number.isFinite(Number(item.quantidade))) {
+      throw erroFicha(
+        'QUANTIDADE_INVALIDA',
+        `A quantidade do item ${item.id} da ficha técnica ${cab.id} deve ser positiva.`
+      );
+    }
+    if (!CLASSIFICACOES_COMERCIAIS.has(String(item.classificacao_comercial || 'OBRIGATORIO_OCULTO'))) {
+      throw erroFicha(
+        'CLASSIFICACAO_INGREDIENTE_INVALIDA',
+        `A classificação comercial do item ${item.id} da ficha técnica ${cab.id} é inválida.`
+      );
+    }
+    if (!Number.isFinite(Number(item.preco_adicional)) || Number(item.preco_adicional) < 0) {
+      throw erroFicha(
+        'PRECO_ADICIONAL_INVALIDO',
+        `O preço adicional do item ${item.id} da ficha técnica ${cab.id} é inválido.`
+      );
+    }
+    if (
+      item.classificacao_comercial === 'OPCIONAL_COM_ADICIONAL'
+        ? Number(item.preco_adicional) <= 0
+        : Number(item.preco_adicional) !== 0
+    ) {
+      throw erroFicha(
+        'PRECO_ADICIONAL_INVALIDO',
+        `O preço adicional do item ${item.id} da ficha técnica ${cab.id} não corresponde à classificação comercial.`
+      );
+    }
+    validarUnidadeFicha(item.unidade);
+    return {
+      ...item,
+      insumo_nome: insumo.nome,
+      insumo_unidade: insumo.unidade
+    };
+  });
+  return {
+    ...cab,
+    permite_personalizacao_ingredientes: Number(produto.permite_personalizacao_ingredientes) === 1,
+    utiliza_ficha_tecnica: produto.utiliza_ficha_tecnica == null
+      ? true
+      : Number(produto.utiliza_ficha_tecnica) === 1,
+    configuracao_legada: produto.utiliza_ficha_tecnica == null,
+    existe: true,
+    itens
+  };
 }
 
 async function excluirPorProdutoId(produtoId, opcoes = {}) {
@@ -140,6 +273,7 @@ async function excluirPorProdutoId(produtoId, opcoes = {}) {
 async function salvar(produtoId, payload = {}, opcoes = {}) {
   const db = getDb(opcoes.db);
   await garantirSchemaFichaTecnicaAsync(db);
+  await garantirSchemaFichaPersonalizacaoAsync(db);
   const produto = await obterProduto(db, produtoId);
   if (Number(produto.ativo) === 0) {
     throw erroFicha('PRODUTO_INATIVO', 'Produto inativo não recebe ficha técnica.');
@@ -152,7 +286,15 @@ async function salvar(produtoId, payload = {}, opcoes = {}) {
   }
 
   const itens = Array.isArray(payload.itens) ? payload.itens : [];
+  const ativo = payload.ativo === 0 || payload.ativo === false ? 0 : 1;
+  if (ativo === 1 && itens.length === 0) {
+    throw erroFicha(
+      'FICHA_TECNICA_VAZIA',
+      'Ficha técnica ativa deve possuir ao menos um ingrediente.'
+    );
+  }
   const visto = new Set();
+  let quantidadeOpcionais = 0;
 
   for (const raw of itens) {
     const insumoId = Number(raw.insumo_id != null ? raw.insumo_id : raw.insumoId);
@@ -160,10 +302,34 @@ async function salvar(produtoId, payload = {}, opcoes = {}) {
     if (!Number.isInteger(insumoId) || insumoId <= 0) {
       throw erroFicha('INSUMO_INVALIDO', 'Insumo inválido.');
     }
-    if (!(qtd > 0)) {
+    if (!(qtd > 0) || !Number.isFinite(qtd)) {
       throw erroFicha('QUANTIDADE_INVALIDA', 'Quantidade da ficha técnica deve ser positiva.');
     }
     const unidade = validarUnidadeFicha(raw.unidade);
+    const classificacaoComercial = String(raw.classificacao_comercial || 'OBRIGATORIO_OCULTO')
+      .trim()
+      .toUpperCase();
+    if (!CLASSIFICACOES_COMERCIAIS.has(classificacaoComercial)) {
+      throw erroFicha('CLASSIFICACAO_INGREDIENTE_INVALIDA', 'Classificação comercial do ingrediente inválida.');
+    }
+    const precoAdicionalBruto = raw.preco_adicional == null || raw.preco_adicional === ''
+      ? 0
+      : Number(raw.preco_adicional);
+    if (!Number.isFinite(precoAdicionalBruto) || precoAdicionalBruto < 0) {
+      throw erroFicha('PRECO_ADICIONAL_INVALIDO', 'Preço adicional do ingrediente inválido.');
+    }
+    const precoAdicional = Number(precoAdicionalBruto.toFixed(2));
+    if (
+      classificacaoComercial === 'OPCIONAL_COM_ADICIONAL'
+        ? precoAdicional <= 0
+        : precoAdicional !== 0
+    ) {
+      throw erroFicha(
+        'PRECO_ADICIONAL_INVALIDO',
+        'Informe um preço positivo apenas para ingredientes opcionais com adicional.'
+      );
+    }
+    if (classificacaoComercial !== 'OBRIGATORIO_OCULTO') quantidadeOpcionais += 1;
     if (visto.has(insumoId)) {
       throw erroFicha('INSUMO_DUPLICADO', 'Componente duplicado na ficha técnica.');
     }
@@ -198,11 +364,31 @@ async function salvar(produtoId, payload = {}, opcoes = {}) {
         'Insumo não pode ter ficha técnica de outro insumo.'
       );
     }
-    raw._ok = { insumo_id: insumo.id, quantidade: qtd, unidade };
+    raw._ok = {
+      insumo_id: insumo.id,
+      quantidade: qtd,
+      unidade,
+      classificacao_comercial: classificacaoComercial,
+      preco_adicional: precoAdicional
+    };
+  }
+
+  if (Number(produto.permite_personalizacao_ingredientes) === 1) {
+    if (ativo !== 1) {
+      throw erroFicha(
+        'PERSONALIZACAO_SEM_FICHA_ATIVA',
+        'A personalização de ingredientes exige uma ficha técnica ativa.'
+      );
+    }
+    if (quantidadeOpcionais === 0) {
+      throw erroFicha(
+        'PERSONALIZACAO_SEM_OPCOES',
+        'Cadastre ao menos um ingrediente opcional para habilitar a personalização.'
+      );
+    }
   }
 
   const existente = await dbGet(db, 'SELECT id FROM ficha_tecnica WHERE produto_id = ?', [produto.id]);
-  const ativo = payload.ativo === 0 || payload.ativo === false ? 0 : 1;
   let fichaId;
   if (existente) {
     await dbRun(
@@ -225,9 +411,17 @@ async function salvar(produtoId, payload = {}, opcoes = {}) {
     const it = raw._ok;
     await dbRun(
       db,
-      `INSERT INTO ficha_tecnica_itens (ficha_tecnica_id, insumo_id, quantidade, unidade)
-       VALUES (?, ?, ?, ?)`,
-      [fichaId, it.insumo_id, it.quantidade, it.unidade]
+      `INSERT INTO ficha_tecnica_itens (
+         ficha_tecnica_id, insumo_id, quantidade, unidade, classificacao_comercial, preco_adicional
+       ) VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        fichaId,
+        it.insumo_id,
+        it.quantidade,
+        it.unidade,
+        it.classificacao_comercial,
+        it.preco_adicional
+      ]
     );
   }
 
@@ -236,6 +430,7 @@ async function salvar(produtoId, payload = {}, opcoes = {}) {
 
 module.exports = {
   listarInsumos,
+  consultarUsoFichaTecnica,
   obterPorProdutoId,
   salvar,
   excluirPorProdutoId,

@@ -256,6 +256,28 @@ class CentralEventosRepository extends IRepository {
   }
 
   /**
+   * CE-PASTELARIA-04 — localiza evento pela correlação no detalhe_json.
+   * @param {string} tipo
+   * @param {string} correlationId
+   * @returns {Promise<Object|null>}
+   */
+  async buscarPorTipoECorrelationId(tipo, correlationId) {
+    const corr = String(correlationId || '').trim();
+    if (!tipo || !corr) return null;
+    const sql = this._obterSql();
+    await sql.whenReady();
+    const row = await sql.get(
+      `SELECT * FROM ${CentralEventosRepository.TABELA}
+       WHERE tipo = ?
+         AND detalhe_json LIKE ?
+       ORDER BY id DESC
+       LIMIT 1`,
+      [tipo, `%"correlationId":"${corr}"%`]
+    );
+    return this._mapearRow(row);
+  }
+
+  /**
    * @returns {Promise<number|null>}
    */
   async obterTempoMedioSyncMs() {

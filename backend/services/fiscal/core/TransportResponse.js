@@ -23,6 +23,9 @@ function createTransportResponse(input) {
     statusCode: input.statusCode == null ? null : Number(input.statusCode),
     status: input.status == null ? null : String(input.status),
     body: input.body == null ? null : input.body,
+    transmissionState: input.transmissionState == null
+      ? (input.success ? 'RESPONSE_RECEIVED' : 'UNKNOWN')
+      : String(input.transmissionState),
     headers: Object.freeze({
       ...(input.headers && typeof input.headers === 'object' ? input.headers : {})
     }),
@@ -65,6 +68,7 @@ class TransportResponse {
       statusCode: params.statusCode == null ? 200 : params.statusCode,
       status: params.status || 'ok',
       body: params.body == null ? null : params.body,
+      transmissionState: params.transmissionState || 'RESPONSE_RECEIVED',
       headers: params.headers || {},
       tempo: params.tempo,
       warnings: params.warnings || [],
@@ -83,6 +87,7 @@ class TransportResponse {
       statusCode: params.statusCode == null ? null : params.statusCode,
       status: params.status || 'error',
       body: params.body == null ? null : params.body,
+      transmissionState: params.transmissionState || 'UNKNOWN',
       headers: params.headers || {},
       tempo: params.tempo,
       warnings: params.warnings || [],

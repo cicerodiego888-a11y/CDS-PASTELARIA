@@ -60,6 +60,11 @@ const CAMPOS_CABECALHO = [
 ];
 
 const CAMPOS_ITEM = [
+  'nfe_item_n',
+  'cProd',
+  'cEAN',
+  'cEANTrib',
+  'nfe_item_original',
   'produto_nome',
   'codigo_fornecedor',
   'codigo_barras',
@@ -117,6 +122,12 @@ async function main() {
     assert.strictEqual(parsed.itens.length, 2);
 
     const item1 = parsed.itens[0];
+    assert.strictEqual(item1.nfe_item_n, 1);
+    assert.strictEqual(item1.cProd, 'ABC001');
+    assert.strictEqual(item1.cEAN, '7891234567890');
+    assert.strictEqual(item1.cEANTrib, '');
+    assert.strictEqual(item1.nfe_item_original.$.nItem, '1');
+    assert.strictEqual(item1.nfe_item_original.prod.cProd, 'ABC001');
     assert.strictEqual(item1.produto_nome, 'Refrigerante Cola 2L');
     assert.strictEqual(item1.codigo_fornecedor, 'ABC001');
     assert.strictEqual(item1.codigo_barras, '7891234567890');
@@ -127,6 +138,11 @@ async function main() {
     assert.strictEqual(item1.preco_venda_sugerido, null);
 
     const item2 = parsed.itens[1];
+    assert.strictEqual(item2.nfe_item_n, 2);
+    assert.strictEqual(item2.cProd, 'ABC002');
+    assert.strictEqual(item2.cEAN, '');
+    assert.strictEqual(item2.cEANTrib, '7891234567891');
+    assert.strictEqual(item2.nfe_item_original.$.nItem, '2');
     assert.strictEqual(item2.codigo_barras, '7891234567891');
     assert.strictEqual(item2.unidade, 'CX');
   });

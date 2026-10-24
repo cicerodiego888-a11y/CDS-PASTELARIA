@@ -12,6 +12,7 @@ const sqlite3 = require('sqlite3').verbose();
 
 const ROOT = path.join(__dirname, '../..');
 const { obterMuc } = require('../../backend/motores/muc/public');
+const LegacyMotor = require('../../backend/lib/motorConversaoUnidades');
 const { simularConversaoCompraPreview } = require('../../backend/services/compras/simularConversaoCompraPreview');
 const ProdutoConversaoConfigService = require('../../backend/services/produtos/ProdutoConversaoConfigService');
 const { garantirSchemaProdutoConversaoAsync } = require('../../backend/services/produtos/produtoConversaoSchema');
@@ -97,13 +98,14 @@ async function inserirProduto(db, { nome, unidade = 'UN' } = {}) {
 }
 
 async function inserirApresentacao(db, produtoId, { tipo = 'CX', quantidade = 12, unidade = 'UN' } = {}) {
-  await run(
+  const inserida = await run(
     db,
     `INSERT INTO produto_embalagens
       (produto_id, tipo, quantidade, unidade, principal, compra, venda, estoque, ativa)
      VALUES (?, ?, ?, ?, 1, 1, 1, 1, 1)`,
     [produtoId, tipo, quantidade, unidade]
   );
+  return inserida.lastID;
 }
 
 function processarCompra(db, item, produto) {
@@ -330,11 +332,155 @@ describe('MUC-06 preview e pré-fill da compra', () => {
     await closeDb(db);
   });
 
+  it('T13 — compra de PCT com conteúdo em G usa MUC uma vez e preserva o custo', async () => {
+    const db = await setupDb();
+    try {
+      const id = await inserirProduto(db, { nome: 'Insumo PCT 350 G', unidade: 'G' });
+      const apresentacaoId = await inserirApresentacao(db, id, {
+        tipo: 'PCT', quantidade: 350, unidade: 'G'
+      });
+      const apresentacoes = [{ tipo: 'PCT', quantidade: 350, unidade: 'G', ativa: 1, compra: 1 }];
+      await ProdutoConversaoConfigService.salvarConfiguracao(db, id, {
+        utiliza_conversao: 1,
+        unidade_estoque: 'G',
+        apresentacoes,
+        relacoes: []
+      });
+
+      const cadastrada = await new Promise((resolve, reject) => {
+        obterMuc(db).buscarApresentacao({ apresentacaoId }, (err, ap) => (
+          err ? reject(err) : resolve(ap)
+        ));
+      });
+      assert.equal(cadastrada.unidade, 'g');
+      assert.equal(cadastrada.quantidade, 350);
+
+      const preview = await simularConversaoCompraPreview(db, {
+        produtoId: id,
+        quantidade: 1,
+        unidadeOrigem: 'PCT',
+        unidadeDestino: 'G',
+        valorTotal: 3.5
+      });
+      const produto = { id, unidade: 'G', unidade_estoque: 'G', utiliza_conversao: 1, produto_fracionado: 1 };
+      const item = {
+        produto_id: id,
+        produto_apresentacao_id: apresentacaoId,
+        quantidade_embalagens: 1,
+        quantidade_comercial: 1,
+        compra_em: 'PCT',
+        valor_total_embalagem: 3.5
+      };
+      const compra = await processarCompra(db, item, produto);
+      assert.equal(preview.quantidadeConvertida, 350);
+      assert.equal(compra.quantidadeEstoque, 350);
+      assert.equal(compra.unidadeEstoque, 'G');
+      assert.equal(compra.custoTotal, 3.5);
+      assert.equal(LegacyMotor.obterQuantidadeConvertida({
+        ...item,
+        quantidade: compra.quantidadeEstoque,
+        quantidade_convertida: compra.quantidadeEstoque,
+        peso_total_compra: compra.quantidadeEstoque
+      }), 350);
+
+      const dezPacotes = await processarCompra(db, {
+        ...item,
+        quantidade_embalagens: 10,
+        quantidade_comercial: 10,
+        valor_total_embalagem: 35
+      }, produto);
+      assert.equal(dezPacotes.quantidadeEstoque, 3500);
+      assert.equal(dezPacotes.custoTotal, 35);
+    } finally {
+      await closeDb(db);
+    }
+  });
+
+  it('T14 — PCT com 350 G e estoque em KG resulta em 0,35 KG', async () => {
+    const db = await setupDb();
+    try {
+      const id = await inserirProduto(db, { nome: 'Insumo PCT para KG', unidade: 'KG' });
+      const apresentacaoId = await inserirApresentacao(db, id, {
+        tipo: 'PCT', quantidade: 350, unidade: 'G'
+      });
+      await ProdutoConversaoConfigService.salvarConfiguracao(db, id, {
+        utiliza_conversao: 1,
+        unidade_estoque: 'KG',
+        apresentacoes: [{ tipo: 'PCT', quantidade: 350, unidade: 'G', ativa: 1, compra: 1 }],
+        relacoes: []
+      });
+      const compra = await processarCompra(db, {
+        produto_id: id,
+        produto_apresentacao_id: apresentacaoId,
+        quantidade_embalagens: 1,
+        quantidade_comercial: 1,
+        compra_em: 'PCT',
+        valor_total_embalagem: 3.5
+      }, { id, unidade: 'KG', unidade_estoque: 'KG', utiliza_conversao: 1, produto_fracionado: 1 });
+      assert.equal(compra.quantidadeEstoque, 0.35);
+      assert.equal(compra.unidadeEstoque, 'KG');
+      assert.equal(compra.custoTotal, 3.5);
+    } finally {
+      await closeDb(db);
+    }
+  });
+
+  it('T15 — apresentação sem conteúdo ou com unidade inválida bloqueia o processamento', async () => {
+    const db = await setupDb();
+    try {
+      const id = await inserirProduto(db, { nome: 'Insumo embalagem inválida', unidade: 'G' });
+      await ProdutoConversaoConfigService.salvarConfiguracao(db, id, {
+        utiliza_conversao: 1,
+        unidade_estoque: 'G',
+        apresentacoes: [],
+        relacoes: []
+      });
+      const inserirInvalida = async (quantidade, unidade) => {
+        const resultado = await run(
+          db,
+          `INSERT INTO produto_embalagens (produto_id, tipo, quantidade, unidade, principal, compra, ativa)
+           VALUES (?, 'PCT', ?, ?, 1, 1, 1)`,
+          [id, quantidade, unidade]
+        );
+        return resultado.lastID;
+      };
+      const itemBase = {
+        produto_id: id,
+        quantidade_embalagens: 1,
+        quantidade_comercial: 1,
+        compra_em: 'PCT',
+        valor_total_embalagem: 3.5
+      };
+      const produto = { id, unidade: 'G', unidade_estoque: 'G', utiliza_conversao: 1 };
+      const semConteudoId = await inserirInvalida(0, null);
+      await assert.rejects(
+        () => processarCompra(db, { ...itemBase, produto_apresentacao_id: semConteudoId }, produto),
+        (err) => err.code === 'APRESENTACAO_CONTEUDO_INVALIDO' && /sem quantidade ou unidade de conteúdo/i.test(err.message)
+      );
+
+      const unidadeInvalidaId = await inserirInvalida(350, 'UNIDADE_X');
+      await assert.rejects(
+        () => processarCompra(db, { ...itemBase, produto_apresentacao_id: unidadeInvalidaId }, produto),
+        (err) => err.code === 'APRESENTACAO_CONTEUDO_INVALIDO' && /unidade de conteúdo.*inválida/i.test(err.message)
+      );
+      const itensGravados = await new Promise((resolve, reject) => {
+        db.get('SELECT COUNT(*) AS total FROM compras_itens', [], (err, row) => (
+          err ? reject(err) : resolve(Number(row.total))
+        ));
+      });
+      assert.equal(itensGravados, 0);
+    } finally {
+      await closeDb(db);
+    }
+  });
+
   it('rota e pré-fill não usam legado como autoridade', () => {
     const compras = src('backend/rotas/compras.js');
     const preview = src('backend/services/compras/simularConversaoCompraPreview.js');
     const front = src('frontend/shared/js/motor-quantidade-compra.js');
     const ui = src('frontend/erp/js/compras.js');
+    const cadastro = src('frontend/erp/js/produto-embalagens.js');
+    const cadastroProduto = src('frontend/erp/js/produtos.js');
     assert.match(compras, /simularConversaoCompraPreview/);
     assert.match(preview, /converterQuantidade/);
     assert.doesNotMatch(preview, /obterQuantidadeConvertida/);
@@ -342,6 +488,9 @@ describe('MUC-06 preview e pré-fill da compra', () => {
     assert.doesNotMatch(front, /baseEmb \* qtdPorEmb/);
     assert.match(ui, /unidadeOrigem/);
     assert.match(ui, /unidadeDestino/);
+    assert.match(cadastro, /ap-unidade-conteudo/);
+    assert.match(cadastro, /unidade: unidadeConteudo \|\| \(utilizaConversaoAtiva\(\) \? '' : unidadeBase\)/);
+    assert.match(cadastroProduto, /unidade válida para o conteúdo/);
   });
 
   it('sem unidades não inventa multiplicador', async () => {

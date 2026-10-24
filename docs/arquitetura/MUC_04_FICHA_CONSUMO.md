@@ -49,7 +49,7 @@ Ficha inativa ou produto sem ficha: venda normal, sem consumo.
 - Flag NÃO + unidades diferentes: só o grafo SI do MUC (ex. G→KG, ML→L). Sem fallback MotorUM.
 - UN→UN: identidade; `caminho` vazio. Sem aresta persistida.
 
-Resultado do MUC é a quantidade final. `round3` só no débito/snapshot (contrato 03.04). Não aplicar `/1000` na ficha.
+Resultado do MUC é a quantidade final. A quantidade de estoque mantém até seis casas decimais durante o snapshot, a reserva e o débito. Por exemplo, `0,2 G` convertido para estoque `KG` resulta em `0,0002 KG`. Não aplicar `/1000` na ficha.
 
 ---
 

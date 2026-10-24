@@ -67,6 +67,24 @@ function agoraLocalBrasil() {
 }
 
 function validarSomaPagamentosVenda(pagamentosVenda, total, opcoes = {}) {
+  const totalVenda = Number(total || 0);
+  const temValorOutros = opcoes.valor_outros != null;
+  const valorOutros = temValorOutros ? Number(opcoes.valor_outros) : 0;
+  const valorFiscal = Number(opcoes.valor_fiscal || 0);
+  const valorNaoFiscal = Number(opcoes.valor_nao_fiscal || 0);
+
+  if (temValorOutros) {
+    if (!Number.isFinite(valorOutros) || valorOutros < 0) {
+      return 'Valor de Outros inválido.';
+    }
+    const totalComponentes = Math.round(
+      (valorFiscal + valorNaoFiscal + valorOutros + Number.EPSILON) * 100
+    ) / 100;
+    if (Math.abs(totalComponentes - totalVenda) > 0.01) {
+      return 'O total da venda precisa corresponder aos valores fiscais, não fiscais e Outros.';
+    }
+  }
+
   if (!Array.isArray(pagamentosVenda) || pagamentosVenda.length === 0) {
     return null;
   }
@@ -75,14 +93,11 @@ function validarSomaPagamentosVenda(pagamentosVenda, total, opcoes = {}) {
     (soma, p) => soma + Number(p.valor || 0),
     0
   );
-  const totalVenda = Number(total || 0);
 
   if (Math.abs(totalPagamentos - totalVenda) <= 0.01) {
     return null;
   }
 
-  const valorFiscal = Number(opcoes.valor_fiscal || 0);
-  const valorNaoFiscal = Number(opcoes.valor_nao_fiscal || 0);
   const vendaMista = valorFiscal > 0 && valorNaoFiscal > 0;
 
   if (!vendaMista) {

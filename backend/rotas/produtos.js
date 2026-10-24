@@ -49,10 +49,13 @@ const {
   consultaSomenteVendaveis,
   sqlFiltroProdutoVendavelPdv,
   normalizarTipoOperacional,
-  TipoOperacionalProduto
+  TipoOperacionalProduto,
+  garantirConversaoInsumoSemReferencias
 } = require('../services/produtos/tipoOperacionalProduto');
 const FichaTecnicaService = require('../services/produtos/FichaTecnicaService');
 const ProdutoConversaoConfigService = require('../services/produtos/ProdutoConversaoConfigService');
+const VolumeComercialProdutoService = require('../services/produtos/VolumeComercialProdutoService');
+const VolumeUnidadeComercialService = require('../services/produtos/VolumeUnidadeComercialService');
 
 router.use(criarMiddlewareContextoEmpresa(db));
 
@@ -179,6 +182,7 @@ function normalizarProdutoResposta(produto, modoFiscal) {
 
   const base = {
     ...produto,
+    ...VolumeComercialProdutoService.normalizarVolumeComercialResposta(produto),
     ...aplicarCamposVendaUnidadeResposta(produto),
     produto_fracionado: flagFracionado,
     vendido_por_peso: flagFracionado,
@@ -188,6 +192,7 @@ function normalizarProdutoResposta(produto, modoFiscal) {
     codigo_mgv6: codigoMgv6Valor,
     codigoMgv6: codigoMgv6Valor,
     controla_estoque: normalizarFlagControlaEstoque(produto.controla_estoque),
+    permite_personalizacao_ingredientes: Number(produto.permite_personalizacao_ingredientes || 0) === 1 ? 1 : 0,
     utiliza_conversao: Number(produto.utiliza_conversao || 0) === 1 ? 1 : 0,
     unidade_estoque: produto.unidade_estoque || null,
     preco_compra: precoCompra,
@@ -209,6 +214,74 @@ function normalizarProdutoResposta(produto, modoFiscal) {
     ...base,
     estoque_exibido: estoqueAtual
   };
+}
+
+function normalizarFlagPersonalizacaoIngredientes(valor) {
+  if (valor === undefined || valor === null || valor === '') return 0;
+  if (valor === true || valor === 1 || valor === '1') return 1;
+  if (valor === false || valor === 0 || valor === '0') return 0;
+  const err = new Error('Flag de personalização dos ingredientes inválida.');
+  err.statusCode = 400;
+  err.code = 'PERSONALIZACAO_INGREDIENTES_INVALIDA';
+  throw err;
+}
+
+function normalizarFlagUtilizaFichaTecnica(valor) {
+  if (valor === undefined || valor === null || valor === '') return null;
+  if (valor === true || valor === 1 || valor === '1') return 1;
+  if (valor === false || valor === 0 || valor === '0') return 0;
+  const err = new Error('Flag de uso da ficha técnica inválida.');
+  err.statusCode = 400;
+  err.code = 'UTILIZA_FICHA_TECNICA_INVALIDA';
+  throw err;
+}
+
+function validarUnidadeVolumeProduto(req, res, next) {
+  const body = req.body || {};
+  const validarVolume = (tipo) => {
+    if (tipo === TipoOperacionalProduto.INSUMO) return next();
+
+    let volume;
+    try {
+      volume = VolumeComercialProdutoService.normalizarVolumeComercial(body);
+    } catch (err) {
+      return res.status(err.statusCode || 400).json({
+        error: err.message,
+        code: err.code
+      });
+    }
+    if (!volume.informado || !volume.utiliza_volume) return next();
+
+    VolumeUnidadeComercialService.resolverAssociacaoProduto(db, {
+      unidadeId: volume.volume_unidade_id,
+      sigla: volume.volume_unidade,
+      produtoId: req.params?.id || null
+    }).then((unidade) => {
+      body.volume_unidade = unidade.sigla_normalizada;
+      body.volume_unidade_id = unidade.id;
+      req.volumeUnidadeComercial = unidade;
+      return next();
+    }).catch((err) => {
+      return res.status(err.statusCode || 500).json({
+        error: err.message || 'Não foi possível validar a unidade de volume.',
+        code: err.code || 'ERRO_UNIDADE_VOLUME'
+      });
+    });
+  };
+
+  if (Object.prototype.hasOwnProperty.call(body, 'tipo_operacional') || !req.params?.id) {
+    return validarVolume(String(body.tipo_operacional || '').trim().toUpperCase());
+  }
+
+  db.get('SELECT tipo_operacional FROM produtos WHERE id = ?', [req.params.id], (err, produto) => {
+    if (err) {
+      return res.status(500).json({
+        error: err.message,
+        code: 'ERRO_VALIDAR_TIPO_PRODUTO'
+      });
+    }
+    return validarVolume(String(produto?.tipo_operacional || '').trim().toUpperCase());
+  });
 }
 
 function produtosTemColuna(nomeColuna, callback) {
@@ -477,7 +550,7 @@ function inserirFaixasAtacadoProduto(produtoId, faixas, callback) {
   inserirProxima();
 }
 
-function salvarEmbalagensProduto(produtoId, embalagens, unidadeProduto, usuario, callback) {
+function salvarEmbalagensProduto(produtoId, embalagens, unidadeProduto, usuario, callback, opcoes = {}) {
   if (!Array.isArray(embalagens)) {
     return callback(null, []);
   }
@@ -486,7 +559,8 @@ function salvarEmbalagensProduto(produtoId, embalagens, unidadeProduto, usuario,
     embalagens,
     unidadeProduto,
     usuario,
-    callback
+    callback,
+    opcoes
   );
 }
 
@@ -544,7 +618,8 @@ function buscarProdutoCompleto(produtoId, callback) {
       (SELECT quantidade_minima FROM produto_atacado WHERE produto_id = p.id ORDER BY quantidade_minima ASC LIMIT 1) AS quantidade_minima_atacado,
       c.nome AS categoria_nome,
       s.nome AS subcategoria_nome,
-      m.nome AS marca_nome
+      m.nome AS marca_nome,
+      (SELECT u.nome FROM unidades_volume_comercial u WHERE u.id = p.volume_unidade_id) AS volume_unidade_nome
     FROM produtos p
     LEFT JOIN categorias c ON c.id = p.categoria_id
     LEFT JOIN subcategorias s ON s.id = p.subcategoria_id
@@ -692,6 +767,12 @@ router.get('/', (req, res) => {
   const modoFiscal = isModoFiscalQuery(req.query.modo_fiscal);
   const filtroFiscal = filtroSqlModoFiscalProduto(modoFiscal, 'p');
   const ee = fragmentoEstoqueEmpresaListagem(req.empresaId);
+  const tipoOperacional = req.query.tipo_operacional == null
+    ? null
+    : String(req.query.tipo_operacional).trim().toUpperCase();
+  if (tipoOperacional && !Object.values(TipoOperacionalProduto).includes(tipoOperacional)) {
+    return res.status(400).json({ error: 'tipo_operacional inválido. Use COMERCIAL ou INSUMO.' });
+  }
 
   db.all(`
     SELECT 
@@ -717,8 +798,9 @@ router.get('/', (req, res) => {
     WHERE 1=1
       ${filtroFiscal}
       ${consultaSomenteVendaveis(req) ? sqlFiltroProdutoVendavelPdv('p') : ''}
+      ${tipoOperacional ? "AND COALESCE(p.tipo_operacional, 'COMERCIAL') = ?" : ''}
     ORDER BY p.id DESC
-  `, ee.params, (err, rows) => {
+  `, tipoOperacional ? [...ee.params, tipoOperacional] : ee.params, (err, rows) => {
     if (err) {
       console.error('Erro ao listar produtos:', err.message);
       return res.status(500).json({ error: err.message });
@@ -742,6 +824,30 @@ router.get('/catalogo/insumos', async (req, res) => {
   } catch (err) {
     return responderErroFicha(res, err);
   }
+});
+
+router.put('/:id/ativacao', (req, res) => {
+  const ativo = req.body?.ativo;
+  if (![0, 1, false, true].includes(ativo)) {
+    return res.status(400).json({ error: 'Informe ativo como 0 ou 1.' });
+  }
+  db.get(
+    `SELECT id FROM produtos
+     WHERE id = ? AND COALESCE(tipo_operacional, 'COMERCIAL') = 'INSUMO'`,
+    [req.params.id],
+    (err, produto) => {
+      if (err) return res.status(500).json({ error: err.message });
+      if (!produto) return res.status(404).json({ error: 'Insumo não encontrado.' });
+      db.run(
+        'UPDATE produtos SET ativo = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [ativo ? 1 : 0, produto.id],
+        function onUpdate(updateErr) {
+          if (updateErr) return res.status(500).json({ error: updateErr.message });
+          return res.json({ id: produto.id, ativo: ativo ? 1 : 0 });
+        }
+      );
+    }
+  );
 });
 
 router.get('/:id/ficha-tecnica', async (req, res) => {
@@ -802,31 +908,129 @@ router.put('/:id/conversao', async (req, res) => {
   }
 });
 
-router.post('/:id/conversao/simular', async (req, res) => {
+// Simulação pré-cadastro: usa o motor MUC com a configuração do formulário, sem ler nem gravar produto.
+router.post('/conversao/simular', (req, res) => {
   try {
-    const cfg = await ProdutoConversaoConfigService.obterConfiguracao(db, req.params.id);
-    const apresentacoes = await new Promise((resolve, reject) => {
-      obterProdutoEmbalagemService(db).listarPorProduto(req.params.id, (err, rows) => (
-        err ? reject(err) : resolve(rows || [])
-      ));
+    const body = req.body || {};
+    const apresentacoes = Array.isArray(body.apresentacoes || body.embalagens)
+      ? (body.apresentacoes || body.embalagens)
+      : [];
+    const relacoesIn = Array.isArray(body.relacoes) ? body.relacoes : [];
+    if (!(Number(body.quantidade) > 0)) {
+      return res.status(400).json({ success: false, code: 'CONVERSAO_INVALIDA', error: 'Informe uma quantidade positiva para simular.' });
+    }
+    if (!String(body.unidadeOrigem || body.unidade || '').trim()) {
+      return res.status(400).json({ success: false, code: 'UNIDADE_INVALIDA', error: 'Informe a unidade de origem da simulação.' });
+    }
+    const cfg = ProdutoConversaoConfigService.validarConfiguracao({
+      utilizaConversao: true,
+      unidadeEstoque: body.unidade_estoque || body.unidadeDestino,
+      apresentacoes,
+      relacoes: relacoesIn
     });
+    // Relações ambíguas: mesma origem→destino com fatores diferentes.
+    const vistos = new Map();
+    for (const r of cfg.relacoes) {
+      const chave = `${r.unidade_origem}>${r.unidade_destino}`;
+      if (vistos.has(chave) && vistos.get(chave) !== r.fator) {
+        return res.status(400).json({
+          success: false,
+          code: 'RELACAO_AMBIGUA',
+          error: `Relação ambígua: ${r.unidade_origem} → ${r.unidade_destino} está cadastrada com fatores diferentes.`
+        });
+      }
+      vistos.set(chave, r.fator);
+    }
     const resultado = ProdutoConversaoConfigService.simularConversaoProduto(cfg, {
-      ...(req.body || {}),
+      ...body,
       apresentacoes
     });
     return res.json({
       success: true,
       quantidade: resultado.quantidade,
       unidade: resultado.unidade,
+      quantidade_origem: resultado.quantidade_origem,
+      unidade_origem: resultado.unidade_origem,
+      unidade_estoque: resultado.unidade_estoque,
       caminho: resultado.caminho,
+      etapas: resultado.etapas || [],
+      fatorTotal: resultado.fatorTotal,
       estoqueAlterado: false,
+      persistido: false,
       mensagem: resultado.mensagem || null
     });
   } catch (err) {
+    const body = req.body || {};
     return res.status(err.statusCode || 400).json({
       success: false,
       error: err.message,
-      code: err.code
+      code: err.code,
+      unidade_origem: body.unidadeOrigem || body.unidade || null,
+      unidade_estoque: body.unidade_estoque || body.unidadeDestino || null,
+      motivo: err.message
+    });
+  }
+});
+
+router.post('/:id/conversao/simular', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const configuracaoPendente = body.configuracao
+      && typeof body.configuracao === 'object'
+      && !Array.isArray(body.configuracao)
+      ? body.configuracao
+      : null;
+    let cfg;
+    let apresentacoes;
+    if (configuracaoPendente) {
+      apresentacoes = Array.isArray(configuracaoPendente.apresentacoes)
+        ? configuracaoPendente.apresentacoes
+        : [];
+      cfg = ProdutoConversaoConfigService.validarConfiguracao({
+        utilizaConversao: ProdutoConversaoConfigService.flagUtiliza(
+          configuracaoPendente.utiliza_conversao ?? configuracaoPendente.utilizaConversao
+        ),
+        unidadeEstoque: configuracaoPendente.unidade_estoque
+          ?? configuracaoPendente.unidadeEstoque,
+        apresentacoes,
+        relacoes: Array.isArray(configuracaoPendente.relacoes) ? configuracaoPendente.relacoes : []
+      });
+    } else {
+      cfg = await ProdutoConversaoConfigService.obterConfiguracao(db, req.params.id);
+      apresentacoes = await new Promise((resolve, reject) => {
+        obterProdutoEmbalagemService(db).listarPorProduto(req.params.id, (err, rows) => (
+          err ? reject(err) : resolve(rows || [])
+        ));
+      });
+    }
+    const resultado = ProdutoConversaoConfigService.simularConversaoProduto(cfg, {
+      ...body,
+      apresentacoes
+    });
+    return res.json({
+      success: true,
+      quantidade: resultado.quantidade,
+      unidade: resultado.unidade,
+      quantidade_origem: resultado.quantidade_origem,
+      unidade_origem: resultado.unidade_origem,
+      unidade_estoque: resultado.unidade_estoque,
+      caminho: resultado.caminho,
+      etapas: resultado.etapas || [],
+      fatorTotal: resultado.fatorTotal,
+      estoqueAlterado: false,
+      persistido: !configuracaoPendente,
+      mensagem: resultado.mensagem || null
+    });
+  } catch (err) {
+    const body = req.body || {};
+    const configuracao = body.configuracao || {};
+    return res.status(err.statusCode || 400).json({
+      success: false,
+      error: err.message,
+      code: err.code,
+      unidade_origem: body.unidadeOrigem || body.unidade || null,
+      unidade_estoque: configuracao.unidade_estoque || body.unidadeDestino || null,
+      motivo: err.message
     });
   }
 });
@@ -1276,7 +1480,32 @@ router.get('/consulta-pdv/buscar', async (req, res) => {
       user,
       skipAuth: true
     });
-    const itens = (resultado.itens || []).map((row) => normalizarProdutoResposta(row, modoFiscal));
+    const rows = resultado.itens || [];
+    const produtoIds = [...new Set(rows
+      .map((row) => Number(row.id))
+      .filter((id) => Number.isInteger(id) && id > 0))];
+    const dadosProdutoPorId = new Map();
+    if (produtoIds.length > 0) {
+      const placeholders = produtoIds.map(() => '?').join(',');
+      const dadosProdutos = await new Promise((resolve, reject) => {
+        db.all(
+          `SELECT id, nome_comercial, preco_pedido FROM produtos WHERE id IN (${placeholders})`,
+          produtoIds,
+          (produtoErr, produtos) => (produtoErr ? reject(produtoErr) : resolve(produtos || []))
+        );
+      });
+      dadosProdutos.forEach((produto) => {
+        dadosProdutoPorId.set(Number(produto.id), produto);
+      });
+    }
+    const itens = rows.map((row) => {
+      const dadosProduto = dadosProdutoPorId.get(Number(row.id));
+      return normalizarProdutoResposta({
+        ...row,
+        nome_comercial: dadosProduto?.nome_comercial ?? null,
+        preco_pedido: dadosProduto?.preco_pedido ?? null
+      }, modoFiscal);
+    });
     if (req.query.debug === '1') {
       return res.json({ itens, meta: resultado.meta });
     }
@@ -2367,6 +2596,39 @@ router.delete('/:id/imagens/:imagemId', async (req, res) => {
   }
 });
 
+router.get('/unidades-volume', verificarPermissaoEspecifica('produtos'), async (req, res) => {
+  try {
+    return res.json(await VolumeUnidadeComercialService.listarAtivas(db));
+  } catch (err) {
+    return res.status(500).json({
+      error: 'Erro ao listar unidades de volume.',
+      code: 'ERRO_LISTAR_UNIDADES_VOLUME'
+    });
+  }
+});
+
+router.post('/unidades-volume', verificarPermissaoEspecifica('produtos'), async (req, res) => {
+  try {
+    const unidade = await VolumeUnidadeComercialService.criar(db, req.body || {});
+    gravarAuditoria({
+      usuario_id: req.user?.id || null,
+      usuario_nome: req.user?.username || req.user?.nome || null,
+      modulo: 'produtos',
+      acao: 'criar_unidade_volume',
+      referencia_tipo: 'unidade_volume',
+      referencia_id: unidade.id,
+      detalhes: { nome: unidade.nome, sigla: unidade.sigla },
+      ip_requisicao: req.ip || null
+    }).catch((auditErr) => console.error('Erro ao auditar criação de unidade de volume:', auditErr));
+    return res.status(201).json(unidade);
+  } catch (err) {
+    return res.status(err.statusCode || 500).json({
+      error: err.message || 'Erro ao cadastrar unidade de volume.',
+      code: err.code || 'ERRO_CRIAR_UNIDADE_VOLUME'
+    });
+  }
+});
+
 // Buscar produto por ID trazendo o nome da categoria
 router.get('/:id', (req, res) => {
   const modoFiscal = isModoFiscalQuery(req.query.modo_fiscal);
@@ -2378,6 +2640,7 @@ router.get('/:id', (req, res) => {
       ${SQL_MGV6_SUBQUERY},
       (SELECT preco_atacado FROM produto_atacado WHERE produto_id = p.id ORDER BY quantidade_minima ASC LIMIT 1) AS preco_atacado,
       (SELECT quantidade_minima FROM produto_atacado WHERE produto_id = p.id ORDER BY quantidade_minima ASC LIMIT 1) AS quantidade_minima_atacado,
+      (SELECT u.nome FROM unidades_volume_comercial u WHERE u.id = p.volume_unidade_id) AS volume_unidade_nome,
       c.nome AS categoria_nome,
       s.nome AS subcategoria_nome
     FROM produtos p
@@ -2442,7 +2705,17 @@ router.get('/:id', (req, res) => {
                   if (validadeErr) {
                     return res.status(500).json({ error: validadeErr.message });
                   }
-                  res.json(produto);
+                  ProdutoConversaoConfigService.obterConfiguracao(db, req.params.id)
+                    .then((configuracao) => res.json({
+                      ...produto,
+                      utiliza_conversao: configuracao.utiliza_conversao,
+                      unidade_estoque: configuracao.unidade_estoque,
+                      relacoes: configuracao.relacoes
+                    }))
+                    .catch((configErr) => res.status(configErr.statusCode || 500).json({
+                      error: configErr.message,
+                      code: configErr.code
+                    }));
                 }, { empresaId: req.empresaId, db });
               }).catch((isoErr) => {
                 return res.status(500).json({
@@ -2460,10 +2733,11 @@ router.get('/:id', (req, res) => {
 
 // Criar produto
 // 03.8 — INSERT nasce com saldo 0; crédito inicial operacional via estoqueSaldosPublico.
-router.post('/', (req, res) => {
+router.post('/', validarUnidadeVolumeProduto, (req, res) => {
   const {
-    codigo, nome, categoria_id, subcategoria_id, unidade, preco_compra,
-    lucro_percentual, preco_venda, estoque_atual, estoque_minimo, fornecedor,
+    codigo, nome, nome_comercial, categoria_id, subcategoria_id, unidade, preco_compra,
+    preco_pedido: precoPedidoBody,
+    lucro_percentual: lucroPercentualBody, preco_venda: precoVendaBody, estoque_atual, estoque_minimo, fornecedor,
     ncm, cfop, csosn, origem, cest, codigo_barras,
     aliquota_icms, aliquota_pis, aliquota_cofins,
     controlar_validade,
@@ -2483,6 +2757,8 @@ router.post('/', (req, res) => {
     marca_id,
     observacoes,
     imagem_principal,
+    permite_personalizacao_ingredientes,
+    utiliza_ficha_tecnica: utilizaFichaTecnicaBody,
     // Campos adicionais para lote inicial
     lote_inicial,
     data_fabricacao_inicial,
@@ -2503,6 +2779,64 @@ router.post('/', (req, res) => {
       error: tipoErr.message,
       code: tipoErr.code
     });
+  }
+
+  // Insumo não tem formação de preço de venda: grava 0 (coluna NOT NULL) e nunca deriva do custo.
+  const ehInsumoCriacao = tipoOperacionalGravar === TipoOperacionalProduto.INSUMO;
+  let volumeComercialGravar;
+  try {
+    volumeComercialGravar = ehInsumoCriacao
+      ? { utiliza_volume: 0, volume_valor: null, volume_unidade: null }
+      : VolumeComercialProdutoService.normalizarVolumeComercial(req.body);
+  } catch (volumeErr) {
+    return res.status(volumeErr.statusCode || 400).json({
+      error: volumeErr.message,
+      code: volumeErr.code
+    });
+  }
+  const preco_venda = ehInsumoCriacao ? 0 : precoVendaBody;
+  const lucro_percentual = ehInsumoCriacao ? 0 : lucroPercentualBody;
+  const nomeComercialGravar = normalizarTextoOpcional(nome_comercial);
+  let personalizacaoIngredientesGravar;
+  try {
+    personalizacaoIngredientesGravar = normalizarFlagPersonalizacaoIngredientes(permite_personalizacao_ingredientes);
+  } catch (flagErr) {
+    return res.status(flagErr.statusCode || 400).json({ error: flagErr.message, code: flagErr.code });
+  }
+  if (ehInsumoCriacao && personalizacaoIngredientesGravar === 1) {
+    return res.status(400).json({
+      error: 'A personalização de ingredientes aplica-se somente a produtos comerciais.',
+      code: 'PERSONALIZACAO_SOMENTE_COMERCIAL'
+    });
+  }
+  let utilizaFichaTecnicaSolicitada;
+  try {
+    utilizaFichaTecnicaSolicitada = normalizarFlagUtilizaFichaTecnica(utilizaFichaTecnicaBody);
+  } catch (flagErr) {
+    return res.status(flagErr.statusCode || 400).json({
+      error: flagErr.message,
+      code: flagErr.code
+    });
+  }
+  if (utilizaFichaTecnicaSolicitada === 1 && ehInsumoCriacao) {
+    return res.status(400).json({
+      error: 'Ficha técnica aplica-se somente a produto comercial.',
+      code: 'FICHA_SOMENTE_COMERCIAL'
+    });
+  }
+  const utilizaFichaTecnicaGravar = ehInsumoCriacao ? 0 : utilizaFichaTecnicaSolicitada;
+  if (utilizaFichaTecnicaGravar === 0 && personalizacaoIngredientesGravar === 1) {
+    return res.status(400).json({
+      error: 'A personalização de ingredientes exige o uso da ficha técnica.',
+      code: 'PERSONALIZACAO_EXIGE_FICHA_TECNICA'
+    });
+  }
+  let precoPedidoGravar = null;
+  if (precoPedidoBody !== undefined && precoPedidoBody !== null && String(precoPedidoBody).trim() !== '') {
+    precoPedidoGravar = Number(precoPedidoBody);
+    if (!Number.isFinite(precoPedidoGravar) || precoPedidoGravar < 0) {
+      return res.status(400).json({ error: 'Preço do Pedido inválido.' });
+    }
   }
 
   const codigoMgv6Body = Object.prototype.hasOwnProperty.call(req.body, 'codigo_mgv6')
@@ -2580,8 +2914,9 @@ router.post('/', (req, res) => {
 
   db.run(`
     INSERT INTO produtos (
-      codigo, nome, categoria_id, subcategoria_id, unidade,
+      codigo, nome, nome_comercial, categoria_id, subcategoria_id, unidade,
       preco_compra, lucro_percentual, preco_venda,
+      preco_pedido,
       estoque_atual, estoque_minimo, fornecedor,
       ncm, cfop, csosn, origem, cest, codigo_barras,
       aliquota_icms, aliquota_pis, aliquota_cofins,
@@ -2590,12 +2925,16 @@ router.post('/', (req, res) => {
       venda_atacado,
       saldo_fiscal, saldo_nao_fiscal, item_fiscal,
       permite_venda_unidade, peso_medio_unidade, preco_unidade,
-      marca_id, observacoes, imagem_principal
+      marca_id, observacoes, imagem_principal, tipo_operacional,
+      permite_personalizacao_ingredientes,
+      utiliza_ficha_tecnica,
+      utiliza_volume, volume_valor, volume_unidade, volume_unidade_id
     )
-    VALUES (${Array(37).fill('?').join(', ')})
+    VALUES (${Array(46).fill('?').join(', ')})
   `, [
-    codigoFinal, nome, categoria_id, subcategoria_id, unidade,
+    codigoFinal, nome, nomeComercialGravar, categoria_id, subcategoria_id, unidade,
     preco_compra, lucro_percentual, preco_venda,
+    precoPedidoGravar,
     0, estoque_minimo || 0, fornecedor,
     ncm, cfop, csosn, origem, cest, codigo_barras,
     aliquota_icms, aliquota_pis, aliquota_cofins,
@@ -2615,7 +2954,14 @@ router.post('/', (req, res) => {
     precoUnidade,
     marcaIdGravar,
     observacoesGravar,
-    imagemPrincipalGravar
+    imagemPrincipalGravar,
+    tipoOperacionalGravar,
+    personalizacaoIngredientesGravar,
+    utilizaFichaTecnicaGravar,
+    volumeComercialGravar.utiliza_volume,
+    volumeComercialGravar.utiliza_volume ? volumeComercialGravar.volume_valor : null,
+    volumeComercialGravar.utiliza_volume ? volumeComercialGravar.volume_unidade : null,
+    volumeComercialGravar.utiliza_volume ? volumeComercialGravar.volume_unidade_id : null
   ],
     function(err) {
       if (err) {
@@ -2650,7 +2996,8 @@ router.post('/', (req, res) => {
           obterMibService().notificarProdutoCriado({
             id: produtoId,
             nome,
-            nome_busca: normalizarNomeBusca(nome),
+            nome_comercial: nomeComercialGravar || '',
+            nome_busca: normalizarNomeBusca([nome, nomeComercialGravar].filter(Boolean).join(' ')),
             codigo: codigoFinal,
             codigo_barras,
             preco_venda
@@ -2678,14 +3025,6 @@ router.post('/', (req, res) => {
         );
       } catch (umErr) {
         console.warn('[RC8.4.2] unidade comercial no POST:', umErr.message);
-      }
-      try {
-        db.run(
-          `UPDATE produtos SET tipo_operacional = ? WHERE id = ?`,
-          [tipoOperacionalGravar, produtoId]
-        );
-      } catch (tipoErr) {
-        console.warn('[03.03] tipo_operacional no POST:', tipoErr.message);
       }
       // MIP — dual-write codigo/barras/PLU (aguardar antes da resposta para o GET/editar ver o PLU)
       const camposEspelho = { codigo: codigoFinal, codigo_barras };
@@ -2803,7 +3142,8 @@ router.post('/', (req, res) => {
                 }).catch((auditErr) => console.error('Erro ao gravar auditoria de criação de produto:', auditErr));
               });
               });
-            }
+            },
+            { exigirConteudoExplicito: Number(req.body.utiliza_conversao) === 1 }
           );
         });
       }
@@ -2960,7 +3300,48 @@ router.post('/:id/embalagens/aprendizagem-compra', (req, res) => {
 });
 
 // Atualizar produto
-router.put('/:id', (req, res) => {
+router.put('/:id', (req, res, next) => {
+  if (!Object.prototype.hasOwnProperty.call(req.body || {}, 'tipo_operacional')) {
+    return next();
+  }
+  let tipoSolicitado;
+  try {
+    tipoSolicitado = normalizarTipoOperacional(req.body.tipo_operacional);
+  } catch (_) {
+    return next();
+  }
+  if (tipoSolicitado !== TipoOperacionalProduto.COMERCIAL) return next();
+
+  db.get(
+    `SELECT tipo_operacional FROM produtos WHERE id = ?`,
+    [req.params.id],
+    async (err, produto) => {
+      if (err) return res.status(500).json({ error: err.message });
+      if (!produto) {
+        return next();
+      }
+      let tipoAtual;
+      try {
+        tipoAtual = normalizarTipoOperacional(produto.tipo_operacional);
+      } catch (tipoErr) {
+        return res.status(tipoErr.statusCode || 400).json({
+          error: tipoErr.message,
+          code: tipoErr.code
+        });
+      }
+      if (tipoAtual !== TipoOperacionalProduto.INSUMO) return next();
+      try {
+        await garantirConversaoInsumoSemReferencias(db, req.params.id);
+        return next();
+      } catch (validacaoErr) {
+        return res.status(validacaoErr.statusCode || 500).json({
+          error: validacaoErr.message,
+          code: validacaoErr.code
+        });
+      }
+    }
+  );
+}, validarUnidadeVolumeProduto, (req, res) => {
   const { id } = req.params;
   const {
     atacado_faixas,
@@ -2976,6 +3357,45 @@ router.put('/:id', (req, res) => {
   } = req.body;
 
   const pluInformado = Object.prototype.hasOwnProperty.call(req.body, 'plu');
+  if (Object.prototype.hasOwnProperty.call(bodyUpdates, 'nome_comercial')) {
+    bodyUpdates.nome_comercial = normalizarTextoOpcional(bodyUpdates.nome_comercial);
+  }
+  if (Object.prototype.hasOwnProperty.call(bodyUpdates, 'preco_pedido')) {
+    const bruto = bodyUpdates.preco_pedido;
+    if (bruto == null || String(bruto).trim() === '') {
+      bodyUpdates.preco_pedido = null;
+    } else {
+      const precoPedido = Number(bruto);
+      if (!Number.isFinite(precoPedido) || precoPedido < 0) {
+        return res.status(400).json({ error: 'Preço do Pedido inválido.' });
+      }
+      bodyUpdates.preco_pedido = precoPedido;
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(bodyUpdates, 'permite_personalizacao_ingredientes')) {
+    try {
+      bodyUpdates.permite_personalizacao_ingredientes = normalizarFlagPersonalizacaoIngredientes(
+        bodyUpdates.permite_personalizacao_ingredientes
+      );
+    } catch (flagErr) {
+      return res.status(flagErr.statusCode || 400).json({
+        error: flagErr.message,
+        code: flagErr.code
+      });
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(bodyUpdates, 'utiliza_ficha_tecnica')) {
+    try {
+      bodyUpdates.utiliza_ficha_tecnica = normalizarFlagUtilizaFichaTecnica(
+        bodyUpdates.utiliza_ficha_tecnica
+      );
+    } catch (flagErr) {
+      return res.status(flagErr.statusCode || 400).json({
+        error: flagErr.message,
+        code: flagErr.code
+      });
+    }
+  }
   const pluValidacao = pluInformado ? validarPluOpcional(plu) : { ok: true, valor: null, informado: false };
   if (!pluValidacao.ok) {
     return res.status(400).json({ error: pluValidacao.erro });
@@ -3014,7 +3434,7 @@ router.put('/:id', (req, res) => {
 
   console.log('[AUDIT PRODUTO PUT] id:', id, 'req.body.item_fiscal:', req.body.item_fiscal);
 
-  db.get('SELECT * FROM produtos WHERE id = ?', [id], (err, old) => {
+  db.get('SELECT * FROM produtos WHERE id = ?', [id], async (err, old) => {
     if (err) {
       res.status(500).json({ error: err.message });
       return;
@@ -3047,6 +3467,104 @@ router.put('/:id', (req, res) => {
 
     const fields = [];
     const values = [];
+
+    let tipoResultante = null;
+    try {
+      tipoResultante = normalizarTipoOperacional(
+        Object.prototype.hasOwnProperty.call(bodyUpdates, 'tipo_operacional')
+          ? bodyUpdates.tipo_operacional
+          : old.tipo_operacional
+      );
+    } catch (_) {
+      tipoResultante = null;
+    }
+
+    let utilizaFichaAtual = Object.prototype.hasOwnProperty.call(bodyUpdates, 'utiliza_ficha_tecnica')
+      ? bodyUpdates.utiliza_ficha_tecnica
+      : old.utiliza_ficha_tecnica;
+    const personalizacaoInformada = Object.prototype.hasOwnProperty.call(
+      bodyUpdates,
+      'permite_personalizacao_ingredientes'
+    );
+    const personalizacaoAtual = personalizacaoInformada
+      ? Number(bodyUpdates.permite_personalizacao_ingredientes)
+      : Number(old.permite_personalizacao_ingredientes);
+
+    if (tipoResultante === TipoOperacionalProduto.INSUMO) {
+      if (bodyUpdates.utiliza_ficha_tecnica === 1) {
+        return res.status(400).json({
+          error: 'Ficha técnica aplica-se somente a produto comercial.',
+          code: 'FICHA_SOMENTE_COMERCIAL'
+        });
+      }
+      if (personalizacaoAtual === 1) {
+        return res.status(400).json({
+          error: 'A personalização de ingredientes aplica-se somente a produtos comerciais.',
+          code: 'PERSONALIZACAO_SOMENTE_COMERCIAL'
+        });
+      }
+      bodyUpdates.utiliza_ficha_tecnica = 0;
+      bodyUpdates.permite_personalizacao_ingredientes = 0;
+      utilizaFichaAtual = 0;
+    } else if (utilizaFichaAtual === 0) {
+      if (personalizacaoInformada && personalizacaoAtual === 1) {
+        return res.status(400).json({
+          error: 'A personalização de ingredientes exige o uso da ficha técnica.',
+          code: 'PERSONALIZACAO_EXIGE_FICHA_TECNICA'
+        });
+      }
+      bodyUpdates.permite_personalizacao_ingredientes = 0;
+    } else if (personalizacaoInformada && personalizacaoAtual === 1 && utilizaFichaAtual == null) {
+      try {
+        const usoFicha = await FichaTecnicaService.consultarUsoFichaTecnica(id, { db });
+        if (!usoFicha.utiliza_ficha_tecnica) {
+          return res.status(400).json({
+            error: 'A personalização de ingredientes exige o uso da ficha técnica.',
+            code: 'PERSONALIZACAO_EXIGE_FICHA_TECNICA'
+          });
+        }
+      } catch (usoErr) {
+        return res.status(usoErr.statusCode || 500).json({
+          error: usoErr.message,
+          code: usoErr.code
+        });
+      }
+    }
+
+    if (tipoResultante === TipoOperacionalProduto.INSUMO) {
+      const virouInsumo = String(old.tipo_operacional || '').toUpperCase() !== TipoOperacionalProduto.INSUMO;
+      delete bodyUpdates.preco_venda;
+      delete bodyUpdates.lucro_percentual;
+      VolumeComercialProdutoService.CAMPOS_VOLUME_COMERCIAL.forEach((campo) => delete bodyUpdates[campo]);
+      if (virouInsumo) {
+        bodyUpdates.preco_venda = 0;
+        bodyUpdates.lucro_percentual = 0;
+      }
+    }
+
+    if (tipoResultante === TipoOperacionalProduto.COMERCIAL) {
+      try {
+        const volumeComercial = VolumeComercialProdutoService.normalizarVolumeComercial(bodyUpdates);
+        if (volumeComercial.informado) {
+          bodyUpdates.utiliza_volume = volumeComercial.utiliza_volume;
+          if (volumeComercial.utiliza_volume) {
+            bodyUpdates.volume_valor = volumeComercial.volume_valor;
+            bodyUpdates.volume_unidade = volumeComercial.volume_unidade;
+          } else {
+            delete bodyUpdates.volume_valor;
+            delete bodyUpdates.volume_unidade;
+            bodyUpdates.volume_unidade_id = null;
+          }
+        } else if (String(old.tipo_operacional || '').toUpperCase() === TipoOperacionalProduto.INSUMO) {
+          bodyUpdates.utiliza_volume = 0;
+        }
+      } catch (volumeErr) {
+        return res.status(volumeErr.statusCode || 400).json({
+          error: volumeErr.message,
+          code: volumeErr.code
+        });
+      }
+    }
 
     const flagFracionado = resolverFlagProdutoFracionado(bodyUpdates);
     if (flagFracionado !== undefined) {
@@ -3299,7 +3817,8 @@ router.put('/:id', (req, res) => {
               });
             });
             });
-          }
+          },
+          { exigirConteudoExplicito: Number(req.body.utiliza_conversao ?? old.utiliza_conversao) === 1 }
         );
       });
     };

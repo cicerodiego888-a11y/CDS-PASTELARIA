@@ -335,19 +335,62 @@
         return fiscal && fiscal.csc_configurado ? 'CSC configurado' : 'CSC não configurado';
     }
 
+    function rotuloEstadoCertificado(status) {
+        const mapa = {
+            'NÃO_CONFIGURADO': 'NÃO CONFIGURADO',
+            'CONFIGURADO_NÃO_VALIDADO': 'CONFIGURADO, NÃO VALIDADO',
+            'VÁLIDO': 'VÁLIDO',
+            'SENHA_INVÁLIDA': 'SENHA INVÁLIDA',
+            'ARQUIVO_INVÁLIDO': 'ARQUIVO INVÁLIDO',
+            'EXPIRADO': 'EXPIRADO',
+            'CNPJ_DIVERGENTE': 'CNPJ DIVERGENTE',
+            'ERRO_DE_VALIDACAO': 'ERRO DE VALIDAÇÃO'
+        };
+        return mapa[String(status || '')] || null;
+    }
+
     function indicadorCertificadoVisual(fiscal) {
-        if (fiscal && fiscal.certificado_configurado) {
+        const status = fiscal && fiscal.certificado_status;
+        const rotulo = rotuloEstadoCertificado(status);
+        if (rotulo) {
+            const valido = status === 'VÁLIDO';
             return {
-                marca: '●',
-                texto: 'CERTIFICADO CONFIGURADO',
-                nome: fiscal.certificado_nome || null
+                marca: valido ? '●' : (status === 'NÃO_CONFIGURADO' ? '○' : '!'),
+                texto: rotulo,
+                nome: fiscal.certificado_nome || null,
+                status: status
             };
         }
-        return { marca: '○', texto: 'NÃO CONFIGURADO', nome: null };
+        if (fiscal && fiscal.certificado_validado) {
+            return {
+                marca: '●',
+                texto: 'VÁLIDO',
+                nome: fiscal.certificado_nome || null,
+                status: 'VÁLIDO'
+            };
+        }
+        if (fiscal && fiscal.certificado_configurado) {
+            return {
+                marca: '!',
+                texto: 'CONFIGURADO, NÃO VALIDADO',
+                nome: fiscal.certificado_nome || null,
+                status: 'CONFIGURADO_NÃO_VALIDADO'
+            };
+        }
+        return { marca: '○', texto: 'NÃO CONFIGURADO', nome: null, status: 'NÃO_CONFIGURADO' };
     }
 
     function urlCertificadoUpload() {
         return '/api/fiscal/certificado/upload';
+    }
+
+    function urlCertificadoTestar() {
+        return '/api/fiscal/certificado/testar';
+    }
+
+    function mensagemCertificadoDaApi(data, fallback) {
+        if (!data || typeof data !== 'object') return fallback;
+        return data.mensagem || data.error || fallback;
     }
 
     function chamadaSemApiDuplo(url) {
@@ -745,11 +788,18 @@
                         <h4 class="h6">CERTIFICADO DIGITAL DA EMPRESA</h4>
                         <p data-gef-cert-status>${cert.marca} ${escapeHtml(cert.texto)}</p>
                         <p data-gef-cert-nome>Arquivo: ${escapeHtml(cert.nome || '—')}</p>
+                        ${f.certificado_titular ? `<p data-gef-cert-titular>Titular: ${escapeHtml(f.certificado_titular)}</p>` : ''}
+                        ${f.certificado_validade_ate ? `<p data-gef-cert-validade>Validade: ${escapeHtml(String(f.certificado_validade_ate))}</p>` : ''}
+                        ${f.certificado_mensagem ? `<p data-gef-cert-msg class="small">${escapeHtml(f.certificado_mensagem)}</p>` : ''}
                         <label class="form-label">ESCOLHER ARQUIVO</label>
                         <input type="file" id="gef-pfx" accept=".pfx" class="form-control mb-2">
                         <label class="form-label">Senha do certificado</label>
                         <input type="password" id="gef-pfx-senha" class="form-control" autocomplete="new-password">
-                        <button type="button" class="btn btn-outline-primary mt-3" id="gef-upload-cert">ENVIAR CERTIFICADO</button>
+                        <div class="d-flex flex-wrap gap-2 mt-3">
+                            <button type="button" class="btn btn-outline-primary" id="gef-upload-cert">ENVIAR CERTIFICADO</button>
+                            <button type="button" class="btn btn-outline-info" id="gef-testar-cert">TESTAR CERTIFICADO</button>
+                        </div>
+                        <p id="gef-cert-resultado" data-gef-cert-resultado class="small mt-2 mb-0" hidden></p>
                     </div>
                 </div>
             </div>`;
@@ -770,6 +820,8 @@
         document.getElementById('gef-salvar-gerais').addEventListener('click', salvarGerais);
         document.getElementById('gef-salvar-fiscal').addEventListener('click', salvarFiscal);
         document.getElementById('gef-upload-cert').addEventListener('click', enviarCertificado);
+        const btnTestar = document.getElementById('gef-testar-cert');
+        if (btnTestar) btnTestar.addEventListener('click', testarCertificado);
         const retrySt = document.getElementById('gef-retry-status');
         if (retrySt) retrySt.addEventListener('click', carregarLista);
         box.querySelectorAll('[data-gef-inativar]').forEach(function (btn) {
@@ -892,6 +944,33 @@
         }
     }
 
+    function authHeadersCertificado() {
+        const headers = {};
+        try {
+            const token = localStorage.getItem('token');
+            if (token) headers.Authorization = 'Bearer ' + token;
+        } catch (_e) { /* ignore */ }
+        return headers;
+    }
+
+    function pintarResultadoCertificado(texto, tipo) {
+        const el = document.getElementById('gef-cert-resultado');
+        if (!el) return;
+        el.hidden = false;
+        el.textContent = texto;
+        el.setAttribute('data-gef-cert-tipo', tipo || '');
+    }
+
+    function desabilitarBotoesCertificado(desabilitar, rotuloTeste) {
+        const btnUp = document.getElementById('gef-upload-cert');
+        const btnTest = document.getElementById('gef-testar-cert');
+        if (btnUp) btnUp.disabled = !!desabilitar;
+        if (btnTest) {
+            btnTest.disabled = !!desabilitar;
+            btnTest.textContent = rotuloTeste || 'TESTAR CERTIFICADO';
+        }
+    }
+
     async function enviarCertificado() {
         if (_ui.saving) return;
         const id = empresaIdDaEdicao(_ui.sessao.empresa_id, null);
@@ -905,39 +984,85 @@
             feedback('Selecione um arquivo .pfx.', 'warning');
             return;
         }
+        if (!senha || !String(senha.value || '').length) {
+            feedback('Informe a senha do certificado.', 'warning');
+            return;
+        }
         _ui.saving = true;
-        const btn = document.getElementById('gef-upload-cert');
-        if (btn) btn.disabled = true;
+        desabilitarBotoesCertificado(true, 'TESTAR CERTIFICADO');
         try {
             const fd = new FormData();
             fd.append('certificado', input.files[0]);
             fd.append('empresa_id', String(id));
-            if (senha && senha.value) fd.append('certificado_senha', senha.value);
-            const headers = {};
-            try {
-                const token = localStorage.getItem('token');
-                if (token) headers.Authorization = `Bearer ${token}`;
-            } catch (_e) { /* ignore */ }
+            fd.append('certificado_senha', senha.value);
             const destCert = urlAbsoluta(urlCertificadoUpload());
             if (!chamadaSemApiDuplo(destCert)) throw new Error('URL de API inválida.');
             const res = await fetch(destCert, {
                 method: 'POST',
-                headers: headers,
+                headers: authHeadersCertificado(),
                 body: fd
             });
             const data = await res.json().catch(function () { return {}; });
-            if (!res.ok) throw new Error(data.error || 'Falha no certificado.');
+            if (!res.ok || !data.success) {
+                throw new Error(mensagemCertificadoDaApi(data, 'Falha no certificado.'));
+            }
             if (senha) senha.value = '';
             if (input) input.value = '';
-            feedback('CERTIFICADO DIGITAL CONFIGURADO COM SUCESSO', 'success');
+            feedback(data.mensagem || 'Certificado válido. Senha conferida.', 'success');
             _ui.aba = 'cert';
             await carregarLista();
             await abrirDetalhe(id);
         } catch (err) {
             feedback(err.message, 'danger');
+            pintarResultadoCertificado(err.message, 'erro');
         } finally {
             _ui.saving = false;
-            if (btn) btn.disabled = false;
+            desabilitarBotoesCertificado(false);
+        }
+    }
+
+    async function testarCertificado() {
+        if (_ui.saving) return;
+        const id = empresaIdDaEdicao(_ui.sessao.empresa_id, null);
+        const input = document.getElementById('gef-pfx');
+        const senha = document.getElementById('gef-pfx-senha');
+        if (!id) {
+            feedback('Selecione a empresa para testar o certificado.', 'danger');
+            return;
+        }
+        _ui.saving = true;
+        desabilitarBotoesCertificado(true, 'Testando…');
+        pintarResultadoCertificado('Validando certificado…', 'carregando');
+        try {
+            const fd = new FormData();
+            fd.append('empresa_id', String(id));
+            if (senha && senha.value) fd.append('certificado_senha', senha.value);
+            if (input && input.files && input.files.length) {
+                fd.append('certificado', input.files[0]);
+            }
+            const dest = urlAbsoluta(urlCertificadoTestar());
+            if (!chamadaSemApiDuplo(dest)) throw new Error('URL de API inválida.');
+            const res = await fetch(dest, {
+                method: 'POST',
+                headers: authHeadersCertificado(),
+                body: fd
+            });
+            const data = await res.json().catch(function () { return {}; });
+            if (!res.ok || !data.success || !data.ok) {
+                throw new Error(mensagemCertificadoDaApi(data, 'Não foi possível validar o certificado.'));
+            }
+            const msg = data.mensagem || 'Certificado válido. Senha conferida.';
+            feedback(msg, 'success');
+            pintarResultadoCertificado(msg, 'sucesso');
+            _ui.aba = 'cert';
+            await carregarLista();
+            await abrirDetalhe(id);
+        } catch (err) {
+            feedback(err.message, 'danger');
+            pintarResultadoCertificado(err.message, 'erro');
+        } finally {
+            _ui.saving = false;
+            desabilitarBotoesCertificado(false);
         }
     }
 
@@ -970,6 +1095,8 @@
         recursoSemPrefixoApi,
         resolverEmpresaId,
         urlCertificadoUpload,
+        urlCertificadoTestar,
+        rotuloEstadoCertificado,
         idEmpresaResposta,
         fiscalVazio,
         htmlFormNovaEmpresa,

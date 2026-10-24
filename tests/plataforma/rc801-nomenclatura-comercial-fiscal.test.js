@@ -38,9 +38,8 @@ describe('RC8.0.1 — nomenclatura Comercial × Fiscal', () => {
     const ui = read('frontend/erp/js/pedidos.js');
     assert.match(ui, /AGUARDANDO_FATURAMENTO:\s*'Aguardando Expedição'/);
     assert.match(ui, /FATURADO:\s*'Expedido'/);
-    assert.match(ui, /Enviar para Expedição/);
-    assert.match(ui, /enviar-faturamento/);
-    assert.match(ui, /loadPage\('faturamento'\)/);
+    // Ação "Enviar para Expedição" retirada da tela operacional de Pedidos (backend legado preservado).
+    assert.doesNotMatch(ui, /enviar-faturamento/);
   });
 
   it('tela Expedição: título comercial; NF-e na Central de Faturamento', () => {

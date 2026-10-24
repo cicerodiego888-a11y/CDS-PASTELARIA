@@ -4,6 +4,9 @@
  */
 'use strict';
 
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-05-72-');
+
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -125,10 +128,19 @@ function montarSync(db, extras = {}) {
       return { cStat: '217', notasNovas: 0, origem: 'mock-sefaz' };
     },
     configuracaoService: {
-      obterContextoOperacional: async (opcoes) => ({
-        ok: true,
-        contexto: { empresaId: Number(opcoes.empresaId) }
-      })
+      obterContextoOperacional: async (opcoes) => {
+        const empresaId = Number(opcoes.empresaId);
+        return {
+          ok: true,
+          contexto: {
+            empresaId,
+            cnpj: empresaId === EMP_A ? '11111111000191' : '22222222000182',
+            ambiente: 1,
+            certificadoPath: `C:\\certs\\mock-empresa-${empresaId}.pfx`,
+            certificadoSenha: 'mock'
+          }
+        };
+      }
     },
     ...extras
   });
@@ -382,7 +394,12 @@ function tEstatico() {
     repo.indexOf('_montarClausulaWhere')
   );
   assert.ok(repoFn.includes('WHERE chave = ? AND empresa_id = ?'));
-  console.log('  extra: rota resolve empresa; lookup chave+empresaId; normalização da chave intacta');
+
+  const proprio = fs.readFileSync(__filename, 'utf8');
+  const iIso = proprio.indexOf('isolarBancoTeste(');
+  const iSync = proprio.indexOf("require('../../backend/motores/central-entradas/services/CentralSincronizacaoService')");
+  assert.ok(iIso >= 0 && iIso < iSync, 'isolarBancoTeste deve preceder CentralSincronizacaoService');
+  console.log('  extra: rota resolve empresa; lookup chave+empresaId; isolamento antes de database.js');
 }
 
 async function main() {
@@ -398,6 +415,7 @@ async function main() {
   await t09();
   await t10();
   tEstatico();
+  isolamento.comprobarSeCarregado();
   console.log('OK 10/10');
 }
 

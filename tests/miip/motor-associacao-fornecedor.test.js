@@ -186,6 +186,43 @@ async function main() {
     assert.deepStrictEqual(candidatos[0].motoresQueVotaram, ['motor_associacao_fornecedor']);
   });
 
+  await test('cProd igual em fornecedores distintos permanece vinculado por CNPJ', async () => {
+    const cnpjA = '12345678000199';
+    const cnpjB = '12345678000270';
+    const cProdCompartilhado = 'ITEM-001';
+    const motorA = criarMotor({
+      associacao: {
+        ...ASSOCIACAO_ATIVA,
+        fornecedorCnpj: cnpjA,
+        codigoFornecedor: cProdCompartilhado,
+        produtoId: 50
+      }
+    });
+    const motorB = criarMotor({
+      associacao: {
+        ...ASSOCIACAO_ATIVA,
+        id: 2,
+        fornecedorCnpj: cnpjB,
+        codigoFornecedor: cProdCompartilhado,
+        produtoId: 60,
+        produto: { ...PRODUTO_ATIVO, id: 60, nome: 'Produto do fornecedor B' }
+      }
+    });
+
+    const [candidatosA, candidatosB] = await Promise.all([
+      motorA.identificar({ fornecedorCnpj: cnpjA, codigoFornecedor: cProdCompartilhado }),
+      motorB.identificar({ fornecedorCnpj: cnpjB, codigoFornecedor: cProdCompartilhado })
+    ]);
+    const semAssociacaoOutroFornecedor = await motorA.identificar({
+      fornecedorCnpj: cnpjB,
+      codigoFornecedor: cProdCompartilhado
+    });
+
+    assert.strictEqual(candidatosA[0].produtoId, 50);
+    assert.strictEqual(candidatosB[0].produtoId, 60);
+    assert.deepStrictEqual(semAssociacaoOutroFornecedor, []);
+  });
+
   await test('identificar retorna vazio quando associação não existe', async () => {
     const motor = criarMotor({ associacao: null });
 

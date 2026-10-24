@@ -11,6 +11,9 @@
  */
 'use strict';
 
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-p04-central-entradas-04-gate-');
+
 const assert = require('assert');
 const os = require('os');
 const fs = require('fs');
@@ -47,9 +50,16 @@ const CentralDfePersistenciaService = require(
   '../../backend/motores/central-entradas/services/CentralDfePersistenciaService'
 );
 const {
-  consultarNotaPorChave,
-  sincronizarDistribuicaoDFe
+  consultarNotaPorChave: consultarNotaPorChaveRaw,
+  sincronizarDistribuicaoDFe: sincronizarDistribuicaoDFeRaw
 } = require('../../backend/services/fiscal/distribuicaoDFe');
+const { anexarAutorizacaoTesteSefaz } = require('../../backend/services/fiscal/autorizacaoTransmissaoSefaz');
+function consultarNotaPorChave(chave, deps) {
+  return consultarNotaPorChaveRaw(chave, anexarAutorizacaoTesteSefaz(deps));
+}
+function sincronizarDistribuicaoDFe(deps) {
+  return sincronizarDistribuicaoDFeRaw(anexarAutorizacaoTesteSefaz(deps));
+}
 const {
   montarCandidatoManifestacao,
   ESTADOS_MANIFESTACAO

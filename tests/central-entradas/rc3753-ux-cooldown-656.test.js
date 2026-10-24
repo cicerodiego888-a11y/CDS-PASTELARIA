@@ -85,6 +85,12 @@ describe('RC3.7.5.3 — resolverCooldownSefaz656Ux', () => {
 
 describe('RC3.7.5.3 — estado de serviço não é ERRO', () => {
   it('exibe AGUARDANDO COOLDOWN em vez de Erro na última execução', () => {
+    const prevNav = globalThis.navigator;
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: { onLine: true }
+    });
+    try {
     const estado = UX.resolverEstadoServicoCentral(stateCooldownRecuperado());
     // Congela o "agora" do helper interno via state já com tempos futuros relativos a Date.now
     // Reavalia com clock controlado:
@@ -113,6 +119,16 @@ describe('RC3.7.5.3 — estado de serviço não é ERRO', () => {
     assert.equal(est.label, 'AGUARDANDO COOLDOWN DA SEFAZ');
     assert.doesNotMatch(est.label, /Erro/i);
     assert.equal(est.classe, 'central-ux-servico--cooldown');
+    } finally {
+      if (prevNav === undefined) {
+        delete globalThis.navigator;
+      } else {
+        Object.defineProperty(globalThis, 'navigator', {
+          configurable: true,
+          value: prevNav
+        });
+      }
+    }
   });
 });
 

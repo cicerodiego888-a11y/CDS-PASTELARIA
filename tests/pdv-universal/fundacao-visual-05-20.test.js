@@ -154,9 +154,9 @@ function test12PdvJsNaoCarregado() {
 function test13RotasOficiaisIntactas() {
   const server = src('backend/server.js');
   assert.ok(server.includes("app.get(['/pdv', '/pdv/'], verificarToken"));
-  assert.ok(server.includes("app.get(['/pdv-universal', '/pdv-universal/'], verificarToken"));
+  assert.ok(server.includes('caminhoDoPdvUniversalBloqueado'));
   assert.ok(server.includes("frontendRoot, 'pdv/index.html'"));
-  assert.ok(server.includes("frontendRoot, 'pdv-universal/index.html'"));
+  assert.ok(!server.includes("frontendRoot, 'pdv-universal/index.html'"));
 }
 
 function test14CaixaNaoFake() {

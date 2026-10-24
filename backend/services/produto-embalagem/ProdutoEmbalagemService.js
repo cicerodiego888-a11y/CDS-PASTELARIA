@@ -12,6 +12,7 @@ const {
   TIPOS_APRESENTACAO
 } = require('./tiposApresentacao');
 const { inferirTipoConversao, normalizarTipoConversao } = require('../../motores/muc/constants/tiposConversao');
+const { isUnidadeConhecida } = require('../../motores/muc/core/unidadesSi');
 const { criarProdutoApresentacaoDTO } = require('../../motores/muc');
 
 function num(v, casas = 4) {
@@ -133,6 +134,21 @@ class ProdutoEmbalagemService {
    */
   sincronizarEmbalagensProduto(produtoId, embalagensRaw, unidadeProduto, usuario, callback, opcoes = {}) {
     const usarTransacao = opcoes.usarTransacao !== false;
+    if (opcoes.exigirConteudoExplicito) {
+      const listaRaw = Array.isArray(embalagensRaw) ? embalagensRaw : [];
+      for (let i = 0; i < listaRaw.length; i += 1) {
+        const emb = listaRaw[i] || {};
+        if (Number(emb.ativa ?? 1) !== 1) continue;
+        const tipo = normalizarTipoApresentacao(emb.tipo);
+        const quantidade = tipo === 'UN' ? 1 : num(emb.quantidade ?? emb.quantidade_por_embalagem, 3);
+        if (!(quantidade > 0)) {
+          return callback(new Error(`Apresentação ${i + 1}: informe uma quantidade de conteúdo maior que zero.`));
+        }
+        if (!isUnidadeConhecida(emb.unidade)) {
+          return callback(new Error(`Apresentação ${i + 1}: informe uma unidade válida para o conteúdo.`));
+        }
+      }
+    }
     const validacao = validarListaEmbalagens(
       (Array.isArray(embalagensRaw) ? embalagensRaw : []).map((e) =>
         normalizarEmbalagemInput(e, unidadeProduto)

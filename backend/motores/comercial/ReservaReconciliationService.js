@@ -9,6 +9,7 @@
  * @module motores/comercial/ReservaReconciliationService
  */
 'use strict';
+const { roundStockQuantity } = require('../../services/estoque/quantityPrecision');
 
 const { PedidoStatus } = require('../../services/pedido/enums');
 
@@ -107,9 +108,7 @@ function montarPlanoCorrecao(tipo) {
   }
 }
 
-function round3(n) {
-  return Math.round(Number(n || 0) * 1000) / 1000;
-}
+
 
 function getDb(dbInjected) {
   if (dbInjected) return dbInjected;
@@ -139,9 +138,9 @@ function inconsistencia(ev = {}) {
     produto_id: ev.produto_id != null ? Number(ev.produto_id) : null,
     tipo,
     descricao: String(ev.descricao),
-    pedido_quantidade: ev.pedido_quantidade != null ? round3(ev.pedido_quantidade) : null,
-    reserva_quantidade: ev.reserva_quantidade != null ? round3(ev.reserva_quantidade) : null,
-    saldo_fiscal: ev.saldo_fiscal != null ? round3(ev.saldo_fiscal) : null,
+    pedido_quantidade: ev.pedido_quantidade != null ? roundStockQuantity(ev.pedido_quantidade) : null,
+    reserva_quantidade: ev.reserva_quantidade != null ? roundStockQuantity(ev.reserva_quantidade) : null,
+    saldo_fiscal: ev.saldo_fiscal != null ? roundStockQuantity(ev.saldo_fiscal) : null,
     status_pedido: ev.status_pedido != null ? String(ev.status_pedido) : null,
     reserva_id: ev.reserva_id != null ? Number(ev.reserva_id) : null,
     encontrado_em: ev.encontrado_em != null ? String(ev.encontrado_em) : null,
@@ -162,7 +161,7 @@ function agregarQuantidadesPedido(itens) {
   for (const item of itens || []) {
     const pid = Number(item.produto_id);
     if (!Number.isInteger(pid) || pid <= 0) continue;
-    map.set(pid, round3((map.get(pid) || 0) + Number(item.quantidade || 0)));
+    map.set(pid, roundStockQuantity((map.get(pid) || 0) + Number(item.quantidade || 0)));
   }
   return map;
 }
@@ -177,7 +176,7 @@ function agregarQuantidadesReserva(reservas) {
   for (const r of reservas || []) {
     const pid = Number(r.produto_id);
     if (!Number.isInteger(pid) || pid <= 0) continue;
-    map.set(pid, round3((map.get(pid) || 0) + Number(r.quantidade_fiscal || 0)));
+    map.set(pid, roundStockQuantity((map.get(pid) || 0) + Number(r.quantidade_fiscal || 0)));
   }
   return map;
 }
@@ -195,8 +194,8 @@ function evidenciasBase({
     pedido_quantidade: pedidoQuantidade,
     reserva_quantidade: reservaQuantidade != null
       ? reservaQuantidade
-      : (reserva != null ? round3(reserva.quantidade_fiscal) : null),
-    saldo_fiscal: produto != null ? round3(produto.saldo_fiscal) : null,
+      : (reserva != null ? roundStockQuantity(reserva.quantidade_fiscal) : null),
+    saldo_fiscal: produto != null ? roundStockQuantity(produto.saldo_fiscal) : null,
     status_pedido: pedido?.status ?? null,
     reserva_id: reserva?.id ?? null,
     data_criacao: pedido?.created_at ?? pedido?.data_pedido ?? null,
@@ -296,7 +295,7 @@ async function reconciliarReservas(opts = {}) {
             reserva: r,
             produto,
             pedidoQuantidade: null,
-            reservaQuantidade: round3(r.quantidade_fiscal)
+            reservaQuantidade: roundStockQuantity(r.quantidade_fiscal)
           }),
           pedido_id: pedidoId,
           produto_id: r.produto_id,
@@ -319,10 +318,10 @@ async function reconciliarReservas(opts = {}) {
             reserva: r,
             produto,
             pedidoQuantidade: qtdPedido,
-            reservaQuantidade: round3(r.quantidade_fiscal)
+            reservaQuantidade: roundStockQuantity(r.quantidade_fiscal)
           }),
           tipo: TipoInconsistencia.PEDIDO_CANCELADO_COM_RESERVA_ATIVA,
-          descricao: `Pedido cancelado possui reserva ativa #${r.id} (qtd=${round3(r.quantidade_fiscal)}).`,
+          descricao: `Pedido cancelado possui reserva ativa #${r.id} (qtd=${roundStockQuantity(r.quantidade_fiscal)}).`,
           encontrado_em: EncontradoEm.PEDIDO
         }));
       }
@@ -339,7 +338,7 @@ async function reconciliarReservas(opts = {}) {
     }
 
     for (const r of reservas) {
-      const qtd = round3(r.quantidade_fiscal);
+      const qtd = roundStockQuantity(r.quantidade_fiscal);
       const produto = await carregarProduto(Number(r.produto_id));
       const qtdPedido = qtdPedidoPorProduto.get(Number(r.produto_id)) ?? null;
       const base = evidenciasBase({
@@ -367,11 +366,11 @@ async function reconciliarReservas(opts = {}) {
           descricao: `Reserva #${r.id} referencia produto inexistente.`,
           encontrado_em: EncontradoEm.ESTOQUE
         }));
-      } else if (round3(produto.saldo_fiscal) < 0) {
+      } else if (roundStockQuantity(produto.saldo_fiscal) < 0) {
         inconsistencias.push(inconsistencia({
           ...base,
           tipo: TipoInconsistencia.SALDO_FISCAL_NEGATIVO,
-          descricao: `Saldo fiscal negativo (${round3(produto.saldo_fiscal)}) para o produto.`,
+          descricao: `Saldo fiscal negativo (${roundStockQuantity(produto.saldo_fiscal)}) para o produto.`,
           encontrado_em: EncontradoEm.ESTOQUE
         }));
       }
@@ -457,7 +456,7 @@ async function reconciliarReservas(opts = {}) {
           const base = evidenciasBase({
             pedido: p,
             produto,
-            pedidoQuantidade: round3(item.quantidade),
+            pedidoQuantidade: roundStockQuantity(item.quantidade),
             reservaQuantidade: null
           });
           inconsistencias.push(inconsistencia({

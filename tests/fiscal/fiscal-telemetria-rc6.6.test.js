@@ -3,7 +3,11 @@
  * Observe-only: não altera regras fiscais.
  *
  * Executar: npm run test:fiscal-telemetria
+ *           node tests/fiscal/fiscal-telemetria-rc6.6.test.js
  */
+
+const { isolarBancoTeste } = require('../central-entradas/helpers/isolarBancoTeste');
+isolarBancoTeste('cds-fiscal-telem-');
 
 const assert = require('assert');
 const {

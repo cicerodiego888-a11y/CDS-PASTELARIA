@@ -3,6 +3,9 @@
  * Executar: npm run test:central-entradas-sprint5
  */
 
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-sprint5-');
+
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -13,9 +16,11 @@ const CentralComprasBridgeService = require('../../backend/motores/central-entra
 const { enriquecerParseComMiip } = require('../../backend/shared/nfe/enriquecerParseComMiip');
 const NFeParserService = require('../../backend/shared/nfe/NFeParserService');
 const { DocumentoFiscalStatus } = require('../../backend/motores/central-entradas/core/DocumentoFiscalStatus');
+const { garantirEmpresaTeste } = require('./helpers/empresaTesteCentral');
 
 let passou = 0;
 let falhou = 0;
+isolamento.comprobarSeCarregado();
 
 const CHAVE_SPRINT5 = '35260112345678000199550010000000011000000001';
 const FIXTURE_XML = path.join(__dirname, '../shared/nfe/fixtures/nfe-proc-sample.xml');
@@ -24,6 +29,13 @@ const service = new CentralEntradasService();
 const documentosRepository = new CentralDocumentosRepository();
 const historicoRepository = new CentralHistoricoRepository();
 const bridgeService = new CentralComprasBridgeService();
+const CTX = { empresaId: null };
+const OPCOES_ADMIN = {
+  perfilUsuario: 'ADMIN',
+  roleUsuario: 'admin',
+  usuarioId: 1,
+  usuarioNome: 'admin-teste'
+};
 
 function test(nome, fn) {
   return Promise.resolve()
@@ -40,7 +52,8 @@ function test(nome, fn) {
 }
 
 async function limparDocumentoTeste() {
-  const existente = await documentosRepository.buscarPorChave(CHAVE_SPRINT5);
+  if (!CTX.empresaId) return;
+  const existente = await documentosRepository.buscarPorChave(CHAVE_SPRINT5, CTX.empresaId);
   if (!existente) return;
 
   await historicoRepository._obterSql().run(
@@ -65,7 +78,8 @@ async function criarDocumentoSincronizado() {
     valorTotal: 100,
     xml,
     origem: 'dfe',
-    status: DocumentoFiscalStatus.SINCRONIZADA
+    status: DocumentoFiscalStatus.XML_COMPLETO,
+    empresaId: CTX.empresaId
   });
 }
 
@@ -73,6 +87,7 @@ async function main() {
   console.log('\n=== Testes Central de Entradas — Sprint 5 ===\n');
 
   await documentosRepository._obterSql().whenReady();
+  CTX.empresaId = await garantirEmpresaTeste(documentosRepository._obterSql());
 
   await test('health retorna sprint RC2', async () => {
     const health = await service.obterHealth();
@@ -93,11 +108,12 @@ async function main() {
 
   await test('cria documento sincronizado para processamento', async () => {
     documento = await criarDocumentoSincronizado();
-    assert.strictEqual(documento.status, DocumentoFiscalStatus.SINCRONIZADA);
+    assert.strictEqual(documento.status, DocumentoFiscalStatus.XML_COMPLETO);
+    assert.strictEqual(documento.empresaId, CTX.empresaId);
   });
 
   await test('processarDocumento executa pipeline e persiste parse_json', async () => {
-    const resultado = await service.processarDocumento(documento.id);
+    const resultado = await service.processarDocumento(documento.id, { empresaId: CTX.empresaId });
 
     assert.strictEqual(resultado.sucesso, true);
     assert.ok(resultado.parse);
@@ -108,14 +124,16 @@ async function main() {
     assert.ok(atualizado.processadoEm);
 
     const statusValidos = [
-      DocumentoFiscalStatus.AGUARDANDO_REVISAO,
-      DocumentoFiscalStatus.PRONTA_PARA_COMPRA
+      DocumentoFiscalStatus.EM_REVISAO,
+      DocumentoFiscalStatus.PRONTA_IMPORTACAO
     ];
     assert.ok(statusValidos.includes(atualizado.status));
   });
 
   await test('obterPayloadCompra retorna formato parse-xml', async () => {
-    const payload = await service.obterPayloadCompra(documento.id);
+    const payload = await service.obterPayloadCompra(documento.id, {
+      empresaIdContexto: CTX.empresaId
+    });
     assert.strictEqual(payload.sucesso, true);
     assert.ok(payload.dadosCompra);
     assert.ok(Array.isArray(payload.dadosCompra.itens));
@@ -125,38 +143,51 @@ async function main() {
   await test('concluirRevisao transiciona para PRONTA_PARA_COMPRA', async () => {
     const atual = await documentosRepository.buscarPorId(documento.id);
 
-    if (atual.status === DocumentoFiscalStatus.AGUARDANDO_REVISAO) {
+    if (atual.status === DocumentoFiscalStatus.EM_REVISAO) {
       const itens = atual.parseJson?.itens || [];
-      const resultado = await service.concluirRevisao(documento.id, { itens });
+      const resultado = await service.concluirRevisao(documento.id, {
+        itens,
+        empresaIdContexto: CTX.empresaId
+      });
       assert.strictEqual(resultado.sucesso, true);
-      assert.strictEqual(resultado.documento.status, DocumentoFiscalStatus.PRONTA_PARA_COMPRA);
+      assert.strictEqual(resultado.documento.status, DocumentoFiscalStatus.PRONTA_IMPORTACAO);
     } else {
-      await service.alterarStatus(documento.id, DocumentoFiscalStatus.PRONTA_PARA_COMPRA, {
-        detalhe: 'Teste sprint 5 — já pronto'
+      await service.alterarStatus(documento.id, DocumentoFiscalStatus.PRONTA_IMPORTACAO, {
+        detalhe: 'Teste sprint 5 — já pronto',
+        empresaIdContexto: CTX.empresaId,
+        ...OPCOES_ADMIN
       });
     }
   });
 
   await test('vincularCompra marca documento como GRAVADA', async () => {
-    await bridgeService.registrarAberturaCompra(documento.id);
+    await bridgeService.registrarAberturaCompra(documento.id, {
+      empresaIdContexto: CTX.empresaId
+    });
 
     const sql = documentosRepository._obterSql();
     let compraId;
-    const compraExistente = await sql.get('SELECT id FROM compras ORDER BY id DESC LIMIT 1');
+    const compraExistente = await sql.get(
+      'SELECT id FROM compras WHERE empresa_id = ? ORDER BY id DESC LIMIT 1',
+      [CTX.empresaId]
+    );
     if (compraExistente?.id) {
       compraId = compraExistente.id;
     } else {
       const insert = await sql.run(
-        `INSERT INTO compras (data_compra, fornecedor, total, status, valor_total_nota)
-         VALUES ('2026-07-05', 'Teste Sprint 5', 100, 'concluida', 100)`
+        `INSERT INTO compras (data_compra, fornecedor, total, status, valor_total_nota, empresa_id)
+         VALUES ('2026-07-05', 'Teste Sprint 5', 100, 'concluida', 100, ?)`,
+        [CTX.empresaId]
       );
       compraId = insert.lastID;
     }
 
-    const resultado = await bridgeService.vincularCompra(documento.id, compraId);
+    const resultado = await bridgeService.vincularCompra(documento.id, compraId, {
+      empresaIdContexto: CTX.empresaId
+    });
 
     assert.strictEqual(resultado.sucesso, true);
-    assert.strictEqual(resultado.documento.status, DocumentoFiscalStatus.GRAVADA);
+    assert.strictEqual(resultado.documento.status, DocumentoFiscalStatus.IMPORTADA);
     assert.strictEqual(resultado.compraId, compraId);
 
     const atualizado = await documentosRepository.buscarPorId(documento.id);

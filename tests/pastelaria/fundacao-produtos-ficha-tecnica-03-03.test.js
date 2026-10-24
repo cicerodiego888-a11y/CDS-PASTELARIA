@@ -394,6 +394,19 @@ function t25SemCompatFallback() {
   void ModoOperacionalGlobal;
 }
 
+function t26ControleExplicitoUsoFicha() {
+  const frontend = src('frontend/erp/js/produtos.js');
+  assert.ok(frontend.includes('id="utiliza_ficha_tecnica"'));
+  assert.ok(frontend.includes('Utiliza ficha técnica'));
+  assert.ok(frontend.includes('id="areaComponentesFichaTecnica"'));
+  assert.ok(frontend.includes("$('#areaComponentesFichaTecnica').toggle(comercial && utilizaFicha)"));
+  assert.ok(frontend.includes("$('#permite_personalizacao_ingredientes').prop('disabled', !comercial || !utilizaFicha)"));
+  assert.ok(frontend.includes('utiliza_ficha_tecnica: utilizaFichaTecnica ? 1 : 0'));
+  const schema = src('backend/services/produtos/fichaTecnicaSchema.js');
+  assert.ok(schema.includes('ALTER TABLE produtos ADD COLUMN utiliza_ficha_tecnica INTEGER'));
+  assert.ok(schema.includes("coluna.name === 'utiliza_ficha_tecnica'"));
+}
+
 async function main() {
   const casos = [
     ['T01 Produto comercial no PDV', t01ComercialVendavelPdv],
@@ -420,7 +433,8 @@ async function main() {
     ['T22 Núcleo VendaPagamento sem ficha', t22NucleoNaoReescritoPorFicha],
     ['T23 Sem fallback empresa 1', t23SemFallbackEmpresa1],
     ['T24 Sem primeira empresa', t24SemPrimeiraEmpresa],
-    ['T25 Sem COMPAT', t25SemCompatFallback]
+    ['T25 Sem COMPAT', t25SemCompatFallback],
+    ['T26 Controle explícito do uso da ficha', t26ControleExplicitoUsoFicha]
   ];
 
   let falhas = 0;

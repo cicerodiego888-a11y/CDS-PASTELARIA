@@ -52,6 +52,11 @@ function statusDeErroEmpresa(err) {
     || code === 'EMPRESA_OPERACIONAL_AUSENTE'
     || code === 'EMPRESA_OPERACIONAL_AMBIGUA'
     || code === 'EMPRESA_OPERACIONAL_INVALIDA'
+    || code === 'CNPJ_NAO_CONFIGURADO'
+    || code === 'AMBIENTE_NAO_CONFIGURADO'
+    || code === 'CERTIFICADO'
+    || code === 'IDENTIDADE_FISCAL_AUSENTE'
+    || code === 'IDENTIDADE_FISCAL_INCONSISTENTE'
   ) {
     return 400;
   }
@@ -340,10 +345,22 @@ function responderErroDocumentoCentral(res, err) {
   if (code === 'DOCUMENTO_NAO_ENCONTRADO') {
     return res.status(404).json(corpoDocumentoNaoEncontrado());
   }
-  return res.status(status).json({
+  const body = {
     error: (err && err.message) || 'Erro de ownership do documento.',
     code: code || undefined
-  });
+  };
+  if (err && (err.identidadeFiscalIncompleta === true
+    || code === 'IDENTIDADE_FISCAL_AUSENTE'
+    || code === 'IDENTIDADE_FISCAL_INCONSISTENTE'
+    || code === 'CNPJ_NAO_CONFIGURADO'
+    || code === 'AMBIENTE_NAO_CONFIGURADO'
+    || code === 'CERTIFICADO')) {
+    body.identidadeFiscalIncompleta = true;
+    body.consultaExecutada = false;
+    body.sefazConsultada = false;
+    body.rejeicaoSefaz = false;
+  }
+  return res.status(status).json(body);
 }
 
 function exigirDocumentoCompraMesmaEmpresa(documentoEmpresaId, compraEmpresaId) {

@@ -134,7 +134,7 @@ Fonte: `VendaPagamentoService.criarVenda` + payload montado em `frontend/pdv/js/
 
 | Campo | Origem |
 |---|---|
-| `codigo` | `VND-{timestamp local}` |
+| `codigo` | `VND-{timestamp local}`; sufixo `-NN` quando houver colisão no mesmo segundo |
 | `data_venda` | data local Brasil |
 | `quantidade_fiscal` / `quantidade_nao_fiscal` | `distribuirItemVenda` |
 | `valor_fiscal` / `valor_nao_fiscal` (item e venda) | distribuição + `separarItensDistribuidos` |

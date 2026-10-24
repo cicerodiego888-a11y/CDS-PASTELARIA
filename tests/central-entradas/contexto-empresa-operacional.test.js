@@ -14,6 +14,9 @@
  */
 'use strict';
 
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-p04-contexto-empresa-operacional-');
+
 const assert = require('assert');
 const os = require('os');
 const fs = require('fs');

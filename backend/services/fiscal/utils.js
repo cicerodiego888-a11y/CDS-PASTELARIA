@@ -70,6 +70,17 @@ function gerarChaveAcesso({ uf, aamm, cnpj, modelo = '65', serie, numero, tpEmis
   return `${base}${dv}`;
 }
 
+/**
+ * Dígito verificador da chave NF-e/NFC-e (módulo 11 sobre os 43 primeiros dígitos).
+ * @param {string} chave
+ * @returns {boolean}
+ */
+function validarDigitoVerificadorChaveNfe(chave) {
+  const d = onlyDigits(chave);
+  if (d.length !== 44) return false;
+  return modulo11(d.slice(0, 43)) === Number(d[43]);
+}
+
 function sha1Hex(value) {
   return crypto.createHash('sha1').update(value).digest('hex');
 }
@@ -142,7 +153,9 @@ module.exports = {
   todayYMD,
   nowDhEmi,
   gerarCodigoNumerico,
+  modulo11,
   gerarChaveAcesso,
+  validarDigitoVerificadorChaveNfe,
   sha1Hex,
   xmlEscape,
   compactarXml,

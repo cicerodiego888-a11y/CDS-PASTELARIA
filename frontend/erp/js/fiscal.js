@@ -212,12 +212,16 @@ function carregarFiscalConfig(targetSelector = '#fiscal-config-form-area') {
                         <label class="form-label cds-cfg-label">Enviar certificado A1 (.pfx)</label>
                         <input type="file" id="fiscal_certificado_upload" class="form-control" accept=".pfx">
                         <div class="form-text cds-cfg-hint">Envie o certificado digital da empresa em formato .pfx</div>
-                        <div class="form-text mt-2" style="color: ${cfg.certificadoPath || cfg.certificado_configurado ? 'green' : 'red'};">
-                            ${cfg.certificadoPath || cfg.certificado_configurado ? 'Certificado ativo' : 'Certificado inativo'}
+                        <div class="form-text mt-2" style="color: ${cfg.certificado_validado ? 'green' : (cfg.certificado_configurado || cfg.certificadoPath ? '#b8860b' : 'red')};">
+                            ${cfg.certificado_validado
+                              ? 'Certificado válido (criptográfico)'
+                              : (cfg.certificado_configurado || cfg.certificadoPath
+                                ? 'Certificado configurado — ainda não validado'
+                                : 'Certificado não configurado')}
                         </div>
                     </div>
                     ${getFiscalField('Senha do certificado', 'fiscal_certificado_senha', '', '', 'password')}
-                    <input type="hidden" class="fiscal-field" id="fiscal_certificado_path" value="${cfg.certificadoPath || ''}">
+                    <input type="hidden" class="fiscal-field" id="fiscal_certificado_path" value="">
                     ${getFiscalField('Tipo impressão', 'fiscal_tp_imp', cfg.tpImp || 4, '4 = DANFE NFC-e')}
             `;
 
@@ -396,37 +400,68 @@ function salvarConfigFiscal() {
     });
 }
 
+function resolverEmpresaIdCertificadoFiscal() {
+    try {
+        const deStorage = localStorage.getItem('cds_empresa_id');
+        if (deStorage && Number(deStorage) > 0) return Number(deStorage);
+    } catch (_e) { /* ignore */ }
+    if (typeof globalThis !== 'undefined' && globalThis.__CDS_EMPRESA_ID != null) {
+        const n = Number(globalThis.__CDS_EMPRESA_ID);
+        if (Number.isInteger(n) && n > 0) return n;
+    }
+    return null;
+}
+
 function testarCertificadoFiscal() {
-    const certificadoPath = $('#fiscal_certificado_path').val();
+    const empresaId = resolverEmpresaIdCertificadoFiscal();
     const senha = $('#fiscal_certificado_senha').val();
+    if (!empresaId) {
+        showNotification('Selecione a empresa antes de testar o certificado.', 'warning');
+        return;
+    }
 
     $.ajax({
         url: `${API_URL}/fiscal/config/certificado/testar`,
         method: 'POST',
         contentType: 'application/json',
-        data: JSON.stringify({ certificadoPath, senha }),
+        data: JSON.stringify({
+            empresa_id: empresaId,
+            certificado_senha: senha || undefined
+        }),
         success: function(resp) {
-            showNotification(`Certificado validado com sucesso. Tamanho base64: ${resp.certBase64Length}`);
+            showNotification(resp.mensagem || 'Certificado válido. Senha conferida.');
             if (typeof atualizarPainelExecutivoCentroCfg === 'function') {
                 atualizarPainelExecutivoCentroCfg();
             }
         },
         error: function(xhr) {
-            showNotification(xhr.responseJSON?.error || 'Falha ao validar certificado.', 'danger');
+            showNotification(xhr.responseJSON?.error || xhr.responseJSON?.mensagem || 'Falha ao validar certificado.', 'danger');
         }
     });
 }
 
 function uploadCertificadoFiscal() {
     const input = document.getElementById('fiscal_certificado_upload');
+    const empresaId = resolverEmpresaIdCertificadoFiscal();
+    const senha = $('#fiscal_certificado_senha').val();
 
+    if (!empresaId) {
+        showNotification('Selecione a empresa antes de enviar o certificado.', 'warning');
+        return;
+    }
     if (!input || !input.files || !input.files.length) {
         showNotification('Selecione um arquivo .pfx para enviar.', 'warning');
+        return;
+    }
+    if (!senha) {
+        showNotification('Informe a senha do certificado.', 'warning');
         return;
     }
 
     const formData = new FormData();
     formData.append('certificado', input.files[0]);
+    formData.append('empresa_id', String(empresaId));
+    formData.append('certificado_senha', senha);
 
     $.ajax({
         url: `${API_URL}/fiscal/certificado/upload`,
@@ -435,8 +470,7 @@ function uploadCertificadoFiscal() {
         processData: false,
         contentType: false,
         success: function(resp) {
-            $('#fiscal_certificado_path').val(resp.path || '');
-            showNotification('Certificado enviado com sucesso!');
+            showNotification(resp.message || resp.mensagem || 'Certificado válido. Senha conferida.');
             if (typeof atualizarPainelExecutivoCentroCfg === 'function') {
                 atualizarPainelExecutivoCentroCfg();
             }
@@ -541,7 +575,11 @@ function renderTabelaFiscalNotas() {
                         <tr>
                             <td>${n.id}</td>
                             <td>${n.venda_codigo || n.venda_id || '-'}</td>
-                            <td><span class="badge ${getBadgeFiscalClass(n.status)}">${n.status || 'pendente'}</span></td>
+                            <td><span class="badge ${getBadgeFiscalClass(n.status)}">${({
+                                cancelamento_em_andamento: 'Cancelamento em andamento',
+                                cancelamento_desconhecido: 'Resultado desconhecido — aguardando reconciliação',
+                                cancelamento_falha_pre_envio: 'Falha antes do envio'
+                            })[String(n.status || '').toLowerCase()] || n.status || 'pendente'}</span></td>
                             <td style="max-width:220px; word-break:break-all;">${n.chave_acesso || '-'}</td>
                             <td>${n.protocolo || '-'}</td>
                             <td>${formatarDataHoraBrasil(n.created_at)}</td>
@@ -550,7 +588,7 @@ function renderTabelaFiscalNotas() {
                                     <i class="fas fa-eye"></i>
                                 </button>
 
-                                ${String(n.status || '').toLowerCase().includes('autoriz') || String(n.status || '').toLowerCase() === 'cancelamento_rejeitado' ? `
+                                ${String(n.status || '').toLowerCase().includes('autoriz') || ['cancelamento_rejeitado', 'cancelamento_falha_pre_envio'].includes(String(n.status || '').toLowerCase()) ? `
                                     <button class="btn btn-sm btn-danger ms-1" onclick="cancelarNfce(${n.id})" title="Cancelar NFC-e">
                                         <i class="fas fa-ban"></i>
                                     </button>
@@ -573,8 +611,13 @@ function renderTabelaFiscalNotas() {
 function getBadgeFiscalClass(status) {
     const s = String(status || '').toLowerCase();
 
+    if (s === 'cancelamento_em_andamento') return 'bg-info text-dark';
+    if (s === 'cancelamento_desconhecido' || s === 'cancelamento_falha_pre_envio') {
+        return 'bg-warning text-dark';
+    }
+    if (s === 'cancelamento_rejeitado') return 'bg-danger';
     if (s.includes('autoriz')) return 'bg-success';
-    if (s.includes('cancel')) return 'bg-dark';
+    if (s === 'cancelada') return 'bg-dark';
     if (s.includes('rejeit')) return 'bg-danger';
     if (s.includes('erro')) return 'bg-warning text-dark';
 
@@ -831,6 +874,7 @@ function cancelarNfce(id) {
                         <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
                     </div>
                     <div class="modal-body">
+                        <div id="statusCancelarNfce" class="alert alert-info" role="status" aria-live="polite" hidden></div>
                         <label class="form-label fw-bold">Justificativa do cancelamento (mínimo 15 caracteres):</label>
                         <textarea id="justificativaCancelarNfce" class="form-control" rows="4" maxlength="255" placeholder="Ex: Erro na emissão da nota fiscal..."></textarea>
                         <div class="form-text text-end"><span id="contarCharsCancelar">0</span>/255</div>
@@ -852,11 +896,14 @@ function cancelarNfce(id) {
 
     const textarea = document.getElementById('justificativaCancelarNfce');
     const contador = document.getElementById('contarCharsCancelar');
+    const botaoConfirmar = document.getElementById('btnConfirmarCancelarNfce');
+    const statusCancelamento = document.getElementById('statusCancelarNfce');
     textarea.addEventListener('input', () => {
         contador.textContent = textarea.value.length;
     });
 
-    document.getElementById('btnConfirmarCancelarNfce').addEventListener('click', () => {
+    botaoConfirmar.addEventListener('click', () => {
+        if (botaoConfirmar.disabled) return;
         const justificativa = textarea.value.trim();
 
         const validacaoJustificativa = validarMotivoTexto(justificativa);
@@ -866,7 +913,11 @@ function cancelarNfce(id) {
             return;
         }
 
-        modal.hide();
+        botaoConfirmar.disabled = true;
+        botaoConfirmar.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processando cancelamento...';
+        statusCancelamento.hidden = false;
+        statusCancelamento.className = 'alert alert-info';
+        statusCancelamento.textContent = 'Aguardando confirmação fiscal. Não feche o aplicativo para tentar novamente.';
 
         $.ajax({
             url: `${API_URL}/fiscal/notas/${id}/cancelar`,
@@ -874,12 +925,49 @@ function cancelarNfce(id) {
             contentType: 'application/json',
             data: JSON.stringify({ justificativa }),
             success: function(resp) {
-                showNotification(resp.message || 'Cancelamento enviado com sucesso.');
+                if (resp && (resp.resultUnknown || resp.code === 'CANCELAMENTO_EM_ANDAMENTO')) {
+                    statusCancelamento.className = 'alert alert-warning';
+                    statusCancelamento.textContent = resp.error
+                        || 'O cancelamento está em andamento ou com resultado desconhecido. Não tente reenviar.';
+                    showNotification(statusCancelamento.textContent, 'warning');
+                    carregarFiscalNotas();
+                    botaoConfirmar.innerHTML = 'Aguardando reconciliação';
+                    return;
+                }
+                if (!resp || resp.success !== true) {
+                    statusCancelamento.className = 'alert alert-danger';
+                    statusCancelamento.textContent = (resp && (resp.error || resp.message))
+                        || 'Cancelamento não confirmado.';
+                    showNotification(statusCancelamento.textContent, 'danger');
+                    botaoConfirmar.disabled = false;
+                    botaoConfirmar.innerHTML = '<i class="fas fa-ban"></i> Confirmar Cancelamento';
+                    return;
+                }
+                modal.hide();
+                showNotification(resp.message || 'NFC-e cancelada com confirmação fiscal.');
                 carregarFiscalNotas();
             },
             error: function(xhr) {
                 const resp = xhr.responseJSON || {};
-                showNotification(resp.error || resp.message || 'Erro ao cancelar NFC-e.', 'danger');
+                if (
+                    resp.resultUnknown
+                    || resp.code === 'CANCELAMENTO_EM_ANDAMENTO'
+                    || resp.code === 'CANCELAMENTO_ESTADO_PERSISTENCIA_FALHOU'
+                    || xhr.status === 0
+                ) {
+                    statusCancelamento.className = 'alert alert-warning';
+                    statusCancelamento.textContent = resp.error
+                        || 'O cancelamento está em andamento ou com resultado desconhecido. Não tente reenviar.';
+                    showNotification(statusCancelamento.textContent, 'warning');
+                    carregarFiscalNotas();
+                    botaoConfirmar.innerHTML = 'Aguardando reconciliação';
+                    return;
+                }
+                statusCancelamento.className = 'alert alert-danger';
+                statusCancelamento.textContent = resp.error || resp.message || 'Cancelamento rejeitado ou não confirmado.';
+                showNotification(statusCancelamento.textContent, 'danger');
+                botaoConfirmar.disabled = false;
+                botaoConfirmar.innerHTML = '<i class="fas fa-ban"></i> Confirmar Cancelamento';
             }
         });
     });

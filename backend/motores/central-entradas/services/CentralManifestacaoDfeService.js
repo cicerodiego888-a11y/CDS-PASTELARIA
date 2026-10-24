@@ -283,6 +283,7 @@ class CentralManifestacaoDfeService {
     this._enviarManifestacao = deps.enviarManifestacao || enviarManifestacao;
     this._sincronizarDfe = deps.sincronizarDfe || sincronizarDistribuicaoDFe;
     this._consultarNotaPorChave = deps.consultarNotaPorChave || consultarNotaPorChave;
+    this._autorizacaoTransmissaoSefaz = deps.autorizacaoTransmissaoSefaz || null;
     this._criarPersistencia = deps.criarPersistencia || ((empresaId) => (
       new CentralDfePersistenciaService({
         documentosRepository: this._documentosRepository,
@@ -400,7 +401,11 @@ class CentralManifestacaoDfeService {
       gateSefaz: gate || undefined,
       documentoId: documento?.id != null ? Number(documento.id) : null,
       origemGate: 'CentralManifestacaoDfeService',
-      correlationId: opcoes.correlationId || null
+      correlationId: opcoes.correlationId || null,
+      empresaId: contexto?.empresaId || resolverEmpresaIdDocumento(documento) || null,
+      autorizacaoTransmissaoSefaz: opcoes.autorizacaoTransmissaoSefaz
+        || this._autorizacaoTransmissaoSefaz
+        || null
     };
   }
 
@@ -1225,38 +1230,31 @@ class CentralManifestacaoDfeService {
   async _enviarCiencia(documento, contexto, opcoes) {
     const inicio = Date.now();
     const correlationId = opcoes.correlationId || criarCorrelationId();
+    const contextoEmpresa = this._contextoTelemetria(contexto, documento);
+    const detalheIntencao = {
+      chave: documento.chave,
+      evento: '210210',
+      correlationId,
+      empresaId: contexto.empresaId || resolverEmpresaIdDocumento(documento),
+      cnpjMascarado: camposLogContextoDocumento(contexto, documento).cnpj,
+      fase: 'INTENCAO',
+      transmissaoExecutada: false,
+      respostaRecebida: false
+    };
     await this._registrarEtapa({
-      tipo: TIPOS_EVENTO.CIENCIA_ENVIADA,
+      tipo: TIPOS_EVENTO.CIENCIA_SOLICITADA,
       documento,
-      descricao: 'Ciência da Emissão (210210) enviada.',
-      resultado: 'ENVIADA',
+      descricao: 'Ciência da Emissão (210210) solicitada. Transmissão ainda não iniciada.',
+      resultado: 'SOLICITADA',
       sucesso: null,
       usuarioId: opcoes.usuarioId,
-      detalhe: {
-        chave: documento.chave,
-        evento: '210210',
-        correlationId,
-        empresaId: contexto.empresaId || resolverEmpresaIdDocumento(documento),
-        cnpjMascarado: camposLogContextoDocumento(contexto, documento).cnpj
-      },
+      detalhe: detalheIntencao,
       ignorarHistoricoDuplicado: true
     });
-    const contextoEmpresa = this._contextoTelemetria(contexto, documento);
-    await this._telemetria(TIPOS_EVENTO.MANIFESTACAO_ENVIADA, {
-      documentoId: documento.id,
-      descricao: 'Ciência da Emissão (210210) enviada ao Ambiente Nacional.',
-      resultado: 'ENVIADA',
-      detalhe: {
-        chave: documento.chave,
-        evento: '210210',
-        correlationId,
-        ...contextoEmpresa,
-        ...this._detalhePrazo(calcularPrazoManifestacao(documento, this._agora()))
-      }
-    });
 
+    let envelope;
     try {
-      const envelope = this._prepararEnvelopeAssinado({
+      envelope = this._prepararEnvelopeAssinado({
         tpAmb: Number(contexto.ambiente) === 1 ? 1 : 2,
         cOrgao: '91',
         cnpj: contexto.cnpj,
@@ -1265,6 +1263,40 @@ class CentralManifestacaoDfeService {
         certificadoPath: contexto.certificadoPath,
         certificadoSenha: contexto.certificadoSenha
       });
+    } catch (error) {
+      const duracaoMs = Date.now() - inicio;
+      const proximaConsultaEm = new Date(
+        this._agora().getTime() + INTERVALO_SEGURO_MS
+      ).toISOString();
+      await this._registrarEtapa({
+        tipo: TIPOS_EVENTO.MANIFESTACAO_REJEITADA,
+        documento,
+        descricao: `Falha antes da transmissão da Ciência: ${error.message}`,
+        resultado: 'FALHA_PRE_ENVIO',
+        sucesso: false,
+        duracaoMs,
+        usuarioId: opcoes.usuarioId,
+        detalhe: {
+          evento: '210210',
+          erro: error.message,
+          proximaConsultaEm,
+          correlationId,
+          fase: 'FALHA_PRE_ENVIO',
+          transmissaoExecutada: false,
+          ...contextoEmpresa
+        }
+      });
+      return {
+        documentoId: documento.id,
+        sucesso: false,
+        consultaExecutada: false,
+        transmissaoExecutada: false,
+        proximaConsultaEm,
+        mensagem: error.message
+      };
+    }
+
+    try {
       const runtime = await this._enviarManifestacao({
         operacao: OperationType.MANIFESTACAO_CIENCIA,
         ambiente: contexto.ambiente,
@@ -1272,7 +1304,62 @@ class CentralManifestacaoDfeService {
         chave: documento.chave,
         certificadoPath: contexto.certificadoPath,
         certificadoSenha: contexto.certificadoSenha,
-        envelope
+        envelope,
+        empresaId: contexto.empresaId || resolverEmpresaIdDocumento(documento) || null,
+        contextoCentral: contexto,
+        autorizacaoTransmissaoSefaz: opcoes.autorizacaoTransmissaoSefaz
+          || this._autorizacaoTransmissaoSefaz
+          || null
+      });
+
+      if (runtime?.bloqueadoAutorizacao || runtime?.consultaExecutada === false) {
+        const duracaoMs = Number(runtime.tempoTotalMs) || (Date.now() - inicio);
+        return {
+          documentoId: documento.id,
+          sucesso: false,
+          ignorado: true,
+          bloqueadoAutorizacao: true,
+          consultaExecutada: false,
+          sefazConsultada: false,
+          codigo: runtime.codigo || runtime.code || 'TRANSMISSAO_SEFAZ_NAO_AUTORIZADA',
+          mensagem: runtime.error || runtime.mensagem
+            || 'Manifestação 210210 não executada: falta autorização operacional explícita.'
+        };
+      }
+
+      const respostaRecebida = runtime.body != null && String(runtime.body).trim() !== '';
+      await this._registrarEtapa({
+        tipo: TIPOS_EVENTO.CIENCIA_ENVIADA,
+        documento,
+        descricao: 'Ciência da Emissão (210210) enviada.',
+        resultado: respostaRecebida ? 'RESPOSTA_RECEBIDA' : 'TRANSMISSAO_INICIADA',
+        sucesso: null,
+        usuarioId: opcoes.usuarioId,
+        detalhe: {
+          ...detalheIntencao,
+          ...contextoEmpresa,
+          fase: respostaRecebida ? 'RESPOSTA_RECEBIDA' : 'TRANSMISSAO_INICIADA',
+          transmissaoExecutada: true,
+          respostaRecebida,
+          consultaExecutada: runtime.consultaExecutada !== false,
+          cStat: runtime.cStat || null
+        },
+        ignorarHistoricoDuplicado: true
+      });
+      await this._telemetria(TIPOS_EVENTO.MANIFESTACAO_ENVIADA, {
+        documentoId: documento.id,
+        descricao: 'Ciência da Emissão (210210) enviada ao Ambiente Nacional.',
+        resultado: 'ENVIADA',
+        detalhe: {
+          chave: documento.chave,
+          evento: '210210',
+          correlationId,
+          fase: respostaRecebida ? 'RESPOSTA_RECEBIDA' : 'TRANSMISSAO_INICIADA',
+          transmissaoExecutada: true,
+          respostaRecebida,
+          ...contextoEmpresa,
+          ...this._detalhePrazo(calcularPrazoManifestacao(documento, this._agora()))
+        }
       });
 
       // RC3.3.3 — Central rejeita bypass legado da Plataforma Fiscal.
@@ -1452,15 +1539,45 @@ class CentralManifestacaoDfeService {
       const proximaConsultaEm = new Date(
         this._agora().getTime() + INTERVALO_SEGURO_MS
       ).toISOString();
+      const falhaAntesSoap = error.bloqueadoAutorizacao === true
+        || error.consultaExecutada === false;
+      if (!falhaAntesSoap) {
+        await this._registrarEtapa({
+          tipo: TIPOS_EVENTO.CIENCIA_ENVIADA,
+          documento,
+          descricao: 'Ciência da Emissão (210210) enviada.',
+          resultado: 'FALHA_TRANSPORTE',
+          sucesso: false,
+          duracaoMs,
+          usuarioId: opcoes.usuarioId,
+          detalhe: {
+            ...detalheIntencao,
+            ...contextoEmpresa,
+            fase: 'FALHA_TRANSPORTE',
+            transmissaoExecutada: true,
+            respostaRecebida: false,
+            erro: error.message
+          },
+          ignorarHistoricoDuplicado: true
+        });
+      }
       await this._registrarEtapa({
         tipo: TIPOS_EVENTO.MANIFESTACAO_REJEITADA,
         documento,
         descricao: `Falha ao enviar Ciência da Emissão: ${error.message}`,
-        resultado: 'ERRO',
+        resultado: falhaAntesSoap ? 'FALHA_PRE_ENVIO' : 'FALHA_TRANSPORTE',
         sucesso: false,
         duracaoMs,
         usuarioId: opcoes.usuarioId,
-        detalhe: { evento: '210210', erro: error.message, proximaConsultaEm, correlationId, ...contextoEmpresa }
+        detalhe: {
+          evento: '210210',
+          erro: error.message,
+          proximaConsultaEm,
+          correlationId,
+          fase: falhaAntesSoap ? 'FALHA_PRE_ENVIO' : 'FALHA_TRANSPORTE',
+          transmissaoExecutada: !falhaAntesSoap,
+          ...contextoEmpresa
+        }
       });
       return {
         documentoId: documento.id,

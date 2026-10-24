@@ -12,6 +12,7 @@
  * @module services/ajusteEstoqueService
  */
 'use strict';
+const { roundStockQuantity } = require('./estoque/quantityPrecision');
 
 const estoqueSaldosPublico = require('./fiscalNaoFiscal/estoqueSaldosPublico');
 const { TipoSaldo } = require('./fiscalNaoFiscal/constants');
@@ -214,12 +215,12 @@ function aplicarAjusteEstoqueProduto(db, opcoes, callback) {
         const estoqueTotalAntes = Number(
           (antes.estoque_atual != null
             ? antes.estoque_atual
-            : (saldoFiscalAntes + saldoNaoFiscalAntes)).toFixed(3)
+            : (saldoFiscalAntes + saldoNaoFiscalAntes)).toFixed(6)
         );
 
-        const saldoFiscalDepois = Number((saldoFiscalAntes + ajusteF).toFixed(3));
-        const saldoNaoFiscalDepois = Number((saldoNaoFiscalAntes + ajusteNF).toFixed(3));
-        const estoqueTotalDepois = Number((saldoFiscalDepois + saldoNaoFiscalDepois).toFixed(3));
+        const saldoFiscalDepois = Number((saldoFiscalAntes + ajusteF).toFixed(6));
+        const saldoNaoFiscalDepois = Number((saldoNaoFiscalAntes + ajusteNF).toFixed(6));
+        const estoqueTotalDepois = Number((saldoFiscalDepois + saldoNaoFiscalDepois).toFixed(6));
 
         if (saldoFiscalDepois < 0) {
           throw new Error('Ajuste fiscal resultaria em saldo fiscal negativo.');
@@ -315,7 +316,7 @@ function definirSaldosIniciaisProduto(saldoFiscal, saldoNaoFiscal) {
   if (fiscal < 0 || naoFiscal < 0) {
     throw new Error('Saldos iniciais não podem ser negativos.');
   }
-  const estoqueAtual = Number((fiscal + naoFiscal).toFixed(3));
+  const estoqueAtual = Number((fiscal + naoFiscal).toFixed(6));
   return {
     saldo_fiscal: fiscal,
     saldo_nao_fiscal: naoFiscal,
@@ -345,8 +346,8 @@ function aplicarSaldosIniciaisViaPorta(db, opcoes, callback) {
 
   (async () => {
     const atual = await estoqueSaldosPublico.consultarSaldo(produtoId, optsPorta);
-    const ajusteF = Number((alvo.saldo_fiscal - Number(atual.saldo_fiscal || 0)).toFixed(3));
-    const ajusteNF = Number((alvo.saldo_nao_fiscal - Number(atual.saldo_nao_fiscal || 0)).toFixed(3));
+    const ajusteF = Number((alvo.saldo_fiscal - Number(atual.saldo_fiscal || 0)).toFixed(6));
+    const ajusteNF = Number((alvo.saldo_nao_fiscal - Number(atual.saldo_nao_fiscal || 0)).toFixed(6));
 
     if (ajusteF === 0 && ajusteNF === 0) {
       return {

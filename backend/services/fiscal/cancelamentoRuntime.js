@@ -5,7 +5,8 @@
  *   Cancelamento → FiscalWebServices → UrlResolver → Registry
  *                → TransportFactory → SoapTransport → SEFAZ
  *
- * Fallback automático → cancelamentoLegado.
+ * NFC-e usa fallback apenas quando a plataforma comprova que nenhum envio ocorreu.
+ * Outros consumidores mantêm o comportamento legado até revisão própria.
  *
  * Não migra Autorização, Inutilização, CC-e nem outros eventos.
  *
@@ -29,6 +30,11 @@ const {
   TP_EVENTO_CANCELAMENTO
 } = require('./cancelamentoLegado');
 const { CancelamentoMetrics } = require('./cancelamentoMetrics');
+const {
+  exigirAutorizacaoTransmissao,
+  resultadoCancelamentoNaoExecutado,
+  TIPOS_CONSULTA_SEFAZ
+} = require('./autorizacaoTransmissaoSefaz');
 
 const defaultMetrics = new CancelamentoMetrics();
 const OP = 'CANCELAMENTO';
@@ -57,6 +63,44 @@ function createCancelamentoRuntime(options = {}) {
     const uf = String(input.uf || UF_SVRS).toUpperCase();
     const cUF = String(input.cUF || '23').replace(/\D/g, '').padStart(2, '0');
     const versao = input.versao || '1.00';
+    const modelo = input.modelo === ModelType.NFE ? ModelType.NFE : ModelType.NFCE;
+    const empresaId = input.empresaId
+      || (input.contextoCentral && input.contextoCentral.empresaId)
+      || null;
+    try {
+      exigirAutorizacaoTransmissao({
+        autorizacao: input.autorizacaoTransmissaoSefaz,
+        empresaId,
+        tipoConsulta: TIPOS_CONSULTA_SEFAZ.CANCELAMENTO_110111
+      });
+    } catch (err) {
+      const fail = buildRuntimeResult({
+        ...resultadoCancelamentoNaoExecutado({
+          codigo: err.codigo || err.code,
+          mensagem: err.message
+        }),
+        source: null,
+        operacao: OperationType.CANCELAMENTO,
+        modelo,
+        ambiente,
+        uf,
+        tpEvento: TP_EVENTO_CANCELAMENTO,
+        fallbackUtilizado: false,
+        tempoResolverMs: 0,
+        tempoTransporteMs: 0,
+        tempoXmlMs: 0,
+        tempoSoapMs: 0,
+        tempoPlataformaMs: 0,
+        tempoLegadoMs: 0,
+        tempoTotalMs: nowMs(),
+        retries: 0
+      });
+      metrics.record(fail);
+      return fail;
+    }
+    const safeCancellationMode = input.safeCancellationMode === true
+      || modelo === ModelType.NFCE;
+    const correlationId = input.correlationId || null;
     const warnings = [];
 
     const xmlStarted = process.hrtime.bigint();
@@ -72,8 +116,6 @@ function createCancelamentoRuntime(options = {}) {
     });
     const tempoXmlMs = Number(process.hrtime.bigint() - xmlStarted) / 1e6;
 
-    const modelo = input.modelo === ModelType.NFE ? ModelType.NFE : ModelType.NFCE;
-
     const resolverStarted = process.hrtime.bigint();
     const resolution = platform.resolve({
       modelo,
@@ -86,6 +128,7 @@ function createCancelamentoRuntime(options = {}) {
 
     const def = resolution.definition || null;
     logFiscalRuntime(OP, {
+      correlationId,
       Ambiente: ambiente,
       UF: uf,
       Modelo: modelo,
@@ -115,6 +158,9 @@ function createCancelamentoRuntime(options = {}) {
         senha: input.certificadoSenha || null,
         operacao: OperationType.CANCELAMENTO,
         modelo,
+        metadata: safeCancellationMode
+          ? { retryOnlyBeforeTransmission: true, correlationId }
+          : {}
       });
 
       const transportStarted = process.hrtime.bigint();
@@ -125,8 +171,10 @@ function createCancelamentoRuntime(options = {}) {
       retries = Math.max(0, (transportResponse.attempts || 1) - 1);
 
       logFiscalRuntime(OP, {
+        correlationId,
         'Tempo Transporte/SOAP': tempoTransporteMs,
         'Transport success': transportResponse.success,
+        transmissionState: transportResponse.transmissionState,
         Fallback: false,
         Retry: retries
       });
@@ -160,9 +208,13 @@ function createCancelamentoRuntime(options = {}) {
           retries,
           cStat,
           xMotivo: extrairXMotivo(transportResponse.body),
-          resultado: classificarResultado(cStat)
+          resultado: classificarResultado(cStat),
+          transmissionState: 'RESPONSE_RECEIVED',
+          resultUnknown: false,
+          correlationId
         });
         logFiscalRuntime(OP, {
+          correlationId,
           Resultado: result.resultado,
           'Tempo Total': result.tempoTotalMs,
           Fallback: false
@@ -175,6 +227,51 @@ function createCancelamentoRuntime(options = {}) {
         code: 'PLATFORM_TRANSPORT_FAILED',
         message: transportResponse.error || 'Falha no SoapTransport do cancelamento.'
       });
+      if (
+        safeCancellationMode
+        && transportResponse.transmissionState !== 'NOT_SENT'
+      ) {
+        const result = buildRuntimeResult({
+          success: false,
+          source: 'PLATFORM',
+          resolutionSource: resolution.source || ResolutionSource.REGISTRY,
+          operacao: OperationType.CANCELAMENTO,
+          modelo,
+          endpoint: def.endpoint,
+          namespace: def.namespace || NS_EVENTO,
+          soapAction: def.soapAction || ACTION_EVENTO,
+          versao: def.versao || versao,
+          ambiente,
+          uf,
+          tpEvento: TP_EVENTO_CANCELAMENTO,
+          statusCode: transportResponse.statusCode,
+          error: transportResponse.error || 'Resultado do cancelamento desconhecido.',
+          warnings,
+          tempoResolverMs,
+          tempoTransporteMs,
+          tempoXmlMs,
+          tempoSoapMs,
+          tempoPlataformaMs,
+          tempoLegadoMs: 0,
+          tempoTotalMs: nowMs(),
+          fallbackUtilizado: false,
+          retries,
+          resultado: 'DESCONHECIDO',
+          transmissionState: 'UNKNOWN',
+          resultUnknown: true,
+          correlationId
+        });
+        logFiscalRuntime(OP, {
+          correlationId,
+          Resultado: result.resultado,
+          transmissionState: result.transmissionState,
+          'Tempo Total': result.tempoTotalMs,
+          Fallback: false,
+          Retry: retries
+        });
+        metrics.record(result);
+        return result;
+      }
     } else {
       warnings.push({
         code: 'PLATFORM_RESOLVE_FAILED',
@@ -197,7 +294,9 @@ function createCancelamentoRuntime(options = {}) {
       certificadoSenha: input.certificadoSenha,
       httpsAgent: input.httpsAgent || null,
       timeoutMs: 30000,
-      httpClient: input.legadoHttpClient || null
+      httpClient: input.legadoHttpClient || null,
+      empresaId,
+      autorizacaoTransmissaoSefaz: input.autorizacaoTransmissaoSefaz || null
     });
     tempoLegadoMs = Number(process.hrtime.bigint() - legadoStarted) / 1e6;
 
@@ -235,10 +334,16 @@ function createCancelamentoRuntime(options = {}) {
       retries,
       cStat,
       xMotivo: extrairXMotivo(legado.body),
-      resultado: classificarResultado(cStat)
+      resultado: classificarResultado(cStat),
+      transmissionState: legado.transmissionState
+        || (legado.success ? 'RESPONSE_RECEIVED' : 'UNKNOWN'),
+      resultUnknown: !legado.success
+        && legado.transmissionState !== 'NOT_SENT',
+      correlationId
     });
 
     logFiscalRuntime(OP, {
+      correlationId,
       'Tempo Legado': tempoLegadoMs,
       'Tempo Total': result.tempoTotalMs,
       Fallback: true,
@@ -296,7 +401,7 @@ function extrairXMotivo(body) {
  * @returns {string}
  */
 function classificarResultado(cStat) {
-  if (cStat === '135' || cStat === '155') return 'AUTORIZADO';
+  if (cStat === '135' || cStat === '136' || cStat === '155') return 'AUTORIZADO';
   if (cStat === '573' || cStat === '631') return 'DUPLICADO';
   if (cStat) return 'REJEITADO';
   return 'DESCONHECIDO';

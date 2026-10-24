@@ -46,12 +46,8 @@ function all(db, sql, params = []) {
 }
 
 function closeDb(db) {
-  return new Promise((resolve) => {
-    try {
-      db.close(() => resolve());
-    } catch (_) {
-      resolve();
-    }
+  return new Promise((resolve, reject) => {
+    db.close((err) => (err ? reject(err) : resolve()));
   });
 }
 
@@ -309,17 +305,23 @@ async function etapa1_pedidoIdNoPayload() {
   assert.strictEqual(payload.pedido_id, 77);
 }
 
-async function run() {
+async function runScenarios() {
   await etapa1_pedidoIdNoPayload();
+  console.log('OK payload pedido_id');
   await cenario1_pedidoIgualSaldoAutorizado();
+  console.log('OK cenário 1 — pedido igual ao saldo autorizado');
   await cenario2_doisPedidosExpedirA();
+  console.log('OK cenário 2 — dois pedidos e expedição do pedido A');
   await cenario3_pedidoBBloqueado();
+  console.log('OK cenário 3 — pedido B bloqueado');
   await cenario4_cancelarDevolveReserva();
+  console.log('OK cenário 4 — cancelamento libera reserva');
   await cenario5_legadoSemReserva();
+  console.log('OK cenário 5 — legado sem reserva');
   console.log('RC4.1.2 OK — 5 cenários + pedido_id no payload');
 }
 
-run().catch((err) => {
+runScenarios().catch((err) => {
   console.error('RC4.1.2 FALHOU:', err);
   process.exit(1);
 });

@@ -5,6 +5,7 @@
  * @module services/produtos/FichaTecnicaConsumoService
  */
 'use strict';
+const { roundStockQuantity } = require('../estoque/quantityPrecision');
 
 const { obterMuc } = require('../../motores/muc/public');
 const { normalizarUnidade, isUnidadeConhecida } = require('../../motores/muc/core/unidadesSi');
@@ -26,9 +27,22 @@ function erroConsumo(code, message, statusCode = 400, extra = {}) {
   return err;
 }
 
-function round3(n) {
-  return Math.round(Number(n || 0) * 1000) / 1000;
+function normalizarErroFichaTecnica(err) {
+  const contratos = {
+    INSUMO_INATIVO: 'FICHA_INSUMO_INATIVO',
+    COMPONENTE_NAO_INSUMO: 'FICHA_COMPONENTE_NAO_INSUMO',
+    QUANTIDADE_INVALIDA: 'FICHA_QUANTIDADE_INVALIDA'
+  };
+  const codigo = err && Object.prototype.hasOwnProperty.call(contratos, err.code)
+    ? contratos[err.code]
+    : null;
+  if (!codigo) return err;
+  const normalizado = erroConsumo(codigo, err.message, err.statusCode || 400);
+  normalizado.cause = err;
+  return normalizado;
 }
+
+
 
 function dbGet(db, sql, params = []) {
   return new Promise((resolve, reject) => {
@@ -141,22 +155,70 @@ function converterQuantidadeFichaParaEstoque(db, { quantidade, unidadeOrigem, un
   });
 }
 
-async function montarLinhasConsumo(itens, db) {
+async function montarLinhasConsumo(itens, db, opcoes = {}) {
   await garantirSchemaProdutoConversaoAsync(db);
   const cacheInsumo = new Map();
   const linhas = [];
+  const componentesPorItem = opcoes.componentesPorItem instanceof Map
+    ? opcoes.componentesPorItem
+    : new Map();
   for (const item of itens || []) {
     const produtoId = Number(item.produto_id != null ? item.produto_id : item.produtoId);
     const qtdVenda = Number(item.quantidade);
     if (!Number.isInteger(produtoId) || produtoId <= 0) continue;
     if (!(qtdVenda > 0)) continue;
 
-    const ficha = await FichaTecnicaService.obterPorProdutoId(produtoId, { db });
-    if (!ficha || Number(ficha.ativo) !== 1 || !Array.isArray(ficha.itens) || ficha.itens.length === 0) {
-      continue;
+    const itemId = item.id != null ? Number(item.id) : null;
+    const usaSnapshotPersonalizacao = itemId != null && componentesPorItem.has(itemId);
+    let componentes;
+    if (usaSnapshotPersonalizacao) {
+      componentes = componentesPorItem.get(itemId) || [];
+    } else {
+      let usoFicha;
+      try {
+        usoFicha = await FichaTecnicaService.consultarUsoFichaTecnica(produtoId, { db });
+      } catch (err) {
+        throw normalizarErroFichaTecnica(err);
+      }
+      if (!usoFicha.utiliza_ficha_tecnica) continue;
+
+      let ficha;
+      try {
+        ficha = await FichaTecnicaService.obterPorProdutoId(produtoId, { db });
+      } catch (err) {
+        throw normalizarErroFichaTecnica(err);
+      }
+      if (!ficha || ficha.existe === false) {
+        if (!usoFicha.configuracao_legada) {
+          throw erroConsumo(
+            'FICHA_TECNICA_NAO_ENCONTRADA',
+            `O produto ${produtoId} está configurado para utilizar ficha técnica, mas não possui ficha.`
+          );
+        }
+        continue;
+      }
+      if (Number(ficha.ativo) !== 1) {
+        if (!usoFicha.configuracao_legada) {
+          throw erroConsumo(
+            'FICHA_TECNICA_INATIVA',
+            `A ficha técnica do produto ${produtoId} está inativa.`
+          );
+        }
+        continue;
+      }
+      if (!Array.isArray(ficha.itens) || ficha.itens.length === 0) {
+        if (!usoFicha.configuracao_legada) {
+          throw erroConsumo(
+            'FICHA_TECNICA_VAZIA',
+            `A ficha técnica ativa do produto ${produtoId} não possui ingredientes.`
+          );
+        }
+        continue;
+      }
+      componentes = ficha.itens;
     }
 
-    for (const componente of ficha.itens) {
+    for (const componente of componentes) {
       const qtdFicha = Number(componente.quantidade);
       if (!(qtdFicha > 0)) {
         throw erroConsumo(
@@ -190,7 +252,7 @@ async function montarLinhasConsumo(itens, db) {
         );
       }
 
-      const unidadeFichaRaw = String(componente.unidade || '').trim();
+      const unidadeFichaRaw = String(componente.unidade || componente.unidade_snapshot || '').trim();
       if (!unidadeFichaRaw) {
         throw erroConsumo('UNIDADE_INVALIDA', 'Unidade da ficha é obrigatória.');
       }
@@ -214,10 +276,11 @@ async function montarLinhasConsumo(itens, db) {
       }
 
       linhas.push({
+        pedido_item_id: itemId,
         produto_id: produtoId,
         insumo_id: insumo.id,
         insumo_nome: insumo.nome,
-        quantidade: round3(conv.quantidade),
+        quantidade: roundStockQuantity(conv.quantidade),
         unidade: conv.unidade || unidadeEstoque,
         quantidade_ficha: qtdBruta,
         unidade_ficha: unidadeFicha,
@@ -235,8 +298,8 @@ function agregarPorInsumo(linhas) {
     if (!atual) {
       mapa.set(linha.insumo_id, { ...linha });
     } else {
-      atual.quantidade = round3(atual.quantidade + linha.quantidade);
-      atual.quantidade_ficha = round3(Number(atual.quantidade_ficha) + Number(linha.quantidade_ficha));
+      atual.quantidade = roundStockQuantity(atual.quantidade + linha.quantidade);
+      atual.quantidade_ficha = roundStockQuantity(Number(atual.quantidade_ficha) + Number(linha.quantidade_ficha));
     }
   }
   return [...mapa.values()];
@@ -250,8 +313,8 @@ function agregarPorProdutoInsumo(linhas) {
     if (!atual) {
       mapa.set(key, { ...linha });
     } else {
-      atual.quantidade = round3(atual.quantidade + Number(linha.quantidade));
-      atual.quantidade_ficha = round3(Number(atual.quantidade_ficha || 0) + Number(linha.quantidade_ficha || 0));
+      atual.quantidade = roundStockQuantity(atual.quantidade + Number(linha.quantidade));
+      atual.quantidade_ficha = roundStockQuantity(Number(atual.quantidade_ficha || 0) + Number(linha.quantidade_ficha || 0));
     }
   }
   return [...mapa.values()];
@@ -268,7 +331,7 @@ async function carregarEstornadoPorChave(db, vendaId) {
   );
   const mapa = new Map();
   for (const r of rows) {
-    mapa.set(`${Number(r.produto_id)}:${Number(r.insumo_id)}`, round3(r.qtd));
+    mapa.set(`${Number(r.produto_id)}:${Number(r.insumo_id)}`, roundStockQuantity(r.qtd));
   }
   return mapa;
 }
@@ -276,7 +339,7 @@ async function carregarEstornadoPorChave(db, vendaId) {
 function restanteSnapshot(linha, jaMap) {
   const key = `${Number(linha.produto_id)}:${Number(linha.insumo_id)}`;
   const ja = jaMap.get(key) || 0;
-  return round3(Math.max(0, round3(linha.quantidade) - ja));
+  return roundStockQuantity(Math.max(0, roundStockQuantity(linha.quantidade) - ja));
 }
 
 async function registrarLinhasEstorno(db, { vendaId, empresaId, vendaDevolucaoId, origem, itens }) {
@@ -304,7 +367,7 @@ async function registrarLinhasEstorno(db, { vendaId, empresaId, vendaDevolucaoId
 async function creditarInsumosEstorno(db, empresaId, usuarioId, origem, itens, creditarFn) {
   const creditados = [];
   for (const item of itens) {
-    const qtd = round3(item.quantidade);
+    const qtd = roundStockQuantity(item.quantidade);
     if (!(qtd > 0)) continue;
     await creditoAsync(db, {
       produtoId: item.insumo_id,
@@ -332,7 +395,7 @@ async function validarEstoqueAgregado(db, empresaId, agregados) {
       empresaId,
       legado: false
     });
-    const disponivel = round3(Number(saldo.saldo_fiscal || 0) + Number(saldo.saldo_nao_fiscal || 0));
+    const disponivel = roundStockQuantity(Number(saldo.saldo_fiscal || 0) + Number(saldo.saldo_nao_fiscal || 0));
     if (disponivel + 1e-9 < item.quantidade) {
       throw erroConsumo(
         'SALDO_INSUFICIENTE',
@@ -379,7 +442,7 @@ async function consumirFichaTecnicaDaVenda(params = {}) {
   for (const item of agregados) {
     const qtd = item.quantidade;
     const qFiscal = Math.min(item._saldo_fiscal, qtd);
-    const qNao = round3(qtd - qFiscal);
+    const qNao = roundStockQuantity(qtd - qFiscal);
     await debitoAsync(db, {
       produtoId: item.insumo_id,
       quantidadeFiscal: qFiscal > 0 ? qFiscal : 0,
@@ -696,8 +759,8 @@ async function estornarConsumoFichaTecnicaDaDevolucao(params = {}, deps = {}) {
   const aCreditar = [];
   for (const item of agregados) {
     const resto = restanteSnapshot(item, jaMap);
-    const bruto = round3(round3(item.quantidade) * frac);
-    const qtd = round3(Math.min(bruto, resto));
+    const bruto = roundStockQuantity(roundStockQuantity(item.quantidade) * frac);
+    const qtd = roundStockQuantity(Math.min(bruto, resto));
     if (qtd > 0) {
       aCreditar.push({ ...item, quantidade: qtd });
     }
@@ -766,6 +829,7 @@ module.exports = {
   estornarConsumoFichaTecnicaDaVendaCb,
   estornarConsumoFichaTecnicaDaDevolucao,
   estornarConsumoFichaTecnicaDaDevolucaoCb,
+  normalizarErroFichaTecnica,
   montarLinhasConsumo,
   agregarPorInsumo,
   converterQuantidadeFichaParaEstoque

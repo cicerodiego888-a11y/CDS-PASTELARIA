@@ -125,6 +125,8 @@ class DfeAuditoriaService {
         ultNsuAnterior: dados.ultNsuAnterior,
         ultNsuNovo: dados.ultNsuNovo || dados.ultNsu,
         maxNsu: dados.maxNsu,
+        maxNsuAnterior: dados.maxNsuAnterior,
+        nsuRemoto: dados.nsuRemoto || null,
         avancou: !!dados.avancou,
         cStat: dados.cStat
       }
@@ -149,7 +151,8 @@ class DfeAuditoriaService {
         tempoTotalMs: dados.tempoTotalMs,
         ultNsu: dados.ultNsu,
         maxNsu: dados.maxNsu,
-        cStat: dados.cStat
+        cStat: dados.cStat,
+        pendenciasPersistencia: dados.pendenciasPersistencia || dados.errosPersistencia || []
       }
     });
   }

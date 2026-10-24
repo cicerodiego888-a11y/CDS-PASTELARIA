@@ -1,5 +1,8 @@
 'use strict';
 
+const { isolarBancoTeste } = require('../central-entradas/helpers/isolarBancoTeste');
+isolarBancoTeste('cds-fiscal-val-op-');
+
 const assert = require('assert');
 const fs = require('fs');
 const http = require('http');

@@ -3,8 +3,12 @@
  * Sem HTTP real / sem SEFAZ.
  *
  * Executar: npm run test:central-entradas-rc4
+ *   (node -r ./tests/central-entradas/helpers/preloadIsolamentoBanco.js tests/central-entradas/rc4-configuracao.test.js)
  */
 
+
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-p04-rc4-configuracao-');
 const assert = require('assert');
 const path = require('path');
 const fs = require('fs');
@@ -13,6 +17,9 @@ const CentralConfiguracaoService = require('../../backend/motores/central-entrad
 const CentralConfiguracaoRepository = require('../../backend/motores/central-entradas/repositories/CentralConfiguracaoRepository');
 const CentralSincronizacaoService = require('../../backend/motores/central-entradas/services/CentralSincronizacaoService');
 const { VERSAO_MODULO } = require('../../backend/motores/central-entradas/CentralEntradasOrchestrator');
+const { ModoOperacionalGlobal } = require('../../backend/core/modo-operacional');
+
+const CNPJ_FIXTURE = '12345678000199';
 
 let passou = 0;
 let falhou = 0;
@@ -252,14 +259,77 @@ async function main() {
     assert.ok(!repo._store.has('central_ambiente') || repo._store.get('central_ambiente')?.valor === '2');
   });
 
+  await test('sync sem empresa operacional bloqueia antes do certificado', async () => {
+    const repo = criarRepoMemoria();
+    const cfg = new CentralConfiguracaoService({
+      configuracaoRepository: repo,
+      syncConfigService: criarSyncConfigFake(repo),
+      getFiscalConfig: async () => ({
+        cnpj: CNPJ_FIXTURE,
+        certificadoPath: 'C:\\nao-usar\\producao.pfx',
+        certificadoSenha: 'x'
+      })
+    });
+    const sync = new CentralSincronizacaoService({
+      configuracaoService: cfg,
+      contrato: {
+        modo_operacional: ModoOperacionalGlobal.EMPRESA_SIMPLES,
+        empresa_operacional: null
+      },
+      obterModoOperacionalGlobal: () => ModoOperacionalGlobal.EMPRESA_SIMPLES,
+      listarEmpresasAtivas: async () => [],
+      gate: null
+    });
+    const resultado = await sync.sincronizar();
+    assert.strictEqual(resultado.sucesso, false);
+    assert.strictEqual(resultado.codigoErro, 'EMPRESA_OPERACIONAL_AUSENTE');
+  });
+
+  await test('MULTIEMPRESA sem empresas ativas não usa certificado global', async () => {
+    const repo = criarRepoMemoria();
+    const cfg = new CentralConfiguracaoService({
+      configuracaoRepository: repo,
+      syncConfigService: criarSyncConfigFake(repo),
+      getFiscalConfig: async () => ({
+        cnpj: CNPJ_FIXTURE,
+        certificadoPath: 'C:\\nao-usar\\producao.pfx',
+        certificadoSenha: 'x'
+      })
+    });
+    const sync = new CentralSincronizacaoService({
+      configuracaoService: cfg,
+      contrato: {
+        modo_operacional: ModoOperacionalGlobal.MULTIEMPRESA,
+        empresa_operacional: null
+      },
+      obterModoOperacionalGlobal: () => ModoOperacionalGlobal.MULTIEMPRESA,
+      EmpresaService: { listarEmpresas: async () => [] },
+      gate: null
+    });
+    const resultado = await sync.sincronizar();
+    assert.strictEqual(resultado.sucesso, false);
+    assert.strictEqual(resultado.codigoErro, 'EMPRESA_CENTRAL_AUSENTE');
+  });
+
   await test('sync retorna codigoErro amigável sem 502 semântico', async () => {
     const repo = criarRepoMemoria();
     const cfg = new CentralConfiguracaoService({
       configuracaoRepository: repo,
       syncConfigService: criarSyncConfigFake(repo),
-      getFiscalConfig: async () => ({ cnpj: '12345678000199' })
+      getFiscalConfig: async () => ({ cnpj: CNPJ_FIXTURE })
     });
-    const sync = new CentralSincronizacaoService({ configuracaoService: cfg });
+    const sync = new CentralSincronizacaoService({
+      configuracaoService: cfg,
+      contrato: {
+        modo_operacional: ModoOperacionalGlobal.MULTIEMPRESA,
+        empresa_operacional: null
+      },
+      obterModoOperacionalGlobal: () => ModoOperacionalGlobal.MULTIEMPRESA,
+      EmpresaService: {
+        listarEmpresas: async () => [{ id: 1, cnpj: CNPJ_FIXTURE, ativo: 1 }]
+      },
+      gate: null
+    });
     const resultado = await sync.sincronizar();
     assert.strictEqual(resultado.sucesso, false);
     assert.strictEqual(resultado.codigoErro, 'CERTIFICADO');
@@ -357,8 +427,9 @@ async function main() {
     assert.ok(/Ambiente|SEFAZ|Certificado|Sincroniza|Diagnóstico|Avançado/i.test(js));
   });
 
+  isolamento.comprobarSeCarregado();
   console.log(`\nResultado: ${passou} ok, ${falhou} falhou\n`);
-  if (falhou > 0) process.exit(1);
+  process.exit(falhou > 0 ? 1 : 0);
 }
 
 main().catch((error) => {

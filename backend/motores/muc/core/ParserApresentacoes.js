@@ -18,6 +18,8 @@ function parseApresentacaoRow(row) {
   if (!row) return null;
   const tipo = normalizarTipoApresentacao(row.tipo);
   const unidadeBase = String(row.unidade || 'un').toLowerCase();
+  const quantidadeConteudo = Number(row.quantidade);
+  const unidadeConteudoInformada = String(row.unidade || '').trim();
   return Object.freeze({
     id: row.id,
     produtoId: row.produto_id,
@@ -25,6 +27,9 @@ function parseApresentacaoRow(row) {
     descricao: row.descricao || null,
     quantidade: num(row.quantidade, 4) || 1,
     unidade: unidadeBase,
+    conteudoConfigurado: row.conteudoConfigurado === undefined
+      ? Number.isFinite(quantidadeConteudo) && quantidadeConteudo > 0 && Boolean(unidadeConteudoInformada)
+      : row.conteudoConfigurado === true,
     unidadeComercial: tipoParaUnidadeComercial(tipo),
     gtin: row.gtin || null,
     codigoFornecedor: row.codigo_fornecedor || null,

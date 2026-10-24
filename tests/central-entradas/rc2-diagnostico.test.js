@@ -3,6 +3,9 @@
  * Executar: npm run test:central-entradas-rc2
  */
 
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-rc2-');
+
 const assert = require('assert');
 
 const CentralDiagnosticoService = require('../../backend/motores/central-entradas/services/CentralDiagnosticoService');
@@ -28,6 +31,7 @@ function test(nome, fn) {
 
 async function main() {
   console.log('\n=== Testes RC2 — Diagnóstico Central de Entradas ===\n');
+  isolamento.comprobarSeCarregado();
 
   const service = new CentralDiagnosticoService();
 

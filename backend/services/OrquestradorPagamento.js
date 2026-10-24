@@ -15,6 +15,97 @@ const tefConfigService = require('./tef/tefConfigService');
 const tefFluxoPagamento = require('./tef/tefFluxoPagamento');
 const midp = require('./midp');
 
+const FORMAS_PRAZO = new Set([
+  'prazo',
+  'parcelado',
+  'crediario',
+  'boleto',
+  'boleto_bancario'
+]);
+const FORMAS_TEF = new Set(['cartao_debito', 'cartao_credito']);
+
+function arredondarCentavos(valor) {
+  return Math.round((Number(valor || 0) + Number.EPSILON) * 100) / 100;
+}
+
+function chavePagamento(pagamento) {
+  return JSON.stringify([
+    String(pagamento.forma_pagamento || '').toLowerCase().trim(),
+    pagamento.tef_transacao_id || '',
+    pagamento.nsu || '',
+    pagamento.autorizacao || ''
+  ]);
+}
+
+function distribuirRecebimentosOutros(
+  pagamentos,
+  recebimentosFiscal,
+  recebimentosNaoFiscal,
+  totalOutros
+) {
+  let saldoOutros = arredondarCentavos(totalOutros);
+  const originais = new Map();
+  const usados = new Map();
+  const metadados = new Map();
+
+  (Array.isArray(pagamentos) ? pagamentos : []).forEach((pagamento) => {
+    const chave = chavePagamento(pagamento);
+    originais.set(chave, arredondarCentavos(
+      (originais.get(chave) || 0) + Number(pagamento.valor || 0)
+    ));
+    metadados.set(chave, pagamento);
+  });
+
+  [...(recebimentosFiscal || []), ...(recebimentosNaoFiscal || [])].forEach((recebimento) => {
+    const chave = chavePagamento(recebimento);
+    usados.set(chave, arredondarCentavos(
+      (usados.get(chave) || 0) + Number(recebimento.valor || 0)
+    ));
+  });
+
+  const recebimentosOutros = [];
+  for (const [chave, valorOriginal] of originais.entries()) {
+    const pagamento = metadados.get(chave);
+    const forma = String(pagamento.forma_pagamento || '').toLowerCase().trim();
+    if (FORMAS_PRAZO.has(forma) || FORMAS_TEF.has(forma)) continue;
+
+    const saldoForma = arredondarCentavos(
+      Math.max(0, valorOriginal - Number(usados.get(chave) || 0))
+    );
+    const valor = Math.min(saldoForma, saldoOutros);
+    if (valor <= 0) continue;
+
+    recebimentosOutros.push({
+      forma_pagamento: pagamento.forma_pagamento,
+      valor,
+      tipo_recebimento: 'outros'
+    });
+    saldoOutros = arredondarCentavos(saldoOutros - valor);
+  }
+
+  const valorRecebidoOutros = recebimentosOutros.reduce(
+    (soma, recebimento) => soma + Number(recebimento.valor || 0),
+    0
+  );
+
+  return {
+    recebimentosOutros,
+    saldoOutros: arredondarCentavos(
+      Math.max(0, Number(totalOutros || 0) - valorRecebidoOutros)
+    )
+  };
+}
+
+function validarCoberturaOutrosTef(distribuicao, pagamentos) {
+  const saldo = Number(distribuicao?.saldoOutros || 0);
+  const usaTef = (Array.isArray(pagamentos) ? pagamentos : []).some((pagamento) =>
+    FORMAS_TEF.has(String(pagamento.forma_pagamento || '').toLowerCase().trim())
+  );
+  return saldo > 0.009 && usaTef
+    ? 'Informe uma forma de pagamento sem TEF separada para cobrir o valor de Outros.'
+    : null;
+}
+
 /**
  * ORQUESTRADOR DE PAGAMENTOS - ARQUITETURA OFICIAL CDS SISTEMAS
  *
@@ -33,6 +124,7 @@ const midp = require('./midp');
 async function processarFluxoPagamentoVenda({
   totalFiscal,
   totalNaoFiscal,
+  totalOutros = 0,
   formaPagamento,
   pagamentos,
   tefHabilitado,
@@ -48,10 +140,16 @@ async function processarFluxoPagamentoVenda({
   // Validações básicas — totalFiscal/totalNaoFiscal DEVEM ser líquidos (RC7.10.1 / FISCAL-4.0.2)
   totalFiscal = Number(totalFiscal || 0);
   totalNaoFiscal = Number(totalNaoFiscal || 0);
+  totalOutros = Number(totalOutros || 0);
+  if (!Number.isFinite(totalOutros) || totalOutros < 0) {
+    return { sucesso: false, erro: 'Valor de Outros inválido.' };
+  }
   const fiscalMaximo = Number(
     valorFiscalMaximo != null ? valorFiscalMaximo : totalFiscal
   );
-  const totalLiquidoEsperado = Math.round((totalFiscal + totalNaoFiscal) * 100) / 100;
+  const totalLiquidoEsperado = arredondarCentavos(
+    totalFiscal + totalNaoFiscal + totalOutros
+  );
   
   // Normalizar pagamentos de entrada (fallback cobre o líquido F+NF)
   const pagamentosEntrada = normalizarPagamentosEntrada(
@@ -72,17 +170,33 @@ async function processarFluxoPagamentoVenda({
     preservacaoAplicada: Boolean(preservacaoAplicada),
     midpAtivo
   });
+  const resultadoOutros = distribuirRecebimentosOutros(
+    pagamentosEntrada,
+    resultadoMidp.recebimentosFiscal,
+    resultadoMidp.recebimentosNaoFiscal,
+    totalOutros
+  );
   const distribuicao = {
     recebimentosFiscal: resultadoMidp.recebimentosFiscal,
     recebimentosNaoFiscal: resultadoMidp.recebimentosNaoFiscal,
+    recebimentosOutros: resultadoOutros.recebimentosOutros,
     saldoFiscal: resultadoMidp.saldoFiscal,
     saldoNaoFiscal: resultadoMidp.saldoNaoFiscal,
+    saldoOutros: resultadoOutros.saldoOutros,
     midp: {
       versao: resultadoMidp.versao,
       politica: resultadoMidp.politica,
       auditoria: resultadoMidp.auditoria
     }
   };
+  const erroCoberturaOutros = validarCoberturaOutrosTef(distribuicao, pagamentosEntrada);
+  if (erroCoberturaOutros) {
+    return {
+      sucesso: false,
+      erro: erroCoberturaOutros,
+      distribuicao
+    };
+  }
 
   const totalPagamentos = pagamentosEntrada.reduce(
     (s, p) => s + Number(p.valor || 0),
@@ -161,7 +275,8 @@ async function processarFluxoPagamentoVenda({
     totalPagamentos,
     totalLiquidoEsperado,
     saldoFiscal: distribuicao.saldoFiscal,
-    saldoNaoFiscal: distribuicao.saldoNaoFiscal
+    saldoNaoFiscal: distribuicao.saldoNaoFiscal,
+    saldoOutros: distribuicao.saldoOutros
   });
 
   const vendaMista = totalFiscal > 0 && totalNaoFiscal > 0;
@@ -177,11 +292,15 @@ async function processarFluxoPagamentoVenda({
     fiscalProcessado: resultadoFiscal.sucesso,
     recebimentosNaoFiscalConfirmados
   });
+  const statusComOutrosPendente =
+    distribuicao.saldoOutros > 0.009 && statusPagamento === 'quitada'
+      ? 'pendente'
+      : statusPagamento;
 
   // Montar recebimentos para gravar
   const recebimentosParaGravar = montarRecebimentosParaGravar({
     distribuicao,
-    statusPagamento,
+    statusPagamento: statusComOutrosPendente,
     totalFiscal,
     totalNaoFiscal,
     resultadoFiscal
@@ -189,12 +308,12 @@ async function processarFluxoPagamentoVenda({
   
   return {
     sucesso: true,
-    statusPagamento,
+    statusPagamento: statusComOutrosPendente,
     recebimentos: recebimentosParaGravar,
     distribuicao,
     resultadoFiscal,
     pagamentoIntegralConfirmado,
-    proximaAcao: determinarProximaAcao(statusPagamento, totalNaoFiscal)
+    proximaAcao: determinarProximaAcao(statusComOutrosPendente, totalNaoFiscal)
   };
 }
 
@@ -411,7 +530,8 @@ function isPagamentoIntegralConfirmado({
   totalPagamentos,
   totalLiquidoEsperado,
   saldoFiscal,
-  saldoNaoFiscal
+  saldoNaoFiscal,
+  saldoOutros = 0
 }) {
   const pagos = Math.round((Number(totalPagamentos || 0) + Number.EPSILON) * 100) / 100;
   const esperado = Math.round((Number(totalLiquidoEsperado || 0) + Number.EPSILON) * 100) / 100;
@@ -419,6 +539,7 @@ function isPagamentoIntegralConfirmado({
     Math.abs(pagos - esperado) <= 0.01
     && Number(saldoFiscal || 0) <= 0.009
     && Number(saldoNaoFiscal || 0) <= 0.009
+    && Number(saldoOutros || 0) <= 0.009
   );
 }
 
@@ -435,7 +556,7 @@ function montarRecebimentosParaGravar({
   totalNaoFiscal,
   resultadoFiscal
 }) {
-  const { recebimentosFiscal, recebimentosNaoFiscal } = distribuicao;
+  const { recebimentosFiscal, recebimentosNaoFiscal, recebimentosOutros } = distribuicao;
   const fiscais = (Array.isArray(recebimentosFiscal) ? recebimentosFiscal : []).map((recebimento) => ({
     ...recebimento,
     tipo_recebimento: 'fiscal',
@@ -443,7 +564,12 @@ function montarRecebimentosParaGravar({
   }));
 
   if (statusPagamento === 'aguardando_nao_fiscal') {
-    return fiscais;
+    const outros = (Array.isArray(recebimentosOutros) ? recebimentosOutros : []).map((recebimento) => ({
+      ...recebimento,
+      tipo_recebimento: 'outros',
+      status: 'aprovado'
+    }));
+    return [...fiscais, ...outros];
   }
 
   const naoFiscais = (Array.isArray(recebimentosNaoFiscal) ? recebimentosNaoFiscal : []).map((recebimento) => ({
@@ -452,7 +578,13 @@ function montarRecebimentosParaGravar({
     status: 'aprovado'
   }));
 
-  return [...fiscais, ...naoFiscais];
+  const outros = (Array.isArray(recebimentosOutros) ? recebimentosOutros : []).map((recebimento) => ({
+    ...recebimento,
+    tipo_recebimento: 'outros',
+    status: 'aprovado'
+  }));
+
+  return [...fiscais, ...naoFiscais, ...outros];
 }
 
 /**
@@ -566,6 +698,8 @@ module.exports = {
   determinarStatusPagamento,
   montarRecebimentosParaGravar,
   isPagamentoIntegralConfirmado,
+  distribuirRecebimentosOutros,
+  validarCoberturaOutrosTef,
   normalizarPagamentosEntrada,
   logDebugDescontoFiscal
 };

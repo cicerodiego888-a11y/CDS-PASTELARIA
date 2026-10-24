@@ -24,6 +24,8 @@ const DDL_ITENS = `
     insumo_id INTEGER NOT NULL,
     quantidade REAL NOT NULL,
     unidade TEXT NOT NULL,
+    classificacao_comercial TEXT NOT NULL DEFAULT 'OBRIGATORIO_OCULTO',
+    preco_adicional REAL NOT NULL DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(ficha_tecnica_id, insumo_id),
     FOREIGN KEY (ficha_tecnica_id) REFERENCES ficha_tecnica(id) ON DELETE CASCADE,
@@ -37,18 +39,36 @@ function runSql(db, sql) {
   });
 }
 
-function garantirSchemaFichaTecnica(db, callback) {
-  const done = typeof callback === 'function' ? callback : () => {};
-  if (!db) return done(new Error('db obrigatório para schema ficha_tecnica'));
-  db.serialize(() => {
-    db.run(DDL_FICHA, (err1) => {
-      if (err1) return done(err1);
-      db.run(DDL_ITENS, (err2) => done(err2 || null));
-    });
+function getRows(db, sql) {
+  return new Promise((resolve, reject) => {
+    db.all(sql, (err, rows) => (err ? reject(err) : resolve(rows || [])));
   });
 }
 
+async function garantirColunaUtilizaFichaTecnica(db) {
+  const colunas = await getRows(db, 'PRAGMA table_info(produtos)');
+  if (!colunas.some((coluna) => coluna.name === 'utiliza_ficha_tecnica')) {
+    await runSql(db, 'ALTER TABLE produtos ADD COLUMN utiliza_ficha_tecnica INTEGER');
+  }
+}
+
+function garantirSchemaFichaTecnica(db, callback) {
+  const done = typeof callback === 'function' ? callback : () => {};
+  if (!db) return done(new Error('db obrigatório para schema ficha_tecnica'));
+  garantirColunaUtilizaFichaTecnica(db)
+    .then(() => {
+      db.serialize(() => {
+        db.run(DDL_FICHA, (err1) => {
+          if (err1) return done(err1);
+          db.run(DDL_ITENS, (err2) => done(err2 || null));
+        });
+      });
+    })
+    .catch(done);
+}
+
 async function garantirSchemaFichaTecnicaAsync(db) {
+  await garantirColunaUtilizaFichaTecnica(db);
   await runSql(db, DDL_FICHA);
   await runSql(db, DDL_ITENS);
 }

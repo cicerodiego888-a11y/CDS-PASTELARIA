@@ -6,6 +6,9 @@
  *           node tests/fiscal/url-resolver.test.js
  */
 
+const { isolarBancoTeste } = require('../central-entradas/helpers/isolarBancoTeste');
+isolarBancoTeste('cds-fiscal-url-');
+
 const assert = require('assert');
 const {
   UrlResolver,

@@ -20,6 +20,11 @@ const {
 const { EnvironmentType, fromAmbienteCode } = require('./core/EnvironmentType');
 const { ModelType } = require('./core/ModelType');
 const { RegistryBuilder, UF_AN, NS, ACTION } = require('./core/RegistryBuilder');
+const {
+  exigirAutorizacaoTransmissao,
+  tipoConsultaManifestacao,
+  resultadoManifestacaoNaoExecutada
+} = require('./autorizacaoTransmissaoSefaz');
 
 const NS_EVENTO = NS.EVENTO;
 const ACTION_EVENTO = ACTION.EVENTO;
@@ -154,6 +159,28 @@ async function enviarManifestacaoLegado(params) {
     httpClient = null,
     timeoutMs = 30000
   } = params;
+
+  try {
+    exigirAutorizacaoTransmissao({
+      autorizacao: params.autorizacaoTransmissaoSefaz,
+      empresaId: params.empresaId
+        || (params.contextoCentral && params.contextoCentral.empresaId)
+        || null,
+      tipoConsulta: tipoConsultaManifestacao(operacao) || '210210'
+    });
+  } catch (err) {
+    return {
+      ...resultadoManifestacaoNaoExecutada({
+        codigo: err.codigo || err.code,
+        mensagem: err.message
+      }),
+      endpoint: null,
+      namespace: NS_EVENTO,
+      tempoXmlMs: 0,
+      tempoSoapMs: 0,
+      tempo: elapsedMs()
+    };
+  }
 
   let endpoint = url;
   try {

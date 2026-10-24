@@ -302,6 +302,39 @@ async function main() {
     assert.strictEqual(resultado.resultados[0].associadoAutomaticamente, false);
   });
 
+  await test('candidatos de descrição semelhantes mantêm escolha explícita', async () => {
+    const { service } = criarService({
+      identificar: async () => criarMiipResp({
+        candidatos: [
+          criarCandidato({
+            produtoId: 42,
+            nome: 'Farinha de trigo 1kg',
+            score: 95,
+            motor: 'motor_similarity'
+          }),
+          criarCandidato({
+            produtoId: 43,
+            nome: 'Farinha de trigo especial 1kg',
+            score: 94,
+            motor: 'motor_similarity'
+          })
+        ],
+        score: 95,
+        acao: MiipAction.SUGERIR,
+        precisaConfirmacao: true,
+        confianca: 'MEDIA'
+      })
+    });
+
+    const resultado = await service.processarImportacaoXml(
+      criarXmlBase([criarItemXml('farinha')])
+    );
+
+    assert.strictEqual(resultado.resultados[0].associadoAutomaticamente, false);
+    assert.strictEqual(resultado.resultados[0].precisaConfirmacao, true);
+    assert.strictEqual(resultado.resultados[0].candidatos.length, 2);
+  });
+
   await test('score 95+ com gap suficiente marca precisaConfirmacao', async () => {
     const { service } = criarService({
       identificar: async () => criarMiipResp({

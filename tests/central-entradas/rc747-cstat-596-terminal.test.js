@@ -2,6 +2,9 @@
  * RC7.4.7 — cStat 596 → estado terminal XML_INDISPONIVEL (sem XML_WAIT / retry).
  */
 
+
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-p04-rc747-cstat-596-terminal-');
 const assert = require('assert');
 const CentralManifestacaoDfeService = require(
   '../../backend/motores/central-entradas/services/CentralManifestacaoDfeService'

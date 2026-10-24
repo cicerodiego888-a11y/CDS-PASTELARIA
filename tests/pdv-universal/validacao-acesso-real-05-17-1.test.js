@@ -18,11 +18,13 @@ function src(rel) {
 
 function test01Rota() {
   assert.strictEqual(acesso.urlPdvUniversalOficial(), '/pdv-universal/');
-  assert.ok(src('backend/server.js').includes("'/pdv-universal/'"));
+  assert.ok(src('backend/server.js').includes('caminhoDoPdvUniversalBloqueado'));
 }
 
 function test02Menu() {
-  assert.ok(src('frontend/erp/index.html').includes('href="/pdv-universal/"'));
+  assert.ok(!src('frontend/erp/index.html').includes('href="/pdv-universal'));
+  assert.ok(!src('frontend/pdv/index.html').includes('href="/pdv-universal'));
+  assert.ok(src('frontend/erp/index.html').includes('href="/pdv"'));
 }
 
 function test03NaoLegado() {

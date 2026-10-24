@@ -6,7 +6,7 @@ window.CDS_DEFAULT_PAGE = 'dashboard';
 
 const CDS_ERP_ASSET_VERSION = (typeof window.CDS_ASSET_VERSION === 'string' && window.CDS_ASSET_VERSION)
     ? window.CDS_ASSET_VERSION
-    : '0519';
+    : 'p093-http422-dfe';
 
 function cdsErpAsset(src) {
     const s = String(src || '');
@@ -27,6 +27,7 @@ const CDS_ERP_PAGE_SCRIPTS = Object.freeze({
     'contas-bancarias': ['/erp/js/contas-bancarias.js'],
     monitoring: ['/erp/js/cds-monitoring-engine.js'],
     produtos: ['/shared/js/SearchSDK.js', '/erp/js/categorias.js', '/erp/js/subcategorias.js', '/erp/js/motor-unidades-medida.js', '/erp/js/produto-apresentacao-resolver.js', '/erp/js/produto-embalagens.js', '/shared/js/motor-preco-atacado.js', '/erp/js/formacao-preco-margem.js', '/erp/js/produtos.js'],
+    insumos: ['/shared/js/SearchSDK.js', '/erp/js/categorias.js', '/erp/js/subcategorias.js', '/erp/js/motor-unidades-medida.js', '/erp/js/produto-apresentacao-resolver.js', '/erp/js/produto-embalagens.js', '/shared/js/motor-preco-atacado.js', '/erp/js/formacao-preco-margem.js', '/erp/js/produtos.js'],
     clientes: ['/erp/js/clientes.js'],
     compras: ['/erp/js/categorias.js', '/erp/js/subcategorias.js', '/erp/js/produto-apresentacao-resolver.js', '/erp/js/produto-embalagens.js', '/shared/js/motor-preco-atacado.js', '/erp/js/formacao-preco-margem.js', '/erp/js/produtos.js', '/erp/js/motor-unidades-medida.js', '/shared/js/motor-quantidade-compra.js', '/erp/js/compra-muc-client.js', '/erp/js/tratamento-fiscal-item-compra.js', '/erp/js/miip-central-revisao.js', '/erp/js/compras-fornecedor-cnpj-rc831.js', '/erp/js/compras.js'],
     'central-entradas': [
@@ -294,6 +295,7 @@ window.minimizarModal = function minimizarModal(modalId, rotuloRestaurar) {
 
 async function loadPage(page) {
     currentPage = page;
+    window.CDS_ERP_ACTIVE_PAGE = page;
 
     if (!paginaPermitidaPorImplantacao(page)) {
         const msg = typeof mensagemModuloNaoContratado === 'function'
@@ -377,6 +379,10 @@ async function loadPage(page) {
             return typeof loadProdutos === 'function'
                 ? loadProdutos()
                 : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar produtos.</div>');
+        case 'insumos':
+            return typeof loadInsumos === 'function'
+                ? loadInsumos()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar insumos.</div>');
         case 'clientes':
             return typeof loadClientes === 'function'
                 ? loadClientes()

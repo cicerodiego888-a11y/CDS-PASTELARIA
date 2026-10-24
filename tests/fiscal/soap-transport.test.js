@@ -6,6 +6,9 @@
  *           node tests/fiscal/soap-transport.test.js
  */
 
+const { isolarBancoTeste } = require('../central-entradas/helpers/isolarBancoTeste');
+isolarBancoTeste('cds-fiscal-soap-');
+
 const assert = require('assert');
 const {
   SoapTransport,

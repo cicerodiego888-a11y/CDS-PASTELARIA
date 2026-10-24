@@ -291,6 +291,7 @@ function cancelarVendaNaoFiscal(vendaId) {
                         <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Fechar"></button>
                     </div>
                     <div class="modal-body">
+                        <div id="statusCancelamentoVenda" class="alert alert-info" role="status" aria-live="polite" hidden></div>
                         <div class="alert alert-warning">
                             <i class="fas fa-exclamation-triangle"></i>
                             Atenção: Esta ação irá devolver os produtos ao estoque.
@@ -334,6 +335,8 @@ function cancelarVendaNaoFiscal(vendaId) {
 
     // Handler do botão confirmar
     document.getElementById('btnConfirmarCancelamento').addEventListener('click', async () => {
+        const botaoConfirmar = document.getElementById('btnConfirmarCancelamento');
+        if (botaoConfirmar.disabled) return;
         const motivo = document.getElementById('motivoCancelamento').value.trim();
 
         const validacaoMotivo = validarMotivoTexto(motivo);
@@ -342,27 +345,44 @@ function cancelarVendaNaoFiscal(vendaId) {
             return;
         }
 
-        modal.hide();
+        botaoConfirmar.disabled = true;
+        botaoConfirmar.textContent = 'Processando cancelamento...';
+        const statusCancelamento = document.getElementById('statusCancelamentoVenda');
+        statusCancelamento.hidden = false;
+        statusCancelamento.className = 'alert alert-info';
+        statusCancelamento.textContent = 'Aguardando confirmação fiscal/comercial.';
+        let resultadoDesconhecido = false;
 
         try {
-            const resposta = await fetch(
-                `${API_URL}/vendas/cancelar/${vendaId}`,
-                {
+            let resposta;
+            try {
+                resposta = await fetch(
+                    `${API_URL}/vendas/cancelar/${vendaId}`,
+                    {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                         'Authorization': `Bearer ${localStorage.getItem('token')}`
                     },
                     body: JSON.stringify(montarPayloadCancelamentoVenda(motivo))
-                }
-            );
+                    }
+                );
+            } catch (erroTransporte) {
+                erroTransporte.resultUnknown = true;
+                throw erroTransporte;
+            }
 
             const dados = await resposta.json().catch(() => ({}));
 
             if (!resposta.ok || !dados.sucesso) {
-                throw new Error(extrairMensagemErroResposta(dados, resposta.status));
+                const erro = new Error(extrairMensagemErroResposta(dados, resposta.status));
+                erro.resultUnknown = dados.resultUnknown === true
+                    || dados.code === 'CANCELAMENTO_EM_ANDAMENTO'
+                    || dados.code === 'CANCELAMENTO_ESTADO_PERSISTENCIA_FALHOU';
+                throw erro;
             }
 
+            modal.hide();
             showNotification(
                 'Venda cancelada com sucesso.',
                 'success'
@@ -371,10 +391,24 @@ function cancelarVendaNaoFiscal(vendaId) {
             loadVendas();
 
         } catch (error) {
+            resultadoDesconhecido = error.resultUnknown === true;
+            statusCancelamento.className = resultadoDesconhecido
+                ? 'alert alert-warning'
+                : 'alert alert-danger';
+            statusCancelamento.textContent = resultadoDesconhecido
+                ? `${error.message} Não tente reenviar; aguarde a reconciliação fiscal.`
+                : error.message;
             showNotification(
-                error.message,
-                'danger'
+                statusCancelamento.textContent,
+                resultadoDesconhecido ? 'warning' : 'danger'
             );
+        } finally {
+            if (resultadoDesconhecido) {
+                botaoConfirmar.textContent = 'Aguardando reconciliação';
+            } else {
+                botaoConfirmar.disabled = false;
+                botaoConfirmar.innerHTML = '<i class="fas fa-times"></i> Confirmar Cancelamento';
+            }
         }
     });
 }

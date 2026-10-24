@@ -10,6 +10,7 @@
 
 'use strict';
 
+const { roundStockQuantity } = require('../estoque/quantityPrecision');
 const { resolverQuantidadesVendaItem } = require('../estoqueFiscalService');
 const estoqueSaldosPublico = require('../fiscalNaoFiscal/estoqueSaldosPublico');
 const { TipoSaldo } = require('../fiscalNaoFiscal/constants');
@@ -70,8 +71,8 @@ function resolverQuantidadesItemDevolucaoNfe(item) {
   const totalOrig = Number(qtdsOrig.quantidade_fiscal || 0) + Number(qtdsOrig.quantidade_nao_fiscal || 0)
     || Number(baseItem.quantidade || 0) || 1;
   const fator = Math.min(1, qtd / totalOrig);
-  const qtdFiscal = Math.round(Number(qtdsOrig.quantidade_fiscal || 0) * fator * 1000) / 1000;
-  const qtdNaoFiscal = Math.round(Math.max(0, qtd - qtdFiscal) * 1000) / 1000;
+  const qtdFiscal = roundStockQuantity(Number(qtdsOrig.quantidade_fiscal || 0) * fator);
+  const qtdNaoFiscal = roundStockQuantity(Math.max(0, qtd - qtdFiscal));
   return { produtoId, qtd, qtdFiscal, qtdNaoFiscal };
 }
 

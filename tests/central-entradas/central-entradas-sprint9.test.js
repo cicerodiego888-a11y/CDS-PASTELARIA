@@ -52,15 +52,33 @@ async function main() {
     });
 
     await test('resolverEstadoServicoCentral prioriza offline e sincronizando', async () => {
-        const original = global.navigator;
-        global.navigator = { onLine: false };
-        assert.strictEqual(UX.resolverEstadoServicoCentral({}).codigo, 'offline');
-        global.navigator = { onLine: true };
-
-        const sync = UX.resolverEstadoServicoCentral({ sincronizando: true });
-        assert.strictEqual(sync.codigo, 'sincronizando');
-
-        global.navigator = original;
+        const g = globalThis;
+        const descOriginal = Object.getOwnPropertyDescriptor(g, 'navigator');
+        const definirNavigator = (onLine) => {
+            try {
+                Object.defineProperty(g, 'navigator', {
+                    configurable: true,
+                    enumerable: true,
+                    writable: true,
+                    value: { onLine }
+                });
+            } catch {
+                g.navigator = { onLine };
+            }
+        };
+        try {
+            definirNavigator(false);
+            assert.strictEqual(UX.resolverEstadoServicoCentral({}).codigo, 'offline');
+            definirNavigator(true);
+            const sync = UX.resolverEstadoServicoCentral({ sincronizando: true });
+            assert.strictEqual(sync.codigo, 'sincronizando');
+        } finally {
+            if (descOriginal) {
+                Object.defineProperty(g, 'navigator', descOriginal);
+            } else {
+                try { delete g.navigator; } catch { /* ambiente sem navigator próprio */ }
+            }
+        }
     });
 
     await test('extrairDadosExecutivoCentral agrega itens e precisão MIIP', async () => {

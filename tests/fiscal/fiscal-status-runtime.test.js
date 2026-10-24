@@ -6,6 +6,9 @@
  *           node tests/fiscal/fiscal-status-runtime.test.js
  */
 
+const { isolarBancoTeste } = require('../central-entradas/helpers/isolarBancoTeste');
+isolarBancoTeste('cds-fiscal-status-rt-');
+
 const assert = require('assert');
 const {
   FiscalWebServices,

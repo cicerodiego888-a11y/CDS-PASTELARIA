@@ -1,6 +1,11 @@
 /**
  * RC3.7.5.1 / RC3.7.5.2 — NsuRecoveryService
- * Recuperação automática do cursor NSU após cStat 656 (Consumo Indevido).
+ *
+ * Avalia o cursor informado em cStat 656 (Consumo Indevido) para auditoria.
+ * Não avança ult_nsu/max_nsu: 656 não é DistDFe 137/138 com lote persistido.
+ *
+ * RC3.7.5.1 histórico (AUTO_SYNC quando remoto > local) foi revogado como
+ * avanço automático — ver microsprint correção segura do cursor 656.
  *
  * RC3.7.5.2:
  * - params.ultNsu/maxNsu null → fallback XML (namespace-tolerant);
@@ -22,13 +27,23 @@ const {
 const { logOperacaoCentral } = require('../utils/centralOperacaoLog');
 const { TIPOS_EVENTO, ORIGENS } = require('../config/centralEventosTipos');
 
-/** Eventos já recuperados nesta execução do processo (anti-duplicação). */
+/** Eventos já avaliados nesta execução do processo (anti-duplicação de auditoria). */
 const _eventosProcessados = new Set();
 
 const ORIGEM_NSU = Object.freeze({
   PARSER: 'Parser',
   FALLBACK_XML: 'Fallback XML',
   AUSENTE: 'Ausente'
+});
+
+const MOTIVOS_656 = Object.freeze({
+  CSTAT_DIFERENTE: 'CSTAT_DIFERENTE',
+  CONTROLE_AUSENTE: 'CONTROLE_AUSENTE',
+  SEM_ULT_NSU: 'SEM_ULT_NSU',
+  SEFAZ_NAO_MAIOR: 'SEFAZ_NAO_MAIOR',
+  NSU_REMOTO_INCONSISTENTE: 'NSU_REMOTO_INCONSISTENTE',
+  AVANCO_656_BLOQUEADO: 'AVANCO_656_BLOQUEADO',
+  JA_PROCESSADO: 'JA_PROCESSADO'
 });
 
 function nsuNumerico(valor) {
@@ -38,6 +53,20 @@ function nsuNumerico(valor) {
 
 function nsuInformado(valor) {
   return valor != null && String(valor).trim() !== '';
+}
+
+function nsuEhZero(valor) {
+  return nsuNumerico(valor) === 0n;
+}
+
+/**
+ * Par DistDFe só é candidato a avanço em 137/138: max informado, não zero, max >= ult.
+ * 656 nunca usa este predicado para persistir cursor.
+ */
+function parNsuConsistente(ult, max) {
+  if (!ult || !max) return false;
+  if (nsuEhZero(max)) return false;
+  return nsuNumerico(max) >= nsuNumerico(ult);
 }
 
 function chaveEvento(correlationId, cnpj, ambiente, local, remoto) {
@@ -85,6 +114,7 @@ class NsuRecoveryService {
   }
 
   /**
+   * Avalia 656 sem persistir avanço de cursor.
    * @param {Object} params
    */
   async tentarRecuperar(params = {}) {
@@ -106,11 +136,11 @@ class NsuRecoveryService {
     };
 
     if (cStat !== '656') {
-      return { ...base, motivo: 'CSTAT_DIFERENTE' };
+      return { ...base, motivo: MOTIVOS_656.CSTAT_DIFERENTE };
     }
 
     if (!controle?.id) {
-      return { ...base, motivo: 'CONTROLE_AUSENTE' };
+      return { ...base, motivo: MOTIVOS_656.CONTROLE_AUSENTE };
     }
 
     const resolucaoUlt = resolverNsu(params.ultNsu, xml, 'ultNSU');
@@ -134,10 +164,10 @@ class NsuRecoveryService {
         nsuLocal: base.nsuLocal,
         nsuRemoto: resolucaoUlt.valor,
         atualizado: false,
-        motivo: '656 sem ultNSU/maxNSU válidos',
+        motivo: '656 sem ultNSU/maxNSU válidos — cursor preservado',
         origem: ORIGEM_NSU.AUSENTE
       });
-      return { ...base, motivo: 'SEM_ULT_NSU' };
+      return { ...base, motivo: MOTIVOS_656.SEM_ULT_NSU };
     }
 
     if (resolucaoUlt.recuperadoDoXml || resolucaoMax.recuperadoDoXml) {
@@ -156,6 +186,7 @@ class NsuRecoveryService {
     const nsuRemoto = resolucaoUlt.valor;
     const maxRemoto = resolucaoMax.valor;
     const nsuLocal = normalizarNsuOuZero(controle.ultNsu);
+    const maxLocal = normalizarNsuOuZero(controle.maxNsu);
 
     if (nsuNumerico(nsuRemoto) <= nsuNumerico(nsuLocal)) {
       this._logNsu({
@@ -166,8 +197,13 @@ class NsuRecoveryService {
         motivo: 'SEFAZ <= local (sem alteração)',
         origem: resolucaoUlt.origem
       });
-      return { ...base, motivo: 'SEFAZ_NAO_MAIOR', nsuLocal, nsuRemoto };
+      return { ...base, motivo: MOTIVOS_656.SEFAZ_NAO_MAIOR, nsuLocal, nsuRemoto };
     }
+
+    const parOk = parNsuConsistente(nsuRemoto, maxRemoto);
+    const motivo = parOk
+      ? MOTIVOS_656.AVANCO_656_BLOQUEADO
+      : MOTIVOS_656.NSU_REMOTO_INCONSISTENTE;
 
     const chave = chaveEvento(
       correlationId,
@@ -177,88 +213,68 @@ class NsuRecoveryService {
       nsuRemoto
     );
     if (this._processados.has(chave)) {
-      return { ...base, motivo: 'JA_PROCESSADO', nsuLocal, nsuRemoto };
-    }
-
-    const agora = this._agora();
-    const atualizado = await this._repository.atualizarSincronizacaoSegura(controle.id, {
-      ultNsu: nsuRemoto,
-      maxNsu: maxRemoto,
-      ultimoCstat: '656',
-      dataSincronizacao: agora.toISOString()
-    });
-
-    const novoLocal = normalizarNsuOuZero(atualizado?.ultNsu || nsuLocal);
-    if (nsuNumerico(novoLocal) < nsuNumerico(nsuLocal)) {
-      this._logNsu({
-        correlationId,
-        nsuLocal,
-        nsuRemoto,
-        atualizado: false,
-        motivo: 'REGRESSAO_BLOQUEADA',
-        origem: resolucaoUlt.origem
-      });
       return {
         ...base,
-        motivo: 'REGRESSAO_BLOQUEADA',
+        motivo: MOTIVOS_656.JA_PROCESSADO,
         nsuLocal,
-        nsuRemoto,
-        controle: atualizado || controle
+        nsuRemoto
       };
     }
-
     this._processados.add(chave);
 
     this._logNsu({
       correlationId,
       nsuLocal,
       nsuRemoto,
-      atualizado: true,
-      motivo: '656 Consumo Indevido',
+      atualizado: false,
+      motivo: parOk
+        ? '656 remoto > local — avanço bloqueado (exige 137/138 persistido)'
+        : '656 maxNSU zero ou inconsistente — cursor preservado',
       origem: resolucaoUlt.origem
     });
 
-    await this._auditar({
+    await this._auditarPreservacao({
       empresa: params.empresa || controle.cnpj || null,
       cnpj: controle.cnpj,
       ambiente: controle.ambiente,
       nsuLocal,
       nsuRemoto,
-      nsuAtualizado: novoLocal,
-      maxNsu: normalizarNsuOuZero(atualizado?.maxNsu || maxRemoto),
+      maxLocal,
+      maxNsu: maxRemoto,
       correlationId,
-      data: agora.toISOString(),
+      motivo,
       origemUltNsu: resolucaoUlt.origem,
       origemMaxNsu: resolucaoMax.origem
     });
 
     logOperacaoCentral({
       correlationId,
-      operacao: 'AUTO_SYNC_NSU',
-      nsu: novoLocal,
+      operacao: 'NSU_PRESERVAR_656',
+      nsu: nsuLocal,
       cStat: '656',
-      resultado: 'ATUALIZADO',
+      resultado: 'PRESERVADO',
       origem: 'NsuRecoveryService',
       detalhe: {
         nsuLocal,
         nsuRemoto,
-        nsuAtualizado: novoLocal,
+        maxLocal,
         maxNsu: maxRemoto,
+        motivo,
         origemUltNsu: resolucaoUlt.origem,
         origemMaxNsu: resolucaoMax.origem
       }
     });
 
     return {
-      atualizou: true,
-      motivo: 'RECUPERADO',
+      atualizou: false,
+      motivo,
       nsuLocal,
       nsuRemoto,
-      nsuAtualizado: novoLocal,
-      maxNsuAtualizado: normalizarNsuOuZero(atualizado?.maxNsu || maxRemoto),
+      nsuAtualizado: nsuLocal,
+      maxNsuAtualizado: maxLocal,
       origemUltNsu: resolucaoUlt.origem,
       origemMaxNsu: resolucaoMax.origem,
-      controle: atualizado || controle
+      controle
     };
   }
 
@@ -272,6 +288,11 @@ class NsuRecoveryService {
     let status = 'Sincronizado';
     if (recuperacao?.atualizou) {
       status = 'Atualizado automaticamente';
+    } else if (
+      recuperacao?.motivo === MOTIVOS_656.AVANCO_656_BLOQUEADO
+      || recuperacao?.motivo === MOTIVOS_656.NSU_REMOTO_INCONSISTENTE
+    ) {
+      status = 'Cursor preservado (656)';
     } else if (cooldownAtivo && String(ultimoCstat) === '656') {
       status = 'Aguardando cooldown';
     } else if (String(ultimoCstat) === '656') {
@@ -284,7 +305,7 @@ class NsuRecoveryService {
       ultimoCstat,
       status,
       cooldownAte: controle?.cooldownAte || null,
-      recuperadoAutomaticamente: Boolean(recuperacao?.atualizou),
+      recuperadoAutomaticamente: false,
       origemNsu: recuperacao?.origemUltNsu || null
     };
   }
@@ -321,8 +342,8 @@ class NsuRecoveryService {
       correlationId: dados.correlationId,
       nsuLocal: dados.nsuLocal,
       nsuRemoto: dados.nsuRemoto,
-      atualizado: Boolean(dados.atualizado),
-      motivo: dados.motivo || '656 Consumo Indevido',
+      atualizado: false,
+      motivo: dados.motivo || '656 Consumo Indevido — cursor preservado',
       origem: dados.origem || ORIGEM_NSU.AUSENTE,
       cooldownAte: dados.cooldownAte || null
     });
@@ -356,33 +377,35 @@ class NsuRecoveryService {
   }
 
   /** @private */
-  async _auditar(dados) {
+  async _auditarPreservacao(dados) {
     try {
       const emitir = this._emitirEvento || require('../utils/centralEventosEmitter').emitirEvento;
       await emitir({
-        tipo: TIPOS_EVENTO.AUTO_SYNC_NSU,
+        tipo: TIPOS_EVENTO.NSU_PRESERVADO_656,
         origem: ORIGENS.SISTEMA,
-        descricao: 'Cursor NSU sincronizado automaticamente após retorno 656.',
-        resultado: 'ATUALIZADO',
+        descricao: 'Cursor NSU preservado após cStat 656 — avanço automático bloqueado.',
+        resultado: 'PRESERVADO',
         sucesso: true,
         detalhe: {
-          categoria: 'AUTO_SYNC_NSU',
+          categoria: 'NSU_PRESERVADO_656',
           empresa: dados.empresa,
           cnpj: dados.cnpj,
           ambiente: dados.ambiente,
           nsuLocal: dados.nsuLocal,
           nsuRemoto: dados.nsuRemoto,
-          nsuAtualizado: dados.nsuAtualizado,
+          nsuAtualizado: dados.nsuLocal,
+          maxLocal: dados.maxLocal,
           maxNsu: dados.maxNsu,
+          motivo: dados.motivo,
           origemUltNsu: dados.origemUltNsu,
           origemMaxNsu: dados.origemMaxNsu,
           correlationId: dados.correlationId,
-          data: dados.data,
-          mensagem: 'Cursor NSU sincronizado automaticamente após retorno 656.'
+          data: this._agora().toISOString(),
+          mensagem: 'cStat 656 não avança ult_nsu/max_nsu. Recuperação de documentos exige 137/138 persistido ou consChNFe autorizado.'
         }
       });
     } catch (err) {
-      console.warn('[NsuRecoveryService] Falha ao registrar auditoria AUTO_SYNC_NSU:', err.message);
+      console.warn('[NsuRecoveryService] Falha ao registrar NSU_PRESERVADO_656:', err.message);
     }
   }
 
@@ -392,7 +415,10 @@ class NsuRecoveryService {
 }
 
 NsuRecoveryService.nsuNumerico = nsuNumerico;
+NsuRecoveryService.parNsuConsistente = parNsuConsistente;
+NsuRecoveryService.MOTIVOS_656 = MOTIVOS_656;
 NsuRecoveryService.ORIGEM_NSU = ORIGEM_NSU;
 NsuRecoveryService.extrairNsuTagDoXml = extrairNsuTagDoXml;
+NsuRecoveryService.NSU_ZERADO = NSU_ZERADO;
 
 module.exports = NsuRecoveryService;

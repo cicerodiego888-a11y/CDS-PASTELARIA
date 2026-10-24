@@ -658,6 +658,10 @@ function iniciarAplicacaoElectron(options = {}) {
 
   app.whenReady().then(async () => {
     try {
+      // CSP restritiva no renderer (antes de qualquer loadURL).
+      const { aplicarCspElectron } = require('./electron-csp');
+      aplicarCspElectron();
+
       if (!fs.existsSync(process.env.DB_DIR)) {
         fs.mkdirSync(process.env.DB_DIR, { recursive: true });
       }

@@ -6,6 +6,9 @@
  *           node tests/fiscal/fiscal-platform.test.js
  */
 
+const { isolarBancoTeste } = require('../central-entradas/helpers/isolarBancoTeste');
+isolarBancoTeste('cds-fiscal-platform-');
+
 const assert = require('assert');
 const path = require('path');
 

@@ -2,6 +2,9 @@
  * RC3.7.5.1 — Auto recuperação do cursor NSU após cStat 656.
  */
 
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-rc3751-');
+
 const assert = require('assert');
 const CentralNsuService = require(
   '../../backend/motores/central-entradas/services/CentralNsuService'
@@ -84,9 +87,10 @@ function criarNsuRepoMemoria(inicial = {}) {
 
 async function main() {
   console.log('\n=== RC3.7.5.1 — Auto recuperação NSU ===\n');
+  isolamento.comprobarSeCarregado();
   NsuRecoveryService.limparCacheEventos();
 
-  await test('banco restaurado + 656 com ultNSU/maxNSU → atualiza cursor', async () => {
+  await test('banco restaurado + 656 com ultNSU/maxNSU → NÃO avança cursor (RC3.7.5.1 revogado)', async () => {
     NsuRecoveryService.limparCacheEventos();
     const auditorias = [];
     const repo = criarNsuRepoMemoria({
@@ -110,22 +114,24 @@ async function main() {
       empresa: '12345678000199'
     });
 
-    assert.strictEqual(consumo.atualizouNsu, true);
-    assert.strictEqual(consumo.preservado, false);
-    assert.strictEqual(consumo.ultNsu, '000000000000428');
-    assert.strictEqual(consumo.maxNsu, '000000000000500');
+    assert.strictEqual(consumo.atualizouNsu, false);
+    assert.strictEqual(consumo.preservado, true);
+    assert.strictEqual(consumo.ultNsu, '000000000000000');
+    assert.strictEqual(consumo.maxNsu, '000000000000000');
     assert.strictEqual(consumo.cooldownAtivo, true);
     assert.ok(consumo.proximaConsultaEm);
-    assert.strictEqual(repo._peek().ultNsu, '000000000000428');
+    assert.strictEqual(consumo.recuperacaoNsu.motivo, 'AVANCO_656_BLOQUEADO');
+    assert.strictEqual(repo._peek().ultNsu, '000000000000000');
     assert.strictEqual(repo._peek().ultimoCstat, '656');
     assert.ok(repo._peek().cooldownAte);
 
+    assert.strictEqual(auditorias.filter((a) => a.tipo === TIPOS_EVENTO.AUTO_SYNC_NSU).length, 0);
     assert.strictEqual(auditorias.length, 1);
-    assert.strictEqual(auditorias[0].tipo, TIPOS_EVENTO.AUTO_SYNC_NSU);
-    assert.match(auditorias[0].descricao, /sincronizado automaticamente/i);
+    assert.strictEqual(auditorias[0].tipo, TIPOS_EVENTO.NSU_PRESERVADO_656);
+    assert.match(auditorias[0].descricao, /preservado/i);
     assert.strictEqual(auditorias[0].detalhe.nsuLocal, '000000000000000');
     assert.strictEqual(auditorias[0].detalhe.nsuRemoto, '000000000000428');
-    assert.strictEqual(auditorias[0].detalhe.nsuAtualizado, '000000000000428');
+    assert.strictEqual(auditorias[0].detalhe.nsuAtualizado, '000000000000000');
   });
 
   await test('NSU local igual ao SEFAZ → nenhuma alteração', async () => {
@@ -225,9 +231,10 @@ async function main() {
       maxNsu: '000000000000428',
       correlationId: 'rc3751-once'
     });
-    assert.strictEqual(r1.atualizouNsu, true);
+    assert.strictEqual(r1.atualizouNsu, false);
+    assert.strictEqual(r1.recuperacaoNsu.motivo, 'AVANCO_656_BLOQUEADO');
 
-    // Mesmo correlationId com cursor “atrasado” de novo: não reprocessa o evento.
+    // Mesmo correlationId: não reemite preservação; cursor permanece o local.
     repo._set({ ultNsu: '000000000000000', maxNsu: '000000000000000' });
     const r2 = await service.aplicarRetornoDistDfe({
       controle: { ...r1.controle, ultNsu: '000000000000000', maxNsu: '000000000000000' },
@@ -239,7 +246,8 @@ async function main() {
     });
     assert.strictEqual(r2.atualizouNsu, false);
     assert.strictEqual(r2.recuperacaoNsu.motivo, 'JA_PROCESSADO');
-    assert.strictEqual(auditorias.filter((a) => a.tipo === TIPOS_EVENTO.AUTO_SYNC_NSU).length, 1);
+    assert.strictEqual(auditorias.filter((a) => a.tipo === TIPOS_EVENTO.AUTO_SYNC_NSU).length, 0);
+    assert.strictEqual(auditorias.filter((a) => a.tipo === TIPOS_EVENTO.NSU_PRESERVADO_656).length, 1);
   });
 
   await test('cooldown respeitado após recuperação', async () => {
@@ -266,7 +274,9 @@ async function main() {
       correlationId: 'rc3751-cd'
     });
 
-    assert.strictEqual(consumo.atualizouNsu, true);
+    assert.strictEqual(consumo.atualizouNsu, false);
+    assert.strictEqual(consumo.preservado, true);
+    assert.strictEqual(repo._peek().ultNsu, '000000000000000');
     const cd = service.avaliarCooldown(consumo.controle);
     assert.strictEqual(cd.ativo, true);
     assert.strictEqual(cd.proximaConsultaEm, '2026-07-30T13:00:00.000Z');
@@ -290,10 +300,10 @@ async function main() {
       maxNsu: '000000000000500',
       ultimoCstat: '656',
       cooldownAte: '2026-07-30T13:00:00.000Z'
-    }, { atualizou: true, nsuRemoto: '000000000000428' });
-    assert.strictEqual(auto.status, 'Atualizado automaticamente');
+    }, { atualizou: false, motivo: 'AVANCO_656_BLOQUEADO', nsuRemoto: '000000000000500' });
+    assert.strictEqual(auto.status, 'Cursor preservado (656)');
     assert.strictEqual(auto.nsuLocal, '000000000000428');
-    assert.strictEqual(auto.nsuSefaz, '000000000000428');
+    assert.strictEqual(auto.recuperadoAutomaticamente, false);
 
     const wait = recovery.statusDiagnostico({
       ultNsu: '000000000000428',
@@ -302,6 +312,35 @@ async function main() {
       cooldownAte: '2026-07-30T13:00:00.000Z'
     });
     assert.strictEqual(wait.status, 'Aguardando cooldown');
+  });
+
+  await test('656 com ultNSU remoto maior e maxNSU=0 → cursor e max preservados', async () => {
+    NsuRecoveryService.limparCacheEventos();
+    const auditorias = [];
+    const repo = criarNsuRepoMemoria({
+      ultNsu: '000000000000127',
+      maxNsu: '000000000000127'
+    });
+    const service = new CentralNsuService({
+      nsuRepository: repo,
+      emitirEvento: async (ev) => { auditorias.push(ev); }
+    });
+    const consumo = await service.aplicarRetornoDistDfe({
+      controle: await service.obterOuCriar('12345678000199', 2),
+      cStat: '656',
+      xmlRetorno: '<retDistDFeInt><cStat>656</cStat>'
+        + '<ultNSU>000000000000148</ultNSU><maxNSU>000000000000000</maxNSU></retDistDFeInt>',
+      ultNsu: '000000000000148',
+      maxNsu: '000000000000000',
+      correlationId: 'rc3751-max0'
+    });
+    assert.strictEqual(consumo.atualizouNsu, false);
+    assert.strictEqual(consumo.preservado, true);
+    assert.strictEqual(repo._peek().ultNsu, '000000000000127');
+    assert.strictEqual(repo._peek().maxNsu, '000000000000127');
+    assert.strictEqual(consumo.recuperacaoNsu.motivo, 'NSU_REMOTO_INCONSISTENTE');
+    assert.strictEqual(auditorias.filter((a) => a.tipo === TIPOS_EVENTO.AUTO_SYNC_NSU).length, 0);
+    assert.strictEqual(auditorias.filter((a) => a.tipo === TIPOS_EVENTO.NSU_PRESERVADO_656).length, 1);
   });
 
   await test('cStat != 656 → recovery não executa alteração', async () => {

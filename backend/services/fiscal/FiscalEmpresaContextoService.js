@@ -44,8 +44,15 @@ function statusDeErroFiscalEmpresa(err) {
     || code === 'CONFIGURACAO_FISCAL_EMPRESA_INVALIDA'
     || code === 'EMPRESA_OBRIGATORIA'
     || code === 'EMPRESA_CONTEXT_REQUIRED'
+    || code === 'CERTIFICADO_EMPRESA_OBRIGATORIA'
   ) {
     return 400;
+  }
+  if (
+    String(code).startsWith('CERTIFICADO_')
+    || code === 'EMPRESA_NAO_AUTORIZADA'
+  ) {
+    return err.statusCode || 409;
   }
   return 500;
 }

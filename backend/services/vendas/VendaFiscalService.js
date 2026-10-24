@@ -47,7 +47,13 @@ function buscarNfceAutorizadaVenda(vendaId, callback) {
     SELECT id, status
     FROM nfce_notas
     WHERE venda_id = ?
-      AND status IN ('autorizada', 'cancelamento_rejeitado')
+      AND status IN (
+        'autorizada',
+        'cancelamento_rejeitado',
+        'cancelamento_falha_pre_envio',
+        'cancelamento_em_andamento',
+        'cancelamento_desconhecido'
+      )
       AND (
         (chave_acesso IS NOT NULL AND chave_acesso <> '')
         OR (xml_retorno IS NOT NULL AND xml_retorno LIKE '%<cStat>100</cStat>%')
@@ -58,41 +64,7 @@ function buscarNfceAutorizadaVenda(vendaId, callback) {
 }
 
 async function cancelarNfceAutorizadaVenda(vendaId, justificativa, opcoes = {}) {
-  const cancelamento = await cancelarNfce(vendaId, justificativa.trim(), opcoes);
-  const retornoTexto = typeof cancelamento.sefaz === 'string'
-    ? cancelamento.sefaz
-    : JSON.stringify(cancelamento.sefaz);
-  const dadosCancelamento = extrairCancelamentoSefaz(retornoTexto);
-  const canceladoComSucesso =
-    String(dadosCancelamento.cStatEvento) === '135' ||
-    String(dadosCancelamento.cStatEvento) === '136' ||
-    String(dadosCancelamento.cStatEvento) === '155';
-
-  if (!canceladoComSucesso) {
-    throw new Error(dadosCancelamento.xMotivoEvento || 'Cancelamento de NFC-e rejeitado pela SEFAZ.');
-  }
-
-  await new Promise((resolve, reject) => {
-    const resumoCancelamento = `
-STATUS CANCELAMENTO: cancelada
-cStatEvento: ${dadosCancelamento.cStatEvento || ''}
-xMotivoEvento: ${dadosCancelamento.xMotivoEvento || ''}
-protocoloCancelamento: ${dadosCancelamento.protocoloCancelamento || ''}
-dataCancelamento: ${dadosCancelamento.dataCancelamento || ''}
-justificativa: ${justificativa.trim()}
-`;
-
-    db.run(`
-      UPDATE nfce_notas
-      SET status = 'cancelada',
-          xml_retorno = COALESCE(xml_retorno, '') || char(10) || ? || char(10) || ?,
-          updated_at = datetime('now', 'localtime')
-      WHERE id = ?
-    `, [resumoCancelamento, retornoTexto, cancelamento.notaId], (updErr) => {
-      if (updErr) return reject(updErr);
-      resolve();
-    });
-  });
+  return cancelarNfce(vendaId, justificativa.trim(), opcoes);
 }
 
 async function vincularNfceTransacoesVenda(vendaId, fiscal) {

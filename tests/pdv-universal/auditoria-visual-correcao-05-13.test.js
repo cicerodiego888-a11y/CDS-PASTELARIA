@@ -22,12 +22,12 @@ function test01PdvLegado() {
 }
 
 function test02UniversalEntrega() {
-  assert.ok(src('backend/server.js').includes("frontendRoot, 'pdv-universal/index.html'"));
+  assert.ok(src('backend/server.js').includes('caminhoDoPdvUniversalBloqueado'));
   assert.ok(src('frontend/pdv-universal/index.html').includes('id="pdvu-root"'));
 }
 
 function test03Menu() {
-  assert.ok(src('frontend/erp/index.html').includes('href="/pdv-universal/"'));
+  assert.ok(!src('frontend/erp/index.html').includes('href="/pdv-universal'));
 }
 
 function test04Root() {

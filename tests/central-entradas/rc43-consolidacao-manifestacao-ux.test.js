@@ -24,6 +24,22 @@ assert.ok(
   'Central deve ter deep-link para Config Fiscal / Manifestação'
 );
 assert.ok(
+  centralJs.includes("__CDS_CFG_FORCE_TAB = 'diagnostico'"),
+  'Deep-link da Manifestação deve forçar aba Diagnóstico'
+);
+assert.ok(
+  centralJs.includes("__CDS_CFG_FORCE_ANCHOR = 'manifestacao'"),
+  'Deep-link da Manifestação deve manter âncora manifestacao'
+);
+assert.ok(
+  centralJs.includes('Centro de Configurações → Diagnóstico → Manifestação do Destinatário'),
+  'Texto de origem deve apontar para Diagnóstico → Manifestação'
+);
+assert.ok(
+  !centralJs.includes('Centro de Configurações → Fiscal'),
+  'Texto legado “→ Fiscal” não deve permanecer na Central'
+);
+assert.ok(
   centralJs.includes('centralCfgTestarResolucao'),
   'Central deve ter Testar Resolução'
 );

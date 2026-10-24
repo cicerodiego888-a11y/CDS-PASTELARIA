@@ -11,6 +11,7 @@ const path = require('path');
 const db = require('../../../database');
 const { carregarCertificadoPfx } = require('../../../services/fiscal/certificateService');
 const { enviarDistribuicaoDfe } = require('../../../services/fiscal/distribuicaoDfeRuntime');
+const { avaliarAutorizacaoTransmissao } = require('../../../services/fiscal/autorizacaoTransmissaoSefaz');
 const { extrairMetadadosRetorno } = require('../../../services/fiscal/dfeRetornoParser');
 const { DocumentoFiscalStatus } = require('../core/DocumentoFiscalStatus');
 const { validarTransicao } = require('../core/MaquinaEstadosDocumento');
@@ -29,6 +30,8 @@ class CentralDiagnosticoService {
    * @param {Object} [deps]
    */
   constructor(deps = {}) {
+    /** @private */
+    this._deps = deps;
     /** @private */
     this._documentosRepository = deps.documentosRepository
       ?? new (require('../repositories/CentralDocumentosRepository'))();
@@ -251,21 +254,42 @@ class CentralDiagnosticoService {
     const ctx = resolvido.contexto;
 
     try {
-      const cert = this._carregarCertificado(ctx.certificadoPath, ctx.certificadoSenha);
+      const { testarCertificadoEmpresa } = require('../../../services/fiscal/CertificadoEmpresaService');
+      const { ESTADOS_CERTIFICADO_A1, CODIGOS_CERTIFICADO_A1, MENSAGENS_CERTIFICADO_A1 } = require('../../../services/fiscal/certificadoEstados');
+      if (!resolvido.empresaId) {
+        return {
+          sucesso: false,
+          tempoMs: Date.now() - inicio,
+          empresaId: null,
+          estado: ESTADOS_CERTIFICADO_A1.NAO_CONFIGURADO,
+          codigo: CODIGOS_CERTIFICADO_A1.EMPRESA_OBRIGATORIA,
+          mensagem: MENSAGENS_CERTIFICADO_A1.EMPRESA_OBRIGATORIA,
+          sefaz_chamado: false
+        };
+      }
+      const resultado = await testarCertificadoEmpresa({
+        empresaId: resolvido.empresaId,
+        senha: '',
+        deps: { db: resolverDb() }
+      });
       return {
-        sucesso: true,
+        sucesso: !!resultado.ok,
         tempoMs: Date.now() - inicio,
         empresaId: resolvido.empresaId,
-        cnpj: ctx.cnpj || null,
-        mensagem: 'Certificado carregado com sucesso.',
-        certBase64Length: cert.certBase64?.length ?? 0
+        cnpj: ctx.cnpj || resultado.cnpj_certificado || null,
+        estado: resultado.estado,
+        codigo: resultado.codigo,
+        mensagem: resultado.mensagem,
+        sefaz_chamado: false
       };
     } catch (error) {
+      const { sanitizarTextoCertificado } = require('../../../services/fiscal/ValidarCertificadoA1Service');
       return {
         sucesso: false,
         tempoMs: Date.now() - inicio,
         empresaId: resolvido.empresaId,
-        mensagem: this._sanitizarTexto(error.message)
+        mensagem: sanitizarTextoCertificado(this._sanitizarTexto(error.message)),
+        sefaz_chamado: false
       };
     }
   }
@@ -280,6 +304,43 @@ class CentralDiagnosticoService {
 
     if (!resolvido.ok) return resolvido.resposta;
 
+    // P0.8 — "Testar comunicação" NÃO executa DistDFe silenciosamente.
+    // Consulta real exige /operacao-fiscal-real/consultar-dfe com confirmação.
+    if (opcoes.forcarProbeDistDfe !== true) {
+      try {
+        const CentralOperacaoFiscalRealService = require('./CentralOperacaoFiscalRealService');
+        const svc = this._deps.operacaoFiscalRealService
+          || new CentralOperacaoFiscalRealService({
+            db: this._deps.db,
+            configuracaoService: this._configuracao,
+            nsuService: this._nsuService
+          });
+        const prontidao = await svc.testarProntidaoSemConsulta(
+          resolvido.empresaId || resolvido.contexto?.empresaId
+        );
+        return {
+          ...prontidao,
+          tempoMs: Date.now() - inicio,
+          empresaId: resolvido.empresaId,
+          codigo: prontidao.sucesso ? 'PRONTIDAO_LOCAL_OK' : (prontidao.preVoo?.codigo || 'PRONTIDAO_BLOQUEADA'),
+          tipoTeste: 'PRONTIDAO_LOCAL',
+          consultaExecutada: false,
+          sefazConsultada: false
+        };
+      } catch (err) {
+        return {
+          sucesso: false,
+          consultaExecutada: false,
+          sefazConsultada: false,
+          tipoTeste: 'PRONTIDAO_LOCAL',
+          tempoMs: Date.now() - inicio,
+          empresaId: resolvido.empresaId,
+          codigo: err.code || 'PRONTIDAO_ERRO',
+          mensagem: err.message || 'Falha no teste de prontidão local.'
+        };
+      }
+    }
+
     const ctxGate = {
       empresaId: resolvido.contexto?.empresaId,
       cnpj: resolvido.contexto?.cnpj,
@@ -287,7 +348,8 @@ class CentralDiagnosticoService {
     };
     const gate = this._obterGate();
 
-    // RC7.4.2 — probe DistDFe também passa pelo Gate operacional (da empresa, CE-06).
+    // Probe DistDFe só com forcarProbeDistDfe + autorização explícita (testes isolados).
+    // P0.14 — Gate indisponível = fail-closed (não seguir para SOAP).
     try {
       const auth = await gate.autorizarConsultaDistDfe({
         ...ctxGate,
@@ -297,6 +359,8 @@ class CentralDiagnosticoService {
       if (!auth.permitido) {
         return {
           sucesso: false,
+          consultaExecutada: false,
+          sefazConsultada: false,
           tempoMs: Date.now() - inicio,
           empresaId: resolvido.empresaId,
           mensagem: auth.mensagem,
@@ -306,15 +370,101 @@ class CentralDiagnosticoService {
           bloqueadoPeloGate: true,
           tempoRestanteLabel: auth.tempoRestanteLabel || null,
           proximaConsultaEm: auth.proximaConsultaEm || null,
-          sefazOperacional: gate.obterPainelOperacional()
+          sefazOperacional: typeof gate.obterPainelOperacional === 'function'
+            ? gate.obterPainelOperacional()
+            : null
         };
       }
-    } catch { /* segue probe se gate indisponível */ }
+    } catch (gateErr) {
+      return {
+        sucesso: false,
+        consultaExecutada: false,
+        sefazConsultada: false,
+        tempoMs: Date.now() - inicio,
+        empresaId: resolvido.empresaId,
+        codigo: 'GATE_INDISPONIVEL',
+        mensagem: `Gate SEFAZ indisponível — probe DistDFe bloqueado (fail-closed): ${
+          gateErr && gateErr.message ? gateErr.message : 'erro'
+        }`
+      };
+    }
 
     const ctx = resolvido.contexto;
+    const authTx = avaliarAutorizacaoTransmissao({
+      autorizacao: this._deps && this._deps.autorizacaoTransmissaoSefaz,
+      empresaId: ctx.empresaId || resolvido.empresaId,
+      tipoConsulta: 'distNSU'
+    });
+    if (!authTx.ok) {
+      return {
+        sucesso: false,
+        consultaExecutada: false,
+        sefazConsultada: false,
+        tempoMs: Date.now() - inicio,
+        empresaId: resolvido.empresaId,
+        codigo: authTx.codigo,
+        mensagem: authTx.mensagem
+      };
+    }
+
     const ambiente = ctx.ambiente;
     const codigoUf = ctx.codigoUf;
     const cnpj = ctx.cnpj;
+
+    // P0.14 — mesma decisão centralizada (cooldown / FILA_ESGOTADA / inconsistência).
+    try {
+      const CentralConsultaDistDfeDecisaoService = require('./CentralConsultaDistDfeDecisaoService');
+      const decisaoSvc = this._deps.decisaoDistDfe
+        || new CentralConsultaDistDfeDecisaoService({
+          nsuRepository: this._nsuRepository,
+          gate: this._obterGate(),
+          syncExecucao: this._syncExecucao,
+          mutexTransmissaoSefaz: this._deps.mutexTransmissaoSefaz
+        });
+      // CE-PASTELARIA-05 — decisão com auth obrigatória (mesma barreira do sync).
+      // Gate já avaliado acima; cooldown/FILA/mutex/auth não podem ser bypassados.
+      const decisao = await decisaoSvc.avaliar({
+        empresaId: ctx.empresaId || resolvido.empresaId,
+        cnpj,
+        ambiente,
+        origem: 'DIAGNOSTICO_PROBE',
+        correlationId: `diag-decisao-${Date.now()}`,
+        autorizacaoTransmissaoSefaz: this._deps && this._deps.autorizacaoTransmissaoSefaz,
+        verificarAutorizacao: true,
+        permitirSemAutorizacao: false,
+        verificarRateLimit: true,
+        verificarMutex: true,
+        verificarGate: false,
+        verificarCooldownNsu: true
+      });
+      if (!decisao.permitido) {
+        return {
+          sucesso: false,
+          consultaExecutada: false,
+          sefazConsultada: false,
+          tempoMs: Date.now() - inicio,
+          empresaId: resolvido.empresaId,
+          codigo: decisao.codigo,
+          motivoCooldown: decisao.motivoCooldown || null,
+          mensagem: decisao.mensagem,
+          mensagemAmigavel: decisao.mensagemAmigavel,
+          proximaConsultaEm: decisao.proximaConsultaEm || null,
+          bloqueadoPelaDecisao: true
+        };
+      }
+    } catch (decisaoErr) {
+      return {
+        sucesso: false,
+        consultaExecutada: false,
+        sefazConsultada: false,
+        tempoMs: Date.now() - inicio,
+        empresaId: resolvido.empresaId,
+        codigo: 'NSU_INDISPONIVEL',
+        mensagem: `Decisão DistDFe indisponível — probe bloqueado (fail-closed): ${
+          decisaoErr && decisaoErr.message ? decisaoErr.message : 'erro'
+        }`
+      };
+    }
     const ultimoNsu = resolvido.legado
       ? await this._nsuRepository.obterUltimaSincronizacao()
       : await this._nsuRepository.buscarPorCnpjAmbiente(cnpj, Number(ambiente) === 1 ? 1 : 2);
@@ -337,7 +487,12 @@ class CentralDiagnosticoService {
         cUF: codigoUf,
         certificadoPath: ctx.certificadoPath,
         certificadoSenha: ctx.certificadoSenha,
-        versao: ctx.versaoServico || '1.01'
+        versao: ctx.versaoServico || '1.01',
+        autorizacaoTransmissaoSefaz: this._deps && this._deps.autorizacaoTransmissaoSefaz,
+        empresaId: ctx.empresaId || resolvido.empresaId,
+        cnpj,
+        tipoConsulta: 'distNSU',
+        correlationId: `diag-probe-${Date.now()}`
       });
 
       // RC3.3.3 — probe DistNSU sob o mesmo mutex da sync (não altera NSU).
@@ -513,16 +668,19 @@ class CentralDiagnosticoService {
         validade: null,
         diasRestantes: null,
         tipo: 'A1',
-        status: visao?.status === 'ARQUIVO_AUSENTE' ? 'Arquivo não encontrado' : 'Não configurado',
-        senhaConfigurada: visao?.presente ? 'SIM' : 'NÃO'
+        status: visao?.status || 'NÃO_CONFIGURADO',
+        mensagem: visao?.mensagem || null,
+        senhaConfigurada: visao?.senhaConfigurada || 'NÃO'
       };
     }
 
     const statusMap = {
-      OK: 'Válido',
-      VENCIDO: 'Expirado',
-      A_VENCER: 'A vencer',
-      ERRO: 'Erro'
+      OK: 'VÁLIDO',
+      VENCIDO: 'EXPIRADO',
+      A_VENCER: 'VÁLIDO',
+      ERRO: 'ERRO_DE_VALIDACAO',
+      AUSENTE: 'NÃO_CONFIGURADO',
+      ARQUIVO_AUSENTE: 'ARQUIVO_INVÁLIDO'
     };
 
     return {
@@ -531,9 +689,9 @@ class CentralDiagnosticoService {
       validade: visao.validade,
       diasRestantes: visao.diasRestantes,
       tipo: 'A1',
-      status: statusMap[visao.status] || visao.status || 'OK',
+      status: statusMap[visao.status] || visao.status || 'CONFIGURADO_NÃO_VALIDADO',
       mensagem: visao.mensagem,
-      senhaConfigurada: 'SIM'
+      senhaConfigurada: visao.senhaConfigurada || (visao.presente ? 'SIM' : 'NÃO')
     };
   }
 

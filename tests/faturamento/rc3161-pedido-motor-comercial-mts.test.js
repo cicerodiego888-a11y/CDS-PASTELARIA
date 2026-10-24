@@ -14,6 +14,10 @@ const MotorComercial = require('../../backend/motores/comercial');
 const fxnfReservas = require('../../backend/services/fiscalNaoFiscal/reservasPublico');
 const fxnfSaldos = require('../../backend/services/fiscalNaoFiscal/estoqueSaldosPublico');
 const { TipoSaldo } = require('../../backend/services/fiscalNaoFiscal/constants');
+const EmpresaService = require('../../backend/services/empresas/EmpresaService');
+const { garantirSchemaEmpresasAsync } = require('../../backend/services/empresas/empresasSchema');
+const { garantirSchemaEstoqueEmpresaAsync } = require('../../backend/services/estoque/estoqueEmpresaSchema');
+const EstoqueEmpresaService = require('../../backend/services/estoque/EstoqueEmpresaService');
 
 function openDb(file) {
   return new Promise((resolve, reject) => {
@@ -51,6 +55,12 @@ function closeDb(db) {
 async function setupDb(opts = {}) {
   const file = opts.file || ':memory:';
   const db = await openDb(file);
+  await garantirSchemaEmpresasAsync(db);
+  const empresa = await EmpresaService.criarEmpresa({
+    cnpj: '11222333000181',
+    razao_social: 'Empresa RC3161'
+  }, { db });
+  await garantirSchemaEstoqueEmpresaAsync(db);
   await run(db, `
     CREATE TABLE produtos (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,6 +141,13 @@ async function setupDb(opts = {}) {
      VALUES ('Produto RC3161', ?, ?, 0, 0, ?)`,
     [sf, snf, sf + snf]
   );
+  await EstoqueEmpresaService.criarRegistro({
+    produtoId: p.lastID,
+    empresaId: empresa.id,
+    saldo_fiscal: sf,
+    saldo_nao_fiscal: snf,
+    estoque_atual: sf + snf
+  }, { db });
   return { db, produtoId: p.lastID, file };
 }
 
@@ -348,6 +365,13 @@ function testArquiteturaSemAcoplamento() {
     if (rel.includes('PedidoRepository')) {
       assert.ok(!/motores\/mts/.test(src), 'Repository não pode conhecer MTS');
       assert.ok(!/fiscalNaoFiscal/.test(src), 'Repository não pode conhecer F×NF');
+      continue;
+    }
+    if (rel.includes('PedidoService')) {
+      assert.ok(
+        /PedidoOperacionalService\.criar/.test(src),
+        `${rel} deve delegar a criação ao serviço operacional`
+      );
       continue;
     }
     assert.ok(

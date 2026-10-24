@@ -11,6 +11,7 @@
  * @module services/compras/creditoEstoqueCompraViaPorta
  */
 'use strict';
+const { roundStockQuantity } = require('../estoque/quantityPrecision');
 
 const estoqueSaldosPublico = require('../fiscalNaoFiscal/estoqueSaldosPublico');
 const { TipoSaldo } = require('../fiscalNaoFiscal/constants');
@@ -60,9 +61,7 @@ function montarOptsPortaCreditoCompra(db, opcoes = {}) {
   };
 }
 
-function round3(n) {
-  return Math.round(Number(n || 0) * 1000) / 1000;
-}
+
 
 /**
  * Credita SF e/ou SNF do item de compra pela porta pública.
@@ -88,8 +87,8 @@ function creditarEstoqueItemCompra(db, dados, callback) {
   }
 
   const produtoId = Number(dados.produtoId || dados.produto_id);
-  const qtdFiscal = round3(dados.quantidadeFiscal ?? dados.quantidade_fiscal ?? 0);
-  const qtdNaoFiscal = round3(dados.quantidadeNaoFiscal ?? dados.quantidade_nao_fiscal ?? 0);
+  const qtdFiscal = roundStockQuantity(dados.quantidadeFiscal ?? dados.quantidade_fiscal ?? 0);
+  const qtdNaoFiscal = roundStockQuantity(dados.quantidadeNaoFiscal ?? dados.quantidade_nao_fiscal ?? 0);
 
   if (!Number.isInteger(produtoId) || produtoId <= 0) {
     return callback(new Error('produtoId inválido para crédito de compra'));

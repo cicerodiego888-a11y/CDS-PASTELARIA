@@ -79,6 +79,56 @@ async function produtoIdEhVendavelPdv(db, produtoId) {
   return produtoEhVendavelPdv(row);
 }
 
+async function garantirConversaoInsumoSemReferencias(db, produtoId) {
+  const id = Number(produtoId);
+  if (!db || !Number.isInteger(id) || id <= 0) {
+    throw new Error('db e produtoId válidos são obrigatórios para validar a conversão.');
+  }
+
+  const referencias = [
+    ['ficha_tecnica', 'produto_id'],
+    ['ficha_tecnica_itens', 'insumo_id'],
+    ['estoque_empresa', 'produto_id'],
+    ['compras_itens', 'produto_id'],
+    ['vendas_itens', 'produto_id'],
+    ['produtos_ajustes_estoque', 'produto_id'],
+    ['movimentos_transferencia_saldos', 'produto_id'],
+    ['pedido_estoque_reservas', 'produto_id'],
+    ['venda_estoque_reservas', 'produto_id'],
+    ['produtos_lotes', 'produto_id'],
+    ['produto_identificadores', 'produto_id'],
+    ['produto_atacado', 'produto_id'],
+    ['produto_embalagens', 'produto_id'],
+    ['muc_produto_relacoes', 'produto_id'],
+    ['muc_auditoria_conversao', 'produto_id'],
+    ['muc_aprendizado', 'produto_id'],
+    ['produto_balanca_sync_log', 'produto_id']
+  ];
+
+  for (const [tabela, coluna] of referencias) {
+    const existe = await dbGet(
+      db,
+      `SELECT 1 AS existe FROM sqlite_master WHERE type = 'table' AND name = ?`,
+      [tabela]
+    );
+    if (!existe) continue;
+
+    const referencia = await dbGet(
+      db,
+      `SELECT 1 AS existe FROM ${tabela} WHERE ${coluna} = ? LIMIT 1`,
+      [id]
+    );
+    if (referencia) {
+      const err = new Error(
+        'Conversão de insumo bloqueada: o registro possui referências em fichas técnicas ou operações. Mantenha-o como insumo.'
+      );
+      err.code = 'INSUMO_REFERENCIADO_NAO_CONVERSIVEL';
+      err.statusCode = 409;
+      throw err;
+    }
+  }
+}
+
 function garantirColunaTipoOperacional(db, callback) {
   const done = typeof callback === 'function' ? callback : () => {};
   if (!db) return done(new Error('db obrigatório'));
@@ -107,6 +157,7 @@ module.exports = {
   filtrarItensVendaveisPdv,
   exigirProdutosVendaveisNaVenda,
   produtoIdEhVendavelPdv,
+  garantirConversaoInsumoSemReferencias,
   garantirColunaTipoOperacional,
   garantirColunaTipoOperacionalAsync
 };

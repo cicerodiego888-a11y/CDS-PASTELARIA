@@ -108,6 +108,14 @@ class CatalogSnapshot {
     };
   }
 
+  static normalizarNomeBuscaProduto(produto = {}) {
+    return normalizarNomeBusca([
+      produto.nome,
+      produto.nome_comercial,
+      produto.nome_busca
+    ].filter((valor) => valor != null && String(valor).trim() !== '').join(' '));
+  }
+
   /**
    * @param {object[]} rows
    * @param {object} meta
@@ -115,10 +123,11 @@ class CatalogSnapshot {
   static fromRows(rows, meta = {}) {
     const lista = [];
     for (const row of rows || []) {
-      const nomeBusca = row.nome_busca || normalizarNomeBusca(row.nome);
+      const nomeBusca = CatalogSnapshot.normalizarNomeBuscaProduto(row);
       lista.push({
         id: Number(row.id),
         nome: row.nome || '',
+        nome_comercial: row.nome_comercial != null ? String(row.nome_comercial) : '',
         nome_busca: nomeBusca,
         codigo: row.codigo != null ? String(row.codigo) : '',
         codigo_barras: row.codigo_barras != null ? String(row.codigo_barras) : '',
@@ -127,7 +136,8 @@ class CatalogSnapshot {
         categoria: row.categoria || '',
         marca: row.marca || '',
         status: Number(row.status) === 1 ? 1 : 0,
-        item_fiscal: Number(row.item_fiscal) === 1 ? 1 : 0
+        item_fiscal: Number(row.item_fiscal) === 1 ? 1 : 0,
+        tipo_operacional: row.tipo_operacional || 'COMERCIAL'
       });
     }
     return new CatalogSnapshot(lista, meta);

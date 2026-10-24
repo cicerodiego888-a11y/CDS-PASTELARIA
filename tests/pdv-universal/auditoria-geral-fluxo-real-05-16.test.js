@@ -15,7 +15,7 @@ function src(rel) {
 function testRotasMontadas() {
   const server = src('backend/server.js');
   assert.ok(server.includes("app.use('/api/pdv-universal', verificarToken"));
-  assert.ok(server.includes("app.get(['/pdv-universal', '/pdv-universal/'], verificarToken"));
+  assert.ok(server.includes('caminhoDoPdvUniversalBloqueado'));
   const rota = src('backend/rotas/pdv-universal.js');
   [
     "router.get('/contexto'",
@@ -32,7 +32,7 @@ function testFrontendChama() {
   const tela = src('frontend/pdv-universal/pdv-universal.js');
   assert.ok(tela.includes('/pdv-universal/contexto'));
   assert.ok(tela.includes('Authorization'));
-  assert.ok(src('frontend/erp/index.html').includes('href="/pdv-universal/"'));
+  assert.ok(!src('frontend/erp/index.html').includes('href="/pdv-universal'));
   const pag = src('frontend/pdv-universal/pdv-universal-pagamento.js');
   assert.ok(pag.includes('/reservar'));
   assert.ok(pag.includes('/pagamento'));

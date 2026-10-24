@@ -30,17 +30,16 @@ function depsBase(modo, empresas) {
 
 function test01RotaPdvUniversal() {
   const server = src('backend/server.js');
-  assert.ok(server.includes("app.get(['/pdv-universal', '/pdv-universal/'], verificarToken"));
-  assert.ok(server.includes("frontendRoot, 'pdv-universal/index.html'"));
+  assert.ok(server.includes('caminhoDoPdvUniversalBloqueado'));
+  assert.ok(!server.includes("frontendRoot, 'pdv-universal/index.html'"));
   assert.strictEqual(acesso.urlPdvUniversalOficial(), '/pdv-universal/');
 }
 
 function test02RotaErpParaUniversal() {
   const erp = src('frontend/erp/index.html');
-  assert.ok(erp.includes('href="/pdv-universal/"'));
-  assert.ok(erp.includes('PDV Universal'));
+  assert.ok(!erp.includes('href="/pdv-universal'));
+  assert.ok(!erp.includes('PDV Universal'));
   assert.ok(erp.includes('href="/pdv"'));
-  assert.ok(!erp.includes('href="/pdv-universal"\n') || erp.includes('href="/pdv-universal/"'));
 }
 
 async function test03MultiempresaSemEmpresa() {
@@ -131,8 +130,8 @@ function test12SemFallbackPdvLegado() {
   const helper = src('frontend/shared/js/pdv-acesso-oficial.js');
   assert.ok(!/location\.href\s*=\s*['"]\/pdv['"]/.test(helper.replace(/urlPdvLegadoOficial[\s\S]*?}/, '')));
   const erp = src('frontend/erp/index.html');
-  assert.ok(erp.includes('PDV legado'));
-  assert.ok(erp.includes('href="/pdv-universal/"'));
+  assert.ok(!erp.includes('href="/pdv-universal'));
+  assert.ok(erp.includes('href="/pdv"'));
 }
 
 function test13RemoveItemLateralEmpresas() {

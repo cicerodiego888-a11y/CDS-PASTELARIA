@@ -3,6 +3,9 @@
  * Executar: npm run test:central-entradas-sprint10
  */
 
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-sprint10-');
+
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -12,9 +15,11 @@ const CentralDocumentosRepository = require('../../backend/motores/central-entra
 const CentralHistoricoRepository = require('../../backend/motores/central-entradas/repositories/CentralHistoricoRepository');
 const { detectarNfCancelada } = require('../../backend/services/fiscal/dfeXmlMetadados');
 const { DocumentoFiscalStatus } = require('../../backend/motores/central-entradas/core/DocumentoFiscalStatus');
+const { garantirEmpresaTeste } = require('./helpers/empresaTesteCentral');
 
 let passou = 0;
 let falhou = 0;
+isolamento.comprobarSeCarregado();
 
 const CHAVE_SPRINT10 = '35260112345678000199550010000000011000000001';
 const FIXTURE_XML = path.join(__dirname, '../shared/nfe/fixtures/nfe-proc-sample.xml');
@@ -23,6 +28,7 @@ const uploadService = new CentralUploadService();
 const centralService = new CentralEntradasService();
 const documentosRepository = new CentralDocumentosRepository();
 const historicoRepository = new CentralHistoricoRepository();
+const CTX = { empresaId: null };
 
 function test(nome, fn) {
   return Promise.resolve()
@@ -46,7 +52,8 @@ function criarArquivoMulter(nome, conteudo) {
 }
 
 async function limparDocumentoTeste() {
-  const existente = await documentosRepository.buscarPorChave(CHAVE_SPRINT10);
+  if (!CTX.empresaId) return;
+  const existente = await documentosRepository.buscarPorChave(CHAVE_SPRINT10, CTX.empresaId);
   if (!existente) return;
 
   await historicoRepository._obterSql().run(
@@ -60,6 +67,7 @@ async function main() {
   console.log('\n=== Testes Central de Entradas — Sprint 10 (Upload XML) ===\n');
 
   await documentosRepository._obterSql().whenReady();
+  CTX.empresaId = await garantirEmpresaTeste(documentosRepository._obterSql());
   await limparDocumentoTeste();
 
   await test('detectarNfCancelada identifica evento de cancelamento', async () => {
@@ -95,7 +103,7 @@ async function main() {
     const xml = fs.readFileSync(FIXTURE_XML, 'utf8');
     const resultado = await uploadService.processarUpload([
       criarArquivoMulter('nfe-proc-sample.xml', xml)
-    ]);
+    ], { empresaId: CTX.empresaId });
 
     assert.strictEqual(resultado.totalEnviados, 1);
     assert.strictEqual(resultado.importados, 1);
@@ -109,8 +117,9 @@ async function main() {
     const doc = await documentosRepository.buscarPorId(documentoImportadoId);
     assert.strictEqual(doc.origem, 'upload_manual');
     assert.ok(doc.parseJson, 'parse_json deve existir após pipeline');
+    assert.strictEqual(doc.empresaId, CTX.empresaId);
     assert.ok(
-      [DocumentoFiscalStatus.AGUARDANDO_REVISAO, DocumentoFiscalStatus.PRONTA_PARA_COMPRA].includes(doc.status),
+      [DocumentoFiscalStatus.EM_REVISAO, DocumentoFiscalStatus.PRONTA_IMPORTACAO].includes(doc.status),
       `status inesperado: ${doc.status}`
     );
   });
@@ -119,7 +128,7 @@ async function main() {
     const xml = fs.readFileSync(FIXTURE_XML, 'utf8');
     const resultado = await uploadService.processarUpload([
       criarArquivoMulter('nfe-proc-sample.xml', xml)
-    ]);
+    ], { empresaId: CTX.empresaId });
 
     assert.strictEqual(resultado.importados, 0);
     assert.strictEqual(resultado.duplicados, 1);
@@ -130,7 +139,7 @@ async function main() {
     const xml = fs.readFileSync(FIXTURE_XML, 'utf8');
     const resultado = await centralService.uploadDocumentos([
       criarArquivoMulter('nfe-proc-sample.xml', xml)
-    ]);
+    ], { empresaId: CTX.empresaId });
 
     assert.strictEqual(resultado.duplicados, 1);
     assert.strictEqual(resultado.itens[0].codigo, 'DOCUMENTO_JA_EXISTENTE');

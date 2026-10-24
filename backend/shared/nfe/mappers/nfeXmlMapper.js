@@ -41,8 +41,14 @@ function mapearInfNFe(infNFe) {
     const prod = d.prod || {};
     const trib = extrairTributosItemNfe(d.imposto || {});
     const precoUnitario = parseNumero(prod.vUnCom);
+    const nItemXml = Number(d.$?.nItem);
 
     return NfeItemParseadoDTO.create({
+      nfe_item_n: Number.isInteger(nItemXml) && nItemXml > 0 ? nItemXml : null,
+      cProd: prod.cProd || '',
+      cEAN: prod.cEAN || '',
+      cEANTrib: prod.cEANTrib || '',
+      nfe_item_original: d,
       produto_nome: prod.xProd || '',
       codigo_fornecedor: prod.cProd || '',
       codigo_barras: prod.cEAN || prod.cEANTrib || '',

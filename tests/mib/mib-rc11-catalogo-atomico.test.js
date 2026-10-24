@@ -41,6 +41,7 @@ function criarDb() {
           preco_venda REAL DEFAULT 0,
           ativo INTEGER DEFAULT 1,
           item_fiscal INTEGER DEFAULT 1,
+          tipo_operacional TEXT NOT NULL DEFAULT 'COMERCIAL',
           categoria_id INTEGER,
           marca_id INTEGER,
           unidade TEXT,
@@ -115,6 +116,22 @@ async function main() {
   MibService.resetInstance();
   const mib = MibService.getInstance(db);
   await mib.iniciar();
+  await new Promise((resolve, reject) => {
+    db.run(
+      `INSERT INTO produtos (codigo, nome, nome_busca, tipo_operacional, preco_venda)
+       VALUES (?, ?, ?, 'INSUMO', ?)`,
+      ['INS-01', 'Massa de pastel', normalizarNomeBusca('Massa de pastel'), 4],
+      (err) => (err ? reject(err) : resolve())
+    );
+  });
+  await mib.engine.catalog.rebuild();
+
+  await test('cache da busca do PDV exclui insumo sem contaminar busca ERP', async () => {
+    const erp = await mib.buscar('Massa de pastel', { limite: 10, origem: 'erp-cadastro-produtos' });
+    assert.ok(erp.itens.some((p) => p.nome === 'Massa de pastel'));
+    const pdv = await mib.buscar('Massa de pastel', { limite: 10, origem: 'pdv' });
+    assert.ok(!pdv.itens.some((p) => p.nome === 'Massa de pastel'));
+  });
 
   await test('swap atômico incrementa versão', async () => {
     const v0 = mib.engine.catalog.versao;

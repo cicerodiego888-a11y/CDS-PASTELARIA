@@ -1,0 +1,30 @@
+{
+  "schema": "cds.miip.origin-fixture.v1",
+  "id": "fixture-b-gtin-divergente",
+  "cenario": "B",
+  "descricao": "Descricao e NCM semelhantes, GTIN do item diferente do cadastrado e codigo de fornecedor diferente do codigo interno.",
+  "sintetico": true,
+  "catalogo": [
+    {
+      "id": 202,
+      "codigo": "SINT-B202",
+      "codigo_barras": "7890000002025",
+      "nome": "Bebida Sintetica Beta 2L",
+      "unidade": "UN",
+      "ncm": "22021000",
+      "ativo": 1
+    }
+  ],
+  "item": {
+    "produtoNome": "Bebida Sintetica Beta 2L Pet",
+    "codigoBarras": "7890000002032",
+    "codigoFornecedor": "CPROD-SINT-0202",
+    "ncm": "22021000",
+    "unidade": "UN"
+  },
+  "esperado": {
+    "fontes": ["busca_textual_ncm"],
+    "produtoId": 202,
+    "gtinDivergente": true
+  }
+}

@@ -171,6 +171,7 @@ class CentralComprasBridgeService {
       dadosCompra: {
         ...payload,
         xml: documento.xml || null,
+        chave_acesso: payload.chave_acesso || documento.chave,
         natureza_operacao: payload.natureza_operacao || payload.natureza || null,
         cfop: payload.cfop || null,
         empresa_id: empresaDocumentoId,

@@ -199,7 +199,25 @@ async function consultarSituacaoNfe(notaId, ctx = {}) {
     throw Object.assign(new Error('NF-e sem chave de acesso válida.'), { statusCode: 400 });
   }
 
-  const config = await getFiscalConfig();
+  const venda = nota.venda_id
+    ? await new Promise((resolve, reject) => {
+      db.get(
+        `SELECT id, empresa_id FROM vendas WHERE id = ?`,
+        [nota.venda_id],
+        (err, row) => (err ? reject(err) : resolve(row || null))
+      );
+    })
+    : null;
+  const { carregarConfigEAplicarGateCertificadoNfe } = require('./nfeCertificadoUso');
+  const { config } = await carregarConfigEAplicarGateCertificadoNfe({
+    venda: venda || {},
+    empresaId: ctx.empresaId != null ? ctx.empresaId : (venda && venda.empresa_id),
+    db,
+    getFiscalConfigFn: ctx.getFiscalConfig || getFiscalConfig,
+    exigirCertificadoAptoParaUsoFiscal: ctx.exigirCertificadoAptoParaUsoFiscal,
+    certDeps: ctx.certDeps || {},
+    validarUrls: false
+  });
   const consulta = await consultarProtocolo({
     chave,
     modelo: ModelType.NFE,
@@ -301,7 +319,14 @@ async function consultarSituacaoNfe(notaId, ctx = {}) {
 
 async function cancelarNfeCentral(notaId, justificativa, ctx = {}) {
   await garantirColunasNfeCentral();
-  const out = await cancelarNfe(notaId, justificativa, { forcarPrazo: Boolean(ctx.forcarPrazo) });
+  const out = await cancelarNfe(notaId, justificativa, {
+    forcarPrazo: Boolean(ctx.forcarPrazo),
+    empresaId: ctx.empresaId,
+    db: ctx.db,
+    getFiscalConfig: ctx.getFiscalConfig,
+    exigirCertificadoAptoParaUsoFiscal: ctx.exigirCertificadoAptoParaUsoFiscal,
+    certDeps: ctx.certDeps
+  });
 
   await new Promise((resolve, reject) => {
     db.run(
@@ -350,16 +375,34 @@ async function obterFichaDocumentalNfe(notaId) {
 
   let emitente = {};
   try {
-    const cfg = await getFiscalConfig();
+    const vendaEmp = nota.venda_id
+      ? await new Promise((resolve, reject) => {
+        db.get(
+          `SELECT id, empresa_id FROM vendas WHERE id = ?`,
+          [nota.venda_id],
+          (err, row) => (err ? reject(err) : resolve(row || null))
+        );
+      })
+      : null;
+    const empresaIdFicha = vendaEmp && vendaEmp.empresa_id != null
+      ? Number(vendaEmp.empresa_id)
+      : null;
+    if (!empresaIdFicha) {
+      throw Object.assign(new Error('empresa_id da venda é obrigatório para a ficha documental.'), {
+        code: 'CERTIFICADO_EMPRESA_OBRIGATORIA'
+      });
+    }
+    const cfg = await getFiscalConfig({ empresaId: empresaIdFicha, validarUrls: false });
     emitente = {
       nome: cfg.nomeEmpresa || '',
       cnpj: cfg.cnpj || '',
       ie: cfg.ie || '',
+      empresa_id: empresaIdFicha,
       endereco: [cfg.logradouro, cfg.numero, cfg.bairro, cfg.municipio, cfg.uf, cfg.cep]
         .filter(Boolean)
         .join(', ')
     };
-  } catch (_) { /* ignore */ }
+  } catch (_) { /* ignore — ficha segue sem emitente se empresa ausente */ }
 
   const itens = await new Promise((resolve, reject) => {
     if (!nota.venda_id) return resolve([]);

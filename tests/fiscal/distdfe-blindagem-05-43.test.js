@@ -10,6 +10,9 @@
 
 'use strict';
 
+const { isolarBancoTeste } = require('../central-entradas/helpers/isolarBancoTeste');
+isolarBancoTeste('cds-fiscal-distdfe-05-43-');
+
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -265,7 +268,8 @@ async function main() {
 
     assert.strictEqual(resultado.notasNovas, 0);
     assert.strictEqual(resultado.notasDuplicadas, 0);
-    assert.strictEqual(resultado.ignorados, 1);
+    assert.strictEqual(resultado.ignorados, 0);
+    assert.equal(resultado.errosPersistencia.length, 1);
     assert.ok(resultado.sucesso !== true);
   });
 

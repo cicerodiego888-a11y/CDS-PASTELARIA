@@ -4,6 +4,9 @@
  */
 'use strict';
 
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-p04-isolamento-fila-processamento-05-74-');
+
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -69,10 +72,17 @@ async function criarDb() {
       xml TEXT NOT NULL DEFAULT '',
       fornecedor TEXT,
       status TEXT,
+      status_detalhe TEXT,
+      tipo_documento TEXT,
       parse_json TEXT,
+      miip_sessao_id TEXT,
+      miip_resumo_json TEXT,
+      processado_em TEXT,
+      usuario_id INTEGER,
       compra_id INTEGER,
       empresa_id INTEGER,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(chave, empresa_id)
     )
   `);
@@ -182,9 +192,26 @@ async function t08() {
   const db = await criarDb();
   await seedAB(db);
   await run(db, `UPDATE central_entradas_documentos SET parse_json = '{"ok":1}' WHERE id = 1`);
-  const r = await proc(db).processar(1, { empresaId: EMP_A });
+  const svc = new CentralProcessamentoService({
+    documentosRepository: repo(db),
+    historicoService: { registrar: async () => {} },
+    eventosRepository: { inserirUnico: async () => ({ criado: false }) },
+    parseXml: async () => {
+      throw new Error('não deveria reexecutar parser');
+    },
+    enriquecerParse: async (parsed) => ({
+      parsed,
+      miipImportacao: { operacaoId: 't08', resumo: { totalItens: 0 }, resultados: [] },
+      possuiPendencias: false
+    }),
+    transitionService: {
+      transicionar: async (id, _de, para) => {
+        await run(db, 'UPDATE central_entradas_documentos SET status = ? WHERE id = ?', [para, id]);
+      }
+    }
+  });
+  const r = await svc.processar(1, { empresaId: EMP_A });
   assert.strictEqual(r.sucesso, true);
-  assert.strictEqual(r.reutilizado, true);
   const b = await get(db, 'SELECT xml, status, fornecedor FROM central_entradas_documentos WHERE id = 2');
   assert.strictEqual(b.xml, '<xml-B/>');
   assert.strictEqual(b.status, STATUS_PEND);

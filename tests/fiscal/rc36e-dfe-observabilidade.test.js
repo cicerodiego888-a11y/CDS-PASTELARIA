@@ -5,6 +5,9 @@
 
 'use strict';
 
+const { isolarBancoTeste } = require('../central-entradas/helpers/isolarBancoTeste');
+isolarBancoTeste('cds-fiscal-rc36e-');
+
 const assert = require('assert');
 const zlib = require('zlib');
 const path = require('path');

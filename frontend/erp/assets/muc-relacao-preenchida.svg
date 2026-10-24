@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="250" viewBox="0 0 720 250" role="img" aria-labelledby="title desc">
+  <title id="title">Exemplo de relação MUC preenchida</title>
+  <desc id="desc">Uma unidade de origem KG equivale a um fator 850 na unidade de destino ML, conforme relação configurada para o produto.</desc>
+  <rect x="1" y="1" width="718" height="248" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="2"/>
+  <text x="24" y="42" font-family="Segoe UI, Arial, sans-serif" font-size="22" font-weight="600" fill="#1f2937">Relação de conversão cadastrada</text>
+  <text x="24" y="70" font-family="Segoe UI, Arial, sans-serif" font-size="15" fill="#64748b">O fator indica quanto existe no destino para cada 1 unidade de origem.</text>
+  <rect x="24" y="94" width="672" height="44" fill="#f1f5f9" stroke="#cbd5e1"/>
+  <rect x="24" y="138" width="672" height="54" fill="#ffffff" stroke="#cbd5e1"/>
+  <path d="M84 94v98M260 94v98M316 94v98M490 94v98M620 94v98" stroke="#cbd5e1"/>
+  <g font-family="Segoe UI, Arial, sans-serif" text-anchor="middle" fill="#334155">
+    <text x="54" y="122" font-size="15" font-weight="600">1</text>
+    <text x="172" y="122" font-size="15" font-weight="600">Origem</text>
+    <text x="288" y="122" font-size="15" font-weight="600">=</text>
+    <text x="403" y="122" font-size="15" font-weight="600">Fator</text>
+    <text x="558" y="122" font-size="15" font-weight="600">Destino</text>
+    <text x="54" y="172" font-size="18">1</text>
+    <text x="172" y="172" font-size="18" font-weight="600">KG</text>
+    <text x="288" y="172" font-size="18">=</text>
+    <text x="403" y="172" font-size="18" font-weight="600">850</text>
+    <text x="558" y="172" font-size="18" font-weight="600">ML</text>
+  </g>
+  <text x="24" y="222" font-family="Segoe UI, Arial, sans-serif" font-size="15" fill="#475569">Simulação de referência: 5 KG → 4.250 ML</text>
+</svg>

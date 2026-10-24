@@ -9,8 +9,10 @@
 const NFeParserService = require('../../../shared/nfe/NFeParserService');
 const NFeParserError = require('../../../shared/nfe/errors/NFeParserError');
 const { enriquecerParseComMiip } = require('../../../shared/nfe/enriquecerParseComMiip');
+const { defaultDiagnostics } = require('../../miip/diagnostics/MiipOriginDiagnostics');
+const { extrairPendencias } = require('../../miip/utils/miipCentralRevisaoUtils');
 const ProcessamentoResultadoDTO = require('../contracts/ProcessamentoResultadoDTO');
-const { DocumentoFiscalStatus } = require('../core/DocumentoFiscalStatus');
+const { DocumentoFiscalStatus, normalizarStatus } = require('../core/DocumentoFiscalStatus');
 const { paraDocumentoDetalheDTO } = require('../utils/centralEntradasMapper');
 const CentralDocumentosRepository = require('../repositories/CentralDocumentosRepository');
 const CentralHistoricoService = require('./CentralHistoricoService');
@@ -23,6 +25,58 @@ const ETAPAS_PIPELINE = Object.freeze([
   { codigo: 'persistir', label: 'Persistindo resultados' },
   { codigo: 'status', label: 'Atualizando status' }
 ]);
+
+const STATUS_PIPELINE_CONCLUIDO = Object.freeze([
+  DocumentoFiscalStatus.EM_REVISAO,
+  DocumentoFiscalStatus.PRONTA_IMPORTACAO,
+  DocumentoFiscalStatus.EM_IMPORTACAO,
+  DocumentoFiscalStatus.IMPORTADA,
+  DocumentoFiscalStatus.FINALIZADA
+]);
+
+const locksProcessamento = new Map();
+
+function parseValido(parseJson) {
+  return parseJson != null && typeof parseJson === 'object' && !Array.isArray(parseJson);
+}
+
+function miipValido(resumo) {
+  if (!resumo || typeof resumo !== 'object' || Array.isArray(resumo)) return false;
+  return resumo.resumo != null
+    || Array.isArray(resumo.resultados)
+    || resumo.operacaoId != null;
+}
+
+function pipelineStatusConcluido(status) {
+  return STATUS_PIPELINE_CONCLUIDO.includes(normalizarStatus(status));
+}
+
+function possuiPendenciasDoResumo(resumo) {
+  if (!resumo || typeof resumo !== 'object') return false;
+  return extrairPendencias(resumo.resultados || []).length > 0;
+}
+
+function montarMiipDePersistido(documento) {
+  const bruto = documento.miipResumoJson;
+  if (!miipValido(bruto)) return null;
+  return {
+    operacaoId: documento.miipSessaoId || bruto.operacaoId || null,
+    resumo: bruto.resumo || null,
+    resultados: Array.isArray(bruto.resultados) ? bruto.resultados : []
+  };
+}
+
+function enfileirarPorDocumento(documentoId, fn) {
+  const key = String(documentoId);
+  const anterior = locksProcessamento.get(key) || Promise.resolve();
+  const execucao = anterior.catch(() => {}).then(fn);
+  locksProcessamento.set(key, execucao);
+  return execucao.finally(() => {
+    if (locksProcessamento.get(key) === execucao) {
+      locksProcessamento.delete(key);
+    }
+  });
+}
 
 class CentralProcessamentoService {
   /**
@@ -43,6 +97,12 @@ class CentralProcessamentoService {
         documentosRepository: this._documentosRepository,
         historicoRepository: deps.historicoRepository
       });
+    /** @private */
+    this._parseXml = deps.parseXml || ((xml) => NFeParserService.parse(xml));
+    /** @private */
+    this._enriquecerParse = deps.enriquecerParse || enriquecerParseComMiip;
+    /** @private */
+    this._originDiagnostics = deps.originDiagnostics ?? defaultDiagnostics;
   }
 
   /**
@@ -51,8 +111,18 @@ class CentralProcessamentoService {
    * @returns {Promise<Object>}
    */
   async processar(documentoId, opcoes = {}) {
+    return this._originDiagnostics.withContext(
+      { documentoId },
+      () => enfileirarPorDocumento(documentoId, () => this._processarInterno(documentoId, opcoes))
+    );
+  }
+
+  /** @private */
+  async _processarInterno(documentoId, opcoes = {}) {
     const etapasConcluidas = [];
+    const etapasPuladas = [];
     let etapaAtual = ETAPAS_PIPELINE[0].codigo;
+    let persistiuResultados = false;
 
     try {
       etapaAtual = 'localizar';
@@ -94,32 +164,47 @@ class CentralProcessamentoService {
         { documentosRepository: this._documentosRepository }
       );
 
-      if (documento.parseJson && !opcoes.forcarReprocessamento) {
+      const statusCanonico = normalizarStatus(documento.status);
+      const forcar = opcoes.forcarReprocessamento === true;
+      const temParse = parseValido(documento.parseJson);
+      const temMiip = miipValido(documento.miipResumoJson);
+
+      if (!forcar && temParse && pipelineStatusConcluido(statusCanonico)) {
+        const operacaoId = documento.miipSessaoId || documento.miipResumoJson?.operacaoId || null;
+        this._originDiagnostics.setOperationId(operacaoId);
+        this._originDiagnostics.recordImport({
+          documentoId,
+          operacaoId,
+          resultOrigin: 'persistido_reutilizado',
+          importResult: documento.miipResumoJson
+        });
         const atualizado = await this._documentosRepository.buscarPorId(documentoId);
         return ProcessamentoResultadoDTO.create({
           sucesso: true,
           reutilizado: true,
+          recuperado: false,
           documento: paraDocumentoDetalheDTO(atualizado),
           parse: documento.parseJson,
           miipImportacao: documento.miipResumoJson,
-          possuiPendencias: documento.status === DocumentoFiscalStatus.AGUARDANDO_REVISAO,
-          proximaAcao: documento.status === DocumentoFiscalStatus.AGUARDANDO_REVISAO
+          possuiPendencias: statusCanonico === DocumentoFiscalStatus.EM_REVISAO,
+          proximaAcao: statusCanonico === DocumentoFiscalStatus.EM_REVISAO
             ? 'revisar_produtos'
             : 'abrir_compra',
           etapaAtual: 'concluido',
           etapas: ETAPAS_PIPELINE.map((e) => ({ ...e, concluida: true })),
+          etapasPuladas: ETAPAS_PIPELINE.map((e) => e.codigo),
           mensagem: 'Processamento já existente — resultado reutilizado'
         }).toJSON();
       }
 
-      if (!documento.xml) {
+      if (!documento.xml && !temParse) {
         const erro = new Error('XML não disponível para processamento');
         erro.statusCode = 400;
         throw erro;
       }
 
       const statusInicial = documento.status;
-      if (statusInicial !== DocumentoFiscalStatus.SINCRONIZADA) {
+      if (statusCanonico !== DocumentoFiscalStatus.XML_COMPLETO && !forcar) {
         const erro = new Error(`Documento não pode ser processado no status ${statusInicial}`);
         erro.statusCode = 400;
         throw erro;
@@ -132,45 +217,80 @@ class CentralProcessamentoService {
         statusInicial,
         DocumentoFiscalStatus.EM_PROCESSAMENTO,
         {
-          detalhe: 'Início do pipeline oficial de processamento',
+          detalhe: temParse
+            ? 'Retomada segura do pipeline de processamento incompleto'
+            : 'Início do pipeline oficial de processamento',
           usuarioId: opcoes.usuarioId
         }
       );
 
-      etapaAtual = 'parse';
-      const inicioParser = Date.now();
-      const parsed = await NFeParserService.parse(documento.xml);
-      etapasConcluidas.push('parse');
-      await this._registrarEtapaObservabilidade({
-        documentoId,
-        tipo: 'PARSER_CONCLUIDO',
-        descricao: 'Parser NF-e concluído.',
-        duracaoMs: Date.now() - inicioParser,
-        usuarioId: opcoes.usuarioId
-      });
+      const pularParse = temParse && !forcar;
+      const pularMiip = pularParse && temMiip && !forcar;
 
-      etapaAtual = 'miip';
-      const inicioMiip = Date.now();
-      const { miipImportacao, possuiPendencias, erroMiip } = await enriquecerParseComMiip(parsed);
-      etapasConcluidas.push('miip');
-      await this._registrarEtapaObservabilidade({
+      let parsed = documento.parseJson;
+      if (pularParse) {
+        etapasPuladas.push('parse');
+        etapasConcluidas.push('parse');
+      } else {
+        etapaAtual = 'parse';
+        const inicioParser = Date.now();
+        parsed = await this._parseXml(documento.xml);
+        etapasConcluidas.push('parse');
+        await this._registrarEtapaObservabilidade({
+          documentoId,
+          tipo: 'PARSER_CONCLUIDO',
+          descricao: 'Parser NF-e concluído.',
+          duracaoMs: Date.now() - inicioParser,
+          usuarioId: opcoes.usuarioId
+        });
+      }
+
+      let miipImportacao = montarMiipDePersistido(documento);
+      let possuiPendencias = possuiPendenciasDoResumo(documento.miipResumoJson);
+      let erroMiip = null;
+
+      if (pularMiip) {
+        etapasPuladas.push('miip');
+        etapasConcluidas.push('miip');
+      } else {
+        etapaAtual = 'miip';
+        const inicioMiip = Date.now();
+        const enriquecido = await this._enriquecerParse(parsed);
+        parsed = enriquecido.parsed || parsed;
+        miipImportacao = enriquecido.miipImportacao;
+        possuiPendencias = Boolean(enriquecido.possuiPendencias);
+        erroMiip = enriquecido.erroMiip || null;
+        etapasConcluidas.push('miip');
+        await this._registrarEtapaObservabilidade({
+          documentoId,
+          tipo: 'MIIP_CONCLUIDO',
+          descricao: erroMiip
+            ? `MIIP concluído com indisponibilidade: ${erroMiip}`
+            : 'MIIP concluído.',
+          duracaoMs: Date.now() - inicioMiip,
+          usuarioId: opcoes.usuarioId,
+          sucesso: !erroMiip,
+          detalhe: {
+            operacaoId: miipImportacao?.operacaoId || null,
+            possuiPendencias: Boolean(possuiPendencias),
+            erro: erroMiip || null
+          }
+        });
+      }
+
+      const operacaoId = miipImportacao?.operacaoId || null;
+      const origemMiip = pularMiip
+        ? 'persistido_reutilizado'
+        : (miipImportacao && !erroMiip ? 'novo_processamento' : 'desconhecida');
+      this._originDiagnostics.setOperationId(operacaoId);
+      this._originDiagnostics.recordImport({
         documentoId,
-        tipo: 'MIIP_CONCLUIDO',
-        descricao: erroMiip
-          ? `MIIP concluído com indisponibilidade: ${erroMiip}`
-          : 'MIIP concluído.',
-        duracaoMs: Date.now() - inicioMiip,
-        usuarioId: opcoes.usuarioId,
-        sucesso: !erroMiip,
-        detalhe: {
-          operacaoId: miipImportacao?.operacaoId || null,
-          possuiPendencias: Boolean(possuiPendencias),
-          erro: erroMiip || null
-        }
+        operacaoId,
+        resultOrigin: origemMiip,
+        importResult: miipImportacao
       });
 
       etapaAtual = 'persistir';
-      const processadoEm = new Date().toISOString();
       const miipResumo = miipImportacao
         ? {
           operacaoId: miipImportacao.operacaoId,
@@ -179,15 +299,44 @@ class CentralProcessamentoService {
         }
         : null;
 
-      await this._documentosRepository.atualizar(documentoId, {
-        parseJson: parsed,
-        miipSessaoId: miipImportacao?.operacaoId ?? null,
-        miipResumoJson: miipResumo,
-        processadoEm
-      });
+      if (!pularParse || !pularMiip) {
+        await this._documentosRepository.atualizar(documentoId, {
+          parseJson: parsed,
+          miipSessaoId: miipImportacao?.operacaoId ?? null,
+          miipResumoJson: miipResumo,
+          processadoEm: new Date().toISOString()
+        });
+      } else {
+        etapasPuladas.push('persistir');
+      }
+      persistiuResultados = true;
       etapasConcluidas.push('persistir');
 
       etapaAtual = 'status';
+      const relido = await this._documentosRepository.buscarPorId(documentoId);
+      if (relido && pipelineStatusConcluido(relido.status)) {
+        etapasConcluidas.push('status');
+        return ProcessamentoResultadoDTO.create({
+          sucesso: true,
+          reutilizado: true,
+          recuperado: etapasPuladas.length > 0,
+          documento: paraDocumentoDetalheDTO(relido),
+          parse: parsed,
+          miipImportacao,
+          possuiPendencias: normalizarStatus(relido.status) === DocumentoFiscalStatus.EM_REVISAO,
+          proximaAcao: normalizarStatus(relido.status) === DocumentoFiscalStatus.EM_REVISAO
+            ? 'revisar_produtos'
+            : 'abrir_compra',
+          etapaAtual: 'concluido',
+          etapas: ETAPAS_PIPELINE.map((e) => ({
+            ...e,
+            concluida: true
+          })),
+          etapasPuladas,
+          mensagem: 'Processamento já existente — resultado reutilizado'
+        }).toJSON();
+      }
+
       const statusNovo = possuiPendencias
         ? DocumentoFiscalStatus.AGUARDANDO_REVISAO
         : DocumentoFiscalStatus.PRONTA_PARA_COMPRA;
@@ -215,6 +364,7 @@ class CentralProcessamentoService {
       etapasConcluidas.push('status');
 
       const atualizado = await this._documentosRepository.buscarPorId(documentoId);
+      const recuperado = etapasPuladas.length > 0;
 
       const { emitirDocumentoProcessado } = require('../utils/centralEventosEmitter');
       emitirDocumentoProcessado(atualizado, {
@@ -222,11 +372,13 @@ class CentralProcessamentoService {
         mensagem: possuiPendencias
           ? 'Processamento concluído com pendências MIIP'
           : 'Processamento concluído',
-        origem: 'api'
+        origem: recuperado ? 'recuperacao' : 'api'
       }).catch(() => {});
 
       return ProcessamentoResultadoDTO.create({
         sucesso: true,
+        reutilizado: false,
+        recuperado,
         documento: paraDocumentoDetalheDTO(atualizado),
         parse: parsed,
         miipImportacao,
@@ -237,9 +389,14 @@ class CentralProcessamentoService {
           ...e,
           concluida: etapasConcluidas.includes(e.codigo)
         })),
-        mensagem: possuiPendencias
-          ? 'Processamento concluído com pendências MIIP'
-          : 'Processamento concluído — pronto para Compras'
+        etapasPuladas,
+        mensagem: recuperado
+          ? (possuiPendencias
+            ? 'Recuperação segura: etapas pendentes concluídas com pendências MIIP'
+            : 'Recuperação segura: etapas pendentes concluídas — pronto para Compras')
+          : (possuiPendencias
+            ? 'Processamento concluído com pendências MIIP'
+            : 'Processamento concluído — pronto para Compras')
       }).toJSON();
     } catch (error) {
       const code = error && error.code;
@@ -254,15 +411,30 @@ class CentralProcessamentoService {
         throw error;
       }
 
-      if (error instanceof NFeParserError || error.statusCode === 400) {
+      const mensagemOriginal = String(error && error.message ? error.message : error);
+      try {
+        await this._historicoService.registrar({
+          documentoId,
+          statusAnterior: DocumentoFiscalStatus.EM_PROCESSAMENTO,
+          statusNovo: DocumentoFiscalStatus.EM_PROCESSAMENTO,
+          usuarioId: opcoes.usuarioId ?? null,
+          detalhe: `Falha original no pipeline (${etapaAtual}): ${mensagemOriginal}`
+        });
+      } catch {
+        // não mascarar a exceção original
+      }
+
+      const parserInvalido = error instanceof NFeParserError
+        || (error.statusCode === 400 && etapaAtual === 'parse');
+      if (parserInvalido && !persistiuResultados) {
         try {
           const doc = await this._documentosRepository.buscarPorId(documentoId);
-          if (doc?.status === DocumentoFiscalStatus.EM_PROCESSAMENTO) {
+          if (normalizarStatus(doc?.status) === DocumentoFiscalStatus.XML_COMPLETO) {
             await this._transitionService.transicionar(
               documentoId,
               DocumentoFiscalStatus.EM_PROCESSAMENTO,
               DocumentoFiscalStatus.ERRO,
-              { detalhe: error.message, usuarioId: opcoes.usuarioId }
+              { detalhe: mensagemOriginal, usuarioId: opcoes.usuarioId }
             );
           }
         } catch {
@@ -272,13 +444,15 @@ class CentralProcessamentoService {
 
       return ProcessamentoResultadoDTO.create({
         sucesso: false,
+        recuperado: false,
         etapaAtual,
         etapas: ETAPAS_PIPELINE.map((e) => ({
           ...e,
           concluida: etapasConcluidas.includes(e.codigo)
         })),
-        mensagem: error.message,
-        erros: [error.message]
+        etapasPuladas,
+        mensagem: mensagemOriginal,
+        erros: [mensagemOriginal]
       }).toJSON();
     }
   }

@@ -34,8 +34,38 @@ const {
   DfeAuditoriaEtapa,
   criarCorrelationIdDfeSync
 } = require('./DfeAuditoriaService');
+const { montarErroPersistenciaDfe } = require('./pendenciasPersistenciaDfe');
+const { emitirSefazConsulta } = require('../../motores/central-entradas/observability/SefazConsultaTrace');
+const { resolverIdentidadeConsultaChave } = require('./identidadeConsultaChave');
+const {
+  avaliarAutorizacaoTransmissao,
+  exigirAutorizacaoTransmissao,
+  criarErroTransmissaoNaoAutorizada,
+  resultadoConsultaNaoExecutada,
+  ESTADOS_CONSULTA_SEFAZ,
+  MODO_OPERACAO_REAL
+} = require('./autorizacaoTransmissaoSefaz');
+const { obterMutexTransmissaoSefaz } = require('./SefazTransmissaoMutex');
 
 const MAX_ITERACOES_SYNC = 50;
+
+/**
+ * P0.9 — OPERACAO_REAL só transmite se a ativação persistida ainda estiver viva
+ * (desativação revoga seed imediatamente, mesmo com TTL restante).
+ */
+async function exigirOperacaoRealVivaSeAplicavel(deps, { empresaId, cnpj, tipoConsulta } = {}) {
+  const auth = deps && deps.autorizacaoTransmissaoSefaz;
+  if (!auth || auth.modo !== MODO_OPERACAO_REAL) return null;
+  if (typeof deps.validarOperacaoRealViva === 'function') {
+    return deps.validarOperacaoRealViva(auth, { empresaId, cnpj, tipoConsulta });
+  }
+  const CentralOperacaoFiscalRealService = require(
+    '../../motores/central-entradas/services/CentralOperacaoFiscalRealService'
+  );
+  const svc = deps.operacaoFiscalRealService
+    || new CentralOperacaoFiscalRealService({ db: deps.db || null });
+  return svc.assertAutorizacaoViva(auth, { empresaId, cnpj, tipoConsulta });
+}
 
 /**
  * @param {Object} config
@@ -55,7 +85,8 @@ function validarConfigFiscal(config) {
     throw new Error('Certificado não configurado');
   }
 
-  if (!config.cnpj) {
+  const cnpjEmitente = String(config.cnpj || '').replace(/\D/g, '');
+  if (!cnpjEmitente || cnpjEmitente.length !== 14) {
     throw new Error('CNPJ do emitente não configurado');
   }
 }
@@ -102,22 +133,81 @@ function montarXmlConsChave({ ambiente, codigoUf, cnpj, chave }) {
  * @param {Object} [deps]
  * @returns {Promise<{ body: string, requestId: string|null, correlationId: string|null, tempoResolverMs: number, tempoXmlMs: number, tempoTransporteMs: number, tempoTotalMs: number, endpoint: string|null, fallbackUtilizado: boolean, httpStatus: number|null }>}
  */
+function inferirTipoConsultaDfe(xmlConsulta, fallback) {
+  const xml = String(xmlConsulta || '');
+  if (/<(?:\w+:)?consChNFe\b/i.test(xml)) return 'consChNFe';
+  if (/<(?:\w+:)?consNSU\b/i.test(xml)) return 'consNSU';
+  if (/<(?:\w+:)?distNSU\b/i.test(xml)) return 'distNSU';
+  return fallback || 'desconhecido';
+}
+
 async function executarEnvioConsultaDfe(xmlConsulta, config, ambiente, deps = {}) {
   const runtimeSend = deps.enviarDistribuicaoDfe || enviarDistribuicaoDfe;
-  const resultado = await runtimeSend({
-    xmlConsulta,
-    ambiente,
-    cUF: obterCodigoUf(config),
-    certificadoPath: config.certificadoPath,
-    certificadoSenha: config.certificadoSenha,
-    versao: '1.01',
-    legadoHttpClient: deps.legadoHttpClient || null,
-    correlationId: deps.correlationId || null
+  const tipoConsulta = deps.tipoConsulta || inferirTipoConsultaDfe(xmlConsulta, 'distNSU');
+  const cnpj = String(config && config.cnpj ? config.cnpj : deps.cnpjConsulta || '').replace(/\D/g, '') || null;
+  const empresaId = deps.empresaId ?? deps.contextoCentral?.empresaId ?? null;
+  const nsuAnterior = deps.nsuEnviado != null ? String(deps.nsuEnviado) : null;
+
+  exigirAutorizacaoTransmissao({
+    autorizacao: deps.autorizacaoTransmissaoSefaz,
+    empresaId,
+    tipoConsulta
   });
+  await exigirOperacaoRealVivaSeAplicavel(deps, { empresaId, cnpj, tipoConsulta });
+
+  emitirSefazConsulta('CONSULTA_EXECUTADA', {
+    origem: deps.origemConsulta || null,
+    correlationId: deps.correlationId || null,
+    empresaId,
+    cnpj,
+    tipoConsulta,
+    nsuAnterior,
+    resultado: 'enviada'
+  });
+
+  let resultado;
+  try {
+    resultado = await runtimeSend({
+      xmlConsulta,
+      ambiente,
+      cUF: obterCodigoUf(config),
+      certificadoPath: config.certificadoPath,
+      certificadoSenha: config.certificadoSenha,
+      versao: '1.01',
+      legadoHttpClient: deps.legadoHttpClient || null,
+      correlationId: deps.correlationId || null,
+      autorizacaoTransmissaoSefaz: deps.autorizacaoTransmissaoSefaz || null,
+      empresaId,
+      cnpj,
+      tipoConsulta
+    });
+  } catch (errEnvio) {
+    emitirSefazConsulta('RESPOSTA_RECEBIDA', {
+      origem: deps.origemConsulta || null,
+      correlationId: deps.correlationId || null,
+      empresaId,
+      cnpj,
+      tipoConsulta,
+      nsuAnterior,
+      resultado: 'erro_transporte',
+      motivo: errEnvio && errEnvio.message
+    });
+    throw errEnvio;
+  }
 
   const requestId = resultado.telemetryRequestId || null;
 
   if (!resultado.success || resultado.body == null) {
+    emitirSefazConsulta('RESPOSTA_RECEBIDA', {
+      origem: deps.origemConsulta || null,
+      correlationId: deps.correlationId || resultado.correlationId || null,
+      empresaId,
+      cnpj,
+      tipoConsulta,
+      nsuAnterior,
+      resultado: 'erro_sefaz',
+      motivo: resultado.error || 'Falha na Distribuição DF-e (plataforma/legado).'
+    });
     if (requestId) {
       fiscalSoapTelemetry.finalizar(requestId, {
         sucesso: false,
@@ -132,6 +222,29 @@ async function executarEnvioConsultaDfe(xmlConsulta, config, ambiente, deps = {}
     }
     throw new Error(resultado.error || 'Falha na Distribuição DF-e (plataforma/legado).');
   }
+
+  let nsuRetornado = null;
+  let maxNsu = null;
+  let cStat = null;
+  try {
+    const meta = extrairMetadadosRetorno(resultado.body);
+    nsuRetornado = meta && meta.ultNSU != null ? String(meta.ultNSU) : null;
+    maxNsu = meta && meta.maxNSU != null ? String(meta.maxNSU) : null;
+    cStat = meta && meta.cStat != null ? String(meta.cStat) : null;
+  } catch { /* parse opcional para rastreio */ }
+
+  emitirSefazConsulta('RESPOSTA_RECEBIDA', {
+    origem: deps.origemConsulta || null,
+    correlationId: resultado.correlationId || deps.correlationId || null,
+    empresaId,
+    cnpj,
+    tipoConsulta,
+    nsuAnterior,
+    nsuRetornado,
+    maxNsu,
+    cStat,
+    resultado: 'ok'
+  });
 
   return {
     body: resultado.body,
@@ -264,7 +377,84 @@ function erroBloqueioGate(auth) {
   erro.codigo = auth.codigo || 'GATE_BLOQUEADO';
   erro.proximaConsultaEm = auth.proximaConsultaEm || null;
   erro.gate = auth;
+  erro.consultaExecutada = false;
+  erro.sefazConsultada = false;
+  erro.respostaRecebida = false;
+  erro.recuperacaoConcluida = false;
+  erro.estadoConsulta = ESTADOS_CONSULTA_SEFAZ.NAO_EXECUTADA;
   return erro;
+}
+
+async function confirmarDocumentoConsultaChave(persistencia, chave, empresaId) {
+  const emp = Number(empresaId);
+  const repo = persistencia && persistencia._documentosRepository;
+  if (!repo || typeof repo.buscarPorChave !== 'function' || !Number.isInteger(emp) || emp <= 0) {
+    return { conferido: false, documento: null, xmlPersistido: false };
+  }
+  const documento = await repo.buscarPorChave(chave, emp);
+  const xml = documento && String(documento.xml || documento.xml_completo || '').trim();
+  return {
+    conferido: true,
+    documento: documento || null,
+    xmlPersistido: Boolean(xml)
+  };
+}
+
+function classificarResultadoConsultaChave({ persistidos, metadados, confirmacao }) {
+  const errosPersistencia = Array.isArray(persistidos.errosPersistencia)
+    ? persistidos.errosPersistencia
+    : [];
+  const persistenciaCompleta = errosPersistencia.length === 0;
+  const cStat = metadados && metadados.cStat != null ? String(metadados.cStat) : null;
+  const semDocumentoSefaz = cStat === '137'
+    || (
+      persistenciaCompleta
+      && (Number(persistidos.notasNovas) || 0) === 0
+      && (Number(persistidos.notasDuplicadas) || 0) === 0
+      && (Number(persistidos.atualizados) || 0) === 0
+      && (Number(persistidos.recebidosZip) || 0) === 0
+    );
+
+  if (!persistenciaCompleta) {
+    return {
+      sucesso: false,
+      persistenciaCompleta: false,
+      recuperacaoConcluida: false,
+      estadoConsulta: ESTADOS_CONSULTA_SEFAZ.PERSISTENCIA_PENDENTE,
+      codigo: 'PERSISTENCIA_DFE_INCOMPLETA'
+    };
+  }
+
+  if (semDocumentoSefaz) {
+    return {
+      sucesso: true,
+      persistenciaCompleta: true,
+      recuperacaoConcluida: false,
+      estadoConsulta: ESTADOS_CONSULTA_SEFAZ.SEM_DOCUMENTO
+    };
+  }
+
+  const xmlConfirmado = confirmacao.conferido
+    ? confirmacao.xmlPersistido === true
+    : ((Number(persistidos.notasNovas) || 0)
+      + (Number(persistidos.notasDuplicadas) || 0)
+      + (Number(persistidos.atualizados) || 0)) > 0;
+
+  if (xmlConfirmado) {
+    return {
+      sucesso: true,
+      persistenciaCompleta: true,
+      recuperacaoConcluida: true,
+      estadoConsulta: ESTADOS_CONSULTA_SEFAZ.RECUPERACAO_CONCLUIDA
+    };
+  }
+
+  return {
+    sucesso: false,
+    persistenciaCompleta: true,
+    recuperacaoConcluida: false,
+    estadoConsulta: ESTADOS_CONSULTA_SEFAZ.RESPOSTA_RECEBIDA
+  };
 }
 
 /**
@@ -358,6 +548,8 @@ async function persistirDocumentosRetorno(xmlRetorno, persistencia, origem, ctxA
         if (aplicado?.aplicado && auditoria) {
           await auditoria.registrar({
             correlation_id: correlationId,
+            empresa_id: empresaIdPersistencia,
+            empresaId: empresaIdPersistencia,
             cnpj,
             ambiente,
             nsu: evt.nsu,
@@ -377,6 +569,8 @@ async function persistirDocumentosRetorno(xmlRetorno, persistencia, origem, ctxA
     if (auditoria) {
       await auditoria.registrar({
         correlation_id: correlationId,
+        empresa_id: empresaIdPersistencia,
+        empresaId: empresaIdPersistencia,
         cnpj,
         ambiente,
         nsu: evt.nsu,
@@ -386,7 +580,7 @@ async function persistirDocumentosRetorno(xmlRetorno, persistencia, origem, ctxA
         resultado: evt.resultado,
         motivo: evt.motivo,
         tempo_ms: evt.tempoMs,
-        detalhe: { tamanhoZip: evt.tamanhoZip }
+        detalhe: { tamanhoZip: evt.tamanhoZip, empresaId: empresaIdPersistencia }
       });
     }
   }
@@ -395,6 +589,28 @@ async function persistirDocumentosRetorno(xmlRetorno, persistencia, origem, ctxA
   let notasDuplicadas = 0;
   let ignorados = 0;
   let atualizados = 0;
+  const errosPersistencia = [];
+  const MAX_TENTATIVAS_PERSISTENCIA = 2;
+
+  async function persistirComRetentativa(payload) {
+    let ultimoErro = null;
+    for (let tentativa = 1; tentativa <= MAX_TENTATIVAS_PERSISTENCIA; tentativa += 1) {
+      try {
+        return await persistencia.persistirDocumentoDfe(payload);
+      } catch (err) {
+        if (isFalhaEstruturalPersistenciaDfe(err)) throw err;
+        ultimoErro = err;
+        console.warn('[DistDFe] Retentativa de persistência', {
+          nsu: payload.nsu || null,
+          tentativa,
+          max: MAX_TENTATIVAS_PERSISTENCIA,
+          codigo: err.code || null,
+          mensagem: err.message
+        });
+      }
+    }
+    throw ultimoErro;
+  }
 
   if (documentos.length > 0) {
     try {
@@ -419,6 +635,8 @@ async function persistirDocumentosRetorno(xmlRetorno, persistencia, origem, ctxA
     if (auditoria) {
       await auditoria.registrar({
         correlation_id: correlationId,
+        empresa_id: empresaIdPersistencia,
+        empresaId: empresaIdPersistencia,
         cnpj,
         ambiente,
         nsu: doc.nsu,
@@ -431,6 +649,8 @@ async function persistirDocumentosRetorno(xmlRetorno, persistencia, origem, ctxA
       });
       await auditoria.registrar({
         correlation_id: correlationId,
+        empresa_id: empresaIdPersistencia,
+        empresaId: empresaIdPersistencia,
         cnpj,
         ambiente,
         nsu: doc.nsu,
@@ -446,7 +666,7 @@ async function persistirDocumentosRetorno(xmlRetorno, persistencia, origem, ctxA
     let resultado;
     const tPers = Date.now();
     try {
-      resultado = await persistencia.persistirDocumentoDfe({
+      resultado = await persistirComRetentativa({
         xml: doc.xml,
         nsu: doc.nsu,
         origem,
@@ -463,25 +683,39 @@ async function persistirDocumentosRetorno(xmlRetorno, persistencia, origem, ctxA
         });
         throw err;
       }
-      ignorados += 1;
-      console.error('[DistDFe] Falha ao persistir documento DF-e', {
-        etapa: 'persistirDocumentoDfe',
-        codigo: err.code || null,
+      const pendencia = montarErroPersistenciaDfe({
         nsu: doc.nsu,
+        xml: doc.xml,
+        err,
+        empresaId: empresaIdPersistencia
+      });
+      errosPersistencia.push(pendencia);
+      console.error('[DistDFe] Falha ao persistir documento DF-e — lote incompleto, NSU não deve avançar', {
+        etapa: 'persistirDocumentoDfe',
+        codigo: pendencia.codigo,
+        nsu: pendencia.nsu,
+        chave: pendencia.chave,
         origem,
-        mensagem: err.message
+        mensagem: pendencia.mensagem
       });
       if (auditoria) {
         await auditoria.registrar({
           correlation_id: correlationId,
           cnpj,
           ambiente,
-          nsu: doc.nsu,
+          empresa_id: empresaIdPersistencia,
+          nsu: pendencia.nsu,
+          chave: pendencia.chave,
           tipo: DfeAuditoriaEtapa.PERSISTENCIA,
           schema: doc.schema,
           resultado: DfeAuditoriaResultado.ERRO_BANCO,
-          motivo: err.message || 'Erro ao persistir',
-          tempo_ms: Date.now() - tPers
+          motivo: pendencia.mensagem,
+          tempo_ms: Date.now() - tPers,
+          detalhe: {
+            codigo: pendencia.codigo,
+            empresaId: pendencia.empresaId,
+            retomavel: true
+          }
         });
       }
       continue;
@@ -505,6 +739,8 @@ async function persistirDocumentosRetorno(xmlRetorno, persistencia, origem, ctxA
 
       await auditoria.registrar({
         correlation_id: correlationId,
+        empresa_id: empresaIdPersistencia,
+        empresaId: empresaIdPersistencia,
         cnpj,
         ambiente,
         nsu: doc.nsu,
@@ -521,11 +757,32 @@ async function persistirDocumentosRetorno(xmlRetorno, persistencia, origem, ctxA
           atualizado: !!resultado.atualizado,
           ignorado: !!resultado.ignorado,
           tipoDfe: resultado.tipoDfe || null,
-          documentoId: resultado.documento?.id || null
+          documentoId: resultado.documento?.id || null,
+          empresaId: empresaIdPersistencia
         }
       });
     }
   }
+
+  const persistenciaOk = errosPersistencia.length === 0;
+  emitirSefazConsulta(persistenciaOk ? 'PERSISTENCIA_CONCLUIDA' : 'PERSISTENCIA_FALHOU', {
+    origem: ctxAudit?.origemConsulta || origem || null,
+    correlationId,
+    empresaId: empresaIdPersistencia,
+    cnpj,
+    tipoConsulta: ctxAudit?.tipoConsulta || null,
+    resultado: persistenciaOk ? 'ok' : 'falhou',
+    motivo: persistenciaOk
+      ? null
+      : `${errosPersistencia.length} documento(s) DistDFe não persistidos`,
+    detalhe: {
+      notasNovas,
+      notasDuplicadas,
+      ignorados,
+      errosPersistencia: errosPersistencia.length,
+      chaves: errosPersistencia.map((e) => e.chave).filter(Boolean).slice(0, 10)
+    }
+  });
 
   return {
     notasNovas,
@@ -535,7 +792,8 @@ async function persistirDocumentosRetorno(xmlRetorno, persistencia, origem, ctxA
     eventos,
     errosZip,
     errosSchema,
-    recebidosZip
+    recebidosZip,
+    errosPersistencia
   };
 }
 
@@ -544,6 +802,77 @@ async function persistirDocumentosRetorno(xmlRetorno, persistencia, origem, ctxA
  * @returns {Promise<Object>}
  */
 async function sincronizarDistribuicaoDFe(deps = {}) {
+  const empresaIdAuth = deps.empresaId ?? deps.contextoCentral?.empresaId ?? null;
+  const auth = avaliarAutorizacaoTransmissao({
+    autorizacao: deps.autorizacaoTransmissaoSefaz,
+    empresaId: empresaIdAuth,
+    tipoConsulta: 'distNSU'
+  });
+  if (!auth.ok) {
+    emitirSefazConsulta('BLOQUEADA_AUTORIZACAO', {
+      origem: deps.origemConsulta || null,
+      correlationId: deps.correlationId || null,
+      empresaId: empresaIdAuth,
+      tipoConsulta: 'distNSU',
+      codigo: auth.codigo,
+      motivo: auth.mensagem,
+      resultado: 'bloqueada'
+    });
+    return resultadoConsultaNaoExecutada({
+      codigo: auth.codigo,
+      mensagem: auth.mensagem
+    });
+  }
+
+  try {
+    await exigirOperacaoRealVivaSeAplicavel(deps, {
+      empresaId: empresaIdAuth,
+      cnpj: deps.contextoCentral?.cnpj || auth.cnpj || null,
+      tipoConsulta: 'distNSU'
+    });
+  } catch (errViva) {
+    emitirSefazConsulta('BLOQUEADA_AUTORIZACAO', {
+      origem: deps.origemConsulta || null,
+      correlationId: deps.correlationId || null,
+      empresaId: empresaIdAuth,
+      tipoConsulta: 'distNSU',
+      codigo: errViva.codigo || errViva.code,
+      motivo: errViva.message,
+      resultado: 'bloqueada'
+    });
+    return resultadoConsultaNaoExecutada({
+      codigo: errViva.codigo || errViva.code,
+      mensagem: errViva.message
+    });
+  }
+
+  const mutex = deps.mutexTransmissaoSefaz || obterMutexTransmissaoSefaz();
+  if (!deps.jaPossuiLockTransmissao && mutex && typeof mutex.comLock === 'function' && !mutex.estaNoContexto()) {
+    const cnpjLock = String(
+      deps.contextoCentral?.cnpj || deps.cnpj || ''
+    ).replace(/\D/g, '');
+    const ambLock = deps.contextoCentral?.ambiente != null
+      ? (Number(deps.contextoCentral.ambiente) === 1 ? 1 : 2)
+      : null;
+    const locked = await mutex.comLock(
+      'distNSU',
+      () => sincronizarDistribuicaoDFe({
+        ...deps,
+        jaPossuiLockTransmissao: true
+      }),
+      { cnpj: cnpjLock || null, ambiente: ambLock, tipo: 'distNSU' }
+    );
+    if (!locked.ok) {
+      return resultadoConsultaNaoExecutada({
+        codigo: locked.codigo || 'TRANSMISSAO_SEFAZ_EM_ANDAMENTO',
+        motivoIgnorado: locked.codigo || 'TRANSMISSAO_SEFAZ_EM_ANDAMENTO',
+        bloqueadoAutorizacao: false,
+        mensagem: locked.mensagem || 'Consulta DistDFe não executada: transmissão SEFAZ já em andamento.'
+      });
+    }
+    return locked.valor;
+  }
+
   let config;
   let ambiente;
 
@@ -573,17 +902,19 @@ async function sincronizarDistribuicaoDFe(deps = {}) {
   const negadoGate = await verificarGateSefaz(deps, ctxGate);
   if (negadoGate) {
     return {
-      sucesso: true,
+      sucesso: false,
+      consultaExecutada: false,
       ignorado: true,
       bloqueadoGate: true,
       codigo: negadoGate.codigo || 'GATE_BLOQUEADO',
+      motivoIgnorado: 'GATE_BLOQUEADO',
       cStat: null,
       notasNovas: 0,
       notasDuplicadas: 0,
       ignorados: 0,
       iteracoes: 0,
       proximaConsultaEm: negadoGate.proximaConsultaEm || null,
-      mensagem: negadoGate.mensagem || 'Consulta DF-e bloqueada pelo Gate SEFAZ.'
+      mensagem: negadoGate.mensagem || 'Consulta DF-e não executada: bloqueada pelo Gate SEFAZ.'
     };
   }
 
@@ -592,9 +923,12 @@ async function sincronizarDistribuicaoDFe(deps = {}) {
     ?? new CentralNsuService({ nsuRepository });
   const persistencia = deps.persistenciaService ?? new CentralDfePersistenciaService();
   const auditoria = deps.auditoriaService ?? new DfeAuditoriaService();
-  const correlationId = criarCorrelationIdDfeSync();
+  // Unifica correlationId da orquestração quando presente (CE-ENCERRAMENTO-01).
+  const correlationId = deps.correlationId || criarCorrelationIdDfeSync();
   const syncInicio = Date.now();
-  const parentCorrelationId = deps.correlationId || null;
+  const empresaIdAudit = empresaIdAuth
+    ?? deps.contextoCentral?.empresaId
+    ?? null;
 
   let controleNsu = await nsuService.obterOuCriar(cnpj, ambiente);
   let ultNsuAtual = normalizarNsuOuZero(controleNsu.ultNsu);
@@ -629,7 +963,13 @@ async function sincronizarDistribuicaoDFe(deps = {}) {
     });
 
     const tConsulta = Date.now();
-    const envio = await executarEnvioConsultaDfe(xmlConsulta, config, ambiente, deps);
+    const envio = await executarEnvioConsultaDfe(xmlConsulta, config, ambiente, {
+      ...deps,
+      tipoConsulta: 'distNSU',
+      cnpjConsulta: cnpj,
+      empresaId: ctxGate.empresaId || deps.contextoCentral?.empresaId || null,
+      nsuEnviado: ultNsuAtual
+    });
     let ultimoRetornoIter = null;
     try {
       ultimoRetornoIter = extrairMetadadosRetorno(envio.body);
@@ -644,6 +984,8 @@ async function sincronizarDistribuicaoDFe(deps = {}) {
 
       await auditoria.registrarConsulta({
         correlation_id: correlationId,
+        empresa_id: empresaIdAudit,
+        empresaId: empresaIdAudit,
         cnpj,
         ambiente,
         empresa: cnpj,
@@ -655,7 +997,11 @@ async function sincronizarDistribuicaoDFe(deps = {}) {
         lotes: lotesEstimados,
         tempoMs: tempoConsulta,
         motivo: `ultNSU=${ultNsuAtual} maxNSU=${ultimoRetorno.maxNSU} cStat=${ultimoRetorno.cStat} lotes=${lotesEstimados} tempo=${tempoConsulta}ms`,
-        detalhe: parentCorrelationId ? { parentCorrelationId } : undefined
+        detalhe: {
+          empresaId: empresaIdAudit,
+          sefazConsultada: true,
+          consultaExecutada: true
+        }
       });
 
       console.log(
@@ -678,13 +1024,14 @@ async function sincronizarDistribuicaoDFe(deps = {}) {
         );
       }
 
-      // cStat 656: cooldown obrigatório; RC3.7.5.1 pode recuperar cursor se SEFAZ > local.
+      // cStat 656: cooldown obrigatório. Cursor local NÃO avança (nem com ultNSU remoto maior).
       if (String(ultimoRetorno.cStat) === '656') {
         const xmlPath656 = salvarXmlRetorno656(envio.body, { correlationId });
         if (xmlPath656) {
           console.log(`[DFE][SYNC] ${correlationId} | XML 656 salvo: ${xmlPath656}`);
         }
         const nsuLocalAntes = normalizarNsuOuZero(controleNsu.ultNsu);
+        const maxLocalAntes = normalizarNsuOuZero(controleNsu.maxNsu);
         const aplicado = await nsuService.aplicarRetornoDistDfe({
           controle: controleNsu,
           cStat: '656',
@@ -698,20 +1045,22 @@ async function sincronizarDistribuicaoDFe(deps = {}) {
         controleNsu = aplicado.controle;
         ultNsuAtual = normalizarNsuOuZero(aplicado.ultNsu);
         maxNsuAtual = normalizarNsuOuZero(aplicado.maxNsu);
-        const recuperouNsu = Boolean(aplicado.atualizouNsu);
+        const motivoPreserva = aplicado.recuperacaoNsu?.motivo || 'NSU_PRESERVADO';
         await auditoria.registrarNsuAvanco({
           correlation_id: correlationId,
+          empresa_id: empresaIdAudit,
+          empresaId: empresaIdAudit,
           cnpj,
           ambiente,
           nsu: ultNsuAtual,
-          avancou: recuperouNsu,
-          motivo: recuperouNsu
-            ? 'cStat 656 — Cursor NSU sincronizado automaticamente (AUTO_SYNC_NSU)'
-            : 'cStat 656 — Cursor atualizado=FALSE (NSU preservado)',
+          avancou: false,
+          motivo: `cStat 656 — Cursor atualizado=FALSE (NSU preservado: ${motivoPreserva})`,
           cStat: '656',
           ultNsuAnterior: aplicado.recuperacaoNsu?.nsuLocal || nsuLocalAntes,
           ultNsuNovo: ultNsuAtual,
-          maxNsu: maxNsuAtual
+          maxNsu: maxNsuAtual,
+          maxNsuAnterior: maxLocalAntes,
+          nsuRemoto: aplicado.recuperacaoNsu?.nsuRemoto || null
         });
         finalizarTelemetriaEnvio(envio, {
           sucesso: false,
@@ -726,11 +1075,13 @@ async function sincronizarDistribuicaoDFe(deps = {}) {
         });
         await auditoria.registrarResumoSync({
           correlation_id: correlationId,
+          empresa_id: empresaIdAudit,
+          empresaId: empresaIdAudit,
           cnpj,
           ambiente,
           recebidos: 0,
           processados: 0,
-          atualizados: recuperouNsu ? 1 : 0,
+          atualizados: 0,
           duplicados: 0,
           eventos: 0,
           xml: 0,
@@ -740,10 +1091,11 @@ async function sincronizarDistribuicaoDFe(deps = {}) {
           ultNsu: ultNsuAtual,
           maxNsu: maxNsuAtual,
           cStat: '656',
-          motivo: recuperouNsu ? 'CONSUMO_INDEVIDO_NSU_RECUPERADO' : 'CONSUMO_INDEVIDO'
+          motivo: 'CONSUMO_INDEVIDO'
         });
         return {
           sucesso: false,
+          consultaExecutada: true,
           codigo: 'CONSUMO_INDEVIDO',
           notasNovas: notasNovasTotal,
           notasDuplicadas: notasDuplicadasTotal,
@@ -754,13 +1106,10 @@ async function sincronizarDistribuicaoDFe(deps = {}) {
           cStat: '656',
           xMotivo: ultimoRetorno.xMotivo || null,
           correlationId,
-          nsuRecuperado: recuperouNsu,
+          nsuRecuperado: false,
           proximaConsultaEm: aplicado.proximaConsultaEm,
-          mensagem: recuperouNsu
-            ? (ultimoRetorno.xMotivo
-              || 'Consumo indevido (cStat 656) — cursor NSU sincronizado automaticamente; nova consulta após cooldown.')
-            : (ultimoRetorno.xMotivo
-              || 'Consumo indevido (cStat 656) — NSU preservado; nova consulta após 1 hora.'),
+          mensagem: ultimoRetorno.xMotivo
+            || 'Consumo indevido (cStat 656) — NSU preservado; nova consulta após 1 hora.',
           ultimaSincronizacao: controleNsu.dataSincronizacao || controleNsu.updatedAt
         };
       }
@@ -770,7 +1119,9 @@ async function sincronizarDistribuicaoDFe(deps = {}) {
         correlationId,
         cnpj,
         ambiente,
-        empresaId: deps.contextoCentral?.empresaId ?? persistencia._empresaId ?? null
+        empresaId: deps.contextoCentral?.empresaId ?? persistencia._empresaId ?? null,
+        origemConsulta: deps.origemConsulta || null,
+        tipoConsulta: 'distNSU'
       });
       notasNovasTotal += persistidos.notasNovas;
       notasDuplicadasTotal += persistidos.notasDuplicadas;
@@ -780,9 +1131,12 @@ async function sincronizarDistribuicaoDFe(deps = {}) {
       errosZipTotal += persistidos.errosZip || 0;
       errosSchemaTotal += persistidos.errosSchema || 0;
       recebidosZipTotal += persistidos.recebidosZip || 0;
+      const errosPersistenciaLote = Array.isArray(persistidos.errosPersistencia)
+        ? persistidos.errosPersistencia
+        : [];
 
       finalizarTelemetriaEnvio(envio, {
-        sucesso: true,
+        sucesso: errosPersistenciaLote.length === 0,
         cStat: ultimoRetorno.cStat,
         xMotivo: ultimoRetorno.xMotivo,
         ultNSU: ultimoRetorno.ultNSU,
@@ -790,8 +1144,50 @@ async function sincronizarDistribuicaoDFe(deps = {}) {
         persistidos: persistidos.notasNovas,
         duplicados: persistidos.notasDuplicadas,
         descartados: persistidos.ignorados,
-        resultado: 'OK'
+        resultado: errosPersistenciaLote.length ? 'PERSISTENCIA_INCOMPLETA' : 'OK'
       });
+
+      if (errosPersistenciaLote.length > 0) {
+        await auditoria.registrarResumoSync({
+          correlation_id: correlationId,
+          empresa_id: empresaIdAudit,
+          empresaId: empresaIdAudit,
+          cnpj,
+          ambiente,
+          recebidos: recebidosZipTotal,
+          processados: notasNovasTotal + atualizadosTotal,
+          atualizados: atualizadosTotal,
+          duplicados: notasDuplicadasTotal,
+          eventos: eventosTotal,
+          xml: notasNovasTotal + atualizadosTotal,
+          resumo: 0,
+          erros: errosPersistenciaLote.length + ignoradosTotal + errosZipTotal + errosSchemaTotal,
+          tempoTotalMs: Date.now() - syncInicio,
+          ultNsu: ultNsuAtual,
+          maxNsu: maxNsuAtual,
+          cStat: ultimoRetorno.cStat,
+          motivo: 'PERSISTENCIA_DFE_INCOMPLETA — NSU preservado para retomada idempotente',
+          errosPersistencia: errosPersistenciaLote,
+          pendenciasPersistencia: errosPersistenciaLote
+        });
+        return {
+          sucesso: false,
+          consultaExecutada: true,
+          codigo: 'PERSISTENCIA_DFE_INCOMPLETA',
+          notasNovas: notasNovasTotal,
+          notasDuplicadas: notasDuplicadasTotal,
+          ignorados: ignoradosTotal,
+          atualizados: atualizadosTotal,
+          errosPersistencia: errosPersistenciaLote,
+          ultNsu: ultNsuAtual,
+          maxNsu: maxNsuAtual,
+          iteracoes,
+          cStat: ultimoRetorno.cStat,
+          correlationId,
+          mensagem: `${errosPersistenciaLote.length} documento(s) DistDFe não persistidos — NSU preservado para retomada.`,
+          ultimaSincronizacao: controleNsu.dataSincronizacao || controleNsu.updatedAt
+        };
+      }
 
       const ultAntes = ultNsuAtual;
       const aplicado = await nsuService.aplicarRetornoDistDfe({
@@ -808,6 +1204,8 @@ async function sincronizarDistribuicaoDFe(deps = {}) {
 
       await auditoria.registrarNsuAvanco({
         correlation_id: correlationId,
+        empresa_id: empresaIdAudit,
+        empresaId: empresaIdAudit,
         cnpj,
         ambiente,
         nsu: ultNsuAtual,
@@ -833,6 +1231,8 @@ async function sincronizarDistribuicaoDFe(deps = {}) {
       });
       await auditoria.registrar({
         correlation_id: correlationId,
+        empresa_id: empresaIdAudit,
+        empresaId: empresaIdAudit,
         cnpj,
         ambiente,
         tipo: DfeAuditoriaEtapa.SYNC,
@@ -847,6 +1247,8 @@ async function sincronizarDistribuicaoDFe(deps = {}) {
   const tempoTotal = Date.now() - syncInicio;
   await auditoria.registrarResumoSync({
     correlation_id: correlationId,
+    empresa_id: empresaIdAudit,
+    empresaId: empresaIdAudit,
     cnpj,
     ambiente,
     recebidos: recebidosZipTotal,
@@ -871,10 +1273,12 @@ async function sincronizarDistribuicaoDFe(deps = {}) {
 
   return {
     sucesso: true,
+    consultaExecutada: true,
     notasNovas: notasNovasTotal,
     notasDuplicadas: notasDuplicadasTotal,
     ignorados: ignoradosTotal,
     atualizados: atualizadosTotal,
+    errosPersistencia: [],
     ultNsu: ultNsuAtual,
     maxNsu: maxNsuAtual,
     iteracoes,
@@ -910,25 +1314,11 @@ async function distribuirDocumentosRecebidos() {
  * @returns {Promise<Object>}
  */
 async function consultarNotaPorChave(chave, deps = {}) {
-  let config;
-  let ambiente;
-
-  if (deps.contextoCentral) {
-    const ctx = deps.contextoCentral;
-    config = {
-      certificadoPath: ctx.certificadoPath,
-      certificadoSenha: ctx.certificadoSenha,
-      cnpj: ctx.cnpj,
-      fiscal_codigo_uf: ctx.codigoUf,
-      codigo_uf: ctx.codigoUf,
-      ambiente: ctx.ambiente,
-      fiscal_ambiente: ctx.ambiente
-    };
-    ambiente = Number(ctx.ambiente) === 1 ? 1 : 2;
-  } else {
-    config = await getFiscalConfig({ validarUrls: false });
-    ambiente = Number(config.fiscal_ambiente || config.ambiente || 2);
-  }
+  const identidade = await resolverIdentidadeConsultaChave(deps, {
+    getFiscalConfig: deps.getFiscalConfig || getFiscalConfig
+  });
+  const config = identidade.config;
+  const ambiente = identidade.ambiente;
 
   validarConfigFiscal(config);
 
@@ -942,13 +1332,39 @@ async function consultarNotaPorChave(chave, deps = {}) {
 
   const ctxGate = montarContextoGateSefaz(deps, cnpj, ambiente, {
     chave: chaveLimpa,
-    motivo: 'consChNFe'
+    motivo: 'consChNFe',
+    empresaId: identidade.empresaId ?? deps.contextoCentral?.empresaId ?? null
   });
   const negadoGate = await verificarGateSefaz(deps, ctxGate);
   if (negadoGate) {
     throw erroBloqueioGate(negadoGate);
   }
 
+  const empresaIdOperacao = identidade.empresaId || ctxGate.empresaId || null;
+  const auth = avaliarAutorizacaoTransmissao({
+    autorizacao: deps.autorizacaoTransmissaoSefaz,
+    empresaId: empresaIdOperacao,
+    tipoConsulta: 'consChNFe'
+  });
+  if (!auth.ok) {
+    emitirSefazConsulta('BLOQUEADA_AUTORIZACAO', {
+      origem: deps.origemConsulta || deps.origemGate || null,
+      correlationId: deps.correlationId || null,
+      empresaId: empresaIdOperacao,
+      tipoConsulta: 'consChNFe',
+      codigo: auth.codigo,
+      motivo: auth.mensagem,
+      resultado: 'bloqueada'
+    });
+    throw criarErroTransmissaoNaoAutorizada(auth.mensagem, { codigo: auth.codigo });
+  }
+  await exigirOperacaoRealVivaSeAplicavel(deps, {
+    empresaId: empresaIdOperacao,
+    cnpj: cnpj || identidade.cnpj || auth.cnpj || null,
+    tipoConsulta: 'consChNFe'
+  });
+
+  const executarConsultaAutorizada = async () => {
   const persistencia = deps.persistenciaService ?? new CentralDfePersistenciaService();
 
   const xmlConsulta = montarXmlConsChave({
@@ -958,7 +1374,12 @@ async function consultarNotaPorChave(chave, deps = {}) {
     chave: chaveLimpa
   });
 
-  const envio = await executarEnvioConsultaDfe(xmlConsulta, config, ambiente, deps);
+  const envio = await executarEnvioConsultaDfe(xmlConsulta, config, ambiente, {
+    ...deps,
+    tipoConsulta: 'consChNFe',
+    cnpjConsulta: cnpj,
+    empresaId: empresaIdOperacao
+  });
   try {
     const metadados = extrairMetadadosRetorno(envio.body);
     await reportarGateSefaz(deps, metadados, { ...ctxGate, endpoint: envio.endpoint || null });
@@ -974,34 +1395,65 @@ async function consultarNotaPorChave(chave, deps = {}) {
       erroRejeicao.cStat = metadados.cStat || null;
       erroRejeicao.xMotivo = metadados.xMotivo || null;
       erroRejeicao.rejeicaoSefaz = true;
+      erroRejeicao.consultaExecutada = true;
+      erroRejeicao.respostaRecebida = true;
+      erroRejeicao.recuperacaoConcluida = false;
       throw erroRejeicao;
     }
 
     const persistidos = await persistirDocumentosRetorno(envio.body, persistencia, 'consulta_chave', {
       cnpj,
       ambiente,
-      empresaId: deps.contextoCentral?.empresaId ?? persistencia._empresaId ?? null
+      empresaId: identidade.empresaId ?? persistencia._empresaId ?? null
+    });
+
+    const errosPersistencia = Array.isArray(persistidos.errosPersistencia)
+      ? persistidos.errosPersistencia
+      : [];
+    const confirmacao = await confirmarDocumentoConsultaChave(
+      persistencia,
+      chaveLimpa,
+      identidade.empresaId ?? persistencia._empresaId ?? empresaIdOperacao
+    );
+    const classificacao = classificarResultadoConsultaChave({
+      persistidos,
+      metadados,
+      confirmacao
     });
 
     finalizarTelemetriaEnvio(envio, {
-      sucesso: true,
+      sucesso: classificacao.recuperacaoConcluida || classificacao.estadoConsulta === ESTADOS_CONSULTA_SEFAZ.SEM_DOCUMENTO,
       cStat: metadados.cStat,
       xMotivo: metadados.xMotivo,
       persistidos: persistidos.notasNovas,
       duplicados: persistidos.notasDuplicadas,
       descartados: persistidos.ignorados,
-      resultado: 'OK'
+      resultado: classificacao.persistenciaCompleta
+        ? (classificacao.recuperacaoConcluida ? 'OK' : classificacao.estadoConsulta)
+        : 'PERSISTENCIA_INCOMPLETA'
     });
 
     return {
-      sucesso: true,
+      sucesso: classificacao.sucesso,
+      consultaExecutada: true,
+      sefazConsultada: true,
+      respostaRecebida: true,
+      persistenciaCompleta: classificacao.persistenciaCompleta,
+      recuperacaoConcluida: classificacao.recuperacaoConcluida,
+      estadoConsulta: classificacao.estadoConsulta,
+      codigo: classificacao.codigo || null,
       chave: chaveLimpa,
+      empresaId: identidade.empresaId ?? persistencia._empresaId ?? empresaIdOperacao,
       cStat: metadados.cStat,
       xMotivo: metadados.xMotivo || null,
-      mensagem: metadados.xMotivo,
+      mensagem: classificacao.persistenciaCompleta
+        ? metadados.xMotivo
+        : `${errosPersistencia.length} documento(s) da consulta por chave não persistidos.`,
       notasNovas: persistidos.notasNovas,
       notasDuplicadas: persistidos.notasDuplicadas,
-      ignorados: persistidos.ignorados
+      ignorados: persistidos.ignorados,
+      errosPersistencia,
+      xmlPersistido: confirmacao.xmlPersistido === true
     };
   } catch (erro) {
     finalizarTelemetriaEnvio(envio, {
@@ -1011,6 +1463,25 @@ async function consultarNotaPorChave(chave, deps = {}) {
     });
     throw erro;
   }
+  };
+
+  const mutex = deps.mutexTransmissaoSefaz || obterMutexTransmissaoSefaz();
+  if (!deps.jaPossuiLockTransmissao && mutex && typeof mutex.comLock === 'function' && !mutex.estaNoContexto()) {
+    const locked = await mutex.comLock('consChNFe', executarConsultaAutorizada);
+    if (!locked.ok) {
+      throw criarErroTransmissaoNaoAutorizada(
+        locked.mensagem || 'Consulta por chave não executada: transmissão SEFAZ já em andamento.',
+        {
+          codigo: locked.codigo || 'TRANSMISSAO_SEFAZ_EM_ANDAMENTO',
+          statusCode: 429,
+          bloqueadoAutorizacao: false
+        }
+      );
+    }
+    return locked.valor;
+  }
+
+  return executarConsultaAutorizada();
 }
 
 /**
@@ -1055,5 +1526,6 @@ module.exports = {
   extrairDocumentosZip,
   persistirDocumentosRetorno,
   resolverEmpresaIdPersistenciaDfe,
-  enviarConsultaDfe
+  enviarConsultaDfe,
+  validarConfigFiscal
 };

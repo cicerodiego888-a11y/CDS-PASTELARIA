@@ -3,6 +3,9 @@
  * Executar: npm run test:central-entradas-sprint8
  */
 
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-sprint8-');
+
 const assert = require('assert');
 const CentralEntradasService = require('../../backend/motores/central-entradas/CentralEntradasService');
 const CentralConfigService = require('../../backend/motores/central-entradas/services/CentralConfigService');
@@ -12,6 +15,7 @@ const { TIPOS_EVENTO } = require('../../backend/motores/central-entradas/config/
 
 let passou = 0;
 let falhou = 0;
+isolamento.comprobarSeCarregado();
 
 const service = new CentralEntradasService();
 const configService = new CentralConfigService();

@@ -13,6 +13,7 @@ const { compactarXml, extrairChaveEProtocoloAutorizados } = require('./utils');
 const { validarMotivoTexto } = require('../validacao/validarMotivoTexto');
 const { enviarCancelamento } = require('./cancelamentoRuntime');
 const { ModelType } = require('./core/ModelType');
+const { carregarConfigEAplicarGateCertificadoNfe } = require('./nfeCertificadoUso');
 
 function getCancelamentoUrlNfe(ambiente) {
   return Number(ambiente) === 1
@@ -36,8 +37,8 @@ function validarPrazoCancelamento(nota) {
   return { ok: true };
 }
 
-async function cancelarNfe(notaId, justificativa, { forcarPrazo = false } = {}) {
-  const config = await getFiscalConfig();
+async function cancelarNfe(notaId, justificativa, opcoes = {}) {
+  const { forcarPrazo = false } = opcoes;
   const id = Number(notaId);
   if (!Number.isInteger(id) || id <= 0) {
     throw Object.assign(new Error('nota_id inválido.'), { statusCode: 400 });
@@ -68,6 +69,25 @@ async function cancelarNfe(notaId, justificativa, { forcarPrazo = false } = {}) 
       throw Object.assign(new Error(prazo.erro), { statusCode: 400, codigo: 'PRAZO_CANCELAMENTO' });
     }
   }
+
+  const venda = await new Promise((resolve, reject) => {
+    db.get(
+      `SELECT id, empresa_id FROM vendas WHERE id = ?`,
+      [nota.venda_id],
+      (err, row) => (err ? reject(err) : resolve(row || null))
+    );
+  });
+
+  // P0.3 — gate antes de assinar evento / transporte (sem config global).
+  const { config } = await carregarConfigEAplicarGateCertificadoNfe({
+    venda: venda || {},
+    empresaId: opcoes.empresaId != null ? opcoes.empresaId : (venda && venda.empresa_id),
+    db: opcoes.db || db,
+    getFiscalConfigFn: opcoes.getFiscalConfig || getFiscalConfig,
+    exigirCertificadoAptoParaUsoFiscal: opcoes.exigirCertificadoAptoParaUsoFiscal,
+    certDeps: opcoes.certDeps || {},
+    validarUrls: false
+  });
 
   const authSefaz = extrairChaveEProtocoloAutorizados(nota.xml_retorno || '');
   const chaveAcesso = authSefaz?.chaveAcesso || nota.chave_acesso;
@@ -101,7 +121,8 @@ async function cancelarNfe(notaId, justificativa, { forcarPrazo = false } = {}) 
       </infEvento>
     </evento>`;
 
-  const certificado = carregarCertificadoPfx(config.certificadoPath, config.certificadoSenha);
+  const carregarPfx = opcoes.carregarCertificadoPfx || carregarCertificadoPfx;
+  const certificado = carregarPfx(config.certificadoPath, config.certificadoSenha);
   const assinatura = assinarEvento(
     compactarXml(eventoXml),
     certificado.privateKeyPem,

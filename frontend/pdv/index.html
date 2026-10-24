@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-src 'self' blob: data:; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'">
     <title>CDS Sistemas - PDV</title>
     <link rel="icon" type="image/x-icon" href="/branding/favicon.ico">
     <link href="/vendor/bootstrap/css/bootstrap.min.css" rel="stylesheet">
@@ -63,11 +64,6 @@
                         <li class="nav-item" id="nav-config-rede-pdv" style="display:none">
                             <a class="nav-link text-warning" href="#" data-page="configuracao-rede">
                                 <i class="fas fa-network-wired"></i> Configuração de Rede
-                            </a>
-                        </li>
-                        <li class="nav-item" id="nav-abrir-pdv-universal" data-recurso="pdv">
-                            <a class="nav-link text-success" href="/pdv-universal/" title="Abrir PDV Universal">
-                                <i class="fas fa-store"></i> PDV Universal
                             </a>
                         </li>
                         <li class="nav-item" id="nav-abrir-erp" style="display:none">

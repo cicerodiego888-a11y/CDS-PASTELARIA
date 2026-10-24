@@ -18,7 +18,7 @@ const CHAVES = Object.freeze({
 const INTERVALOS_PERMITIDOS = Object.freeze([30, 60, 120, 360, 1440]);
 
 const DEFAULTS = Object.freeze({
-  ativa: true,
+  ativa: false,
   intervaloMinutos: 60,
   maxTentativas: 48,
   maxDiasMonitoramento: 30,
@@ -45,10 +45,18 @@ function lerConfigDeMapa(mapa = {}) {
   const maxTentativas = Math.max(1, Number(mapa[CHAVES.MAX_TENTATIVAS]) || DEFAULTS.maxTentativas);
   const maxDias = Math.max(1, Number(mapa[CHAVES.MAX_DIAS]) || DEFAULTS.maxDiasMonitoramento);
   const lote = Math.min(20, Math.max(1, Number(mapa[CHAVES.LOTE]) || DEFAULTS.lotePorCiclo));
-  const ativa = mapa[CHAVES.ATIVA] !== false && mapa[CHAVES.ATIVA] !== 'false';
+  const rawAtiva = mapa[CHAVES.ATIVA];
+  const ativaExplicita = rawAtiva === true || rawAtiva === 'true';
+  // KV persistido `true` é legado: não liga scheduler nem autoriza SOAP.
+  // Não existe, nesta etapa, autorização operacional de ciclo de recuperação.
+  const valorLegadoPersistido = ativaExplicita;
+  const ativa = false;
 
   return {
     ativa,
+    ativaExplicita,
+    valorLegadoPersistido,
+    autorizaTransmissaoSefaz: false,
     intervaloMinutos,
     maxTentativas,
     maxDiasMonitoramento: maxDias,
@@ -62,7 +70,7 @@ function lerConfigDeMapa(mapa = {}) {
  */
 function defaultsKv() {
   return Object.freeze([
-    [CHAVES.ATIVA, 'true', 'boolean', 'RC3.7.5 — Recuperação automática de XML (procNFe)'],
+    [CHAVES.ATIVA, 'false', 'boolean', 'RC3.7.5 — Recuperação automática de XML (procNFe). Default desligado (P0.8).'],
     [CHAVES.INTERVALO_MIN, String(DEFAULTS.intervaloMinutos), 'number', 'Intervalo do scheduler (min): 30|60|120|360|1440'],
     [CHAVES.MAX_TENTATIVAS, String(DEFAULTS.maxTentativas), 'number', 'Máximo de tentativas consChNFe por documento'],
     [CHAVES.MAX_DIAS, String(DEFAULTS.maxDiasMonitoramento), 'number', 'Dias máximos em monitoramento'],

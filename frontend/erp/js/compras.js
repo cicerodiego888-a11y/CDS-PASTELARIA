@@ -2906,9 +2906,21 @@ function normalizeItemCompra(itemBruto = {}) {
             : (item.margem_origem
                 || (itemCompraTemMargemGravada(item) ? 'item' : (margemInfo.fallback ? 'fallback' : 'cadastro'))));
     const linhaId = item.linha_id || item.linhaId || gerarLinhaIdCompra();
+    const origemCentralNfe = isOrigemCompraCentralNfe();
+    const classificacaoConfirmada = item.classificacao_operacional_confirmada === true;
+    const tipoOperacional = origemCentralNfe && !classificacaoConfirmada
+        ? ''
+        : String(item.tipo_operacional || '').trim().toUpperCase();
+    const criacaoProdutoConfirmada = item.criacao_produto_confirmada === true;
     const normalizado = {
         linha_id: linhaId,
         produto_id: item.produto_id ? Number(item.produto_id) : '',
+        tipo_operacional: tipoOperacional,
+        classificacao_operacional_confirmada: classificacaoConfirmada,
+        criar_produto: origemCentralNfe
+            ? (criacaoProdutoConfirmada && (item.criar_produto === true || Number(item.criar_produto) === 1))
+            : (item.criar_produto === true || Number(item.criar_produto) === 1),
+        criacao_produto_confirmada: criacaoProdutoConfirmada,
         produto_nome: item.produto_nome || item.nome || item.descricao_produto || '',
         codigo_barras: item.codigo_barras || item.codigo || '',
         unidade: item.unidade || 'UN',
@@ -2942,8 +2954,16 @@ function normalizeItemCompra(itemBruto = {}) {
         data_validade: item.data_validade || null,
         compra_em: item.compra_em || '',
         codigo_fornecedor: item.codigo_fornecedor || item.codigoFornecedor || '',
+        cProd: item.cProd || item.codigo_fornecedor || item.codigoFornecedor || '',
+        cEAN: item.cEAN || '',
+        cEANTrib: item.cEANTrib || '',
+        nfe_item_n: Number(item.nfe_item_n || item.nItem) || null,
+        nfe_item_original: item.nfe_item_original
+            ? clonarDadosItemCompra(item.nfe_item_original)
+            : null,
         miip_sugestao: clonarNestedMiipItemCompra(item.miip_sugestao),
         miip_resultado: clonarNestedMiipItemCompra(item.miip_resultado),
+        mip_resultado: clonarNestedMiipItemCompra(item.mip_resultado),
         quantidade_embalagens: Number(item.quantidade_embalagens || 0),
         quantidade_por_embalagem: Number(item.quantidade_por_embalagem || 0),
         valor_total_embalagem: Number(item.valor_total_embalagem || 0),
@@ -3221,6 +3241,97 @@ function alterarTipoFiscalItemCompra(index, tipo) {
     renderItensCompraTabelaCore();
 }
 
+function tipoOperacionalCadastroCompra(produto) {
+    return String(produto?.tipo_operacional || 'COMERCIAL').trim().toUpperCase();
+}
+
+function alterarTipoOperacionalItemNfeCompra(index, tipo) {
+    const valor = String(tipo || '').trim().toUpperCase();
+    if (valor && !['COMERCIAL', 'INSUMO'].includes(valor)) {
+        showNotification('Selecione Produto Comercial ou Insumo.', 'warning');
+        return;
+    }
+
+    atualizarItemCompraImutavel(index, (draft) => {
+        if (draft.tipo_operacional !== valor && draft.criar_produto) {
+            draft.criar_produto = false;
+            draft.criacao_produto_confirmada = false;
+        }
+        draft.tipo_operacional = valor;
+        draft.classificacao_operacional_confirmada = Boolean(valor);
+        if (!draft.produto_id) return;
+        const produto = produtosCompraList.find((p) => String(p.id) === String(draft.produto_id));
+        if (!produto || tipoOperacionalCadastroCompra(produto) !== valor) {
+            draft.produto_id = '';
+        }
+    });
+    renderItensCompraTabela();
+}
+
+function marcarCriacaoProdutoNfeCompra(index) {
+    const item = itensCompraAtual[index];
+    if (!item || !['COMERCIAL', 'INSUMO'].includes(item.tipo_operacional)) {
+        showNotification('Escolha a classificação do item antes de criar o cadastro.', 'warning');
+        return;
+    }
+    if (item.produto_id) {
+        showNotification('Remova o vínculo atual antes de marcar a criação de um novo cadastro.', 'warning');
+        return;
+    }
+
+    atualizarItemCompraImutavel(index, (draft) => {
+        draft.criar_produto = true;
+        draft.criacao_produto_confirmada = true;
+    });
+    renderItensCompraTabela();
+}
+
+function renderAssociacaoProdutoItemCompra(item, index, optionsProdutos) {
+    if (!isOrigemCompraCentralNfe()) {
+        return `<select class="form-control form-control-sm mb-1" onchange="alterarProdutoItemCompra(${index}, this.value)">
+            ${optionsProdutos.replace(`value="${item.produto_id}"`, `value="${item.produto_id}" selected`)}
+        </select>`;
+    }
+
+    const tipo = ['COMERCIAL', 'INSUMO'].includes(item.tipo_operacional)
+        ? item.tipo_operacional
+        : '';
+    const produtoAtual = item.produto_id
+        ? produtosCompraList.find((p) => String(p.id) === String(item.produto_id))
+        : null;
+    const produtosDoTipo = tipo
+        ? produtosCompraList.filter((p) => tipoOperacionalCadastroCompra(p) === tipo)
+        : [];
+    const opcoesProduto = produtosDoTipo.map((produto) =>
+        `<option value="${escapeHtml(produto.id)}"${String(produto.id) === String(item.produto_id) ? ' selected' : ''}>${escapeHtml(produto.nome)}</option>`
+    ).join('');
+    const avisoVinculo = !tipo && item.produto_id
+        ? `<option value="${escapeHtml(item.produto_id)}" selected>Vínculo MIIP: ${escapeHtml(produtoAtual?.nome || `cadastro #${item.produto_id}`)} — confirme o tipo</option>`
+        : '';
+    const criar = item.criar_produto === true
+        ? '<div class="small text-success mt-1"><i class="fas fa-plus-circle me-1"></i>Novo cadastro será criado nesta entrada.</div>'
+        : (!item.produto_id && tipo
+            ? `<button type="button" class="btn btn-sm btn-outline-primary mt-1" onclick="marcarCriacaoProdutoNfeCompra(${index})">Criar novo ${tipo === 'INSUMO' ? 'Insumo' : 'Produto Comercial'}</button>`
+            : '');
+
+    return `
+        <label class="form-label small mb-1">Classificação do item</label>
+        <select class="form-select form-select-sm mb-1" aria-label="Classificação operacional do item ${index + 1}"
+            onchange="alterarTipoOperacionalItemNfeCompra(${index}, this.value)">
+            <option value="">Selecione o tipo</option>
+            <option value="COMERCIAL"${tipo === 'COMERCIAL' ? ' selected' : ''}>Produto Comercial (COMERCIAL)</option>
+            <option value="INSUMO"${tipo === 'INSUMO' ? ' selected' : ''}>Insumo (INSUMO)</option>
+        </select>
+        <select class="form-select form-select-sm mb-1" aria-label="Cadastro vinculado ao item ${index + 1}"
+            ${tipo ? '' : 'disabled'}
+            onchange="alterarProdutoItemCompra(${index}, this.value)">
+            <option value="">${tipo ? 'Selecione um cadastro existente' : 'Escolha o tipo primeiro'}</option>
+            ${avisoVinculo}
+            ${opcoesProduto}
+        </select>
+        ${criar}`;
+}
+
 function renderItensCompraTabelaCore() {
     const tbody = $('#itensCompraBody');
     const optionsProdutos = '<option value="">Selecione</option>' + produtosCompraList.map(p => `<option value="${p.id}">${p.nome}</option>`).join('');
@@ -3235,12 +3346,21 @@ function renderItensCompraTabelaCore() {
         const badgeProximo = indiceProximoDestaqueCompra === index
             ? '<span class="badge compra-item-proximo-badge ms-1">PRÓXIMO</span>'
             : '';
+        const vendaItemHtml = isOrigemCompraCentralNfe() && item.tipo_operacional === 'INSUMO'
+            ? '<span class="text-muted small">Não aplicável — Insumo sem preço de venda</span>'
+            : `${formatCurrency(item.preco_venda_sugerido)}
+              <br>
+              <small>
+                <label>
+                  <input type="checkbox" ${Number(item.atualizar_preco_venda ?? 1) === 1 ? 'checked' : ''}
+                    onchange="alterarAtualizarPrecoItemCompra(${index}, this.checked)">
+                  Atualizar preço
+                </label>
+              </small>`;
         return `
         <tr ${attrsLinha}>
             <td style="min-width:220px;">
-                <select class="form-control form-control-sm mb-1" onchange="alterarProdutoItemCompra(${index}, this.value)">
-                    ${optionsProdutos.replace(`value="${item.produto_id}"`, `value="${item.produto_id}" selected`)}
-                </select>
+                ${renderAssociacaoProdutoItemCompra(item, index, optionsProdutos)}
                 ${renderMiipSugestaoCard(item, index)}
                 <div class="text-muted small">${escapeHtml(item.produto_nome || '')}${badgeProximo}</div>
             </td>
@@ -3259,15 +3379,7 @@ function renderItensCompraTabelaCore() {
             </td>
             <td style="min-width:95px;">${formatNumberInput(item.margem_lucro)}%</td>
             <td style="min-width:110px;">
-              ${formatCurrency(item.preco_venda_sugerido)}
-              <br>
-              <small>
-                <label>
-                  <input type="checkbox" ${Number(item.atualizar_preco_venda ?? 1) === 1 ? 'checked' : ''}
-                    onchange="alterarAtualizarPrecoItemCompra(${index}, this.checked)">
-                  Atualizar preço
-                </label>
-              </small>
+              ${vendaItemHtml}
             </td>
             <td>${formatCurrency(item.subtotal)}</td>
             <td>
@@ -3779,15 +3891,30 @@ function abrirCadastroProdutoDesdeCompra(opcoes = {}) {
         return;
     }
 
+    const itemContextual = opcoes.indexItem != null
+        ? itensCompraAtual[Number(opcoes.indexItem)]
+        : null;
+    const tipoOperacionalInformado = String(
+        opcoes.tipo_operacional ?? itemContextual?.tipo_operacional ?? ''
+    ).trim().toUpperCase();
+    if (tipoOperacionalInformado && !['COMERCIAL', 'INSUMO'].includes(tipoOperacionalInformado)) {
+        showNotification('Tipo operacional inválido. Selecione Produto Comercial ou Insumo.', 'warning');
+        return;
+    }
+
     origemCadastroProduto = ORIGEM_CADASTRO_PRODUTO.COMPRA;
     contextoCadastroProdutoCompra = {
         tipo: opcoes.tipo || 'form',
         indexItem: opcoes.indexItem != null ? Number(opcoes.indexItem) : null,
+        tipo_operacional: tipoOperacionalInformado || null,
         prefill: opcoes.prefill || null,
         itensCount: Array.isArray(itensCompraAtual) ? itensCompraAtual.length : 0
     };
 
-    showProdutoModal(null, { origem: ORIGEM_CADASTRO_PRODUTO.COMPRA });
+    showProdutoModal(null, {
+        origem: ORIGEM_CADASTRO_PRODUTO.COMPRA,
+        ...(tipoOperacionalInformado ? { tipo_operacional: tipoOperacionalInformado } : {})
+    });
 
     const el = document.getElementById('produtoModal');
     if (!el) {
@@ -3983,6 +4110,10 @@ function retornarAoLancamentoCompraAposCadastroProduto() {
 function miipNovoProdutoItemCompra(index) {
     const item = clonarDadosItemCompra(itensCompraAtual[index]);
     if (!item) return;
+    if (isOrigemCompraCentralNfe()) {
+        marcarCriacaoProdutoNfeCompra(index);
+        return;
+    }
 
     atualizarItemCompraImutavel(index, (draft) => {
         if (draft.miip_sugestao) {
@@ -3999,6 +4130,7 @@ function miipNovoProdutoItemCompra(index) {
         abrirCadastroProdutoDesdeCompra({
             tipo: 'miip_item',
             indexItem: index,
+            tipo_operacional: item.tipo_operacional,
             prefill: {
                 produto_nome: item.produto_nome,
                 codigo_barras: item.codigo_barras,
@@ -4041,8 +4173,23 @@ function alterarProdutoItemCompra(index, produtoId) {
         limparDestaqueProximoItemCompra();
     }
     const produto = produtosCompraList.find(p => String(p.id) === String(produtoId));
+    if (isOrigemCompraCentralNfe() && produtoId) {
+        const tipoSelecionado = itensCompraAtual[index]?.tipo_operacional;
+        if (!['COMERCIAL', 'INSUMO'].includes(tipoSelecionado)) {
+            showNotification('Escolha a classificação operacional antes de vincular o cadastro.', 'warning');
+            renderItensCompraTabela();
+            return;
+        }
+        if (!produto || tipoOperacionalCadastroCompra(produto) !== tipoSelecionado) {
+            showNotification('O cadastro selecionado não corresponde à classificação escolhida.', 'warning');
+            renderItensCompraTabela();
+            return;
+        }
+    }
     atualizarItemCompraImutavel(index, (draft) => {
         draft.produto_id = produtoId ? Number(produtoId) : '';
+        draft.criar_produto = false;
+        draft.criacao_produto_confirmada = false;
         if (!produto) return;
         draft.produto_nome = produto.nome;
         draft.codigo_barras = produto.codigo_barras || produto.codigo || '';
@@ -4365,6 +4512,16 @@ async function adicionarItemCompraAsync() {
         produto_id: produto ? produto.id : '',
         produto_nome: produto ? produto.nome : descricaoLivre,
         codigo_barras: produto ? (produto.codigo_barras || produto.codigo || '') : '',
+        codigo_fornecedor: itemExistente?.codigo_fornecedor
+            || itemDraftCompra?.codigo_fornecedor
+            || '',
+        cProd: itemExistente?.cProd || itemDraftCompra?.cProd || '',
+        cEAN: itemExistente?.cEAN || itemDraftCompra?.cEAN || '',
+        cEANTrib: itemExistente?.cEANTrib || itemDraftCompra?.cEANTrib || '',
+        nfe_item_n: itemExistente?.nfe_item_n || itemDraftCompra?.nfe_item_n || null,
+        nfe_item_original: clonarDadosItemCompra(
+            itemExistente?.nfe_item_original || itemDraftCompra?.nfe_item_original
+        ),
         quantidade: qtds.quantidade,
         quantidade_fiscal: qtds.quantidade_fiscal,
         quantidade_nao_fiscal: qtds.quantidade_nao_fiscal,
@@ -4389,6 +4546,7 @@ async function adicionarItemCompraAsync() {
         subtotal: (fracionado || usaEmbalagemComercial) ? valorTotalEmbalagem : undefined,
         miip_sugestao: clonarNestedMiipItemCompra(itemExistente?.miip_sugestao || itemDraftCompra?.miip_sugestao),
         miip_resultado: clonarNestedMiipItemCompra(itemExistente?.miip_resultado || itemDraftCompra?.miip_resultado),
+        mip_resultado: clonarNestedMiipItemCompra(itemExistente?.mip_resultado || itemDraftCompra?.mip_resultado),
         distribuicao_fiscal_preenchida: isOrigemCompraCentralNfe()
             && !itemDraftCompra?.distribuicao_fiscal_editada_manual
             && !itemExistente?.distribuicao_fiscal_editada_manual
@@ -5335,6 +5493,31 @@ function saveCompra() {
 
     if (!entradaSimplificada) {
         if (isOrigemCompraCentralNfe()) {
+            for (let index = 0; index < itensCompraAtual.length; index += 1) {
+                const item = itensCompraAtual[index];
+                if (!['COMERCIAL', 'INSUMO'].includes(item.tipo_operacional)) {
+                    showNotification(`Classifique o item ${index + 1} como Produto Comercial ou Insumo.`, 'warning');
+                    return;
+                }
+                if (item.criar_produto === true) {
+                    if (item.produto_id) {
+                        showNotification(`O item ${index + 1} não pode criar cadastro e manter outro vínculo ao mesmo tempo.`, 'warning');
+                        return;
+                    }
+                    continue;
+                }
+                const produto = produtosCompraList.find((p) => String(p.id) === String(item.produto_id));
+                if (!produto) {
+                    showNotification(`Vincule o item ${index + 1} a um cadastro existente ou marque a criação de um novo.`, 'warning');
+                    return;
+                }
+                if (tipoOperacionalCadastroCompra(produto) !== item.tipo_operacional) {
+                    showNotification(`A classificação do item ${index + 1} não corresponde ao cadastro selecionado.`, 'warning');
+                    return;
+                }
+            }
+        }
+        if (isOrigemCompraCentralNfe()) {
             itensCompraAtual = itensCompraAtual.map((item) => {
                 if (!itemCompraEhFracionado(item) || item.distribuicao_fiscal_editada_manual) return item;
                 return aplicarDistribuicaoFiscalItemCentral(item, obterTipoEntradaSelecionado());
@@ -5471,6 +5654,16 @@ function saveCompra() {
             );
             return {
             produto_id: sincronizado.produto_id || null,
+            tipo_operacional: sincronizado.tipo_operacional || null,
+            criar_produto: sincronizado.criar_produto === true ? 1 : 0,
+            cProd: sincronizado.cProd || sincronizado.codigo_fornecedor || '',
+            cEAN: sincronizado.cEAN || '',
+            cEANTrib: sincronizado.cEANTrib || '',
+            nfe_item_n: sincronizado.nfe_item_n || null,
+            nfe_item_original: sincronizado.nfe_item_original || null,
+            miip_sugestao: sincronizado.miip_sugestao || null,
+            miip_resultado: sincronizado.miip_resultado || null,
+            mip_resultado: sincronizado.mip_resultado || null,
             produto_nome: sincronizado.produto_nome,
             codigo_barras: sincronizado.codigo_barras,
             unidade: sincronizado.unidade,
@@ -5482,8 +5675,12 @@ function saveCompra() {
             quantidade_fiscal: Number(sincronizado.quantidade_fiscal ?? sincronizado.quantidade_convertida ?? sincronizado.quantidade ?? 0),
             quantidade_nao_fiscal: Number(sincronizado.quantidade_nao_fiscal || 0),
             preco_unitario: Number(sincronizado.preco_unitario || 0),
-            margem_lucro: Number(sincronizado.margem_lucro || 0),
-            preco_venda_sugerido: Number(sincronizado.preco_venda_sugerido || 0),
+            margem_lucro: sincronizado.tipo_operacional === 'INSUMO'
+                ? 0
+                : Number(sincronizado.margem_lucro || 0),
+            preco_venda_sugerido: sincronizado.tipo_operacional === 'INSUMO'
+                ? 0
+                : Number(sincronizado.preco_venda_sugerido || 0),
             subtotal: Number(sincronizado.subtotal || 0),
             data_validade: sincronizado.data_validade || null,
             produto_fracionado: itemCompraEhFracionado(sincronizado) ? 1 : 0,
@@ -5503,7 +5700,9 @@ function saveCompra() {
             valor_embalagem_venda: itemUsaEmbalagemComercial(sincronizado)
                 ? Number(sincronizado.valor_embalagem_venda || 0)
                 : 0,
-            atualizar_preco_venda: Number(sincronizado.atualizar_preco_venda ?? 1),
+            atualizar_preco_venda: sincronizado.tipo_operacional === 'INSUMO'
+                ? 0
+                : Number(sincronizado.atualizar_preco_venda ?? 1),
             cfop: sincronizado.cfop || null,
             tipo_fiscal_item: sincronizado.tipo_fiscal_manual ? (sincronizado.tipo_fiscal_item || null) : null,
             bonificacao: Number(sincronizado.bonificacao || 0),
@@ -6855,4 +7054,3 @@ function confirmarEmissaoNFeDevolucaoCompra(id) {
         $btn.prop('disabled', false).text('Emitir NF-e de Devolução');
     });
 }
-

@@ -4,7 +4,12 @@
  *
  * Executar: npm run test:fiscal-dfe-runtime
  *           node tests/fiscal/fiscal-dfe-runtime.test.js
+ *
+ * Isolamento in-file: a invocação direta sem -r não abre o banco oficial.
  */
+
+const { isolarBancoTeste } = require('../central-entradas/helpers/isolarBancoTeste');
+isolarBancoTeste('cds-fiscal-dfe-rt-');
 
 const assert = require('assert');
 const {

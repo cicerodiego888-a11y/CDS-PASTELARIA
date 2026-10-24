@@ -5,6 +5,9 @@
 
 'use strict';
 
+const { isolarBancoTeste } = require('../central-entradas/helpers/isolarBancoTeste');
+isolarBancoTeste('cds-fiscal-iso-nfce-');
+
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -329,6 +332,13 @@ async function t14CancelamentoUsaEmpresaDaVenda() {
         ids.push(opts.empresaId);
         return getFiscalConfig({ ...opts, db });
       },
+      // Ownership 05.46: gate P0.2 injetável — o foco deste caso é empresa da venda.
+      exigirCertificadoAptoParaUsoFiscal: async ({ empresaId }) => ({
+        empresaId,
+        certificadoPath: `C:/certs/A.pfx`,
+        certificadoSenha: 'senha-A',
+        estado: 'VÁLIDO'
+      }),
       carregarCertificadoPfx: () => {
         throw new Error('PFX_MOCK');
       }
@@ -375,6 +385,8 @@ function t18RegressaoEmissaoFonte() {
   const cancel = src('backend/services/fiscal/cancelarNfce.js');
   assert.ok(emissor.includes('exigirEmpresaFiscalDaVenda'));
   assert.ok(emissor.includes('resolverCredenciaisNfceDaEmpresa'));
+  assert.ok(emissor.includes('exigirCertificadoAptoParaUsoFiscal'));
+  assert.ok(cancel.includes('exigirCertificadoAptoParaUsoFiscal'));
   assert.ok(!/getFiscalConfig\(\s*\)/.test(emissor));
   assert.ok(!/getFiscalConfig\(\s*\)/.test(cancel));
   assert.ok(cancel.includes('exigirEmpresaFiscalDaVenda'));

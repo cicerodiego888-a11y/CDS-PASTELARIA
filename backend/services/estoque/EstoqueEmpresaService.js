@@ -7,12 +7,11 @@
  * @module services/estoque/EstoqueEmpresaService
  */
 'use strict';
+const { roundStockQuantity } = require('./quantityPrecision');
 
 const { garantirSchemaEstoqueEmpresaAsync } = require('./estoqueEmpresaSchema');
 
-function round3(n) {
-  return Math.round(Number(n || 0) * 1000) / 1000;
-}
+
 
 function erroAcesso(code, message, extra = {}) {
   const err = new Error(message);
@@ -80,7 +79,7 @@ function exigirProdutoId(fonte) {
 function numeroOpcional(valor, padrao) {
   if (valor == null || valor === '') return padrao;
   const n = Number(valor);
-  return Number.isFinite(n) ? round3(n) : padrao;
+  return Number.isFinite(n) ? roundStockQuantity(n) : padrao;
 }
 
 function mapearRegistro(row) {
@@ -89,11 +88,11 @@ function mapearRegistro(row) {
     id: Number(row.id),
     produto_id: Number(row.produto_id),
     empresa_id: Number(row.empresa_id),
-    saldo_fiscal: round3(row.saldo_fiscal),
-    saldo_nao_fiscal: round3(row.saldo_nao_fiscal),
-    estoque_atual: round3(row.estoque_atual),
-    reservado_fiscal: round3(row.reservado_fiscal),
-    reservado_nao_fiscal: round3(row.reservado_nao_fiscal),
+    saldo_fiscal: roundStockQuantity(row.saldo_fiscal),
+    saldo_nao_fiscal: roundStockQuantity(row.saldo_nao_fiscal),
+    estoque_atual: roundStockQuantity(row.estoque_atual),
+    reservado_fiscal: roundStockQuantity(row.reservado_fiscal),
+    reservado_nao_fiscal: roundStockQuantity(row.reservado_nao_fiscal),
     created_at: row.created_at || null,
     updated_at: row.updated_at || null
   };
@@ -229,7 +228,7 @@ async function criarRegistro(params = {}, opts = {}) {
   const saldoNaoFiscal = numeroOpcional(params.saldo_nao_fiscal ?? params.saldoNaoFiscal, 0);
   const estoqueAtual = params.estoque_atual != null || params.estoqueAtual != null
     ? numeroOpcional(params.estoque_atual ?? params.estoqueAtual, 0)
-    : round3(saldoFiscal + saldoNaoFiscal);
+    : roundStockQuantity(saldoFiscal + saldoNaoFiscal);
   const reservadoFiscal = numeroOpcional(params.reservado_fiscal ?? params.reservadoFiscal, 0);
   const reservadoNaoFiscal = numeroOpcional(params.reservado_nao_fiscal ?? params.reservadoNaoFiscal, 0);
 
@@ -274,33 +273,56 @@ async function criarRegistro(params = {}, opts = {}) {
 async function aplicarEfeitoSaldo(params = {}, opts = {}) {
   const { db, produtoId, empresaId } = await prepararAcesso(params, opts);
   const existia = await buscarLinha(db, produtoId, empresaId);
+  const deltaFiscal = numeroOpcional(params.deltaSaldoFiscal ?? params.delta_saldo_fiscal, 0);
+  const deltaNaoFiscal = numeroOpcional(params.deltaSaldoNaoFiscal ?? params.delta_saldo_nao_fiscal, 0);
+  if (!existia && (deltaFiscal < 0 || deltaNaoFiscal < 0)) {
+    const err = erroAcesso('SALDO_INSUFICIENTE', 'Saldo da empresa insuficiente.');
+    err.saldo_disponivel = 0;
+    throw err;
+  }
   if (!existia) {
     await criarRegistro({ produtoId, empresaId }, { db });
   }
-
-  const deltaFiscal = numeroOpcional(params.deltaSaldoFiscal ?? params.delta_saldo_fiscal, 0);
-  const deltaNaoFiscal = numeroOpcional(params.deltaSaldoNaoFiscal ?? params.delta_saldo_nao_fiscal, 0);
 
   if (deltaFiscal === 0 && deltaNaoFiscal === 0) {
     const atual = await consultarSaldo({ produtoId, empresaId }, { db });
     return { ...atual, criado: !existia };
   }
 
-  const atual = await buscarLinha(db, produtoId, empresaId);
-  const saldoFiscal = round3(Number(atual.saldo_fiscal || 0) + deltaFiscal);
-  const saldoNaoFiscal = round3(Number(atual.saldo_nao_fiscal || 0) + deltaNaoFiscal);
-  const estoqueAtual = round3(saldoFiscal + saldoNaoFiscal);
-
-  await dbRun(
+  const atualizado = await dbRun(
     db,
     `UPDATE estoque_empresa
-        SET saldo_fiscal = ?,
-            saldo_nao_fiscal = ?,
-            estoque_atual = ?,
+        SET saldo_fiscal = ROUND(COALESCE(saldo_fiscal, 0) + ?, 6),
+            saldo_nao_fiscal = ROUND(COALESCE(saldo_nao_fiscal, 0) + ?, 6),
+            estoque_atual = ROUND(
+              COALESCE(saldo_fiscal, 0) + COALESCE(saldo_nao_fiscal, 0) + ? + ?, 3
+            ),
             updated_at = CURRENT_TIMESTAMP
-      WHERE produto_id = ? AND empresa_id = ?`,
-    [saldoFiscal, saldoNaoFiscal, estoqueAtual, produtoId, empresaId]
+      WHERE produto_id = ? AND empresa_id = ?
+        AND COALESCE(saldo_fiscal, 0) + ? >= -0.000000001
+        AND COALESCE(saldo_nao_fiscal, 0) + ? >= -0.000000001`,
+    [
+      deltaFiscal,
+      deltaNaoFiscal,
+      deltaFiscal,
+      deltaNaoFiscal,
+      produtoId,
+      empresaId,
+      deltaFiscal,
+      deltaNaoFiscal
+    ]
   );
+  if (atualizado.changes === 0) {
+    const saldoAtual = await buscarLinha(db, produtoId, empresaId);
+    const fiscalInsuficiente = roundStockQuantity(Number(saldoAtual?.saldo_fiscal || 0) + deltaFiscal) < -1e-9;
+    const disponivel = fiscalInsuficiente
+      ? Number(saldoAtual?.saldo_fiscal || 0)
+      : Number(saldoAtual?.saldo_nao_fiscal || 0);
+    const tipo = fiscalInsuficiente ? 'fiscal' : 'não fiscal';
+    const err = erroAcesso('SALDO_INSUFICIENTE', `Saldo ${tipo} da empresa insuficiente.`);
+    err.saldo_disponivel = roundStockQuantity(disponivel);
+    throw err;
+  }
 
   const depois = await consultarSaldo({ produtoId, empresaId }, { db });
   return { ...depois, criado: !existia };
@@ -330,8 +352,8 @@ async function aplicarEfeitoReservado(params = {}, opts = {}) {
   }
 
   const atual = await buscarLinha(db, produtoId, empresaId);
-  const reservadoFiscal = pisoReservado(round3(Number(atual.reservado_fiscal || 0) + deltaFiscal));
-  const reservadoNaoFiscal = pisoReservado(round3(Number(atual.reservado_nao_fiscal || 0) + deltaNaoFiscal));
+  const reservadoFiscal = pisoReservado(roundStockQuantity(Number(atual.reservado_fiscal || 0) + deltaFiscal));
+  const reservadoNaoFiscal = pisoReservado(roundStockQuantity(Number(atual.reservado_nao_fiscal || 0) + deltaNaoFiscal));
 
   await dbRun(
     db,

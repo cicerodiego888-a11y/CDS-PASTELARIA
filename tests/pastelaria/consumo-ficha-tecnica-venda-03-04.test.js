@@ -505,10 +505,24 @@ function t28UniversalNaoAcionado() {
 
 function t29NaTransacao() {
   const nucleo = src('backend/services/vendas/VendaPagamentoService.js');
-  assert.ok(nucleo.includes("db.run('BEGIN IMMEDIATE')"));
-  const iBegin = nucleo.indexOf("db.run('BEGIN IMMEDIATE')");
-  const iCall = nucleo.lastIndexOf('aposBaixaItensDaVenda(vendaId');
-  assert.ok(iBegin > 0 && iCall > iBegin);
+  const inicioTransacao = nucleo.indexOf('async function executarTransacaoVendaExclusiva');
+  const fimTransacao = nucleo.indexOf('\nfunction gravarRecebimentos', inicioTransacao);
+  assert.ok(inicioTransacao >= 0 && fimTransacao > inicioTransacao);
+  const transacao = nucleo.slice(inicioTransacao, fimTransacao);
+  assert.match(transacao, /db\.openExclusiveConnection\(\)/);
+  assert.match(transacao, /runSqlite\(transacaoDb, 'BEGIN IMMEDIATE'\)/);
+  assert.match(transacao, /resultado = await operacao\(transacaoDb\)/);
+  assert.match(transacao, /runSqlite\(transacaoDb, 'COMMIT'\)/);
+  assert.match(transacao, /runSqlite\(transacaoDb, 'ROLLBACK'\)/);
+
+  const inicioItens = nucleo.indexOf('async function inserirItensDaVenda(transacaoDb, vendaId)');
+  const fimItens = nucleo.indexOf('\n  async function vincularTransacoesTef', inicioItens);
+  assert.ok(inicioItens >= 0 && fimItens > inicioItens);
+  const insercaoItens = nucleo.slice(inicioItens, fimItens);
+  assert.match(insercaoItens, /reduzirEstoqueDistribuido\([\s\S]*?db: transacaoDb/);
+  assert.match(insercaoItens, /await aposBaixaItensDaVenda\(vendaId, transacaoDb\)/);
+  assert.match(nucleo, /await executarTransacaoVendaExclusiva\(async \(transacaoDb\) =>/);
+  assert.match(nucleo, /await inserirItensDaVenda\(transacaoDb, id\)/);
 }
 
 async function t30SemDuplicar() {

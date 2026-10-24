@@ -144,6 +144,11 @@ async function main() {
       await run(db, 'UPDATE produtos SET codigo_barras = NULL WHERE id = ?', [id]);
 
       setProdutoIdentidadeEnabled(true);
+      const idGtinAlternativo = await seedProduto(db, {
+        codigo: 'P-MIP-ALTERNATIVO',
+        nome: 'Produto com GTIN alternativo',
+        codigo_barras: '7891234567895'
+      });
 
       await test('flag ON → identificarItem acha GTIN só em produto_identificadores', async () => {
         const svc = new EntradasProdutoIdentificacaoService({ db, isEnabled: () => true });
@@ -193,6 +198,104 @@ async function main() {
           forcarMip: true
         });
         assert.strictEqual(parsed.itens[0].produto_id, 999);
+      });
+
+      await test('Central não usa cProd como identidade global de produto', async () => {
+        const svc = new EntradasProdutoIdentificacaoService({ db, isEnabled: () => true });
+        const r = await svc.identificarItem(
+          { cProd: 'P-MIP', codigo_fornecedor: 'P-MIP', codigo_barras: 'SEM GTIN' },
+          { origem: 'xml_central', fornecedor_cnpj: '12345678000199' }
+        );
+        assert.strictEqual(r.encontrado, false);
+        assert.strictEqual(r.produtoId, null);
+      });
+
+      await test('GTIN/EAN inequívoco associa e GTINs conflitantes exigem revisão', async () => {
+        const svc = new EntradasProdutoIdentificacaoService({ db, isEnabled: () => true });
+        const inequivoco = await svc.identificarItem(
+          { cEAN: '7899999999999', cEANTrib: '0000000000000' },
+          { origem: 'xml_central' }
+        );
+        assert.strictEqual(inequivoco.encontrado, true);
+        assert.strictEqual(inequivoco.produtoId, id);
+
+        const ambiguo = await svc.identificarItem(
+          { cEAN: '7899999999999', cEANTrib: '7891234567895' },
+          { origem: 'xml_central' }
+        );
+        assert.strictEqual(ambiguo.encontrado, false);
+        assert.strictEqual(ambiguo.ambiguidade, true);
+        assert.deepStrictEqual(
+          new Set(ambiguo.produtosCandidatos.map((c) => c.produtoId)),
+          new Set([id, idGtinAlternativo])
+        );
+      });
+
+      await test('ambiguidade MIP mantém item sem produto_id e cria pendência de revisão', async () => {
+        const parsed = {
+          itens: [{
+            cEAN: '7899999999999',
+            cEANTrib: '7891234567895',
+            codigo_barras: '7899999999999'
+          }]
+        };
+        const resultado = await require('../../backend/shared/nfe/enriquecerParseComMiip').enriquecerParseComMiip(
+          parsed,
+          {
+            miipService: { processarImportacaoXml: async () => ({ resultados: [] }) },
+            entradasIdentificacao: new EntradasProdutoIdentificacaoService({ db, isEnabled: () => true }),
+            forcarMip: true,
+            origem: 'xml_central'
+          }
+        );
+        assert.strictEqual(resultado.possuiPendencias, true);
+        assert.strictEqual(parsed.itens[0].produto_id, undefined);
+        assert.strictEqual(parsed.itens[0].mip_resultado.ambiguidade, true);
+      });
+
+      await test('GTINs conflitantes revogam associação automática MIIP e exigem revisão', async () => {
+        const parsed = {
+          itens: [{
+            cEAN: '7899999999999',
+            cEANTrib: '7891234567895',
+            codigo_barras: '7899999999999'
+          }]
+        };
+        const resultado = await require('../../backend/shared/nfe/enriquecerParseComMiip').enriquecerParseComMiip(
+          parsed,
+          {
+            miipService: {
+              processarImportacaoXml: async () => ({
+                resultados: [{
+                  indice: 0,
+                  associadoAutomaticamente: true,
+                  precisaConfirmacao: false,
+                  precisaCadastro: false,
+                  produtoEncontrado: { id, nome: 'Via Identificadores' },
+                  candidatos: [{ produtoId: id }],
+                  motivos: []
+                }],
+                resumo: {
+                  identificadosAutomaticamente: 1,
+                  precisamConfirmacao: 0
+                }
+              })
+            },
+            entradasIdentificacao: new EntradasProdutoIdentificacaoService({ db, isEnabled: () => true }),
+            forcarMip: true,
+            origem: 'xml_central'
+          }
+        );
+        assert.strictEqual(resultado.possuiPendencias, true);
+        assert.strictEqual(parsed.itens[0].produto_id, undefined);
+        assert.strictEqual(parsed.miip_importacao.resultados[0].associadoAutomaticamente, false);
+        assert.strictEqual(parsed.miip_importacao.resultados[0].precisaConfirmacao, true);
+        assert.strictEqual(parsed.miip_importacao.resumo.identificadosAutomaticamente, 0);
+        assert.strictEqual(parsed.miip_importacao.resumo.precisamConfirmacao, 1);
+        assert.deepStrictEqual(
+          new Set(parsed.itens[0].mip_resultado.produtosCandidatos.map((c) => c.produtoId)),
+          new Set([id, idGtinAlternativo])
+        );
       });
 
       await test('flag OFF → enriquecerItensComMip noop', async () => {

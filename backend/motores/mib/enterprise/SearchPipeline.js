@@ -2,6 +2,7 @@
 
 const { tokenizar } = require('../core/tokenizer');
 const { normalizarNomeBusca } = require('../core/normalizarNomeBusca');
+const { origemPdvExigeVendavel } = require('../../../services/produtos/tipoOperacionalProduto');
 
 /**
  * Pipeline padronizado RC3.0:
@@ -40,7 +41,10 @@ class SearchPipeline {
   }
 
   chaveCache(entity, preprocessado, ctx) {
-    return `E3|${entity}|${ctx.modoFiscal ? 'F' : 'N'}|${ctx.operador_id || 0}|${ctx.limite || 20}|${preprocessado.normalizado}`;
+    const escopoVendaveis = entity === 'produto' && origemPdvExigeVendavel(ctx.origem)
+      ? 'PDV'
+      : 'ALL';
+    return `E3|${entity}|${escopoVendaveis}|${ctx.modoFiscal ? 'F' : 'N'}|${ctx.operador_id || 0}|${ctx.limite || 20}|${preprocessado.normalizado}`;
   }
 
   getCache(chave) {

@@ -398,8 +398,8 @@ class CentralEntradasOrchestrator {
   }
 
   /**
-   * Processa documentos SINCRONIZADA sem parse (pipeline único Parser + MIIP).
-   * Fila filtrada por empresaId da operação (05.74).
+   * Processa documentos XML_COMPLETO da empresa, inclusive retomada de
+   * pipeline incompleto (parse/MIIP já persistidos). Fila filtrada por empresaId (05.74).
    *
    * @param {Object} [opcoes]
    * @returns {Promise<Object[]>}
@@ -451,10 +451,23 @@ class CentralEntradasOrchestrator {
       ignorarHorario: opcoes.ignorarHorario ?? true,
       forcar: opcoes.forcar,
       maxIteracoes: opcoes.maxIteracoes,
-      usuarioId: opcoes.usuarioId
+      usuarioId: opcoes.usuarioId,
+      autorizacaoTransmissaoSefaz: opcoes.autorizacaoTransmissaoSefaz || null,
+      empresaId: opcoes.empresaId || null,
+      operacaoFiscalRealService: opcoes.operacaoFiscalRealService || null
     });
 
-    if (resultado.sucesso) {
+    // P0.8 — operação real DistDFe não dispara manifestação automática 210210.
+    if (
+      opcoes.pularManifestacaoAutomatica === true
+      || (opcoes.autorizacaoTransmissaoSefaz
+        && opcoes.autorizacaoTransmissaoSefaz.modo === 'OPERACAO_REAL')
+    ) {
+      resultado.manifestacaoAutomatica = false;
+      return resultado;
+    }
+
+    if (resultado.sucesso && !resultado.ignorado && resultado.consultaExecutada !== false) {
       const filaEsgotada = resultado.ultNsu
         && resultado.maxNsu
         && resultado.ultNsu === resultado.maxNsu;
@@ -500,8 +513,71 @@ class CentralEntradasOrchestrator {
     return this.executarSincronizacao({
       origem: opcoes.origem || ORIGENS.MANUAL,
       ignorarHorario: true,
-      usuarioId: opcoes.usuarioId
+      usuarioId: opcoes.usuarioId,
+      autorizacaoTransmissaoSefaz: opcoes.autorizacaoTransmissaoSefaz || null,
+      empresaId: opcoes.empresaId || null,
+      pularManifestacaoAutomatica: opcoes.pularManifestacaoAutomatica
     });
+  }
+
+  /** @private */
+  _operacaoFiscalReal() {
+    if (!this._operacaoFiscalRealService) {
+      const CentralOperacaoFiscalRealService = require('./services/CentralOperacaoFiscalRealService');
+      this._operacaoFiscalRealService = new CentralOperacaoFiscalRealService({
+        configuracaoService: this._configuracaoService,
+        nsuService: this._nsuService || new CentralNsuService({ nsuRepository: this._nsuRepository })
+      });
+    }
+    return this._operacaoFiscalRealService;
+  }
+
+  obterStatusOperacaoFiscalReal(empresaId) {
+    return this._operacaoFiscalReal().obterStatus(empresaId);
+  }
+
+  habilitarOperacaoFiscalReal(params) {
+    return this._operacaoFiscalReal().habilitar(params);
+  }
+
+  desabilitarOperacaoFiscalReal(params) {
+    return this._operacaoFiscalReal().desabilitar(params);
+  }
+
+  liberarFilaEsgotadaOperacaoReal(params) {
+    return this._operacaoFiscalReal().liberarFilaEsgotada(params);
+  }
+
+  /**
+   * Consulta DistDFe real: pré-voo + ativação + confirmações + sync autorizado.
+   * Não executa SOAP neste método de desenvolvimento sem o fluxo completo —
+   * o sync só transmite se a barreira aceitar a autorização emitida.
+   */
+  async consultarDfeReal(params = {}) {
+    const opReal = this._operacaoFiscalReal();
+    const emitido = await opReal.emitirAutorizacaoConsultaReal(params);
+    // Revalida ativação viva imediatamente antes do sync (janela pós-emissão).
+    await opReal.assertAutorizacaoViva(emitido.autorizacao, {
+      empresaId: emitido.ativacao.empresaId,
+      cnpj: emitido.ativacao.cnpj || emitido.preVoo?.contexto?.cnpj,
+      tipoConsulta: 'distNSU'
+    });
+    const resultado = await this.executarSincronizacao({
+      origem: 'CONSULTA_DFE_REAL',
+      ignorarHorario: true,
+      usuarioId: params.usuario?.id || params.usuarioId,
+      empresaId: emitido.ativacao.empresaId,
+      autorizacaoTransmissaoSefaz: emitido.autorizacao,
+      operacaoFiscalRealService: opReal,
+      pularManifestacaoAutomatica: true
+    });
+    return {
+      ...resultado,
+      operacaoReal: true,
+      preVoo: emitido.preVoo,
+      autorizacaoModo: 'OPERACAO_REAL',
+      manifestacaoAutomatica: false
+    };
   }
 
   async sincronizarAoAbrir() {
@@ -901,7 +977,11 @@ class CentralEntradasOrchestrator {
   }
 
   testarSefazDiagnostico(opcoes = {}) {
-    return this._diagnosticoService.testarConexaoSefaz(opcoes);
+    // CE-PASTELARIA-05 — rotas operacionais NUNCA ativam probe DistDFe real.
+    // forcarProbeDistDfe só via injeção em testes isolados no DiagnosticoService.
+    const seguro = { ...(opcoes || {}) };
+    delete seguro.forcarProbeDistDfe;
+    return this._diagnosticoService.testarConexaoSefaz(seguro);
   }
 
   limparCacheDiagnostico() {

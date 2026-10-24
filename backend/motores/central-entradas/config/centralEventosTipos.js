@@ -12,6 +12,9 @@ const TIPOS_EVENTO = Object.freeze({
   DOCUMENTO_PROCESSADO: 'DOCUMENTO_PROCESSADO',
   DOCUMENTO_ATUALIZADO: 'DOCUMENTO_ATUALIZADO',
   DOCUMENTO_MIGRADO: 'DOCUMENTO_MIGRADO',
+  /** Intenção de ciência — gravado antes do SOAP. Não prova envio. */
+  CIENCIA_SOLICITADA: 'CIENCIA_SOLICITADA',
+  /** SOAP 210210 iniciado (transporte chamado). Sucesso fiscal = MANIFESTACAO_ACEITA. */
   CIENCIA_ENVIADA: 'CIENCIA_ENVIADA',
   /** Claim atômico pré-envio (RC3.3.3) — não é evento de timeline de negócio. */
   MANIFESTACAO_CLAIM: 'MANIFESTACAO_CLAIM',
@@ -72,10 +75,26 @@ const TIPOS_EVENTO = Object.freeze({
   RECUPERACAO_XML_FALHA: 'RECUPERACAO_XML_FALHA',
   RECUPERACAO_XML_TIMEOUT: 'RECUPERACAO_XML_TIMEOUT',
   RECUPERACAO_XML_REMOVIDO: 'RECUPERACAO_XML_REMOVIDO',
-  /** RC3.7.5.1 — cursor NSU sincronizado automaticamente após cStat 656 */
+  /** RC3.7.5.1 histórico — não emitir em 656; cursor não avança só porque o remoto é maior. */
   AUTO_SYNC_NSU: 'AUTO_SYNC_NSU',
+  /** cStat 656: cursor local preservado (cooldown + auditoria, sem avanço). */
+  NSU_PRESERVADO_656: 'NSU_PRESERVADO_656',
+  /**
+   * CE-PASTELARIA-04 — liberação operacional local da FILA_ESGOTADA.
+   * Não implica transmissão SEFAZ nem alteração de NSU.
+   */
+  FILA_ESGOTADA_LIBERACAO_OP: 'FILA_ESGOTADA_LIBERACAO_OP',
   /** RC3.7.5.2 — NSU obtido via fallback XML (namespace) */
-  NSU_RECOVERED_FROM_XML: 'NSU_RECOVERED_FROM_XML'
+  NSU_RECOVERED_FROM_XML: 'NSU_RECOVERED_FROM_XML',
+  /** Auditoria de consumo DistDFe (abertura / manual / scheduler). */
+  CONSULTA_SOLICITADA: 'CONSULTA_SOLICITADA',
+  BLOQUEADA_GATE: 'BLOQUEADA_GATE',
+  BLOQUEADA_COOLDOWN: 'BLOQUEADA_COOLDOWN',
+  ENFILEIRADA: 'ENFILEIRADA',
+  CONSULTA_EXECUTADA: 'CONSULTA_EXECUTADA',
+  RESPOSTA_RECEBIDA: 'RESPOSTA_RECEBIDA',
+  PERSISTENCIA_CONCLUIDA: 'PERSISTENCIA_CONCLUIDA',
+  PERSISTENCIA_FALHOU: 'PERSISTENCIA_FALHOU'
 });
 
 const ORIGENS = Object.freeze({

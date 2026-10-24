@@ -1,6 +1,6 @@
 {
   "codigo": "INTEGRITY-AUDIT",
-  "geradoEm": "2026-08-04T14:27:36.578Z",
+  "geradoEm": "2026-10-22T01:11:42.122Z",
   "checks": [
     {
       "id": "mib.dir",
@@ -392,79 +392,84 @@
     {
       "nome": "mib-rc10",
       "script": "tests/mib/mib-rc10-motor-busca.test.js",
-      "exitCode": 0,
-      "ms": 544,
-      "ok": true
+      "exitCode": 1,
+      "ms": 1033,
+      "ok": false,
+      "stderr": "log\\AtomicCatalog.js:92:15\n    at new Promise (<anonymous>)\n    at AtomicCatalog.rebuild (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\AtomicCatalog.js:91:12)\n    at AtomicCatalog.garantir (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\AtomicCatalog.js:170:17)\n    at CatalogMemory.garantir (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\CatalogMemory.js:46:24)\n    at SearchEngine.preaquecer (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\SearchEngine.js:115:24)\n    at async MibService.iniciar (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\MibService.js:62:17)\n    at async main (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\tests\\mib\\mib-rc10-motor-busca.test.js:149:3) {\n  errno: 1,\n  code: 'SQLITE_ERROR',\n  __augmented: true\n}\n"
     },
     {
       "nome": "mib-rc11",
       "script": "tests/mib/mib-rc11-catalogo-atomico.test.js",
       "exitCode": 0,
-      "ms": 971,
+      "ms": 1576,
       "ok": true
     },
     {
       "nome": "mib-rc20",
       "script": "tests/mib/mib-rc20-motor-cognitivo.test.js",
-      "exitCode": 0,
-      "ms": 679,
-      "ok": true
+      "exitCode": 1,
+      "ms": 985,
+      "ok": false,
+      "stderr": "AtomicCatalog.js:92:15\n    at new Promise (<anonymous>)\n    at AtomicCatalog.rebuild (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\AtomicCatalog.js:91:12)\n    at AtomicCatalog.garantir (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\AtomicCatalog.js:170:17)\n    at CatalogMemory.garantir (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\CatalogMemory.js:46:24)\n    at SearchEngine.preaquecer (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\SearchEngine.js:115:24)\n    at async MibService.iniciar (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\MibService.js:62:17)\n    at async main (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\tests\\mib\\mib-rc20-motor-cognitivo.test.js:138:3) {\n  errno: 1,\n  code: 'SQLITE_ERROR',\n  __augmented: true\n}\n"
     },
     {
       "nome": "mib-rc30",
       "script": "tests/mib/mib-rc30-enterprise-search.test.js",
-      "exitCode": 0,
-      "ms": 1184,
-      "ok": true
+      "exitCode": 1,
+      "ms": 909,
+      "ok": false,
+      "stderr": "omicCatalog.js:92:15\n    at new Promise (<anonymous>)\n    at AtomicCatalog.rebuild (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\AtomicCatalog.js:91:12)\n    at AtomicCatalog.garantir (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\AtomicCatalog.js:170:17)\n    at CatalogMemory.garantir (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\CatalogMemory.js:46:24)\n    at SearchEngine.preaquecer (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\SearchEngine.js:115:24)\n    at async MibService.iniciar (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\MibService.js:62:17)\n    at async main (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\tests\\mib\\mib-rc30-enterprise-search.test.js:142:3) {\n  errno: 1,\n  code: 'SQLITE_ERROR',\n  __augmented: true\n}\n"
     },
     {
       "nome": "mib-rc40",
       "script": "tests/mib/mib-rc40-knowledge-graph.test.js",
-      "exitCode": 0,
-      "ms": 2665,
-      "ok": true
+      "exitCode": 1,
+      "ms": 4457,
+      "ok": false,
+      "stderr": "CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\AtomicCatalog.js:91:12)\n    at AtomicCatalog.garantir (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\AtomicCatalog.js:170:17)\n    at CatalogMemory.garantir (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\CatalogMemory.js:46:24)\n    at SearchEngine.preaquecer (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\SearchEngine.js:115:24)\n    at async MibService.iniciar (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\MibService.js:62:17)\n    at async C:\\projetos\\CDS-SISTEMAS PASTELARIA\\tests\\mib\\mib-rc40-knowledge-graph.test.js:188:5\n    at async main (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\tests\\mib\\mib-rc40-knowledge-graph.test.js:186:3) {\n  errno: 1,\n  code: 'SQLITE_ERROR',\n  __augmented: true\n}\n"
     },
     {
       "nome": "cip-rc10",
       "script": "tests/cip/cip-rc10-intelligence.test.js",
       "exitCode": 0,
-      "ms": 880,
+      "ms": 1846,
       "ok": true
     },
     {
       "nome": "cia-rc10",
       "script": "tests/cia/cia-rc10-agent.test.js",
       "exitCode": 0,
-      "ms": 1011,
+      "ms": 2237,
       "ok": true
     },
     {
       "nome": "cia-apps-rc10",
       "script": "tests/cia-apps/cia-apps-rc10-plugins.test.js",
       "exitCode": 0,
-      "ms": 1098,
+      "ms": 1922,
       "ok": true
     },
     {
       "nome": "smart-dashboard",
       "script": "tests/cia-apps/smart-dashboard-rc10.test.js",
       "exitCode": 0,
-      "ms": 954,
+      "ms": 2048,
       "ok": true
     },
     {
       "nome": "business-monitor",
       "script": "tests/cia-apps/business-monitor-rc10.test.js",
       "exitCode": 0,
-      "ms": 1613,
+      "ms": 2972,
       "ok": true
     },
     {
       "nome": "stable-10",
       "script": "tests/stable/stable-10-certificacao.test.js",
-      "exitCode": 0,
-      "ms": 2394,
-      "ok": true
+      "exitCode": 1,
+      "ms": 449,
+      "ok": false,
+      "stderr": "us>)\n    at AtomicCatalog.rebuild (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\AtomicCatalog.js:91:12)\n    at AtomicCatalog.garantir (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\AtomicCatalog.js:170:17)\n    at CatalogMemory.garantir (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\CatalogMemory.js:46:24)\n    at SearchEngine.buscar (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\SearchEngine.js:343:26)\n    at C:\\projetos\\CDS-SISTEMAS PASTELARIA\\tests\\stable\\stable-10-certificacao.test.js:270:38\n    at C:\\projetos\\CDS-SISTEMAS PASTELARIA\\tests\\stable\\stable-10-certificacao.test.js:46:17\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5) {\n  errno: 1,\n  code: 'SQLITE_ERROR',\n  __augmented: true\n}\n"
     }
   ],
   "warnings": [
@@ -473,12 +478,33 @@
       "detalhe": "BaseSqlProvider ainda usa LOWER/REPLACE (fora do hot-path PDV)"
     }
   ],
-  "falhas": [],
-  "resultado": "INTEGRIDADE OK",
+  "falhas": [
+    {
+      "id": "suite:mib-rc10",
+      "detalhe": "log\\AtomicCatalog.js:92:15\n    at new Promise (<anonymous>)\n    at AtomicCatalog.rebuild (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\AtomicCatalog.js:91:12)\n    at AtomicCatalog.garantir (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\AtomicCatalog.js:170:17)\n    at CatalogMemory.garantir (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\CatalogMemory.js:46:24)\n    at SearchEngine.preaquecer (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\SearchEngine.js:115:24)\n    at async MibService.iniciar (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\MibService.js:62:17)\n    at async main (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\tests\\mib\\mib-rc10-motor-busca.test.js:149:3) {\n  errno: 1,\n  code: 'SQLITE_ERROR',\n  __augmented: true\n}\n"
+    },
+    {
+      "id": "suite:mib-rc20",
+      "detalhe": "AtomicCatalog.js:92:15\n    at new Promise (<anonymous>)\n    at AtomicCatalog.rebuild (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\AtomicCatalog.js:91:12)\n    at AtomicCatalog.garantir (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\AtomicCatalog.js:170:17)\n    at CatalogMemory.garantir (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\CatalogMemory.js:46:24)\n    at SearchEngine.preaquecer (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\SearchEngine.js:115:24)\n    at async MibService.iniciar (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\MibService.js:62:17)\n    at async main (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\tests\\mib\\mib-rc20-motor-cognitivo.test.js:138:3) {\n  errno: 1,\n  code: 'SQLITE_ERROR',\n  __augmented: true\n}\n"
+    },
+    {
+      "id": "suite:mib-rc30",
+      "detalhe": "omicCatalog.js:92:15\n    at new Promise (<anonymous>)\n    at AtomicCatalog.rebuild (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\AtomicCatalog.js:91:12)\n    at AtomicCatalog.garantir (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\AtomicCatalog.js:170:17)\n    at CatalogMemory.garantir (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\CatalogMemory.js:46:24)\n    at SearchEngine.preaquecer (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\SearchEngine.js:115:24)\n    at async MibService.iniciar (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\MibService.js:62:17)\n    at async main (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\tests\\mib\\mib-rc30-enterprise-search.test.js:142:3) {\n  errno: 1,\n  code: 'SQLITE_ERROR',\n  __augmented: true\n}\n"
+    },
+    {
+      "id": "suite:mib-rc40",
+      "detalhe": "CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\AtomicCatalog.js:91:12)\n    at AtomicCatalog.garantir (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\AtomicCatalog.js:170:17)\n    at CatalogMemory.garantir (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\CatalogMemory.js:46:24)\n    at SearchEngine.preaquecer (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\SearchEngine.js:115:24)\n    at async MibService.iniciar (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\MibService.js:62:17)\n    at async C:\\projetos\\CDS-SISTEMAS PASTELARIA\\tests\\mib\\mib-rc40-knowledge-graph.test.js:188:5\n    at async main (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\tests\\mib\\mib-rc40-knowledge-graph.test.js:186:3) {\n  errno: 1,\n  code: 'SQLITE_ERROR',\n  __augmented: true\n}\n"
+    },
+    {
+      "id": "suite:stable-10",
+      "detalhe": "us>)\n    at AtomicCatalog.rebuild (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\AtomicCatalog.js:91:12)\n    at AtomicCatalog.garantir (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\AtomicCatalog.js:170:17)\n    at CatalogMemory.garantir (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\catalog\\CatalogMemory.js:46:24)\n    at SearchEngine.buscar (C:\\projetos\\CDS-SISTEMAS PASTELARIA\\backend\\motores\\mib\\SearchEngine.js:343:26)\n    at C:\\projetos\\CDS-SISTEMAS PASTELARIA\\tests\\stable\\stable-10-certificacao.test.js:270:38\n    at C:\\projetos\\CDS-SISTEMAS PASTELARIA\\tests\\stable\\stable-10-certificacao.test.js:46:17\n    at process.processTicksAndRejections (node:internal/process/task_queues:104:5) {\n  errno: 1,\n  code: 'SQLITE_ERROR',\n  __augmented: true\n}\n"
+    }
+  ],
+  "resultado": "INTEGRIDADE COM FALHAS",
   "resumo": {
     "checksOk": 77,
     "checksFail": 0,
-    "suitesOk": 11,
+    "suitesOk": 6,
     "suitesTotal": 11,
     "warnings": 1
   }

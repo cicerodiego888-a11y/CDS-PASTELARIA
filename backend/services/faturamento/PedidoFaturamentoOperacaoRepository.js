@@ -1,0 +1,288 @@
+'use strict';
+
+function run(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function onRun(err) {
+      if (err) reject(err);
+      else resolve({ lastID: this.lastID, changes: this.changes });
+    });
+  });
+}
+
+function get(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
+  });
+}
+
+function all(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
+  });
+}
+
+function erroConflito(message, extra = {}) {
+  const err = new Error(message);
+  err.statusCode = 409;
+  err.codigo = 'FATURAMENTO_PEDIDO_CONFLITANTE';
+  Object.assign(err, extra);
+  return err;
+}
+
+async function garantirSchema(db) {
+  await run(db, `
+    CREATE TABLE IF NOT EXISTS pedido_faturamento_operacoes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pedido_id INTEGER NOT NULL UNIQUE,
+      empresa_id INTEGER NOT NULL,
+      venda_id INTEGER,
+      status TEXT NOT NULL DEFAULT 'INICIADA',
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+}
+
+function emCentavos(valor) {
+  const numero = Number(valor);
+  return Number.isFinite(numero) ? Math.round(numero * 100) : null;
+}
+
+async function detectarVendasOrfas(db, pedido, payload) {
+  if (!Array.isArray(payload?.itens)) return [];
+
+  const possiveis = await all(db, `
+    SELECT v.id, v.empresa_id, v.cliente_id, v.total, v.status, v.status_venda
+    FROM vendas v
+    WHERE (v.pedido_id IS NULL OR v.pedido_id <> ?)
+      AND v.empresa_id = ?
+      AND COALESCE(v.cliente_id, 0) = COALESCE(?, 0)
+      AND (
+        v.created_at IS NULL
+        OR ? IS NULL
+        OR datetime(v.created_at) >= datetime(?)
+      )
+      AND v.status = 'concluida'
+      AND COALESCE(UPPER(v.status_venda), '') <> 'CANCELADA'
+    ORDER BY v.id
+  `, [
+    pedido.id,
+    pedido.empresa_id,
+    pedido.cliente_id,
+    pedido.created_at || null,
+    pedido.created_at || null
+  ]);
+
+  const vendasOrfas = [];
+  for (const venda of possiveis) {
+    if (emCentavos(venda.total) !== emCentavos(payload.total)) continue;
+    const itens = await all(db, `
+      SELECT produto_id, quantidade, preco_unitario, subtotal
+      FROM vendas_itens
+      WHERE venda_id = ?
+      ORDER BY id
+    `, [venda.id]);
+    if (itens.length !== payload.itens.length) continue;
+
+    const itensCoincidem = itens.every((item, indice) => {
+      const esperado = payload.itens[indice];
+      return Number(item.produto_id) === Number(esperado.produto_id)
+        && Math.round(Number(item.quantidade) * 1000) === Math.round(Number(esperado.quantidade) * 1000)
+        && emCentavos(item.preco_unitario) === emCentavos(esperado.preco_unitario)
+        && emCentavos(item.subtotal) === emCentavos(esperado.subtotal);
+    });
+    if (itensCoincidem) vendasOrfas.push(Number(venda.id));
+  }
+  return vendasOrfas;
+}
+
+async function prepararOperacao(pedidoId, empresaId, payload = {}) {
+  const db = require('../../database');
+  const transacaoDb = await db.openExclusiveConnection();
+  let iniciouTransacao = false;
+  let erroOperacao = null;
+  let resultado;
+
+  try {
+    await garantirSchema(transacaoDb);
+    await run(transacaoDb, 'BEGIN IMMEDIATE');
+    iniciouTransacao = true;
+
+    const pedido = await get(
+      transacaoDb,
+      'SELECT id, empresa_id, status, venda_id, cliente_id, created_at FROM pedidos WHERE id = ?',
+      [pedidoId]
+    );
+    if (!pedido) throw erroConflito('Pedido não encontrado durante a preparação do faturamento.');
+    if (Number(pedido.empresa_id) !== Number(empresaId)) {
+      throw erroConflito('A empresa do Pedido diverge da empresa da operação.', {
+        pedido_empresa_id: pedido.empresa_id,
+        operacao_empresa_id: empresaId
+      });
+    }
+
+    let operacao = await get(
+      transacaoDb,
+      'SELECT * FROM pedido_faturamento_operacoes WHERE pedido_id = ?',
+      [pedidoId]
+    );
+    const statusOperacaoAnterior = operacao ? operacao.status : null;
+
+    const candidatos = await all(transacaoDb, `
+      SELECT DISTINCT v.id, v.empresa_id, v.pedido_id
+      FROM vendas v
+      WHERE v.pedido_id = ?
+         OR v.id = ?
+         OR v.id = ?
+      ORDER BY v.id
+    `, [pedidoId, pedido.venda_id || 0, operacao?.venda_id || 0]);
+
+    const idsCandidatos = new Set(candidatos.map((venda) => Number(venda.id)));
+    if (idsCandidatos.size > 1) {
+      throw erroConflito('Há mais de uma venda candidata para este Pedido; nenhuma foi selecionada.', {
+        pedido_id: pedidoId,
+        venda_ids_candidatas: Array.from(idsCandidatos)
+      });
+    }
+    if (
+      pedido.venda_id != null
+      && !idsCandidatos.has(Number(pedido.venda_id))
+    ) {
+      throw erroConflito('O Pedido aponta para uma venda que não existe; faturamento bloqueado.', {
+        pedido_id: pedidoId,
+        venda_id: pedido.venda_id
+      });
+    }
+    if (!idsCandidatos.size && operacao?.venda_id == null) {
+      const vendasOrfas = await detectarVendasOrfas(transacaoDb, pedido, payload);
+      if (vendasOrfas.length) {
+        throw erroConflito(
+          'Há venda(s) sem vínculo compatível com este Pedido; faturamento bloqueado para evitar duplicidade. Verifique os registros antes de retomar.',
+          {
+            pedido_id: pedidoId,
+            venda_ids_candidatas: vendasOrfas,
+            codigo: 'FATURAMENTO_VENDA_ORFA'
+          }
+        );
+      }
+    }
+
+    if (!operacao) {
+      const inserida = await run(transacaoDb, `
+        INSERT INTO pedido_faturamento_operacoes (pedido_id, empresa_id, status)
+        VALUES (?, ?, 'INICIADA')
+      `, [pedidoId, empresaId]);
+      operacao = await get(
+        transacaoDb,
+        'SELECT * FROM pedido_faturamento_operacoes WHERE id = ?',
+        [inserida.lastID]
+      );
+    } else if (Number(operacao.empresa_id) !== Number(empresaId)) {
+      throw erroConflito('A operação de faturamento existente pertence a outra empresa.', {
+        pedido_id: pedidoId,
+        operacao_empresa_id: operacao.empresa_id,
+        empresa_id: empresaId
+      });
+    }
+
+    const vendaCandidata = candidatos[0] || null;
+    if (operacao.venda_id != null) {
+      if (!vendaCandidata || Number(vendaCandidata.id) !== Number(operacao.venda_id)) {
+        throw erroConflito('A venda registrada na operação de faturamento não foi encontrada ou diverge dos vínculos.', {
+          pedido_id: pedidoId,
+          venda_id: operacao.venda_id
+        });
+      }
+    } else if (vendaCandidata) {
+      await run(transacaoDb, `
+        UPDATE pedido_faturamento_operacoes
+        SET venda_id = ?, status = 'VENDA_CRIADA', updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND venda_id IS NULL
+      `, [vendaCandidata.id, operacao.id]);
+      operacao = await get(
+        transacaoDb,
+        'SELECT * FROM pedido_faturamento_operacoes WHERE id = ?',
+        [operacao.id]
+      );
+    }
+
+    resultado = {
+      pedido,
+      operacao,
+      vendaCandidata,
+      statusOperacaoAnterior
+    };
+    await run(transacaoDb, 'COMMIT');
+    iniciouTransacao = false;
+  } catch (err) {
+    erroOperacao = err instanceof Error ? err : new Error(String(err));
+    if (iniciouTransacao) {
+      try {
+        await run(transacaoDb, 'ROLLBACK');
+      } catch (rollbackError) {
+        erroOperacao.rollbackError = rollbackError;
+      }
+    }
+  }
+
+  try {
+    await new Promise((resolve, reject) => {
+      transacaoDb.close((err) => (err ? reject(err) : resolve()));
+    });
+  } catch (closeError) {
+    if (erroOperacao) erroOperacao.closeError = closeError;
+    else erroOperacao = closeError;
+  }
+
+  if (erroOperacao) throw erroOperacao;
+  return resultado;
+}
+
+async function registrarVendaCriada(db, operacaoId, pedidoId, empresaId, vendaId) {
+  const operacao = await get(db, `
+    SELECT id, pedido_id, empresa_id, venda_id
+    FROM pedido_faturamento_operacoes
+    WHERE id = ?
+  `, [operacaoId]);
+
+  if (
+    !operacao
+    || Number(operacao.pedido_id) !== Number(pedidoId)
+    || Number(operacao.empresa_id) !== Number(empresaId)
+  ) {
+    throw erroConflito('Operação de faturamento inválida ao registrar a venda.', {
+      pedido_id: pedidoId,
+      venda_id: vendaId
+    });
+  }
+
+  if (operacao.venda_id != null) {
+    throw erroConflito('O Pedido já possui uma venda registrada na operação.', {
+      pedido_id: pedidoId,
+      venda_id: operacao.venda_id
+    });
+  }
+
+  const atualizacao = await run(db, `
+    UPDATE pedido_faturamento_operacoes
+    SET venda_id = ?, status = 'VENDA_CRIADA', updated_at = CURRENT_TIMESTAMP
+    WHERE id = ? AND venda_id IS NULL
+  `, [vendaId, operacaoId]);
+
+  if (atualizacao.changes !== 1) {
+    throw erroConflito('Não foi possível registrar a venda de forma exclusiva para o Pedido.', {
+      pedido_id: pedidoId,
+      venda_id: vendaId
+    });
+  }
+}
+
+module.exports = {
+  garantirSchema,
+  prepararOperacao,
+  registrarVendaCriada,
+  erroConflito,
+  run,
+  get,
+  all
+};

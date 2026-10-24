@@ -59,7 +59,12 @@ router.get('/monitor', async (req, res) => {
 
 router.get('/diagnostico', async (req, res) => {
   try {
-    const out = await nfeOperacional.executarDiagnosticoFiscal();
+    // P0.4 — local por padrão. Remoto só com flag explícita + autorização no body/serviço.
+    const out = await nfeOperacional.executarDiagnosticoFiscal({
+      empresaId: req.query.empresa_id || req.query.empresaId || req.empresaId,
+      remoto: req.query.remoto === '1' || req.query.remoto === 'true',
+      autorizacaoTransmissaoSefaz: req.autorizacaoTransmissaoSefaz || null
+    });
     res.json(out);
   } catch (err) {
     enviarErroAmigavel(res, err);

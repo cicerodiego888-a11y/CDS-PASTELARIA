@@ -19,18 +19,15 @@ const PESOS = Object.freeze({
 });
 
 const SCORE_POR_STATUS = Object.freeze({
-  [DocumentoFiscalStatus.GRAVADA]: 100,
-  [DocumentoFiscalStatus.PRONTA_PARA_COMPRA]: 95,
-  [DocumentoFiscalStatus.REVISADA]: 90,
-  [DocumentoFiscalStatus.EM_COMPRA]: 85,
-  [DocumentoFiscalStatus.EM_PROCESSAMENTO]: 70,
-  [DocumentoFiscalStatus.AGUARDANDO_REVISAO]: 65,
-  [DocumentoFiscalStatus.AGUARDANDO_XML_COMPLETO]: 55,
-  [DocumentoFiscalStatus.SINCRONIZADA]: 60,
-  [DocumentoFiscalStatus.RECEBIDA]: 55,
+  [DocumentoFiscalStatus.IMPORTADA]: 100,
+  [DocumentoFiscalStatus.PRONTA_IMPORTACAO]: 95,
+  [DocumentoFiscalStatus.EM_IMPORTACAO]: 85,
+  [DocumentoFiscalStatus.EM_REVISAO]: 65,
+  [DocumentoFiscalStatus.XML_COMPLETO]: 60,
+  [DocumentoFiscalStatus.RESUMO_RECEBIDO]: 55,
+  [DocumentoFiscalStatus.NOVA]: 55,
   [DocumentoFiscalStatus.ERRO]: 15,
-  [DocumentoFiscalStatus.DUPLICADA]: 25,
-  [DocumentoFiscalStatus.DESCARTADA]: 0,
+  [DocumentoFiscalStatus.FINALIZADA]: 0,
   [DocumentoFiscalStatus.XML_INDISPONIVEL]: 0
 });
 

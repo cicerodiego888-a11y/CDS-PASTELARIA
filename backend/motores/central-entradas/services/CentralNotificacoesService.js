@@ -12,6 +12,7 @@ const TIPOS_NOTIFICACAO = Object.freeze({
   NOVAS_NOTAS: 'NOVAS_NOTAS',
   SYNC_CONCLUIDA: 'SYNC_CONCLUIDA',
   SYNC_ERRO: 'SYNC_ERRO',
+  SYNC_CONSULTA_NAO_ENVIADA: 'SYNC_CONSULTA_NAO_ENVIADA',
   PRONTA_COMPRA: 'PRONTA_COMPRA',
   COMPRA_GRAVADA: 'COMPRA_GRAVADA',
   ERRO: 'ERRO'
@@ -69,6 +70,15 @@ class CentralNotificacoesService {
    */
   async notificarSyncConcluida(opcoes = {}) {
     const { notasNovas = 0, sucesso = true, mensagem, origem } = opcoes;
+    const consultaNaoEnviada = opcoes.consultaExecutada === false || opcoes.ignorado === true;
+
+    if (!sucesso && consultaNaoEnviada) {
+      return this.criar({
+        tipo: TIPOS_NOTIFICACAO.SYNC_CONSULTA_NAO_ENVIADA,
+        titulo: 'Consulta DF-e não enviada',
+        mensagem: mensagem || 'A consulta DistDFe não foi enviada à SEFAZ.'
+      });
+    }
 
     if (!sucesso) {
       return this.criar({

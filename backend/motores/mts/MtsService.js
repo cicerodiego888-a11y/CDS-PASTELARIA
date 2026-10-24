@@ -12,6 +12,7 @@
  * (validação de token/perfil permanece no orquestrador, ex.: Motor Comercial).
  */
 'use strict';
+const { roundStockQuantity } = require('../../services/estoque/quantityPrecision');
 
 const estoqueSaldosPublico = require('../../services/fiscalNaoFiscal/estoqueSaldosPublico');
 const {
@@ -22,9 +23,7 @@ const { TipoSaldo, ResultadoTransferencia } = require('./contracts');
 const auditoria = require('./MtsAuditoriaRepository');
 const schema = require('./schema');
 
-function round3(n) {
-  return Math.round(Number(n || 0) * 1000) / 1000;
-}
+
 
 function getDefaultDb() {
   return require('../../database');
@@ -111,7 +110,7 @@ async function transferirSaldo(params = {}, deps = {}) {
   await schema.garantirSchema(db);
 
   const produtoId = resolverProdutoId(params.produto ?? params.produto_id ?? params.produtoId);
-  const quantidade = round3(params.quantidade);
+  const quantidade = roundStockQuantity(params.quantidade);
   const motivo = params.motivo != null ? String(params.motivo).trim() : '';
   const usuarioId = resolverUsuarioId(params.usuario ?? params.usuario_id ?? params.usuarioId);
   const empresaId = resolverEmpresaId(params) ?? resolverEmpresaId(deps);

@@ -7,6 +7,7 @@
       <select id="filtro-tipo-categoria" class="form-select" style="width: auto; display: inline-block;">
         <option value="">Todos</option>
         <option value="produto">Produto</option>
+        <option value="insumo">Insumo</option>
         <option value="despesa">Despesa</option>
       </select>
     </div>
@@ -73,6 +74,7 @@
           <label for="categoria-tipo" class="form-label">Tipo</label>
           <select id="categoria-tipo" class="form-select">
             <option value="produto">Produto</option>
+            <option value="insumo">Insumo</option>
             <option value="despesa">Despesa</option>
           </select>
         </div>
@@ -148,10 +150,11 @@
   });
 
   function atualizarSelectCategoriasSubcategoria() {
-    categoriasAPI.listar('produto').done(function(categorias) {
+    $.when(categoriasAPI.listar('produto'), categoriasAPI.listar('insumo')).done(function(produtos, insumos) {
+      const categorias = [...(produtos[0] || []), ...(insumos[0] || [])];
       let options = '';
       categorias.forEach(cat => {
-        options += `<option value="${cat.id}">${cat.nome}</option>`;
+        options += `<option value="${cat.id}">${cat.nome}${cat.tipo === 'insumo' ? ' (Insumo)' : ''}</option>`;
       });
       $('#subcategoria-categoria-id').html(options);
     });
@@ -165,7 +168,8 @@
 
   function loadSubcategorias() {
     // Buscar categorias para mapear id -> nome
-    categoriasAPI.listar('produto').done(function(categorias) {
+    $.when(categoriasAPI.listar('produto'), categoriasAPI.listar('insumo')).done(function(produtos, insumos) {
+      const categorias = [...(produtos[0] || []), ...(insumos[0] || [])];
       const mapCat = {};
       categorias.forEach(cat => { mapCat[cat.id] = cat.nome; });
       subcategoriasAPI.listar().done(function(subcats) {

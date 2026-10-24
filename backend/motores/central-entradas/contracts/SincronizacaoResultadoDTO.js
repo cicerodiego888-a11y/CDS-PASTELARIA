@@ -22,6 +22,12 @@ class SincronizacaoResultadoDTO {
     this.erros = dados.erros ?? [];
     this.codigoErro = dados.codigoErro ?? dados.codigo_erro ?? null;
     this.mensagemAmigavel = dados.mensagemAmigavel ?? dados.mensagem_amigavel ?? null;
+    this.consultaExecutada = dados.consultaExecutada === true;
+    this.ignorado = dados.ignorado === true;
+    this.motivoIgnorado = dados.motivoIgnorado ?? dados.motivo_ignorado ?? null;
+    this.errosPersistencia = Array.isArray(dados.errosPersistencia) ? dados.errosPersistencia : [];
+    this.codigo = dados.codigo ?? null;
+    this.proximaConsultaEm = dados.proximaConsultaEm ?? dados.proxima_consulta_em ?? null;
   }
 
   /**
@@ -49,7 +55,13 @@ class SincronizacaoResultadoDTO {
       ultimaSincronizacao: this.ultimaSincronizacao,
       erros: this.erros,
       codigoErro: this.codigoErro,
-      mensagemAmigavel: this.mensagemAmigavel || this.mensagem || (this.erros[0] || null)
+      mensagemAmigavel: this.mensagemAmigavel || this.mensagem || (this.erros[0] || null),
+      consultaExecutada: this.consultaExecutada,
+      ignorado: this.ignorado,
+      motivoIgnorado: this.motivoIgnorado,
+      errosPersistencia: this.errosPersistencia,
+      codigo: this.codigo,
+      proximaConsultaEm: this.proximaConsultaEm
     };
   }
 }

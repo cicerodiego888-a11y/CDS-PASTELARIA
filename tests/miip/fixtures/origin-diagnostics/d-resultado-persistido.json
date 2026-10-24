@@ -1,0 +1,81 @@
+{
+  "schema": "cds.miip.origin-fixture.v1",
+  "id": "fixture-d-resultado-persistido",
+  "cenario": "D",
+  "descricao": "Resultado MIIP persistido (entrada) com contrato do resultado real; score e evidencias sao valores de entrada, nao calculados.",
+  "sintetico": true,
+  "persistencia": "persistencia_simulada",
+  "catalogo": [
+    {
+      "id": 404,
+      "codigo": "SINT-D404",
+      "codigo_barras": "7890000004015",
+      "nome": "Produto Persistido Sintetico",
+      "unidade": "UN",
+      "ncm": "22021000",
+      "ativo": 1
+    }
+  ],
+  "item": {
+    "codigoBarras": "7890000004015"
+  },
+  "documento": {
+    "id": 9401,
+    "chave": "99990000000000000000000000000000000000009401",
+    "status": "EM_REVISAO",
+    "empresaId": 7,
+    "miipSessaoId": "op-fixture-d"
+  },
+  "resultadoPersistido": {
+    "operacaoId": "op-fixture-d",
+    "resultados": [
+      {
+        "operacaoId": "op-fixture-d",
+        "produtoEncontrado": {
+          "id": 404,
+          "codigo": "SINT-D404",
+          "nome": "Produto Persistido Sintetico",
+          "codigoBarras": "7890000004015"
+        },
+        "candidatoSelecionado": {
+          "produtoId": 404,
+          "produto": {
+            "id": 404,
+            "codigo": "SINT-D404",
+            "nome": "Produto Persistido Sintetico",
+            "codigoBarras": "7890000004015",
+            "unidade": "UN",
+            "ncm": "22021000",
+            "ativo": 1
+          },
+          "scoreTotal": 71,
+          "confianca": "MEDIA",
+          "ranking": 1,
+          "evidencias": [
+            {
+              "motor": "motor_gtin",
+              "tipo": "gtin_exato",
+              "descricao": "Evidencia de entrada persistida",
+              "peso": 71,
+              "valor": "7890000004015",
+              "score": 71
+            }
+          ],
+          "motoresQueVotaram": ["motor_gtin"],
+          "atributosExtraidos": {
+            "gtin": "7890000004015",
+            "origemDados": "ProdutoRepository",
+            "campoOrigem": "codigo_barras"
+          }
+        },
+        "score": 71,
+        "motor": "motor_gtin"
+      }
+    ]
+  },
+  "esperado": {
+    "origemResultado": "persistido_reutilizado",
+    "fontes": ["busca_gtin"],
+    "produtoId": 404
+  }
+}

@@ -24,6 +24,13 @@ const DDL_EMPRESAS_CONFIGURACAO_FISCAL = `
     id_csc TEXT,
     certificado_path TEXT,
     certificado_senha TEXT,
+    certificado_validacao_status TEXT,
+    certificado_validacao_em TEXT,
+    certificado_validade_ate TEXT,
+    certificado_cnpj TEXT,
+    certificado_titular TEXT,
+    certificado_validacao_codigo TEXT,
+    certificado_validacao_mensagem TEXT,
     crt TEXT,
     ie TEXT,
     im TEXT,
@@ -93,6 +100,17 @@ async function garantirSchemaFiscalEmpresaAsync(db) {
   if (!db) throw new Error('db obrigatório para configuração fiscal por empresa');
   await runSql(db, DDL_EMPRESAS_CONFIGURACAO_FISCAL);
   for (const col of URL_CAMPOS_AMBIENTE) {
+    await garantirColuna(db, 'empresas_configuracao_fiscal', col, `${col} TEXT`);
+  }
+  for (const col of [
+    'certificado_validacao_status',
+    'certificado_validacao_em',
+    'certificado_validade_ate',
+    'certificado_cnpj',
+    'certificado_titular',
+    'certificado_validacao_codigo',
+    'certificado_validacao_mensagem'
+  ]) {
     await garantirColuna(db, 'empresas_configuracao_fiscal', col, `${col} TEXT`);
   }
   const nfce = await dbGet(db, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'nfce_notas'`);
@@ -217,6 +235,11 @@ function montarConfigEmpresa({ empresa, row, validarUrls }) {
     idCSC: row.id_csc || '',
     certificadoPath: row.certificado_path || '',
     certificadoSenha: row.certificado_senha || '',
+    certificadoValidacaoStatus: row.certificado_validacao_status || '',
+    certificadoValidadeAte: row.certificado_validade_ate || '',
+    certificadoCnpj: row.certificado_cnpj || '',
+    certificadoTitular: row.certificado_titular || '',
+    certificadoValidacaoMensagem: row.certificado_validacao_mensagem || '',
     crt: String(row.crt || '1'),
     ie,
     im: row.im || empresa.inscricao_municipal || '',
@@ -308,7 +331,11 @@ const STATUS_FISCAL_ADMIN = Object.freeze({
 
 const CAMPOS_ESCRITA = Object.freeze([
   'ambiente', 'uf', 'codigo_uf', 'serie', 'numero_atual', 'token_csc', 'id_csc',
-  'certificado_path', 'certificado_senha', 'crt', 'ie', 'im', 'cnae', 'telefone', 'email',
+  'certificado_path', 'certificado_senha',
+  'certificado_validacao_status', 'certificado_validacao_em', 'certificado_validade_ate',
+  'certificado_cnpj', 'certificado_titular', 'certificado_validacao_codigo',
+  'certificado_validacao_mensagem',
+  'crt', 'ie', 'im', 'cnae', 'telefone', 'email',
   'municipio_codigo', 'municipio_nome', 'cep', 'logradouro', 'numero_endereco', 'bairro',
   'ws_autorizacao', 'ws_retorno', 'ws_status', 'csc_qrcode_url', 'consulta_chave_url',
   ...URL_CAMPOS_AMBIENTE
@@ -421,18 +448,36 @@ function avaliarStatusAdmin(empresa, row) {
   return pronta ? STATUS_FISCAL_ADMIN.PRONTA : STATUS_FISCAL_ADMIN.INCOMPLETA;
 }
 
+function derivarEstadoCertificado(row) {
+  const { ESTADOS_CERTIFICADO_A1 } = require('./certificadoEstados');
+  const pathOk = row && preencherTexto(row.certificado_path);
+  const senhaOk = row && preencherTexto(row.certificado_senha);
+  if (!pathOk && !senhaOk) return ESTADOS_CERTIFICADO_A1.NAO_CONFIGURADO;
+  const gravado = row && preencherTexto(row.certificado_validacao_status)
+    ? String(row.certificado_validacao_status).trim()
+    : '';
+  if (gravado && Object.values(ESTADOS_CERTIFICADO_A1).includes(gravado)) return gravado;
+  return ESTADOS_CERTIFICADO_A1.CONFIGURADO_NAO_VALIDADO;
+}
+
 function dtoPublicoConfiguracao(empresa, row) {
   const path = require('path');
+  const { ESTADOS_CERTIFICADO_A1 } = require('./certificadoEstados');
   const campos = avaliarCamposProntidao(row);
   const status = avaliarStatusAdmin(empresa, row);
   const nomeCert = row && preencherTexto(row.certificado_path)
     ? path.basename(String(row.certificado_path))
     : null;
+  const certificadoStatus = derivarEstadoCertificado(row);
+  const certificadoConfigurado = !!(row && preencherTexto(row.certificado_path) && preencherTexto(row.certificado_senha));
+  const certificadoValidado = certificadoStatus === ESTADOS_CERTIFICADO_A1.VALIDO;
   return {
     empresa_id: Number(empresa.id),
     cnpj: empresa.cnpj,
     razao_social: empresa.razao_social,
     ativo: Number(empresa.ativo) === 1 ? 1 : 0,
+    // status / status_administrativo: prontidão de configuração administrativa (não prova validade criptográfica).
+    status_administrativo: status,
     ambiente: row && row.ambiente != null ? Number(row.ambiente) : null,
     ambiente_label: row && Number(row.ambiente) === 1
       ? 'PRODUCAO'
@@ -445,7 +490,22 @@ function dtoPublicoConfiguracao(empresa, row) {
     id_csc: row && preencherTexto(row.id_csc) ? String(row.id_csc).trim() : null,
     id_csc_configurado: !!(row && preencherTexto(row.id_csc)),
     csc_configurado: !!(row && preencherTexto(row.token_csc)),
-    certificado_configurado: !!(row && preencherTexto(row.certificado_path) && preencherTexto(row.certificado_senha)),
+    certificado_configurado: certificadoConfigurado,
+    certificado_validado: certificadoValidado,
+    certificado_status: certificadoStatus,
+    // Estado de configuração (arquivo+senha) ≠ estado criptográfico.
+    certificado_estado_configuracao: certificadoConfigurado ? 'CONFIGURADO' : 'NÃO_CONFIGURADO',
+    // Aptidão criptográfica explícita — nunca inferida só de path/senha.
+    apto_certificado_criptografico: certificadoValidado,
+    certificado_validade_ate: row && preencherTexto(row.certificado_validade_ate)
+      ? String(row.certificado_validade_ate)
+      : null,
+    certificado_titular: row && preencherTexto(row.certificado_titular)
+      ? String(row.certificado_titular)
+      : null,
+    certificado_mensagem: row && preencherTexto(row.certificado_validacao_mensagem)
+      ? String(row.certificado_validacao_mensagem)
+      : null,
     certificado_nome: nomeCert,
     sefaz_configurado: !!(row && (
       preencherTexto(row.ws_autorizacao)
@@ -513,7 +573,12 @@ async function obterStatusFiscalEmpresa(empresaId, deps = {}) {
   return {
     empresa_id: dto.empresa_id,
     status: dto.status,
-    campos: dto.campos
+    status_administrativo: dto.status_administrativo || dto.status,
+    campos: dto.campos,
+    certificado_configurado: dto.certificado_configurado,
+    certificado_validado: dto.certificado_validado,
+    certificado_status: dto.certificado_status,
+    apto_certificado_criptografico: dto.apto_certificado_criptografico
   };
 }
 
@@ -532,7 +597,12 @@ async function listarStatusFiscalEmpresas(deps = {}) {
     out.push({
       empresa_id: dto.empresa_id,
       status: dto.status,
-      campos: dto.campos
+      status_administrativo: dto.status_administrativo || dto.status,
+      campos: dto.campos,
+      certificado_configurado: dto.certificado_configurado,
+      certificado_validado: dto.certificado_validado,
+      certificado_status: dto.certificado_status,
+      apto_certificado_criptografico: dto.apto_certificado_criptografico
     });
   }
   return out;
@@ -567,6 +637,71 @@ async function salvarConfiguracaoFiscalEmpresa(empresaId, configuracao, deps = {
       } else {
         merged[campo] = base[campo] != null ? base[campo] : null;
       }
+    }
+    const pathMudou = String(merged.certificado_path || '') !== String(base.certificado_path || '');
+    const senhaMudou = String(merged.certificado_senha || '') !== String(base.certificado_senha || '');
+    const snapshotNoPatch = Object.prototype.hasOwnProperty.call(patch, 'certificado_validacao_status');
+
+    // P0.4 — path administrativo só dentro da pasta protegida da empresa.
+    if (Object.prototype.hasOwnProperty.call(patch, 'certificado_path')
+      && merged.certificado_path
+      && String(merged.certificado_path).trim()) {
+      const pathMod = require('path');
+      const { getFiscalSubDir } = require('./paths');
+      const {
+        CODIGOS_CERTIFICADO_A1,
+        MENSAGENS_CERTIFICADO_A1
+      } = require('./certificadoEstados');
+      const raiz = pathMod.resolve(deps.pastaCertificados || getFiscalSubDir('certificados'));
+      const esperado = pathMod.resolve(raiz, `certificado-empresa-${id}.pfx`);
+      const bruto = String(merged.certificado_path).trim();
+      if (/\0/.test(bruto) || /[\\/]\.\.[\\/]|^\.\.[\\/]|[\\/]\.\.$/.test(bruto)) {
+        throw erroConfig(
+          CODIGOS_CERTIFICADO_A1.CAMINHO_NEGADO,
+          MENSAGENS_CERTIFICADO_A1.CAMINHO_NEGADO,
+          { statusCode: 403 }
+        );
+      }
+      const resolvido = pathMod.resolve(bruto);
+      const prefixo = raiz.endsWith(pathMod.sep) ? raiz : raiz + pathMod.sep;
+      if (resolvido !== raiz && !resolvido.startsWith(prefixo)) {
+        throw erroConfig(
+          CODIGOS_CERTIFICADO_A1.CAMINHO_NEGADO,
+          MENSAGENS_CERTIFICADO_A1.CAMINHO_NEGADO,
+          { statusCode: 403 }
+        );
+      }
+      if (pathMod.basename(resolvido) !== `certificado-empresa-${id}.pfx`) {
+        throw erroConfig(
+          CODIGOS_CERTIFICADO_A1.CAMINHO_NEGADO,
+          MENSAGENS_CERTIFICADO_A1.CAMINHO_NEGADO,
+          { statusCode: 403 }
+        );
+      }
+      merged.certificado_path = pathMod.normalize(resolvido) === pathMod.normalize(esperado)
+        ? esperado
+        : resolvido;
+    }
+
+    // Snapshot VÁLIDO só via fluxo confiável (upload/teste/gate), nunca por PUT administrativo cru.
+    if (snapshotNoPatch && !deps.confiarSnapshotValidacao) {
+      const {
+        ESTADOS_CERTIFICADO_A1,
+        snapshotInvalidadoPorSubstituicao
+      } = require('./certificadoEstados');
+      const statusPedido = String(patch.certificado_validacao_status || '').trim();
+      if (statusPedido === ESTADOS_CERTIFICADO_A1.VALIDO) {
+        Object.assign(merged, snapshotInvalidadoPorSubstituicao());
+      }
+    }
+
+    if ((pathMudou || senhaMudou) && !snapshotNoPatch) {
+      const { snapshotInvalidadoPorSubstituicao } = require('./certificadoEstados');
+      Object.assign(merged, snapshotInvalidadoPorSubstituicao());
+    }
+    if ((pathMudou || senhaMudou) && snapshotNoPatch && !deps.confiarSnapshotValidacao) {
+      const { snapshotInvalidadoPorSubstituicao } = require('./certificadoEstados');
+      Object.assign(merged, snapshotInvalidadoPorSubstituicao());
     }
     if (merged.serie == null) merged.serie = 1;
     if (merged.numero_atual == null) merged.numero_atual = 1;
@@ -612,5 +747,7 @@ module.exports = {
   obterStatusFiscalEmpresa,
   listarStatusFiscalEmpresas,
   exigirEmpresaAlvoAdministrativo,
-  dtoPublicoConfiguracao
+  obterEmpresaOuErro,
+  dtoPublicoConfiguracao,
+  derivarEstadoCertificado
 };

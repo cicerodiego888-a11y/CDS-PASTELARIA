@@ -38,7 +38,7 @@ const DEFAULTS = Object.freeze([
   ['proxy_url', '', 'string', 'URL do proxy (estrutura)'],
   ['log_detalhado', 'false', 'boolean', 'Log detalhado da Central'],
   ['modo_debug', 'false', 'boolean', 'Modo debug da Central'],
-  ['recuperacao_xml_ativa', 'true', 'boolean', 'RC3.7.5 — Recuperação automática de XML (procNFe)'],
+  ['recuperacao_xml_ativa', 'false', 'boolean', 'RC3.7.5 — Recuperação automática de XML (procNFe). Default desligado (P0.8).'],
   ['recuperacao_xml_intervalo_minutos', '60', 'number', 'RC3.7.5 — Intervalo do scheduler (min): 30|60|120|360|1440'],
   ['recuperacao_xml_max_tentativas', '48', 'number', 'RC3.7.5 — Máximo de tentativas consChNFe por documento'],
   ['recuperacao_xml_max_dias_monitoramento', '30', 'number', 'RC3.7.5 — Dias máximos em monitoramento'],

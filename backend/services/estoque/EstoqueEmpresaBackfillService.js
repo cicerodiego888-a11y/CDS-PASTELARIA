@@ -8,13 +8,12 @@
  * @module services/estoque/EstoqueEmpresaBackfillService
  */
 'use strict';
+const { roundStockQuantity } = require('./quantityPrecision');
 
 const { garantirSchemaEstoqueEmpresaAsync } = require('./estoqueEmpresaSchema');
 const EstoqueEmpresaService = require('./EstoqueEmpresaService');
 
-function round3(n) {
-  return Math.round(Number(n || 0) * 1000) / 1000;
-}
+
 
 function erroBackfill(code, message, extra = {}) {
   const err = new Error(message);
@@ -66,17 +65,17 @@ function exigirEmpresaId(fonte) {
 }
 
 function snapshotProduto(row) {
-  const saldoFiscal = round3(row.saldo_fiscal);
-  const saldoNaoFiscal = round3(row.saldo_nao_fiscal);
+  const saldoFiscal = roundStockQuantity(row.saldo_fiscal);
+  const saldoNaoFiscal = roundStockQuantity(row.saldo_nao_fiscal);
   const estoqueAtual = row.estoque_atual != null && row.estoque_atual !== ''
-    ? round3(row.estoque_atual)
-    : round3(saldoFiscal + saldoNaoFiscal);
+    ? roundStockQuantity(row.estoque_atual)
+    : roundStockQuantity(saldoFiscal + saldoNaoFiscal);
   return {
     saldo_fiscal: saldoFiscal,
     saldo_nao_fiscal: saldoNaoFiscal,
     estoque_atual: estoqueAtual,
-    reservado_fiscal: round3(row.reservado_fiscal),
-    reservado_nao_fiscal: round3(row.reservado_nao_fiscal)
+    reservado_fiscal: roundStockQuantity(row.reservado_fiscal),
+    reservado_nao_fiscal: roundStockQuantity(row.reservado_nao_fiscal)
   };
 }
 

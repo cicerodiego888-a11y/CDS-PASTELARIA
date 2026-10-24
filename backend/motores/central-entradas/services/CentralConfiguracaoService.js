@@ -110,6 +110,34 @@ class CentralConfiguracaoService {
     /** @private */
     this._carregarCertificado = deps.carregarCertificado
       || ((p, s) => require('../../../services/fiscal/certificateService').carregarCertificadoPfx(p, s));
+    /** @private — testes: CNPJ oficial de empresas.cnpj */
+    this._obterCnpjEmpresa = typeof deps.obterCnpjEmpresa === 'function'
+      ? deps.obterCnpjEmpresa
+      : null;
+  }
+
+  /**
+   * CNPJ oficial do cadastro da empresa (`empresas.cnpj`).
+   * Normaliza só em memória — não grava o valor.
+   * @private
+   */
+  async _obterCnpjCadastroEmpresa(empresaId, opcoes = {}) {
+    if (typeof this._obterCnpjEmpresa === 'function') {
+      const bruto = await this._obterCnpjEmpresa({
+        empresaId,
+        db: this._resolverConexaoSqlite(opcoes)
+      });
+      return String(bruto || '').replace(/\D/g, '');
+    }
+    try {
+      const EmpresaService = require('../../../services/empresas/EmpresaService');
+      const empresa = await EmpresaService.buscarEmpresaPorId(empresaId, {
+        db: this._resolverConexaoSqlite(opcoes)
+      });
+      return String((empresa && empresa.cnpj) || '').replace(/\D/g, '');
+    } catch {
+      return '';
+    }
   }
 
   /**
@@ -339,7 +367,12 @@ class CentralConfiguracaoService {
     const visao = await this._montarVisaoCertificado({
       certificadoPath: ctx.certificadoPath,
       certificadoSenha: ctx.certificadoSenha,
-      cnpj: ctx.cnpj
+      cnpj: ctx.cnpj,
+      certificadoValidacaoStatus: ctx.certificadoValidacaoStatus,
+      certificadoValidadeAte: ctx.certificadoValidadeAte,
+      certificadoCnpj: ctx.certificadoCnpj,
+      certificadoTitular: ctx.certificadoTitular,
+      certificadoValidacaoMensagem: ctx.certificadoValidacaoMensagem
     });
     return {
       estado: 'OK',
@@ -383,54 +416,81 @@ class CentralConfiguracaoService {
     const mapa = await this._obterMapaValores();
     const sync = await this._syncConfig.obterResumo();
 
-    const empresaIdOpcao = opcoes.empresaId != null ? Number(opcoes.empresaId) : null;
+    const empresaInformada = opcoes.empresaId != null && String(opcoes.empresaId).trim() !== '';
+    const empresaIdOpcao = empresaInformada ? Number(opcoes.empresaId) : null;
     const permitirFallbackGlobal = opcoes.permitirFallbackGlobal !== false;
 
     let fiscal = {};
     let origemAmbiente = 'getFiscalConfig';
+    let origemCnpj = null;
     let empresaIdContexto = Number.isInteger(empresaIdOpcao) && empresaIdOpcao > 0
       ? empresaIdOpcao
       : null;
 
+    if (empresaInformada && !empresaIdContexto) {
+      return {
+        ok: false,
+        codigoErro: 'EMPRESA_CENTRAL_INVALIDA',
+        mensagem: 'empresaId inválido para sincronização DF-e. Selecione a empresa correta.'
+      };
+    }
+
+    let cnpjOficial = '';
     if (empresaIdContexto) {
+      cnpjOficial = await this._obterCnpjCadastroEmpresa(empresaIdContexto, opcoes);
+      if (cnpjOficial.length === 14) origemCnpj = 'empresas';
+
       try {
         const cfgEmp = await this._carregarFiscalDaEmpresa(empresaIdContexto, opcoes);
-        const cnpjEmp = String(cfgEmp.cnpj || '').replace(/\D/g, '');
-        const certOk = !!(cfgEmp.certificadoPath && cfgEmp.certificadoSenha && cnpjEmp.length === 14);
-        if (certOk) {
-          fiscal = {
-            certificadoPath: cfgEmp.certificadoPath,
-            certificadoSenha: cfgEmp.certificadoSenha,
-            cnpj: cnpjEmp,
-            fiscal_ambiente: cfgEmp.ambiente,
-            ambiente: cfgEmp.ambiente,
-            fiscal_codigo_uf: cfgEmp.codigoUf,
-            codigo_uf: cfgEmp.codigoUf,
-            fiscal_uf: cfgEmp.uf,
-            uf: cfgEmp.uf
-          };
-          origemAmbiente = 'empresas_configuracao_fiscal';
-        } else if (!permitirFallbackGlobal) {
-          return {
-            ok: false,
-            codigoErro: 'CERTIFICADO',
-            mensagem: `Certificado/CNPJ não configurados para a empresa ${empresaIdContexto}.`
-          };
+        const cnpjEmp = cnpjOficial || String(cfgEmp.cnpj || '').replace(/\D/g, '');
+        if (cnpjEmp.length === 14) {
+          cnpjOficial = cnpjEmp;
+          origemCnpj = origemCnpj || 'empresas';
         }
+        fiscal = {
+          certificadoPath: cfgEmp.certificadoPath,
+          certificadoSenha: cfgEmp.certificadoSenha,
+          certificadoValidacaoStatus: cfgEmp.certificadoValidacaoStatus,
+          certificadoValidadeAte: cfgEmp.certificadoValidadeAte,
+          certificadoCnpj: cfgEmp.certificadoCnpj,
+          certificadoTitular: cfgEmp.certificadoTitular,
+          certificadoValidacaoMensagem: cfgEmp.certificadoValidacaoMensagem,
+          cnpj: cnpjEmp,
+          fiscal_ambiente: cfgEmp.ambiente,
+          ambiente: cfgEmp.ambiente,
+          fiscal_codigo_uf: cfgEmp.codigoUf,
+          codigo_uf: cfgEmp.codigoUf,
+          fiscal_uf: cfgEmp.uf,
+          uf: cfgEmp.uf
+        };
+        origemAmbiente = 'empresas_configuracao_fiscal';
       } catch (error) {
         if (!permitirFallbackGlobal) {
           return {
             ok: false,
             codigoErro: error.code || 'CONFIG_FISCAL',
-            mensagem: this._mensagemAmigavel(error.message)
+            mensagem: `Configuração fiscal da empresa ${empresaIdContexto} não encontrada. ${this._mensagemAmigavel(error.message)}`
           };
         }
       }
     }
 
     if (!fiscal.certificadoPath) {
+      if (!permitirFallbackGlobal) {
+        return {
+          ok: false,
+          codigoErro: empresaIdContexto ? 'CERTIFICADO' : 'EMPRESA_CENTRAL_AUSENTE',
+          mensagem: empresaIdContexto
+            ? `Certificado digital não configurado para a empresa ${empresaIdContexto}.`
+            : 'Selecione a empresa para sincronizar o DF-e. Não há CNPJ global de fallback.'
+        };
+      }
       try {
-        fiscal = await this._getFiscalConfig();
+        const global = await this._getFiscalConfig();
+        fiscal = {
+          ...global,
+          cnpj: empresaIdContexto ? cnpjOficial : global.cnpj
+        };
         origemAmbiente = 'getFiscalConfig';
       } catch (error) {
         return {
@@ -444,15 +504,21 @@ class CentralConfiguracaoService {
     const ambiente = this._ambienteDeFiscal(fiscal);
     const ufSnap = this._ufDeFiscal(fiscal);
 
-    const certificadoPath = fiscal.certificadoPath || null;
+    const certificadoPathConfigurado = fiscal.certificadoPath || null;
+    const certificadoPath = this._resolverCaminhoCertificadoExistente(
+      certificadoPathConfigurado,
+      empresaIdContexto
+    );
     const certificadoSenha = fiscal.certificadoSenha || null;
-    const cnpj = String(fiscal.cnpj || '').replace(/\D/g, '');
+    const cnpj = String(cnpjOficial || fiscal.cnpj || '').replace(/\D/g, '');
 
     if (!certificadoPath || !certificadoSenha) {
       return {
         ok: false,
         codigoErro: 'CERTIFICADO',
-        mensagem: 'Certificado digital não configurado. Configure em Configurações Avançadas → Fiscal.'
+        mensagem: empresaIdContexto
+          ? `Certificado digital não configurado para a empresa ${empresaIdContexto}.`
+          : 'Certificado digital não configurado. Configure em Configurações Avançadas → Fiscal.'
       };
     }
 
@@ -460,7 +526,9 @@ class CentralConfiguracaoService {
       return {
         ok: false,
         codigoErro: 'CNPJ',
-        mensagem: 'CNPJ do emitente não configurado. Verifique o cadastro fiscal da empresa.'
+        mensagem: empresaIdContexto
+          ? `CNPJ do emitente não configurado para a empresa ${empresaIdContexto}. Verifique o cadastro da empresa.`
+          : 'CNPJ do emitente não configurado. Selecione a empresa e verifique o cadastro.'
       };
     }
 
@@ -489,9 +557,15 @@ class CentralConfiguracaoService {
         uf: ufSnap.uf,
         codigoUf: ufSnap.codigoUf,
         origemAmbiente,
+        origemCnpj: origemCnpj || (empresaIdContexto ? 'empresas' : null),
         cnpj,
         certificadoPath,
         certificadoSenha,
+        certificadoValidacaoStatus: fiscal.certificadoValidacaoStatus || null,
+        certificadoValidadeAte: fiscal.certificadoValidadeAte || null,
+        certificadoCnpj: fiscal.certificadoCnpj || null,
+        certificadoTitular: fiscal.certificadoTitular || null,
+        certificadoValidacaoMensagem: fiscal.certificadoValidacaoMensagem || null,
         urls: {
           // Somente informativo — SOAP usa UrlResolver em distribuicaoDfeRuntime
           distribuicaoDfe: urlDfe,
@@ -894,12 +968,59 @@ class CentralConfiguracaoService {
   }
 
   /**
+   * Resolve PFX existente quando o path absoluto gravado aponta para outra pasta
+   * (ex.: `…\\dados\\fiscal\\…` após o cliente operar em `dados-pastelaria`).
+   * Preferência: arquivo sob FISCAL_DIR atual (`certificado-empresa-<id>.pfx`).
+   * Não altera o banco — só o caminho usado em memória nesta operação.
+   *
+   * @private
+   * @param {string|null} certificadoPath
+   * @param {number|null} empresaId
+   * @returns {string|null}
+   */
+  _resolverCaminhoCertificadoExistente(certificadoPath, empresaId) {
+    const bruto = certificadoPath ? String(certificadoPath).trim() : '';
+    if (bruto && fs.existsSync(bruto)) return bruto;
+
+    let fiscalDir = null;
+    try {
+      const { getFiscalDir } = require('../../../services/fiscal/paths');
+      fiscalDir = getFiscalDir();
+    } catch {
+      fiscalDir = process.env.FISCAL_DIR || null;
+    }
+    if (!fiscalDir) return bruto || null;
+
+    const candidatos = [];
+    if (empresaId) {
+      candidatos.push(path.join(fiscalDir, 'certificados', `certificado-empresa-${empresaId}.pfx`));
+    }
+    if (bruto) {
+      candidatos.push(path.join(fiscalDir, 'certificados', path.basename(bruto)));
+    }
+
+    for (const candidato of candidatos) {
+      try {
+        if (candidato && fs.existsSync(candidato)) return path.resolve(candidato);
+      } catch {
+        /* ignore */
+      }
+    }
+    return bruto || null;
+  }
+
+  /**
    * @private
    * @param {{ certificadoPath?: string, certificadoSenha?: string, cnpj?: string }} fiscal
    */
   async _montarVisaoCertificado(fiscal = {}) {
+    const {
+      ESTADOS_CERTIFICADO_A1,
+      MENSAGENS_CERTIFICADO_A1
+    } = require('../../../services/fiscal/certificadoEstados');
     try {
       const certificadoPath = fiscal.certificadoPath;
+      const senhaConfigurada = !!(fiscal.certificadoSenha && String(fiscal.certificadoSenha).trim());
       if (!certificadoPath) {
         return {
           presente: false,
@@ -907,9 +1028,10 @@ class CentralConfiguracaoService {
           cnpj: fiscal.cnpj || null,
           validade: null,
           diasRestantes: null,
-          status: 'AUSENTE',
+          status: ESTADOS_CERTIFICADO_A1.NAO_CONFIGURADO,
           caminho: null,
-          mensagem: 'Nenhum certificado configurado — edite em Configurações Avançadas'
+          senhaConfigurada: senhaConfigurada ? 'SIM' : 'NÃO',
+          mensagem: MENSAGENS_CERTIFICADO_A1.NAO_CONFIGURADO
         };
       }
 
@@ -921,61 +1043,63 @@ class CentralConfiguracaoService {
           cnpj: fiscal.cnpj || null,
           validade: null,
           diasRestantes: null,
-          status: 'ARQUIVO_AUSENTE',
+          status: ESTADOS_CERTIFICADO_A1.ARQUIVO_INVALIDO,
           caminho: certificadoPath,
-          mensagem: 'Arquivo do certificado não encontrado'
+          senhaConfigurada: senhaConfigurada ? 'SIM' : 'NÃO',
+          mensagem: 'Arquivo do certificado não encontrado no caminho configurado.'
         };
       }
 
-      try {
-        const cert = this._carregarCertificado(certificadoPath, fiscal.certificadoSenha);
-        let validade = null;
+      const snapshot = fiscal.certificadoValidacaoStatus
+        || fiscal.certificado_validacao_status
+        || null;
+      if (snapshot && Object.values(ESTADOS_CERTIFICADO_A1).includes(String(snapshot))) {
+        const validade = fiscal.certificadoValidadeAte || fiscal.certificado_validade_ate || null;
         let diasRestantes = null;
-        let status = 'OK';
-        let nome = path.basename(certificadoPath);
-        try {
-          const forge = require('node-forge');
-          const x509 = forge.pki.certificateFromPem(cert.certPem);
-          validade = x509.validity.notAfter;
-          diasRestantes = Math.ceil((validade.getTime() - Date.now()) / 86400000);
-          if (diasRestantes < 0) status = 'VENCIDO';
-          else if (diasRestantes <= 30) status = 'A_VENCER';
-          const cn = x509.subject.getField('CN');
-          if (cn?.value) nome = cn.value;
-        } catch { /* ignore parse */ }
-
+        if (validade) {
+          const dt = new Date(validade);
+          if (!Number.isNaN(dt.getTime())) {
+            diasRestantes = Math.ceil((dt.getTime() - Date.now()) / 86400000);
+          }
+        }
         return {
           presente: true,
-          nome,
-          cnpj: fiscal.cnpj || null,
-          validade: validade ? new Date(validade).toISOString() : null,
+          nome: fiscal.certificadoTitular || fiscal.certificado_titular || path.basename(certificadoPath),
+          cnpj: fiscal.certificadoCnpj || fiscal.certificado_cnpj || fiscal.cnpj || null,
+          validade,
           diasRestantes,
-          status,
+          status: String(snapshot),
           caminho: certificadoPath,
-          mensagem: status === 'OK' ? 'Certificado válido' : status
-        };
-      } catch (error) {
-        return {
-          presente: true,
-          nome: path.basename(certificadoPath),
-          cnpj: fiscal.cnpj || null,
-          validade: null,
-          diasRestantes: null,
-          status: 'ERRO',
-          caminho: certificadoPath,
-          mensagem: this._mensagemAmigavel(error.message)
+          senhaConfigurada: senhaConfigurada ? 'SIM' : 'NÃO',
+          mensagem: fiscal.certificadoValidacaoMensagem
+            || fiscal.certificado_validacao_mensagem
+            || MENSAGENS_CERTIFICADO_A1.CONFIGURADO_NAO_VALIDADO
         };
       }
+
+      return {
+        presente: true,
+        nome: path.basename(certificadoPath),
+        cnpj: fiscal.cnpj || null,
+        validade: null,
+        diasRestantes: null,
+        status: ESTADOS_CERTIFICADO_A1.CONFIGURADO_NAO_VALIDADO,
+        caminho: certificadoPath,
+        senhaConfigurada: senhaConfigurada ? 'SIM' : 'NÃO',
+        mensagem: MENSAGENS_CERTIFICADO_A1.CONFIGURADO_NAO_VALIDADO
+      };
     } catch (error) {
+      const { sanitizarTextoCertificado } = require('../../../services/fiscal/ValidarCertificadoA1Service');
       return {
         presente: false,
         nome: null,
         cnpj: null,
         validade: null,
         diasRestantes: null,
-        status: 'ERRO',
+        status: ESTADOS_CERTIFICADO_A1.ERRO_DE_VALIDACAO,
         caminho: null,
-        mensagem: this._mensagemAmigavel(error.message)
+        senhaConfigurada: 'NÃO',
+        mensagem: sanitizarTextoCertificado(this._mensagemAmigavel(error.message))
       };
     }
   }
@@ -1029,6 +1153,9 @@ class CentralConfiguracaoService {
   /** @private */
   _mensagemAmigavel(msg) {
     const m = String(msg || '');
+    if (/MAC could not be verified|Invalid password/i.test(m)) {
+      return 'A senha informada não confere com o certificado.';
+    }
     if (/certificado/i.test(m)) return 'Certificado digital ausente ou inválido. Configure em Configurações Avançadas → Fiscal.';
     if (/cnpj/i.test(m)) return 'CNPJ do emitente não configurado.';
     if (/ambiente fiscal/i.test(m)) return 'Ambiente fiscal não configurado. Defina em Configurações Avançadas.';

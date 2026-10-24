@@ -19,7 +19,10 @@ const { criarVendaContract } = require('../vendas/VendaContract');
 const { criarVendaContext } = require('../vendas/VendaContext');
 const VendaApplicationService = require('../vendas/VendaApplicationService');
 const { consumirReservasDaVenda } = require('../estoque/EstoqueConsumoReserva');
+const { consumirReservasPedidoNaVenda } = require('../estoque/pedidoReservaPonteNucleo');
 const { montarOptsPortaReservaPdv } = require('../estoque/EstoqueReservaService');
+const { calcularFinanceiroPedido } = require('./CalculoFinanceiroPedido');
+const PedidoFaturamentoOperacaoRepository = require('./PedidoFaturamentoOperacaoRepository');
 
 function assertModuloHabilitado() {
   if (!configService.recursoHabilitado('expedicao')) {
@@ -102,8 +105,7 @@ function montarPayloadVendaDoPedido(pedido, pagamentosBody = {}, opcoes = {}) {
     || 'dinheiro';
 
   const dadosNfe = extrairDadosNfe(pagamentosBody, pedido);
-  const totalBase = Number(pedido.total);
-  const totalAjustado = Number((totalBase + dadosNfe.frete + dadosNfe.acrescimo - (dadosNfe.desconto || 0)).toFixed(2));
+  const financeiroPedido = calcularFinanceiroPedido(pedido.itens || [], dadosNfe);
 
   // Núcleo / venda_pagamentos exigem forma_pagamento (NOT NULL).
   // UI do Faturamento pode enviar { forma, valor } — normalizar aqui.
@@ -124,8 +126,9 @@ function montarPayloadVendaDoPedido(pedido, pagamentosBody = {}, opcoes = {}) {
     pedido_id: Number(pedido.id),
     cliente_id: pedido.cliente_id || null,
     itens,
-    total: totalAjustado > 0 ? totalAjustado : totalBase,
-    desconto: Number(pedido.desconto || 0),
+    total: financeiroPedido.total,
+    desconto: financeiroPedido.desconto,
+    valor_outros: financeiroPedido.valor_outros,
     forma_pagamento: forma,
     pagamentos,
     parcelas: Math.max(1, parseInt(pagamentosBody.parcelas || 1, 10) || 1),
@@ -133,7 +136,7 @@ function montarPayloadVendaDoPedido(pedido, pagamentosBody = {}, opcoes = {}) {
     intervalo_parcelas: pagamentosBody.intervalo_parcelas || pagamentosBody.intervalo || 'mensal',
     valor_recebido: pagamentosBody.valor_recebido != null
       ? Number(pagamentosBody.valor_recebido)
-      : (totalAjustado > 0 ? totalAjustado : totalBase),
+      : financeiroPedido.total,
     // RC3.15.11 — NFC-e nunca pela Expedição; distribuição fiscal segue F12 (venda_fiscal).
     emitir_fiscal: false,
     venda_fiscal: opcoes.vendaFiscal === true,
@@ -179,14 +182,232 @@ function invocarNucleo(contract, context, reqBase) {
     try {
       const ret = VendaApplicationService.criarVendaComContexto(contract, context, req, res);
       if (ret && typeof ret.then === 'function') {
-        ret.then(() => {
-          if (!settled) finish(res.statusCode || 200, { success: true });
-        }).catch(reject);
+        ret.catch((err) => {
+          if (settled) return;
+          settled = true;
+          reject(err);
+        });
       }
     } catch (err) {
       reject(err);
     }
   });
+}
+
+function valorEmCentavos(valor) {
+  const numero = Number(valor);
+  return Number.isFinite(numero) ? Math.round(numero * 100) : null;
+}
+
+function erroVendaPedidoConflitante(message, pedidoId, vendaId, extra = {}) {
+  const err = new Error(message);
+  err.statusCode = 409;
+  err.codigo = 'FATURAMENTO_PEDIDO_CONFLITANTE';
+  err.pedido_id = pedidoId;
+  if (vendaId != null) err.venda_id = Number(vendaId);
+  Object.assign(err, extra);
+  return err;
+}
+
+async function validarVendaCandidata(pedido, vendaId, payload, dbConn) {
+  try {
+    const venda = await PedidoFaturamentoOperacaoRepository.get(dbConn, `
+    SELECT id, codigo, empresa_id, cliente_id, total, status, status_venda, pedido_id, origem
+    FROM vendas
+    WHERE id = ?
+  `, [vendaId]);
+    const itensVenda = await PedidoFaturamentoOperacaoRepository.all(dbConn, `
+    SELECT produto_id, quantidade, preco_unitario, subtotal
+    FROM vendas_itens
+    WHERE venda_id = ?
+    ORDER BY id
+  `, [vendaId]);
+
+  const conflito = () => erroVendaPedidoConflitante(
+    'A venda candidata não corresponde ao Pedido; nenhuma venda será criada ou substituída.',
+    pedido.id,
+    vendaId
+  );
+
+  if (
+    !venda
+    || Number(venda.empresa_id) !== Number(pedido.empresa_id)
+    || Number(venda.cliente_id || 0) !== Number(pedido.cliente_id || 0)
+    || String(venda.status || '').toLowerCase() !== 'concluida'
+    || String(venda.status_venda || '').toUpperCase() === 'CANCELADA'
+    || (venda.pedido_id != null && Number(venda.pedido_id) !== Number(pedido.id))
+    || valorEmCentavos(venda.total) !== valorEmCentavos(payload.total)
+    || itensVenda.length !== payload.itens.length
+  ) {
+    throw conflito();
+  }
+
+  for (let indice = 0; indice < payload.itens.length; indice += 1) {
+    const esperado = payload.itens[indice];
+    const persistido = itensVenda[indice];
+    if (
+      Number(persistido.produto_id) !== Number(esperado.produto_id)
+      || Math.round(Number(persistido.quantidade) * 1000) !== Math.round(Number(esperado.quantidade) * 1000)
+      || valorEmCentavos(persistido.preco_unitario) !== valorEmCentavos(esperado.preco_unitario)
+      || valorEmCentavos(persistido.subtotal) !== valorEmCentavos(esperado.subtotal)
+    ) {
+      throw conflito();
+    }
+  }
+
+  if (pedido.venda_id != null && Number(pedido.venda_id) !== Number(vendaId)) {
+    throw erroVendaPedidoConflitante(
+      'O Pedido já está associado a outra venda.',
+      pedido.id,
+      vendaId,
+      { pedido_venda_id: pedido.venda_id }
+    );
+  }
+
+  return venda;
+  } catch (err) {
+    err.pedido_id = Number(pedido.id);
+    err.venda_id = Number(vendaId);
+    err.venda_persistida = true;
+    throw err;
+  }
+}
+
+async function finalizarPedidoComVenda(pedidoId, vendaId, empresaId, operadorId, reqHttp, payload) {
+  const db = require('../../database');
+  let transacaoDb;
+  let iniciouTransacao = false;
+  let erroOperacao = null;
+  let pedidoAtualizado;
+
+  try {
+    transacaoDb = await db.openExclusiveConnection();
+    await PedidoFaturamentoOperacaoRepository.run(transacaoDb, 'BEGIN IMMEDIATE');
+    iniciouTransacao = true;
+
+    const pedido = await PedidoRepository.obterPorId(pedidoId, { db: transacaoDb });
+    if (!pedido || Number(pedido.empresa_id) !== Number(empresaId)) {
+      throw erroVendaPedidoConflitante(
+        'Pedido ausente ou pertencente a outra empresa durante a finalização.',
+        pedidoId,
+        vendaId
+      );
+    }
+    if (![PedidoStatus.ABERTO, PedidoStatus.AGUARDANDO_FATURAMENTO, PedidoStatus.FATURADO].includes(pedido.status)) {
+      throw erroVendaPedidoConflitante(
+        `Pedido não pode ser finalizado no status ${pedido.status}.`,
+        pedidoId,
+        vendaId
+      );
+    }
+
+    const operacao = await PedidoFaturamentoOperacaoRepository.get(transacaoDb, `
+      SELECT id, pedido_id, empresa_id, venda_id, status
+      FROM pedido_faturamento_operacoes
+      WHERE pedido_id = ?
+    `, [pedidoId]);
+    if (
+      !operacao
+      || Number(operacao.empresa_id) !== Number(empresaId)
+      || Number(operacao.venda_id) !== Number(vendaId)
+    ) {
+      throw erroVendaPedidoConflitante(
+        'A identidade persistida da operação diverge da venda a finalizar.',
+        pedidoId,
+        vendaId
+      );
+    }
+
+    const venda = await validarVendaCandidata(pedido, vendaId, payload, transacaoDb);
+    if (venda.pedido_id == null || Number(venda.pedido_id) !== Number(pedidoId)) {
+      const vinculada = await PedidoFaturamentoOperacaoRepository.run(transacaoDb, `
+        UPDATE vendas
+        SET origem = ?, pedido_id = ?
+        WHERE id = ? AND empresa_id = ?
+          AND (pedido_id IS NULL OR pedido_id = ?)
+      `, [VendaOrigin.FATURAMENTO, pedidoId, vendaId, empresaId, pedidoId]);
+      if (vinculada.changes !== 1) {
+        throw erroVendaPedidoConflitante(
+          'Não foi possível vincular a venda ao Pedido sem sobrescrever outro vínculo.',
+          pedidoId,
+          vendaId
+        );
+      }
+    } else if (venda.origem !== VendaOrigin.FATURAMENTO) {
+      await PedidoFaturamentoOperacaoRepository.run(transacaoDb, `
+        UPDATE vendas SET origem = ?
+        WHERE id = ? AND empresa_id = ? AND pedido_id = ?
+      `, [VendaOrigin.FATURAMENTO, vendaId, empresaId, pedidoId]);
+    }
+
+    await consumirReservasDaVenda(
+      vendaId,
+      montarOptsPortaReservaPdv(reqHttp, transacaoDb)
+    );
+    await consumirReservasPedidoNaVenda(pedidoId, vendaId, {
+      db: transacaoDb,
+      empresaId,
+      contexto: reqHttp,
+      usuarioId: operadorId
+    });
+
+    const marcado = await PedidoRepository.marcarFaturado(pedidoId, vendaId, operadorId, {
+      db: transacaoDb,
+      empresaId
+    });
+    if (!marcado) {
+      throw erroVendaPedidoConflitante(
+        'Venda persistida, mas o status do Pedido não pôde ser atualizado.',
+        pedidoId,
+        vendaId
+      );
+    }
+
+    const atualizacaoOperacao = await PedidoFaturamentoOperacaoRepository.run(transacaoDb, `
+      UPDATE pedido_faturamento_operacoes
+      SET status = 'FINALIZADA', updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND venda_id = ? AND empresa_id = ?
+    `, [operacao.id, vendaId, empresaId]);
+    if (atualizacaoOperacao.changes !== 1) {
+      throw erroVendaPedidoConflitante(
+        'Não foi possível registrar a finalização da operação do Pedido.',
+        pedidoId,
+        vendaId
+      );
+    }
+
+    pedidoAtualizado = await PedidoRepository.obterPorId(pedidoId, { db: transacaoDb });
+    await PedidoFaturamentoOperacaoRepository.run(transacaoDb, 'COMMIT');
+    iniciouTransacao = false;
+  } catch (err) {
+    erroOperacao = err instanceof Error ? err : new Error(String(err));
+    if (iniciouTransacao) {
+      try {
+        await PedidoFaturamentoOperacaoRepository.run(transacaoDb, 'ROLLBACK');
+      } catch (rollbackError) {
+        erroOperacao.rollbackError = rollbackError;
+      }
+    }
+  }
+
+  if (transacaoDb) {
+    try {
+      await new Promise((resolve, reject) => {
+        transacaoDb.close((err) => (err ? reject(err) : resolve()));
+      });
+    } catch (closeError) {
+      if (erroOperacao) erroOperacao.closeError = closeError;
+      else erroOperacao = closeError;
+    }
+  }
+
+  if (erroOperacao) {
+    erroOperacao.venda_id = Number(vendaId);
+    erroOperacao.venda_persistida = true;
+    erroOperacao.message = `A venda ${vendaId} já foi persistida, mas a finalização do Pedido falhou: ${erroOperacao.message}`;
+    throw erroOperacao;
+  }
+  return pedidoAtualizado;
 }
 
 async function faturarPedido(pedidoId, body = {}, reqHttp = {}) {
@@ -205,14 +426,12 @@ async function faturarPedido(pedidoId, body = {}, reqHttp = {}) {
     reqHttp.empresaId != null ? reqHttp.empresaId : reqHttp.empresa_id
   );
 
-  if (pedido.status === PedidoStatus.FATURADO) {
-    const err = new Error('Pedido já faturado.');
-    err.statusCode = 409;
-    err.venda_id = pedido.venda_id;
-    throw err;
-  }
-
-  if (![PedidoStatus.ABERTO, PedidoStatus.AGUARDANDO_FATURAMENTO].includes(pedido.status)) {
+  const statusPedidoPodeRetomar = [
+    PedidoStatus.ABERTO,
+    PedidoStatus.AGUARDANDO_FATURAMENTO,
+    PedidoStatus.FATURADO
+  ].includes(pedido.status);
+  if (!statusPedidoPodeRetomar) {
     const err = new Error(`Pedido não está aguardando faturamento (status=${pedido.status}).`);
     err.statusCode = 409;
     throw err;
@@ -228,26 +447,99 @@ async function faturarPedido(pedidoId, body = {}, reqHttp = {}) {
   const modoOperacionalFiscal = await modoOperacionalFiscalAtivo();
   const dadosNfe = extrairDadosNfe(body, pedido);
 
-  // Persistir metadados fiscais do pedido antes do núcleo (úteis na Central)
+  const payload = montarPayloadVendaDoPedido(pedido, body, {
+    vendaFiscal: modoOperacionalFiscal
+  });
+  const preparacao = await PedidoFaturamentoOperacaoRepository.prepararOperacao(
+    id,
+    empresaIdPedido,
+    payload
+  );
+  const vendaCandidataId = Number(
+    preparacao.operacao.venda_id || preparacao.vendaCandidata?.id || 0
+  ) || null;
+  const vendaCandidata = vendaCandidataId
+    ? await validarVendaCandidata(
+      pedido,
+      vendaCandidataId,
+      payload,
+      require('../../database')
+    )
+    : null;
+
+  if (pedido.status === PedidoStatus.FATURADO) {
+    if (!vendaCandidataId) {
+      throw erroVendaPedidoConflitante(
+        'Pedido consta como faturado, mas não há uma venda vinculada que possa ser recuperada.',
+        id,
+        pedido.venda_id
+      );
+    }
+
+    const linksConsistentes = Number(pedido.venda_id) === vendaCandidataId
+      && Number(vendaCandidata.pedido_id) === id;
+    const db = require('../../database');
+    let reservaAtiva;
+    try {
+      reservaAtiva = await PedidoFaturamentoOperacaoRepository.get(db, `
+        SELECT 1 AS existe
+        FROM pedido_estoque_reservas
+        WHERE pedido_id = ? AND status = 'ATIVA'
+        LIMIT 1
+      `, [id]);
+    } catch (err) {
+      err.pedido_id = id;
+      err.venda_id = vendaCandidataId;
+      err.venda_persistida = true;
+      throw err;
+    }
+    if (
+      preparacao.statusOperacaoAnterior === 'FINALIZADA'
+      || (linksConsistentes && !reservaAtiva)
+    ) {
+      const err = new Error('Pedido já faturado.');
+      err.statusCode = 409;
+      err.venda_id = vendaCandidataId;
+      throw err;
+    }
+  } else if (!vendaCandidataId && ![
+    PedidoStatus.ABERTO,
+    PedidoStatus.AGUARDANDO_FATURAMENTO
+  ].includes(pedido.status)) {
+    const err = new Error(`Pedido não está aguardando faturamento (status=${pedido.status}).`);
+    err.statusCode = 409;
+    throw err;
+  }
+
+  // Persistir metadados fiscais do pedido antes do núcleo (úteis na Central).
+  // A rejeição idempotente de um Pedido já finalizado não altera seus dados.
   try {
     await PedidoRepository.atualizarDadosFiscais(id, dadosNfe);
   } catch (metaErr) {
     console.warn('[Faturamento] metadados fiscais:', metaErr.message);
   }
 
-  const payload = montarPayloadVendaDoPedido(pedido, body, {
-    vendaFiscal: modoOperacionalFiscal
-  });
   const contract = criarVendaContract({ body: payload });
   const context = criarVendaContext(reqHttp, { origem: VendaOrigin.FATURAMENTO });
 
-  const vendaResposta = await invocarNucleo(contract, context, {
-    user: reqHttp.user,
-    operadorId: reqHttp.operadorId || reqHttp.user?.id || null,
-    terminalId: reqHttp.terminalId || null,
-    caixaId: reqHttp.caixaId || null,
-    caixaSessaoId: reqHttp.caixaSessaoId || null
-  });
+  let vendaResposta;
+  if (vendaCandidataId) {
+    vendaResposta = {
+      id: vendaCandidataId,
+      venda_id: vendaCandidataId,
+      codigo: vendaCandidata.codigo,
+      recuperada: true
+    };
+  } else {
+    vendaResposta = await invocarNucleo(contract, context, {
+      user: reqHttp.user,
+      operadorId: reqHttp.operadorId || reqHttp.user?.id || null,
+      terminalId: reqHttp.terminalId || null,
+      caixaId: reqHttp.caixaId || null,
+      caixaSessaoId: reqHttp.caixaSessaoId || null,
+      pedidoFaturamentoOperacaoId: preparacao.operacao.id
+    });
+  }
 
   const vendaId = Number(vendaResposta?.id || vendaResposta?.venda_id || 0);
   if (!Number.isInteger(vendaId) || vendaId <= 0) {
@@ -257,53 +549,15 @@ async function faturarPedido(pedidoId, body = {}, reqHttp = {}) {
     throw err;
   }
 
-  const db = require('../../database');
-  try {
-    await new Promise((resolve, reject) => {
-      db.run(
-        `UPDATE vendas SET origem = ?, pedido_id = ? WHERE id = ?`,
-        [VendaOrigin.FATURAMENTO, id, vendaId],
-        (err) => (err ? reject(err) : resolve())
-      );
-    });
-  } catch (linkErr) {
-    console.warn('[Faturamento] origem/pedido_id:', linkErr.message);
-  }
-
-  try {
-    await consumirReservasDaVenda(
-      vendaId,
-      montarOptsPortaReservaPdv(reqHttp, db)
-    );
-  } catch (resErr) {
-    console.warn('[Faturamento] consumirReservasDaVenda:', resErr.message);
-  }
-
-  // RC4.1.2 — garantia: consome reservas do pedido (idempotente se Núcleo já consumiu)
-  try {
-    const { consumirReservasPedidoNaVenda } = require('../estoque/pedidoReservaPonteNucleo');
-    await consumirReservasPedidoNaVenda(id, vendaId, {
-      db,
-      empresaId: empresaIdPedido,
-      contexto: reqHttp,
-      usuarioId: reqHttp.operadorId || reqHttp.user?.id || null
-    });
-  } catch (pedResErr) {
-    console.warn('[Faturamento] consumirReservasPedidoNaVenda:', pedResErr.message);
-  }
-
   const operadorId = reqHttp.operadorId || reqHttp.user?.id || null;
-  const ok = await PedidoRepository.marcarFaturado(id, vendaId, operadorId, {
-    empresaId: empresaIdPedido
-  });
-  if (!ok) {
-    const err = new Error('Venda gerada, mas falha ao atualizar status do pedido.');
-    err.statusCode = 500;
-    err.venda_id = vendaId;
-    throw err;
-  }
-
-  const pedidoAtualizado = await PedidoRepository.obterPorId(id);
+  const pedidoAtualizado = await finalizarPedidoComVenda(
+    id,
+    vendaId,
+    empresaIdPedido,
+    operadorId,
+    reqHttp,
+    payload
+  );
 
   return {
     success: true,
@@ -565,6 +819,15 @@ async function listarVendasFaturadas(query = {}) {
         nfe2.id DESC
       LIMIT 1
     )
+    LEFT JOIN nfce_notas nfce ON nfce.id = (
+      SELECT nfce2.id
+      FROM nfce_notas nfce2
+      WHERE nfce2.venda_id = v.id
+      ORDER BY
+        CASE WHEN LOWER(COALESCE(nfce2.status, '')) = 'autorizada' THEN 0 ELSE 1 END,
+        nfce2.id DESC
+      LIMIT 1
+    )
     ${whereSql}
   `;
 
@@ -598,7 +861,10 @@ async function listarVendasFaturadas(query = {}) {
         nfe.serie AS nfe_serie,
         nfe.status AS nfe_status,
         nfe.chave_acesso AS nfe_chave,
-        nfe.protocolo AS nfe_protocolo
+        nfe.protocolo AS nfe_protocolo,
+        nfce.id AS nfce_id,
+        nfce.numero AS nfce_numero,
+        nfce.status AS nfce_status
       ${sqlBase}
       ORDER BY v.data_venda DESC, v.id DESC
       LIMIT ? OFFSET ?

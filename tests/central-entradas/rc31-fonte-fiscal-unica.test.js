@@ -7,6 +7,9 @@
  * Executar: npm run test:central-entradas-rc31
  */
 
+
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-p04-rc31-fonte-fiscal-unica-');
 const assert = require('assert');
 const path = require('path');
 const fs = require('fs');

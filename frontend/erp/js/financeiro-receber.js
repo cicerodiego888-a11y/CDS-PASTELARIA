@@ -301,6 +301,7 @@ function renderizarDuplicataCliente(dados) {
             <thead>
               <tr>
                 <th>Parcela</th>
+                <th>Componente</th>
                 <th>Valor</th>
                 <th>Restante</th>
                 <th>Vencimento</th>
@@ -311,6 +312,7 @@ function renderizarDuplicataCliente(dados) {
               ${venda.parcelas.map(parcela => `
                 <tr>
                   <td>${parcela.parcela}</td>
+                  <td>${parcela.componente === 'outros' ? 'Outros' : 'Produtos'}</td>
                   <td>${formatarMoeda(parcela.valor_parcela)}</td>
                   <td>${formatarMoeda(parcela.valor_restante)}</td>
                   <td>${formatarData(parcela.vencimento)}</td>

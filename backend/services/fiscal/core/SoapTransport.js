@@ -21,6 +21,7 @@ const { TransportException } = require('./TransportException');
 const { isTransportEnabledFor, ENABLED_OPERATIONS } = require('./TransportEnablement');
 const { OperationType } = require('./OperationType');
 const { fiscalSoapTelemetry } = require('./FiscalSoapTelemetry');
+const { logFiscalRuntime } = require('./FiscalRuntimeLog');
 
 const DEFAULT_MAX_RETRIES = 2;
 const PLATFORM_USER_AGENT = 'CDGESTAO-FISCAL-PLATFORM/RC1';
@@ -165,7 +166,8 @@ class SoapTransport {
         status: 'invalid_request',
         tempo: elapsedMs(),
         error: error.message,
-        attempts: 1
+        attempts: 1,
+        transmissionState: 'NOT_SENT'
       });
       this.metrics.record(response);
       this._observeTelemetry(normalized, response);
@@ -182,6 +184,7 @@ class SoapTransport {
         tempo: elapsedMs(),
         error: `SoapTransport desabilitado para operação ${operacao || '(não informada)'}. Use soapClient.js.`,
         attempts: 1,
+        transmissionState: 'NOT_SENT',
         warnings: [
           Object.freeze({
             code: 'TRANSPORT_DISABLED',
@@ -243,33 +246,76 @@ class SoapTransport {
     const maxTries = this.retryPolicy.getMaxTries();
     let attempts = 0;
     let lastError = null;
+    const metadata = {
+      ...(request.context?.metadata || {}),
+      ...(request.metadata || {})
+    };
+    const retryOnlyBeforeTransmission = metadata.retryOnlyBeforeTransmission === true;
+    const correlationId = metadata.correlationId || null;
+    const operacao = request.operacao || metadata.operacao || 'SOAP';
 
     while (attempts < maxTries) {
       attempts += 1;
+      const attemptStarted = process.hrtime.bigint();
       try {
         const httpResult = await this._executeHttp(request);
+        const attemptDurationMs = Number(process.hrtime.bigint() - attemptStarted) / 1e6;
         const response = TransportResponse.success({
           statusCode: httpResult.statusCode,
           status: 'ok',
           body: httpResult.body,
           headers: httpResult.headers || {},
           tempo: elapsedMs(),
-          attempts
+          attempts,
+          transmissionState: 'RESPONSE_RECEIVED'
         });
+        if (retryOnlyBeforeTransmission) {
+          logFiscalRuntime(operacao, {
+            correlationId,
+            etapa: 'transporte_tentativa',
+            tentativa: attempts,
+            duracaoMs: attemptDurationMs,
+            resultado: 'resposta_recebida',
+            transmissionState: response.transmissionState
+          });
+        }
         this.metrics.record(response, { retries: Math.max(0, attempts - 1) });
         return response;
       } catch (error) {
         lastError = error;
+        const transmissionState = transmissionStateForError(error);
         const isTimeout = error.code === 'ECONNABORTED'
           || error.code === 'TIMEOUT'
           || /timeout/i.test(error.message || '');
 
         const canRetry = this.retryPolicy.shouldRetry(attempts)
-          && (isTimeout || error.retryable);
+          && (retryOnlyBeforeTransmission
+            ? transmissionState === 'NOT_SENT'
+            : (isTimeout || error.retryable));
+        const attemptDurationMs = Number(process.hrtime.bigint() - attemptStarted) / 1e6;
+        if (retryOnlyBeforeTransmission) {
+          logFiscalRuntime(operacao, {
+            correlationId,
+            etapa: 'transporte_tentativa',
+            tentativa: attempts,
+            duracaoMs: attemptDurationMs,
+            resultado: canRetry ? 'falha_pre_envio' : 'falha_sem_reenvio',
+            transmissionState,
+            codigoErro: error.code || null
+          });
+        }
 
         if (canRetry) {
           const delayMs = this.retryPolicy.getDelayMs(attempts);
           if (delayMs > 0 && !this._skipBackoff) {
+            if (retryOnlyBeforeTransmission) {
+              logFiscalRuntime(operacao, {
+                correlationId,
+                etapa: 'transporte_backoff',
+                tentativa: attempts,
+                duracaoMs: delayMs
+              });
+            }
             await sleep(delayMs);
           }
           continue;
@@ -289,7 +335,8 @@ class SoapTransport {
       body: lastError?.body || null,
       tempo: elapsedMs(),
       error: lastError?.message || 'Falha no transporte SOAP.',
-      attempts
+      attempts,
+      transmissionState: transmissionStateForError(lastError)
     });
     this.metrics.record(response, {
       retries: Math.max(0, attempts - 1),
@@ -340,25 +387,30 @@ class SoapTransport {
    */
   async _defaultAxiosPost({ url, envelope, headers, timeout, certificado, senha }) {
     let httpsAgent;
-    if (typeof this._createHttpsAgent === 'function') {
-      httpsAgent = this._createHttpsAgent({ url, certificado, senha, tls: this.tlsPolicy });
-    } else {
-      const { carregarCertificadoPfx } = require('../certificateService');
-      if (!certificado) {
-        const err = new Error('Certificado não configurado para SoapTransport.');
-        err.code = 'CERT_MISSING';
-        throw err;
+    try {
+      if (typeof this._createHttpsAgent === 'function') {
+        httpsAgent = this._createHttpsAgent({ url, certificado, senha, tls: this.tlsPolicy });
+      } else {
+        const { carregarCertificadoPfx } = require('../certificateService');
+        if (!certificado) {
+          const err = new Error('Certificado não configurado para SoapTransport.');
+          err.code = 'CERT_MISSING';
+          throw err;
+        }
+        const cert = carregarCertificadoPfx(certificado, senha);
+        const host = new URL(url).hostname;
+        httpsAgent = new https.Agent({
+          key: cert.privateKeyPem,
+          cert: cert.certBundlePem || cert.certPem,
+          rejectUnauthorized: this.tlsPolicy.rejectUnauthorized,
+          minVersion: this.tlsPolicy.minVersion,
+          keepAlive: this.tlsPolicy.keepAlive,
+          servername: host
+        });
       }
-      const cert = carregarCertificadoPfx(certificado, senha);
-      const host = new URL(url).hostname;
-      httpsAgent = new https.Agent({
-        key: cert.privateKeyPem,
-        cert: cert.certBundlePem || cert.certPem,
-        rejectUnauthorized: this.tlsPolicy.rejectUnauthorized,
-        minVersion: this.tlsPolicy.minVersion,
-        keepAlive: this.tlsPolicy.keepAlive,
-        servername: host
-      });
+    } catch (error) {
+      error.transmissionState = 'NOT_SENT';
+      throw error;
     }
 
     try {
@@ -386,6 +438,11 @@ class SoapTransport {
       wrapped.code = error.code || 'NETWORK_ERROR';
       wrapped.statusCode = statusCode;
       wrapped.body = rawBody;
+      wrapped.transmissionState = error.response
+        ? 'RESPONSE_RECEIVED'
+        : definitelyPreSendSocketError(error)
+          ? 'NOT_SENT'
+          : 'UNKNOWN';
       throw wrapped;
     }
   }
@@ -425,9 +482,31 @@ class SoapTransport {
   }
 }
 
+function transmissionStateForError(error) {
+  if (!error) return 'UNKNOWN';
+  if (error.response || error.transmissionState === 'RESPONSE_RECEIVED') {
+    return 'RESPONSE_RECEIVED';
+  }
+  if (error.transmissionState === 'NOT_SENT') return 'NOT_SENT';
+  return 'UNKNOWN';
+}
+
+function definitelyPreSendSocketError(error) {
+  if (!error || error.response) return false;
+  const definitelyPreSendCodes = new Set([
+    'ECONNREFUSED',
+    'ENOTFOUND',
+    'EAI_AGAIN',
+    'ENETUNREACH',
+    'EHOSTUNREACH'
+  ]);
+  return definitelyPreSendCodes.has(error.code);
+}
+
 module.exports = {
   SoapTransport,
   formatSoapHttpError,
+  transmissionStateForError,
   DEFAULT_TIMEOUT_MS,
   DEFAULT_MAX_RETRIES,
   PLATFORM_USER_AGENT

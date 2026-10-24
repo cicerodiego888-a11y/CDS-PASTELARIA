@@ -85,7 +85,9 @@ async function assertRejects(promise, codeOrMsg) {
 }
 
 function extrairPostCreate(src) {
-  const inicio = src.indexOf("router.post('/', (req, res) => {");
+  const declaracao = /router\.post\('\/'(?:,\s*[A-Za-z_$][\w$]*)?\s*,\s*\(req,\s*res\)\s*=>\s*\{/;
+  const match = declaracao.exec(src);
+  const inicio = match ? match.index : -1;
   const fim = src.indexOf("router.get('/vencimentos/estatisticas'");
   assert.ok(inicio >= 0 && fim > inicio, 'POST create produto não encontrado');
   return src.slice(inicio, fim);

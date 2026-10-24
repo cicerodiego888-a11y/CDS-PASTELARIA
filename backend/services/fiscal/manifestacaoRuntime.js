@@ -31,6 +31,11 @@ const {
   ACTION_EVENTO
 } = require('./manifestacaoLegado');
 const { ManifestacaoMetrics } = require('./manifestacaoMetrics');
+const {
+  exigirAutorizacaoTransmissao,
+  tipoConsultaManifestacao,
+  resultadoManifestacaoNaoExecutada
+} = require('./autorizacaoTransmissaoSefaz');
 
 const OPERACOES_MANIFESTACAO = Object.freeze([
   OperationType.MANIFESTACAO_CIENCIA,
@@ -88,6 +93,42 @@ function createManifestacaoRuntime(options = {}) {
         ambiente,
         uf,
         error: 'operacao de manifestação inválida. Use MANIFESTACAO_CIENCIA|CONFIRMACAO|DESCONHECIMENTO|NAO_REALIZADA.',
+        fallbackUtilizado: false,
+        tempoResolverMs: 0,
+        tempoTransporteMs: 0,
+        tempoXmlMs: 0,
+        tempoSoapMs: 0,
+        tempoPlataformaMs: 0,
+        tempoLegadoMs: 0,
+        tempoTotalMs: nowMs(),
+        retries: 0
+      });
+      metrics.record(fail);
+      return fail;
+    }
+
+    const tipoConsulta = tipoConsultaManifestacao(operacao);
+    const empresaId = input.empresaId
+      || (input.contextoCentral && input.contextoCentral.empresaId)
+      || null;
+    try {
+      exigirAutorizacaoTransmissao({
+        autorizacao: input.autorizacaoTransmissaoSefaz,
+        empresaId,
+        tipoConsulta
+      });
+    } catch (err) {
+      const fail = buildRuntimeResult({
+        ...resultadoManifestacaoNaoExecutada({
+          codigo: err.codigo || err.code,
+          mensagem: err.message
+        }),
+        source: null,
+        operacao,
+        tpEvento: getManifestacaoEventoCode(operacao),
+        modelo: ModelType.NFE,
+        ambiente,
+        uf,
         fallbackUtilizado: false,
         tempoResolverMs: 0,
         tempoTransporteMs: 0,
@@ -230,7 +271,9 @@ function createManifestacaoRuntime(options = {}) {
       certificadoPath: input.certificadoPath,
       certificadoSenha: input.certificadoSenha,
       url: legadoUrl,
-      httpClient: input.legadoHttpClient || null
+      httpClient: input.legadoHttpClient || null,
+      empresaId,
+      autorizacaoTransmissaoSefaz: input.autorizacaoTransmissaoSefaz
     });
     tempoLegadoMs = Number(process.hrtime.bigint() - legadoStarted) / 1e6;
 

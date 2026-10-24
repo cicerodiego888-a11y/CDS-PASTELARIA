@@ -10,6 +10,7 @@
     mis: { grupo: 'Painel', titulo: 'MIS', subtitulo: 'Visão gerencial da empresa' },
     monitoring: { grupo: 'Painel', titulo: 'Central de Monitoramento', subtitulo: 'Indicadores oficiais via CDS Monitoring Engine' },
     produtos: { grupo: 'Suprimentos', titulo: 'Produtos', subtitulo: 'Cadastro e estoque de produtos' },
+    insumos: { grupo: 'Suprimentos', titulo: 'Insumos', subtitulo: 'Cadastro, custo e estoque de insumos' },
     categorias: { grupo: 'Suprimentos', titulo: 'Categorias', subtitulo: 'Organização do catálogo' },
     compras: { grupo: 'Suprimentos', titulo: 'Compras', subtitulo: 'Lançamento e acompanhamento de compras' },
     'central-entradas': { grupo: 'Suprimentos', titulo: 'Central de Entradas', subtitulo: 'Documentos fiscais recebidos' },

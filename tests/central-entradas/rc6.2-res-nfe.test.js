@@ -5,6 +5,9 @@
  * Executar: npm run test:central-entradas-rc6.2
  */
 
+
+const { isolarBancoTeste } = require('./helpers/isolarBancoTeste');
+const isolamento = isolarBancoTeste('ce-p04-rc6-2-res-nfe-');
 const assert = require('assert');
 const { DocumentoFiscalStatus, LABELS_UI } = require('../../backend/motores/central-entradas/core/DocumentoFiscalStatus');
 const {

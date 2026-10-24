@@ -719,10 +719,11 @@ function inicializarMotorConversaoUnidadesCadastro() {
 
 // Carrega página de produtos
 function loadProdutos() {
+    window.CDS_PRODUTOS_MODO_LISTAGEM = 'COMERCIAL';
     const modoFiscal = typeof modoFiscalQueryParam === 'function' ? modoFiscalQueryParam() : '0';
 
     return $.ajax({
-        url: `${API_URL}/produtos?modo_fiscal=${modoFiscal}`,
+        url: `${API_URL}/produtos?modo_fiscal=${modoFiscal}&tipo_operacional=COMERCIAL`,
         method: 'GET',
         success: function (produtos) {
             window.produtosList = produtos || [];
@@ -734,6 +735,42 @@ function loadProdutos() {
     });
 }
 window.loadProdutos = loadProdutos;
+
+function loadInsumos() {
+    window.CDS_PRODUTOS_MODO_LISTAGEM = 'INSUMO';
+    return $.ajax({
+        url: `${API_URL}/produtos?tipo_operacional=INSUMO`,
+        method: 'GET',
+        success: function (insumos) {
+            window.produtosList = insumos || [];
+            renderProdutos(window.produtosList);
+        },
+        error: function () {
+            $('#page-content').html('<div class="alert alert-danger">Erro ao carregar insumos.</div>');
+        }
+    });
+}
+window.loadInsumos = loadInsumos;
+
+async function alterarStatusInsumo(id, ativo) {
+    try {
+        const response = await fetch(`${API_URL}/produtos/${id}/ativacao`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${localStorage.getItem('token') || ''}`
+            },
+            body: JSON.stringify({ ativo: Number(ativo) })
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || 'Falha ao atualizar situação do insumo.');
+        showNotification(`Insumo ${Number(ativo) === 1 ? 'ativado' : 'inativado'} com sucesso.`, 'success');
+        return loadInsumos();
+    } catch (error) {
+        showNotification(error.message || 'Falha ao atualizar situação do insumo.', 'danger');
+    }
+}
+window.alterarStatusInsumo = alterarStatusInsumo;
 
 function obterQuantidadeEstoqueProduto(p) {
     if (typeof obterEstoqueDisponivelProduto === 'function') {
@@ -1682,7 +1719,12 @@ function setIndicadorBuscaProdutos(ativo) {
 function enriquecerHitsBuscaProdutos(itens) {
     const cache = window.produtosCache || window.produtosList || [];
     const byId = new Map(cache.map((p) => [Number(p.id), p]));
-    return (itens || []).map((hit) => {
+    const tipoEsperado = window.CDS_PRODUTOS_MODO_LISTAGEM || 'COMERCIAL';
+    return (itens || []).filter((hit) => {
+        const completo = byId.get(Number(hit.id));
+        const tipo = String(hit.tipo_operacional || completo?.tipo_operacional || 'COMERCIAL').toUpperCase();
+        return tipo === tipoEsperado;
+    }).map((hit) => {
         const full = byId.get(Number(hit.id));
         if (full) {
             return { ...full, mib_score: hit.mib_score, _fonteBusca: hit._fonte || 'mib' };
@@ -1798,6 +1840,8 @@ function renderProdutoRow(p) {
     const status = obterStatusVisualProduto(p);
     const classes = classesLinhaStatusProduto(status);
     const badges = montarBadgesStatusProduto(p);
+    const modoInsumos = window.CDS_PRODUTOS_MODO_LISTAGEM === 'INSUMO';
+    const ativo = Number(p.ativo ?? 1) === 1;
 
     return `
         <tr class="${classes.row}">
@@ -1806,7 +1850,9 @@ function renderProdutoRow(p) {
             <td>${escapeHtml(p.categoria || p.categoria_nome || '')}</td>
             <td>${escapeHtml(p.unidade || '')}</td>
             <td>${formatCurrency(p.preco_compra || 0)}</td>
-            <td>${formatCurrency(p.preco_venda || 0)}</td>
+            <td>${modoInsumos
+                ? `<span class="badge ${ativo ? 'bg-success' : 'bg-secondary'}">${ativo ? 'Ativo' : 'Inativo'}</span>`
+                : formatCurrency(p.preco_venda || 0)}</td>
             <td class="${classes.estoque}">
                 ${formatarColunaEstoqueLista(p)}
                 ${badges}
@@ -1818,6 +1864,13 @@ function renderProdutoRow(p) {
                 <button class="btn btn-sm btn-warning" onclick="editProduto(${p.id})">
                     <i class="fas fa-edit"></i>
                 </button>
+                ${modoInsumos ? `
+                <button class="btn btn-sm ${ativo ? 'btn-outline-secondary' : 'btn-outline-success'}"
+                    onclick="alterarStatusInsumo(${p.id}, ${ativo ? 0 : 1})"
+                    title="${ativo ? 'Inativar' : 'Ativar'} insumo">
+                    <i class="fas ${ativo ? 'fa-ban' : 'fa-check'}"></i>
+                </button>
+                ` : ''}
                 ${podeAjustarEstoque() ? `
                 <button class="btn btn-sm btn-success" onclick="abrirModalAjustarEstoque(${p.id})" title="Ajustar Estoque">
                     <i class="fas fa-boxes"></i>
@@ -2163,12 +2216,13 @@ function renderProdutos(produtos) {
     window.produtosCache = produtos;
     window.produtosOriginais = produtos;
     resetarEstadoArvoreProdutos();
+    const modoInsumos = window.CDS_PRODUTOS_MODO_LISTAGEM === 'INSUMO';
     const shell = (typeof CdsPageShell !== 'undefined' && CdsPageShell.renderHeader)
-        ? CdsPageShell.renderHeader({ page: 'produtos' })
+        ? CdsPageShell.renderHeader({ page: modoInsumos ? 'insumos' : 'produtos' })
         : '';
     const html = `
         ${shell}
-        <div class="row mb-3 g-3">
+        ${modoInsumos ? '' : `<div class="row mb-3 g-3">
             <div class="col-md-6 col-lg-4">
                 <div class="card mb-0 border-danger h-100" id="cardEstoqueBaixoProdutos">
                     <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2 bg-danger bg-opacity-10">
@@ -2212,19 +2266,20 @@ function renderProdutos(produtos) {
                     </div>
                 </div>
             </div>
-        </div>
+        </div>`}
         <div class="card cds-prod-lista" id="cdsProdLista" data-cds-prod-visualizacao="default">
             <div class="card-header cds-prod-lista-header">
                 <div class="cds-prod-lista-header__top">
                     <div class="cds-prod-lista-header__title">
-                        <i class="fas fa-box"></i> Lista de Produtos
+                        <i class="fas ${modoInsumos ? 'fa-boxes-stacked' : 'fa-box'}"></i>
+                        ${modoInsumos ? 'Lista de Insumos' : 'Lista de Produtos'}
                     </div>
                     <div class="cds-prod-lista-header__actions">
-                        <button type="button" class="btn btn-secondary btn-sm" onclick="gerarRelatorioEstoque()">
+                        ${modoInsumos ? '' : `<button type="button" class="btn btn-secondary btn-sm" onclick="gerarRelatorioEstoque()">
                             <i class="fas fa-list"></i> Relatório de estoque
-                        </button>
+                        </button>`}
                         <button type="button" class="btn btn-primary btn-sm" onclick="showProdutoModal()">
-                            <i class="fas fa-plus"></i> Novo Produto
+                            <i class="fas fa-plus"></i> ${modoInsumos ? 'Novo Insumo' : 'Novo Produto'}
                         </button>
                     </div>
                 </div>
@@ -2274,8 +2329,8 @@ function renderProdutos(produtos) {
                                 <th>Código</th>
                                 <th>Categoria</th>
                                 <th>Unidade</th>
-                                <th>Preço Compra</th>
-                                <th>Preço Venda</th>
+                                <th>${modoInsumos ? 'Custo / Compra' : 'Preço Compra'}</th>
+                                <th>${modoInsumos ? 'Situação' : 'Preço Venda'}</th>
                                 <th>${tituloColunaEstoqueLista()}</th>
                                 <th>Ações</th>
                             </tr>
@@ -2300,10 +2355,12 @@ function renderProdutos(produtos) {
     inicializarZoomListagemProdutos();
 
     carregarCategoriasProdutos();
-    inicializarCardEstoqueBaixo();
-    inicializarModalVencimentosProdutos();
-    carregarVencimentosProdutos();
-    carregarDashboardPromocoes();
+    if (!modoInsumos) {
+        inicializarCardEstoqueBaixo();
+        inicializarModalVencimentosProdutos();
+        carregarVencimentosProdutos();
+        carregarDashboardPromocoes();
+    }
 }
 
 /** Sprint UX-01 — densidade visual da listagem (somente CSS + localStorage). */
@@ -2403,6 +2460,8 @@ function unidadesFichaTecnicaOpcoes(selecionada) {
 
 function linhaFichaTecnicaHtml(item, insumos) {
     const insumoId = String(item.insumo_id || '');
+    const classificacao = String(item.classificacao_comercial || 'OBRIGATORIO_OCULTO').toUpperCase();
+    const adicional = classificacao === 'OPCIONAL_COM_ADICIONAL';
     const opcoes = (insumos || []).map((i) => (
         `<option value="${i.id}" ${String(i.id) === insumoId ? 'selected' : ''}>${escapeHtml(i.nome || ('#' + i.id))}</option>`
     )).join('');
@@ -2416,6 +2475,14 @@ function linhaFichaTecnicaHtml(item, insumos) {
             </td>
             <td><input type="number" min="0.0001" step="0.0001" class="form-control form-control-sm ficha-qtd" value="${item.quantidade != null ? item.quantidade : ''}"></td>
             <td><select class="form-control form-control-sm ficha-un">${unidadesFichaTecnicaOpcoes(item.unidade || 'UN')}</select></td>
+            <td>
+                <select class="form-control form-control-sm ficha-classificacao">
+                    <option value="OBRIGATORIO_OCULTO" ${classificacao === 'OBRIGATORIO_OCULTO' ? 'selected' : ''}>Obrigatório (não exibir)</option>
+                    <option value="OPCIONAL" ${classificacao === 'OPCIONAL' ? 'selected' : ''}>Opcional</option>
+                    <option value="OPCIONAL_COM_ADICIONAL" ${adicional ? 'selected' : ''}>Opcional com adicional</option>
+                </select>
+            </td>
+            <td><input type="number" min="0.01" step="0.01" class="form-control form-control-sm ficha-adicional" value="${adicional ? Number(item.preco_adicional || 0) : ''}" ${adicional ? '' : 'disabled'}></td>
             <td><button type="button" class="btn btn-outline-danger btn-sm btn-remover-ficha-item" title="Remover">×</button></td>
         </tr>
     `;
@@ -2427,7 +2494,11 @@ function coletarFichaTecnicaItens() {
         const insumo_id = Number($(this).find('.ficha-insumo').val());
         const quantidade = Number($(this).find('.ficha-qtd').val());
         const unidade = ($(this).find('.ficha-un').val() || 'UN').trim();
-        if (insumo_id) itens.push({ insumo_id, quantidade, unidade });
+        const classificacao_comercial = $(this).find('.ficha-classificacao').val() || 'OBRIGATORIO_OCULTO';
+        const preco_adicional = classificacao_comercial === 'OPCIONAL_COM_ADICIONAL'
+            ? Number($(this).find('.ficha-adicional').val())
+            : 0;
+        if (insumo_id) itens.push({ insumo_id, quantidade, unidade, classificacao_comercial, preco_adicional });
     });
     return itens;
 }
@@ -2435,12 +2506,27 @@ function coletarFichaTecnicaItens() {
 function sincronizarVisibilidadeFichaTecnica() {
     const comercial = ($('#tipo_operacional').val() || 'COMERCIAL') === 'COMERCIAL';
     $('#cardFichaTecnicaProduto').toggle(comercial);
+    const utilizaFicha = $('#utiliza_ficha_tecnica').is(':checked');
+    $('#areaComponentesFichaTecnica').toggle(comercial && utilizaFicha);
+    $('#permite_personalizacao_ingredientes').prop('disabled', !comercial || !utilizaFicha);
+    $('#btnAddFichaTecnicaItem').prop('disabled', !comercial || !utilizaFicha);
 }
 
 function inicializarFichaTecnicaCadastro(produto, isEdit) {
     const token = localStorage.getItem('token') || '';
+    const $modal = $('#produtoModal');
+    $modal.data('fichaTecnicaCarregada', !isEdit || !produto || !produto.id);
+    $modal.data('fichaTecnicaAtiva', false);
+    $('#utiliza_ficha_tecnica')
+        .prop('checked', Boolean(isEdit && produto && Number(produto.utiliza_ficha_tecnica) === 1));
     sincronizarVisibilidadeFichaTecnica();
     $('#tipo_operacional').off('change.ficha03').on('change.ficha03', sincronizarVisibilidadeFichaTecnica);
+    $('#utiliza_ficha_tecnica').off('change.ficha03').on('change.ficha03', function () {
+        if (!$(this).is(':checked')) {
+            $('#permite_personalizacao_ingredientes').prop('checked', false);
+        }
+        sincronizarVisibilidadeFichaTecnica();
+    });
     $('#btnAddFichaTecnicaItem').off('click.ficha03').on('click.ficha03', function () {
         const insumos = $('#produtoModal').data('insumosFicha') || [];
         $('#fichaTecnicaItensBody').append(linhaFichaTecnicaHtml({}, insumos));
@@ -2448,24 +2534,50 @@ function inicializarFichaTecnicaCadastro(produto, isEdit) {
     $('#fichaTecnicaItensBody').off('click.ficha03').on('click.ficha03', '.btn-remover-ficha-item', function () {
         $(this).closest('tr').remove();
     });
+    $('#fichaTecnicaItensBody').off('change.ficha03', '.ficha-classificacao')
+        .on('change.ficha03', '.ficha-classificacao', function () {
+            const adicional = $(this).val() === 'OPCIONAL_COM_ADICIONAL';
+            const $campo = $(this).closest('tr').find('.ficha-adicional');
+            $campo.prop('disabled', !adicional);
+            if (!adicional) $campo.val('');
+        });
     fetch(`${API_URL}/produtos/catalogo/insumos`, {
         headers: { Authorization: `Bearer ${token}` }
     })
-        .then((r) => (r.ok ? r.json() : []))
-        .then((insumos) => {
-            $('#produtoModal').data('insumosFicha', insumos || []);
+        .then(async (r) => {
+            const insumos = await r.json().catch(() => null);
+            if (!r.ok) throw new Error((insumos && (insumos.error || insumos.mensagem)) || `Falha ao carregar insumos (HTTP ${r.status}).`);
+            if (!Array.isArray(insumos)) throw new Error('Resposta inválida ao carregar insumos.');
+            $('#produtoModal').data('insumosFicha', insumos);
             if (!isEdit || !produto || !produto.id) return null;
             return fetch(`${API_URL}/produtos/${produto.id}/ficha-tecnica`, {
                 headers: { Authorization: `Bearer ${token}` }
-            }).then((r) => (r.ok ? r.json() : { itens: [] }))
-                .then((ficha) => {
+            }).then(async (resposta) => {
+                    const ficha = await resposta.json().catch(() => null);
+                    if (!resposta.ok) {
+                        throw new Error((ficha && (ficha.error || ficha.mensagem))
+                            || `Falha ao carregar ficha técnica (HTTP ${resposta.status}).`);
+                    }
+                    if (!ficha || !Array.isArray(ficha.itens)) {
+                        throw new Error('Resposta inválida ao carregar ficha técnica.');
+                    }
                     $('#fichaTecnicaItensBody').empty();
-                    (ficha.itens || []).forEach((item) => {
-                        $('#fichaTecnicaItensBody').append(linhaFichaTecnicaHtml(item, insumos || []));
+                    ficha.itens.forEach((item) => {
+                        $('#fichaTecnicaItensBody').append(linhaFichaTecnicaHtml(item, insumos));
                     });
+                    const utilizaFicha = Number(ficha.utiliza_ficha_tecnica) === 1;
+                    $('#utiliza_ficha_tecnica').prop('checked', utilizaFicha);
+                    $('#permite_personalizacao_ingredientes')
+                        .prop('checked', utilizaFicha && Number(ficha.permite_personalizacao_ingredientes) === 1);
+                    $modal.data('fichaTecnicaAtiva', Number(ficha.ativo) === 1);
+                    $modal.data('fichaTecnicaCarregada', true);
+                    sincronizarVisibilidadeFichaTecnica();
                 });
         })
-        .catch(() => {});
+        .catch((err) => {
+            $modal.data('fichaTecnicaCarregada', false);
+            showNotification(`Não foi possível carregar a ficha técnica: ${err.message}`, 'danger');
+        });
 }
 
 function persistirFichaTecnicaCadastro(produtoSalvo, done) {
@@ -2473,13 +2585,30 @@ function persistirFichaTecnicaCadastro(produtoSalvo, done) {
     const tipo = $('#tipo_operacional').val();
     const id = produtoSalvo && produtoSalvo.id;
     if (!id || tipo === 'INSUMO') return cb();
+    const $modal = $('#produtoModal');
+    if (!$modal.data('fichaTecnicaCarregada')) {
+        const err = new Error('Não foi possível carregar a ficha técnica; ela não foi alterada.');
+        showNotification(err.message, 'danger');
+        return cb(err);
+    }
+    if (!$('#utiliza_ficha_tecnica').is(':checked')) return cb();
+    const itens = coletarFichaTecnicaItens();
+    if (itens.length === 0) {
+        const err = new Error('Cadastre ao menos um componente válido para utilizar a ficha técnica.');
+        showNotification(err.message, 'warning');
+        return cb(err);
+    }
     $.ajax({
         url: `${API_URL}/produtos/${id}/ficha-tecnica`,
         method: 'PUT',
         contentType: 'application/json',
         headers: { Authorization: 'Bearer ' + (localStorage.getItem('token') || '') },
-        data: JSON.stringify({ ativo: 1, itens: coletarFichaTecnicaItens() }),
-        success: function () { cb(); },
+        data: JSON.stringify({ ativo: itens.length > 0 ? 1 : 0, itens }),
+        success: function () {
+            $modal.data('fichaTecnicaAtiva', itens.length > 0);
+            $modal.data('fichaTecnicaCarregada', true);
+            cb();
+        },
         error: function (xhr) {
             const msg = (xhr.responseJSON && xhr.responseJSON.error) || 'Erro ao salvar ficha técnica.';
             showNotification(msg, 'danger');
@@ -2493,7 +2622,24 @@ function showProdutoModal(produto = null, opcoes = {}) {
     const origemCadastro = opcoes && typeof opcoes === 'object' ? (opcoes.origem || null) : null;
     const preservarOutrosModais = origemCadastro === 'COMPRA' || opcoes?.preservarOutrosModais === true;
     const isEdit = produto !== null;
-    const title = isEdit ? 'Editar Produto' : 'Novo Produto';
+    const tipoOperacionalSolicitado = String(opcoes?.tipo_operacional || '').trim().toUpperCase();
+    if (!isEdit && tipoOperacionalSolicitado && !['COMERCIAL', 'INSUMO'].includes(tipoOperacionalSolicitado)) {
+        showNotification('Tipo operacional inválido. Selecione Produto Comercial ou Insumo.', 'warning');
+        return;
+    }
+    const paginaProduto = window.CDS_ERP_ACTIVE_PAGE;
+    const tipoOperacionalForcado = !isEdit && tipoOperacionalSolicitado
+        ? tipoOperacionalSolicitado
+        : (paginaProduto === 'insumos'
+            ? 'INSUMO'
+            : (paginaProduto === 'produtos' ? 'COMERCIAL' : null));
+    const tipoOperacionalInicial = tipoOperacionalForcado
+        || (isEdit
+            ? (String(produto.tipo_operacional || 'COMERCIAL').trim().toUpperCase() === 'INSUMO' ? 'INSUMO' : 'COMERCIAL')
+            : 'COMERCIAL');
+    const exibirCamposVolumeComercial = tipoOperacionalForcado !== 'INSUMO';
+    const entidade = tipoOperacionalForcado === 'INSUMO' ? 'Insumo' : 'Produto';
+    const title = `${isEdit ? 'Editar' : 'Novo'} ${entidade}`;
     const lucro = (() => {
         if (!isEdit || !produto) return '';
         if (produto.lucro_percentual !== undefined && produto.lucro_percentual !== null && produto.lucro_percentual !== '') {
@@ -2576,13 +2722,22 @@ function showProdutoModal(produto = null, opcoes = {}) {
                                                 <input type="text" class="form-control" id="codigo_barras" value="${isEdit ? escapeHtml(produto.codigo_barras || '') : ''}">
                                             </div>
                                             <div class="col-12">
-                                                <label for="nome" class="form-label">Nome do Produto *</label>
+                                                <label for="nome" class="form-label">Nome principal *</label>
                                                 <input
                                                     type="text"
                                                     class="form-control cds-prod-cadastro__nome"
                                                     id="nome"
                                                     required
                                                     value="${isEdit ? escapeHtml(produto.nome || '') : ''}"
+                                                >
+                                            </div>
+                                            <div class="col-12" data-campo-produto-comercial ${tipoOperacionalInicial === 'INSUMO' ? 'hidden' : ''}>
+                                                <label for="nome_comercial" class="form-label">Nome comercial</label>
+                                                <input
+                                                    type="text"
+                                                    class="form-control"
+                                                    id="nome_comercial"
+                                                    value="${isEdit ? escapeHtml(produto.nome_comercial || '') : ''}"
                                                 >
                                             </div>
                                         </div>
@@ -2599,8 +2754,8 @@ function showProdutoModal(produto = null, opcoes = {}) {
                                             <div class="col-md-6">
                                                 <label for="tipo_operacional" class="form-label">Tipo operacional</label>
                                                 <select class="form-control" id="tipo_operacional">
-                                                    <option value="COMERCIAL" ${!isEdit || String(produto.tipo_operacional || 'COMERCIAL').toUpperCase() !== 'INSUMO' ? 'selected' : ''}>Produto comercial</option>
-                                                    <option value="INSUMO" ${isEdit && String(produto.tipo_operacional || '').toUpperCase() === 'INSUMO' ? 'selected' : ''}>Insumo</option>
+                                                    <option value="COMERCIAL" ${tipoOperacionalInicial === 'COMERCIAL' ? 'selected' : ''}>Produto comercial</option>
+                                                    <option value="INSUMO" ${tipoOperacionalInicial === 'INSUMO' ? 'selected' : ''}>Insumo</option>
                                                 </select>
                                                 <small class="text-muted">Insumo não aparece no PDV. A ficha técnica vale só para produto comercial.</small>
                                             </div>
@@ -2662,6 +2817,45 @@ function showProdutoModal(produto = null, opcoes = {}) {
                                                     Selecione uma unidade fracionável (KG, MT, LT, M², M³, etc.).
                                                 </small>
                                             </div>
+                                            ${exibirCamposVolumeComercial ? `
+                                            <div class="col-12" data-campo-volume-comercial>
+                                                <div class="form-check mb-2">
+                                                    <input class="form-check-input" type="checkbox" id="utiliza_volume"
+                                                        ${isEdit && Number(produto.utiliza_volume) === 1 ? 'checked' : ''}>
+                                                    <label class="form-check-label" for="utiliza_volume">Utiliza volume?</label>
+                                                </div>
+                                                <div class="row g-3${isEdit && Number(produto.utiliza_volume) === 1 ? '' : ' d-none'}" id="campos_volume_comercial">
+                                                    <div class="col-md-6">
+                                                        <label for="volume_valor" class="form-label">Volume</label>
+                                                        <input type="number" class="form-control" id="volume_valor" min="0.000001" step="any"
+                                                            value="${isEdit && Number(produto.utiliza_volume) === 1 ? escapeHtml(String(produto.volume_valor ?? '')) : ''}">
+                                                    </div>
+                                                    <div class="col-md-6">
+                                                        <label for="volume_unidade" class="form-label">Unidade do volume</label>
+                                                        <div class="input-group">
+                                                            <select class="form-control" id="volume_unidade">
+                                                                <option value="">Carregando unidades...</option>
+                                                            </select>
+                                                            <button type="button" class="btn btn-outline-success" id="btnNovaUnidadeVolume" title="Cadastrar unidade de volume" aria-label="Cadastrar unidade de volume">+</button>
+                                                        </div>
+                                                        <div id="formNovaUnidadeVolume" class="border rounded p-3 mt-2 d-none">
+                                                            <div class="mb-2">
+                                                                <label for="nomeNovaUnidadeVolume" class="form-label">Nome da unidade</label>
+                                                                <input type="text" class="form-control" id="nomeNovaUnidadeVolume" maxlength="80">
+                                                            </div>
+                                                            <div class="mb-2">
+                                                                <label for="siglaNovaUnidadeVolume" class="form-label">Sigla</label>
+                                                                <input type="text" class="form-control" id="siglaNovaUnidadeVolume" maxlength="10" autocomplete="off">
+                                                            </div>
+                                                            <div class="d-flex gap-2 justify-content-end">
+                                                                <button type="button" class="btn btn-outline-secondary btn-sm" id="btnCancelarNovaUnidadeVolume">Cancelar</button>
+                                                                <button type="button" class="btn btn-success btn-sm" id="btnSalvarNovaUnidadeVolume">Salvar</button>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            ` : ''}
                                             ${typeof ProdutoEmbalagensUI !== 'undefined'
                                                 ? ProdutoEmbalagensUI.montarHtmlPainelApresentacoes()
                                                 : ''}
@@ -2675,7 +2869,23 @@ function showProdutoModal(produto = null, opcoes = {}) {
                                         <h6 class="cds-prod-cadastro__card-title">Ficha técnica</h6>
                                     </div>
                                     <div class="cds-prod-cadastro__card-body">
-                                        <p class="text-muted small mb-2">Componentes somente insumos. Catálogo compartilhado — a ficha pertence ao produto, não ao CNPJ.</p>
+                                        <p class="text-muted small mb-2">Componentes somente insumos. Catálogo compartilhado — a ficha pertence ao produto, não ao CNPJ. Sem personalização, todos os componentes continuam obrigatórios.</p>
+                                        <div class="form-check form-switch mb-3">
+                                                <input class="form-check-input" type="checkbox" id="utiliza_ficha_tecnica"
+                                                    ${isEdit && Number(produto.utiliza_ficha_tecnica) === 1 ? 'checked' : ''}>
+                                                <label class="form-check-label" for="utiliza_ficha_tecnica">
+                                                    Utiliza ficha técnica
+                                                </label>
+                                            </div>
+                                            <div id="areaComponentesFichaTecnica">
+                                            <div class="form-check form-switch mb-3">
+                                                <input class="form-check-input" type="checkbox" id="permite_personalizacao_ingredientes"
+                                                    ${isEdit && Number(produto.permite_personalizacao_ingredientes) === 1 ? 'checked' : ''}>
+                                            <label class="form-check-label" for="permite_personalizacao_ingredientes">
+                                                Permitir personalização dos ingredientes no Pedido
+                                            </label>
+                                            <div class="form-text">Exige ficha ativa e ao menos um ingrediente opcional.</div>
+                                        </div>
                                         <div class="table-responsive">
                                             <table class="table table-sm align-middle mb-2">
                                                 <thead>
@@ -2683,6 +2893,8 @@ function showProdutoModal(produto = null, opcoes = {}) {
                                                         <th>Insumo</th>
                                                         <th style="width: 140px;">Quantidade</th>
                                                         <th style="width: 140px;">Unidade</th>
+                                                        <th style="width: 210px;">Tipo no Pedido</th>
+                                                        <th style="width: 120px;">Adicional (R$)</th>
                                                         <th style="width: 48px;"></th>
                                                     </tr>
                                                 </thead>
@@ -2690,6 +2902,7 @@ function showProdutoModal(produto = null, opcoes = {}) {
                                             </table>
                                         </div>
                                         <button type="button" class="btn btn-outline-primary btn-sm" id="btnAddFichaTecnicaItem">Adicionar componente</button>
+                                        </div>
                                     </div>
                                 </div>
 
@@ -2722,7 +2935,7 @@ function showProdutoModal(produto = null, opcoes = {}) {
                                 <div class="cds-prod-cadastro__card">
                                     <div class="cds-prod-cadastro__card-header">
                                         <span class="cds-prod-cadastro__card-icon" aria-hidden="true">💰</span>
-                                        <h6 class="cds-prod-cadastro__card-title">Formação do Preço</h6>
+                                        <h6 class="cds-prod-cadastro__card-title">Preços</h6>
                                     </div>
                                     <div class="cds-prod-cadastro__card-body">
                                         <div class="row g-3">
@@ -2750,7 +2963,7 @@ function showProdutoModal(produto = null, opcoes = {}) {
                                                 >
                                                 <small class="text-muted">Quantidade Total × Custo Unitário</small>
                                             </div>
-                                            <div class="col-md-3">
+                                            <div class="col-md-3" data-campo-venda-comercial>
                                                 <label for="lucro_percentual" class="form-label">
                                                     Markup (%)
                                                     <span class="cds-prod-cadastro__badge-oficial" title="Percentual aplicado sobre o custo.">OFICIAL</span>
@@ -2768,8 +2981,8 @@ function showProdutoModal(produto = null, opcoes = {}) {
                                                     <span class="input-group-text">%</span>
                                                 </div>
                                             </div>
-                                            <div class="col-md-3">
-                                                <label for="preco_venda" class="form-label">Preço Unitário *</label>
+                                            <div class="col-md-3" data-campo-venda-comercial>
+                                                <label for="preco_venda" class="form-label">Preço comercial *</label>
                                                 <input
                                                     type="number"
                                                     step="0.01"
@@ -2779,12 +2992,23 @@ function showProdutoModal(produto = null, opcoes = {}) {
                                                     value="${isEdit ? Number(produto.preco_venda || 0) : 0}"
                                                 >
                                             </div>
-                                            <div class="col-md-3 d-none" id="wrap_valor_embalagem_venda">
+                                            <div class="col-md-3" data-campo-produto-comercial ${tipoOperacionalInicial === 'INSUMO' ? 'hidden' : ''}>
+                                                <label for="preco_pedido" class="form-label">Preço do Pedido</label>
+                                                <input
+                                                    type="number"
+                                                    step="0.01"
+                                                    min="0"
+                                                    class="form-control"
+                                                    id="preco_pedido"
+                                                    value="${isEdit && produto.preco_pedido != null ? Number(produto.preco_pedido) : ''}"
+                                                >
+                                            </div>
+                                            <div class="col-md-3 d-none" id="wrap_valor_embalagem_venda" data-campo-venda-comercial>
                                                 <label for="valor_embalagem_venda" class="form-label">Valor de Venda da Embalagem</label>
                                                 <input type="text" class="form-control bg-light fw-semibold" id="valor_embalagem_venda" readonly value="R$ 0,00">
                                                 <small class="text-muted">Preço unitário × quantidade por embalagem</small>
                                             </div>
-                                            <div class="col-md-4">
+                                            <div class="col-md-4" data-campo-venda-comercial>
                                                 <label for="valor_total_venda_preview" class="form-label">Valor Total Venda</label>
                                                 <input
                                                     type="text"
@@ -2799,7 +3023,7 @@ function showProdutoModal(produto = null, opcoes = {}) {
                                     </div>
                                 </div>
 
-                                <div class="cds-prod-cadastro__card cds-prod-cadastro__card--tempo-real" id="area_info_margem_bruta_real">
+                                <div class="cds-prod-cadastro__card cds-prod-cadastro__card--tempo-real" id="area_info_margem_bruta_real" data-campo-venda-comercial>
                                     <div class="cds-prod-cadastro__card-header cds-prod-cadastro__card-header--tempo-real">
                                         <h6 class="cds-prod-cadastro__card-title cds-prod-cadastro__card-title--tempo-real">
                                             Informações em tempo real (não salvas)
@@ -3152,6 +3376,10 @@ function showProdutoModal(produto = null, opcoes = {}) {
         $('#modal-container').html(modalHtml);
     }
 
+    if (tipoOperacionalForcado) {
+        $('#tipo_operacional').val(tipoOperacionalForcado).prop('disabled', true);
+    }
+
     const produtoModalEl = document.getElementById('produtoModal');
     if (produtoModalEl && typeof bootstrap !== 'undefined' && bootstrap.Modal) {
         bootstrap.Modal.getOrCreateInstance(produtoModalEl).show();
@@ -3185,6 +3413,8 @@ function showProdutoModal(produto = null, opcoes = {}) {
     inicializarMarcasProdutoCadastro(produto, isEdit);
     inicializarAutocompleteFornecedor();
     inicializarCalculoPreco(produto, isEdit);
+    inicializarVolumeComercialCadastro();
+    inicializarUnidadesVolumeComercialCadastro(produto, isEdit);
     if (typeof ProdutoEmbalagensUI !== 'undefined') {
         ProdutoEmbalagensUI.inicializarApresentacoes(produto);
     }
@@ -3552,6 +3782,97 @@ function inicializarControleLoteInicial() {
 }
 
 
+let cadastroRapidoNomeAberto = false;
+
+function solicitarNomeCadastroRapido(titulo, rotulo) {
+    if (cadastroRapidoNomeAberto) return Promise.resolve(null);
+    if (!window.bootstrap || !window.bootstrap.Modal) {
+        showNotification('Não foi possível abrir o formulário de criação rápida.', 'danger');
+        return Promise.resolve(null);
+    }
+
+    let modalEl = document.getElementById('modalNomeCadastroRapido');
+    if (!modalEl) {
+        modalEl = document.createElement('div');
+        modalEl.id = 'modalNomeCadastroRapido';
+        modalEl.className = 'modal fade';
+        modalEl.tabIndex = -1;
+        modalEl.setAttribute('aria-labelledby', 'modalNomeCadastroRapidoTitulo');
+        modalEl.setAttribute('aria-hidden', 'true');
+        modalEl.innerHTML = `
+            <div class="modal-dialog">
+                <form class="modal-content" id="formNomeCadastroRapido">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="modalNomeCadastroRapidoTitulo"></h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
+                    </div>
+                    <div class="modal-body">
+                        <label class="form-label" for="nomeCadastroRapido"></label>
+                        <input type="text" class="form-control" id="nomeCadastroRapido" maxlength="100" required>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
+                        <button type="submit" class="btn btn-success">Salvar</button>
+                    </div>
+                </form>
+            </div>`;
+        document.body.appendChild(modalEl);
+    }
+
+    const input = modalEl.querySelector('#nomeCadastroRapido');
+    const form = modalEl.querySelector('#formNomeCadastroRapido');
+    modalEl.querySelector('#modalNomeCadastroRapidoTitulo').textContent = titulo;
+    modalEl.querySelector('label[for="nomeCadastroRapido"]').textContent = rotulo;
+    input.value = '';
+    input.setCustomValidity('');
+
+    // O modal de criação rápida deve ser independente do cadastro principal.
+    // Anexar dentro do modal do produto faz com que ele fique atrás do formulário e
+    // gere problemas de foco / clique, além de quebrar a pilha de backdrops do Bootstrap.
+    const instanciaAnterior = window.bootstrap.Modal.getInstance(modalEl);
+    if (instanciaAnterior) instanciaAnterior.dispose();
+    if (modalEl.parentNode !== document.body) {
+        document.body.appendChild(modalEl);
+    }
+    const modal = new window.bootstrap.Modal(modalEl, {
+        backdrop: true,
+        keyboard: true,
+        focus: true
+    });
+    cadastroRapidoNomeAberto = true;
+
+    return new Promise((resolve) => {
+        let nome = null;
+        const limparValidacao = () => input.setCustomValidity('');
+        const finalizar = () => {
+            form.removeEventListener('submit', salvar);
+            input.removeEventListener('input', limparValidacao);
+            modalEl.removeEventListener('hidden.bs.modal', finalizar);
+            cadastroRapidoNomeAberto = false;
+            // Fechar o modal aninhado remove o bloqueio de rolagem do cadastro que continua aberto.
+            if (document.querySelector('.modal.show')) document.body.classList.add('modal-open');
+            resolve(nome);
+        };
+        const salvar = (event) => {
+            event.preventDefault();
+            const valor = input.value.trim();
+            if (!valor) {
+                input.setCustomValidity('Informe um nome.');
+                input.reportValidity();
+                return;
+            }
+            nome = valor;
+            modal.hide();
+        };
+
+        input.addEventListener('input', limparValidacao);
+        form.addEventListener('submit', salvar);
+        modalEl.addEventListener('hidden.bs.modal', finalizar, { once: true });
+        modalEl.addEventListener('shown.bs.modal', () => input.focus(), { once: true });
+        modal.show();
+    });
+}
+
 // Inicializa categorias e subcategorias
 function inicializarBotoesCriacaoRapidaCategoriaSubcategoria() {
     const $btnCategoria = $('#btnCriarCategoriaRapida');
@@ -3559,27 +3880,33 @@ function inicializarBotoesCriacaoRapidaCategoriaSubcategoria() {
     if (!$btnCategoria.length && !$btnSubcategoria.length) return;
 
     $btnCategoria.off('click.miipQuickCreate').on('click.miipQuickCreate', async function () {
-        const nome = window.prompt('Nome da categoria', '');
-        if (!nome || !nome.trim()) return;
+        const nome = await solicitarNomeCadastroRapido('Nova categoria', 'Nome da categoria');
+        if (!nome) return;
         try {
-            const criada = await window.categoriasAPI.criar({ nome: nome.trim(), tipo: 'produto' });
-            await window.categoriasAPI.listar('produto').done(function (categorias) {
-                const categoriasComSubs = (categorias || []).map((cat) => ({
-                    ...cat,
-                    subcategorias: (window.categoriasSistema || []).find((item) => String(item.id) === String(cat.id))?.subcategorias || []
-                }));
-                window.categoriasSistema = categoriasComSubs;
-                const catId = String(criada?.id || '');
-                const $cat = $('#categoria_id');
-                let options = '<option value="">Selecione</option>';
-                categoriasComSubs.forEach((cat) => {
-                    options += `<option value="${cat.id}"${String(cat.id) === catId ? ' selected' : ''}>${escapeHtml(cat.nome || '')}</option>`;
-                });
-                $cat.html(options);
-                $cat.val(catId);
-                $cat.trigger('change');
-                showNotification('Categoria criada com sucesso.', 'success');
+            const tipoCategoria = tipoCategoriaCadastroAtual();
+            const criada = await window.categoriasAPI.criar({ nome, tipo: tipoCategoria });
+            let categorias;
+            try {
+                categorias = await window.categoriasAPI.listar(tipoCategoria);
+            } catch (err) {
+                showNotification('Categoria criada, mas não foi possível atualizar a lista. Reabra o cadastro para conferir.', 'warning');
+                return;
+            }
+            const categoriasComSubs = (categorias || []).map((cat) => ({
+                ...cat,
+                subcategorias: (window.categoriasSistema || []).find((item) => String(item.id) === String(cat.id))?.subcategorias || []
+            }));
+            registrarCategoriasSistema(tipoCategoria, categoriasComSubs);
+            const catId = String(criada?.id || '');
+            const $cat = $('#categoria_id');
+            let options = '<option value="">Selecione</option>';
+            categoriasComSubs.forEach((cat) => {
+                options += `<option value="${cat.id}"${String(cat.id) === catId ? ' selected' : ''}>${escapeHtml(cat.nome || '')}</option>`;
             });
+            $cat.html(options);
+            $cat.val(catId);
+            $cat.trigger('change');
+            showNotification('Categoria criada com sucesso.', 'success');
         } catch (err) {
             showNotification(err?.responseJSON?.erro || 'Erro ao criar categoria.', 'danger');
         }
@@ -3591,11 +3918,17 @@ function inicializarBotoesCriacaoRapidaCategoriaSubcategoria() {
             showNotification('Selecione uma categoria antes de criar uma subcategoria.', 'warning');
             return;
         }
-        const nome = window.prompt('Nome da subcategoria', '');
-        if (!nome || !nome.trim()) return;
+        const nome = await solicitarNomeCadastroRapido('Nova subcategoria', 'Nome da subcategoria');
+        if (!nome) return;
         try {
-            const criada = await window.subcategoriasAPI.criar({ nome: nome.trim(), categoria_id: categoriaId });
-            const subs = await window.subcategoriasAPI.listarPorCategoria(categoriaId).catch(() => []);
+            const criada = await window.subcategoriasAPI.criar({ nome, categoria_id: categoriaId });
+            let subs;
+            try {
+                subs = await window.subcategoriasAPI.listarPorCategoria(categoriaId);
+            } catch (err) {
+                showNotification('Subcategoria criada, mas não foi possível atualizar a lista. Reabra o cadastro para conferir.', 'warning');
+                return;
+            }
             const $select = $('#subcategoria_id');
             let options = '<option value="">Nenhuma</option>';
             (subs || []).forEach((sub) => {
@@ -3617,6 +3950,16 @@ function inicializarBotoesCriacaoRapidaCategoriaSubcategoria() {
 
 window.inicializarBotoesCriacaoRapidaCategoriaSubcategoria = inicializarBotoesCriacaoRapidaCategoriaSubcategoria;
 
+function tipoCategoriaCadastroAtual() {
+    return String($('#tipo_operacional').val() || 'COMERCIAL').toUpperCase() === 'INSUMO' ? 'insumo' : 'produto';
+}
+
+function registrarCategoriasSistema(tipo, categorias) {
+    window.categoriasSistemaPorTipo = window.categoriasSistemaPorTipo || {};
+    window.categoriasSistemaPorTipo[tipo] = categorias;
+    window.categoriasSistema = Object.values(window.categoriasSistemaPorTipo).flat();
+}
+
 function inicializarCategoriasESubcategorias(produto, isEdit) {
     if (!(window.categoriasAPI && window.subcategoriasAPI)) {
         $('#categoria_id').html('<option value="">Categorias indisponíveis</option>');
@@ -3624,14 +3967,19 @@ function inicializarCategoriasESubcategorias(produto, isEdit) {
         return;
     }
 
+    const tipoCategoria = tipoCategoriaCadastroAtual();
+    const tipoOriginal = isEdit && produto && String(produto.tipo_operacional || '').toUpperCase() === 'INSUMO' ? 'insumo' : 'produto';
+    // Só restaura a seleção salva enquanto o tipo da tela for o mesmo do registro.
+    const manterSelecaoSalva = isEdit && produto && tipoCategoria === tipoOriginal;
+
     function renderCategorias(categoriasComSubs) {
-        window.categoriasSistema = categoriasComSubs;
+        registrarCategoriasSistema(tipoCategoria, categoriasComSubs);
         let catOptions = '<option value="">Selecione</option>';
         categoriasComSubs.forEach(cat => {
             catOptions += `<option value="${cat.id}">${escapeHtml(cat.nome || '')}</option>`;
         });
         $('#categoria_id').html(catOptions);
-        if (isEdit && produto && produto.categoria_id) {
+        if (manterSelecaoSalva && produto.categoria_id) {
             $('#categoria_id').val(String(produto.categoria_id));
         }
 
@@ -3657,7 +4005,7 @@ function inicializarCategoriasESubcategorias(produto, isEdit) {
             carregarSubs($(this).val());
         });
 
-        if (isEdit && produto && typeof produto.categoria_id !== 'undefined' && produto.categoria_id !== null) {
+        if (manterSelecaoSalva && typeof produto.categoria_id !== 'undefined' && produto.categoria_id !== null) {
             let subId = '';
             if (typeof produto.subcategoria_id !== 'undefined' && produto.subcategoria_id !== null && produto.subcategoria_id !== 'null') {
                 subId = String(produto.subcategoria_id);
@@ -3669,15 +4017,15 @@ function inicializarCategoriasESubcategorias(produto, isEdit) {
         }
     }
 
-    // Renderiza rapidamente com cache local (quando houver) e em seguida
+    // Renderiza rapidamente com cache local do mesmo tipo (quando houver) e em seguida
     // sempre sincroniza da API para refletir novas subcategorias sem recarregar a página.
-    if (window.categoriasSistema && Array.isArray(window.categoriasSistema) && window.categoriasSistema.length > 0) {
-        renderCategorias(window.categoriasSistema);
+    const cacheTipo = (window.categoriasSistemaPorTipo || {})[tipoCategoria];
+    const possuiCacheCategorias = Array.isArray(cacheTipo) && cacheTipo.length > 0;
+    if (possuiCacheCategorias) {
+        renderCategorias(cacheTipo);
     }
 
-    const possuiCacheCategorias = window.categoriasSistema && Array.isArray(window.categoriasSistema) && window.categoriasSistema.length > 0;
-
-    $.when(categoriasAPI.listar('produto'), subcategoriasAPI.listar()).done(function (categorias, subcategorias) {
+    $.when(categoriasAPI.listar(tipoCategoria), subcategoriasAPI.listar()).done(function (categorias, subcategorias) {
         categorias = categorias[0] || [];
         subcategorias = subcategorias[0] || [];
 
@@ -3693,6 +4041,12 @@ function inicializarCategoriasESubcategorias(produto, isEdit) {
         }
         $('#categoria_id').html('<option value="">Erro ao carregar categorias</option>');
         $('#subcategoria_id').html('<option value="">Erro ao carregar subcategorias</option>');
+    });
+
+    $('#tipo_operacional').off('change.categoriaTipo').on('change.categoriaTipo', function () {
+        if (tipoCategoriaCadastroAtual() !== tipoCategoria) {
+            inicializarCategoriasESubcategorias(produto, isEdit);
+        }
     });
 }
 
@@ -4250,13 +4604,129 @@ function atualizarFormacaoPrecoMargemInfo() {
 }
 window.atualizarFormacaoPrecoMargemInfo = atualizarFormacaoPrecoMargemInfo;
 
+function cadastroEhInsumo() {
+    return String($('#tipo_operacional').val() || 'COMERCIAL').toUpperCase() === 'INSUMO';
+}
+
+function inicializarVolumeComercialCadastro() {
+    const $toggle = $('#utiliza_volume');
+    if (!$toggle.length) return;
+
+    const atualizar = () => {
+        const insumo = cadastroEhInsumo();
+        const ativo = !insumo && $toggle.is(':checked');
+        $('[data-campo-volume-comercial]').toggleClass('d-none', insumo);
+        $('#campos_volume_comercial').toggleClass('d-none', !ativo);
+        $('#volume_valor, #volume_unidade').prop('required', ativo);
+    };
+
+    $toggle.off('change.volumeComercial').on('change.volumeComercial', atualizar);
+    $('#tipo_operacional').off('change.volumeComercial').on('change.volumeComercial', atualizar);
+    atualizar();
+}
+
+async function inicializarUnidadesVolumeComercialCadastro(produto, isEdit) {
+    const $select = $('#volume_unidade');
+    if (!$select.length) return;
+
+    const headers = { Authorization: `Bearer ${localStorage.getItem('token') || ''}` };
+    const $form = $('#formNovaUnidadeVolume');
+    const esconderForm = () => {
+        $form.addClass('d-none');
+        $('#nomeNovaUnidadeVolume, #siglaNovaUnidadeVolume').val('');
+    };
+
+    const carregarUnidades = async (selecionarId = null) => {
+        const response = await fetch(`${API_URL}/produtos/unidades-volume`, { headers });
+        const unidades = await response.json().catch(() => null);
+        if (!response.ok || !Array.isArray(unidades)) {
+            throw new Error(unidades?.error || 'Não foi possível carregar as unidades de volume.');
+        }
+
+        const selecionadaId = selecionarId != null
+            ? String(selecionarId)
+            : (isEdit && Number(produto?.utiliza_volume) === 1 ? String(produto.volume_unidade_id || '') : '');
+        let options = '<option value="">Selecione</option>';
+        unidades.forEach((unidade) => {
+            options += `<option value="${unidade.id}" data-sigla="${escapeHtml(unidade.sigla)}"${String(unidade.id) === selecionadaId ? ' selected' : ''}>${escapeHtml(unidade.nome)} (${escapeHtml(unidade.sigla)})</option>`;
+        });
+
+        if (isEdit && Number(produto?.utiliza_volume) === 1 && produto.volume_unidade_id
+            && !unidades.some((unidade) => String(unidade.id) === String(produto.volume_unidade_id))) {
+            const label = produto.volume_unidade_nome || produto.volume_unidade || `Unidade #${produto.volume_unidade_id}`;
+            options += `<option value="${escapeHtml(String(produto.volume_unidade_id))}" data-sigla="${escapeHtml(produto.volume_unidade || '')}" selected>${escapeHtml(label)} (${escapeHtml(produto.volume_unidade || '')} — inativa/histórica)</option>`;
+        }
+
+        $select.html(options);
+        if (!selecionadaId && isEdit && Number(produto?.utiliza_volume) === 1) {
+            const match = unidades.find((unidade) =>
+                String(unidade.sigla || '').toUpperCase() === String(produto.volume_unidade || '').toUpperCase()
+            );
+            if (match) $select.val(String(match.id));
+        }
+    };
+
+    try {
+        await carregarUnidades();
+    } catch (err) {
+        $select.html('<option value="">Erro ao carregar unidades</option>');
+        showNotification(err.message || 'Erro ao carregar unidades de volume.', 'danger');
+    }
+
+    $('#btnNovaUnidadeVolume').off('click.unidadeVolume').on('click.unidadeVolume', () => {
+        $form.removeClass('d-none');
+        $('#nomeNovaUnidadeVolume').trigger('focus');
+    });
+    $('#btnCancelarNovaUnidadeVolume').off('click.unidadeVolume').on('click.unidadeVolume', esconderForm);
+    $('#btnSalvarNovaUnidadeVolume').off('click.unidadeVolume').on('click.unidadeVolume', async () => {
+        const nome = String($('#nomeNovaUnidadeVolume').val() || '').trim();
+        const sigla = String($('#siglaNovaUnidadeVolume').val() || '').trim().replace(/\s+/g, '').toUpperCase();
+        if (!nome || nome.length > 80) {
+            showNotification('Informe o nome da unidade (até 80 caracteres).', 'warning');
+            $('#nomeNovaUnidadeVolume').trigger('focus');
+            return;
+        }
+        if (!/^[A-Z0-9]{1,10}$/.test(sigla)) {
+            showNotification('Informe uma sigla de até 10 caracteres, usando apenas letras e números.', 'warning');
+            $('#siglaNovaUnidadeVolume').trigger('focus');
+            return;
+        }
+
+        const $botao = $('#btnSalvarNovaUnidadeVolume').prop('disabled', true);
+        try {
+            const response = await fetch(`${API_URL}/produtos/unidades-volume`, {
+                method: 'POST',
+                headers: { ...headers, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ nome, sigla })
+            });
+            const resultado = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(resultado.error || 'Não foi possível cadastrar a unidade.');
+            await carregarUnidades(resultado.id);
+            esconderForm();
+            showNotification('Unidade de volume cadastrada.', 'success');
+        } catch (err) {
+            showNotification(err.message || 'Erro ao cadastrar unidade de volume.', 'danger');
+        } finally {
+            $botao.prop('disabled', false);
+        }
+    });
+}
+
+// Insumos preservam valores comerciais existentes, mas não os exibem nem os reenviam no formulário.
+function aplicarModoInsumoCamposVenda() {
+    const insumo = cadastroEhInsumo();
+    $('#produtoModal [data-campo-venda-comercial]').prop('hidden', insumo);
+    $('#produtoModal [data-campo-produto-comercial]').prop('hidden', insumo);
+    $('#preco_venda').prop('required', !insumo);
+}
+window.aplicarModoInsumoCamposVenda = aplicarModoInsumoCamposVenda;
+
 function sincronizarFormacaoPrecoProduto(origem = 'init') {
     if (typeof ProdutoEmbalagensUI !== 'undefined'
         && ProdutoEmbalagensUI.sincronizarFormacaoPrecoApresentacaoPrincipal(origem)) {
         atualizarFormacaoPrecoMargemInfo();
         return;
     }
-
     const $precoCompra = $('#preco_compra');
     const $lucro = $('#lucro_percentual');
     const $precoVenda = $('#preco_venda');
@@ -4272,6 +4742,12 @@ function sincronizarFormacaoPrecoProduto(origem = 'init') {
     }
 
     $precoCompra.prop('readonly', false).removeClass('bg-light');
+
+    if (cadastroEhInsumo()) {
+        // Sem preço de venda/markup: nunca derivar venda a partir do custo.
+        atualizarPreviewValorTotalEstoqueCadastro();
+        return;
+    }
 
     const precoCompra = numero($precoCompra.val());
     const precoVenda = numero($precoVenda.val());
@@ -4343,6 +4819,11 @@ function inicializarCalculoPreco(produto, isEdit) {
         });
 
     atualizarVisibilidadeEmbalagemComercialCadastro();
+    aplicarModoInsumoCamposVenda();
+    $('#tipo_operacional').off('change.camposVenda').on('change.camposVenda', function () {
+        aplicarModoInsumoCamposVenda();
+        sincronizarFormacaoPrecoProduto('init');
+    });
     setTimeout(() => sincronizarFormacaoPrecoProduto('init'), 0);
 }
 
@@ -4431,6 +4912,12 @@ async function saveProduto() {
                 showNotification(`Apresentação ${i + 1}: informe a quantidade de conversão.`, 'warning');
                 return;
             }
+            if (ProdutoEmbalagensUI.utilizaConversaoAtiva()
+                && Number(ap.ativa) === 1
+                && !ProdutoEmbalagensUI.normalizarUnidadeRelacao(ap.unidade)) {
+                showNotification(`Apresentação ${i + 1}: informe uma unidade válida para o conteúdo.`, 'warning');
+                return;
+            }
             if (Number(ap.compra) === 1 && String(ap.tipo || 'UN').toUpperCase() !== 'UN' && Number(ap.valor_compra || 0) <= 0) {
                 showNotification(`Apresentação ${i + 1}: informe o valor de compra da embalagem.`, 'warning');
                 return;
@@ -4471,6 +4958,42 @@ async function saveProduto() {
         }
     }
 
+    const personalizacaoAtiva = $('#permite_personalizacao_ingredientes').is(':checked')
+        && !cadastroEhInsumo()
+        && $('#utiliza_ficha_tecnica').is(':checked');
+    const utilizaFichaTecnica = $('#utiliza_ficha_tecnica').is(':checked') && !cadastroEhInsumo();
+    if (!$('#produtoModal').data('fichaTecnicaCarregada')) {
+        showNotification('A ficha técnica ainda está sendo carregada ou houve falha; aguarde antes de salvar.', 'warning');
+        return;
+    }
+    if (utilizaFichaTecnica) {
+        const fichaItens = coletarFichaTecnicaItens();
+        if (fichaItens.length === 0) {
+            showNotification('Cadastre ao menos um componente válido para utilizar a ficha técnica.', 'warning');
+            return;
+        }
+    }
+    if (personalizacaoAtiva) {
+        if (!$('#produtoModal').data('fichaTecnicaCarregada')) {
+            showNotification('A ficha técnica ainda não foi carregada; não é possível habilitar a personalização.', 'warning');
+            return;
+        }
+        const fichaItens = coletarFichaTecnicaItens();
+        if (!fichaItens.some((item) => item.classificacao_comercial !== 'OBRIGATORIO_OCULTO')) {
+            showNotification('Cadastre ao menos um ingrediente opcional para habilitar a personalização.', 'warning');
+            return;
+        }
+        const adicionalInvalido = fichaItens.some((item) => (
+            item.classificacao_comercial === 'OPCIONAL_COM_ADICIONAL'
+                ? !(item.preco_adicional > 0)
+                : item.preco_adicional !== 0
+        ));
+        if (adicionalInvalido) {
+            showNotification('Informe um preço adicional positivo para cada ingrediente opcional com adicional.', 'warning');
+            return;
+        }
+    }
+
     const fracionadoAtivo = $('#produto_fracionado').is(':checked');
     const permiteVendaUnidade = fracionadoAtivo && $('#permite_venda_unidade').is(':checked');
     const pesoMedioUnidade = parseFloat($('#peso_medio_unidade').val()) || 0;
@@ -4502,13 +5025,15 @@ async function saveProduto() {
         imagem_principal: ($('#produtoModal').data('produtoImagemPath') || null),
         unidade: ($('#unidade').val() || '').trim(),
         tipo_operacional: ($('#tipo_operacional').val() || 'COMERCIAL').trim(),
+        permite_personalizacao_ingredientes: personalizacaoAtiva ? 1 : 0,
+        utiliza_ficha_tecnica: utilizaFichaTecnica ? 1 : 0,
         preco_compra: parseFloat($('#preco_compra').val()) || 0,
-        preco_venda: parseFloat($('#preco_venda').val()) || 0,
-        lucro_percentual: $('#lucro_percentual').val() !== '' ? parseFloat($('#lucro_percentual').val()) : (
+        preco_venda: cadastroEhInsumo() ? 0 : (parseFloat($('#preco_venda').val()) || 0),
+        lucro_percentual: cadastroEhInsumo() ? 0 : ($('#lucro_percentual').val() !== '' ? parseFloat($('#lucro_percentual').val()) : (
             (parseFloat($('#preco_compra').val()) || 0) > 0 && (parseFloat($('#preco_venda').val()) || 0) > 0
                 ? parseFloat(((((parseFloat($('#preco_venda').val()) - parseFloat($('#preco_compra').val())) / parseFloat($('#preco_compra').val())) * 100).toFixed(2)))
                 : null
-        ),
+        )),
         estoque_minimo: parseFloat($('#estoque_minimo').val()) || 0,
         fornecedor: ($('#fornecedor').val() || '').trim(),
         data_validade: ($('#data_validade').val() || '').trim() || null,
@@ -4539,6 +5064,45 @@ async function saveProduto() {
         data_validade_inicial: ($('#data_validade_inicial').val() || '').trim() || null
     };
 
+    if (!cadastroEhInsumo()) {
+        data.nome_comercial = ($('#nome_comercial').val() || '').trim() || null;
+        data.preco_pedido = $('#preco_pedido').val() !== '' ? parseFloat($('#preco_pedido').val()) : null;
+    }
+
+    if (data.tipo_operacional === 'COMERCIAL' && $('#utiliza_volume').length) {
+        data.utiliza_volume = $('#utiliza_volume').is(':checked') ? 1 : 0;
+        if (data.utiliza_volume) {
+            const volumeTexto = String($('#volume_valor').val() || '').trim();
+            const volume = Number(volumeTexto);
+            const unidadeVolume = String($('#volume_unidade').val() || '').trim().toUpperCase();
+            if (!volumeTexto || !Number.isFinite(volume) || volume <= 0) {
+                showNotification('Informe um volume numérico válido e maior que zero.', 'warning');
+                $('#volume_valor').focus();
+                return;
+            }
+            if (!['L', 'ML'].includes(unidadeVolume)) {
+                const $unidade = $('#volume_unidade option:selected');
+                const unidadeId = Number($unidade.val());
+                const sigla = String($unidade.attr('data-sigla') || '').trim().toUpperCase();
+                if (!Number.isSafeInteger(unidadeId) || unidadeId <= 0 || !/^[A-Z0-9]{1,10}$/.test(sigla)) {
+                    showNotification('Selecione uma unidade de volume cadastrada.', 'warning');
+                    $('#volume_unidade').trigger('focus');
+                    return;
+                }
+                data.volume_unidade_id = unidadeId;
+                data.volume_unidade = sigla;
+            } else {
+                const $unidade = $('#volume_unidade option:selected');
+                const unidadeId = Number($unidade.val());
+                if (Number.isSafeInteger(unidadeId) && unidadeId > 0) {
+                    data.volume_unidade_id = unidadeId;
+                }
+                data.volume_unidade = unidadeVolume;
+            }
+            data.volume_valor = volume;
+        }
+    }
+
     if (typeof ProdutoEmbalagensUI !== 'undefined' && typeof ProdutoEmbalagensUI.utilizaConversaoAtiva === 'function') {
         const usaConv = ProdutoEmbalagensUI.utilizaConversaoAtiva();
         data.utiliza_conversao = usaConv ? 1 : 0;
@@ -4550,14 +5114,13 @@ async function saveProduto() {
                 return;
             }
             data.unidade = data.unidade_estoque;
-            data.relacoes = ProdutoEmbalagensUI.coletarRelacoesDoFormulario();
-            for (let r = 0; r < data.relacoes.length; r += 1) {
-                const rel = data.relacoes[r];
-                if (!(Number(rel.fator) > 0) || !rel.unidade_origem || !rel.unidade_destino) {
-                    showNotification(`Relação ${r + 1}: informe origem, destino e fator maior que zero.`, 'warning');
-                    return;
-                }
+            const validacaoRel = ProdutoEmbalagensUI.validarRelacoesFormulario();
+            if (!validacaoRel.ok) {
+                showNotification(validacaoRel.mensagem, 'warning');
+                ProdutoEmbalagensUI.focarCampoRelacao(validacaoRel.indice, validacaoRel.campo);
+                return;
             }
+            data.relacoes = validacaoRel.relacoes;
         } else {
             data.unidade_estoque = null;
             data.relacoes = [];
@@ -4640,7 +5203,7 @@ async function saveProduto() {
     }
 
     if (typeof ProdutoEmbalagensUI !== 'undefined') {
-        const precoVendaUnit = parseFloat($('#preco_venda').val()) || 0;
+        const precoVendaUnit = cadastroEhInsumo() ? 0 : (parseFloat($('#preco_venda').val()) || 0);
         data.embalagens = ProdutoEmbalagensUI.coletarApresentacoesDoFormulario().map((ap) => ({
             ...ap,
             preco_venda: Number((precoVendaUnit * Number(ap.quantidade || 1)).toFixed(2))
@@ -4667,7 +5230,23 @@ async function saveProduto() {
             Authorization: 'Bearer ' + (localStorage.getItem('token') || '')
         },
         data: JSON.stringify(data),
-        success: function (produtoSalvo) {
+        success: async function (produtoSalvo) {
+            const produtoIdSalvo = Number(produtoSalvo?.id || id || 0);
+            if (
+                produtoIdSalvo > 0
+                && typeof ProdutoEmbalagensUI !== 'undefined'
+                && typeof ProdutoEmbalagensUI.recarregarConfiguracaoPersistida === 'function'
+            ) {
+                try {
+                    const configuracao = await ProdutoEmbalagensUI.recarregarConfiguracaoPersistida(produtoIdSalvo);
+                    produtoSalvo = { ...(produtoSalvo || {}), ...configuracao };
+                } catch (configErr) {
+                    showNotification(
+                        `Produto salvo, mas não foi possível recarregar a configuração MUC: ${configErr.responseJSON?.error || configErr.message || 'falha de comunicação.'}`,
+                        'warning'
+                    );
+                }
+            }
             persistirFichaTecnicaCadastro(produtoSalvo, function (fichaErr) {
             if (fichaErr) return;
             const $modal = $('#produtoModal');

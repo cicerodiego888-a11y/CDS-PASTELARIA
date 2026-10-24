@@ -196,9 +196,9 @@ function avaliarDocumento(doc, wait = {}, ctx = {}) {
     });
   }
 
-  // 4) Sem Parser (XML sincronizado)
+  // 4) Sem Parser (XML sincronizado). Canônico XML_COMPLETO; literal legado SINCRONIZADA.
   if (
-    ['SINCRONIZADA'].includes(status)
+    (status === DocumentoFiscalStatus.XML_COMPLETO || status === 'SINCRONIZADA')
     && xmlProvavelCompleto
     && !temParse
     && (atualizadoMs == null || atualizadoMs > LIMITES.SEM_PARSER_MS)
@@ -226,6 +226,25 @@ function avaliarDocumento(doc, wait = {}, ctx = {}) {
       nivel: HealthNiveis.ATENCAO,
       diagnostico: 'Parser concluído, porém o MIIP ainda não foi iniciado ou não gerou resumo.',
       recomendacao: 'Reprocessar internamente o documento (pipeline Parser → MIIP).',
+      tempoParadoMs: atualizadoMs,
+      autoRecuperavel: true,
+      acaoInterna: 'processar_pendentes'
+    });
+  }
+
+  // 5b) Parse/MIIP persistidos, status ainda XML_COMPLETO (processamento incompleto)
+  if (
+    temParse
+    && [DocumentoFiscalStatus.SINCRONIZADA, DocumentoFiscalStatus.EM_PROCESSAMENTO].includes(status)
+    && !temCompra
+  ) {
+    alertas.push({
+      regra: 'PROCESSAMENTO_INCOMPLETO',
+      nivel: temMiip ? HealthNiveis.CRITICO : HealthNiveis.ATENCAO,
+      diagnostico: temMiip
+        ? 'Parser e MIIP persistidos, porém o status não avançou — documento preso em processamento incompleto.'
+        : 'Parser persistido, porém o pipeline (MIIP/status) não foi concluído.',
+      recomendacao: 'Retomar internamente somente as etapas pendentes. Sem consulta à SEFAZ.',
       tempoParadoMs: atualizadoMs,
       autoRecuperavel: true,
       acaoInterna: 'processar_pendentes'

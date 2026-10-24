@@ -21,15 +21,15 @@ function existe(rel) {
 
 function test01RotaRegistrada() {
   const server = src('backend/server.js');
-  assert.ok(server.includes("'/pdv-universal'"));
-  assert.ok(server.includes("frontendRoot, 'pdv-universal/index.html'"));
+  assert.ok(server.includes('caminhoDoPdvUniversalBloqueado'));
+  assert.ok(!server.includes("frontendRoot, 'pdv-universal/index.html'"));
 }
 
 function test02RotaExigeAuth() {
+  // A interface do Universal não é mais servida: a rota redireciona ao /pdv oficial, que exige auth.
   const server = src('backend/server.js');
-  const bloco = server.split("app.get(['/pdv-universal'")[1] || '';
-  assert.ok(server.includes("app.get(['/pdv-universal', '/pdv-universal/'], verificarToken"));
-  assert.ok(bloco.includes("recursoHabilitado('pdv')"));
+  assert.ok(server.includes("res.redirect(302, '/pdv')"));
+  assert.ok(server.includes("app.get(['/pdv', '/pdv/'], verificarToken"));
 }
 
 function test03PermissaoPdv() {
@@ -43,10 +43,11 @@ function test03PermissaoPdv() {
 function test04MenuDestino() {
   assert.strictEqual(acesso.urlPdvUniversalOficial(), '/pdv-universal/');
   const erp = src('frontend/erp/index.html');
-  assert.ok(erp.includes('href="/pdv-universal/"'));
-  assert.ok(erp.includes('PDV Universal'));
+  assert.ok(!erp.includes('href="/pdv-universal'));
+  assert.ok(erp.includes('id="nav-abrir-pdv"'));
+  assert.ok(erp.includes('href="/pdv"'));
   const dash = src('frontend/erp/js/dashboard-command.js');
-  assert.ok(dash.includes('urlPdvUniversalOficial') || dash.includes('/pdv-universal'));
+  assert.ok(dash.includes('urlPdvLegadoOficial') && !dash.includes('/pdv-universal'));
 }
 
 function test05AssetsDeclaradosExistem() {

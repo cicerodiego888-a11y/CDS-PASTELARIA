@@ -11,6 +11,7 @@
 const ProdutoSnapshot = require('../core/ProdutoSnapshot');
 const { resolverDb, criarDbHelpers } = require('./dbHelpers');
 const produtoCache = require('../cache/ProdutoCache');
+const { defaultDiagnostics } = require('../diagnostics/MiipOriginDiagnostics');
 
 const COLUNAS_LEITURA = `
   id,
@@ -54,6 +55,8 @@ class ProdutoRepository {
     this._helpers = this._db ? criarDbHelpers(this._db) : null;
     this._identidadeService = deps.identidadeService ?? null;
     this._isMipEnabled = deps.isMipEnabled ?? null;
+    this._originDiagnostics = deps.originDiagnostics ?? defaultDiagnostics;
+    this._catalogContext = deps.db ? 'sqlite_injetado' : 'sqlite_padrao';
   }
 
   /**
@@ -124,7 +127,16 @@ class ProdutoRepository {
     if (!Number.isFinite(produtoId) || produtoId <= 0 || !this._helpers) return null;
 
     const emCache = produtoCache.buscarPorId(produtoId);
-    if (emCache) return emCache;
+    if (emCache) {
+      this._originDiagnostics.recordLookup({
+        lookup: 'id',
+        cacheHit: true,
+        productId: emCache.id,
+        source: 'produto_cache',
+        catalogContext: this._catalogContext
+      });
+      return emCache;
+    }
 
     await this._helpers.whenReady();
 
@@ -135,6 +147,13 @@ class ProdutoRepository {
 
     const snapshot = this._mapearSnapshot(row);
     if (snapshot) produtoCache.armazenar(snapshot);
+    this._originDiagnostics.recordLookup({
+      lookup: 'id',
+      cacheHit: false,
+      productId: snapshot?.id,
+      source: 'sqlite',
+      catalogContext: this._catalogContext
+    });
     return snapshot;
   }
 
@@ -155,7 +174,16 @@ class ProdutoRepository {
     if (!gtin || !this._helpers) return null;
 
     const emCache = produtoCache.buscarPorGtin(gtin);
-    if (emCache) return emCache;
+    if (emCache) {
+      this._originDiagnostics.recordLookup({
+        lookup: 'gtin',
+        cacheHit: true,
+        productId: emCache.id,
+        source: 'produto_cache',
+        catalogContext: this._catalogContext
+      });
+      return emCache;
+    }
 
     await this._helpers.whenReady();
 
@@ -166,6 +194,13 @@ class ProdutoRepository {
         if (viaMip) {
           // Garante chave GTIN no cache mesmo se codigo_barras do produto divergir
           produtoCache.armazenar(viaMip);
+          this._originDiagnostics.recordLookup({
+            lookup: 'gtin',
+            cacheHit: false,
+            productId: viaMip.id,
+            source: 'sqlite',
+            catalogContext: this._catalogContext
+          });
           return viaMip;
         }
       }
@@ -178,6 +213,13 @@ class ProdutoRepository {
 
     const snapshot = this._mapearSnapshot(row);
     if (snapshot) produtoCache.armazenar(snapshot);
+    this._originDiagnostics.recordLookup({
+      lookup: 'gtin',
+      cacheHit: false,
+      productId: snapshot?.id,
+      source: 'sqlite',
+      catalogContext: this._catalogContext
+    });
     return snapshot;
   }
 
@@ -343,9 +385,17 @@ class ProdutoRepository {
       this._acumularHits(mapa, rowsCest, 'cest');
     }
 
-    return [...mapa.values()]
+    const candidatos = [...mapa.values()]
       .map((h) => ({ snapshot: h.snapshot, motivos: [...h.motivos] }))
       .slice(0, limite);
+    this._originDiagnostics.recordCatalogCandidates({
+      candidates: candidatos.map((candidate) => ({
+        produtoId: candidate.snapshot.id,
+        motivos: candidate.motivos
+      })),
+      catalogContext: this._catalogContext
+    });
+    return candidatos;
   }
 }
 

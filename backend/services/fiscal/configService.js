@@ -1,4 +1,3 @@
-const dbDefault = require('../../database');
 const {
   normalizarEmpresaId,
   carregarConfiguracaoFiscalEmpresa,
@@ -13,7 +12,7 @@ const {
 } = require('./FiscalConfigUrlsResolver');
 
 function useDb(db) {
-  return db || dbDefault;
+  return db || require('../../database');
 }
 
 function getConfiguracoes(chaves, dbInjected) {

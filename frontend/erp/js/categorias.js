@@ -46,7 +46,8 @@ const categoriasAPI = {
 };
 
 function textoTipoCategoria(tipo) {
-  return tipo === 'despesa' ? 'Despesa' : 'Produto';
+  if (tipo === 'despesa') return 'Despesa';
+  return tipo === 'insumo' ? 'Insumo' : 'Produto';
 }
 
 function loadCategorias() {

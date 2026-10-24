@@ -275,6 +275,7 @@ function renderPainelDiagnosticoCentral(dados) {
         { label: 'Dias restantes', valor: cert.diasRestantes != null ? cert.diasRestantes : '—' },
         { label: 'Tipo', valor: cert.tipo || 'A1' },
         { label: 'Status', valor: badgeStatusCentral(cert.status) },
+        { label: 'Validação', valor: cert.mensagem || '—' },
         { label: 'Senha configurada', valor: cert.senhaConfigurada || 'NÃO' }
       ]), 'fa-certificate')}
       ${renderSecaoCentral('Pipeline', renderPipelineCentral(dados.pipeline), 'fa-project-diagram')}
@@ -340,7 +341,10 @@ function bindEventosDiagnosticoCentral() {
   $('#btnDiagSync').off('click').on('click', () => executarAcaoDiagnostico('/diagnostico/acoes/sincronizar', 'Sincronização iniciada.'));
   $('#btnDiagReprocessar').off('click').on('click', () => executarAcaoDiagnostico('/diagnostico/acoes/reprocessar-pendencias', 'Reprocessamento de pendências iniciado.'));
   $('#btnDiagCert').off('click').on('click', () => executarAcaoDiagnostico('/diagnostico/acoes/testar-certificado', 'Teste de certificado concluído.'));
-  $('#btnDiagSefaz').off('click').on('click', () => executarAcaoDiagnostico('/diagnostico/acoes/testar-sefaz', 'Teste SEFAZ concluído.'));
+  $('#btnDiagSefaz').off('click').on('click', () => executarAcaoDiagnostico(
+    '/diagnostico/acoes/testar-sefaz',
+    'Teste de prontidão local concluído (sem DistDFe).'
+  ));
   $('#btnDiagCache').off('click').on('click', () => executarAcaoDiagnostico('/diagnostico/acoes/limpar-cache', 'Cache limpo.'));
   $('#btnDiagHealth').off('click').on('click', async () => {
     try {
