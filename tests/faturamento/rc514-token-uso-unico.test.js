@@ -17,6 +17,12 @@ const {
   limparSupervisorTokensUsados
 } = require('../../backend/rotas/auth');
 const MotorComercial = require('../../backend/motores/comercial');
+const EmpresaService = require('../../backend/services/empresas/EmpresaService');
+const { garantirSchemaEmpresasAsync } = require('../../backend/services/empresas/empresasSchema');
+const {
+  garantirSchemaEstoqueEmpresaAsync
+} = require('../../backend/services/estoque/estoqueEmpresaSchema');
+const EstoqueEmpresaService = require('../../backend/services/estoque/EstoqueEmpresaService');
 
 function openDb(file) {
   return new Promise((resolve, reject) => {
@@ -62,6 +68,12 @@ function emitirTokenSupervisor(overrides = {}) {
 async function setupDb(opts = {}) {
   const file = opts.file || path.join(os.tmpdir(), `rc514-${Date.now()}-${Math.random().toString(16).slice(2)}.db`);
   const db = await openDb(file);
+  await garantirSchemaEmpresasAsync(db);
+  const empresa = await EmpresaService.criarEmpresa({
+    cnpj: '11222333000181',
+    razao_social: 'Empresa RC514'
+  }, { db });
+  await garantirSchemaEstoqueEmpresaAsync(db);
   await run(db, `
     CREATE TABLE produtos (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -131,7 +143,7 @@ async function setupDb(opts = {}) {
     )
   `);
   for (const id of [501, 503]) {
-    await run(db, `INSERT INTO pedidos (id, empresa_id, status) VALUES (?, 1, 'PEDIDO')`, [id]);
+    await run(db, `INSERT INTO pedidos (id, empresa_id, status) VALUES (?, ?, 'PEDIDO')`, [id, empresa.id]);
   }
 
   const sf = opts.saldo_fiscal != null ? opts.saldo_fiscal : 5;
@@ -142,7 +154,14 @@ async function setupDb(opts = {}) {
      VALUES ('Produto RC514', ?, ?, 0, 0, ?)`,
     [sf, snf, sf + snf]
   );
-  return { db, produtoId: p.lastID, file };
+  await EstoqueEmpresaService.criarRegistro({
+    produtoId: p.lastID,
+    empresaId: empresa.id,
+    saldo_fiscal: sf,
+    saldo_nao_fiscal: snf,
+    estoque_atual: sf + snf
+  }, { db });
+  return { db, produtoId: p.lastID, empresaId: empresa.id, file };
 }
 
 async function testPrimeiroUsoOk() {
@@ -176,6 +195,58 @@ async function testTokenSemJtiRejeitado() {
       return true;
     }
   );
+}
+
+async function testOperadorSemPermissaoRejeitadoSemAlterarEstoque() {
+  limparSupervisorTokensUsados();
+  const { db, produtoId, empresaId, file } = await setupDb({ saldo_fiscal: 5, saldo_nao_fiscal: 100 });
+  const { token } = emitirTokenSupervisor({ role: 'user', perfil: 'CAIXA' });
+
+  await assert.rejects(
+    () => MotorComercial.confirmarPedidoFiscal({
+      pedidoId: 501,
+      itens: [{ produto_id: produtoId, quantidade: 20 }],
+      supervisorToken: token,
+      usuarioId: 1
+    }, { db }),
+    (err) => {
+      assert.strictEqual(err.codigo || err.code, 'AUTORIZACAO_REJEITADA');
+      return true;
+    }
+  );
+
+  const produto = await new Promise((resolve, reject) => {
+    db.get(
+      'SELECT saldo_fiscal, saldo_nao_fiscal, reservado_fiscal FROM produtos WHERE id = ?',
+      [produtoId],
+      (err, row) => (err ? reject(err) : resolve(row))
+    );
+  });
+  assert.deepStrictEqual(produto, {
+    saldo_fiscal: 5,
+    saldo_nao_fiscal: 100,
+    reservado_fiscal: 0
+  });
+  const saldoEmpresa = await EstoqueEmpresaService.consultarSaldo(
+    { produtoId, empresaId },
+    { db }
+  );
+  assert.deepStrictEqual({
+    saldo_fiscal: saldoEmpresa.saldo_fiscal,
+    saldo_nao_fiscal: saldoEmpresa.saldo_nao_fiscal,
+    estoque_atual: saldoEmpresa.estoque_atual,
+    reservado_fiscal: saldoEmpresa.reservado_fiscal,
+    reservado_nao_fiscal: saldoEmpresa.reservado_nao_fiscal
+  }, {
+    saldo_fiscal: 5,
+    saldo_nao_fiscal: 100,
+    estoque_atual: 105,
+    reservado_fiscal: 0,
+    reservado_nao_fiscal: 0
+  });
+
+  await closeDb(db);
+  try { fs.unlinkSync(file); } catch (_) { /* ignore */ }
 }
 
 async function testMotorComercialPropagaTokenJaUtilizado() {
@@ -243,6 +314,7 @@ async function main() {
     ['primeiro uso ok', testPrimeiroUsoOk],
     ['reutilização → TOKEN_JA_UTILIZADO', testReutilizacaoBloqueada],
     ['token sem jti rejeitado', testTokenSemJtiRejeitado],
+    ['operador sem permissão é rejeitado sem alterar estoque', testOperadorSemPermissaoRejeitadoSemAlterarEstoque],
     ['Motor Comercial propaga TOKEN_JA_UTILIZADO', testMotorComercialPropagaTokenJaUtilizado]
   ];
 

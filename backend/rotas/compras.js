@@ -24,6 +24,7 @@ const {
   calcularSubtotalFinanceiroItemCompra,
   resolverQuantidadesCompraItem
 } = require('../lib/motorConversaoUnidades');
+const CompraContasPagarMcfService = require('../services/compras/CompraContasPagarMcfService');
 const { obterMuc, resultadoParaJson } = require('../motores/muc');
 const { simularConversaoCompraPreview } = require('../services/compras/simularConversaoCompraPreview');
 const {
@@ -68,6 +69,7 @@ const {
   normalizarParcelasDetalhe,
   moeda: moedaParcela
 } = require('../services/compras/MotorParcelamentoCompra');
+const ContasPagarService = require('../motores/mcf/services/ContasPagarService');
 const {
   creditarEstoqueItemCompra,
   empresaIdDoReqCompra
@@ -264,7 +266,7 @@ function garantirFornecedorCompra(dados, callback) {
   });
 }
 
-function criarFinanceiroCompra(compra, callback) {
+function criarTitulosMcfCompra(compra, callback) {
   const {
     id,
     data_compra,
@@ -299,140 +301,102 @@ function criarFinanceiroCompra(compra, callback) {
     || parcelas_importadas_xml === 1
     || String(parcelas_importadas_xml) === '1';
 
-  db.run('DELETE FROM financeiro WHERE compra_id = ? AND (empresa_id = ? OR empresa_id IS NULL)', [id, empresaIdFin], (deleteErr) => {
-    if (deleteErr) return callback(deleteErr);
+  const inserirGradeMcf = (grade, statusResolver) => {
+    if (!grade.length) {
+      return callback(new Error('Grade de parcelas vazia.'));
+    }
+    const validacao = validarSomaParcelas(grade, valorTotal);
+    if (!validacao.ok) {
+      return callback(new Error(validacao.mensagem || 'Total das parcelas diverge do valor da nota.'));
+    }
 
-    const inserir = (payload, done) => {
-      db.run(`
-        INSERT INTO financeiro (
-          tipo, descricao, valor, data_movimento, categoria, forma_pagamento,
-          referencia_id, referencia_tipo, status, origem, documento, vencimento,
-          numero_parcela, total_parcelas, compra_id, pessoa_nome, observacao, baixado_em, empresa_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [
-        'despesa',
-        payload.descricao,
-        payload.valor,
-        data_compra,
-        'compras',
-        forma_pagamento || null,
-        id,
-        'compra',
-        payload.status,
-        'compra',
-        payload.documento || documentoNf,
-        payload.vencimento,
-        payload.numero_parcela,
-        payload.total_parcelas,
-        id,
-        fornecedor || null,
-        observacao || null,
-        payload.status === 'pago' ? data_compra : null,
-        empresaIdFin
-      ], done);
-    };
-
-    const inserirGrade = (grade, statusResolver) => {
-      if (!grade.length) {
-        return callback(new Error('Grade de parcelas vazia.'));
-      }
-      const validacao = validarSomaParcelas(grade, valorTotal);
-      if (!validacao.ok) {
-        return callback(new Error(validacao.mensagem || 'Total das parcelas diverge do valor da nota.'));
-      }
-      let pendentes = grade.length;
-      grade.forEach((p) => {
-        const status = typeof statusResolver === 'function'
-          ? statusResolver(p)
-          : 'pendente';
-        const rotulo = p.tipo === 'entrada'
+    const parcelasMcf = grade.map((parcela, index) => {
+      const numeroParcela = index + 1;
+      return {
+        descricao: parcela.tipo === 'entrada'
           ? `${descricaoBase} - Entrada`
-          : `${descricaoBase} - Parcela ${p.numero}/${grade.length}`;
-        inserir({
-          descricao: rotulo,
-          valor: moedaParcela(p.valor),
-          vencimento: toDate(p.vencimento, vencimentoBase),
-          documento: p.documento || documentoNf,
-          numero_parcela: p.numero,
-          total_parcelas: grade.length,
-          status
-        }, (err) => {
-          if (err) return callback(err);
-          pendentes -= 1;
-          if (pendentes === 0) callback(null);
-        });
-      });
-    };
+          : `${descricaoBase} - Parcela ${numeroParcela}/${grade.length}`,
+        valor: moedaParcela(parcela.valor),
+        data_vencimento: toDate(parcela.vencimento, vencimentoBase),
+        documento: parcela.documento || documentoNf,
+        numero_parcela: numeroParcela,
+        pagar_agora: typeof statusResolver === 'function'
+          && statusResolver(parcela) === 'pago'
+      };
+    });
+    CompraContasPagarMcfService.criarTitulosMcfCompra({
+      db,
+      compra_id: id,
+      empresa_id: empresaIdFin,
+      data_emissao: toDate(data_compra),
+      documento: documentoNf,
+      forma_pagamento,
+      observacao,
+      usuario_id: compra.usuario_id || null,
+      parcelas: parcelasMcf
+    }).then(() => callback(null), callback);
+  };
 
-    // RC4.31.14 / RC8.5.0 — grade explícita (XML ou cliente) tem prioridade absoluta
-    if (gradeCliente.length > 0) {
-      return inserirGrade(gradeCliente, (p) => (
-        p.tipo === 'entrada' || condicao_pagamento === 'avista' ? 'pago' : 'pendente'
-      ));
-    }
+  // RC4.31.14 / RC8.5.0 — grade explícita (XML ou cliente) tem prioridade absoluta
+  if (gradeCliente.length > 0) {
+    return inserirGradeMcf(gradeCliente, (p) => (
+      p.tipo === 'entrada' || condicao_pagamento === 'avista' ? 'pago' : 'pendente'
+    ));
+  }
 
-    if (parcelasImportadasXml) {
-      return callback(new Error('Grade de parcelas importada do XML ausente ou inválida.'));
-    }
+  if (parcelasImportadasXml) {
+    return callback(new Error('Grade de parcelas importada do XML ausente ou inválida.'));
+  }
 
-    if (condicao_pagamento === 'parcelado' || condicao_pagamento === 'prazo') {
-      if (qtdParcelas > 1 || condicao_pagamento === 'prazo') {
-        const dias = Math.max(0, Number(dias_entre_parcelas) || 30);
-        const gerada = gerarGradeParcelas({
-          valorTotal,
-          quantidadeParcelas: qtdParcelas,
-          diasEntreParcelas: dias,
-          primeiroVencimento: vencimentoBase
-        });
-        return inserirGrade(gerada.parcelas);
-      }
-    }
-
-    if (condicao_pagamento === 'entrada_parcelado' && qtdParcelas > 0 && valor_entrada > 0) {
+  if (condicao_pagamento === 'parcelado' || condicao_pagamento === 'prazo') {
+    if (qtdParcelas > 1 || condicao_pagamento === 'prazo') {
       const dias = Math.max(0, Number(dias_entre_parcelas) || 30);
       const gerada = gerarGradeParcelas({
         valorTotal,
         quantidadeParcelas: qtdParcelas,
         diasEntreParcelas: dias,
-        primeiroVencimento: vencimentoBase,
-        valorEntrada: Number(valor_entrada) || 0
+        primeiroVencimento: vencimentoBase
       });
-      return inserirGrade(gerada.parcelas, (p) => (p.tipo === 'entrada' ? 'pago' : 'pendente'));
+      return inserirGradeMcf(gerada.parcelas);
     }
+  }
 
-    // legado parcelado sem dias (mensal)
-    if (condicao_pagamento === 'parcelado' && qtdParcelas > 1) {
-      const valorBase = Math.floor((valorTotal / qtdParcelas) * 100) / 100;
-      const resto = Math.round((valorTotal - (valorBase * qtdParcelas)) * 100) / 100;
-      let pendentes = qtdParcelas;
-      for (let i = 1; i <= qtdParcelas; i++) {
-        const valorParcela = Number((valorBase + (i === qtdParcelas ? resto : 0)).toFixed(2));
-        inserir({
-          descricao: `${descricaoBase} - Parcela ${i}/${qtdParcelas}`,
-          valor: valorParcela,
-          vencimento: addMonths(vencimentoBase, i - 1),
-          numero_parcela: i,
-          total_parcelas: qtdParcelas,
-          status: 'pendente'
-        }, (err) => {
-          if (err) return callback(err);
-          pendentes -= 1;
-          if (pendentes === 0) callback(null);
-        });
-      }
-      return;
+  if (condicao_pagamento === 'entrada_parcelado' && qtdParcelas > 0 && valor_entrada > 0) {
+    const dias = Math.max(0, Number(dias_entre_parcelas) || 30);
+    const gerada = gerarGradeParcelas({
+      valorTotal,
+      quantidadeParcelas: qtdParcelas,
+      diasEntreParcelas: dias,
+      primeiroVencimento: vencimentoBase,
+      valorEntrada: Number(valor_entrada) || 0
+    });
+    return inserirGradeMcf(gerada.parcelas, (p) => (p.tipo === 'entrada' ? 'pago' : 'pendente'));
+  }
+
+  // legado parcelado sem dias (mensal)
+  if (condicao_pagamento === 'parcelado' && qtdParcelas > 1) {
+    const valorBase = Math.floor((valorTotal / qtdParcelas) * 100) / 100;
+    const resto = Math.round((valorTotal - (valorBase * qtdParcelas)) * 100) / 100;
+    const gradeMensal = [];
+    for (let i = 1; i <= qtdParcelas; i++) {
+      const valorParcela = Number((valorBase + (i === qtdParcelas ? resto : 0)).toFixed(2));
+      gradeMensal.push({
+        tipo: 'parcela',
+        valor: valorParcela,
+        vencimento: addMonths(vencimentoBase, i - 1),
+        numero: i
+      });
     }
+    return inserirGradeMcf(gradeMensal);
+  }
 
-    const pagoNaHora = condicao_pagamento === 'avista';
-    inserir({
-      descricao: descricaoBase,
-      valor: valorTotal,
-      vencimento: pagoNaHora ? data_compra : vencimentoBase,
-      numero_parcela: 1,
-      total_parcelas: 1,
-      status: pagoNaHora ? 'pago' : 'pendente'
-    }, callback);
-  });
+  const pagoNaHora = condicao_pagamento === 'avista';
+  inserirGradeMcf([{
+    tipo: 'parcela',
+    valor: valorTotal,
+    vencimento: pagoNaHora ? data_compra : vencimentoBase,
+    numero: 1
+  }], () => (pagoNaHora ? 'pago' : 'pendente'));
 }
 
 function ensureProductForItemLegado(item, callback, opcoes = {}) {
@@ -1744,7 +1708,7 @@ router.post('/', (req, res) => {
         const compraId = this.lastID;
 
         if (entradaSimplificada) {
-          criarFinanceiroCompra({
+          criarTitulosMcfCompra({
             id: compraId,
             data_compra,
             fornecedor,
@@ -1759,7 +1723,8 @@ router.post('/', (req, res) => {
             parcelas_importadas_xml: parcelasImportadasXmlReq,
             numero_nf,
             observacao,
-            empresa_id: empresaCompraId
+            empresa_id: empresaCompraId,
+            usuario_id: req.user && req.user.id
           }, (finErr) => {
             if (finErr) {
               db.run('ROLLBACK');
@@ -1846,7 +1811,7 @@ router.post('/', (req, res) => {
               });
             }
 
-            criarFinanceiroCompra({
+            criarTitulosMcfCompra({
               id: compraId,
               data_compra,
               fornecedor,
@@ -1861,7 +1826,8 @@ router.post('/', (req, res) => {
               parcelas_importadas_xml: parcelasImportadasXmlReq,
               numero_nf,
               observacao,
-              empresa_id: empresaCompraId
+              empresa_id: empresaCompraId,
+              usuario_id: req.user && req.user.id
             }, (finErr) => {
               if (finErr) {
                 db.run('ROLLBACK');
@@ -2015,10 +1981,49 @@ router.post('/:id/cancelar', async (req, res) => {
         return res.status(400).json({ error: 'Esta compra já está cancelada.' });
       }
 
-      db.all('SELECT * FROM compras_itens WHERE compra_id = ?', [id], (itensErr, itens) => {
+      db.all('SELECT * FROM compras_itens WHERE compra_id = ?', [id], async (itensErr, itens) => {
         if (itensErr) {
           db.run('ROLLBACK');
           return res.status(500).json({ error: itensErr.message });
+        }
+
+        let titulosMcf;
+        try {
+          titulosMcf = await ContasPagarService.listar({
+            db,
+            empresaId: empresaCompraId,
+            referencia_tipo: 'compra',
+            referencia_id: id,
+            limite: 500
+          });
+          const quitada = titulosMcf.find(
+            (titulo) => titulo.status === ContasPagarService.STATUS_CONTA_PAGAR.QUITADA
+          );
+          if (quitada) {
+            db.run('ROLLBACK');
+            return res.status(409).json({
+              error: 'Compra possui título quitado. Devolução ou estorno deve ser tratado separadamente.',
+              code: 'MCF_TITULO_QUITADO',
+              conta_pagar_id: quitada.id
+            });
+          }
+          for (const titulo of titulosMcf) {
+            if (titulo.status === ContasPagarService.STATUS_CONTA_PAGAR.CANCELADA) continue;
+            await ContasPagarService.cancelarNaTransacaoAtual({
+              db,
+              empresaId: empresaCompraId,
+              id: titulo.id,
+              motivo: `Cancelamento da compra ${id}: ${motivo}`,
+              idempotency_key: `compra:${id}:cancelamento:${titulo.numero_parcela || titulo.id}`,
+              usuario_id: req.user && req.user.id
+            });
+          }
+        } catch (mcfErr) {
+          db.run('ROLLBACK');
+          return res.status(mcfErr.statusCode || 409).json({
+            error: mcfErr.message || 'Falha ao cancelar títulos MCF da compra.',
+            code: mcfErr.code || 'MCF_CANCELAMENTO_COMPRA_FALHOU'
+          });
         }
 
         const tipoEntrada = normalizarTipoEntrada(compra.tipo_entrada);
@@ -2103,6 +2108,7 @@ router.post('/:id/cancelar', async (req, res) => {
                 observacao = COALESCE(observacao, '') || ' | Cancelado junto com a compra.'
             WHERE compra_id = ?
               AND (empresa_id = ? OR empresa_id IS NULL)
+              AND status NOT IN ('pago', 'recebido')
           `, [id, empresaCompraId], (finErr) => {
             if (finErr) {
               db.run('ROLLBACK');

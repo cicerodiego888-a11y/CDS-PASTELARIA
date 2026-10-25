@@ -19,6 +19,8 @@ const PedidoService = require('../../backend/services/pedido/PedidoService');
 const PedidoOperacionalService = require('../../backend/services/pedido/PedidoOperacionalService');
 const PedidoConsumoEstoqueService = require('../../backend/services/pedido/PedidoConsumoEstoqueService');
 const FaturamentoService = require('../../backend/services/faturamento/FaturamentoService');
+const PedidoFaturamentoOperacaoRepository = require('../../backend/services/faturamento/PedidoFaturamentoOperacaoRepository');
+const VendaCancelamentoService = require('../../backend/services/vendas/VendaCancelamentoService');
 const VendaApplicationService = require('../../backend/services/vendas/VendaApplicationService');
 const { criarVendaContract } = require('../../backend/services/vendas/VendaContract');
 const { criarVendaContext } = require('../../backend/services/vendas/VendaContext');
@@ -174,7 +176,11 @@ function criarVendaSemPedido(payload) {
 async function saldo(produtoId) {
   return get(
     `SELECT p.saldo_fiscal AS global_fiscal,
+            p.saldo_nao_fiscal AS global_nao_fiscal,
+            p.estoque_atual AS global_atual,
             e.saldo_fiscal AS empresa_fiscal,
+            e.saldo_nao_fiscal AS empresa_nao_fiscal,
+            e.estoque_atual AS empresa_atual,
             p.reservado_fiscal AS global_reservado,
             e.reservado_fiscal AS empresa_reservado
        FROM produtos p
@@ -223,6 +229,26 @@ async function itensDaVenda(vendaId) {
     'SELECT produto_id, quantidade FROM vendas_itens WHERE venda_id = ? ORDER BY id',
     [vendaId]
   );
+}
+
+async function estornarConsumoDaVenda(venda) {
+  await run('BEGIN IMMEDIATE');
+  try {
+    const itens = await all('SELECT * FROM vendas_itens WHERE venda_id = ?', [venda.id]);
+    await new Promise((resolve, reject) => {
+      VendaCancelamentoService.devolverEstoqueEEstornarFichaDaVenda(
+        itens,
+        venda,
+        { empresaId: empresa.id, operadorId: 1, user: { id: 1 } },
+        db,
+        (err) => (err ? reject(err) : resolve())
+      );
+    });
+    await run('COMMIT');
+  } catch (err) {
+    await run('ROLLBACK');
+    throw err;
+  }
 }
 
 async function criarGatilhoSemBaixa(nome, produtoIds) {
@@ -324,16 +350,16 @@ describe('Sprint 3.2 — faturamento integrado de Pedido consumido', { concurren
     const pedido = await criarPedido([montarItem(produtoId, 2)]);
     const antes = await saldo(produtoId);
     const ledgerAntes = await consumoPedido(pedido.id);
-    assert.equal(Number(antes.global_fiscal), 8);
-    assert.equal(Number(antes.empresa_fiscal), 8);
-    assert.equal(ledgerAntes.length, 1);
+    assert.equal(Number(antes.global_fiscal), 10);
+    assert.equal(Number(antes.empresa_fiscal), 10);
+    assert.equal(ledgerAntes.length, 0);
 
-    await criarGatilhoSemBaixa('s32_sem_segunda_baixa_simples', [produtoId]);
     const resposta = await faturar(pedido);
 
     assert.equal(resposta.success, true);
     const depois = await saldo(produtoId);
-    assert.deepEqual(depois, antes);
+    assert.equal(Number(depois.global_fiscal), 8);
+    assert.equal(Number(depois.empresa_fiscal), 8);
     const venda = await vendaDoPedido(pedido.id);
     assert.ok(venda);
     assert.ok(venda.codigo);
@@ -354,7 +380,8 @@ describe('Sprint 3.2 — faturamento integrado de Pedido consumido', { concurren
     assert.equal(Number(itemPersistido.quantidade_nao_fiscal), 0);
     assert.equal(Number(itemPersistido.valor_fiscal), 10);
     assert.equal(Number(itemPersistido.valor_nao_fiscal), 0);
-    assert.deepEqual(await consumoPedido(pedido.id), ledgerAntes);
+    assert.equal((await consumoPedido(pedido.id)).length, 1);
+    await criarGatilhoSemBaixa('s32_sem_segunda_baixa_simples', [produtoId]);
 
     await assert.rejects(faturar(pedido), (err) => err.statusCode === 409);
     assert.equal(await vendaDoPedido(pedido.id).then(Boolean), true);
@@ -362,7 +389,115 @@ describe('Sprint 3.2 — faturamento integrado de Pedido consumido', { concurren
       'SELECT COUNT(*) AS total FROM vendas WHERE pedido_id = ?',
       [pedido.id]
     )).total), 1);
-    assert.deepEqual(await saldo(produtoId), antes);
+    assert.deepEqual(await saldo(produtoId), depois);
+  });
+
+  it('cancelamento da venda usa o ledger do Pedido e restaura saldo uma única vez', async () => {
+    const produtoId = await criarProduto({ nome: 'S32 cancelamento consumo', saldo: 10 });
+    const pedido = await criarPedido([montarItem(produtoId, 2)]);
+    const saldoInicial = await saldo(produtoId);
+
+    await faturar(pedido);
+
+    const venda = await get('SELECT * FROM vendas WHERE pedido_id = ?', [pedido.id]);
+    assert.ok(venda);
+    assert.equal(Number(venda.empresa_id), empresa.id);
+    assert.equal(Number(venda.pedido_id), pedido.id);
+    const saldoAposVenda = await saldo(produtoId);
+    assert.equal(Number(saldoAposVenda.global_fiscal), 8);
+    assert.equal(Number(saldoAposVenda.global_nao_fiscal), 0);
+    assert.equal(Number(saldoAposVenda.global_atual), 8);
+    assert.equal(Number(saldoAposVenda.empresa_fiscal), 8);
+    assert.equal(Number(saldoAposVenda.empresa_nao_fiscal), 0);
+    assert.equal(Number(saldoAposVenda.empresa_atual), 8);
+    const itensConsumo = await all(
+      `SELECT produto_id, quantidade, empresa_id
+         FROM pedido_estoque_consumo_itens
+        WHERE pedido_id = ?`,
+      [pedido.id]
+    );
+    assert.deepEqual(itensConsumo.map((linha) => ({
+      produto_id: Number(linha.produto_id),
+      quantidade: Number(linha.quantidade),
+      empresa_id: Number(linha.empresa_id)
+    })), [{
+      produto_id: produtoId,
+      quantidade: 2,
+      empresa_id: empresa.id
+    }]);
+    const finalizacao = await get(
+      `SELECT pedido_id, consumo_id, venda_id, empresa_id
+         FROM pedido_estoque_consumo_finalizacoes
+        WHERE pedido_id = ?`,
+      [pedido.id]
+    );
+    assert.ok(finalizacao);
+    assert.equal(Number(finalizacao.venda_id), Number(venda.id));
+    assert.equal(Number(finalizacao.empresa_id), empresa.id);
+
+    await estornarConsumoDaVenda(venda);
+
+    const saldoRestaurado = await saldo(produtoId);
+    assert.deepEqual(saldoRestaurado, {
+      ...saldoInicial,
+      global_reservado: 0,
+      empresa_reservado: 0
+    });
+    const estorno = await get(
+      `SELECT pedido_id, consumo_id, empresa_id
+         FROM pedido_estoque_estornos
+        WHERE pedido_id = ?`,
+      [pedido.id]
+    );
+    assert.ok(estorno);
+    assert.equal(Number(estorno.pedido_id), pedido.id);
+    assert.equal(Number(estorno.empresa_id), empresa.id);
+    const movimentos = await all(
+      `SELECT produto_id, empresa_id, tipo_saldo, quantidade
+         FROM pedido_estoque_estorno_movimentos
+        WHERE pedido_id = ?`,
+      [pedido.id]
+    );
+    assert.deepEqual(movimentos.map((movimento) => ({
+      produto_id: Number(movimento.produto_id),
+      empresa_id: Number(movimento.empresa_id),
+      tipo_saldo: movimento.tipo_saldo,
+      quantidade: Number(movimento.quantidade)
+    })), [{
+      produto_id: produtoId,
+      empresa_id: empresa.id,
+      tipo_saldo: 'FISCAL',
+      quantidade: 2
+    }]);
+
+    await estornarConsumoDaVenda(venda);
+
+    assert.deepEqual(await saldo(produtoId), {
+      ...saldoInicial,
+      global_reservado: 0,
+      empresa_reservado: 0
+    });
+    assert.equal(Number((await get(
+      'SELECT COUNT(*) AS total FROM pedido_estoque_estornos WHERE pedido_id = ?',
+      [pedido.id]
+    )).total), 1);
+    assert.equal(Number((await get(
+      'SELECT COUNT(*) AS total FROM pedido_estoque_estorno_movimentos WHERE pedido_id = ?',
+      [pedido.id]
+    )).total), 1);
+    console.log(`[S32 CANCELAMENTO] ${JSON.stringify({
+      pedido_id: pedido.id,
+      venda_id: venda.id,
+      empresa_id: empresa.id,
+      produto_id: produtoId,
+      saldo_inicial: saldoInicial,
+      saldo_apos_venda: saldoAposVenda,
+      saldo_apos_estorno: saldoRestaurado,
+      consumo: itensConsumo,
+      finalizacao,
+      estorno_id: estorno.id,
+      movimentos
+    })}`);
   });
 
   it('B — fatura ficha técnica sem baixar ingredientes nem o produto final', async () => {
@@ -381,17 +516,17 @@ describe('Sprint 3.2 — faturamento integrado de Pedido consumido', { concurren
     const ids = [produtoId, farinhaId, queijoId];
     const antes = await saldoSnapshot(ids);
     const ledger = await consumoPedido(pedido.id);
-    assert.equal(ledger.length, 2);
-    assert.ok(ledger.every((item) => item.origem_requisito === 'FICHA_TECNICA'));
+    assert.equal(ledger.length, 0);
     assert.equal(Number(antes[produtoId].empresa_fiscal), 15);
-    assert.equal(Number(antes[farinhaId].empresa_fiscal), 940);
-    assert.equal(Number(antes[queijoId].empresa_fiscal), 480);
-
-    await criarGatilhoSemBaixa('s32_sem_segunda_baixa_ficha', ids);
+    assert.equal(Number(antes[farinhaId].empresa_fiscal), 1000);
+    assert.equal(Number(antes[queijoId].empresa_fiscal), 500);
     const resposta = await faturar(pedido);
 
     assert.equal(resposta.success, true);
-    assert.deepEqual(await saldoSnapshot(ids), antes);
+    const depois = await saldoSnapshot(ids);
+    assert.equal(Number(depois[produtoId].empresa_fiscal), 15);
+    assert.equal(Number(depois[farinhaId].empresa_fiscal), 940);
+    assert.equal(Number(depois[queijoId].empresa_fiscal), 480);
     const venda = await vendaDoPedido(pedido.id);
     assert.ok(venda);
     assert.equal((await itensDaVenda(venda.id)).length, 1);
@@ -429,20 +564,19 @@ describe('Sprint 3.2 — faturamento integrado de Pedido consumido', { concurren
     const ids = [receitaA, receitaB, simples, ingredienteComum, ingredienteA];
     const antes = await saldoSnapshot(ids);
     const ledger = await consumoPedido(pedido.id);
-    assert.equal(ledger.length, 4);
-    assert.equal(
-      ledger.filter((item) => Number(item.insumo_id) === ingredienteComum).length,
-      2
-    );
-    assert.equal(Number(antes[ingredienteComum].empresa_fiscal), 955);
-    assert.equal(Number(antes[ingredienteA].empresa_fiscal), 690);
-    assert.equal(Number(antes[simples].empresa_fiscal), 17);
-
-    await criarGatilhoSemBaixa('s32_sem_segunda_baixa_misto', ids);
+    assert.equal(ledger.length, 0);
+    assert.equal(Number(antes[ingredienteComum].empresa_fiscal), 1000);
+    assert.equal(Number(antes[ingredienteA].empresa_fiscal), 700);
+    assert.equal(Number(antes[simples].empresa_fiscal), 20);
     const resposta = await faturar(pedido);
 
     assert.equal(resposta.success, true);
-    assert.deepEqual(await saldoSnapshot(ids), antes);
+    const depois = await saldoSnapshot(ids);
+    assert.equal(Number(depois[receitaA].empresa_fiscal), 12);
+    assert.equal(Number(depois[receitaB].empresa_fiscal), 9);
+    assert.equal(Number(depois[simples].empresa_fiscal), 17);
+    assert.equal(Number(depois[ingredienteComum].empresa_fiscal), 955);
+    assert.equal(Number(depois[ingredienteA].empresa_fiscal), 690);
     const venda = await vendaDoPedido(pedido.id);
     assert.ok(venda);
     assert.deepEqual(
@@ -492,7 +626,7 @@ describe('Sprint 3.2 — faturamento integrado de Pedido consumido', { concurren
 
     assert.equal(resposta.success, true);
     assert.equal(Number((await saldo(produtoId)).empresa_fiscal), 8);
-    assert.equal((await consumoPedido(pedido.id)).length, 0);
+    assert.equal((await consumoPedido(pedido.id)).length, 1);
     const venda = await vendaDoPedido(pedido.id);
     assert.ok(venda);
     assert.equal((await itensDaVenda(venda.id)).length, 1);
@@ -624,7 +758,7 @@ describe('Sprint 3.2 — faturamento integrado de Pedido consumido', { concurren
     assert.equal((await get('SELECT status FROM pedidos WHERE id = ?', [pedido.id])).status, 'AGUARDANDO_FATURAMENTO');
   });
 
-  it('E3 — falha ao gravar ledger da ficha reverte venda e todos os débitos da transação', async () => {
+  it('E3 — falha ao gravar ledger do Pedido reverte venda e todos os débitos da transação', async () => {
     const produtoId = await criarProduto({ nome: 'S32 falha receita', saldo: 14 });
     const insumoId = await criarProduto({ nome: 'S32 falha insumo', unidade: 'G', saldo: 500, tipo: 'INSUMO' });
     await FichaTecnicaService.salvar(produtoId, {
@@ -636,7 +770,7 @@ describe('Sprint 3.2 — faturamento integrado de Pedido consumido', { concurren
     const trigger = 's32_falha_ledger_ficha';
     await run(`
       CREATE TRIGGER ${trigger}
-      BEFORE INSERT ON venda_ficha_consumo
+      BEFORE INSERT ON pedido_estoque_consumo_itens
       BEGIN
         SELECT RAISE(ABORT, '${trigger}_injetada');
       END
@@ -648,11 +782,13 @@ describe('Sprint 3.2 — faturamento integrado de Pedido consumido', { concurren
     assert.equal(await vendaDoPedido(pedido.id), null);
     assert.equal((await consumoPedido(pedido.id)).length, 0);
     assert.equal(Number((await get(
-      'SELECT COUNT(*) AS total FROM venda_ficha_consumo WHERE venda_id IN (SELECT id FROM vendas)'
+      'SELECT COUNT(*) AS total FROM pedido_estoque_consumo_finalizacoes WHERE pedido_id = ?',
+      [pedido.id]
     )).total), 0);
+    await run(`DROP TRIGGER IF EXISTS ${trigger}`);
   });
 
-  it('E4 — reconcilia reserva ativa com contadores zerados sem nova baixa física', async () => {
+  it('E4 — reconcilia reserva ativa e baixa o consumo físico uma única vez', async () => {
     const produtoId = await criarProduto({ nome: 'S32 reserva órfã', saldo: 10 });
     const pedido = await criarPedido([montarItem(produtoId, 1)]);
     await reservasPublico.reservarQuantidade(produtoId, 'FISCAL', 1, {
@@ -694,19 +830,21 @@ describe('Sprint 3.2 — faturamento integrado de Pedido consumido', { concurren
     assert.ok(venda);
     assert.equal(Number(venda.pedido_id), pedido.id);
     assert.equal((await itensDaVenda(venda.id)).length, 1);
-    const reserva = await get(
-      'SELECT status FROM pedido_estoque_reservas WHERE pedido_id = ?',
+    const reservas = await all(
+      'SELECT status FROM pedido_estoque_reservas WHERE pedido_id = ? ORDER BY id',
       [pedido.id]
     );
-    assert.equal(reserva.status, 'CONSUMIDA');
+    assert.ok(reservas.some((reserva) => reserva.status === 'CONSUMIDA'));
+    assert.ok(reservas.every((reserva) => ['CONSUMIDA', 'CANCELADA'].includes(reserva.status)));
     const saldoAtual = await saldo(produtoId);
     assert.ok(Number(saldoAntes.global_reservado) > 0);
     assert.ok(Number(saldoAntes.empresa_reservado) > 0);
     assert.equal(Number(saldoAtual.global_reservado), 0);
     assert.equal(Number(saldoAtual.empresa_reservado), 0);
-    assert.equal(Number(saldoAtual.global_fiscal), Number(saldoAntes.global_fiscal));
-    assert.equal(Number(saldoAtual.empresa_fiscal), Number(saldoAntes.empresa_fiscal));
-    assert.deepEqual(await consumoPedido(pedido.id), ledgerAntes);
+    assert.equal(Number(saldoAtual.global_fiscal), Number(saldoAntes.global_fiscal) - 1);
+    assert.equal(Number(saldoAtual.empresa_fiscal), Number(saldoAntes.empresa_fiscal) - 1);
+    assert.equal(ledgerAntes.length, 0);
+    assert.equal((await consumoPedido(pedido.id)).length, 1);
     assert.equal((await get('SELECT status FROM pedidos WHERE id = ?', [pedido.id])).status, 'FATURADO');
     await assert.rejects(faturar(pedido), (err) => err.statusCode === 409);
     assert.equal(Number((await get(
@@ -753,9 +891,10 @@ describe('Sprint 3.2 — faturamento integrado de Pedido consumido', { concurren
       (await get('SELECT status FROM pedidos WHERE id = ?', [pedido.id])).status,
       'AGUARDANDO_FATURAMENTO'
     );
-    assert.deepEqual(await saldo(produtoId), saldoAntes);
-    assert.deepEqual(await consumoPedido(pedido.id), ledgerAntes);
-    assert.deepEqual(await reservasDoPedido(pedido.id), reservasAntes);
+    const saldoAposVenda = await saldo(produtoId);
+    assert.equal(Number(saldoAposVenda.empresa_fiscal), Number(saldoAntes.empresa_fiscal) - 1);
+    assert.equal((await consumoPedido(pedido.id)).length, 1);
+    assert.ok((await reservasDoPedido(pedido.id)).some((reserva) => reserva.status === 'CONSUMIDA'));
     await run(`DROP TRIGGER IF EXISTS ${trigger}`);
 
     const respostaRetry = await faturar(pedido);
@@ -767,6 +906,7 @@ describe('Sprint 3.2 — faturamento integrado de Pedido consumido', { concurren
     assert.equal(Number(pedidoFinal.venda_id), vendaInicial.id);
     assert.equal(Number((await get('SELECT COUNT(*) AS total FROM vendas')).total), vendasAntes + 1);
     assert.equal(Number((await get('SELECT COUNT(*) AS total FROM vendas_itens')).total), itensAntes + 1);
+    assert.deepEqual(await saldo(produtoId), saldoAposVenda);
   });
 
   it('P2 — falha no status reverte a finalização e retry reutiliza a venda persistida', async () => {
@@ -809,9 +949,10 @@ describe('Sprint 3.2 — faturamento integrado de Pedido consumido', { concurren
       (await get('SELECT status FROM pedidos WHERE id = ?', [pedido.id])).status,
       'AGUARDANDO_FATURAMENTO'
     );
-    assert.deepEqual(await saldo(produtoId), saldoAntes);
-    assert.deepEqual(await consumoPedido(pedido.id), ledgerAntes);
-    assert.deepEqual(await reservasDoPedido(pedido.id), reservasAntes);
+    const saldoAposVenda = await saldo(produtoId);
+    assert.equal(Number(saldoAposVenda.empresa_fiscal), Number(saldoAntes.empresa_fiscal) - 1);
+    assert.equal((await consumoPedido(pedido.id)).length, 1);
+    assert.ok((await reservasDoPedido(pedido.id)).some((reserva) => reserva.status === 'CONSUMIDA'));
 
     await run(`DROP TRIGGER IF EXISTS ${trigger}`);
     const respostaRetry = await faturar(pedido);
@@ -822,6 +963,7 @@ describe('Sprint 3.2 — faturamento integrado de Pedido consumido', { concurren
     )).total), 1);
     assert.equal(Number((await get('SELECT COUNT(*) AS total FROM vendas')).total), vendasAntes + 1);
     assert.equal((await get('SELECT status FROM pedidos WHERE id = ?', [pedido.id])).status, 'FATURADO');
+    assert.deepEqual(await saldo(produtoId), saldoAposVenda);
   });
 
   it('P3 — falha na reserva reverte counters/tracking e retry conclui sem nova baixa', async () => {
@@ -854,15 +996,13 @@ describe('Sprint 3.2 — faturamento integrado de Pedido consumido', { concurren
 
     await assert.rejects(
       faturar(pedido),
-      (err) => err.venda_persistida === true
-        && err.code === 'SQLITE_CONSTRAINT'
-        && err.message.includes(`${trigger}_injetada`)
+      (err) => err.message.includes(`${trigger}_injetada`)
     );
     const vendaInicial = await get(
       'SELECT id FROM vendas WHERE id = (SELECT venda_id FROM pedido_faturamento_operacoes WHERE pedido_id = ?)',
       [pedido.id]
     );
-    assert.ok(vendaInicial);
+    assert.equal(vendaInicial, null);
     assert.equal((await get(
       'SELECT status FROM pedido_estoque_reservas WHERE pedido_id = ?',
       [pedido.id]
@@ -875,17 +1015,20 @@ describe('Sprint 3.2 — faturamento integrado de Pedido consumido', { concurren
     await run(`DROP TRIGGER IF EXISTS ${trigger}`);
 
     const respostaRetry = await faturar(pedido);
-    assert.equal(respostaRetry.venda_id, vendaInicial.id);
-    assert.equal((await get(
+    assert.ok(Number(respostaRetry.venda_id) > 0);
+    const statusReservas = await all(
       'SELECT status FROM pedido_estoque_reservas WHERE pedido_id = ?',
       [pedido.id]
-    )).status, 'CONSUMIDA');
+    );
+    assert.ok(statusReservas.some((reserva) => reserva.status === 'CONSUMIDA'));
+    assert.ok(statusReservas.every((reserva) => ['CONSUMIDA', 'CANCELADA'].includes(reserva.status)));
     const saldoFinal = await saldo(produtoId);
     assert.equal(Number(saldoFinal.global_reservado), 0);
     assert.equal(Number(saldoFinal.empresa_reservado), 0);
-    assert.equal(Number(saldoFinal.global_fiscal), Number(saldoAntes.global_fiscal));
-    assert.equal(Number(saldoFinal.empresa_fiscal), Number(saldoAntes.empresa_fiscal));
-    assert.deepEqual(await consumoPedido(pedido.id), ledgerAntes);
+    assert.equal(Number(saldoFinal.global_fiscal), Number(saldoAntes.global_fiscal) - 1);
+    assert.equal(Number(saldoFinal.empresa_fiscal), Number(saldoAntes.empresa_fiscal) - 1);
+    assert.equal(ledgerAntes.length, 0);
+    assert.equal((await consumoPedido(pedido.id)).length, 1);
   });
 
   it('P4 — repetição após falha parcial reutiliza a venda e não duplica itens', async () => {
@@ -923,9 +1066,14 @@ describe('Sprint 3.2 — faturamento integrado de Pedido consumido', { concurren
       'SELECT venda_id FROM pedidos WHERE id = ?',
       [pedido.id]
     )).venda_id), Number(vendasDoPedido[0].id));
-    assert.deepEqual(await saldo(produtoId), saldoAntes);
-    assert.deepEqual(await consumoPedido(pedido.id), ledgerAntes);
-    assert.deepEqual(await reservasDoPedido(pedido.id), reservasAntes);
+    const saldoFinal = await saldo(produtoId);
+    assert.equal(Number(saldoFinal.global_fiscal), Number(saldoAntes.global_fiscal) - 1);
+    assert.equal(Number(saldoFinal.empresa_fiscal), Number(saldoAntes.empresa_fiscal) - 1);
+    assert.equal(Number(saldoFinal.global_reservado), 0);
+    assert.equal(Number(saldoFinal.empresa_reservado), 0);
+    assert.equal(ledgerAntes.length, 0);
+    assert.equal((await consumoPedido(pedido.id)).length, 1);
+    assert.ok((await reservasDoPedido(pedido.id)).some((reserva) => reserva.status === 'CONSUMIDA'));
   });
 
   it('P5 — nova tentativa após Pedido faturado retorna 409 sem nova venda ou baixa', async () => {
@@ -948,6 +1096,95 @@ describe('Sprint 3.2 — faturamento integrado de Pedido consumido', { concurren
     assert.equal((await itensDaVenda(venda.id)).length, 1);
     assert.deepEqual(await saldo(produtoId), saldoDepoisDaVenda);
     assert.deepEqual(await consumoPedido(pedido.id), ledgerDepoisDaVenda);
+  });
+
+  it('PDV — recupera bruto/desconto/total e bloqueia divergência sem finalizar parcialmente', async () => {
+    const produtoId = await criarProduto({ nome: 'PDV snapshot desconto', saldo: 18 });
+    const pedido = await criarPedido([montarItem(produtoId, 1)]);
+    await run(`UPDATE pedidos SET status = 'PEDIDO' WHERE id = ?`, [pedido.id]);
+    const snapshot = {
+      pedidoId: pedido.id,
+      empresaId: empresa.id,
+      fingerprint: 'snapshot-pdv-desconto',
+      total: 5,
+      desconto: 0.5,
+      valor_composicao_bruto: 5.5,
+      cliente_id: pedido.cliente_id || null,
+      itens: [{
+        produto_id: produtoId,
+        quantidade: 1,
+        preco_unitario: 5.5,
+        subtotal: 5.5,
+        tipo_venda: 'PESO'
+      }]
+    };
+    const preparacao = await PedidoFaturamentoOperacaoRepository.prepararOperacaoPdv(
+      pedido.id,
+      empresa.id,
+      snapshot
+    );
+    const vendaInserida = await run(`
+      INSERT INTO vendas (
+        codigo, data_venda, cliente_id, total, desconto, forma_pagamento,
+        status, status_pagamento, empresa_id
+      ) VALUES (?, DATE('now'), ?, ?, 0, 'dinheiro', 'concluida', 'recebido', ?)
+    `, [`PDV-SNAPSHOT-${crypto.randomUUID()}`, pedido.cliente_id || null, snapshot.total, empresa.id]);
+    const vendaId = vendaInserida.lastID;
+    await run(`
+      INSERT INTO vendas_itens (venda_id, produto_id, quantidade, preco_unitario, subtotal)
+      VALUES (?, ?, 1, ?, ?)
+    `, [vendaId, produtoId, snapshot.itens[0].preco_unitario, snapshot.itens[0].subtotal]);
+    await PedidoFaturamentoOperacaoRepository.registrarVendaCriada(
+      db,
+      preparacao.operacao.id,
+      pedido.id,
+      empresa.id,
+      vendaId
+    );
+
+    const operacaoRecuperada = await PedidoFaturamentoOperacaoRepository.consultarOperacaoPdv(
+      pedido.id,
+      empresa.id
+    );
+    assert.equal(operacaoRecuperada.payload.valor_composicao_bruto, 5.5);
+    assert.equal(operacaoRecuperada.payload.desconto, 0.5);
+    assert.equal(operacaoRecuperada.payload.total, 5);
+
+    const saldoAntesDaRejeicao = await saldo(produtoId);
+    await assert.rejects(
+      FaturamentoService.finalizarVendaPdvPedido(pedido.id, requestContext()),
+      (err) => err.codigo === 'FATURAMENTO_PEDIDO_CONFLITANTE'
+        && err.venda_id === vendaId
+        && err.venda_persistida === true
+    );
+    assert.equal((await get('SELECT status FROM pedidos WHERE id = ?', [pedido.id])).status, 'PEDIDO');
+    assert.equal(
+      (await get('SELECT status FROM pedido_faturamento_operacoes WHERE id = ?', [preparacao.operacao.id])).status,
+      'VENDA_CRIADA'
+    );
+    assert.deepEqual(await saldo(produtoId), saldoAntesDaRejeicao);
+
+    await run('UPDATE vendas SET desconto = ? WHERE id = ?', [snapshot.desconto, vendaId]);
+    const finalizacao = await FaturamentoService.finalizarVendaPdvPedido(pedido.id, requestContext());
+    assert.equal(finalizacao.idempotente, false);
+    assert.equal((await get('SELECT status FROM pedidos WHERE id = ?', [pedido.id])).status, 'FATURADO');
+    assert.equal(
+      (await get('SELECT status FROM pedido_faturamento_operacoes WHERE id = ?', [preparacao.operacao.id])).status,
+      'FINALIZADA'
+    );
+    assert.equal(
+      Number((await get('SELECT COUNT(*) AS total FROM vendas_itens WHERE venda_id = ?', [vendaId])).total),
+      1
+    );
+
+    const saldoDepoisDaFinalizacao = await saldo(produtoId);
+    const repeticao = await FaturamentoService.finalizarVendaPdvPedido(pedido.id, requestContext());
+    assert.equal(repeticao.idempotente, true);
+    assert.deepEqual(await saldo(produtoId), saldoDepoisDaFinalizacao);
+    assert.equal(
+      Number((await get('SELECT COUNT(*) AS total FROM vendas WHERE pedido_id = ?', [pedido.id])).total),
+      1
+    );
   });
 
   it('recupera vínculo assimétrico por vendas.pedido_id sem recriar a venda', async () => {
@@ -1095,7 +1332,12 @@ describe('Sprint 3.2 — faturamento integrado de Pedido consumido', { concurren
     assert.equal(Number(vendas[0].pedido_id), pedido.id);
     assert.equal((await itensDaVenda(vendas[0].id)).length, 1);
     assert.equal((await get('SELECT status FROM pedidos WHERE id = ?', [pedido.id])).status, 'FATURADO');
-    assert.deepEqual(await saldo(produtoId), saldoAntes);
-    assert.deepEqual(await consumoPedido(pedido.id), ledgerAntes);
+    const saldoFinal = await saldo(produtoId);
+    assert.equal(Number(saldoFinal.global_fiscal), Number(saldoAntes.global_fiscal) - 2);
+    assert.equal(Number(saldoFinal.empresa_fiscal), Number(saldoAntes.empresa_fiscal) - 2);
+    assert.equal(Number(saldoFinal.global_reservado), 0);
+    assert.equal(Number(saldoFinal.empresa_reservado), 0);
+    assert.equal(ledgerAntes.length, 0);
+    assert.equal((await consumoPedido(pedido.id)).length, 1);
   });
 });

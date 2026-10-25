@@ -15,6 +15,9 @@ let formaPagamentoSelecionadaPDV = null;
 let supervisorAuthToken = null;
 let terminalId = null;
 let terminalHostname = null;
+let pdvPedidoHandoff = null;
+let pdvCarregandoHandoff = false;
+let pdvPedidoHandoffFinalizado = false;
 /** Escolha explícita do operador: emitir NFC-e nesta venda (null = ainda não definido). */
 let pdvEmitirFiscalNaVenda = null;
 
@@ -368,6 +371,7 @@ function loadPDV() {
             produtosDisponiveis = normalizarProdutoPdvLista(produtos);
             console.log('[PDV] Identificação: MIP oficial → fallback legado');
             inicializarPDV();
+            aplicarHandoffPedidoPdv();
         },
         error: function(xhr) {
             console.error('Erro ao carregar produtos:', xhr);
@@ -376,6 +380,151 @@ function loadPDV() {
             showNotification('Erro ao carregar produtos do PDV.', 'danger');
         }
     });
+}
+
+function headersPedidoPdv() {
+    if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.headersJson === 'function') {
+        return CdsEmpresaContexto.headersJson();
+    }
+    return {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${localStorage.getItem('token') || ''}`
+    };
+}
+
+async function finalizarPedidoPdv(vendaId) {
+    if (!pdvPedidoHandoff) return;
+    const pedidoId = Number(pdvPedidoHandoff.pedido_id);
+    const response = await fetch(
+        `${API_URL}/pedidos/${pedidoId}/finalizar-venda-pdv`,
+        {
+            method: 'POST',
+            headers: headersPedidoPdv(),
+            body: JSON.stringify({ venda_id: Number(vendaId) })
+        }
+    );
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || Number(data.venda_id) !== Number(vendaId)) {
+        throw new Error(
+            data.mensagem
+            || data.error
+            || `A venda ${vendaId} foi persistida, mas não foi possível vincular o Pedido.`
+        );
+    }
+    pdvPedidoHandoffFinalizado = true;
+}
+
+function aplicarHandoffPedidoPdv() {
+    const raw = sessionStorage.getItem('pdvPedidoHandoff');
+    if (!raw) return;
+    let handoff;
+    try {
+        handoff = JSON.parse(raw);
+    } catch (err) {
+        showNotification('Dados de preparação do Pedido inválidos; nenhum item foi carregado.', 'danger');
+        return;
+    }
+    if (
+        !handoff
+        || !Number.isInteger(Number(handoff.pedido_id))
+        || !Number.isInteger(Number(handoff.operacao_id))
+        || !Array.isArray(handoff.itens)
+        || handoff.itens.length === 0
+    ) {
+        showNotification('Preparação do Pedido incompleta; nenhum item foi carregado.', 'danger');
+        return;
+    }
+    const descontoHandoffCentavos = Math.round(Number(handoff.desconto || 0) * 100);
+    const totalHandoffCentavos = Math.round(Number(handoff.total) * 100);
+    const brutoHandoffCentavos = handoff.itens.reduce(
+        (total, item) => total + Math.round(Number(item.subtotal) * 100),
+        0
+    );
+    if (
+        !Number.isSafeInteger(descontoHandoffCentavos)
+        || descontoHandoffCentavos < 0
+        || !Number.isSafeInteger(totalHandoffCentavos)
+        || totalHandoffCentavos < 0
+        || !Number.isSafeInteger(brutoHandoffCentavos)
+        || descontoHandoffCentavos > brutoHandoffCentavos
+        || brutoHandoffCentavos - descontoHandoffCentavos !== totalHandoffCentavos
+    ) {
+        showNotification('Totais da preparação do Pedido inválidos; nenhum item foi carregado.', 'danger');
+        return;
+    }
+    if (handoff.venda_concluida) {
+        showNotification(`O Pedido já possui a venda ${handoff.venda_id || ''} concluída.`, 'info');
+        sessionStorage.removeItem('pdvPedidoHandoff');
+        return;
+    }
+    if (handoff.venda_id) {
+        showNotification(
+            `A venda ${handoff.venda_id} já foi registrada para este Pedido. Retome o pagamento pelo fluxo da venda; não será criada outra.`,
+            'warning'
+        );
+        return;
+    }
+    if (carrinho.length) {
+        showNotification('O PDV já possui itens no carrinho; a composição do Pedido não foi carregada.', 'danger');
+        return;
+    }
+
+    pdvPedidoHandoff = handoff;
+    pdvCarregandoHandoff = true;
+    try {
+        for (const item of handoff.itens) {
+            const produto = produtosDisponiveis.find(
+                (candidato) => Number(candidato.id) === Number(item.produto_id)
+            );
+            if (!produto) {
+                throw new Error(`Produto ${item.produto_id} não está disponível no catálogo do PDV.`);
+            }
+            adicionarItemNoCarrinho(
+                produto,
+                Number(item.quantidade),
+                Number(item.preco_unitario),
+                '',
+                null,
+                { tipo_venda: item.tipo_venda || 'PESO' }
+            );
+            const itemCarrinho = carrinho.find(
+                (candidato) => Number(candidato.id) === Number(item.produto_id)
+            );
+            if (!itemCarrinho) {
+                throw new Error(`Não foi possível inserir o produto ${item.produto_id} no carrinho.`);
+            }
+            itemCarrinho.quantidade = Number(item.quantidade);
+            itemCarrinho.preco_unitario = Number(item.preco_unitario);
+            itemCarrinho.preco_base = Number(produto.preco_venda || item.preco_unitario);
+            itemCarrinho.preco_origem = Number(item.preco_origem || itemCarrinho.preco_base);
+            itemCarrinho.preco_editado_manual = 0;
+            itemCarrinho.desconto_percentual = Number(item.desconto_percentual || 0);
+            itemCarrinho.desconto_valor = Number(item.desconto_valor || 0);
+            itemCarrinho.desconto_manual = Number(item.desconto_manual || 0);
+            itemCarrinho.promocao_id = item.promocao_id || null;
+            itemCarrinho.desconto_atacado = Number(item.desconto_atacado || 0);
+            itemCarrinho.tipo_preco = item.tipo_preco || 'varejo';
+            itemCarrinho.subtotal = Number(item.subtotal);
+            itemCarrinho.subtotal_exibicao = Number(item.subtotal);
+            itemCarrinho.tipo_venda = item.tipo_venda || 'PESO';
+        }
+        $('#descontoPdv').val((descontoHandoffCentavos / 100).toFixed(2));
+        $('#acrescimoPdv').val(0);
+        atualizarCarrinho();
+        $('#descontoPdv, #acrescimoPdv').prop('disabled', true);
+        showNotification(
+            `Composição do Pedido ${handoff.pedido_id} carregada. Finalize o pagamento normalmente no PDV.`,
+            'info'
+        );
+    } catch (err) {
+        carrinho = [];
+        $('#descontoPdv').val(0);
+        $('#acrescimoPdv').val(0);
+        atualizarCarrinho();
+        showNotification(err.message || 'Falha ao carregar a composição do Pedido.', 'danger');
+    } finally {
+        pdvCarregandoHandoff = false;
+    }
 }
 
 /**
@@ -1530,6 +1679,9 @@ function iniciarFluxoPosVendaComNaoFiscal(vendaId, opcoes = {}) {
                             emitirFiscal
                         );
 
+                        if (pdvPedidoHandoff) {
+                            await finalizarPedidoPdv(vendaId);
+                        }
                         processarFiscalPosPagamento(vendaId, resultado);
 
                         finalizarPosVenda();
@@ -2574,6 +2726,7 @@ function renderCarrinhoItens() {
                            min="${decimal ? '0.01' : '1'}"
                            step="${decimal ? '0.01' : '1'}"
                            inputmode="${decimal ? 'decimal' : 'numeric'}"
+                           ${pdvPedidoHandoff && !pdvCarregandoHandoff ? 'disabled' : ''}
                            data-index="${index}">
                 </td>
                 <td class="col-un"><span class="pdv-unidade-badge">${escapeHtml(unidade)}</span></td>
@@ -2598,6 +2751,7 @@ function renderCarrinhoItens() {
                            step="0.01"
                            inputmode="decimal"
                            title="Desconto em %"
+                           ${pdvPedidoHandoff ? 'disabled' : ''}
                            data-index="${index}">
                 </td>
                 <td class="col-desc-rs">
@@ -2608,11 +2762,12 @@ function renderCarrinhoItens() {
                            step="0.01"
                            inputmode="decimal"
                            title="Desconto em R$"
+                           ${pdvPedidoHandoff ? 'disabled' : ''}
                            data-index="${index}">
                 </td>
                 <td class="${classeTotal}"><span class="pdv-total-valor">${formatCurrency(item.subtotal_exibicao ?? item.subtotal)}</span></td>
                 <td class="col-acao">
-                    <button type="button" class="btn btn-sm btn-outline-danger item-remover" data-index="${index}" title="Remover">
+                    <button type="button" class="btn btn-sm btn-outline-danger item-remover" data-index="${index}" title="Remover" ${pdvPedidoHandoff ? 'disabled' : ''}>
                         <i class="fas fa-trash"></i>
                     </button>
                 </td>
@@ -2979,6 +3134,10 @@ function resolverPrecoComercialItemPdv(item, produto, quantidade) {
 }
 
 function adicionarItemNoCarrinho(produto, quantidade, precoUnitario, mensagemExtra = '', promocao = null, opcoes = {}) {
+    if (pdvPedidoHandoff && !pdvCarregandoHandoff) {
+        showNotification('A composição vinculada ao Pedido não pode ser alterada no PDV.', 'warning');
+        return;
+    }
     const tipoVenda = normalizarTipoVendaItem(opcoes);
     const etiquetaBalanca = opcoes && opcoes.etiquetaBalanca && typeof opcoes.etiquetaBalanca === 'object'
         ? opcoes.etiquetaBalanca
@@ -3629,6 +3788,11 @@ async function adicionarProdutoPorCodigoViaMip(codigoDigitado) {
 }
 
 function atualizarQuantidade(index, quantidade) {
+    if (pdvPedidoHandoff && !pdvCarregandoHandoff) {
+        showNotification('A composição vinculada ao Pedido não pode ser alterada no PDV.', 'warning');
+        atualizarCarrinho();
+        return;
+    }
     const item = carrinho[index];
 
     if (!item) return;
@@ -3828,6 +3992,11 @@ function aplicarDescontoPercentualComAuth(index, percentual, $input, valorAnteri
 }
 
 function atualizarPrecoUnitario(index, valor) {
+    if (pdvPedidoHandoff && !pdvCarregandoHandoff) {
+        showNotification('O preço da composição vinculada ao Pedido não pode ser alterado no PDV.', 'warning');
+        atualizarCarrinho();
+        return;
+    }
     const item = carrinho[index];
     if (!item) return;
 
@@ -3859,6 +4028,10 @@ function atualizarPrecoUnitario(index, valor) {
 }
 
 function removerItemCarrinho(index) {
+    if (pdvPedidoHandoff && !pdvCarregandoHandoff) {
+        showNotification('A composição vinculada ao Pedido não pode ser alterada no PDV.', 'warning');
+        return;
+    }
     const item = carrinho[index];
     if (!item) return;
 
@@ -3879,6 +4052,10 @@ function removerItemCarrinho(index) {
 }
 
 function limparCarrinho() {
+    if (pdvPedidoHandoff) {
+        showNotification('Use “Cancelar venda” para abandonar a composição do Pedido.', 'warning');
+        return;
+    }
     if (carrinho.length === 0) {
         if (window.PdvVendaEntrega && typeof PdvVendaEntrega.limparEstadoEntregaUi === 'function') {
             PdvVendaEntrega.limparEstadoEntregaUi();
@@ -4911,6 +5088,20 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
         }),
         supervisor_token: supervisorAuthToken || null
     };
+    if (pdvPedidoHandoff) {
+        const totalEsperado = Math.round(Number(pdvPedidoHandoff.total || 0) * 100);
+        if (totalEsperado !== Math.round(total * 100)) {
+            showNotification(
+                'O total do carrinho diverge do total aprovado para o Pedido; a venda foi bloqueada.',
+                'danger'
+            );
+            return;
+        }
+        dados.origem = 'PDV';
+        dados.pedido_id = Number(pdvPedidoHandoff.pedido_id);
+        dados.pedido_faturamento_operacao_id = Number(pdvPedidoHandoff.operacao_id);
+        dados.cliente_id = pdvPedidoHandoff.cliente_id || clienteId;
+    }
 
     if (formaPagamento === 'dinheiro') {
         dados.valor_recebido = parseFloat($('#valorRecebidoPDV').val()) || 0;
@@ -5176,11 +5367,16 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
             data: JSON.stringify(payload),
             timeout: 120000,
             beforeSend: function (xhr) {
+                // This per-request callback replaces $.ajaxSetup's beforeSend.
+                const token = localStorage.getItem('token');
+                if (token) {
+                    xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+                }
                 if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.anexarHeaderXhr === 'function') {
                     CdsEmpresaContexto.anexarHeaderXhr(xhr);
                 }
             },
-            success: function(response) {
+            success: async function(response) {
                 try {
                     if (!response || typeof response !== 'object') {
                         vendaEmProcessamento = false;
@@ -5200,6 +5396,10 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
                         showNotification('Venda finalizada, mas não foi possível localizar o ID da venda.', 'danger');
                         return;
                     }
+                    if (pdvPedidoHandoff) {
+                        pdvPedidoHandoff.venda_id = Number(vendaId);
+                        sessionStorage.setItem('pdvPedidoHandoff', JSON.stringify(pdvPedidoHandoff));
+                    }
 
                     if (statusPagamento === 'aguardando_nao_fiscal') {
                         // 2ª etapa legítima: fiscal confirmado, não fiscal ainda pendente
@@ -5213,6 +5413,13 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
 
                         vendaEmProcessamento = false;
                         pagamentoFiscalAtual = null;
+                        if (pdvPedidoHandoff) {
+                            showNotification(
+                                `Venda ${vendaId} registrada, mas o pagamento não fiscal está pendente. O Pedido não foi finalizado.`,
+                                'warning'
+                            );
+                            return;
+                        }
                         imprimirCupomNaoFiscal(vendaId, {
                             ...payload,
                             itens: itensParaCupom
@@ -5225,6 +5432,9 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
                     // status quitada (ou outro): NÃO abre modal de não fiscal
                     vendaEmProcessamento = false;
                     pagamentoFiscalAtual = null;
+                    if (pdvPedidoHandoff) {
+                        await finalizarPedidoPdv(vendaId);
+                    }
 
                     const vendaQuitadaCompletamente = !vendaPrazoInfo && statusPagamento === 'quitada';
 
@@ -5291,6 +5501,11 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
 }
 
 function finalizarPosVenda() {
+    if (pdvPedidoHandoffFinalizado) {
+        sessionStorage.removeItem('pdvPedidoHandoff');
+        pdvPedidoHandoff = null;
+        pdvPedidoHandoffFinalizado = false;
+    }
     carrinho = [];
     formaPagamentoSelecionada = null;
     clienteSelecionado = null;
@@ -5300,6 +5515,7 @@ function finalizarPosVenda() {
     pdvEmitirFiscalNaVenda = null;
     window.pdvTipoVenda = 'BALCAO';
     $('#descontoPdv').val(0);
+    $('#descontoPdv, #acrescimoPdv').prop('disabled', false);
     $('#formaPagamentoPdv').val('');
     $('#valorRecebidoPDV').val('');
     $('#trocoPDV').text('R$ 0,00');
@@ -5323,6 +5539,13 @@ function finalizarPosVenda() {
 }
 
 async function cancelarVendaAtual() {
+    if (pdvPedidoHandoff?.venda_id) {
+        showNotification(
+            `A venda ${pdvPedidoHandoff.venda_id} já foi persistida e não pode ser cancelada por este fluxo.`,
+            'danger'
+        );
+        return;
+    }
     if (carrinho.length === 0) {
         if (window.PdvVendaEntrega && typeof PdvVendaEntrega.estaConfigurada === 'function'
             && PdvVendaEntrega.estaConfigurada()
@@ -5338,6 +5561,11 @@ async function cancelarVendaAtual() {
     }
 
     if (!window.confirm('Tem certeza que deseja cancelar esta venda?')) return;
+    if (pdvPedidoHandoff) {
+        sessionStorage.removeItem('pdvPedidoHandoff');
+        pdvPedidoHandoff = null;
+        $('#descontoPdv, #acrescimoPdv').prop('disabled', false);
+    }
 
     // Cancelar pagamento fiscal se existir
     if (pagamentoFiscalAtual && pagamentoFiscalAtual.transacao_id) {

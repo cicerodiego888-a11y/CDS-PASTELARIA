@@ -19,6 +19,7 @@ const {
   resolverEmpresaDaOrigemFinanceira
 } = require('../financeiro/FinanceiroEmpresaContextoService');
 const { logFiscalRuntime } = require('../fiscal/core/FiscalRuntimeLog');
+const PedidoConsumoEstoqueService = require('../pedido/PedidoConsumoEstoqueService');
 
 const { devolverEstoqueItensVenda } = VendaDevolucaoService;
 const {
@@ -32,15 +33,54 @@ const {
  */
 function devolverEstoqueEEstornarFichaDaVenda(itens, venda, req, dbConn, callback) {
   const opcoes = montarOpcoesRetornoEstoqueDaVenda(venda, req, 'cancelamento_venda', dbConn);
-  devolverEstoqueItensVenda(itens, (estErr) => {
-    if (estErr) return callback(estErr);
-    estornarConsumoFichaTecnicaDaVendaCb({
-      vendaId: Number(venda.id),
-      empresaId: opcoes.empresaId,
-      db: dbConn,
-      usuarioId: opcoes.usuarioId
-    }, callback);
-  }, opcoes);
+  const obter = (sql, params = []) => new Promise((resolve, reject) => {
+    dbConn.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
+  });
+  const obterPedidoId = async () => {
+    if (Number(venda.pedido_id) > 0) return Number(venda.pedido_id);
+    try {
+      const operacao = await obter(
+        `SELECT pedido_id
+           FROM pedido_faturamento_operacoes
+          WHERE venda_id = ? AND empresa_id = ? AND tipo_operacao = 'PDV_COMPOSICAO'`,
+        [Number(venda.id), Number(opcoes.empresaId)]
+      );
+      return operacao ? Number(operacao.pedido_id) : null;
+    } catch (err) {
+      if (/no such table/i.test(String(err.message || ''))) return null;
+      throw err;
+    }
+  };
+
+  (async () => {
+    const pedidoId = await obterPedidoId();
+    if (
+      pedidoId
+      && await PedidoConsumoEstoqueService.jaConsumido(pedidoId, { db: dbConn })
+    ) {
+      await PedidoConsumoEstoqueService.solicitarEstorno({
+        db: dbConn,
+        pedidoId,
+        empresaId: opcoes.empresaId,
+        chaveIdempotencia: `cancelamento-venda-${Number(venda.id)}`,
+        usuarioId: opcoes.usuarioId,
+        jaEmTransacao: true
+      });
+      return;
+    }
+
+    await new Promise((resolve, reject) => {
+      devolverEstoqueItensVenda(itens, (estErr) => {
+        if (estErr) return reject(estErr);
+        estornarConsumoFichaTecnicaDaVendaCb({
+          vendaId: Number(venda.id),
+          empresaId: opcoes.empresaId,
+          db: dbConn,
+          usuarioId: opcoes.usuarioId
+        }, (fichaErr) => (fichaErr ? reject(fichaErr) : resolve()));
+      }, opcoes);
+    });
+  })().then(() => callback(null)).catch(callback);
 }
 
 /**

@@ -197,6 +197,15 @@ function precoUnitarioMinimoPossivel(deps) {
     return minimo;
 }
 
+function precoUnitarioMaximoPossivel(deps) {
+    let maximo = Motor.arredondarInterno(deps.precoBase);
+    if (deps.promocao) {
+        const promocional = Number(deps.promocao.preco_promocional || 0);
+        if (promocional > 0) maximo = Math.max(maximo, Motor.arredondarInterno(promocional));
+    }
+    return maximo;
+}
+
 /** Fingerprint das dependências lidas (independe da quantidade). */
 function fingerprintDependenciasCotacao(deps) {
     return hash({
@@ -323,6 +332,7 @@ async function criarCotadorPreco(opts = {}) {
         dataReferencia: deps.agora.toISOString(),
         dependenciasFingerprint,
         precoUnitarioMinimoInterno: precoUnitarioMinimoPossivel(deps),
+        precoUnitarioMaximoInterno: precoUnitarioMaximoPossivel(deps),
         cotar(quantidade) {
             const chave = Number(quantidade);
             if (!cache.has(chave)) cache.set(chave, cotarComDependencias(deps, chave));

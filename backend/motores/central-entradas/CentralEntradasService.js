@@ -99,6 +99,10 @@ class CentralEntradasService {
     return this._orchestrator.consultarDfeReal(params);
   }
 
+  consultarChaveReal(params) {
+    return this._orchestrator.consultarChaveReal(params);
+  }
+
   uploadDocumentos(arquivos = [], opcoes = {}) {
     return this._orchestrator.uploadDocumentos(arquivos, opcoes);
   }

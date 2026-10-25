@@ -90,11 +90,15 @@ test('UI compras remove condição e mantém tipo simplificado', () => {
   assert.doesNotMatch(src, /entrada_parcelado">Entrada/);
 });
 
-test('integração Contas a Pagar permanece (criarFinanceiroCompra)', () => {
+test('integração Contas a Pagar grava títulos MCF por parcela', () => {
   const src = ler('backend/rotas/compras.js');
-  assert.match(src, /function criarFinanceiroCompra/);
+  const service = ler('backend/services/compras/CompraContasPagarMcfService.js');
+  assert.match(src, /function criarTitulosMcfCompra/);
+  assert.match(src, /CompraContasPagarMcfService\.criarTitulosMcfCompra/);
   assert.match(src, /parcelas_detalhe/);
-  assert.match(src, /status.*pendente|pendente/);
+  assert.match(src, /pagar_agora:/);
+  assert.match(service, /idempotency_key: `compra:/);
+  assert.match(service, /ContasPagarService\.criarNaTransacaoAtual/);
 });
 
 console.log(`\nResultado: ${ok} OK, ${falhas} falha(s)\n`);

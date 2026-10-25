@@ -18,6 +18,13 @@ describe('PDV — Processando / timeout / erro', () => {
     assert.match(src, /timeout:\s*120000/);
   });
 
+  it('AJAX de finalização envia o token apesar do beforeSend local', () => {
+    assert.match(
+      src,
+      /beforeSend: function \(xhr\) \{\s*(?:\/\/[^\r\n]*\s*)?const token = localStorage\.getItem\('token'\);\s*if \(token\) \{\s*xhr\.setRequestHeader\('Authorization', `Bearer \$\{token\}`\);\s*\}\s*if \(window\.CdsEmpresaContexto/
+    );
+  });
+
   it('TESTE 8/9 — timeout e erro liberam vendaEmProcessamento', () => {
     assert.match(src, /textStatus === 'timeout'/);
     assert.match(src, /textStatus === 'abort'/);

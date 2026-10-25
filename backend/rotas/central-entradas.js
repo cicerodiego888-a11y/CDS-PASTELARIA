@@ -523,6 +523,38 @@ router.post('/operacao-fiscal-real/consultar-dfe', async (req, res) => {
   }
 });
 
+/**
+ * Recuperação pontual por chave (consChNFe) — OPERACAO_REAL.
+ * Auth emitida no servidor; não aceita token no body. Não altera NSU.
+ */
+router.post('/operacao-fiscal-real/consultar-chave', async (req, res) => {
+  try {
+    const ctx = await resolverEmpresaParaCentral({ req, empresaId: req.empresaId });
+    const body = req.body || {};
+    if (body.autorizacaoTransmissaoSefaz != null || body.tokenSeed != null || body.token != null) {
+      return res.status(400).json({
+        sucesso: false,
+        consultaExecutada: false,
+        codigo: 'AUTORIZACAO_CLIENTE_RECUSADA',
+        mensagem: 'Não é permitido enviar autorização/token no body.',
+        mensagemAmigavel: 'Requisição inválida: autorização deve ser emitida pelo servidor.'
+      });
+    }
+    const resultado = await centralEntradasService.consultarChaveReal({
+      empresaId: ctx.empresaId,
+      modo: ctx.modo,
+      usuario: req.user,
+      chave: body.chave,
+      confirmacaoConsultaReal: body.confirmacaoConsultaReal === true,
+      confirmacaoAmbienteProducao: body.confirmacaoAmbienteProducao === true
+    });
+    return res.status(resultado.sucesso === false && resultado.consultaExecutada === false ? 422 : 200)
+      .json(resultado);
+  } catch (error) {
+    return responderErroConsultaDfeReal(res, error);
+  }
+});
+
 router.post('/diagnostico/acoes/limpar-cache', exigirDiagnosticoCentral, async (req, res) => {
   try {
     const resultado = centralEntradasService.limparCacheDiagnostico();

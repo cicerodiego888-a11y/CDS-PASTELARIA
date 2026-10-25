@@ -337,6 +337,45 @@ describe('Pedido — nome de apresentação e preço unitário persistidos', () 
     assert.match(ui, /input\.pedpersonalizacao change\.pedpersonalizacao/);
   });
 
+  it('considera equivalentes apenas linhas com a mesma configuração comercial e de ingredientes', () => {
+    const ui = fs.readFileSync(path.join(ROOT, 'frontend/erp/js/pedidos.js'), 'utf8');
+    const contexto = { window: {} };
+    vm.runInNewContext(ui, contexto);
+    const equivalente = contexto._pedPersonalizacaoEquivalente;
+    const linha = {
+      produto_id: 5,
+      produto_nome: 'Pastel',
+      produto_codigo: 'P5',
+      preco_base_unitario_snapshot: 10,
+      preco_adicionais_unitario_snapshot: 3,
+      preco_unitario: 13,
+      desconto_percentual: 0,
+      tipo_venda: 'PESO',
+      preco_venda_snapshot: 12,
+      preco_pedido_snapshot: 10,
+      preco_sugerido_snapshot: 10,
+      origem_preco_sugerido: 'PRECO_PEDIDO',
+      quantidade: 1,
+      ingredientes_personalizados: [{
+        insumo_id: 8,
+        insumo_nome_snapshot: 'Carne de Sol',
+        quantidade_snapshot: 1,
+        unidade_snapshot: 'UN',
+        classificacao_comercial_snapshot: 'OPCIONAL_COM_ADICIONAL',
+        selecionado: 1,
+        preco_adicional_snapshot: 3
+      }]
+    };
+
+    assert.equal(equivalente(linha, { ...linha, quantidade: 4 }), true);
+    assert.equal(equivalente(linha, {
+      ...linha,
+      ingredientes_personalizados: [{ ...linha.ingredientes_personalizados[0], selecionado: 0 }]
+    }), false);
+    assert.equal(equivalente(linha, { ...linha, desconto_percentual: 5 }), false);
+    assert.equal(equivalente(linha, { ...linha, preco_base_unitario_snapshot: 11 }), false);
+  });
+
   it('prioriza preco_pedido, preserva zero e usa a origem comercial somente quando NULL', () => {
     const ui = fs.readFileSync(path.join(ROOT, 'frontend/erp/js/pedidos.js'), 'utf8');
     const contexto = { window: {} };

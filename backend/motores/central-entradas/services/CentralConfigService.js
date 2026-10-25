@@ -117,7 +117,9 @@ class CentralConfigService {
    */
   async obterIntervaloMs() {
     const resumo = await this.obterResumo();
-    const minutos = Math.max(1, Math.min(1440, resumo.syncIntervaloMinutos || 15));
+    // Piso 60 min: SEFAZ 656 pede ≥1 h entre DistDFe no mesmo CNPJ; com
+    // round-robin multiempresa o ciclo completo fica ainda mais espaçado.
+    const minutos = Math.max(60, Math.min(1440, resumo.syncIntervaloMinutos || 60));
     return minutos * 60 * 1000;
   }
 

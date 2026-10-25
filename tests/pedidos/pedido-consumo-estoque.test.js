@@ -11,6 +11,7 @@ const PedidoOperacionalService = require('../../backend/services/pedido/PedidoOp
 const PedidoConsumoEstoqueService = require('../../backend/services/pedido/PedidoConsumoEstoqueService');
 const PedidoRepository = require('../../backend/services/pedido/PedidoRepository');
 const PedidoService = require('../../backend/services/pedido/PedidoService');
+const PedidoPersonalizacaoService = require('../../backend/services/pedido/PedidoPersonalizacaoService');
 const pedidoReservaPonteNucleo = require('../../backend/services/estoque/pedidoReservaPonteNucleo');
 const VendaPagamentoService = require('../../backend/services/vendas/VendaPagamentoService');
 const MotorComercial = require('../../backend/motores/comercial');
@@ -74,14 +75,17 @@ async function criarProduto(db, {
   saldoNaoFiscal = 0,
   utilizaVolume = 0,
   volumeValor = null,
-  volumeUnidade = null
+  volumeUnidade = null,
+  precoVenda = 0,
+  precoPedido = null
 }) {
   const produto = await run(
     db,
     `INSERT INTO produtos (
       nome, unidade, tipo_operacional, controla_estoque, saldo_fiscal,
-      saldo_nao_fiscal, estoque_atual, utiliza_volume, volume_valor, volume_unidade
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
+      saldo_nao_fiscal, estoque_atual, utiliza_volume, volume_valor, volume_unidade,
+      preco_venda, preco_pedido
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
     [
       nome,
       unidade,
@@ -92,7 +96,9 @@ async function criarProduto(db, {
       saldoFiscal + saldoNaoFiscal,
       utilizaVolume,
       volumeValor,
-      volumeUnidade
+      volumeUnidade,
+      precoVenda,
+      precoPedido
     ]
   );
   return produto.lastID;
@@ -125,6 +131,8 @@ async function setup(filename) {
       codigo TEXT,
       nome TEXT NOT NULL,
       nome_comercial TEXT,
+      preco_venda REAL NOT NULL DEFAULT 0,
+      preco_pedido REAL,
       unidade TEXT NOT NULL,
       tipo_operacional TEXT NOT NULL DEFAULT 'COMERCIAL',
       ativo INTEGER NOT NULL DEFAULT 1,
@@ -140,6 +148,18 @@ async function setup(filename) {
       volume_valor REAL,
       volume_unidade TEXT,
       updated_at DATETIME
+    )
+  `);
+  await run(db, `
+    CREATE TABLE promocoes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      produto_id INTEGER NOT NULL,
+      preco_original REAL,
+      preco_promocional REAL,
+      desconto_percentual REAL,
+      data_inicio DATE,
+      data_fim DATE,
+      status TEXT DEFAULT 'ativa'
     )
   `);
   await run(db, `
@@ -185,6 +205,14 @@ async function setup(filename) {
   `);
   await run(db, 'CREATE TABLE clientes (id INTEGER PRIMARY KEY, nome TEXT)');
   await run(db, 'CREATE TABLE usuarios (id INTEGER PRIMARY KEY, username TEXT, nome TEXT)');
+  await run(db, `
+    CREATE TABLE vendas (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      status TEXT,
+      cancelada INTEGER DEFAULT 0
+    )
+  `);
   await garantirSchemaEstoqueEmpresaAsync(db);
   await garantirColunaTipoOperacionalAsync(db);
   await garantirSchemaFichaTecnicaAsync(db);
@@ -213,6 +241,28 @@ async function criarPedido(db, empresaId, itens, chave = crypto.randomUUID(), su
     chaveIdempotencia: chave,
     exigirChaveIdempotencia: true
   });
+}
+
+async function finalizarConsumoPedido(db, empresaId, pedidoId, supervisorToken = null) {
+  await run(db, 'BEGIN IMMEDIATE');
+  try {
+    const venda = await run(db, 'INSERT INTO vendas (empresa_id) VALUES (?)', [empresaId]);
+    const pedido = await PedidoRepository.obterPorId(pedidoId, { db });
+    await PedidoConsumoEstoqueService.registrarConsumo({
+      db,
+      pedidoId,
+      empresaId,
+      itens: pedido.itens,
+      supervisorToken,
+      vendaId: venda.lastID,
+      jaEmTransacao: true
+    });
+    await run(db, 'COMMIT');
+    return venda.lastID;
+  } catch (err) {
+    await run(db, 'ROLLBACK');
+    throw err;
+  }
 }
 
 const crypto = require('crypto');
@@ -269,6 +319,8 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
       }, { db });
       const resultado = await criarPedido(db, empresa.id, itens, chave);
       assert.equal(resultado.pedido.total, 10);
+      assert.equal(Number((await get(db, 'SELECT COUNT(*) AS total FROM pedido_estoque_consumos')).total), 0);
+      await finalizarConsumoPedido(db, empresa.id, resultado.pedido.id);
       assert.equal(Number((await get(db, 'SELECT COUNT(*) AS total FROM pedidos')).total), 1);
       assert.equal(Number((await get(db, 'SELECT COUNT(*) AS total FROM pedido_estoque_consumos')).total), 1);
       assert.equal(Number((await EstoqueEmpresaService.consultarSaldo(
@@ -437,9 +489,19 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
       }, { db });
       await run(db, 'UPDATE produtos SET utiliza_ficha_tecnica = 1 WHERE id = ?', [produto]);
 
-      await criarPedido(db, empresa.id, [
+      const resultado = await criarPedido(db, empresa.id, [
         { produto_id: produto, quantidade: 2, preco_unitario: 4, subtotal: 8 }
       ]);
+      assert.equal(Number((await EstoqueEmpresaService.consultarSaldo(
+        { produtoId: insumo, empresaId: empresa.id },
+        { db }
+      )).saldo_fiscal), 30);
+      assert.equal(Number((await get(
+        db,
+        'SELECT COUNT(*) AS total FROM pedido_estoque_consumos WHERE pedido_id = ?',
+        [resultado.pedido.id]
+      )).total), 0);
+      await finalizarConsumoPedido(db, empresa.id, resultado.pedido.id);
       assert.equal(Number((await EstoqueEmpresaService.consultarSaldo(
         { produtoId: insumo, empresaId: empresa.id },
         { db }
@@ -545,6 +607,9 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
       const itens = [{ produto_id: produto, quantidade: 2, preco_unitario: 5, subtotal: 10 }];
       await criarPedido(db, empresa.id, itens);
       await criarPedido(db, outraEmpresa.id, itens);
+      const pedidos = await all(db, 'SELECT id FROM pedidos ORDER BY id');
+      await finalizarConsumoPedido(db, empresa.id, Number(pedidos[0].id));
+      await finalizarConsumoPedido(db, outraEmpresa.id, Number(pedidos[1].id));
 
       assert.equal(Number((await EstoqueEmpresaService.consultarSaldo(
         { produtoId: insumo, empresaId: empresa.id },
@@ -573,7 +638,12 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
     configService.recursoHabilitado = () => true;
     const { db, empresa } = await setup();
     try {
-      const produto = await criarProduto(db, { nome: 'Pastel fiscal', unidade: 'UN', saldoFiscal: 5 });
+      const produto = await criarProduto(db, {
+        nome: 'Pastel fiscal',
+        unidade: 'UN',
+        saldoFiscal: 5,
+        precoVenda: 4
+      });
       const massa = await criarProduto(db, { nome: 'Massa', unidade: 'UN', tipo: 'INSUMO', saldoFiscal: 50 });
       const queijo = await criarProduto(db, { nome: 'Queijo', unidade: 'UN', tipo: 'INSUMO', saldoFiscal: 30 });
       const azeitona = await criarProduto(db, { nome: 'Azeitona', unidade: 'UN', tipo: 'INSUMO', saldoFiscal: 20 });
@@ -645,6 +715,7 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
 
       pedido = await PedidoRepository.obterPorId(orcamento.pedido.id, { db });
       assert.equal(Number(pedido.total), 11);
+      await finalizarConsumoPedido(db, empresa.id, pedido.id);
       assert.equal(Number((await EstoqueEmpresaService.consultarSaldo(
         { produtoId: massa, empresaId: empresa.id }, { db }
       )).saldo_fiscal), 46);
@@ -668,6 +739,314 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
     }
   });
 
+  it('mantém personalizações repetidas independentes entre salvar, editar, remover e finalizar', async () => {
+    const originalHabilitado = configService.recursoHabilitado;
+    configService.recursoHabilitado = () => true;
+    const { db, empresa } = await setup();
+    try {
+      const produto = await criarProduto(db, {
+        nome: 'Pastel com personalização por linha',
+        unidade: 'UN',
+        saldoFiscal: 20,
+        precoVenda: 10
+      });
+      const massa = await criarProduto(db, {
+        nome: 'Massa',
+        unidade: 'UN',
+        tipo: 'INSUMO',
+        saldoFiscal: 50
+      });
+      const carne = await criarProduto(db, {
+        nome: 'Carne de Sol',
+        unidade: 'UN',
+        tipo: 'INSUMO',
+        saldoFiscal: 50
+      });
+      const frango = await criarProduto(db, {
+        nome: 'Frango',
+        unidade: 'UN',
+        tipo: 'INSUMO',
+        saldoFiscal: 50
+      });
+      const mussarela = await criarProduto(db, {
+        nome: 'Mussarela',
+        unidade: 'UN',
+        tipo: 'INSUMO',
+        saldoFiscal: 50
+      });
+      await run(db, 'UPDATE produtos SET permite_personalizacao_ingredientes = 1 WHERE id = ?', [produto]);
+      for (const id of [produto, massa, carne, frango, mussarela]) {
+        await adicionarSaldoEmpresa(db, id, empresa.id, id === produto ? 20 : 50);
+      }
+      await FichaTecnicaService.salvar(produto, {
+        ativo: 1,
+        itens: [
+          { insumo_id: massa, quantidade: 1, unidade: 'UN', classificacao_comercial: 'OBRIGATORIO_OCULTO' },
+          { insumo_id: carne, quantidade: 1, unidade: 'UN', classificacao_comercial: 'OPCIONAL_COM_ADICIONAL', preco_adicional: 3 },
+          { insumo_id: frango, quantidade: 1, unidade: 'UN', classificacao_comercial: 'OPCIONAL_COM_ADICIONAL', preco_adicional: 2 },
+          { insumo_id: mussarela, quantidade: 1, unidade: 'UN', classificacao_comercial: 'OPCIONAL_COM_ADICIONAL', preco_adicional: 1 }
+        ]
+      }, { db });
+
+      const criado = await criarPedido(db, empresa.id, [
+        {
+          produto_id: produto,
+          quantidade: 1,
+          preco_unitario: 10,
+          subtotal: 10,
+          preco_base_unitario: 10,
+          ingredientes_selecionados: []
+        },
+        {
+          produto_id: produto,
+          quantidade: 1,
+          preco_unitario: 13,
+          subtotal: 13,
+          preco_base_unitario: 10,
+          ingredientes_selecionados: [carne]
+        },
+        {
+          produto_id: produto,
+          quantidade: 1,
+          preco_unitario: 13,
+          subtotal: 13,
+          preco_base_unitario: 10,
+          ingredientes_selecionados: [frango, mussarela]
+        }
+      ]);
+      let pedido = await PedidoRepository.obterPorId(criado.pedido.id, { db });
+      assert.equal(pedido.itens.length, 3);
+      assert.equal(new Set(pedido.itens.map((item) => Number(item.id))).size, 3);
+      assert.deepEqual(
+        pedido.itens.map((item) => item.ingredientes_personalizados
+          .filter((ingrediente) => Number(ingrediente.selecionado) === 1
+            && ingrediente.classificacao_comercial_snapshot !== 'OBRIGATORIO_OCULTO')
+          .map((ingrediente) => Number(ingrediente.insumo_id))
+          .sort((a, b) => a - b)),
+        [[], [carne], [frango, mussarela].sort((a, b) => a - b)]
+      );
+      const idsOriginais = pedido.itens.map((item) => Number(item.id));
+
+      const itensEditados = pedido.itens.map((item, index) => {
+        const quantidade = index === 1 ? 2 : Number(item.quantidade);
+        const preco = Number(item.preco_unitario);
+        return {
+          id: item.id,
+          produto_id: item.produto_id,
+          quantidade,
+          preco_unitario: preco,
+          desconto_percentual: Number(item.desconto_percentual || 0),
+          subtotal: Number((quantidade * preco).toFixed(2)),
+          preco_base_unitario: item.preco_base_unitario_snapshot,
+          ingredientes_selecionados: item.ingredientes_personalizados
+            .filter((ingrediente) => Number(ingrediente.selecionado) === 1
+              && ingrediente.classificacao_comercial_snapshot !== 'OBRIGATORIO_OCULTO')
+            .map((ingrediente) => Number(ingrediente.insumo_id))
+        };
+      });
+      await PedidoOperacionalService.atualizar(criado.pedido.id, {
+        total: 49,
+        itens: itensEditados
+      }, { db, empresaId: empresa.id });
+      pedido = await PedidoRepository.obterPorId(criado.pedido.id, { db });
+      assert.deepEqual(pedido.itens.map((item) => Number(item.id)), idsOriginais);
+      assert.equal(Number(pedido.itens[1].quantidade), 2);
+      assert.equal(Number(pedido.itens[0].quantidade), 1);
+      assert.equal(Number(pedido.itens[2].quantidade), 1);
+      assert.deepEqual(
+        pedido.itens.map((item) => item.ingredientes_personalizados
+          .filter((ingrediente) => Number(ingrediente.selecionado) === 1
+            && ingrediente.classificacao_comercial_snapshot !== 'OBRIGATORIO_OCULTO')
+          .map((ingrediente) => Number(ingrediente.insumo_id))
+          .sort((a, b) => a - b)),
+        [[], [carne], [frango, mussarela].sort((a, b) => a - b)]
+      );
+
+      const itensSemTerceiraLinha = pedido.itens.slice(0, 2).map((item) => ({
+        id: item.id,
+        produto_id: item.produto_id,
+        quantidade: Number(item.quantidade),
+        preco_unitario: Number(item.preco_unitario),
+        desconto_percentual: Number(item.desconto_percentual || 0),
+        subtotal: Number(item.subtotal),
+        preco_base_unitario: item.preco_base_unitario_snapshot,
+        ingredientes_selecionados: item.ingredientes_personalizados
+          .filter((ingrediente) => Number(ingrediente.selecionado) === 1
+            && ingrediente.classificacao_comercial_snapshot !== 'OBRIGATORIO_OCULTO')
+          .map((ingrediente) => Number(ingrediente.insumo_id))
+      }));
+      await PedidoOperacionalService.atualizar(criado.pedido.id, {
+        total: 36,
+        itens: itensSemTerceiraLinha
+      }, { db, empresaId: empresa.id });
+      pedido = await PedidoRepository.obterPorId(criado.pedido.id, { db });
+      assert.deepEqual(pedido.itens.map((item) => Number(item.id)), idsOriginais.slice(0, 2));
+      assert.equal(pedido.itens.length, 2);
+
+      const saldoAntes = await EstoqueEmpresaService.consultarSaldo(
+        { produtoId: massa, empresaId: empresa.id },
+        { db }
+      );
+      assert.equal(Number(saldoAntes.saldo_fiscal), 50);
+      const vendaId = await finalizarConsumoPedido(db, empresa.id, pedido.id);
+      const consumo = await all(
+        db,
+        `SELECT pedido_item_id, insumo_id, quantidade
+           FROM pedido_estoque_consumo_itens
+          WHERE pedido_id = ?
+          ORDER BY pedido_item_id, insumo_id`,
+        [pedido.id]
+      );
+      assert.equal(consumo.length, 3);
+      assert.deepEqual(consumo.map((item) => [
+        Number(item.pedido_item_id),
+        Number(item.insumo_id),
+        Number(item.quantidade)
+      ]), [
+        [idsOriginais[0], massa, 1],
+        [idsOriginais[1], massa, 2],
+        [idsOriginais[1], carne, 2]
+      ]);
+
+      await run(db, 'BEGIN IMMEDIATE');
+      const repetido = await PedidoConsumoEstoqueService.registrarConsumo({
+        db,
+        pedidoId: pedido.id,
+        empresaId: empresa.id,
+        itens: pedido.itens,
+        vendaId,
+        jaEmTransacao: true
+      });
+      await run(db, 'COMMIT');
+      assert.equal(repetido.ja_consumido, true);
+      assert.equal(Number((await EstoqueEmpresaService.consultarSaldo(
+        { produtoId: massa, empresaId: empresa.id },
+        { db }
+      )).saldo_fiscal), 47);
+      assert.equal(Number((await EstoqueEmpresaService.consultarSaldo(
+        { produtoId: carne, empresaId: empresa.id },
+        { db }
+      )).saldo_fiscal), 48);
+    } finally {
+      configService.recursoHabilitado = originalHabilitado;
+      await closeDb(db);
+    }
+  });
+
+  it('calcula preço personalizado pela fonte oficial, ignora valores de cobrança do cliente e preserva snapshot', async () => {
+    const { db } = await setup();
+    try {
+      const produto = await criarProduto(db, {
+        nome: 'Produto com preço oficial',
+        unidade: 'UN',
+        precoVenda: 7.9,
+        precoPedido: 4.25
+      });
+      const opcional = await criarProduto(db, {
+        nome: 'Adicional',
+        unidade: 'UN',
+        tipo: 'INSUMO'
+      });
+      await run(db, 'UPDATE produtos SET permite_personalizacao_ingredientes = 1 WHERE id = ?', [produto]);
+      await FichaTecnicaService.salvar(produto, {
+        ativo: 1,
+        itens: [{
+          insumo_id: opcional,
+          quantidade: 1,
+          unidade: 'UN',
+          classificacao_comercial: 'OPCIONAL'
+        }]
+      }, { db });
+
+      async function preparar(precoBase, dadosExistentes = []) {
+        const itens = [{
+          produto_id: produto,
+          quantidade: 2,
+          preco_unitario: 999,
+          subtotal: 1998,
+          desconto_percentual: 0
+        }];
+        await PedidoPersonalizacaoService.prepararItens(itens, [{
+          preco_base_unitario: precoBase,
+          ingredientes_selecionados: []
+        }], { db, itensExistentes: dadosExistentes });
+        return itens[0];
+      }
+
+      let item = await preparar(4.25);
+      assert.equal(item.preco_unitario, 4.25);
+      assert.equal(item.subtotal, 8.5);
+      assert.equal(item.preco_venda_snapshot, 7.9);
+      assert.equal(item.preco_pedido_snapshot, 4.25);
+      assert.equal(item.preco_sugerido_snapshot, 4.25);
+      assert.equal(item.origem_preco_sugerido, 'PRECO_PEDIDO');
+
+      await run(db, 'UPDATE produtos SET preco_pedido = 5.1 WHERE id = ?', [produto]);
+      item = await preparar(5.1);
+      assert.equal(item.preco_unitario, 5.1);
+      assert.equal(item.subtotal, 10.2);
+      assert.equal(item.preco_pedido_snapshot, 5.1);
+
+      await run(db, 'UPDATE produtos SET preco_pedido = 0 WHERE id = ?', [produto]);
+      item = await preparar(0);
+      assert.equal(item.preco_unitario, 0);
+      assert.equal(item.subtotal, 0);
+      assert.equal(item.preco_pedido_snapshot, 0);
+      assert.equal(item.origem_preco_sugerido, 'PRECO_PEDIDO');
+
+      await run(db, 'UPDATE produtos SET preco_pedido = NULL WHERE id = ?', [produto]);
+      await run(
+        db,
+        `INSERT INTO promocoes (
+          produto_id, preco_original, preco_promocional, data_inicio, data_fim, status
+        ) VALUES (?, 7.9, 3.75, date('now', '-1 day'), date('now', '+1 day'), 'ativa')`,
+        [produto]
+      );
+      item = await preparar(3.75);
+      assert.equal(item.preco_unitario, 3.75);
+      assert.equal(item.preco_pedido_snapshot, null);
+      assert.equal(item.preco_sugerido_snapshot, 3.75);
+      assert.equal(item.origem_preco_sugerido, 'PROMOCAO');
+
+      await assert.rejects(
+        preparar(999),
+        (err) => err && err.code === 'PRECO_BASE_DIVERGENTE' && err.statusCode === 409
+      );
+
+      const anterior = {
+        id: 91,
+        produto_id: produto,
+        personalizacao_ingredientes_snapshot: 1,
+        preco_base_unitario_snapshot: 4.25,
+        preco_adicionais_unitario_snapshot: 0,
+        preco_venda_snapshot: 7.9,
+        preco_pedido_snapshot: 4.25,
+        preco_sugerido_snapshot: 4.25,
+        origem_preco_sugerido: 'PRECO_PEDIDO',
+        ingredientes_personalizados: []
+      };
+      const itemReaberto = {
+        id: anterior.id,
+        produto_id: produto,
+        quantidade: 1,
+        preco_unitario: 4.25,
+        subtotal: 4.25,
+        desconto_percentual: 0
+      };
+      await PedidoPersonalizacaoService.prepararItens(
+        [itemReaberto],
+        [{ preco_base_unitario: 4.25, ingredientes_selecionados: [] }],
+        { db, itensExistentes: [anterior] }
+      );
+      assert.equal(itemReaberto.preco_unitario, 4.25);
+      assert.equal(itemReaberto.preco_base_unitario_snapshot, 4.25);
+      assert.equal(itemReaberto.preco_pedido_snapshot, 4.25);
+      assert.equal(itemReaberto.origem_preco_sugerido, 'PRECO_PEDIDO');
+    } finally {
+      await closeDb(db);
+    }
+  });
+
   it('consome e reserva corretamente 0,2 g de ingrediente com estoque em KG', async () => {
     const originalHabilitado = configService.recursoHabilitado;
     configService.recursoHabilitado = () => true;
@@ -675,7 +1054,8 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
     try {
       const produto = await criarProduto(db, {
         nome: 'Pastel com consumo subgrama',
-        unidade: 'UN'
+        unidade: 'UN',
+        precoVenda: 1
       });
       const carne = await criarProduto(db, {
         nome: 'Carne de Sol',
@@ -708,6 +1088,7 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
         preco_base_unitario: 1,
         ingredientes_selecionados: [carne]
       }]);
+      await finalizarConsumoPedido(db, empresa.id, pedido.pedido.id);
       const consumo = await get(
         db,
         `SELECT quantidade, quantidade_fiscal, unidade
@@ -732,12 +1113,16 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
     }
   });
 
-  it('rejeita seleção inválida e reverte pedido e snapshots se o consumo não puder ser concluído', async () => {
+  it('rejeita seleção inválida e só baixa ingredientes personalizados na finalização', async () => {
     const originalHabilitado = configService.recursoHabilitado;
     configService.recursoHabilitado = () => true;
     const { db, empresa } = await setup();
     try {
-      const produto = await criarProduto(db, { nome: 'Produto personalizável', unidade: 'UN' });
+      const produto = await criarProduto(db, {
+        nome: 'Produto personalizável',
+        unidade: 'UN',
+        precoVenda: 2
+      });
       const massa = await criarProduto(db, { nome: 'Massa', unidade: 'UN', tipo: 'INSUMO' });
       const recheio = await criarProduto(db, { nome: 'Recheio', unidade: 'UN', tipo: 'INSUMO' });
       await run(db, 'UPDATE produtos SET permite_personalizacao_ingredientes = 1 WHERE id = ?', [produto]);
@@ -777,7 +1162,10 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
       );
       assert.equal(Number((await get(db, 'SELECT COUNT(*) AS total FROM pedidos')).total), 0);
 
-      await assert.rejects(criarPersonalizado([recheio]));
+      await assert.rejects(
+        criarPersonalizado([recheio]),
+        (err) => err && ['SALDO_INSUFICIENTE', 'ESTOQUE_INSUFICIENTE'].includes(err.codigo || err.code)
+      );
       assert.equal(Number((await get(db, 'SELECT COUNT(*) AS total FROM pedidos')).total), 0);
       assert.equal(Number((await get(db, 'SELECT COUNT(*) AS total FROM pedidos_itens')).total), 0);
       assert.equal(Number((await get(db, 'SELECT COUNT(*) AS total FROM pedido_item_ingredientes')).total), 0);
@@ -809,6 +1197,13 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
       assert.equal(repetido.pedido.id, recuperado.pedido.id);
       assert.equal(Number((await get(db, 'SELECT COUNT(*) AS total FROM pedidos')).total), 1);
       assert.equal(Number((await get(db, 'SELECT COUNT(*) AS total FROM pedido_item_ingredientes')).total), 2);
+      assert.equal(Number((await EstoqueEmpresaService.consultarSaldo(
+        { produtoId: massa, empresaId: empresa.id }, { db }
+      )).saldo_fiscal), 1);
+      assert.equal(Number((await EstoqueEmpresaService.consultarSaldo(
+        { produtoId: recheio, empresaId: empresa.id }, { db }
+      )).saldo_fiscal), 1);
+      await finalizarConsumoPedido(db, empresa.id, recuperado.pedido.id);
       assert.equal(Number((await EstoqueEmpresaService.consultarSaldo(
         { produtoId: massa, empresaId: empresa.id }, { db }
       )).saldo_fiscal), 0);
@@ -868,6 +1263,7 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
         { produto_id: refrigerante, quantidade: 1, preco_unitario: 18, subtotal: 18 }
       ]);
       assert.equal(resultado.pedido.total, 61.98);
+      await finalizarConsumoPedido(db, empresa.id, resultado.pedido.id);
       assert.equal(Number((await EstoqueEmpresaService.consultarSaldo({ produtoId: queijo, empresaId: empresa.id }, { db })).saldo_fiscal), 900);
       assert.equal(Number((await EstoqueEmpresaService.consultarSaldo({ produtoId: carne, empresaId: empresa.id }, { db })).saldo_fiscal), 460);
       assert.equal(Number((await EstoqueEmpresaService.consultarSaldo({ produtoId: refrigerante, empresaId: empresa.id }, { db })).saldo_fiscal), 4000);
@@ -907,11 +1303,11 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
       );
       assert.match(
         pagamentoSource,
-        /const pedidoJaConsumido = Boolean\(creditoReserva && creditoReserva\.consumo_confirmado\);\s*opcoesBaixaEstoque\.pedidoJaConsumido = pedidoJaConsumido;/
+        /await PedidoConsumoEstoqueService\.registrarConsumo\(\{[\s\S]*?jaEmTransacao: true/
       );
       assert.match(
         pagamentoSource,
-        /if \(opcoes\.pedidoJaConsumido\)\s*\{\s*return callback\(null\);\s*\}/
+        /if \(pedidoJaConsumido\)\s*\{\s*return;/
       );
       const faturamentoSource = fs.readFileSync(
         path.resolve(__dirname, '../../backend/services/faturamento/FaturamentoService.js'),
@@ -1027,6 +1423,7 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
         ], chave),
         (err) => err && err.codigo === 'CHAVE_IDEMPOTENCIA_REUTILIZADA'
       );
+      const vendaId = await finalizarConsumoPedido(db, empresa.id, primeiro.pedido.id);
       await run(db, 'BEGIN IMMEDIATE');
       const pedidoPersistido = await PedidoRepository.obterPorId(primeiro.pedido.id, { db });
       const repeticaoConsumo = await PedidoConsumoEstoqueService.registrarConsumo({
@@ -1034,6 +1431,7 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
         pedidoId: primeiro.pedido.id,
         empresaId: empresa.id,
         itens: pedidoPersistido.itens,
+        vendaId,
         jaEmTransacao: true
       });
       await run(db, 'COMMIT');
@@ -1091,6 +1489,7 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
       const pedido = await criarPedido(db, empresa.id, [
         { produto_id: produto, quantidade: 2, preco_unitario: 8, subtotal: 16 }
       ]);
+      await finalizarConsumoPedido(db, empresa.id, pedido.pedido.id);
       assert.equal(Number((await EstoqueEmpresaService.consultarSaldo(
         { produtoId: produto, empresaId: empresa.id },
         { db }
@@ -1208,6 +1607,7 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
       const repetido = await criarPedido(db, empresa.id, itens, chave, 'aprovado');
       assert.equal(repetido.idempotente, true);
       assert.equal(repetido.pedido.id, criado.pedido.id);
+      await finalizarConsumoPedido(db, empresa.id, criado.pedido.id, 'aprovado');
       const movimentos = await all(
         db,
         'SELECT produto_id, origem, destino, quantidade FROM movimentos_transferencia_saldos ORDER BY produto_id'
@@ -1306,22 +1706,27 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
             }))
           }, { db });
 
+          const pedido = await criarPedido(
+            db,
+            empresa.id,
+            [{ produto_id: produtoFinal, quantidade: 1, preco_unitario: 30, subtotal: 30 }],
+            crypto.randomUUID(),
+            'aprovado'
+          );
+          const auditoriasAntes = Number((await get(
+            db,
+            'SELECT COUNT(*) AS total FROM auditoria_pedido_estoque_fiscal'
+          )).total);
           await assert.rejects(
-            criarPedido(
-              db,
-              empresa.id,
-              [{ produto_id: produtoFinal, quantidade: 1, preco_unitario: 30, subtotal: 30 }],
-              crypto.randomUUID(),
-              'aprovado'
-            ),
+            finalizarConsumoPedido(db, empresa.id, pedido.pedido.id, 'aprovado'),
             (err) => err && err.code === 'FALHA_DEBITO_INJETADA'
           );
           assert.equal(debitosFiscais, falharAposDebito);
-          assert.equal(Number((await get(db, 'SELECT COUNT(*) AS total FROM pedidos')).total), 0);
+          assert.equal(Number((await get(db, 'SELECT COUNT(*) AS total FROM pedidos')).total), 1);
           assert.equal(Number((await get(
             db,
             'SELECT COUNT(*) AS total FROM pedidos_itens'
-          )).total), 0);
+          )).total), 1);
           assert.equal(Number((await get(
             db,
             'SELECT COUNT(*) AS total FROM pedido_estoque_consumos'
@@ -1333,34 +1738,34 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
           assert.equal(Number((await get(
             db,
             'SELECT COUNT(*) AS total FROM pedido_operacao_idempotencia'
-          )).total), 0);
+          )).total), 1);
           assert.equal(Number((await get(
             db,
             'SELECT COUNT(*) AS total FROM movimentos_transferencia_saldos'
-          )).total), 0);
+          )).total), 3);
           assert.equal(Number((await get(
             db,
             'SELECT COUNT(*) AS total FROM pedido_estoque_reservas'
-          )).total), 0);
+          )).total), 3);
           assert.equal(Number((await get(
             db,
             'SELECT COUNT(*) AS total FROM auditoria_pedido_estoque_fiscal'
-          )).total), 0);
+          )).total), auditoriasAntes);
           for (const insumo of insumos) {
             const global = await get(
               db,
               'SELECT saldo_fiscal, saldo_nao_fiscal FROM produtos WHERE id = ?',
               [insumo.produto]
             );
-            assert.equal(Number(global.saldo_fiscal), 0);
-            assert.equal(Number(global.saldo_nao_fiscal), 20);
+            assert.equal(Number(global.saldo_fiscal), insumo.quantidade);
+            assert.equal(Number(global.saldo_nao_fiscal), 20 - insumo.quantidade);
             const empresarial = await EstoqueEmpresaService.consultarSaldo(
               { produtoId: insumo.produto, empresaId: empresa.id },
               { db }
             );
-            assert.equal(Number(empresarial.saldo_fiscal), 0);
-            assert.equal(Number(empresarial.saldo_nao_fiscal), 20);
-            assert.equal(Number(empresarial.reservado_fiscal), 0);
+            assert.equal(Number(empresarial.saldo_fiscal), insumo.quantidade);
+            assert.equal(Number(empresarial.saldo_nao_fiscal), 20 - insumo.quantidade);
+            assert.equal(Number(empresarial.reservado_fiscal), insumo.quantidade);
           }
         } finally {
           await closeDb(db);
@@ -1426,12 +1831,17 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
       assert.equal(Number((await EstoqueEmpresaService.consultarSaldo(
         { produtoId: produto, empresaId: empresa.id },
         { db }
-      )).saldo_fiscal), 3);
-
-      await assert.rejects(
-        PedidoOperacionalService.atualizar(orcamento.pedido.id, {}, { db, empresaId: empresa.id }),
-        (err) => err && err.codigo === 'PEDIDO_CONSUMO_ESTOQUE_IMUTAVEL'
-      );
+      )).saldo_fiscal), 5);
+      const pedidoEditavel = await PedidoRepository.obterPorId(orcamento.pedido.id, { db });
+      await PedidoOperacionalService.atualizar(orcamento.pedido.id, {
+        total: pedidoEditavel.total,
+        itens: pedidoEditavel.itens
+      }, { db, empresaId: empresa.id });
+      assert.equal(Number((await EstoqueEmpresaService.consultarSaldo(
+        { produtoId: produto, empresaId: empresa.id },
+        { db }
+      )).saldo_fiscal), 5);
+      await finalizarConsumoPedido(db, empresa.id, orcamento.pedido.id);
       const chaveCancelamento = crypto.randomUUID();
       const cancelado = await PedidoOperacionalService.cancelar(orcamento.pedido.id, {
         db,
@@ -1462,24 +1872,13 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
       const pedidoSeguinte = await criarPedido(db, empresa.id, [
         { produto_id: produto, quantidade: 1, preco_unitario: 3, subtotal: 3 }
       ]);
-      await assert.rejects(
-        PedidoOperacionalService.cancelar(pedidoSeguinte.pedido.id, {
-          db,
-          empresaId: empresa.id,
-          chaveIdempotencia: chaveCancelamento
-        }),
-        (err) => err && err.codigo === 'CHAVE_IDEMPOTENCIA_REUTILIZADA'
-      );
-      assert.equal((await PedidoRepository.obterPorId(pedidoSeguinte.pedido.id, { db })).status, 'PEDIDO');
-      assert.equal(Number((await EstoqueEmpresaService.consultarSaldo(
-        { produtoId: produto, empresaId: empresa.id },
-        { db }
-      )).saldo_fiscal), 4);
-      await PedidoOperacionalService.cancelar(pedidoSeguinte.pedido.id, {
+      const cancelamentoSeguinte = await PedidoOperacionalService.cancelar(pedidoSeguinte.pedido.id, {
         db,
         empresaId: empresa.id,
         chaveIdempotencia: crypto.randomUUID()
       });
+      assert.equal(cancelamentoSeguinte.pedido.status, 'CANCELADO');
+      assert.equal((await PedidoRepository.obterPorId(pedidoSeguinte.pedido.id, { db })).status, 'CANCELADO');
       assert.equal(Number((await EstoqueEmpresaService.consultarSaldo(
         { produtoId: produto, empresaId: empresa.id },
         { db }
@@ -1537,6 +1936,7 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
             crypto.randomUUID(),
             'aprovado'
           );
+          await finalizarConsumoPedido(db, empresa.id, pedido.pedido.id, 'aprovado');
           const saldosAntes = [];
           for (const item of insumos) {
             saldosAntes.push(await EstoqueEmpresaService.consultarSaldo(
@@ -1631,14 +2031,6 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
     configService.recursoHabilitado = () => true;
     const { db, empresa } = await setup();
     try {
-      await run(db, `
-        CREATE TABLE vendas (
-          id INTEGER PRIMARY KEY,
-          empresa_id INTEGER,
-          status TEXT,
-          cancelada INTEGER DEFAULT 0
-        )
-      `);
       await run(db, 'CREATE TABLE nfe_notas (id INTEGER PRIMARY KEY, venda_id INTEGER, status TEXT)');
       await run(db, 'CREATE TABLE nfce_notas (id INTEGER PRIMARY KEY, venda_id INTEGER, status TEXT)');
       const produto = await criarProduto(db, {
@@ -1650,6 +2042,7 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
       const pedido = await criarPedido(db, empresa.id, [
         { produto_id: produto, quantidade: 1, preco_unitario: 8, subtotal: 8 }
       ]);
+      await finalizarConsumoPedido(db, empresa.id, pedido.pedido.id);
       await run(db, 'INSERT INTO vendas (id, empresa_id, status) VALUES (51, ?, ?)', [
         empresa.id,
         'concluida'
@@ -1751,14 +2144,19 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
       assert.equal(Number((await EstoqueEmpresaService.consultarSaldo(
         { produtoId: produto, empresaId: empresa.id },
         { db }
-      )).saldo_fiscal), 2);
+      )).saldo_fiscal), 4);
+      assert.equal(Number((await get(
+        db,
+        'SELECT COUNT(*) AS total FROM pedido_estoque_consumos WHERE pedido_id = ?',
+        [primeiro.pedido.id]
+      )).total), 0);
     } finally {
       configService.recursoHabilitado = originalHabilitado;
       await closeDb(db);
     }
   });
 
-  it('reverte Pedido, reservas e saldo se o ledger falhar após o débito', async () => {
+  it('reverte a venda e o consumo se o ledger falhar durante a finalização', async () => {
     const originalHabilitado = configService.recursoHabilitado;
     configService.recursoHabilitado = () => true;
     const { db, empresa } = await setup();
@@ -1769,6 +2167,9 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
         saldoFiscal: 5
       });
       await adicionarSaldoEmpresa(db, produto, empresa.id, 5);
+      const pedido = await criarPedido(db, empresa.id, [
+        { produto_id: produto, quantidade: 2, preco_unitario: 3, subtotal: 6 }
+      ]);
       await PedidoConsumoEstoqueService.garantirSchema(db);
       await run(db, `
         CREATE TRIGGER falhar_ledger_pedido
@@ -1778,12 +2179,11 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
         END
       `);
       await assert.rejects(
-        criarPedido(db, empresa.id, [
-          { produto_id: produto, quantidade: 2, preco_unitario: 3, subtotal: 6 }
-        ]),
+        finalizarConsumoPedido(db, empresa.id, pedido.pedido.id),
         /falha injetada no ledger/
       );
-      assert.equal(Number((await get(db, 'SELECT COUNT(*) AS total FROM pedidos')).total), 0);
+      assert.equal(Number((await get(db, 'SELECT COUNT(*) AS total FROM pedidos')).total), 1);
+      assert.equal(Number((await get(db, 'SELECT COUNT(*) AS total FROM vendas')).total), 0);
       assert.equal(Number((await EstoqueEmpresaService.consultarSaldo(
         { produtoId: produto, empresaId: empresa.id },
         { db }
@@ -1792,7 +2192,7 @@ describe('Consumo de estoque por Pedido', { concurrency: false }, () => {
         db,
         'SELECT reservado_fiscal FROM estoque_empresa WHERE produto_id = ? AND empresa_id = ?',
         [produto, empresa.id]
-      )).reservado_fiscal), 0);
+      )).reservado_fiscal), 2);
     } finally {
       configService.recursoHabilitado = originalHabilitado;
       await closeDb(db);

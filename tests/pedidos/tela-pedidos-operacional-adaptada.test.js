@@ -47,6 +47,28 @@ describe('Tela de Pedidos adaptada (código-fonte; sem navegador)', () => {
     assert.match(UI, /window\.imprimirPedidoPorId/);
     assert.match(UI, /montarHtmlImpressaoPedido/);
   });
+  it('exibe o preço-base personalizado como somente leitura e mantém o preço final protegido', () => {
+    assert.match(
+      UI,
+      /<input type="text" inputmode="decimal" class="form-control" id="pedPersonalizacaoPrecoBase" readonly aria-readonly="true">/
+    );
+    assert.match(UI, /Number\(it\.personalizacao_ingredientes_snapshot\) === 1 \? 'text' : 'number'/);
+    assert.match(
+      UI,
+      /Number\(it\.personalizacao_ingredientes_snapshot\) === 1 \? 'readonly aria-readonly="true"' : ''/
+    );
+    assert.match(UI, /#pedPersonalizacaoQtd'\)/);
+    assert.doesNotMatch(UI, /#pedPersonalizacaoQtd, #pedPersonalizacaoPrecoBase/);
+  });
+  it('identifica a linha personalizada para editar e agrupa somente configurações equivalentes', () => {
+    assert.match(UI, /editor_id: `pedido-\$\{i\.id\}`/);
+    assert.match(UI, /const existente = itemEditorId[\s\S]*?itensEditor\.find\(\(item\) => item\.editor_id === itemEditorId\)/);
+    assert.match(UI, /itemEditorId: existente\?\.editor_id \|\| null/);
+    assert.match(UI, /_pedPersonalizacaoEquivalente\(item, candidato\)/);
+    assert.match(UI, /class="[^"]*ped-edit-personalizacao/);
+    assert.match(UI, /id: itemExistente\?\.id/);
+    assert.doesNotMatch(UI, /const existentes = itensEditor\.find\(\(item\) => Number\(item\.produto_id\) === Number\(produto\.id\)\)/);
+  });
 });
 
 describe('Backend reutilizado (PedidoRepository, banco em memória)', () => {
@@ -85,6 +107,24 @@ describe('Backend reutilizado (PedidoRepository, banco em memória)', () => {
       const lista1 = await PedidoRepository.listarPedidos({ db, empresaId: 1, statusIn: ['PEDIDO'] });
       assert.equal(lista1.length, 1);
       assert.equal(lista1[0].cliente_nome, null);
+      assert.equal(lista1[0].venda_pdv_status, null);
+      assert.equal(lista1[0].venda_pdv_id, null);
+
+      await run(db, `CREATE TABLE pedido_faturamento_operacoes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pedido_id INTEGER NOT NULL,
+        empresa_id INTEGER NOT NULL,
+        tipo_operacao TEXT NOT NULL,
+        venda_id INTEGER,
+        status TEXT NOT NULL
+      )`);
+      await run(db, `INSERT INTO pedido_faturamento_operacoes
+        (pedido_id, empresa_id, tipo_operacao, venda_id, status)
+        VALUES (?, ?, 'PDV_COMPOSICAO', ?, 'VENDA_CRIADA')`, [id, 1, 27]);
+      const listaComOperacao = await PedidoRepository.listarPedidos({ db, empresaId: 1 });
+      assert.equal(listaComOperacao[0].venda_pdv_status, 'VENDA_CRIADA');
+      assert.equal(listaComOperacao[0].venda_pdv_id, 27);
+
       assert.equal((await PedidoRepository.listarPedidos({ db, empresaId: 2 })).length, 0);
       assert.equal((await PedidoRepository.listarPedidos({ db })).length, 0);
     } finally {

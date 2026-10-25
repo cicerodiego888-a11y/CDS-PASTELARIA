@@ -162,10 +162,53 @@ class CentralSincronizacaoService {
     // `ignorarCooldown` / `forcar` NÃO bypassam. BACKGROUND / abrir_central /
     // MANUAL / sync sem OPERACAO_REAL são bloqueados na decisão (fail-closed),
     // sem depender apenas da barreira SOAP.
-    const autorizacao = opcoes.autorizacaoTransmissaoSefaz
+    // Com OPERACAO_REAL ativa + distDfeAutomatico: emite auth controlada (1× TTL)
+    // só para background/abrir_central — nunca contorna cooldown/FILA/Gate.
+    let autorizacao = opcoes.autorizacaoTransmissaoSefaz
       || this._deps.autorizacaoTransmissaoSefaz
       || null;
+    let operacaoFiscalRealService = opcoes.operacaoFiscalRealService
+      || this._deps.operacaoFiscalRealService
+      || null;
     const origemSync = opcoes.origem || null;
+    const origemNorm = String(origemSync || '').toLowerCase();
+    if (!autorizacao && (origemNorm === 'background' || origemNorm === 'abrir_central')) {
+      try {
+        if (!operacaoFiscalRealService) {
+          const CentralOperacaoFiscalRealService = require('./CentralOperacaoFiscalRealService');
+          operacaoFiscalRealService = new CentralOperacaoFiscalRealService({
+            db: opcoes.db || this._deps.db || null
+          });
+        }
+        const emitido = await operacaoFiscalRealService.emitirAutorizacaoSyncControlado({
+          empresaId,
+          origem: origemNorm,
+          cnpj: contexto.cnpj
+        });
+        autorizacao = emitido.autorizacao;
+      } catch (errAuth) {
+        const codigoAuth = errAuth.code || errAuth.codigo || 'AUTORIZACAO_AUSENTE';
+        const janela = codigoAuth === 'COOLDOWN_ATIVO'
+          || codigoAuth === 'FILA_ESGOTADA'
+          || codigoAuth === 'ESTADO_NSU_INCONSISTENTE'
+          || codigoAuth === 'PRE_VOO_BLOQUEADO';
+        return {
+          sucesso: false,
+          consultaExecutada: false,
+          ignorado: true,
+          empresaId,
+          cnpj: contexto.cnpj,
+          notasNovas: 0,
+          notasDuplicadas: 0,
+          codigo: janela ? 'AGUARDAR_JANELA_DFE' : codigoAuth,
+          codigoErro: janela ? 'AGUARDAR_JANELA_DFE' : codigoAuth,
+          motivoIgnorado: codigoAuth,
+          mensagem: errAuth.mensagemAmigavel || errAuth.message,
+          mensagemAmigavel: errAuth.mensagemAmigavel || errAuth.message,
+          proximaConsultaEm: errAuth.proximaConsultaEm || errAuth.preVoo?.proximaConsultaEm || null
+        };
+      }
+    }
     const decisao = await this._decisaoDistDfe.avaliar({
       empresaId,
       cnpj: contexto.cnpj,
@@ -298,12 +341,8 @@ class CentralSincronizacaoService {
         persistenciaService: persistencia,
         correlationId: opcoes.correlationId || null,
         origemConsulta: opcoes.origem || null,
-        autorizacaoTransmissaoSefaz: opcoes.autorizacaoTransmissaoSefaz
-          || this._deps.autorizacaoTransmissaoSefaz
-          || null,
-        operacaoFiscalRealService: opcoes.operacaoFiscalRealService
-          || this._deps.operacaoFiscalRealService
-          || null,
+        autorizacaoTransmissaoSefaz: autorizacao,
+        operacaoFiscalRealService,
         mutexTransmissaoSefaz: this._deps.mutexTransmissaoSefaz
       });
 
@@ -375,7 +414,7 @@ class CentralSincronizacaoService {
       let ultimoOk = null;
       let algumaConsulta = false;
 
-      const alvos = opcoes.empresaIdFiltro
+      let alvos = opcoes.empresaIdFiltro
         ? plano.alvos.filter((a) => Number(a.empresaId) === Number(opcoes.empresaIdFiltro))
         : plano.alvos;
       if (!alvos.length) {
@@ -388,6 +427,17 @@ class CentralSincronizacaoService {
           mensagemAmigavel: 'Empresa não elegível para sincronização DF-e',
           codigoErro: 'EMPRESA_CENTRAL_AUSENTE'
         }).toJSON();
+      }
+
+      // 1 empresa por ciclo em background/abrir_central → reduz rajada 656 multi-CNPJ.
+      const origemCiclo = String(opcoes.origem || '').toLowerCase();
+      if (
+        !opcoes.empresaIdFiltro
+        && (origemCiclo === 'background' || origemCiclo === 'abrir_central')
+        && alvos.length > 1
+        && opcoes.roundRobinEmpresas !== false
+      ) {
+        alvos = [await this._escolherAlvoRoundRobin(alvos)];
       }
 
       for (const alvo of alvos) {
@@ -574,6 +624,31 @@ class CentralSincronizacaoService {
         ? 'Documento localizado no banco da empresa. A SEFAZ não foi consultada.'
         : 'GET /buscar-chave é somente leitura local. A SEFAZ não foi consultada.'
     };
+  }
+
+  /**
+   * Round-robin de empresa para DistDFe automático (1 CNPJ por ciclo).
+   * @private
+   * @param {Array<{ empresaId: number }>} alvos
+   * @returns {Promise<{ empresaId: number }>}
+   */
+  async _escolherAlvoRoundRobin(alvos) {
+    const ordenados = [...alvos].sort((a, b) => Number(a.empresaId) - Number(b.empresaId));
+    const chave = 'sync_rr_ultima_empresa_id';
+    let ultima = 0;
+    try {
+      const CentralConfigRepository = require('../repositories/CentralConfigRepository');
+      const repo = this._deps.configRepository
+        || new CentralConfigRepository({ db: this._deps.db || null });
+      const reg = await repo.buscarPorChave(chave);
+      ultima = reg ? Number(repo.parseValor(reg)) || 0 : 0;
+      const idxAtual = ordenados.findIndex((a) => Number(a.empresaId) === ultima);
+      const proximo = ordenados[(idxAtual + 1) % ordenados.length];
+      await repo.salvar(chave, Number(proximo.empresaId), 'number');
+      return proximo;
+    } catch {
+      return ordenados[0];
+    }
   }
 }
 

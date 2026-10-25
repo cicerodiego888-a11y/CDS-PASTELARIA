@@ -97,10 +97,17 @@ test('ETAPA 5 — saveCompra envia parcelas_detalhe quando grade tem itens', () 
   assert.match(comprasJs, /parcelas_importadas_xml: parcelasImportadasXml/);
 });
 
-test('ETAPA 6 — criarFinanceiroCompra prioriza grade e respeita flag XML', () => {
+test('ETAPA 6 — títulos MCF priorizam grade e respeitam flag XML', () => {
   assert.match(rotasCompras, /if \(gradeCliente\.length > 0\) \{/);
   assert.match(rotasCompras, /parcelasImportadasXml/);
   assert.match(rotasCompras, /Grade de parcelas importada do XML ausente/);
+  assert.match(rotasCompras, /CompraContasPagarMcfService\.criarTitulosMcfCompra/);
+  const mcfCompras = fs.readFileSync(
+    path.join(ROOT, 'backend/services/compras/CompraContasPagarMcfService.js'),
+    'utf8'
+  );
+  assert.match(mcfCompras, /referencia_tipo: 'compra'/);
+  assert.match(mcfCompras, /numero_parcela: numeroParcela/);
 });
 
 test('ETAPA 7 — MIIP/MUC não disparam calcularParcelas no render core', () => {

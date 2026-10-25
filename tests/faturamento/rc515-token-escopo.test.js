@@ -18,6 +18,12 @@ const {
   normalizarEscopoSupervisor
 } = require('../../backend/rotas/auth');
 const MotorComercial = require('../../backend/motores/comercial');
+const EmpresaService = require('../../backend/services/empresas/EmpresaService');
+const { garantirSchemaEmpresasAsync } = require('../../backend/services/empresas/empresasSchema');
+const {
+  garantirSchemaEstoqueEmpresaAsync
+} = require('../../backend/services/estoque/estoqueEmpresaSchema');
+const EstoqueEmpresaService = require('../../backend/services/estoque/EstoqueEmpresaService');
 
 function openDb(file) {
   return new Promise((resolve, reject) => {
@@ -64,6 +70,12 @@ function emitirTokenSupervisor(escopo, overrides = {}) {
 async function setupDb(opts = {}) {
   const file = opts.file || path.join(os.tmpdir(), `rc515-${Date.now()}-${Math.random().toString(16).slice(2)}.db`);
   const db = await openDb(file);
+  await garantirSchemaEmpresasAsync(db);
+  const empresa = await EmpresaService.criarEmpresa({
+    cnpj: '11222333000181',
+    razao_social: 'Empresa RC515'
+  }, { db });
+  await garantirSchemaEstoqueEmpresaAsync(db);
   await run(db, `
     CREATE TABLE produtos (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -133,7 +145,7 @@ async function setupDb(opts = {}) {
     )
   `);
   for (const id of [701, 802, 901, 1001]) {
-    await run(db, `INSERT INTO pedidos (id, empresa_id, status) VALUES (?, 1, 'PEDIDO')`, [id]);
+    await run(db, `INSERT INTO pedidos (id, empresa_id, status) VALUES (?, ?, 'PEDIDO')`, [id, empresa.id]);
   }
 
   const sf = opts.saldo_fiscal != null ? opts.saldo_fiscal : 5;
@@ -150,7 +162,16 @@ async function setupDb(opts = {}) {
      VALUES ('Produto B RC515', ?, ?, 0, 0, ?)`,
     [sf, snf, sf + snf]
   );
-  return { db, produtoId: p.lastID, produtoIdB: p2.lastID, file };
+  for (const produtoId of [p.lastID, p2.lastID]) {
+    await EstoqueEmpresaService.criarRegistro({
+      produtoId,
+      empresaId: empresa.id,
+      saldo_fiscal: sf,
+      saldo_nao_fiscal: snf,
+      estoque_atual: sf + snf
+    }, { db });
+  }
+  return { db, produtoId: p.lastID, produtoIdB: p2.lastID, empresaId: empresa.id, file };
 }
 
 async function testTokenValidoMesmoPedido() {

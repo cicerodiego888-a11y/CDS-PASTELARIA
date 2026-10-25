@@ -37,10 +37,24 @@ async function garantirSchema(db) {
       empresa_id INTEGER NOT NULL,
       venda_id INTEGER,
       status TEXT NOT NULL DEFAULT 'INICIADA',
+      tipo_operacao TEXT NOT NULL DEFAULT 'FATURAMENTO',
+      payload_json TEXT,
       created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  const colunas = await all(db, 'PRAGMA table_info(pedido_faturamento_operacoes)');
+  const nomes = new Set(colunas.map((coluna) => String(coluna.name).toLowerCase()));
+  if (!nomes.has('tipo_operacao')) {
+    await run(
+      db,
+      "ALTER TABLE pedido_faturamento_operacoes ADD COLUMN tipo_operacao TEXT NOT NULL DEFAULT 'FATURAMENTO'"
+    );
+  }
+  if (!nomes.has('payload_json')) {
+    await run(db, 'ALTER TABLE pedido_faturamento_operacoes ADD COLUMN payload_json TEXT');
+  }
 }
 
 function emCentavos(valor) {
@@ -126,6 +140,12 @@ async function prepararOperacao(pedidoId, empresaId, payload = {}) {
       'SELECT * FROM pedido_faturamento_operacoes WHERE pedido_id = ?',
       [pedidoId]
     );
+    if (operacao && String(operacao.tipo_operacao || 'FATURAMENTO') !== 'FATURAMENTO') {
+      throw erroConflito('O Pedido possui uma operação PDV ativa e não pode ser faturado por outro fluxo.', {
+        pedido_id: pedidoId,
+        tipo_operacao: operacao.tipo_operacao
+      });
+    }
     const statusOperacaoAnterior = operacao ? operacao.status : null;
 
     const candidatos = await all(transacaoDb, `
@@ -238,6 +258,184 @@ async function prepararOperacao(pedidoId, empresaId, payload = {}) {
   return resultado;
 }
 
+async function prepararOperacaoPdv(pedidoId, empresaId, payload) {
+  const db = require('../../database');
+  const transacaoDb = await db.openExclusiveConnection();
+  let iniciouTransacao = false;
+  let erroOperacao = null;
+  let resultado;
+
+  try {
+    await garantirSchema(transacaoDb);
+    await run(transacaoDb, 'BEGIN IMMEDIATE');
+    iniciouTransacao = true;
+
+    const pedido = await get(transacaoDb, `
+      SELECT id, empresa_id, status, venda_id
+      FROM pedidos
+      WHERE id = ?
+    `, [pedidoId]);
+    if (!pedido || Number(pedido.empresa_id) !== Number(empresaId)) {
+      throw erroConflito('Pedido não encontrado para a empresa informada.');
+    }
+    if (!['PEDIDO', 'ABERTO', 'EM_SEPARACAO'].includes(String(pedido.status || '').toUpperCase())) {
+      throw erroConflito(`Pedido no estado ${pedido.status} não pode iniciar uma venda pelo PDV.`);
+    }
+
+    let operacao = await get(
+      transacaoDb,
+      'SELECT * FROM pedido_faturamento_operacoes WHERE pedido_id = ?',
+      [pedidoId]
+    );
+    if (operacao && Number(operacao.empresa_id) !== Number(empresaId)) {
+      throw erroConflito('A operação existente pertence a outra empresa.', { pedido_id: pedidoId });
+    }
+    if (operacao && String(operacao.tipo_operacao || 'FATURAMENTO') !== 'PDV_COMPOSICAO') {
+      throw erroConflito('O Pedido já possui uma operação de faturamento incompatível com o PDV.', {
+        pedido_id: pedidoId,
+        tipo_operacao: operacao.tipo_operacao
+      });
+    }
+
+    if (!operacao) {
+      if (pedido.venda_id != null) {
+        throw erroConflito('O Pedido já aponta para uma venda; a geração foi bloqueada para evitar duplicidade.', {
+          pedido_id: pedidoId,
+          venda_id: pedido.venda_id
+        });
+      }
+      const vendaVinculada = await get(
+        transacaoDb,
+        'SELECT id FROM vendas WHERE pedido_id = ? AND empresa_id = ? LIMIT 1',
+        [pedidoId, empresaId]
+      );
+      if (vendaVinculada) {
+        throw erroConflito('Já existe uma venda vinculada ao Pedido sem operação recuperável.', {
+          pedido_id: pedidoId,
+          venda_id: vendaVinculada.id
+        });
+      }
+      const inserida = await run(transacaoDb, `
+        INSERT INTO pedido_faturamento_operacoes
+          (pedido_id, empresa_id, status, tipo_operacao, payload_json)
+        VALUES (?, ?, 'INICIADA', 'PDV_COMPOSICAO', ?)
+      `, [pedidoId, empresaId, JSON.stringify(payload)]);
+      operacao = await get(
+        transacaoDb,
+        'SELECT * FROM pedido_faturamento_operacoes WHERE id = ?',
+        [inserida.lastID]
+      );
+    } else if (operacao.venda_id != null) {
+      const venda = await get(transacaoDb, `
+        SELECT id, empresa_id, pedido_id
+        FROM vendas
+        WHERE id = ?
+      `, [operacao.venda_id]);
+      if (
+        !venda
+        || Number(venda.empresa_id) !== Number(empresaId)
+        || (venda.pedido_id != null && Number(venda.pedido_id) !== Number(pedidoId))
+      ) {
+        throw erroConflito('A venda persistida na operação não corresponde ao Pedido.', {
+          pedido_id: pedidoId,
+          venda_id: operacao.venda_id
+        });
+      }
+      let payloadPersistido;
+      try {
+        payloadPersistido = JSON.parse(operacao.payload_json || 'null');
+      } catch (parseError) {
+        throw erroConflito('O snapshot da composição persistida não pode ser recuperado.', {
+          pedido_id: pedidoId,
+          venda_id: operacao.venda_id
+        });
+      }
+      if (!payloadPersistido) {
+        throw erroConflito('A operação não contém snapshot recuperável da composição.', {
+          pedido_id: pedidoId,
+          venda_id: operacao.venda_id
+        });
+      }
+      resultado = { operacao, payload: payloadPersistido, recuperacao: true };
+    } else {
+      await run(transacaoDb, `
+        UPDATE pedido_faturamento_operacoes
+        SET payload_json = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND venda_id IS NULL AND tipo_operacao = 'PDV_COMPOSICAO'
+      `, [JSON.stringify(payload), operacao.id]);
+      operacao = await get(
+        transacaoDb,
+        'SELECT * FROM pedido_faturamento_operacoes WHERE id = ?',
+        [operacao.id]
+      );
+      resultado = { operacao, payload, recuperacao: false };
+    }
+
+    if (!resultado) resultado = { operacao, payload, recuperacao: false };
+    await run(transacaoDb, 'COMMIT');
+    iniciouTransacao = false;
+  } catch (err) {
+    erroOperacao = err instanceof Error ? err : new Error(String(err));
+    if (iniciouTransacao) {
+      try {
+        await run(transacaoDb, 'ROLLBACK');
+      } catch (rollbackError) {
+        erroOperacao.rollbackError = rollbackError;
+      }
+    }
+  }
+
+  try {
+    await new Promise((resolve, reject) => {
+      transacaoDb.close((err) => (err ? reject(err) : resolve()));
+    });
+  } catch (closeError) {
+    if (erroOperacao) erroOperacao.closeError = closeError;
+    else erroOperacao = closeError;
+  }
+  if (erroOperacao) throw erroOperacao;
+  return resultado;
+}
+
+async function consultarOperacaoPdv(pedidoId, empresaId) {
+  const db = require('../../database');
+  const tabela = await get(
+    db,
+    "SELECT 1 AS existe FROM sqlite_master WHERE type = 'table' AND name = 'pedido_faturamento_operacoes'"
+  );
+  if (!tabela) return null;
+  const operacao = await get(db, `
+    SELECT *
+    FROM pedido_faturamento_operacoes
+    WHERE pedido_id = ?
+  `, [pedidoId]);
+  if (!operacao) return null;
+  if (
+    Number(operacao.empresa_id) !== Number(empresaId)
+    || operacao.tipo_operacao !== 'PDV_COMPOSICAO'
+  ) {
+    return null;
+  }
+  let payload = null;
+  try {
+    payload = JSON.parse(operacao.payload_json || 'null');
+  } catch (parseError) {
+    if (operacao.venda_id != null) {
+      throw erroConflito('O snapshot da composição PDV persistida não pode ser recuperado.', {
+        pedido_id: pedidoId,
+        venda_id: operacao.venda_id
+      });
+    }
+  }
+  if (operacao.venda_id != null && !payload) {
+    throw erroConflito('A venda persistida não possui um snapshot de composição recuperável.', {
+      pedido_id: pedidoId,
+      venda_id: operacao.venda_id
+    });
+  }
+  return { operacao, payload };
+}
+
 async function registrarVendaCriada(db, operacaoId, pedidoId, empresaId, vendaId) {
   const operacao = await get(db, `
     SELECT id, pedido_id, empresa_id, venda_id
@@ -280,6 +478,8 @@ async function registrarVendaCriada(db, operacaoId, pedidoId, empresaId, vendaId
 module.exports = {
   garantirSchema,
   prepararOperacao,
+  prepararOperacaoPdv,
+  consultarOperacaoPdv,
   registrarVendaCriada,
   erroConflito,
   run,

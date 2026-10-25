@@ -31,6 +31,37 @@ function _pedCalcularTotaisPersonalizacao({
   return { precoAdicionais: adicionais, precoUnitario, subtotal };
 }
 
+function _pedPersonalizacaoEquivalente(a, b) {
+  if (!a || !b) return false;
+  const componentes = (item) => (item.ingredientes_personalizados || [])
+    .map((ingrediente) => [
+      Number(ingrediente.insumo_id),
+      String(ingrediente.insumo_nome_snapshot || ''),
+      Number(ingrediente.quantidade_snapshot),
+      String(ingrediente.unidade_snapshot || ''),
+      String(ingrediente.classificacao_comercial_snapshot || ''),
+      Number(ingrediente.selecionado),
+      Number(ingrediente.preco_adicional_snapshot || 0)
+    ])
+    .sort((x, y) => x[0] - y[0]);
+  const chave = (item) => JSON.stringify([
+    Number(item.produto_id),
+    String(item.produto_nome || ''),
+    String(item.produto_codigo || ''),
+    Number(item.preco_base_unitario_snapshot),
+    Number(item.preco_adicionais_unitario_snapshot),
+    Number(item.preco_unitario),
+    Number(item.desconto_percentual || 0),
+    String(item.tipo_venda || 'PESO'),
+    item.preco_venda_snapshot == null ? null : Number(item.preco_venda_snapshot),
+    item.preco_pedido_snapshot == null ? null : Number(item.preco_pedido_snapshot),
+    item.preco_sugerido_snapshot == null ? null : Number(item.preco_sugerido_snapshot),
+    item.origem_preco_sugerido || null,
+    componentes(item)
+  ]);
+  return chave(a) === chave(b);
+}
+
 /** Cabeçalhos com token e X-Empresa-Id (o backend exige o contexto explícito da empresa). */
 function _pedHeaders() {
   if (typeof CdsEmpresaContexto !== 'undefined' && typeof CdsEmpresaContexto.headersJson === 'function') {
@@ -61,7 +92,7 @@ function _pedEscapeHtml(text) {
   return div.innerHTML;
 }
 
-/** Layout oficial de impressão do pedido — não alterar visual. */
+/** Layout A4 legado do pedido; mantido para os consumidores que ainda o utilizam. */
 function montarHtmlImpressaoPedido(p) {
   const escapeHtml = _pedEscapeHtml;
   const fmtMoney = _pedFmtMoney;
@@ -191,11 +222,105 @@ function montarHtmlImpressaoPedido(p) {
 </html>`;
 }
 
+function formatarQuantidadeImpressaoPedido(valor) {
+  const texto = String(valor == null ? 0 : valor);
+  const partes = texto.match(/^(-?\d+)(?:\.(\d+))?$/);
+  if (!partes) return _pedEscapeHtml(texto);
+  const inteiro = partes[1].replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+  return _pedEscapeHtml(`${inteiro}${partes[2] ? `,${partes[2]}` : ''}`);
+}
+
+function montarHtmlImpressaoPedidoTermico(p) {
+  const escapeHtml = _pedEscapeHtml;
+  const fmtMoney = _pedFmtMoney;
+  const fmtData = _pedFmtData;
+  const itens = Array.isArray(p.itens) ? p.itens : [];
+  const linhas = itens.map((item) => `
+    <div class="item-row">
+      <span class="item-qtd">${formatarQuantidadeImpressaoPedido(item.quantidade)}</span>
+      <span class="item-nome">${escapeHtml(item.produto_nome || '')}</span>
+      <span class="item-valor">${fmtMoney(item.subtotal)}</span>
+    </div>`).join('');
+  const subtotal = itens.reduce((total, item) => total + Number(item.subtotal || 0), 0);
+  const marca = (typeof BrandService !== 'undefined' && BrandService.meta)
+    ? BrandService.meta().nome
+    : 'CDS Sistemas';
+  const titulo = escapeHtml(p.codigo || ('#' + p.id));
+  const nomeCliente = p.cliente_nome || 'Consumidor';
+
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Pedido ${titulo}</title>
+  <style>
+    *{box-sizing:border-box}
+    @page{size:80mm auto;margin:0}
+    html,body{width:76mm;max-width:76mm;margin:0 auto;padding:0;background:#fff;color:#111}
+    body{font-family:Arial,Helvetica,sans-serif;font-size:12px;line-height:1.35}
+    .toolbar{display:flex;justify-content:flex-end;gap:6px;padding:3mm 2.5mm;background:#f3f4f6}
+    .toolbar button{border:0;border-radius:3px;padding:6px 10px;font-size:12px}
+    .btn-imprimir{background:#15803d;color:#fff}
+    .btn-fechar{background:#e5e7eb;color:#111}
+    .cupom{width:76mm;padding:2.5mm}
+    h1{margin:0 0 2mm;font-size:14px;line-height:1.25;overflow-wrap:anywhere}
+    .identificacao{margin-bottom:3mm;overflow-wrap:anywhere}
+    .item-list{border-top:1px dashed #555;border-bottom:1px dashed #555}
+    .item-row{display:grid;grid-template-columns:8mm minmax(0,1fr) 20mm;gap:1mm;align-items:start;padding:2mm 0;border-bottom:1px dashed #bbb}
+    .item-row:last-child{border-bottom:0}
+    .item-qtd{white-space:nowrap}
+    .item-nome{min-width:0;overflow-wrap:anywhere;word-break:normal}
+    .item-valor{text-align:right;white-space:nowrap}
+    .totais{margin-top:3mm}
+    .total-row{display:flex;justify-content:space-between;gap:2mm;padding:1mm 0}
+    .total-row span:last-child{text-align:right;white-space:nowrap}
+    .total-final{margin-top:1mm;padding-top:2mm;border-top:1px solid #111;font-size:14px;font-weight:700}
+    @media print{
+      html,body{width:76mm!important;max-width:76mm!important;margin:0!important;background:#fff!important}
+      .toolbar{display:none!important}
+      .cupom{width:76mm!important;padding:2.5mm!important}
+    }
+  </style>
+</head>
+<body class="danfe danfe-80">
+  <div class="toolbar">
+    <button type="button" class="btn-imprimir" onclick="window.print()">Imprimir</button>
+    <button type="button" class="btn-fechar" onclick="window.close()">Fechar</button>
+  </div>
+  <main class="cupom">
+    <h1>${escapeHtml(marca)} — Pedido ${titulo}</h1>
+    <div class="identificacao">
+      <div><strong>Data:</strong> ${fmtData(p.data_pedido)}</div>
+      <div><strong>Cliente:</strong> ${escapeHtml(nomeCliente)}</div>
+    </div>
+    <div class="item-list">
+      ${linhas || '<div class="item-row">Sem itens</div>'}
+    </div>
+    <div class="totais">
+      <div class="total-row"><span>Subtotal</span><span>${fmtMoney(subtotal)}</span></div>
+      <div class="total-row"><span>Desconto</span><span>${fmtMoney(p.desconto)}</span></div>
+      <div class="total-row"><span>Frete</span><span>${fmtMoney(p.frete)}</span></div>
+      <div class="total-row total-final"><span>Total</span><span>${fmtMoney(p.total)}</span></div>
+    </div>
+  </main>
+</body>
+</html>`;
+}
+
+async function obterImpressoraCupomPedido(headers) {
+  const resp = await fetch(`${API_URL}/configuracoes/impressora_cupom`, { headers });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    throw new Error(data.mensagem || data.error || 'Falha ao carregar a impressora de cupom configurada.');
+  }
+  return data.caminho || null;
+}
+
 /**
- * Reimpressão do pedido — layout idêntico ao módulo Pedidos.
+ * Reimpressão do pedido — mantém A4 para consumidores existentes e oferece layout térmico para Pedidos.
  * @returns {Promise<{ ok: boolean, error?: string }>}
  */
-async function imprimirPedidoPorId(pedidoId) {
+async function imprimirPedidoPorId(pedidoId, formato = 'a4') {
   const id = Number(pedidoId);
   if (!id) return { ok: false, error: 'Pedido inválido.' };
   const headers = _pedHeaders();
@@ -206,9 +331,27 @@ async function imprimirPedidoPorId(pedidoId) {
     const p = data.pedido;
     if (!p) throw new Error('Pedido não encontrado.');
 
-    // A4 @ 96dpi ≈ 794 × 1123; + barra + margem
-    const w = 860;
-    const h = 1200;
+    const termico = formato === 'termico';
+    const html = termico
+      ? montarHtmlImpressaoPedidoTermico(p)
+      : montarHtmlImpressaoPedido(p);
+    if (termico && window.electronAPI?.abrirComprovante) {
+      const deviceName = await obterImpressoraCupomPedido(headers);
+      window.electronAPI.abrirComprovante(html, {
+        silent: false,
+        autoFecharMs: 5000,
+        deviceName
+      });
+      return { ok: true };
+    }
+    if (termico && window.electronAPI?.imprimirDANFESilencioso) {
+      const deviceName = await obterImpressoraCupomPedido(headers);
+      await window.electronAPI.imprimirDANFESilencioso(html, deviceName);
+      return { ok: true };
+    }
+
+    const w = termico ? 420 : 860;
+    const h = termico ? 720 : 1200;
     const left = Math.max(0, Math.round((window.screen.availWidth - w) / 2));
     const top = Math.max(0, Math.round((window.screen.availHeight - h) / 2));
     const win = window.open(
@@ -218,7 +361,7 @@ async function imprimirPedidoPorId(pedidoId) {
     );
     if (!win) return { ok: false, error: 'Permita pop-ups para visualizar o pedido.' };
     win.document.open();
-    win.document.write(montarHtmlImpressaoPedido(p));
+    win.document.write(html);
     win.document.close();
     win.focus();
     return { ok: true };
@@ -266,6 +409,7 @@ function _pedResolverPrecoSugerido(produto = {}, precoComercial, origemPrecoCome
 }
 
 window.montarHtmlImpressaoPedido = montarHtmlImpressaoPedido;
+window.montarHtmlImpressaoPedidoTermico = montarHtmlImpressaoPedidoTermico;
 window.imprimirPedidoPorId = imprimirPedidoPorId;
 
 function loadPedidos() {
@@ -274,6 +418,7 @@ function loadPedidos() {
   let assinaturaCriacaoPendente = null;
   const chavesDuplicacaoPendentes = new Map();
   const chavesCancelamentoPendentes = new Map();
+  const operacoesVendaPdvPendentes = new Set();
 
   function novaChaveIdempotencia() {
     if (window.crypto && typeof window.crypto.randomUUID === 'function') {
@@ -298,6 +443,7 @@ function loadPedidos() {
 
   const ABAS = [
     { id: 'pedidos', label: 'Pedidos', status: 'PEDIDO,ABERTO,EM_SEPARACAO' },
+    { id: 'concluidos', label: 'Concluídos', status: 'FATURADO' },
     { id: 'cancelados', label: 'Cancelados', status: 'CANCELADO' }
   ];
 
@@ -316,11 +462,14 @@ function loadPedidos() {
   }
 
   let itensEditor = [];
+  let sequenciaItemEditor = 0;
   let precoSugestaoSelecionada = null;
   let produtoSelecionadoParaPedido = null;
   let adicionarPersonalizacaoPendente = null;
   let pedidoEditandoId = null;
   let pedidoEditandoStatus = null;
+  let pedidoEdicaoBloqueada = false;
+  let pedidoSomenteConsulta = false;
   let representanteAtual = null;
   let freteAtual = 0;
   let clienteSelecionado = null;
@@ -449,6 +598,7 @@ function loadPedidos() {
             </div>
           </div>
           <div class="modal-body">
+            <div id="pedEditorBloqueioAviso" class="alert alert-warning d-none" role="alert"></div>
             <div class="row g-2 mb-3">
               <div class="col-md-3">
                 <label class="form-label">Mesa</label>
@@ -559,7 +709,7 @@ function loadPedidos() {
               </div>
               <div class="col-sm-6">
                 <label class="form-label" for="pedPersonalizacaoPrecoBase">Preço-base por unidade (R$)</label>
-                <input type="number" min="0" step="0.01" class="form-control" id="pedPersonalizacaoPrecoBase">
+                <input type="text" inputmode="decimal" class="form-control" id="pedPersonalizacaoPrecoBase" readonly aria-readonly="true">
               </div>
             </div>
             <div class="row g-3">
@@ -663,14 +813,21 @@ function loadPedidos() {
     return true;
   }
 
-  async function aplicarProdutoSelecionado(id, nome, codigo, precoComercial, origemPrecoComercial) {
+  async function aplicarProdutoSelecionado(
+    id,
+    nome,
+    codigo,
+    precoComercial,
+    origemPrecoComercial,
+    itemEditorId = null
+  ) {
     precoSugestaoSelecionada = null;
     produtoSelecionadoParaPedido = null;
     try {
       const resp = await fetch(`${API_URL}/produtos/${id}`, { headers });
       const produto = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(produto.error || 'Falha ao carregar o produto selecionado.');
-      const nomePedido = String(produto.nome_comercial || '').trim() || produto.nome || nome || '';
+      const nomePedidoAtual = String(produto.nome_comercial || '').trim() || produto.nome || nome || '';
       let fichaPersonalizacao = null;
       if (Number(produto.permite_personalizacao_ingredientes) === 1) {
         const fichaResp = await fetch(`${API_URL}/produtos/${id}/ficha-tecnica`, { headers });
@@ -686,8 +843,18 @@ function loadPedidos() {
         }
         fichaPersonalizacao = ficha;
       }
+      if (itemEditorId && !fichaPersonalizacao) {
+        throw new Error('A configuração atual do produto não permite editar esta personalização.');
+      }
       const sugestao = _pedResolverPrecoSugerido(produto, precoComercial, origemPrecoComercial);
-      const existente = itensEditor.find((item) => Number(item.produto_id) === Number(id));
+      const existente = itemEditorId
+        ? itensEditor.find((item) => item.editor_id === itemEditorId)
+        : null;
+      if (itemEditorId && !existente) {
+        throw new Error('O item que seria editado não está mais no Pedido.');
+      }
+      const nomePedido = existente?.produto_nome || nomePedidoAtual;
+      const codigoPedido = existente?.produto_codigo || codigo || '';
       const precoInicial = fichaPersonalizacao && existente
         ? Number(existente.preco_base_unitario_snapshot ?? sugestao.precoInicial)
         : sugestao.precoInicial;
@@ -704,20 +871,21 @@ function loadPedidos() {
         : null;
       $('#pedProdutoId').val(id);
       $('#pedProdutoNome').val(nomePedido);
-      $('#pedProdutoCodigo').val(codigo);
+      $('#pedProdutoCodigo').val(codigoPedido);
       $('#pedItemPreco').val(precoInicial);
-      $('#pedProdutoBusca').val((codigo || '') + (codigo ? ' — ' : '') + nomePedido);
+      $('#pedProdutoBusca').val((codigoPedido || '') + (codigoPedido ? ' — ' : '') + nomePedido);
       fecharSugestoes('produto');
       $('#pedItemQtd').val($('#pedItemQtd').val() || '1');
       if (fichaPersonalizacao) {
         abrirModalPersonalizacao(produtoSelecionadoParaPedido, {
+          itemEditorId: existente?.editor_id || null,
           produtoId: Number(id),
-          quantidade: Number($('#pedItemQtd').val()),
+          quantidade: Number(existente?.quantidade ?? $('#pedItemQtd').val()),
           precoBase: Number(precoInicial),
-          precoAdicionais: 0,
-          desconto: Number($('#pedItemDesc').val() || 0),
+          precoAdicionais: Number(existente?.preco_adicionais_unitario_snapshot || 0),
+          desconto: Number(existente?.desconto_percentual ?? $('#pedItemDesc').val() ?? 0),
           nome: nomePedido,
-          codigo: codigo || '',
+          codigo: codigoPedido,
           snapshotPreco: precoSugestaoSelecionada
         });
         return;
@@ -741,7 +909,7 @@ function loadPedidos() {
 
   function renderItens() {
     if (!itensEditor.length) {
-      $('#pedItensBody').html('<tr><td colspan="7" class="text-muted text-center">Nenhum item. Pesquise e adicione produtos.</td></tr>');
+      $('#pedItensBody').html(`<tr><td colspan="7" class="text-muted text-center">${pedidoEdicaoBloqueada ? 'Nenhum item registrado.' : 'Nenhum item. Pesquise e adicione produtos.'}</td></tr>`);
       linhaGradeFoco = -1;
     } else {
       $('#pedItensBody').html(itensEditor.map((it, idx) => {
@@ -757,14 +925,19 @@ function loadPedidos() {
         <tr class="ped-item-row ${linhaGradeFoco === idx ? 'table-active' : ''}" data-idx="${idx}" tabindex="0">
           <td>${escapeHtml(it.produto_codigo || it.produto_id)}</td>
           <td>${escapeHtml(it.produto_nome || ('#' + it.produto_id))}${resumo}</td>
-          <td style="width:90px"><input type="number" class="form-control form-control-sm ped-edit-qtd" data-idx="${idx}" value="${it.quantidade}" min="0.001" step="0.001"></td>
-          <td style="width:100px"><input type="number" class="form-control form-control-sm ped-edit-preco" data-idx="${idx}" value="${it.preco_unitario}" min="0" step="0.01" title="${Number(it.personalizacao_ingredientes_snapshot) === 1 ? 'Preço unitário final (inclui os adicionais)' : 'Preço unitário'}"></td>
-          <td style="width:80px"><input type="number" class="form-control form-control-sm ped-edit-desc" data-idx="${idx}" value="${it.desconto_percentual || 0}" min="0" max="100" step="0.01"></td>
+          <td style="width:90px"><input type="number" class="form-control form-control-sm ped-edit-qtd" data-idx="${idx}" value="${it.quantidade}" min="0.001" step="0.001" ${pedidoEdicaoBloqueada ? 'disabled aria-disabled="true"' : ''}></td>
+          <td style="width:100px"><input type="${Number(it.personalizacao_ingredientes_snapshot) === 1 ? 'text' : 'number'}" class="form-control form-control-sm ped-edit-preco" data-idx="${idx}" value="${it.preco_unitario}" min="0" step="0.01" ${Number(it.personalizacao_ingredientes_snapshot) === 1 ? 'readonly aria-readonly="true"' : ''} ${pedidoEdicaoBloqueada ? 'disabled aria-disabled="true"' : ''} title="${Number(it.personalizacao_ingredientes_snapshot) === 1 ? 'Preço oficial + adicionais (somente leitura)' : 'Preço unitário'}"></td>
+          <td style="width:80px"><input type="number" class="form-control form-control-sm ped-edit-desc" data-idx="${idx}" value="${it.desconto_percentual || 0}" min="0" max="100" step="0.01" ${pedidoEdicaoBloqueada ? 'disabled aria-disabled="true"' : ''}></td>
           <td class="text-end">${fmtMoney(it.subtotal)}</td>
           <td class="text-end">
-            <button type="button" class="btn btn-sm btn-outline-danger ped-del-item" data-idx="${idx}" title="Excluir (Del)">
+            ${!pedidoEdicaoBloqueada && Number(it.personalizacao_ingredientes_snapshot) === 1
+              ? `<button type="button" class="btn btn-sm btn-outline-secondary ped-edit-personalizacao me-1" data-idx="${idx}" title="Editar personalização" aria-label="Editar personalização de ${escapeHtml(it.produto_nome || ('#' + it.produto_id))}">
+                   <i class="fas fa-edit"></i>
+                 </button>`
+              : ''}
+            ${!pedidoEdicaoBloqueada ? `<button type="button" class="btn btn-sm btn-outline-danger ped-del-item" data-idx="${idx}" title="Excluir (Del)">
               <i class="fas fa-trash"></i>
-            </button>
+            </button>` : ''}
           </td>
         </tr>`;
       }).join(''));
@@ -772,6 +945,7 @@ function loadPedidos() {
     atualizarTotaisBar();
 
     $('#pedItensBody').off('click', '.ped-del-item').on('click', '.ped-del-item', function (e) {
+      if (pedidoEdicaoBloqueada) return;
       e.preventDefault();
       e.stopPropagation();
       const idx = Number($(this).closest('.ped-item-row').data('idx'));
@@ -782,29 +956,53 @@ function loadPedidos() {
       $('#pedProdutoBusca').trigger('focus');
     });
 
+    $('#pedItensBody').off('click', '.ped-edit-personalizacao')
+      .on('click', '.ped-edit-personalizacao', function (e) {
+        if (pedidoEdicaoBloqueada) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const idx = Number($(this).closest('.ped-item-row').data('idx'));
+        const item = itensEditor[idx];
+        if (!item || !item.editor_id) {
+          alertar('Não foi possível identificar a linha personalizada do Pedido.', 'danger');
+          return;
+        }
+        aplicarProdutoSelecionado(
+          item.produto_id,
+          item.produto_nome,
+          item.produto_codigo,
+          item.preco_base_unitario_snapshot,
+          item.origem_preco_sugerido,
+          item.editor_id
+        );
+      });
+
     $('.ped-edit-qtd, .ped-edit-preco, .ped-edit-desc').off('change input').on('change input', function () {
+      if (pedidoEdicaoBloqueada) return;
       const idx = Number($(this).data('idx'));
       const row = itensEditor[idx];
       if (!row) return;
       const qtd = Number($('.ped-edit-qtd[data-idx="' + idx + '"]').val());
-      const preco = Number($('.ped-edit-preco[data-idx="' + idx + '"]').val());
+      const $preco = $('.ped-edit-preco[data-idx="' + idx + '"]');
+      let preco = Number($preco.val());
       const desc = Number($('.ped-edit-desc[data-idx="' + idx + '"]').val());
       row.quantidade = qtd;
       if (Number(row.personalizacao_ingredientes_snapshot) === 1) {
         const adicionais = Number(row.preco_adicionais_unitario_snapshot || 0);
-        row.preco_unitario = Math.max(adicionais, preco);
-        row.preco_base_unitario_snapshot = Number((row.preco_unitario - adicionais).toFixed(2));
-        $(this).filter('.ped-edit-preco').val(row.preco_unitario);
+        preco = Number((Number(row.preco_base_unitario_snapshot || 0) + adicionais).toFixed(2));
+        row.preco_unitario = preco;
+        $preco.val(preco.toFixed(2));
       } else {
         row.preco_unitario = preco;
       }
       row.desconto_percentual = desc;
-      row.subtotal = Number((qtd * preco * (1 - desc / 100)).toFixed(2));
+      row.subtotal = Number((qtd * row.preco_unitario * (1 - desc / 100)).toFixed(2));
       atualizarTotaisBar();
       $(this).closest('tr').find('td').eq(5).text(fmtMoney(row.subtotal));
     });
 
     $('.ped-item-row').off('dblclick').on('dblclick', function () {
+      if (pedidoEdicaoBloqueada) return;
       const idx = Number($(this).data('idx'));
       linhaGradeFoco = idx;
       $(this).find('.ped-edit-qtd').trigger('focus').select();
@@ -817,6 +1015,7 @@ function loadPedidos() {
     });
 
     $('.ped-item-row').off('keydown').on('keydown', function (e) {
+      if (pedidoEdicaoBloqueada) return;
       const idx = Number($(this).data('idx'));
       if (e.key === 'Delete' && !$(e.target).is('input')) {
         e.preventDefault();
@@ -855,7 +1054,30 @@ function loadPedidos() {
         return;
       }
       $('#pedListaBody').html(itens.map((p) => {
-        const editavel = !['FATURADO', 'CANCELADO'].includes(p.status);
+        const status = String(p.status || '').toUpperCase();
+        const editavel = !(p.edicao_bloqueada === true || Number(p.edicao_bloqueada) === 1
+          || ['FATURADO', 'CANCELADO'].includes(status)
+          || (p.venda_id != null && Number(p.venda_id) > 0));
+        const somenteConsulta = p.somente_consulta === true || Number(p.somente_consulta) === 1
+          || Number(p.finalizacao_confirmada) === 1
+          || String(p.venda_pdv_status || '').toUpperCase() === 'FINALIZADA'
+          || ['FATURADO', 'CANCELADO'].includes(status);
+        const vendaPdvId = Number(p.venda_pdv_id || p.venda_id) || null;
+        const vendaPdvStatus = String(p.venda_pdv_status || '').toUpperCase();
+        const vendaPdvFinalizada = vendaPdvStatus === 'FINALIZADA'
+          || (status === 'FATURADO' && vendaPdvId);
+        const vendaPdvGerada = vendaPdvStatus === 'VENDA_CRIADA' && vendaPdvId;
+        const vendaPdvIniciada = vendaPdvStatus === 'INICIADA' && !vendaPdvId;
+        const podeGerarVendaPdv = ['PEDIDO', 'ABERTO', 'EM_SEPARACAO'].includes(p.status)
+          && !vendaPdvId
+          && !somenteConsulta;
+        const estadoVendaPdv = vendaPdvFinalizada
+          ? `<span class="badge bg-success me-1">Venda ${vendaPdvId ? `#${vendaPdvId} ` : ''}finalizada</span>`
+          : vendaPdvGerada
+            ? `<span class="badge bg-warning text-dark me-1">Venda #${vendaPdvId} gerada; vínculo pendente</span>`
+            : vendaPdvIniciada
+              ? '<span class="badge bg-info text-dark me-1">Preparação da venda pendente</span>'
+              : (vendaPdvId ? `<span class="badge bg-secondary me-1">Venda #${vendaPdvId} vinculada</span>` : '');
         return `
         <tr class="ped-linha" data-id="${p.id}" style="cursor:pointer;" title="Clique para visualizar">
           <td><strong>${escapeHtml(p.codigo || ('#' + p.id))}</strong></td>
@@ -866,9 +1088,12 @@ function loadPedidos() {
           <td>${fmtData(p.data_pedido)}</td>
           <td>${escapeHtml(p.usuario_nome || '—')}</td>
           <td class="text-end text-nowrap ped-acoes">
+            ${estadoVendaPdv}
+            ${vendaPdvGerada && !somenteConsulta ? `<button class="btn btn-sm btn-outline-success ped-recuperar-venda-pdv" data-id="${p.id}" data-venda-id="${vendaPdvId}" title="Concluir o vínculo da venda existente">Concluir vínculo</button>` : ''}
+            ${podeGerarVendaPdv ? `<button class="btn btn-sm btn-outline-success ped-gerar-venda-pdv" data-id="${p.id}" title="${vendaPdvIniciada ? 'Retomar a preparação da venda' : 'Gerar venda no PDV'}">${vendaPdvIniciada ? 'Retomar no PDV' : 'Gerar venda no PDV'}</button>` : ''}
             ${editavel ? `<button class="btn btn-sm btn-outline-primary ped-editar" data-id="${p.id}" title="Editar"><i class="fas fa-edit"></i></button>` : ''}
             <button class="btn btn-sm btn-outline-dark ped-imprimir" data-id="${p.id}" title="Imprimir"><i class="fas fa-print"></i></button>
-            <button class="btn btn-sm btn-outline-secondary ped-duplicar" data-id="${p.id}" title="Duplicar"><i class="fas fa-copy"></i></button>
+            ${!somenteConsulta ? `<button class="btn btn-sm btn-outline-secondary ped-duplicar" data-id="${p.id}" title="Duplicar"><i class="fas fa-copy"></i></button>` : ''}
             ${editavel ? `<button class="btn btn-sm btn-outline-danger ped-cancelar" data-id="${p.id}" title="Cancelar"><i class="fas fa-ban"></i></button>` : ''}
           </td>
         </tr>`;
@@ -895,8 +1120,134 @@ function loadPedidos() {
         e.stopPropagation();
         cancelarPedido(Number($(this).data('id')));
       });
+      $('.ped-gerar-venda-pdv').off('click').on('click', function (e) {
+        e.stopPropagation();
+        iniciarVendaPdv(Number($(this).data('id')));
+      });
+      $('.ped-recuperar-venda-pdv').off('click').on('click', function (e) {
+        e.stopPropagation();
+        concluirVinculoVendaPdv(
+          Number($(this).data('id')),
+          Number($(this).data('venda-id'))
+        );
+      });
     } catch (err) {
       $('#pedListaBody').html(`<tr><td colspan="8" class="text-danger text-center py-4">${escapeHtml(err.message)}</td></tr>`);
+    }
+  }
+
+  function montarDiagnosticoPreparacao(preparacao) {
+    const detalhes = preparacao.detalhes || {};
+    const parcial = Array.isArray(detalhes.composicao_parcial)
+      ? detalhes.composicao_parcial
+        .map((item) => `${item.nome} × ${item.quantidade}`)
+        .join(', ')
+      : '';
+    const valorParcial = Number(detalhes.melhor_valor_disponivel_centavos);
+    const complemento = Number.isFinite(valorParcial) && valorParcial >= 0
+      ? ` Melhor composição disponível: R$ ${(valorParcial / 100).toFixed(2).replace('.', ',')}${parcial ? ` (${parcial})` : ''}; diferença de R$ ${(Number(detalhes.diferenca_centavos || 0) / 100).toFixed(2).replace('.', ',')}.`
+      : '';
+    return `${preparacao.mensagem || preparacao.error || 'Não foi possível preparar a venda no PDV.'}${complemento}`;
+  }
+
+  async function requisitarPreparacaoVendaPdv(id) {
+    const resp = await fetch(
+      `${API_URL}/pedidos/${id}/preparar-venda-pdv`,
+      { method: 'POST', headers: _pedHeaders(), body: '{}' }
+    );
+    const preparacao = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(montarDiagnosticoPreparacao(preparacao));
+    return preparacao;
+  }
+
+  async function requisitarFinalizacaoVendaPdv(id) {
+    const resp = await fetch(
+      `${API_URL}/pedidos/${id}/finalizar-venda-pdv`,
+      { method: 'POST', headers: _pedHeaders(), body: '{}' }
+    );
+    const resultado = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      throw new Error(resultado.mensagem || resultado.error || `Falha ao concluir o vínculo da venda (HTTP ${resp.status}).`);
+    }
+    return resultado;
+  }
+
+  function limparHandoffPedido(id) {
+    try {
+      const handoff = sessionStorage.getItem('pdvPedidoHandoff');
+      if (handoff && Number(JSON.parse(handoff).pedido_id) === id) {
+        sessionStorage.removeItem('pdvPedidoHandoff');
+      }
+    } catch (erroHandoff) {
+      console.error('Falha ao validar o handoff do Pedido no PDV.', erroHandoff);
+    }
+  }
+
+  async function concluirVinculoVendaPdv(id, vendaId, confirmar = true) {
+    if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(vendaId) || vendaId <= 0) {
+      alertar('Não foi possível identificar o Pedido e a venda para concluir o vínculo.', 'danger');
+      return;
+    }
+    if (operacoesVendaPdvPendentes.has(id)) return;
+    if (confirmar && !window.confirm(
+      `A venda #${vendaId} do Pedido #${id} já foi criada. Deseja concluir o vínculo do Pedido?`
+    )) return;
+
+    operacoesVendaPdvPendentes.add(id);
+    try {
+      const resultado = await requisitarFinalizacaoVendaPdv(id);
+      const vendaConcluidaId = Number(resultado.venda_id) || vendaId;
+      limparHandoffPedido(id);
+      alertar(
+        `Venda #${vendaConcluidaId} vinculada ao Pedido #${id}${resultado.idempotente ? ' (operação já concluída).' : '.'}`,
+        'success'
+      );
+      await carregarLista();
+    } catch (erro) {
+      alertar(`A venda foi preservada, mas o vínculo não foi concluído: ${erro.message}`, 'danger');
+    } finally {
+      operacoesVendaPdvPendentes.delete(id);
+    }
+  }
+
+  async function iniciarVendaPdv(id, confirmar = true, mensagemConfirmacao) {
+    if (!Number.isInteger(id) || id <= 0) {
+      alertar('Pedido inválido para gerar venda no PDV.', 'danger');
+      return;
+    }
+    if (operacoesVendaPdvPendentes.has(id)) return;
+    if (confirmar && !window.confirm(
+      mensagemConfirmacao || `Pedido #${id}: deseja gerar a venda deste pedido no PDV?`
+    )) return;
+
+    operacoesVendaPdvPendentes.add(id);
+    try {
+      const preparacao = await requisitarPreparacaoVendaPdv(id);
+      if (preparacao.venda_concluida) {
+        alertar(`Este Pedido já possui a venda ${preparacao.venda_id || ''} concluída.`, 'info');
+        await carregarLista();
+        return;
+      }
+      const vendaId = Number(preparacao.venda_id);
+      if (Number.isInteger(vendaId) && vendaId > 0) {
+        const resultado = await requisitarFinalizacaoVendaPdv(id);
+        limparHandoffPedido(id);
+        alertar(
+          `Venda #${Number(resultado.venda_id) || vendaId} vinculada ao Pedido #${id}${resultado.idempotente ? ' (operação já concluída).' : '.'}`,
+          'success'
+        );
+        await carregarLista();
+        return;
+      }
+      sessionStorage.setItem('pdvPedidoHandoff', JSON.stringify(preparacao));
+      window.location.assign('/pdv');
+    } catch (erro) {
+      alertar(
+        `O Pedido foi preservado, mas a venda não pôde ser gerada ou recuperada: ${erro.message}`,
+        'danger'
+      );
+    } finally {
+      operacoesVendaPdvPendentes.delete(id);
     }
   }
 
@@ -1012,6 +1363,8 @@ function loadPedidos() {
   function limparEditor() {
     pedidoEditandoId = null;
     pedidoEditandoStatus = null;
+    pedidoEdicaoBloqueada = false;
+    pedidoSomenteConsulta = false;
     representanteAtual = null;
     freteAtual = 0;
     itensEditor = [];
@@ -1036,13 +1389,55 @@ function loadPedidos() {
     $('#pedItemQtd').val('1');
     $('#pedItemPreco').val('');
     $('#pedItemDesc').val('0');
+    configurarModoLeituraPedido(null);
     renderItens();
+  }
+
+  function configurarModoLeituraPedido(pedido) {
+    const status = String(pedido?.status || '').toUpperCase();
+    const vendaVinculada = pedido?.venda_vinculada === true
+      || Number(pedido?.venda_id) > 0
+      || Number(pedido?.venda_pdv_id) > 0;
+    const finalizacaoConfirmada = pedido?.finalizacao_confirmada === true
+      || Number(pedido?.finalizacao_confirmada) === 1
+      || status === 'FATURADO'
+      || String(pedido?.venda_pdv_status || '').toUpperCase() === 'FINALIZADA';
+    pedidoEditandoStatus = status || null;
+    pedidoEdicaoBloqueada = pedido?.edicao_bloqueada === true
+      || Number(pedido?.edicao_bloqueada) === 1
+      || ['FATURADO', 'CANCELADO'].includes(status)
+      || vendaVinculada
+      || finalizacaoConfirmada;
+    pedidoSomenteConsulta = pedido?.somente_consulta === true
+      || Number(pedido?.somente_consulta) === 1
+      || ['FATURADO', 'CANCELADO'].includes(status)
+      || finalizacaoConfirmada;
+
+    let aviso = '';
+    if (pedidoEdicaoBloqueada) {
+      aviso = status === 'CANCELADO'
+        ? 'Este pedido está cancelado. A edição está bloqueada.'
+        : finalizacaoConfirmada || pedidoSomenteConsulta
+          ? 'Este pedido já foi finalizado e faturado. A edição está bloqueada.'
+          : 'Este pedido possui uma venda vinculada. A edição está bloqueada.';
+    }
+    $('#pedEditorBloqueioAviso').text(aviso).toggleClass('d-none', !aviso);
+    $('#pedMesaId, #pedClienteBusca, #pedClienteId, #pedDesconto, #pedObservacao, #pedProdutoBusca, #pedProdutoId, #pedProdutoNome, #pedProdutoCodigo, #pedItemQtd, #pedItemPreco, #pedItemDesc, #btnPedAddItem')
+      .prop('disabled', pedidoEdicaoBloqueada);
+    $('#pedClienteSugestoes, #pedProdutoSugestoes').hide().empty();
+    $('#pedPersonalizacaoModal input, #btnPedConfirmarPersonalizacao')
+      .prop('disabled', pedidoEdicaoBloqueada);
+    $('#btnPedSalvar')
+      .prop('hidden', pedidoEdicaoBloqueada)
+      .prop('disabled', pedidoEdicaoBloqueada);
   }
 
   function focarAoAbrirModal() {
     const el = document.getElementById('modalPedidoEditor');
     const handler = () => {
-      setTimeout(() => $('#pedProdutoBusca').trigger('focus'), 50);
+      if (!pedidoEdicaoBloqueada) {
+        setTimeout(() => $('#pedProdutoBusca').trigger('focus'), 50);
+      }
       el.removeEventListener('shown.bs.modal', handler);
     };
     el.addEventListener('shown.bs.modal', handler);
@@ -1069,7 +1464,7 @@ function loadPedidos() {
       if (!resp.ok) throw new Error(data.mensagem || data.error || 'Falha ao carregar');
       const p = data.pedido;
       pedidoEditandoId = p.id;
-      pedidoEditandoStatus = p.status;
+      configurarModoLeituraPedido(p);
       representanteAtual = p.representante_nome || null;
       freteAtual = Number(p.frete || 0);
       $('#btnPedImprimir').prop('disabled', false);
@@ -1082,6 +1477,7 @@ function loadPedidos() {
       $('#pedObservacao').val(p.observacao || '');
       itensEditor = (p.itens || []).map((i) => ({
         id: i.id,
+        editor_id: `pedido-${i.id}`,
         produto_id: i.produto_id,
         produto_nome: i.produto_nome,
         produto_codigo: i.produto_codigo,
@@ -1225,6 +1621,10 @@ function loadPedidos() {
   }
 
   async function salvarPedido() {
+    if (pedidoEdicaoBloqueada) {
+      alertar($('#pedEditorBloqueioAviso').text() || 'A edição deste pedido está bloqueada.', 'warning');
+      return;
+    }
     if (!_pedEmpresaSelecionada()) {
       alertar('Selecione a empresa antes de salvar o pedido.', 'warning');
       return;
@@ -1283,6 +1683,13 @@ function loadPedidos() {
       if (method === 'POST') {
         chaveCriacaoPendente = null;
         assinaturaCriacaoPendente = null;
+        if (!data.idempotente && data.pedido?.id) {
+          await iniciarVendaPdv(
+            Number(data.pedido.id),
+            true,
+            'Pedido salvo com sucesso. Deseja gerar a venda deste pedido no PDV?'
+          );
+        }
       }
     } catch (err) {
       alertar(err.message, 'danger');
@@ -1340,7 +1747,7 @@ function loadPedidos() {
       alertar('Salve o pedido antes de imprimir.', 'warning');
       return;
     }
-    const out = await imprimirPedidoPorId(pedidoId);
+    const out = await imprimirPedidoPorId(pedidoId, 'termico');
     if (!out.ok) alertar(out.error || 'Erro ao abrir visualização.', 'danger');
   }
 
@@ -1419,6 +1826,7 @@ function loadPedidos() {
   }
 
   function adicionarItemConfirmado({
+    itemEditorId,
     produtoId,
     quantidade,
     precoBase,
@@ -1426,26 +1834,50 @@ function loadPedidos() {
     desconto,
     ingredientes,
     selecao,
-    personalizado
+    personalizado,
+    snapshotPreco
   }) {
+    if (pedidoEdicaoBloqueada) return;
     const preco = Number((precoBase + (personalizado ? precoAdicionais : 0)).toFixed(2));
     const subtotal = Number((quantidade * preco * (1 - desconto / 100)).toFixed(2));
-    const existente = itensEditor.findIndex((i) => Number(i.produto_id) === Number(produtoId));
-    const row = {
-      id: existente >= 0 ? itensEditor[existente].id : undefined,
+    const candidato = {
       produto_id: produtoId,
       produto_nome: $('#pedProdutoNome').val(),
       produto_codigo: $('#pedProdutoCodigo').val(),
-      quantidade,
-      preco_unitario: preco,
-      desconto_percentual: desconto,
-      subtotal,
-      tipo_venda: 'PESO',
-      personalizacao_ingredientes_snapshot: personalizado ? 1 : 0,
       preco_base_unitario_snapshot: personalizado ? precoBase : null,
       preco_adicionais_unitario_snapshot: personalizado ? precoAdicionais : null,
+      preco_unitario: preco,
+      desconto_percentual: desconto,
+      tipo_venda: 'PESO',
+      personalizacao_ingredientes_snapshot: personalizado ? 1 : 0,
       ingredientes_personalizados: personalizado ? ingredientes : [],
-      ...(precoSugestaoSelecionada || {})
+      ...(snapshotPreco || {})
+    };
+    let existente = -1;
+    if (itemEditorId) {
+      existente = itensEditor.findIndex((item) => item.editor_id === itemEditorId);
+      if (existente < 0) {
+        alertar('O item que seria editado não está mais no Pedido.', 'warning');
+        return;
+      }
+    } else if (personalizado) {
+      existente = itensEditor.findIndex((item) => (
+        Number(item.personalizacao_ingredientes_snapshot) === 1
+        && _pedPersonalizacaoEquivalente(item, candidato)
+      ));
+    } else {
+      existente = itensEditor.findIndex((item) => (
+        Number(item.produto_id) === Number(produtoId)
+        && Number(item.personalizacao_ingredientes_snapshot) !== 1
+      ));
+    }
+    const itemExistente = existente >= 0 ? itensEditor[existente] : null;
+    const row = {
+      id: itemExistente?.id,
+      editor_id: itemExistente?.editor_id || `novo-${++sequenciaItemEditor}`,
+      ...candidato,
+      quantidade,
+      subtotal,
     };
     if (personalizado) row.ingredientes_selecionados = selecao;
     if (existente >= 0) {
@@ -1482,10 +1914,13 @@ function loadPedidos() {
   }
 
   function abrirModalPersonalizacao(produto, valores) {
+    if (pedidoEdicaoBloqueada) return;
     const ficha = produto.ficha;
-    const existentes = itensEditor.find((item) => Number(item.produto_id) === Number(produto.id));
+    const existente = valores.itemEditorId
+      ? itensEditor.find((item) => item.editor_id === valores.itemEditorId)
+      : null;
     const selecionadosExistentes = new Set(
-      (existentes?.ingredientes_personalizados || [])
+      (existente?.ingredientes_personalizados || [])
         .filter((item) => Number(item.selecionado) === 1
           && item.classificacao_comercial_snapshot !== 'OBRIGATORIO_OCULTO')
         .map((item) => Number(item.insumo_id))
@@ -1517,10 +1952,10 @@ function loadPedidos() {
       .off('change.pedpersonalizacao', 'input[type="checkbox"]')
       .on('change.pedpersonalizacao', 'input[type="checkbox"]', atualizarResumoAdicionaisPersonalizacao);
     $('#pedPersonalizacaoModal')
-      .off('input.pedpersonalizacao change.pedpersonalizacao', '#pedPersonalizacaoQtd, #pedPersonalizacaoPrecoBase')
+      .off('input.pedpersonalizacao change.pedpersonalizacao', '#pedPersonalizacaoQtd')
       .on(
         'input.pedpersonalizacao change.pedpersonalizacao',
-        '#pedPersonalizacaoQtd, #pedPersonalizacaoPrecoBase',
+        '#pedPersonalizacaoQtd',
         atualizarResumoAdicionaisPersonalizacao
       );
 
@@ -1536,6 +1971,7 @@ function loadPedidos() {
   }
 
   function confirmarPersonalizacaoPendente() {
+    if (pedidoEdicaoBloqueada) return;
     const pendente = adicionarPersonalizacaoPendente;
     if (!pendente) return;
     const quantidade = Number($('#pedPersonalizacaoQtd').val());
@@ -1582,6 +2018,7 @@ function loadPedidos() {
   }
 
   function adicionarItem() {
+    if (pedidoEdicaoBloqueada) return;
     const produtoId = Number($('#pedProdutoId').val());
     const quantidade = Number($('#pedItemQtd').val());
     const precoBase = Number($('#pedItemPreco').val());
@@ -1612,7 +2049,8 @@ function loadPedidos() {
       precoBase,
       precoAdicionais: 0,
       desconto,
-      personalizado: false
+      personalizado: false,
+      snapshotPreco: precoSugestaoSelecionada
     });
   }
 
@@ -1716,6 +2154,7 @@ function loadPedidos() {
     if (e.ctrlKey && (e.key === 'f' || e.key === 'F')) {
       e.preventDefault();
       if (modalAberto()) {
+        if (pedidoEdicaoBloqueada) return;
         $('#pedClienteBusca').trigger('focus').select();
       } else {
         $('#pedFiltroCliente').trigger('focus').select();
@@ -1733,7 +2172,7 @@ function loadPedidos() {
     }
 
     // Del na grade (quando foco não é input)
-    if (modalAberto() && e.key === 'Delete' && linhaGradeFoco >= 0 && !$(e.target).is('input, textarea, select')) {
+    if (modalAberto() && !pedidoEdicaoBloqueada && e.key === 'Delete' && linhaGradeFoco >= 0 && !$(e.target).is('input, textarea, select')) {
       e.preventDefault();
       itensEditor.splice(linhaGradeFoco, 1);
       linhaGradeFoco = -1;

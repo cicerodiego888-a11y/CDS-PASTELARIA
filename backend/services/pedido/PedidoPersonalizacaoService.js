@@ -45,18 +45,77 @@ function idsSelecionados(raw, anterior) {
   return ids;
 }
 
-function obterPrecoBase(raw, anterior) {
-  const bruto = Object.prototype.hasOwnProperty.call(raw, 'preco_base_unitario')
-    ? raw.preco_base_unitario
-    : anterior?.preco_base_unitario_snapshot;
-  if (bruto == null || (typeof bruto === 'string' && bruto.trim() === '')) {
-    throw erro('PRECO_BASE_INVALIDO', 'Informe um preço-base unitário válido para o item personalizável.');
+function normalizarPrecoCatalogo(valor, campo) {
+  if (valor == null || (typeof valor === 'string' && valor.trim() === '')) {
+    if (campo === 'preco_venda') return 0;
+    return null;
   }
-  const base = Number(bruto);
-  if (!Number.isFinite(base) || base < 0) {
-    throw erro('PRECO_BASE_INVALIDO', 'Informe um preço-base unitário válido para o item personalizável.');
+  const preco = Number(valor);
+  if (!Number.isFinite(preco) || preco < 0) {
+    throw erro('PRECO_BASE_INVALIDO', `O preço oficial ${campo} do produto é inválido.`);
   }
-  return arredondarDinheiro(base);
+  return arredondarDinheiro(preco);
+}
+
+async function obterPrecoBaseCatalogo(db, produto) {
+  const precoVenda = normalizarPrecoCatalogo(produto.preco_venda, 'preco_venda');
+  const precoPedido = normalizarPrecoCatalogo(produto.preco_pedido, 'preco_pedido');
+  if (precoPedido != null) {
+    return {
+      precoBase: precoPedido,
+      precoVenda,
+      precoPedido,
+      origem: 'PRECO_PEDIDO'
+    };
+  }
+
+  const promocao = await dbGet(
+    db,
+    `SELECT preco_promocional
+       FROM promocoes
+      WHERE produto_id = ?
+        AND status = 'ativa'
+        AND date(data_inicio) <= date('now')
+        AND date(data_fim) >= date('now')
+      ORDER BY id ASC
+      LIMIT 1`,
+    [Number(produto.id)]
+  );
+  const precoPromocional = promocao
+    ? normalizarPrecoCatalogo(promocao.preco_promocional, 'preco_promocional')
+    : null;
+  return {
+    precoBase: precoPromocional != null ? precoPromocional : precoVenda,
+    precoVenda,
+    precoPedido: null,
+    origem: precoPromocional != null ? 'PROMOCAO' : 'PRECO_VENDA'
+  };
+}
+
+function obterPrecoBase(raw, anterior, precoCatalogo) {
+  const snapshotAnterior = anterior?.preco_base_unitario_snapshot;
+  const base = snapshotAnterior != null
+    ? normalizarPrecoCatalogo(snapshotAnterior, 'snapshot')
+    : precoCatalogo?.precoBase;
+  if (base == null || !Number.isFinite(base)) {
+    throw erro('PRECO_BASE_INVALIDO', 'O preço-base oficial do item personalizável é inválido.');
+  }
+
+  if (Object.prototype.hasOwnProperty.call(raw, 'preco_base_unitario')) {
+    const bruto = raw.preco_base_unitario;
+    if (bruto == null || (typeof bruto === 'string' && bruto.trim() === '')) {
+      throw erro('PRECO_BASE_INVALIDO', 'Informe um preço-base unitário válido para o item personalizável.');
+    }
+    const informado = normalizarPrecoCatalogo(bruto, 'informado');
+    if (informado !== base) {
+      throw erro(
+        'PRECO_BASE_DIVERGENTE',
+        'O preço-base do item mudou ou não corresponde ao preço oficial. Atualize o Pedido e tente novamente.',
+        409
+      );
+    }
+  }
+  return base;
 }
 
 function validarSelecaoContraFicha(ids, ficha, produtoId) {
@@ -92,8 +151,8 @@ function montarSnapshot(ficha, ids) {
   });
 }
 
-function aplicarPrecoPersonalizado(item, raw, rows, anterior) {
-  const precoBase = obterPrecoBase(raw, anterior);
+function aplicarPrecoPersonalizado(item, raw, rows, anterior, precoCatalogo) {
+  const precoBase = obterPrecoBase(raw, anterior, precoCatalogo);
   const adicionais = arredondarDinheiro(rows.reduce((total, row) => (
     total + (Number(row.selecionado) === 1
       && row.classificacao_comercial_snapshot === 'OPCIONAL_COM_ADICIONAL'
@@ -108,6 +167,17 @@ function aplicarPrecoPersonalizado(item, raw, rows, anterior) {
   item.subtotal = arredondarDinheiro(
     Number(item.quantidade) * item.preco_unitario * (1 - Number(item.desconto_percentual || 0) / 100)
   );
+  if (anterior) {
+    item.preco_venda_snapshot = anterior.preco_venda_snapshot ?? null;
+    item.preco_pedido_snapshot = anterior.preco_pedido_snapshot ?? null;
+    item.preco_sugerido_snapshot = anterior.preco_sugerido_snapshot ?? null;
+    item.origem_preco_sugerido = anterior.origem_preco_sugerido ?? null;
+  } else if (precoCatalogo) {
+    item.preco_venda_snapshot = precoCatalogo.precoVenda;
+    item.preco_pedido_snapshot = precoCatalogo.precoPedido;
+    item.preco_sugerido_snapshot = precoCatalogo.precoBase;
+    item.origem_preco_sugerido = precoCatalogo.origem;
+  }
 }
 
 async function prepararItens(itens, itensBrutos, opcoes = {}) {
@@ -133,7 +203,8 @@ async function prepararItens(itens, itensBrutos, opcoes = {}) {
 
     const produto = await dbGet(
       db,
-      `SELECT id, nome, COALESCE(permite_personalizacao_ingredientes, 0) AS permite_personalizacao_ingredientes,
+      `SELECT id, nome, preco_venda, preco_pedido,
+              COALESCE(permite_personalizacao_ingredientes, 0) AS permite_personalizacao_ingredientes,
               utiliza_ficha_tecnica
        FROM produtos WHERE id = ?`,
       [Number(item.produto_id)]
@@ -166,7 +237,7 @@ async function prepararItens(itens, itensBrutos, opcoes = {}) {
       const idsAtuais = [...ids].sort((a, b) => a - b);
       if (idsAnteriores.length === idsAtuais.length
         && idsAnteriores.every((id, i) => id === idsAtuais[i])) {
-        aplicarPrecoPersonalizado(item, raw, rowsAnteriores, anterior);
+        aplicarPrecoPersonalizado(item, raw, rowsAnteriores, anterior, null);
         continue;
       }
     }
@@ -224,7 +295,10 @@ async function prepararItens(itens, itensBrutos, opcoes = {}) {
     }
     validarSelecaoContraFicha(ids, ficha, produto.id);
     const rows = montarSnapshot(ficha, ids);
-    aplicarPrecoPersonalizado(item, raw, rows, null);
+    const precoCatalogo = anterior?.preco_base_unitario_snapshot != null
+      ? null
+      : await obterPrecoBaseCatalogo(db, produto);
+    aplicarPrecoPersonalizado(item, raw, rows, anterior, precoCatalogo);
   }
 }
 

@@ -2,7 +2,10 @@ window.__financeiroPagarState = window.__financeiroPagarState || {
   modalNovaDespesaInstance: null,
   modalDetalhesPagamento: null,
   modalPagamentoInstance: null,
-  contaPagamentoAtual: null
+  contaPagamentoAtual: null,
+  pagamentoIdempotencyKey: null,
+  criacaoIdempotencyKey: null,
+  cancelamentoIdempotencyKeys: {}
 };
 
 // Contas a Pagar
@@ -17,10 +20,11 @@ function renderContasPagar(periodo) {
         <label for="filtroStatusPagar">Status:</label>
         <select id="filtroStatusPagar" class="form-control">
           <option value="todos">Todos</option>
-          <option value="pendente">Pendente</option>
-          <option value="pago">Pago</option>
+          <option value="aberto">Aberto</option>
           <option value="parcial">Parcial</option>
+          <option value="quitada">Quitada</option>
           <option value="vencido">Vencido</option>
+          <option value="cancelada">Cancelada</option>
         </select>
       </div>
 
@@ -139,14 +143,6 @@ function renderContasPagar(periodo) {
                   </select>
                 </div>
 
-                <div class="col-md-3">
-                  <label class="form-label">Status</label>
-                  <select class="form-select" id="despesaStatus">
-                    <option value="pendente">Pendente</option>
-                    <option value="pago">Pago</option>
-                  </select>
-                </div>
-
                 <div class="col-12">
                   <label class="form-label">Observação</label>
                   <textarea class="form-control" id="despesaObservacao" rows="3"></textarea>
@@ -237,14 +233,13 @@ function carregarContasPagar(filtros) {
 
 async function carregarContasPagarDados(filtros) {
   try {
-    const params = new URLSearchParams({
-      dataInicio: filtros.dataInicio || '',
-      dataFim: filtros.dataFim || '',
-      status: filtros.status || 'todos',
-      fornecedor: filtros.fornecedor || ''
-    });
+    const params = new URLSearchParams();
+    if (filtros.dataInicio) params.set('dataInicio', filtros.dataInicio);
+    if (filtros.dataFim) params.set('dataFim', filtros.dataFim);
+    if (filtros.status) params.set('status', filtros.status);
+    if (filtros.fornecedor) params.set('fornecedor', filtros.fornecedor);
 
-    const response = await fetch(`/api/financeiro/contas-pagar?${params.toString()}`, {
+    const response = await fetch(`/api/contas-pagar?${params.toString()}`, {
       headers: {
         'Accept': 'application/json',
         'Authorization': 'Bearer ' + localStorage.getItem('token')
@@ -265,25 +260,34 @@ async function carregarContasPagarDados(filtros) {
     if (!tbody) return;
 
     if (dados.success && Array.isArray(dados.contas) && dados.contas.length > 0) {
-      tbody.innerHTML = dados.contas.map(conta => `
+      tbody.innerHTML = dados.contas.map(conta => {
+        const vencida = ['aberto', 'parcial'].includes(conta.status)
+          && conta.data_vencimento
+          && conta.data_vencimento < new Date().toISOString().slice(0, 10);
+        const statusExibicao = vencida ? 'vencido' : conta.status;
+        const podePagar = ['aberto', 'parcial'].includes(conta.status);
+        return `
         <tr>
-          <td>${formatarDataPagar(conta.dataEmissao)}</td>
-          <td>${formatarDataPagar(conta.dataVencimento)}</td>
-          <td>${escapeHtmlFinanceiro(conta.fornecedor || '-')}</td>
+          <td>${formatarDataPagar(conta.data_emissao)}</td>
+          <td>${formatarDataPagar(conta.data_vencimento)}</td>
+          <td>${escapeHtmlFinanceiro(conta.pessoa_nome || conta.fornecedor_nome || '-')}</td>
           <td>${escapeHtmlFinanceiro(conta.categoria || '-')}</td>
           <td>${escapeHtmlFinanceiro(conta.descricao || '')}</td>
-          <td class="font-weight-bold">${formatarMoedaPagar(conta.valor)}</td>
-          <td><span class="status-${conta.status}">${escapeHtmlFinanceiro(conta.status)}</span></td>
+          <td class="font-weight-bold">
+            ${formatarMoedaPagar(conta.valor_restante)}
+            <small class="d-block text-muted">Original: ${formatarMoedaPagar(conta.valor_original)}</small>
+          </td>
+          <td><span class="status-${statusExibicao}">${escapeHtmlFinanceiro(statusExibicao)}</span></td>
           <td>
             <button class="btn btn-sm btn-outline-primary" onclick="abrirDetalhesPagar(${conta.id})">
               <i class="fas fa-eye"></i>
             </button>
-            <button class="btn btn-sm btn-outline-success" onclick="pagarConta(${conta.id})">
+            ${podePagar ? `<button class="btn btn-sm btn-outline-success" onclick="pagarConta(${conta.id})">
               <i class="fas fa-check"></i>
-            </button>
+            </button>` : ''}
           </td>
         </tr>
-      `).join('');
+      `}).join('');
     } else {
       tbody.innerHTML = '<tr><td colspan="8" class="text-center">Nenhuma conta a pagar encontrada</td></tr>';
     }
@@ -370,7 +374,6 @@ async function novaDespesa() {
   const vencimento = document.getElementById('despesaVencimento');
   const fornecedor = document.getElementById('despesaFornecedor');
   const formaPagamento = document.getElementById('despesaFormaPagamento');
-  const status = document.getElementById('despesaStatus');
   const observacao = document.getElementById('despesaObservacao');
   const erro = document.getElementById('erroNovaDespesa');
 
@@ -380,7 +383,7 @@ async function novaDespesa() {
   if (vencimento) vencimento.value = new Date().toISOString().slice(0, 10);
   if (fornecedor) fornecedor.value = '';
   if (formaPagamento) formaPagamento.value = 'dinheiro';
-  if (status) status.value = 'pendente';
+  window.__financeiroPagarState.criacaoIdempotencyKey = null;
   if (observacao) observacao.value = '';
   if (erro) erro.innerText = '';
 
@@ -428,20 +431,18 @@ async function salvarNovaDespesa(event) {
     if (erroEl) erroEl.innerText = '';
 
     const payload = {
-      tipo: 'despesa',
       descricao: (document.getElementById('despesaDescricao')?.value || '').trim(),
       categoria: document.getElementById('despesaCategoria')?.value || '',
       valor: Number(document.getElementById('despesaValor')?.value || 0),
-      data_movimento: document.getElementById('despesaData')?.value || '',
-      vencimento: document.getElementById('despesaVencimento')?.value || '',
+      data_emissao: document.getElementById('despesaData')?.value || '',
+      data_vencimento: document.getElementById('despesaVencimento')?.value || '',
       pessoa_nome: (document.getElementById('despesaFornecedor')?.value || '').trim() || null,
       forma_pagamento: document.getElementById('despesaFormaPagamento')?.value || 'dinheiro',
-      status: document.getElementById('despesaStatus')?.value || 'pendente',
       observacao: (document.getElementById('despesaObservacao')?.value || '').trim(),
       origem: 'manual'
     };
 
-    if (!payload.descricao || !payload.categoria || payload.valor <= 0 || !payload.data_movimento || !payload.vencimento) {
+    if (!payload.descricao || !payload.categoria || !Number.isFinite(payload.valor) || payload.valor <= 0 || !payload.data_emissao || !payload.data_vencimento) {
       if (erroEl) erroEl.innerText = 'Preencha os campos obrigatórios.';
       return;
     }
@@ -450,45 +451,58 @@ async function salvarNovaDespesa(event) {
     const numParcelas = isParcelado ? Number(document.getElementById('despesaParcelas')?.value || 2) : 1;
     const intervaloDias = isParcelado ? Number(document.getElementById('despesaIntervalo')?.value || 30) : 0;
 
-    if (isParcelado && (numParcelas < 2 || intervaloDias < 1)) {
+    if (
+      !Number.isInteger(numParcelas)
+      || numParcelas < (isParcelado ? 2 : 1)
+      || numParcelas > 60
+      || (isParcelado && (!Number.isInteger(intervaloDias) || intervaloDias < 1 || intervaloDias > 365))
+    ) {
       if (erroEl) erroEl.innerText = 'Preencha número de parcelas (mín. 2) e intervalo (mín. 1 dia) para parcelamento.';
       return;
     }
 
-    const valorParcela = payload.valor / numParcelas;
-    let vencimentoBase = new Date(payload.vencimento);
-
-    for (let i = 1; i <= numParcelas; i++) {
-      const parcelaPayload = {
-        ...payload,
-        valor: valorParcela,
-        vencimento: new Date(vencimentoBase.getTime() + (i - 1) * intervaloDias * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
-        numero_parcela: i,
-        total_parcelas: numParcelas,
-        descricao: `${payload.descricao} (Parcela ${i}/${numParcelas})`
-      };
-
-      try {
-        const response = await fetch(`${API_URL}/financeiro`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer ' + localStorage.getItem('token')
-          },
-          body: JSON.stringify(parcelaPayload)
-        });
-
-        const result = await response.json();
-
-        if (!response.ok) {
-          throw new Error(result.error || `Erro na parcela ${i}`);
-        }
-      } catch (error) {
-        console.error(`Erro ao salvar parcela ${i}:`, error);
-        if (erroEl) erroEl.innerText = `Erro ao salvar parcela ${i}: ${error.message}`;
-        return;
-      }
+    const totalCentavos = Math.round(payload.valor * 100);
+    if (!Number.isSafeInteger(totalCentavos) || totalCentavos <= 0) {
+      if (erroEl) erroEl.innerText = 'Informe um valor válido em centavos.';
+      return;
     }
+    const centavosBase = Math.floor(totalCentavos / numParcelas);
+    const parcelas = Array.from({ length: numParcelas }, (_, index) => {
+      const vencimento = new Date(`${payload.data_vencimento}T00:00:00Z`);
+      vencimento.setUTCDate(vencimento.getUTCDate() + index * intervaloDias);
+      const centavos = index === numParcelas - 1
+        ? totalCentavos - centavosBase * (numParcelas - 1)
+        : centavosBase;
+      return {
+        descricao: numParcelas > 1
+          ? `${payload.descricao} (Parcela ${index + 1}/${numParcelas})`
+          : payload.descricao,
+        valor_original: centavos / 100,
+        data_vencimento: vencimento.toISOString().slice(0, 10)
+      };
+    });
+    if (!window.__financeiroPagarState.criacaoIdempotencyKey) {
+      window.__financeiroPagarState.criacaoIdempotencyKey = gerarChaveIdempotenciaPagar();
+    }
+
+    const response = await fetch('/api/contas-pagar/lote', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + localStorage.getItem('token'),
+        'Idempotency-Key': window.__financeiroPagarState.criacaoIdempotencyKey
+      },
+      body: JSON.stringify({
+        ...payload,
+        parcelas,
+        idempotency_key: window.__financeiroPagarState.criacaoIdempotencyKey
+      })
+    });
+    const result = await response.json();
+    if (!response.ok || !result.success) {
+      throw new Error(result.error || 'Erro ao cadastrar despesas.');
+    }
+    window.__financeiroPagarState.criacaoIdempotencyKey = null;
 
     if (window.__financeiroPagarState.modalNovaDespesaInstance) {
       window.__financeiroPagarState.modalNovaDespesaInstance.hide();
@@ -513,8 +527,15 @@ async function salvarNovaDespesa(event) {
   } catch (error) {
     console.error('Erro ao salvar nova despesa:', error);
     const erroEl = document.getElementById('erroNovaDespesa');
-    if (erroEl) erroEl.innerText = 'Erro ao conectar com o servidor.';
+    if (erroEl) erroEl.innerText = error.message || 'Erro ao conectar com o servidor.';
   }
+}
+
+function gerarChaveIdempotenciaPagar() {
+  if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+    return window.crypto.randomUUID();
+  }
+  return `pagar-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
 function inicializarModalDetalhesPagamento() {
@@ -546,7 +567,7 @@ function pagarConta(id) {
 
 async function abrirModalPagamento(id) {
   try {
-    const response = await fetch(`/api/financeiro/contas-pagar/${id}/detalhes`, {
+    const response = await fetch(`/api/contas-pagar/${id}/detalhes`, {
       headers: {
         'Authorization': 'Bearer ' + localStorage.getItem('token')
       }
@@ -554,11 +575,12 @@ async function abrirModalPagamento(id) {
 
     const dados = await response.json();
 
-    if (!response.ok || dados.error) {
+    if (!response.ok || dados.error || !['aberto', 'parcial'].includes(dados.status)) {
       throw new Error(dados.error || 'Erro ao carregar dados da conta.');
     }
 
     window.__financeiroPagarState.contaPagamentoAtual = dados;
+    window.__financeiroPagarState.pagamentoIdempotencyKey = gerarChaveIdempotenciaPagar();
 
     const valorInput = document.getElementById('pagamentoValor');
     const valorRestanteSpan = document.getElementById('pagamentoValorRestante');
@@ -566,11 +588,11 @@ async function abrirModalPagamento(id) {
     const erroEl = document.getElementById('erroPagamento');
 
     if (valorInput) {
-      valorInput.value = dados.valor || 0;
+      valorInput.value = dados.valor_restante || 0;
     }
 
     if (valorRestanteSpan) {
-      valorRestanteSpan.textContent = formatarMoedaPagar(dados.valor || 0);
+      valorRestanteSpan.textContent = formatarMoedaPagar(dados.valor_restante || 0);
     }
 
     if (formaPagamentoSelect) {
@@ -616,15 +638,18 @@ async function processarPagamento(event) {
       return;
     }
 
-    const response = await fetch(`/api/financeiro/pagar/${conta.id}/baixar`, {
+    const idempotencyKey = window.__financeiroPagarState.pagamentoIdempotencyKey;
+    const response = await fetch(`/api/contas-pagar/${conta.id}/baixar`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + localStorage.getItem('token')
+        'Authorization': 'Bearer ' + localStorage.getItem('token'),
+        'Idempotency-Key': idempotencyKey
       },
       body: JSON.stringify({
-        valor: valor,
-        forma_pagamento: formaPagamento
+        valor_pago: valor,
+        forma_pagamento: formaPagamento,
+        idempotency_key: idempotencyKey
       })
     });
 
@@ -633,6 +658,7 @@ async function processarPagamento(event) {
     if (!response.ok || !result.success) {
       throw new Error(result.error || 'Erro ao processar pagamento.');
     }
+    window.__financeiroPagarState.pagamentoIdempotencyKey = null;
 
     if (window.__financeiroPagarState.modalPagamentoInstance) {
       window.__financeiroPagarState.modalPagamentoInstance.hide();
@@ -654,32 +680,7 @@ async function processarPagamento(event) {
 }
 
 async function baixarPagamento(id) {
-  try {
-    const response = await fetch(`/api/financeiro/pagar/${id}/baixar`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + localStorage.getItem('token')
-      }
-    });
-
-    const result = await response.json();
-
-    if (result.success) {
-      alert('Pagamento realizado com sucesso!');
-      const periodo = obterPeriodoFinanceiro();
-      carregarContasPagar(coletarFiltrosPagar(periodo));
-
-      if (typeof carregarDashboardFinanceiro === 'function') {
-        carregarDashboardFinanceiro(periodo);
-      }
-    } else {
-      alert('Erro ao realizar pagamento: ' + (result.error || 'Erro desconhecido'));
-    }
-  } catch (error) {
-    console.error('Erro ao baixar pagamento:', error);
-    alert('Erro ao conectar com o servidor');
-  }
+  return pagarConta(id);
 }
 
 function abrirDetalhesPagar(id) {
@@ -700,7 +701,7 @@ function abrirDetalhesPagar(id) {
     window.__financeiroPagarState.modalDetalhesPagamento.show();
   }
 
-  fetch(`/api/financeiro/contas-pagar/${id}/detalhes`, {
+  fetch(`/api/contas-pagar/${id}/detalhes`, {
     headers: {
       'Authorization': 'Bearer ' + localStorage.getItem('token')
     }
@@ -711,14 +712,12 @@ function abrirDetalhesPagar(id) {
         throw new Error(dados.error || 'Falha ao carregar detalhes da conta a pagar.');
       }
 
-      const adminAcoes = podeAdministrarFinanceiro() ? `
+      const adminAcoes = podeAdministrarFinanceiro()
+        && ['aberto', 'parcial'].includes(dados.status) ? `
         <hr>
         <div class="d-flex gap-2 justify-content-end flex-wrap">
-          <button class="btn btn-primary" onclick="abrirEdicaoPagar(${dados.id})">
-            <i class="fas fa-edit"></i> Editar
-          </button>
-          <button class="btn btn-danger" onclick="excluirContaPagar(${dados.id})">
-            <i class="fas fa-trash"></i> Excluir
+          <button class="btn btn-warning" onclick="cancelarContaPagar(${dados.id})">
+            <i class="fas fa-ban"></i> Cancelar título
           </button>
         </div>
       ` : '';
@@ -727,6 +726,26 @@ function abrirDetalhesPagar(id) {
       const itensCompra = dados.itens_compra || [];
 
       const parcelado = Number(dados.total_parcelas || 1) > 1 ? 'Sim' : 'Não';
+      const pagamentos = dados.pagamentos || [];
+      const blocoPagamentos = `
+        <hr>
+        <h6 class="mb-2">Pagamentos registrados</h6>
+        <div class="table-responsive">
+          <table class="table table-sm table-bordered">
+            <thead><tr><th>Data</th><th>Valor</th><th>Forma</th><th>Responsável</th></tr></thead>
+            <tbody>
+              ${pagamentos.length ? pagamentos.map(pagamento => `
+                <tr>
+                  <td>${formatarDataPagar(pagamento.data_pagamento)}</td>
+                  <td>${formatarMoedaPagar(pagamento.valor_pago)}</td>
+                  <td>${escapeHtmlFinanceiro(pagamento.forma_pagamento || '-')}</td>
+                  <td>${escapeHtmlFinanceiro(pagamento.usuario_nome || pagamento.usuario_id || '-')}</td>
+                </tr>
+              `).join('') : '<tr><td colspan="4" class="text-center text-muted">Nenhum pagamento registrado.</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      `;
 
       const blocoCompra = compra ? `
         <hr>
@@ -819,7 +838,7 @@ function abrirDetalhesPagar(id) {
       body.innerHTML = `
         <div class="row g-3">
           <div class="col-12 col-md-6">
-            <strong>Fornecedor:</strong> ${escapeHtmlFinanceiro(dados.pessoa_nome || '-')}
+            <strong>Fornecedor:</strong> ${escapeHtmlFinanceiro(dados.pessoa_nome || dados.fornecedor_nome || '-')}
           </div>
 
           <div class="col-12 col-md-6">
@@ -827,7 +846,8 @@ function abrirDetalhesPagar(id) {
           </div>
 
           <div class="col-12 col-md-6">
-            <strong>Valor:</strong> ${formatarMoedaPagar(dados.valor)}
+            <strong>Valor original:</strong> ${formatarMoedaPagar(dados.valor_original)}
+            <br><strong>Saldo restante:</strong> ${formatarMoedaPagar(dados.valor_restante)}
           </div>
 
           <div class="col-12 col-md-6">
@@ -870,6 +890,7 @@ function abrirDetalhesPagar(id) {
         </div>
 
         ${blocoCompra}
+        ${blocoPagamentos}
 
         ${adminAcoes}
       `;
@@ -880,192 +901,46 @@ function abrirDetalhesPagar(id) {
     });
 }
 
-async function abrirEdicaoPagar(id) {
-  const body = document.getElementById('modalDetalhesFinanceiroBody');
-  if (!body) return;
+async function cancelarContaPagar(id) {
+  const motivo = prompt('Informe o motivo do cancelamento do título:');
+  if (!motivo || !motivo.trim()) return;
+  if (!confirm('Cancelar este título? Pagamentos já registrados serão preservados.')) return;
 
-  body.innerHTML = '<div class="text-center text-muted">Carregando dados para edição...</div>';
-
-  try {
-    const response = await fetch(`/api/financeiro/${id}`, {
-      headers: {
-        'Authorization': 'Bearer ' + localStorage.getItem('token')
-      }
-    });
-
-    const dados = await response.json();
-
-    if (!response.ok || dados.error) {
-      throw new Error(dados.error || 'Erro ao carregar conta a pagar para edição.');
-    }
-
-    body.innerHTML = `
-      <form id="formEditarPagar" class="row g-3">
-        <div class="col-md-8">
-          <label class="form-label">Descrição</label>
-          <input type="text" class="form-control" id="editarPagarDescricao" value="${escapeHtmlFinanceiro(dados.descricao || '')}" required>
-        </div>
-
-        <div class="col-md-4">
-          <label class="form-label">Valor</label>
-          <input type="number" class="form-control" id="editarPagarValor" value="${Number(dados.valor || 0)}" min="0.01" step="0.01" required>
-        </div>
-
-        <div class="col-md-4">
-          <label class="form-label">Data Movimento</label>
-          <input type="date" class="form-control" id="editarPagarData" value="${dados.data_movimento || ''}" required>
-        </div>
-
-        <div class="col-md-4">
-          <label class="form-label">Vencimento</label>
-          <input type="date" class="form-control" id="editarPagarVencimento" value="${dados.vencimento || ''}">
-        </div>
-
-        <div class="col-md-4">
-          <label class="form-label">Status</label>
-          <select class="form-control" id="editarPagarStatus">
-            <option value="pendente" ${dados.status === 'pendente' ? 'selected' : ''}>Pendente</option>
-            <option value="pago" ${dados.status === 'pago' ? 'selected' : ''}>Pago</option>
-            <option value="recebido" ${dados.status === 'recebido' ? 'selected' : ''}>Recebido</option>
-            <option value="parcial" ${dados.status === 'parcial' ? 'selected' : ''}>Parcial</option>
-            <option value="vencido" ${dados.status === 'vencido' ? 'selected' : ''}>Vencido</option>
-          </select>
-        </div>
-
-        <div class="col-md-6">
-          <label class="form-label">Fornecedor / Favorecido</label>
-          <input type="text" class="form-control" id="editarPagarPessoa" value="${escapeHtmlFinanceiro(dados.pessoa_nome || '')}">
-        </div>
-
-        <div class="col-md-6">
-          <label class="form-label">Documento</label>
-          <input type="text" class="form-control" id="editarPagarDocumento" value="${escapeHtmlFinanceiro(dados.documento || '')}">
-        </div>
-
-        <div class="col-md-6">
-          <label class="form-label">Categoria</label>
-          <input type="text" class="form-control" id="editarPagarCategoria" value="${escapeHtmlFinanceiro(dados.categoria || '')}">
-        </div>
-
-        <div class="col-md-6">
-          <label class="form-label">Forma de pagamento</label>
-          <input type="text" class="form-control" id="editarPagarForma" value="${escapeHtmlFinanceiro(dados.forma_pagamento || '')}">
-        </div>
-
-        <div class="col-12">
-          <label class="form-label">Observação</label>
-          <textarea class="form-control" id="editarPagarObservacao" rows="3">${escapeHtmlFinanceiro(dados.observacao || '')}</textarea>
-        </div>
-
-        <div class="col-12 d-flex gap-2 justify-content-end flex-wrap">
-          <button type="button" class="btn btn-secondary" onclick="abrirDetalhesPagar(${id})">Cancelar</button>
-          <button type="submit" class="btn btn-primary">Salvar Alterações</button>
-        </div>
-      </form>
-    `;
-
-    const form = document.getElementById('formEditarPagar');
-    form.addEventListener('submit', async function (event) {
-      event.preventDefault();
-      await salvarEdicaoPagar(id);
-    });
-  } catch (error) {
-    console.error('Erro ao abrir edição da conta a pagar:', error);
-    body.innerHTML = `<div class="text-danger">Erro ao carregar formulário de edição. ${escapeHtmlFinanceiro(error.message || '')}</div>`;
+  const chavesCancelamento = window.__financeiroPagarState.cancelamentoIdempotencyKeys;
+  if (!chavesCancelamento[id]) {
+    chavesCancelamento[id] = gerarChaveIdempotenciaPagar();
   }
-}
-
-async function salvarEdicaoPagar(id) {
+  const idempotencyKey = chavesCancelamento[id];
   try {
-    const payload = {
-      descricao: document.getElementById('editarPagarDescricao')?.value?.trim() || '',
-      valor: Number(document.getElementById('editarPagarValor')?.value || 0),
-      data_movimento: document.getElementById('editarPagarData')?.value || '',
-      vencimento: document.getElementById('editarPagarVencimento')?.value || '',
-      status: document.getElementById('editarPagarStatus')?.value || 'pendente',
-      pessoa_nome: document.getElementById('editarPagarPessoa')?.value?.trim() || '',
-      documento: document.getElementById('editarPagarDocumento')?.value?.trim() || '',
-      categoria: document.getElementById('editarPagarCategoria')?.value?.trim() || '',
-      forma_pagamento: document.getElementById('editarPagarForma')?.value?.trim() || '',
-      observacao: document.getElementById('editarPagarObservacao')?.value?.trim() || ''
-    };
-
-    if (!payload.descricao || payload.valor <= 0 || !payload.data_movimento) {
-      alert('Preencha descrição, valor e data do movimento.');
-      return;
-    }
-
-    const response = await fetch(`/api/financeiro/${id}`, {
-      method: 'PUT',
+    const response = await fetch(`/api/contas-pagar/${id}/cancelar`, {
+      method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + localStorage.getItem('token')
+        'Authorization': 'Bearer ' + localStorage.getItem('token'),
+        'Idempotency-Key': idempotencyKey
       },
-      body: JSON.stringify(payload)
+      body: JSON.stringify({
+        motivo: motivo.trim(),
+        idempotency_key: idempotencyKey
+      })
     });
-
-    const dados = await response.json();
-
-    if (!response.ok || dados.error) {
-      throw new Error(dados.error || 'Erro ao salvar alterações.');
+    const result = await response.json();
+    if (!response.ok || !result.success) {
+      throw new Error(result.error || 'Erro ao cancelar título.');
     }
-
-    alert('Conta a pagar atualizada com sucesso.');
-
-    const periodo = obterPeriodoFinanceiro();
-    carregarContasPagar(coletarFiltrosPagar(periodo));
-
-    if (typeof carregarDashboardFinanceiro === 'function') {
-      carregarDashboardFinanceiro(periodo);
-    }
-
-    if (typeof carregarHistoricoFinanceiro === 'function') {
-      carregarHistoricoFinanceiro(periodo);
-    }
-
-    abrirDetalhesPagar(id);
-  } catch (error) {
-    console.error('Erro ao salvar edição da conta a pagar:', error);
-    alert(error.message || 'Erro ao salvar alterações.');
-  }
-}
-
-async function excluirContaPagar(id) {
-  if (!confirm('Tem certeza que deseja excluir esta conta a pagar?')) return;
-
-  try {
-    const response = await fetch(`/api/financeiro/${id}`, {
-      method: 'DELETE',
-      headers: {
-        'Authorization': 'Bearer ' + localStorage.getItem('token')
-      }
-    });
-
-    const dados = await response.json();
-
-    if (!response.ok || dados.error) {
-      throw new Error(dados.error || 'Erro ao excluir conta a pagar.');
-    }
-
-    alert('Conta a pagar excluída com sucesso.');
+    delete chavesCancelamento[id];
 
     if (window.__financeiroPagarState.modalDetalhesPagamento) {
       window.__financeiroPagarState.modalDetalhesPagamento.hide();
     }
-
     const periodo = obterPeriodoFinanceiro();
     carregarContasPagar(coletarFiltrosPagar(periodo));
-
     if (typeof carregarDashboardFinanceiro === 'function') {
       carregarDashboardFinanceiro(periodo);
     }
-
-    if (typeof carregarHistoricoFinanceiro === 'function') {
-      carregarHistoricoFinanceiro(periodo);
-    }
   } catch (error) {
-    console.error('Erro ao excluir conta a pagar:', error);
-    alert(error.message || 'Erro ao excluir conta a pagar.');
+    console.error('Erro ao cancelar título MCF:', error);
+    alert(error.message || 'Erro ao cancelar título.');
   }
 }
 
@@ -1122,50 +997,26 @@ function atualizarPreviaParcelas() {
     return;
   }
 
-  const valorParcela = valorTotal / numParcelas;
-  let html = '<h6>Prévia das Parcelas:</h6><ul class="list-group">';
-
-  let dataAtual = new Date(vencimentoBase);
-  for (let i = 1; i <= numParcelas; i++) {
-    const dataFormatada = dataAtual.toLocaleDateString('pt-BR');
-    html += `<li class="list-group-item d-flex justify-content-between align-items-center">
-      Parcela ${i}/${numParcelas}
-      <span>${formatarMoedaPagar(valorParcela)} - Vence em ${dataFormatada}</span>
-    </li>`;
-    dataAtual = new Date(dataAtual.getTime() + intervaloDias * 24 * 60 * 60 * 1000);
-  }
-
-  html += '</ul>';
-  previaDiv.innerHTML = html;
-}
-
-// Função para atualizar a prévia das parcelas
-function atualizarPreviaParcelas() {
-  const isParcelado = document.getElementById('despesaParcelado')?.checked || false;
-  const valorTotal = Number(document.getElementById('despesaValor')?.value || 0);
-  const numParcelas = Number(document.getElementById('despesaParcelas')?.value || 2);
-  const intervaloDias = Number(document.getElementById('despesaIntervalo')?.value || 30);
-  const vencimentoBase = document.getElementById('despesaVencimento')?.value;
-
-  const previaDiv = document.getElementById('previaParcelas');
-  if (!previaDiv) return;
-
-  if (!isParcelado || valorTotal <= 0 || numParcelas < 2 || !vencimentoBase) {
+  const totalCentavos = Math.round(valorTotal * 100);
+  if (!Number.isSafeInteger(totalCentavos) || totalCentavos <= 0 || !Number.isInteger(numParcelas)) {
     previaDiv.innerHTML = '';
     return;
   }
-
-  const valorParcela = valorTotal / numParcelas;
+  const centavosBase = Math.floor(totalCentavos / numParcelas);
   let html = '<h6>Prévia das Parcelas:</h6><ul class="list-group">';
 
-  let dataAtual = new Date(vencimentoBase);
-  for (let i = 1; i <= numParcelas; i++) {
-    const dataFormatada = dataAtual.toLocaleDateString('pt-BR');
+  for (let index = 0; index < numParcelas; index++) {
+    const dataAtual = new Date(`${vencimentoBase}T00:00:00Z`);
+    dataAtual.setUTCDate(dataAtual.getUTCDate() + index * intervaloDias);
+    const [ano, mes, dia] = dataAtual.toISOString().slice(0, 10).split('-');
+    const dataFormatada = `${dia}/${mes}/${ano}`;
+    const centavos = index === numParcelas - 1
+      ? totalCentavos - centavosBase * (numParcelas - 1)
+      : centavosBase;
     html += `<li class="list-group-item d-flex justify-content-between align-items-center">
-      Parcela ${i}/${numParcelas}
-      <span>${formatarMoedaPagar(valorParcela)} - Vence em ${dataFormatada}</span>
+      Parcela ${index + 1}/${numParcelas}
+      <span>${formatarMoedaPagar(centavos / 100)} - Vence em ${dataFormatada}</span>
     </li>`;
-    dataAtual = new Date(dataAtual.getTime() + intervaloDias * 24 * 60 * 60 * 1000);
   }
 
   html += '</ul>';
@@ -1178,14 +1029,5 @@ window.carregarContasPagar = carregarContasPagar;
 window.novaDespesa = novaDespesa;
 window.abrirDetalhesPagar = abrirDetalhesPagar;
 window.pagarConta = pagarConta;
+window.cancelarContaPagar = cancelarContaPagar;
 window.filtrarPagar = filtrarPagar;
-window.abrirEdicaoPagar = abrirEdicaoPagar;
-window.salvarEdicaoPagar = salvarEdicaoPagar;
-window.excluirContaPagar = excluirContaPagar;
-
-
-
-
-
-
-

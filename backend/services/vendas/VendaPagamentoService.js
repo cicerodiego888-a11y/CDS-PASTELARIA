@@ -292,6 +292,20 @@ function valorEmCentavos(valor) {
   return Number.isFinite(numero) ? Math.round(numero * 100) : null;
 }
 
+function obterOperacaoPedidoId(req) {
+  return Number(
+    req.pedidoFaturamentoOperacaoId
+    || req.body?.pedido_faturamento_operacao_id
+    || 0
+  );
+}
+
+function vendaVinculadaAoPedidoOperacional(req, pedidoId) {
+  if (!Number.isInteger(Number(pedidoId)) || Number(pedidoId) <= 0) return false;
+  const origem = String(req.vendaContext?.origem || req.body?.origem || '').trim().toUpperCase();
+  return origem === 'FATURAMENTO' || obterOperacaoPedidoId(req) > 0;
+}
+
 async function obterVendaExistenteDaOperacaoPedido(
   transacaoDb,
   distribuicaoItens,
@@ -300,11 +314,26 @@ async function obterVendaExistenteDaOperacaoPedido(
   req,
   pedidoIdVenda
 ) {
-  const operacaoId = Number(req.pedidoFaturamentoOperacaoId || 0);
-  if (!Number.isInteger(operacaoId) || operacaoId <= 0) return null;
+  const operacaoId = obterOperacaoPedidoId(req);
+  if (!Number.isInteger(operacaoId) || operacaoId <= 0) {
+    if (Number.isInteger(Number(pedidoIdVenda)) && Number(pedidoIdVenda) > 0) {
+      const operacaoPedido = await getSqlite(transacaoDb, `
+        SELECT tipo_operacao
+        FROM pedido_faturamento_operacoes
+        WHERE pedido_id = ?
+      `, [pedidoIdVenda]);
+      if (operacaoPedido?.tipo_operacao === 'PDV_COMPOSICAO') {
+        const err = new Error('A venda deste Pedido deve usar a operação de composição PDV preparada.');
+        err.statusCode = 409;
+        err.codigo = 'FATURAMENTO_PEDIDO_CONFLITANTE';
+        throw err;
+      }
+    }
+    return null;
+  }
 
   const operacao = await getSqlite(transacaoDb, `
-    SELECT id, pedido_id, empresa_id, venda_id
+    SELECT id, pedido_id, empresa_id, venda_id, tipo_operacao, payload_json
     FROM pedido_faturamento_operacoes
     WHERE id = ?
   `, [operacaoId]);
@@ -317,6 +346,36 @@ async function obterVendaExistenteDaOperacaoPedido(
     err.statusCode = 409;
     err.codigo = 'FATURAMENTO_PEDIDO_CONFLITANTE';
     throw err;
+  }
+  if (operacao.tipo_operacao === 'PDV_COMPOSICAO') {
+    let snapshot;
+    try {
+      snapshot = JSON.parse(operacao.payload_json || 'null');
+    } catch (parseError) {
+      snapshot = null;
+    }
+    const itensEsperados = snapshot?.itens;
+    const itensConferem = Array.isArray(itensEsperados)
+      && itensEsperados.length === distribuicaoItens.length
+      && itensEsperados.every((esperado, indice) => {
+        const recebido = distribuicaoItens[indice];
+        return Number(recebido.produto_id) === Number(esperado.produto_id)
+          && Math.round(Number(recebido.quantidade) * 1000) === Math.round(Number(esperado.quantidade) * 1000)
+          && valorEmCentavos(recebido.preco_unitario) === valorEmCentavos(esperado.preco_unitario)
+          && valorEmCentavos(recebido.subtotal) === valorEmCentavos(esperado.subtotal);
+      });
+    if (
+      !snapshot
+      || Number(snapshot.pedidoId) !== Number(pedidoIdVenda)
+      || Number(snapshot.empresaId) !== Number(empresaId)
+      || valorEmCentavos(snapshot.total) !== valorEmCentavos(total)
+      || !itensConferem
+    ) {
+      const err = new Error('Os itens ou o total enviados ao PDV divergem do snapshot aprovado para este Pedido.');
+      err.statusCode = 409;
+      err.codigo = 'COMPOSICAO_PDV_DIVERGENTE';
+      throw err;
+    }
   }
   if (operacao.venda_id == null) return null;
 
@@ -367,7 +426,7 @@ async function obterVendaExistenteDaOperacaoPedido(
 }
 
 async function registrarVendaDaOperacaoPedido(transacaoDb, vendaId, empresaId, req, pedidoIdVenda) {
-  const operacaoId = Number(req.pedidoFaturamentoOperacaoId || 0);
+  const operacaoId = obterOperacaoPedidoId(req);
   if (!Number.isInteger(operacaoId) || operacaoId <= 0) return;
 
   const PedidoFaturamentoOperacaoRepository = require('../faturamento/PedidoFaturamentoOperacaoRepository');
@@ -999,6 +1058,7 @@ const {
 
 /** RC4.1.2 — ponte reserva do pedido (Expedição → Núcleo). Já vem em FaturamentoService. */
 const pedidoIdVenda = Number(pedidoIdBody || req.body?.pedidoId || 0) || null;
+const vendaPedidoOperacional = vendaVinculadaAoPedidoOperacional(req, pedidoIdVenda);
 
 const vendaFiscal = resolverVendaFiscalParaMotor(req.body);
 
@@ -1165,7 +1225,9 @@ db.all(`
       return;
     }
     const creditoPorProduto = (creditoReserva && creditoReserva.por_produto) || {};
-    const pedidoJaConsumido = Boolean(creditoReserva && creditoReserva.consumo_confirmado);
+    const pedidoJaConsumido = Boolean(
+      (creditoReserva && creditoReserva.consumo_confirmado) || vendaPedidoOperacional
+    );
     opcoesBaixaEstoque.pedidoJaConsumido = pedidoJaConsumido;
 
   const distribuicaoItens = [];
@@ -1318,6 +1380,29 @@ db.all(`
     }
 
     await aposBaixaItensDaVenda(vendaId, transacaoDb);
+  }
+
+  async function consumirPedidoNaVenda(transacaoDb, vendaId) {
+    if (!vendaPedidoOperacional) return;
+    const PedidoRepository = require('../pedido/PedidoRepository');
+    const PedidoConsumoEstoqueService = require('../pedido/PedidoConsumoEstoqueService');
+    const pedido = await PedidoRepository.obterPorId(pedidoIdVenda, { db: transacaoDb });
+    if (!pedido || Number(pedido.empresa_id) !== Number(empresaIdVenda)) {
+      const err = new Error('Pedido ausente ou pertencente a outra empresa durante a baixa física.');
+      err.statusCode = 409;
+      err.codigo = 'PEDIDO_EMPRESA_DIVERGENTE';
+      throw err;
+    }
+    await PedidoConsumoEstoqueService.registrarConsumo({
+      db: transacaoDb,
+      pedidoId: pedidoIdVenda,
+      empresaId: empresaIdVenda,
+      usuarioId: req.operadorId || req.user?.id || null,
+      itens: pedido.itens || [],
+      supervisorToken: req.body?.supervisor_token || null,
+      vendaId,
+      jaEmTransacao: true
+    });
   }
 
   async function vincularTransacoesTef(transacaoDb, vendaId, resultadoFiscal) {
@@ -1544,6 +1629,7 @@ db.all(`
         ]);
         const id = venda.lastID;
 
+        await consumirPedidoNaVenda(transacaoDb, id);
         await gravarRecebimentosAsync(id, recebimentos, transacaoDb);
         await vincularTransacoesTef(transacaoDb, id, resultadoFiscal);
         await inserirItensDaVenda(transacaoDb, id);
@@ -1764,6 +1850,7 @@ const executarVenda = async () => {
       ]);
       const id = venda.lastID;
 
+      await consumirPedidoNaVenda(transacaoDb, id);
       await gravarRecebimentosAsync(id, recebimentos, transacaoDb);
       await vincularTransacoesTef(transacaoDb, id, resultadoFiscal);
       await inserirItensDaVenda(transacaoDb, id);

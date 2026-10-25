@@ -34,6 +34,30 @@ const SQL_SCHEMA = [
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (pedido_id) REFERENCES pedidos(id) ON DELETE CASCADE
   )`,
+  `CREATE TABLE IF NOT EXISTS pedido_estoque_consumo_finalizacoes (
+    pedido_id INTEGER PRIMARY KEY,
+    consumo_id INTEGER NOT NULL UNIQUE,
+    venda_id INTEGER NOT NULL UNIQUE,
+    empresa_id INTEGER NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (pedido_id) REFERENCES pedidos(id),
+    FOREIGN KEY (consumo_id) REFERENCES pedido_estoque_consumos(id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS pedido_estoque_consumo_ajustes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    consumo_id INTEGER NOT NULL,
+    pedido_id INTEGER NOT NULL,
+    venda_id INTEGER NOT NULL,
+    empresa_id INTEGER NOT NULL,
+    produto_id INTEGER NOT NULL,
+    quantidade_fiscal_delta REAL NOT NULL,
+    quantidade_nao_fiscal_delta REAL NOT NULL DEFAULT 0,
+    unidade TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (consumo_id, venda_id, produto_id),
+    FOREIGN KEY (consumo_id) REFERENCES pedido_estoque_consumos(id),
+    FOREIGN KEY (pedido_id) REFERENCES pedidos(id)
+  )`,
   `CREATE TABLE IF NOT EXISTS pedido_estoque_consumo_itens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     consumo_id INTEGER NOT NULL,
@@ -100,6 +124,20 @@ const SQL_SCHEMA = [
     UNIQUE (empresa_id, chave),
     FOREIGN KEY (pedido_id) REFERENCES pedidos(id),
     FOREIGN KEY (estorno_id) REFERENCES pedido_estoque_estornos(id)
+  )`,
+  `CREATE TABLE IF NOT EXISTS pedido_estoque_estorno_movimentos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    estorno_id INTEGER NOT NULL,
+    pedido_id INTEGER NOT NULL,
+    empresa_id INTEGER NOT NULL,
+    produto_id INTEGER NOT NULL,
+    tipo_saldo TEXT NOT NULL,
+    quantidade REAL NOT NULL,
+    unidade TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (estorno_id, produto_id, tipo_saldo),
+    FOREIGN KEY (estorno_id) REFERENCES pedido_estoque_estornos(id),
+    FOREIGN KEY (pedido_id) REFERENCES pedidos(id)
   )`
 ];
 
@@ -213,6 +251,230 @@ async function obterEstornoPorPedido(pedidoId, opts = {}) {
     );
   }
 
+function normalizarUnidadeConsumo(unidade) {
+  const valor = String(unidade || '').trim();
+  if (!valor) return null;
+  return normalizarUnidade(valor) || valor.toUpperCase();
+}
+
+function agregarRequisitosPorEstoque(requisitos = []) {
+  const agregados = new Map();
+  for (const requisito of requisitos) {
+    const produtoId = Number(requisito.insumo_id || requisito.produto_id);
+    const unidade = normalizarUnidadeConsumo(requisito.unidade);
+    const quantidade = roundStockQuantity(requisito.quantidade);
+    if (!Number.isInteger(produtoId) || produtoId <= 0 || !unidade
+      || !Number.isFinite(quantidade) || quantidade < 0) {
+      throw erro(
+        'PEDIDO_REQUISITO_ESTOQUE_INVALIDO',
+        'Um requisito de estoque do Pedido está inválido.',
+        409
+      );
+    }
+    const anterior = agregados.get(produtoId);
+    if (anterior && anterior.unidade !== unidade) {
+      throw erro(
+        'PEDIDO_UNIDADE_ESTOQUE_DIVERGENTE',
+        `O produto de estoque ${produtoId} possui unidades divergentes no consumo do Pedido.`,
+        409
+      );
+    }
+    agregados.set(produtoId, {
+      produto_id: produtoId,
+      unidade,
+      quantidade: roundStockQuantity((anterior?.quantidade || 0) + quantidade)
+    });
+  }
+  return agregados;
+}
+
+async function obterResumoConsumo(consumoId, db) {
+  const linhas = await dbAll(
+    db,
+    `SELECT produto_id, insumo_id, unidade,
+            SUM(quantidade_fiscal) AS quantidade_fiscal,
+            SUM(quantidade_nao_fiscal) AS quantidade_nao_fiscal
+       FROM pedido_estoque_consumo_itens
+      WHERE consumo_id = ?
+      GROUP BY produto_id, insumo_id, unidade`,
+    [Number(consumoId)]
+  );
+  const resumo = new Map();
+  for (const linha of linhas) {
+    const produtoId = Number(linha.insumo_id || linha.produto_id);
+    const unidade = normalizarUnidadeConsumo(linha.unidade);
+    if (!Number.isInteger(produtoId) || produtoId <= 0 || !unidade) {
+      throw erro(
+        'PEDIDO_LEDGER_CONSUMO_INVALIDO',
+        'O ledger de consumo contém produto ou unidade inválidos.',
+        409
+      );
+    }
+    const anterior = resumo.get(produtoId);
+    if (anterior && anterior.unidade !== unidade) {
+      throw erro(
+        'PEDIDO_UNIDADE_ESTOQUE_DIVERGENTE',
+        `O ledger do produto ${produtoId} contém unidades de estoque divergentes.`,
+        409
+      );
+    }
+    resumo.set(produtoId, {
+      produto_id: produtoId,
+      unidade,
+      quantidade_fiscal: roundStockQuantity(
+        (anterior?.quantidade_fiscal || 0) + Number(linha.quantidade_fiscal || 0)
+      ),
+      quantidade_nao_fiscal: roundStockQuantity(
+        (anterior?.quantidade_nao_fiscal || 0) + Number(linha.quantidade_nao_fiscal || 0)
+      )
+    });
+  }
+  return resumo;
+}
+
+function calcularAjustesConsumo(resumoAnterior, resumoDesejado) {
+  const ids = new Set([...resumoAnterior.keys(), ...resumoDesejado.keys()]);
+  const ajustes = [];
+  for (const produtoId of ids) {
+    const anterior = resumoAnterior.get(produtoId);
+    const desejado = resumoDesejado.get(produtoId);
+    if (anterior && desejado && anterior.unidade !== desejado.unidade) {
+      throw erro(
+        'PEDIDO_UNIDADE_ESTOQUE_DIVERGENTE',
+        `A unidade de estoque do produto ${produtoId} mudou desde o consumo histórico; reconciliação bloqueada.`,
+        409
+      );
+    }
+    const unidade = desejado?.unidade || anterior?.unidade;
+    const quantidadeFiscalDelta = roundStockQuantity(
+      Number(desejado?.quantidade || 0) - Number(anterior?.quantidade_fiscal || 0)
+    );
+    const quantidadeNaoFiscalDelta = roundStockQuantity(
+      0 - Number(anterior?.quantidade_nao_fiscal || 0)
+    );
+    if (Math.abs(quantidadeFiscalDelta) > 1e-9 || Math.abs(quantidadeNaoFiscalDelta) > 1e-9) {
+      ajustes.push({
+        produto_id: produtoId,
+        unidade,
+        quantidade_fiscal_delta: quantidadeFiscalDelta,
+        quantidade_nao_fiscal_delta: quantidadeNaoFiscalDelta
+      });
+    }
+  }
+  return ajustes;
+}
+
+async function carregarConsumoPedido(pedidoId, db) {
+  return dbGet(
+    db,
+    `SELECT id, pedido_id, empresa_id, operacao_id
+       FROM pedido_estoque_consumos
+      WHERE pedido_id = ?`,
+    [Number(pedidoId)]
+  );
+}
+
+async function exigirContextoPedido(db, pedidoId, empresaId) {
+  const pedido = await dbGet(db, 'SELECT id, empresa_id, status FROM pedidos WHERE id = ?', [Number(pedidoId)]);
+  if (!pedido) throw erro('PEDIDO_NAO_ENCONTRADO', 'Pedido não encontrado.', 404);
+  if (Number(pedido.empresa_id) !== Number(empresaId)) {
+    throw erro('PEDIDO_EMPRESA_DIVERGENTE', 'O Pedido não pertence à empresa informada.', 409);
+  }
+  return pedido;
+}
+
+function depsMotorNaTransacao(db) {
+  return {
+    db,
+    executarEmTransacao: async (work, opcoes = {}) => work(opcoes.db || db)
+  };
+}
+
+async function reservarConsumo({
+  db,
+  pedidoId,
+  empresaId,
+  usuarioId,
+  itens,
+  supervisorToken,
+  jaEmTransacao
+}) {
+  if (!db) throw erro('DB_OBRIGATORIO', 'Conexão SQLite obrigatória.', 500);
+  if (jaEmTransacao !== true) {
+    throw erro(
+      'TRANSACAO_PEDIDO_OBRIGATORIA',
+      'A reserva do Pedido deve participar da transação iniciada pelo caller.',
+      500
+    );
+  }
+  const id = Number(pedidoId);
+  const empresa = Number(empresaId);
+  if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(empresa) || empresa <= 0) {
+    throw erro('CONTEXTO_PEDIDO_INVALIDO', 'Pedido e empresa são obrigatórios para reservar estoque.');
+  }
+  const pedido = await exigirContextoPedido(db, id, empresa);
+  if (String(pedido.status || '').toUpperCase() === 'CANCELADO') {
+    throw erro('PEDIDO_CANCELADO', 'Pedido cancelado não pode reservar estoque.', 409);
+  }
+
+  const requisitos = await montarRequisitos(itens, db);
+  const desejado = agregarRequisitosPorEstoque(requisitos);
+  const consumo = await carregarConsumoPedido(id, db);
+  let quantidadeAReservar = desejado;
+
+  if (consumo) {
+    if (Number(consumo.empresa_id) !== empresa) {
+      throw erro('PEDIDO_EMPRESA_DIVERGENTE', 'O consumo não pertence à empresa informada.', 409);
+    }
+    const finalizacao = await dbGet(
+      db,
+      'SELECT venda_id FROM pedido_estoque_consumo_finalizacoes WHERE pedido_id = ?',
+      [id]
+    );
+    if (finalizacao) {
+      throw erro(
+        'PEDIDO_CONSUMO_JA_FINALIZADO',
+        'O Pedido já foi encaminhado para uma venda finalizada e não pode reservar estoque novamente.',
+        409
+      );
+    }
+    const anterior = await obterResumoConsumo(consumo.id, db);
+    const deltas = calcularAjustesConsumo(anterior, desejado);
+    quantidadeAReservar = new Map(
+      deltas
+        .filter((delta) => delta.quantidade_fiscal_delta > 1e-9)
+        .map((delta) => [delta.produto_id, {
+          produto_id: delta.produto_id,
+          unidade: delta.unidade,
+          quantidade: delta.quantidade_fiscal_delta
+        }])
+    );
+  }
+
+  if (quantidadeAReservar.size > 0) {
+    await MotorComercial.confirmarPedidoFiscal({
+      pedidoId: id,
+      itens: [...quantidadeAReservar.values()].map((item) => ({
+        produto_id: item.produto_id,
+        quantidade: item.quantidade
+      })),
+      supervisorToken,
+      usuarioId,
+      motivo: `Reserva de requisitos do pedido ${id}`,
+      empresaId: empresa
+    }, depsMotorNaTransacao(db));
+  } else {
+    await MotorComercial.liberarReservasDoPedido(id, depsMotorNaTransacao(db));
+  }
+
+  return {
+    pedido_id: id,
+    empresa_id: empresa,
+    requisitos,
+    reservas: [...quantidadeAReservar.values()]
+  };
+}
+
 async function solicitarEstorno({
     db,
     pedidoId,
@@ -222,6 +484,7 @@ async function solicitarEstorno({
     jaEmTransacao
   }) {
     if (!db) throw erro('DB_OBRIGATORIO', 'Conexão SQLite obrigatória.', 500);
+    await garantirSchema(db);
     if (jaEmTransacao !== true) {
       throw erro(
         'TRANSACAO_PEDIDO_OBRIGATORIA',
@@ -313,6 +576,86 @@ async function solicitarEstorno({
       );
       estornoId = cabecalho.lastID;
 
+      const resumoEfetivo = await obterResumoConsumo(consumo.id, db);
+      const ajustesConsumo = await dbAll(
+        db,
+        `SELECT produto_id, unidade,
+                SUM(quantidade_fiscal_delta) AS quantidade_fiscal_delta,
+                SUM(quantidade_nao_fiscal_delta) AS quantidade_nao_fiscal_delta
+           FROM pedido_estoque_consumo_ajustes
+          WHERE consumo_id = ?
+          GROUP BY produto_id, unidade`,
+        [Number(consumo.id)]
+      );
+      for (const ajuste of ajustesConsumo) {
+        const produtoId = Number(ajuste.produto_id);
+        const unidade = normalizarUnidadeConsumo(ajuste.unidade);
+        if (!Number.isInteger(produtoId) || produtoId <= 0 || !unidade) {
+          throw erro(
+            'PEDIDO_LEDGER_ESTORNO_INVALIDO',
+            'O histórico de reconciliação do Pedido contém produto ou unidade inválidos.',
+            409
+          );
+        }
+        const anterior = resumoEfetivo.get(produtoId);
+        if (anterior && anterior.unidade !== unidade) {
+          throw erro(
+            'PEDIDO_UNIDADE_ESTOQUE_DIVERGENTE',
+            `O histórico de reconciliação do produto ${produtoId} possui unidade divergente.`,
+            409
+          );
+        }
+        resumoEfetivo.set(produtoId, {
+          produto_id: produtoId,
+          unidade,
+          quantidade_fiscal: roundStockQuantity(
+            Number(anterior?.quantidade_fiscal || 0) + Number(ajuste.quantidade_fiscal_delta || 0)
+          ),
+          quantidade_nao_fiscal: roundStockQuantity(
+            Number(anterior?.quantidade_nao_fiscal || 0)
+              + Number(ajuste.quantidade_nao_fiscal_delta || 0)
+          )
+        });
+      }
+      for (const movimento of resumoEfetivo.values()) {
+        const quantidadeFiscal = roundStockQuantity(movimento.quantidade_fiscal);
+        const quantidadeNaoFiscal = roundStockQuantity(movimento.quantidade_nao_fiscal);
+        if (quantidadeFiscal < -1e-9 || quantidadeNaoFiscal < -1e-9) {
+          throw erro(
+            'PEDIDO_LEDGER_ESTORNO_INVALIDO',
+            'O consumo efetivo do Pedido ficou negativo após a reconciliação; o estorno foi bloqueado.',
+            409
+          );
+        }
+        for (const [tipoSaldo, quantidade] of [
+          [TipoSaldo.FISCAL, Math.max(0, quantidadeFiscal)],
+          [TipoSaldo.NAO_FISCAL, Math.max(0, quantidadeNaoFiscal)]
+        ]) {
+          if (quantidade <= 1e-9) continue;
+          await estoqueSaldosPublico.creditarSaldo(
+            movimento.produto_id,
+            tipoSaldo,
+            quantidade,
+            { db, empresaId: empresa, usuarioId }
+          );
+          await dbRun(
+            db,
+            `INSERT INTO pedido_estoque_estorno_movimentos (
+              estorno_id, pedido_id, empresa_id, produto_id, tipo_saldo, quantidade, unidade
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [
+              estornoId,
+              id,
+              empresa,
+              movimento.produto_id,
+              tipoSaldo,
+              quantidade,
+              movimento.unidade
+            ]
+          );
+        }
+      }
+
       for (const linha of linhas) {
         const quantidade = roundStockQuantity(linha.quantidade);
         const quantidadeFiscal = roundStockQuantity(linha.quantidade_fiscal);
@@ -333,24 +676,6 @@ async function solicitarEstorno({
             'PEDIDO_LEDGER_ESTORNO_INVALIDO',
             'O ledger de consumo contém dados inválidos; o cancelamento foi bloqueado.',
             409
-          );
-        }
-
-        const opcoesSaldo = { db, empresaId: empresa, usuarioId };
-        if (quantidadeFiscal > 0) {
-          await estoqueSaldosPublico.creditarSaldo(
-            produtoEstoqueId,
-            TipoSaldo.FISCAL,
-            quantidadeFiscal,
-            opcoesSaldo
-          );
-        }
-        if (quantidadeNaoFiscal > 0) {
-          await estoqueSaldosPublico.creditarSaldo(
-            produtoEstoqueId,
-            TipoSaldo.NAO_FISCAL,
-            quantidadeNaoFiscal,
-            opcoesSaldo
           );
         }
 
@@ -680,6 +1005,7 @@ async function registrarConsumo({
   usuarioId,
   itens,
   supervisorToken,
+  vendaId,
   jaEmTransacao
 }) {
   if (!db) throw erro('DB_OBRIGATORIO', 'Conexão SQLite obrigatória.', 500);
@@ -692,78 +1018,197 @@ async function registrarConsumo({
   }
   const id = Number(pedidoId);
   const empresa = Number(empresaId);
-  if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(empresa) || empresa <= 0) {
-    throw erro('CONTEXTO_PEDIDO_INVALIDO', 'Pedido e empresa são obrigatórios para o consumo.');
+  const venda = Number(vendaId);
+  if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(empresa) || empresa <= 0
+    || !Number.isInteger(venda) || venda <= 0) {
+    throw erro('CONTEXTO_PEDIDO_INVALIDO', 'Pedido, empresa e venda são obrigatórios para o consumo.');
   }
-  const pedido = await dbGet(db, 'SELECT empresa_id FROM pedidos WHERE id = ?', [id]);
-  if (!pedido) throw erro('PEDIDO_NAO_ENCONTRADO', 'Pedido não encontrado.', 404);
-  if (Number(pedido.empresa_id) !== empresa) {
-    throw erro('PEDIDO_EMPRESA_DIVERGENTE', 'O Pedido não pertence à empresa informada.', 409);
+  await garantirSchema(db);
+  const pedido = await exigirContextoPedido(db, id, empresa);
+  const vendaPersistida = await dbGet(db, 'SELECT id, empresa_id FROM vendas WHERE id = ?', [venda]);
+  if (!vendaPersistida || Number(vendaPersistida.empresa_id) !== empresa) {
+    throw erro('VENDA_EMPRESA_DIVERGENTE', 'A venda não foi persistida na mesma empresa do Pedido.', 409);
   }
-  if (await jaConsumido(id, { db })) {
-    return { pedido_id: id, empresa_id: empresa, ja_consumido: true, itens: [] };
+
+  const finalizacaoExistente = await dbGet(
+    db,
+    `SELECT venda_id, consumo_id, empresa_id
+       FROM pedido_estoque_consumo_finalizacoes
+      WHERE pedido_id = ?`,
+    [id]
+  );
+  if (finalizacaoExistente) {
+    if (Number(finalizacaoExistente.venda_id) !== venda
+      || Number(finalizacaoExistente.empresa_id) !== empresa) {
+      throw erro(
+        'PEDIDO_CONSUMO_JA_FINALIZADO',
+        'Este Pedido já teve o consumo físico reconciliado com outra venda.',
+        409
+      );
+    }
+    return {
+      pedido_id: id,
+      empresa_id: empresa,
+      venda_id: venda,
+      ja_consumido: true,
+      idempotente: true,
+      itens: []
+    };
+  }
+
+  if (String(pedido.status || '').toUpperCase() === 'CANCELADO') {
+    throw erro('PEDIDO_CANCELADO', 'Pedido cancelado não pode consumir estoque.', 409);
   }
 
   const requisitos = await montarRequisitos(itens, db);
-  const agregados = agregarRequisitos(requisitos);
-  if (agregados.length > 0) {
+  const resumoDesejado = agregarRequisitosPorEstoque(requisitos);
+  const consumoExistente = await carregarConsumoPedido(id, db);
+  let ajustes = [];
+  let resumoAnterior = new Map();
+
+  if (consumoExistente) {
+    if (Number(consumoExistente.empresa_id) !== empresa) {
+      throw erro('PEDIDO_EMPRESA_DIVERGENTE', 'O consumo não pertence à empresa informada.', 409);
+    }
+    const estornoExistente = await obterEstornoPorPedido(id, { db });
+    if (estornoExistente) {
+      throw erro(
+        'PEDIDO_CONSUMO_ESTORNADO',
+        'O consumo histórico deste Pedido já foi estornado; uma nova venda exige um novo Pedido.',
+        409
+      );
+    }
+    resumoAnterior = await obterResumoConsumo(consumoExistente.id, db);
+    ajustes = calcularAjustesConsumo(resumoAnterior, resumoDesejado);
+  } else {
+    ajustes = [...resumoDesejado.values()].map((item) => ({
+      produto_id: item.produto_id,
+      unidade: item.unidade,
+      quantidade_fiscal_delta: item.quantidade,
+      quantidade_nao_fiscal_delta: 0
+    }));
+  }
+
+  const reservasDiferenciais = ajustes
+    .filter((ajuste) => ajuste.quantidade_fiscal_delta > 1e-9)
+    .map((ajuste) => ({
+      produto_id: ajuste.produto_id,
+      quantidade: ajuste.quantidade_fiscal_delta
+    }));
+  if (reservasDiferenciais.length > 0) {
     await MotorComercial.confirmarPedidoFiscal({
       pedidoId: id,
-      itens: agregados,
+      itens: reservasDiferenciais,
       supervisorToken,
       usuarioId,
-      motivo: `Consumo operacional pedido ${id}`,
+      motivo: `Finalização de consumo do pedido ${id}`,
       empresaId: empresa
-    }, {
-      db,
-      executarEmTransacao: async (work, opcoes = {}) => work(opcoes.db || db)
-    });
-
-    for (const agregado of agregados) {
-      await debitarEstoque(db, agregado.produto_id, agregado.quantidade, empresa, usuarioId);
-    }
-
-    await consumirReservasPedidoNaVenda(id, null, { db, empresaId: empresa, usuarioId });
+    }, depsMotorNaTransacao(db));
+  } else {
+    await MotorComercial.liberarReservasDoPedido(id, depsMotorNaTransacao(db));
   }
 
-  const operacaoId = crypto.randomUUID();
-  const cab = await dbRun(
-    db,
-    `INSERT INTO pedido_estoque_consumos (pedido_id, empresa_id, operacao_id)
-     VALUES (?, ?, ?)`,
-    [id, empresa, operacaoId]
-  );
-
-  for (const requisito of requisitos) {
-    await dbRun(
+  let consumoId = consumoExistente ? Number(consumoExistente.id) : null;
+  if (!consumoExistente) {
+    const operacaoId = crypto.randomUUID();
+    const cab = await dbRun(
       db,
-      `INSERT INTO pedido_estoque_consumo_itens (
-        consumo_id, pedido_id, empresa_id, pedido_item_id, produto_id, insumo_id,
-        origem_requisito, quantidade, unidade, quantidade_fiscal,
-        quantidade_nao_fiscal, quantidade_ficha, unidade_ficha
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
-      [
-        cab.lastID,
-        id,
-        empresa,
-        requisito.pedido_item_id,
-        requisito.produto_id,
-        requisito.insumo_id,
-        requisito.origem_requisito,
-        requisito.quantidade,
-        requisito.unidade,
-        requisito.quantidade,
-        requisito.quantidade_ficha,
-        requisito.unidade_ficha
-      ]
+      `INSERT INTO pedido_estoque_consumos (pedido_id, empresa_id, operacao_id)
+       VALUES (?, ?, ?)`,
+      [id, empresa, operacaoId]
     );
+    consumoId = Number(cab.lastID);
   }
+
+  for (const ajuste of ajustes) {
+    const quantidadeFiscalDelta = roundStockQuantity(ajuste.quantidade_fiscal_delta);
+    const quantidadeNaoFiscalDelta = roundStockQuantity(ajuste.quantidade_nao_fiscal_delta);
+    if (quantidadeFiscalDelta > 1e-9) {
+      await debitarEstoque(db, ajuste.produto_id, quantidadeFiscalDelta, empresa, usuarioId);
+    } else if (quantidadeFiscalDelta < -1e-9) {
+      await estoqueSaldosPublico.creditarSaldo(
+        ajuste.produto_id,
+        TipoSaldo.FISCAL,
+        Math.abs(quantidadeFiscalDelta),
+        { db, empresaId: empresa, usuarioId }
+      );
+    }
+    if (quantidadeNaoFiscalDelta > 1e-9) {
+      await debitarEstoque(db, ajuste.produto_id, quantidadeNaoFiscalDelta, empresa, usuarioId);
+    } else if (quantidadeNaoFiscalDelta < -1e-9) {
+      await estoqueSaldosPublico.creditarSaldo(
+        ajuste.produto_id,
+        TipoSaldo.NAO_FISCAL,
+        Math.abs(quantidadeNaoFiscalDelta),
+        { db, empresaId: empresa, usuarioId }
+      );
+    }
+  }
+
+  if (consumoExistente) {
+    for (const ajuste of ajustes) {
+      await dbRun(
+        db,
+        `INSERT INTO pedido_estoque_consumo_ajustes (
+          consumo_id, pedido_id, venda_id, empresa_id, produto_id,
+          quantidade_fiscal_delta, quantidade_nao_fiscal_delta, unidade
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          consumoId,
+          id,
+          venda,
+          empresa,
+          ajuste.produto_id,
+          roundStockQuantity(ajuste.quantidade_fiscal_delta),
+          roundStockQuantity(ajuste.quantidade_nao_fiscal_delta),
+          ajuste.unidade
+        ]
+      );
+    }
+  } else {
+    for (const requisito of requisitos) {
+      await dbRun(
+        db,
+        `INSERT INTO pedido_estoque_consumo_itens (
+          consumo_id, pedido_id, empresa_id, pedido_item_id, produto_id, insumo_id,
+          origem_requisito, quantidade, unidade, quantidade_fiscal,
+          quantidade_nao_fiscal, quantidade_ficha, unidade_ficha
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        [
+          consumoId,
+          id,
+          empresa,
+          requisito.pedido_item_id,
+          requisito.produto_id,
+          requisito.insumo_id,
+          requisito.origem_requisito,
+          requisito.quantidade,
+          requisito.unidade,
+          requisito.quantidade,
+          requisito.quantidade_ficha,
+          requisito.unidade_ficha
+        ]
+      );
+    }
+  }
+
+  await consumirReservasPedidoNaVenda(id, venda, { db, empresaId: empresa, usuarioId });
+  await dbRun(
+    db,
+    `INSERT INTO pedido_estoque_consumo_finalizacoes
+      (pedido_id, consumo_id, venda_id, empresa_id)
+     VALUES (?, ?, ?, ?)`,
+    [id, consumoId, venda, empresa]
+  );
 
   return {
     pedido_id: id,
     empresa_id: empresa,
-    operacao_id: operacaoId,
+    venda_id: venda,
+    operacao_id: consumoExistente?.operacao_id || null,
     ja_consumido: false,
+    reconciliado: Boolean(consumoExistente),
+    ajustes,
     itens: requisitos
   };
 }
@@ -778,5 +1223,6 @@ module.exports = {
   obterEstornoPorPedido,
   solicitarEstorno,
   montarRequisitos,
-  registrarConsumo
+  registrarConsumo,
+  reservarConsumo
 };

@@ -65,6 +65,111 @@ async function obterColunasTabela(tabela, dbInjected) {
   return new Set((rows || []).map((r) => String(r.name || '').toLowerCase()));
 }
 
+function criarErroPedidoImutavel(pedido, estado = {}) {
+  const status = String(pedido?.status || '').toUpperCase();
+  const mensagem = status === 'CANCELADO'
+    ? 'Pedido cancelado não pode ser editado.'
+    : estado.venda_vinculada
+      ? 'Pedido com venda vinculada não pode ser editado.'
+      : 'Este pedido já foi finalizado e faturado. A edição está bloqueada.';
+  const err = new Error(mensagem);
+  err.statusCode = 409;
+  err.codigo = 'PEDIDO_IMUTAVEL';
+  err.detalhes = {
+    pedido_id: Number(pedido?.id),
+    status: pedido?.status || null,
+    venda_id: pedido?.venda_id ?? null
+  };
+  return err;
+}
+
+async function obterEstadoEdicao(pedido, opts = {}) {
+  const db = opts.db;
+  const status = String(pedido?.status || '').toUpperCase();
+  let vendaVinculada = pedido?.venda_id != null;
+  let finalizacaoConfirmada = status === 'FATURADO';
+  const pedidoId = Number(pedido?.id);
+  const empresaId = Number(pedido?.empresa_id);
+
+  if (Number.isInteger(pedidoId) && pedidoId > 0) {
+    const colunasFinalizacoes = await obterColunasTabela(
+      'pedido_estoque_consumo_finalizacoes',
+      db
+    );
+    if (colunasFinalizacoes.has('pedido_id')) {
+      const filtroEmpresa = colunasFinalizacoes.has('empresa_id')
+        && Number.isInteger(empresaId) && empresaId > 0
+        ? ' AND empresa_id = ?'
+        : '';
+      const params = [pedidoId];
+      if (filtroEmpresa) params.push(empresaId);
+      finalizacaoConfirmada = finalizacaoConfirmada || Boolean(await get(
+        `SELECT 1 AS existe
+           FROM pedido_estoque_consumo_finalizacoes
+          WHERE pedido_id = ?${filtroEmpresa}
+          LIMIT 1`,
+        params,
+        db
+      ));
+    }
+
+    const colunasOperacoes = await obterColunasTabela('pedido_faturamento_operacoes', db);
+    if (colunasOperacoes.has('pedido_id')) {
+      const filtroEmpresa = colunasOperacoes.has('empresa_id')
+        && Number.isInteger(empresaId) && empresaId > 0
+        ? ' AND empresa_id = ?'
+        : '';
+      const camposOperacao = [
+        colunasOperacoes.has('status') ? 'status' : null,
+        colunasOperacoes.has('venda_id') ? 'venda_id' : null
+      ].filter(Boolean);
+      if (camposOperacao.length) {
+        const params = [pedidoId];
+        if (filtroEmpresa) params.push(empresaId);
+        const operacao = await get(
+          `SELECT ${camposOperacao.join(', ')}
+             FROM pedido_faturamento_operacoes
+            WHERE pedido_id = ?${filtroEmpresa}
+            LIMIT 1`,
+          params,
+          db
+        );
+        if (operacao) {
+          finalizacaoConfirmada = finalizacaoConfirmada
+            || String(operacao.status || '').toUpperCase() === 'FINALIZADA';
+          vendaVinculada = vendaVinculada || operacao.venda_id != null;
+        }
+      }
+    }
+
+    const colunasVendas = await obterColunasTabela('vendas', db);
+    if (colunasVendas.has('pedido_id')) {
+      const filtroEmpresa = colunasVendas.has('empresa_id')
+        && Number.isInteger(empresaId) && empresaId > 0
+        ? ' AND empresa_id = ?'
+        : '';
+      const params = [pedidoId];
+      if (filtroEmpresa) params.push(empresaId);
+      vendaVinculada = vendaVinculada || Boolean(await get(
+        `SELECT 1 AS existe
+           FROM vendas
+          WHERE pedido_id = ?${filtroEmpresa}
+          LIMIT 1`,
+        params,
+        db
+      ));
+    }
+  }
+
+  const statusEncerrado = ['FATURADO', 'CANCELADO'].includes(status);
+  return {
+    edicao_bloqueada: statusEncerrado || finalizacaoConfirmada || vendaVinculada,
+    finalizacao_confirmada: finalizacaoConfirmada,
+    somente_consulta: statusEncerrado || finalizacaoConfirmada,
+    venda_vinculada: vendaVinculada
+  };
+}
+
 async function carregarSnapshotsProdutos(itens = [], dbInjected) {
   const ids = Array.from(
     new Set((itens || []).map((item) => Number(item.produto_id)).filter((id) => Number.isInteger(id) && id > 0))
@@ -168,7 +273,24 @@ function montarInsertPedidoItem({ pedidoId, item, snapshot, colunasPedidoItens }
       INSERT INTO pedidos_itens (${colunas.join(', ')})
       VALUES (${colunas.map(() => '?').join(', ')})
     `,
+    colunas,
     valores
+  };
+}
+
+function montarUpdatePedidoItem({ pedidoId, item, snapshot, colunasPedidoItens }) {
+  const dados = montarInsertPedidoItem({ pedidoId, item, snapshot, colunasPedidoItens });
+  const atualizaveis = dados.colunas.filter((coluna) => coluna !== 'pedido_id');
+  const indices = atualizaveis.map((coluna) => dados.colunas.indexOf(coluna));
+  return {
+    sql: `UPDATE pedidos_itens
+             SET ${atualizaveis.map((coluna) => `${coluna} = ?`).join(', ')}
+           WHERE id = ? AND pedido_id = ?`,
+    valores: [
+      ...indices.map((index) => dados.valores[index]),
+      Number(item.id),
+      Number(pedidoId)
+    ]
   };
 }
 
@@ -239,6 +361,74 @@ async function listarPedidos(filtros = {}) {
   const colunasPedidos = await obterColunasTabela('pedidos', db);
   const temMesa = colunasPedidos.has('mesa_id') && (await obterColunasTabela('mesas', db)).size > 0;
   const temOrigem = colunasPedidos.has('origem_canal');
+  const colunasOperacaoPdv = await obterColunasTabela('pedido_faturamento_operacoes', db);
+  const temOperacaoPdv = [
+    'pedido_id',
+    'status',
+    'tipo_operacao',
+    'venda_id'
+  ].every((coluna) => colunasOperacaoPdv.has(coluna));
+  const operacaoPdvSelect = temOperacaoPdv
+    ? 'op.id AS venda_pdv_operacao_id, op.status AS venda_pdv_status, op.venda_id AS venda_pdv_id'
+    : 'NULL AS venda_pdv_operacao_id, NULL AS venda_pdv_status, NULL AS venda_pdv_id';
+  const operacaoPdvJoin = temOperacaoPdv
+    ? "LEFT JOIN pedido_faturamento_operacoes op ON op.pedido_id = p.id AND op.tipo_operacao = 'PDV_COMPOSICAO'"
+    : '';
+  const colunasFinalizacoes = await obterColunasTabela('pedido_estoque_consumo_finalizacoes', db);
+  const finalizacaoConsumoSql = colunasFinalizacoes.has('pedido_id')
+    ? `EXISTS (
+        SELECT 1 FROM pedido_estoque_consumo_finalizacoes f
+         WHERE f.pedido_id = p.id
+         ${colunasFinalizacoes.has('empresa_id') ? 'AND f.empresa_id = p.empresa_id' : ''}
+      )`
+    : null;
+  const colunasOperacoes = await obterColunasTabela('pedido_faturamento_operacoes', db);
+  const predicadoEmpresaOperacao = colunasOperacoes.has('empresa_id')
+    ? 'AND opf.empresa_id = p.empresa_id'
+    : '';
+  const operacaoFinalizadaSql = colunasOperacoes.has('pedido_id') && colunasOperacoes.has('status')
+    ? `EXISTS (
+        SELECT 1 FROM pedido_faturamento_operacoes opf
+         WHERE opf.pedido_id = p.id ${predicadoEmpresaOperacao}
+           AND UPPER(opf.status) = 'FINALIZADA'
+      )`
+    : null;
+  const operacaoComVendaSql = colunasOperacoes.has('pedido_id') && colunasOperacoes.has('venda_id')
+    ? `EXISTS (
+        SELECT 1 FROM pedido_faturamento_operacoes opv
+         WHERE opv.pedido_id = p.id
+           ${colunasOperacoes.has('empresa_id') ? 'AND opv.empresa_id = p.empresa_id' : ''}
+           AND opv.venda_id IS NOT NULL
+      )`
+    : null;
+  const colunasVendas = await obterColunasTabela('vendas', db);
+  const vendaPedidoSql = colunasVendas.has('pedido_id')
+    ? `EXISTS (
+        SELECT 1 FROM vendas vped
+         WHERE vped.pedido_id = p.id
+           ${colunasVendas.has('empresa_id') ? 'AND vped.empresa_id = p.empresa_id' : ''}
+      )`
+    : null;
+  const finalizacoesConfirmadas = [
+    "UPPER(COALESCE(p.status, '')) = 'FATURADO'",
+    finalizacaoConsumoSql,
+    operacaoFinalizadaSql
+  ].filter(Boolean);
+  const vendasVinculadas = [
+    'p.venda_id IS NOT NULL',
+    operacaoComVendaSql,
+    vendaPedidoSql
+  ].filter(Boolean);
+  const statusEncerradoSql = "UPPER(COALESCE(p.status, '')) IN ('FATURADO', 'CANCELADO')";
+  const edicaoBloqueadaSql = [
+    statusEncerradoSql,
+    ...finalizacoesConfirmadas,
+    ...vendasVinculadas
+  ].join(' OR ');
+  const somenteConsultaSql = [
+    statusEncerradoSql,
+    ...finalizacoesConfirmadas
+  ].join(' OR ');
   const where = ['1=1'];
   const params = [];
   const empresaId = filtros.empresaId != null ? Number(filtros.empresaId) : null;
@@ -305,6 +495,10 @@ async function listarPedidos(filtros = {}) {
       p.representante_id,
       p.representante_nome,
       p.venda_id,
+      CASE WHEN (${edicaoBloqueadaSql}) THEN 1 ELSE 0 END AS edicao_bloqueada,
+      CASE WHEN (${somenteConsultaSql}) THEN 1 ELSE 0 END AS somente_consulta,
+      CASE WHEN (${finalizacoesConfirmadas.join(' OR ')}) THEN 1 ELSE 0 END AS finalizacao_confirmada,
+      ${operacaoPdvSelect},
       p.observacao,
       p.created_at,
       p.updated_at,
@@ -318,6 +512,7 @@ async function listarPedidos(filtros = {}) {
     LEFT JOIN clientes c ON c.id = p.cliente_id
     ${temMesa ? 'LEFT JOIN mesas m ON m.id = p.mesa_id AND m.empresa_id = p.empresa_id' : ''}
     LEFT JOIN usuarios u ON u.id = p.operador_id
+    ${operacaoPdvJoin}
     WHERE ${where.join(' AND ')}
     ORDER BY p.id DESC
     LIMIT ?
@@ -502,16 +697,44 @@ async function substituirPedido({
   itens,
   empresaId,
   mesaId,
-  db
+  db,
+  jaEmTransacao = false
 }) {
   await garantirSchemaPedidoPersonalizacaoAsync(conn(db));
   const snapshots = await carregarSnapshotsProdutos(itens, db);
   const colunasPedidoItens = await obterColunasTabela('pedidos_itens', db);
-  if (mesaId !== undefined && !(await obterColunasTabela('pedidos', db)).has('mesa_id')) {
+  const colunasPedidos = await obterColunasTabela('pedidos', db);
+  if (mesaId !== undefined && !colunasPedidos.has('mesa_id')) {
     throw new Error('Schema de pedidos sem mesa_id: migração de mesas pendente.');
   }
-  await run('BEGIN IMMEDIATE', [], db);
+  if (!jaEmTransacao) await run('BEGIN IMMEDIATE', [], db);
   try {
+    const pedidoAtual = await get(
+      `SELECT id, status,
+              ${colunasPedidos.has('venda_id') ? 'venda_id' : 'NULL AS venda_id'},
+              ${colunasPedidos.has('empresa_id') ? 'empresa_id' : 'NULL AS empresa_id'}
+         FROM pedidos WHERE id = ?`,
+      [pedidoId],
+      db
+    );
+    if (!pedidoAtual) {
+      const err = new Error('Pedido não encontrado.');
+      err.statusCode = 404;
+      err.codigo = 'PEDIDO_NAO_ENCONTRADO';
+      throw err;
+    }
+    const empresaSolicitada = Number(empresaId);
+    if (Number.isInteger(empresaSolicitada) && empresaSolicitada > 0
+      && Number(pedidoAtual.empresa_id) !== empresaSolicitada) {
+      const err = new Error('Pedido não encontrado.');
+      err.statusCode = 404;
+      err.codigo = 'PEDIDO_NAO_ENCONTRADO';
+      throw err;
+    }
+    const estadoEdicao = await obterEstadoEdicao(pedidoAtual, { db });
+    if (estadoEdicao.edicao_bloqueada) {
+      throw criarErroPedidoImutavel(pedidoAtual, estadoEdicao);
+    }
     const colunasSnapshot = [
       'id',
       'produto_id',
@@ -538,6 +761,30 @@ async function substituirPedido({
       lista.push(item);
       anterioresPorProduto.set(produtoId, lista);
     }
+    const idsAnterioresUsados = new Set();
+    const associacoes = itens.map((item) => {
+      const produtoId = Number(item.produto_id);
+      let anterior = null;
+      if (item.id != null) {
+        const id = Number(item.id);
+        anterior = anterioresPorId.get(id) || null;
+        if (!Number.isInteger(id) || id <= 0 || !anterior
+          || Number(anterior.produto_id) !== produtoId || idsAnterioresUsados.has(id)) {
+          const err = new Error('A identidade de uma linha do Pedido é inválida ou não pertence a este Pedido.');
+          err.statusCode = 400;
+          err.code = 'ITEM_PEDIDO_INVALIDO';
+          throw err;
+        }
+      } else {
+        const candidatos = anterioresPorProduto.get(produtoId) || [];
+        if (candidatos.length === 1 && !idsAnterioresUsados.has(Number(candidatos[0].id))) {
+          anterior = candidatos[0];
+          item.id = Number(anterior.id);
+        }
+      }
+      if (anterior) idsAnterioresUsados.add(Number(anterior.id));
+      return anterior;
+    });
     const params = [
       clienteId || null,
       Number(total || 0),
@@ -561,6 +808,7 @@ async function substituirPedido({
       WHERE id = ?
         AND status IN ('ORCAMENTO', 'PEDIDO', 'ABERTO', 'EM_SEPARACAO', 'AGUARDANDO_FATURAMENTO')
     `;
+    if (colunasPedidos.has('venda_id')) sql += ' AND venda_id IS NULL';
     const emp = empresaId != null ? Number(empresaId) : null;
     if (Number.isInteger(emp) && emp > 0) {
       sql += ' AND empresa_id = ?';
@@ -572,8 +820,6 @@ async function substituirPedido({
       err.statusCode = 400;
       throw err;
     }
-    await run('DELETE FROM pedido_item_ingredientes WHERE pedido_id = ?', [pedidoId], db);
-    await run('DELETE FROM pedidos_itens WHERE pedido_id = ?', [pedidoId], db);
     if (mesaId !== undefined) {
       await run(
         'UPDATE pedidos SET mesa_id = ? WHERE id = ? AND empresa_id = ?',
@@ -581,14 +827,19 @@ async function substituirPedido({
         db
       );
     }
-    for (const item of itens) {
+    for (const anterior of itensAnteriores) {
+      if (idsAnterioresUsados.has(Number(anterior.id))) continue;
+      await run('DELETE FROM pedido_item_ingredientes WHERE pedido_item_id = ?', [anterior.id], db);
+      await run(
+        'DELETE FROM pedidos_itens WHERE id = ? AND pedido_id = ?',
+        [anterior.id, pedidoId],
+        db
+      );
+    }
+    for (let index = 0; index < itens.length; index += 1) {
+      const item = itens[index];
       const produtoId = Number(item.produto_id);
-      const anteriorPorId = item.id != null ? anterioresPorId.get(Number(item.id)) : null;
-      const anterior = anteriorPorId && Number(anteriorPorId.produto_id) === produtoId
-        ? anteriorPorId
-        : (!item.id && anterioresPorProduto.get(produtoId)?.length === 1
-          ? anterioresPorProduto.get(produtoId)[0]
-          : null);
+      const anterior = associacoes[index];
       const snapshotAtual = snapshots.get(produtoId) || null;
       const snapshot = anterior
         ? {
@@ -617,19 +868,39 @@ async function substituirPedido({
           preco_adicionais_unitario_snapshot: item.preco_adicionais_unitario_snapshot ?? null
         }
         : combinarSnapshotProdutoComItem(snapshotAtual, item);
-      const insert = montarInsertPedidoItem({
+      if (anterior) {
+        const update = montarUpdatePedidoItem({
         pedidoId,
         item,
         snapshot,
         colunasPedidoItens
-      });
-      const itemInserido = await run(insert.sql, insert.valores, db);
-      await persistirIngredientesPersonalizados(db, pedidoId, itemInserido.lastID, emp, item);
+        });
+        const atualizado = await run(update.sql, update.valores, db);
+        if (!atualizado.changes) {
+        const err = new Error('A linha do Pedido não pôde ser atualizada.');
+        err.statusCode = 409;
+        err.code = 'ITEM_PEDIDO_CONCORRENTE';
+        throw err;
+        }
+        await run('DELETE FROM pedido_item_ingredientes WHERE pedido_item_id = ?', [item.id], db);
+      } else {
+        const insert = montarInsertPedidoItem({
+        pedidoId,
+        item,
+        snapshot,
+        colunasPedidoItens
+        });
+        const itemInserido = await run(insert.sql, insert.valores, db);
+        item.id = itemInserido.lastID;
+      }
+      await persistirIngredientesPersonalizados(db, pedidoId, item.id, emp, item);
     }
-    await run('COMMIT', [], db);
+    if (!jaEmTransacao) await run('COMMIT', [], db);
     return true;
   } catch (err) {
-    try { await run('ROLLBACK', [], db); } catch (_) { /* ignore */ }
+    if (!jaEmTransacao) {
+      try { await run('ROLLBACK', [], db); } catch (_) { /* ignore */ }
+    }
     throw err;
   }
 }
@@ -662,21 +933,33 @@ async function excluirOrcamento(pedidoId, opts = {}) {
   const emp = opts.empresaId != null ? Number(opts.empresaId) : null;
   await run('BEGIN IMMEDIATE', [], db);
   try {
-    const row = await get('SELECT id, status, empresa_id FROM pedidos WHERE id = ?', [pedidoId], db);
+    const colunasPedidos = await obterColunasTabela('pedidos', db);
+    const row = await get(
+      `SELECT id, status,
+              ${colunasPedidos.has('empresa_id') ? 'empresa_id' : 'NULL AS empresa_id'},
+              ${colunasPedidos.has('venda_id') ? 'venda_id' : 'NULL AS venda_id'}
+         FROM pedidos WHERE id = ?`,
+      [pedidoId],
+      db
+    );
     if (!row) {
       const err = new Error('Pedido não encontrado.');
       err.statusCode = 404;
-      throw err;
-    }
-    if (row.status !== 'ORCAMENTO') {
-      const err = new Error('Somente orçamentos podem ser excluídos. Use cancelar para pedidos.');
-      err.statusCode = 400;
       throw err;
     }
     if (Number.isInteger(emp) && emp > 0 && Number(row.empresa_id) !== emp) {
       const err = new Error('Pedido não encontrado.');
       err.statusCode = 404;
       err.code = 'PEDIDO_NAO_ENCONTRADO';
+      throw err;
+    }
+    const estadoEdicao = await obterEstadoEdicao(row, { db });
+    if (estadoEdicao.edicao_bloqueada) {
+      throw criarErroPedidoImutavel(row, estadoEdicao);
+    }
+    if (row.status !== 'ORCAMENTO') {
+      const err = new Error('Somente orçamentos podem ser excluídos. Use cancelar para pedidos.');
+      err.statusCode = 400;
       throw err;
     }
     await run('DELETE FROM pedidos_itens WHERE pedido_id = ?', [pedidoId], db);
@@ -703,6 +986,9 @@ async function excluirOrcamento(pedidoId, opts = {}) {
 async function marcarFaturado(pedidoId, vendaId, operadorId, opts = {}) {
   const db = opts.db;
   const params = [vendaId, operadorId || null, pedidoId];
+  const statusPermitidos = opts.permitirPedido
+    ? "'PEDIDO', 'ABERTO', 'AGUARDANDO_FATURAMENTO', 'FATURADO'"
+    : "'ABERTO', 'AGUARDANDO_FATURAMENTO', 'FATURADO'";
   let sql = `
     UPDATE pedidos
     SET status = 'FATURADO',
@@ -711,7 +997,7 @@ async function marcarFaturado(pedidoId, vendaId, operadorId, opts = {}) {
         faturado_por = ?,
         updated_at = DATETIME('now', 'localtime')
     WHERE id = ?
-      AND status IN ('ABERTO', 'AGUARDANDO_FATURAMENTO', 'FATURADO')
+      AND status IN (${statusPermitidos})
       AND (venda_id IS NULL OR venda_id = ?)
   `;
   params.push(vendaId);
@@ -756,6 +1042,8 @@ module.exports = {
   listarAguardandoFaturamento,
   listarPedidos,
   obterPorId,
+  obterEstadoEdicao,
+  criarErroPedidoImutavel,
   criarPedido,
   substituirPedido,
   atualizarStatus,

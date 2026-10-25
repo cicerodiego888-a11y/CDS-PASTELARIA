@@ -212,7 +212,7 @@ function erroVendaPedidoConflitante(message, pedidoId, vendaId, extra = {}) {
 async function validarVendaCandidata(pedido, vendaId, payload, dbConn) {
   try {
     const venda = await PedidoFaturamentoOperacaoRepository.get(dbConn, `
-    SELECT id, codigo, empresa_id, cliente_id, total, status, status_venda, pedido_id, origem
+    SELECT id, codigo, empresa_id, cliente_id, total, desconto, status, status_venda, pedido_id, origem
     FROM vendas
     WHERE id = ?
   `, [vendaId]);
@@ -228,6 +228,24 @@ async function validarVendaCandidata(pedido, vendaId, payload, dbConn) {
     pedido.id,
     vendaId
   );
+  const descontoSnapshotCentavos = payload.desconto == null
+    ? null
+    : valorEmCentavos(payload.desconto);
+  const brutoSnapshotCentavos = payload.valor_composicao_bruto == null
+    ? null
+    : valorEmCentavos(payload.valor_composicao_bruto);
+  const subtotaisItensCentavos = payload.itens.map((item) => valorEmCentavos(item.subtotal));
+  const brutoItensCentavos = subtotaisItensCentavos.every(Number.isSafeInteger)
+    ? subtotaisItensCentavos.reduce((total, subtotal) => total + subtotal, 0)
+    : null;
+  const composicaoFinanceiraInconsistente = payload.valor_composicao_bruto != null
+    && (
+      brutoSnapshotCentavos == null
+      || descontoSnapshotCentavos == null
+      || !Number.isSafeInteger(brutoItensCentavos)
+      || brutoSnapshotCentavos !== brutoItensCentavos
+      || brutoSnapshotCentavos - descontoSnapshotCentavos !== valorEmCentavos(payload.total)
+    );
 
   if (
     !venda
@@ -237,6 +255,9 @@ async function validarVendaCandidata(pedido, vendaId, payload, dbConn) {
     || String(venda.status_venda || '').toUpperCase() === 'CANCELADA'
     || (venda.pedido_id != null && Number(venda.pedido_id) !== Number(pedido.id))
     || valorEmCentavos(venda.total) !== valorEmCentavos(payload.total)
+    || (payload.desconto != null
+      && valorEmCentavos(venda.desconto || 0) !== descontoSnapshotCentavos)
+    || composicaoFinanceiraInconsistente
     || itensVenda.length !== payload.itens.length
   ) {
     throw conflito();
@@ -273,8 +294,20 @@ async function validarVendaCandidata(pedido, vendaId, payload, dbConn) {
   }
 }
 
-async function finalizarPedidoComVenda(pedidoId, vendaId, empresaId, operadorId, reqHttp, payload) {
+async function finalizarPedidoComVenda(
+  pedidoId,
+  vendaId,
+  empresaId,
+  operadorId,
+  reqHttp,
+  payload,
+  opcoes = {}
+) {
   const db = require('../../database');
+  const origemVenda = opcoes.origemVenda || VendaOrigin.FATURAMENTO;
+  const statusPermitidos = opcoes.permitirStatusPedido
+    ? [PedidoStatus.PEDIDO, PedidoStatus.ABERTO, PedidoStatus.AGUARDANDO_FATURAMENTO, PedidoStatus.FATURADO]
+    : [PedidoStatus.ABERTO, PedidoStatus.AGUARDANDO_FATURAMENTO, PedidoStatus.FATURADO];
   let transacaoDb;
   let iniciouTransacao = false;
   let erroOperacao = null;
@@ -293,7 +326,7 @@ async function finalizarPedidoComVenda(pedidoId, vendaId, empresaId, operadorId,
         vendaId
       );
     }
-    if (![PedidoStatus.ABERTO, PedidoStatus.AGUARDANDO_FATURAMENTO, PedidoStatus.FATURADO].includes(pedido.status)) {
+    if (!statusPermitidos.includes(pedido.status)) {
       throw erroVendaPedidoConflitante(
         `Pedido não pode ser finalizado no status ${pedido.status}.`,
         pedidoId,
@@ -302,7 +335,7 @@ async function finalizarPedidoComVenda(pedidoId, vendaId, empresaId, operadorId,
     }
 
     const operacao = await PedidoFaturamentoOperacaoRepository.get(transacaoDb, `
-      SELECT id, pedido_id, empresa_id, venda_id, status
+      SELECT id, pedido_id, empresa_id, venda_id, status, tipo_operacao, payload_json
       FROM pedido_faturamento_operacoes
       WHERE pedido_id = ?
     `, [pedidoId]);
@@ -317,6 +350,13 @@ async function finalizarPedidoComVenda(pedidoId, vendaId, empresaId, operadorId,
         vendaId
       );
     }
+    if (opcoes.tipoOperacao && operacao.tipo_operacao !== opcoes.tipoOperacao) {
+      throw erroVendaPedidoConflitante(
+        'O tipo da operação persistida diverge do fluxo de venda.',
+        pedidoId,
+        vendaId
+      );
+    }
 
     const venda = await validarVendaCandidata(pedido, vendaId, payload, transacaoDb);
     if (venda.pedido_id == null || Number(venda.pedido_id) !== Number(pedidoId)) {
@@ -325,7 +365,7 @@ async function finalizarPedidoComVenda(pedidoId, vendaId, empresaId, operadorId,
         SET origem = ?, pedido_id = ?
         WHERE id = ? AND empresa_id = ?
           AND (pedido_id IS NULL OR pedido_id = ?)
-      `, [VendaOrigin.FATURAMENTO, pedidoId, vendaId, empresaId, pedidoId]);
+      `, [origemVenda, pedidoId, vendaId, empresaId, pedidoId]);
       if (vinculada.changes !== 1) {
         throw erroVendaPedidoConflitante(
           'Não foi possível vincular a venda ao Pedido sem sobrescrever outro vínculo.',
@@ -337,7 +377,7 @@ async function finalizarPedidoComVenda(pedidoId, vendaId, empresaId, operadorId,
       await PedidoFaturamentoOperacaoRepository.run(transacaoDb, `
         UPDATE vendas SET origem = ?
         WHERE id = ? AND empresa_id = ? AND pedido_id = ?
-      `, [VendaOrigin.FATURAMENTO, vendaId, empresaId, pedidoId]);
+      `, [origemVenda, vendaId, empresaId, pedidoId]);
     }
 
     await consumirReservasDaVenda(
@@ -353,7 +393,8 @@ async function finalizarPedidoComVenda(pedidoId, vendaId, empresaId, operadorId,
 
     const marcado = await PedidoRepository.marcarFaturado(pedidoId, vendaId, operadorId, {
       db: transacaoDb,
-      empresaId
+      empresaId,
+      permitirPedido: opcoes.permitirStatusPedido === true
     });
     if (!marcado) {
       throw erroVendaPedidoConflitante(
@@ -408,6 +449,111 @@ async function finalizarPedidoComVenda(pedidoId, vendaId, empresaId, operadorId,
     throw erroOperacao;
   }
   return pedidoAtualizado;
+}
+
+async function finalizarVendaPdvPedido(pedidoId, reqHttp = {}) {
+  const id = Number(pedidoId);
+  if (!Number.isInteger(id) || id <= 0) {
+    const err = new Error('Pedido inválido.');
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const pedido = await PedidoRepository.obterPorId(id);
+  const empresaId = exigirOperacaoDoPedido(
+    pedido,
+    reqHttp.empresaId != null ? reqHttp.empresaId : reqHttp.empresa_id
+  );
+  const db = require('../../database');
+  const operacao = await PedidoFaturamentoOperacaoRepository.get(db, `
+    SELECT id, pedido_id, empresa_id, venda_id, status, tipo_operacao, payload_json
+    FROM pedido_faturamento_operacoes
+    WHERE pedido_id = ?
+  `, [id]);
+  if (
+    !operacao
+    || Number(operacao.empresa_id) !== Number(empresaId)
+    || operacao.tipo_operacao !== 'PDV_COMPOSICAO'
+  ) {
+    throw erroVendaPedidoConflitante(
+      'Não existe uma operação de composição PDV válida para este Pedido.',
+      id,
+      operacao?.venda_id
+    );
+  }
+  if (
+    operacao.status === 'FINALIZADA'
+    && pedido.status === PedidoStatus.FATURADO
+    && Number(pedido.venda_id) === Number(operacao.venda_id)
+  ) {
+    return { pedido, venda_id: Number(operacao.venda_id), idempotente: true };
+  }
+  if (!Number.isInteger(Number(operacao.venda_id)) || Number(operacao.venda_id) <= 0) {
+    throw erroVendaPedidoConflitante(
+      'A venda ainda não foi persistida pelo PDV; a finalização do Pedido não pode ser antecipada.',
+      id
+    );
+  }
+  const vendaPagamento = await PedidoFaturamentoOperacaoRepository.get(db, `
+    SELECT status_pagamento
+    FROM vendas
+    WHERE id = ? AND empresa_id = ?
+  `, [operacao.venda_id, empresaId]);
+  if (!vendaPagamento) {
+    throw erroVendaPedidoConflitante(
+      'A venda persistida não foi encontrada para validar o estado do pagamento.',
+      id,
+      operacao.venda_id
+    );
+  }
+  if (String(vendaPagamento.status_pagamento || '').toLowerCase() === 'aguardando_nao_fiscal') {
+    const err = erroVendaPedidoConflitante(
+      'A venda aguarda a conclusão do pagamento não fiscal; o Pedido permanecerá aberto até essa etapa terminar.',
+      id,
+      operacao.venda_id
+    );
+    err.codigo = 'PAGAMENTO_PDV_PENDENTE';
+    throw err;
+  }
+
+  let payload;
+  try {
+    payload = JSON.parse(operacao.payload_json || 'null');
+  } catch (parseError) {
+    throw erroVendaPedidoConflitante(
+      'O snapshot da composição da venda não pode ser recuperado.',
+      id,
+      operacao.venda_id
+    );
+  }
+  if (
+    !payload
+    || Number(payload.pedidoId) !== id
+    || Number(payload.empresaId) !== Number(empresaId)
+    || !Array.isArray(payload.itens)
+    || !Number.isFinite(Number(payload.total))
+  ) {
+    throw erroVendaPedidoConflitante(
+      'O snapshot persistido da composição é inválido ou pertence a outra operação.',
+      id,
+      operacao.venda_id
+    );
+  }
+
+  const pedidoAtualizado = await finalizarPedidoComVenda(
+    id,
+    Number(operacao.venda_id),
+    empresaId,
+    reqHttp.operadorId || reqHttp.user?.id || null,
+    reqHttp,
+    payload,
+    {
+      origemVenda: VendaOrigin.PDV,
+      permitirStatusPedido: true,
+      tipoOperacao: 'PDV_COMPOSICAO'
+    }
+  );
+  return { pedido: pedidoAtualizado, venda_id: Number(operacao.venda_id), idempotente: false };
 }
 
 async function faturarPedido(pedidoId, body = {}, reqHttp = {}) {
@@ -890,6 +1036,7 @@ async function listarVendasFaturadas(query = {}) {
 
 module.exports = {
   faturarPedido,
+  finalizarVendaPdvPedido,
   listarVendasFaturadas,
   normalizarAbaCentral,
   abasDisponiveisCentral,

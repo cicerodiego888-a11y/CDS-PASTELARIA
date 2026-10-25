@@ -316,6 +316,14 @@ function statusExigeConfirmacaoFiscal(status) {
   ].includes(status);
 }
 
+async function exigirPedidoEditavel(pedido, db) {
+  const estadoEdicao = await repo.obterEstadoEdicao(pedido, { db });
+  if (estadoEdicao.edicao_bloqueada) {
+    throw repo.criarErroPedidoImutavel(pedido, estadoEdicao);
+  }
+  return estadoEdicao;
+}
+
 /**
  * Confirma estoque fiscal via Motor Comercial (única ponte).
  * Pedido NÃO conhece F×NF nem MTS.
@@ -358,7 +366,8 @@ async function obter(pedidoId, opcoes = {}) {
     err.statusCode = 400;
     throw err;
   }
-  const pedido = await repo.obterPorId(id, { db: opcoes.db });
+  const db = opcoes.db || dbPadrao;
+  const pedido = await repo.obterPorId(id, { db });
   if (!pedido) {
     const err = new Error('Pedido não encontrado.');
     err.statusCode = 404;
@@ -366,6 +375,7 @@ async function obter(pedidoId, opcoes = {}) {
     throw err;
   }
   exigirPedidoDaEmpresa(pedido, empresaId);
+  Object.assign(pedido, await repo.obterEstadoEdicao(pedido, { db }));
   return { success: true, pedido };
 }
 
@@ -442,7 +452,7 @@ async function criar(body = {}, operadorId = null, opcoes = {}) {
 
       if (statusExigeConfirmacaoFiscal(status)) {
         const pedido = await repo.obterPorId(pedidoId, { db });
-        await PedidoConsumoEstoqueService.registrarConsumo({
+        await PedidoConsumoEstoqueService.reservarConsumo({
           db,
           pedidoId,
           empresaId,
@@ -485,19 +495,7 @@ async function atualizar(pedidoId, body = {}, opcoes = {}) {
   const id = Number(pedidoId);
   const existente = await repo.obterPorId(id, { db });
   const empresaId = exigirOperacaoDoPedido(existente, empresaIdContexto);
-  if (await PedidoConsumoEstoqueService.jaConsumido(id, { db })) {
-    const err = new Error(
-      'Pedido com consumo de estoque confirmado não pode ser editado até existir ajuste transacional.'
-    );
-    err.statusCode = 409;
-    err.codigo = 'PEDIDO_CONSUMO_ESTOQUE_IMUTAVEL';
-    throw err;
-  }
-  if ([PedidoStatus.FATURADO, PedidoStatus.CANCELADO].includes(existente.status)) {
-    const err = new Error('Pedido faturado ou cancelado não pode ser editado.');
-    err.statusCode = 400;
-    throw err;
-  }
+  await exigirPedidoEditavel(existente, db);
   const cab = await montarCabecalho(body, { db, itensExistentes: existente.itens || [] });
 
   // Mesa só é revalidada (ativa e da empresa) quando muda; pedido existente pode manter mesa desativada depois.
@@ -510,58 +508,39 @@ async function atualizar(pedidoId, body = {}, opcoes = {}) {
     });
   }
 
-  if (statusExigeConfirmacaoFiscal(existente.status)) {
-    const analise = await MotorComercial.analisarDisponibilidadeFiscal(cab.itens, {
+  await PedidoConsumoEstoqueService.garantirSchema(db);
+  await executarTransacaoPedido(db, async () => {
+    const atual = await repo.obterPorId(id, { db });
+    const empresaAtual = exigirOperacaoDoPedido(atual, empresaIdContexto);
+    await exigirPedidoEditavel(atual, db);
+    await repo.substituirPedido({
       pedidoId: id,
-      empresaId
+      clienteId: cab.clienteId,
+      total: cab.total,
+      desconto: cab.desconto,
+      frete: cab.frete,
+      representanteId: cab.representanteId,
+      representanteNome: cab.representanteNome,
+      observacao: cab.observacao,
+      itens: cab.itens,
+      mesaId: mesaAtualizada,
+      empresaId: empresaAtual,
+      db,
+      jaEmTransacao: true
     });
-    if (analise.bloqueado) {
-      const err = new Error('Saldo insuficiente para atender o pedido.');
-      err.statusCode = 409;
-      err.codigo = 'SALDO_INSUFICIENTE';
-      err.consultas = analise.consultas;
-      err.plano = analise.plano;
-      throw err;
+    if (statusExigeConfirmacaoFiscal(atual.status)) {
+      const pedido = await repo.obterPorId(id, { db });
+      await PedidoConsumoEstoqueService.reservarConsumo({
+        db,
+        pedidoId: id,
+        empresaId: empresaAtual,
+        usuarioId: opcoes.usuarioId || null,
+        itens: pedido.itens || cab.itens,
+        supervisorToken: cab.supervisorToken,
+        jaEmTransacao: true
+      });
     }
-    if (analise.requerAutorizacao && !cab.supervisorToken) {
-      const err = new Error(
-        'Saldo fiscal insuficiente. É necessária autorização do supervisor para transferir do saldo não fiscal.'
-      );
-      err.statusCode = 409;
-      err.codigo = 'REQUER_AUTORIZACAO_SUPERVISOR';
-      err.requer_autorizacao = true;
-      err.plano = analise.plano.filter((p) => p.acao === 'TRANSFERIR_E_RESERVAR');
-      err.consultas = analise.consultas;
-      throw err;
-    }
-  }
-
-  await repo.substituirPedido({
-    pedidoId: id,
-    clienteId: cab.clienteId,
-    total: cab.total,
-    desconto: cab.desconto,
-    frete: cab.frete,
-    representanteId: cab.representanteId,
-    representanteNome: cab.representanteNome,
-    observacao: cab.observacao,
-    itens: cab.itens,
-    mesaId: mesaAtualizada,
-    empresaId,
-    db
   });
-
-  if (statusExigeConfirmacaoFiscal(existente.status)) {
-    const pedido = await repo.obterPorId(id);
-    await confirmarEstoqueViaMotorComercial({
-      pedidoId: id,
-      itens: pedido.itens || cab.itens,
-      supervisorToken: cab.supervisorToken,
-      usuarioId: null,
-      motivo: `Reconfirmação fiscal pedido ${existente.codigo}`,
-      empresaId
-    });
-  }
 
   return obter(id, { empresaId, db });
 }
@@ -622,6 +601,10 @@ async function cancelar(pedidoId, opcoes = {}) {
         chaveIdempotencia: opcoes.chaveIdempotencia,
         jaEmTransacao: true
       });
+      await MotorComercial.liberarReservasDoPedido(id, {
+        db,
+        executarEmTransacao: async (work, opcoesMotor = {}) => work(opcoesMotor.db || db)
+      });
       const ok = await repo.atualizarStatus(id, PedidoStatus.CANCELADO, [
         PedidoStatus.ORCAMENTO,
         PedidoStatus.PEDIDO,
@@ -680,9 +663,11 @@ async function excluir(pedidoId, opcoes = {}) {
     err.statusCode = 400;
     throw err;
   }
-  const existente = await repo.obterPorId(id);
+  const db = opcoes.db || dbPadrao;
+  const existente = await repo.obterPorId(id, { db });
   exigirOperacaoDoPedido(existente, empresaId);
-  await repo.excluirOrcamento(id, { empresaId });
+  await exigirPedidoEditavel(existente, db);
+  await repo.excluirOrcamento(id, { empresaId, db });
   return { success: true, excluido: true, id };
 }
 
@@ -747,7 +732,7 @@ async function converterParaPedido(pedidoId, body = {}, operadorId = null, opcoe
     }
 
     const supervisorToken = body.supervisor_token || body.supervisorToken || null;
-    await PedidoConsumoEstoqueService.registrarConsumo({
+    await PedidoConsumoEstoqueService.reservarConsumo({
       db,
       pedidoId: id,
       empresaId,
@@ -779,7 +764,8 @@ async function enviarParaFaturamento(pedidoId, body = {}, operadorId = null, opc
   assertExpedicaoHabilitada();
   const empresaIdContexto = empresaDoContexto(opcoes);
   const id = Number(pedidoId);
-  const existente = await repo.obterPorId(id);
+  const db = opcoes.db || dbPadrao;
+  const existente = await repo.obterPorId(id, { db });
   const empresaId = exigirOperacaoDoPedido(existente, empresaIdContexto);
   if (existente.status === PedidoStatus.ORCAMENTO) {
     const err = new Error('Orçamento não pode ser faturado. Converta em Pedido primeiro.');
@@ -801,30 +787,38 @@ async function enviarParaFaturamento(pedidoId, body = {}, operadorId = null, opc
     throw err;
   }
 
-  if (!(await PedidoConsumoEstoqueService.jaConsumido(id, { db: opcoes.db || dbPadrao }))) {
+  await PedidoConsumoEstoqueService.garantirSchema(db);
+  await executarTransacaoPedido(db, async () => {
+    const pedidoAtual = await repo.obterPorId(id, { db });
+    exigirOperacaoDoPedido(pedidoAtual, empresaId);
+    if (!STATUS_ENVIAVEIS_FATURAMENTO.includes(pedidoAtual.status)) {
+      const err = new Error('Somente pedidos comerciais podem ser enviados ao faturamento.');
+      err.statusCode = 400;
+      throw err;
+    }
     const supervisorToken = body.supervisor_token || body.supervisorToken || null;
-    await confirmarEstoqueViaMotorComercial({
+    await PedidoConsumoEstoqueService.reservarConsumo({
+      db,
       pedidoId: id,
-      itens: existente.itens,
-      supervisorToken,
+      empresaId,
       usuarioId: operadorId,
-      motivo: `Envio Expedição pedido ${existente.codigo}`,
-      empresaId
+      itens: pedidoAtual.itens || [],
+      supervisorToken,
+      jaEmTransacao: true
     });
-  }
-
-  const ok = await repo.atualizarStatus(
-    id,
-    PedidoStatus.AGUARDANDO_FATURAMENTO,
-    [...STATUS_ENVIAVEIS_FATURAMENTO],
-    { empresaId }
-  );
-  if (!ok) {
-    const err = new Error('Falha ao enviar para faturamento.');
-    err.statusCode = 400;
-    throw err;
-  }
-  return obter(id, { empresaId });
+    const ok = await repo.atualizarStatus(
+      id,
+      PedidoStatus.AGUARDANDO_FATURAMENTO,
+      [...STATUS_ENVIAVEIS_FATURAMENTO],
+      { empresaId, db }
+    );
+    if (!ok) {
+      const err = new Error('Falha ao enviar para faturamento.');
+      err.statusCode = 400;
+      throw err;
+    }
+  });
+  return obter(id, { empresaId, db });
 }
 
 module.exports = {

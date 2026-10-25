@@ -13,6 +13,9 @@ const { criarMiddlewareContextoEmpresa } = require('../services/fiscalNaoFiscal/
 const PedidoOperacional = require('../services/pedido/PedidoOperacionalService');
 const EntradaPedido = require('../services/pedido/EntradaPedidoService');
 const { empresaIdDoReqPedido } = require('../services/pedido/empresaIdDoReqPedido');
+const { prepararComposicaoPedidoPdv } = require('../services/vendas/PedidoPdvComposicaoService');
+const PedidoFaturamentoOperacaoRepository = require('../services/faturamento/PedidoFaturamentoOperacaoRepository');
+const FaturamentoService = require('../services/faturamento/FaturamentoService');
 
 router.use(exigirRecurso('pedidos'));
 router.use(criarMiddlewareContextoEmpresa(db));
@@ -28,6 +31,7 @@ function responderErro(res, err) {
   if (err.requer_autorizacao) payload.requer_autorizacao = true;
   if (err.plano) payload.plano = err.plano;
   if (err.consultas) payload.consultas = err.consultas;
+  if (err.detalhes) payload.detalhes = err.detalhes;
   if (err.codigo === 'MODULO_NAO_LICENCIADO') {
     payload.erro = 'MODULO_NAO_LICENCIADO';
     payload.modulo = 'pedidos';
@@ -74,6 +78,84 @@ router.post('/', async (req, res) => {
       chaveIdempotencia: req.get('Idempotency-Key')
     });
     res.status(201).json(out);
+  } catch (err) {
+    responderErro(res, err);
+  }
+});
+
+router.post('/:id/preparar-venda-pdv', async (req, res) => {
+  try {
+    const empresaId = empresaIdDoReqPedido(req);
+    const operacaoExistente = await PedidoFaturamentoOperacaoRepository.consultarOperacaoPdv(
+      Number(req.params.id),
+      empresaId
+    );
+    if (operacaoExistente?.operacao.venda_id != null) {
+      const payloadPersistido = operacaoExistente.payload;
+      return res.json({
+        success: true,
+        pedido_id: Number(req.params.id),
+        empresa_id: empresaId,
+        operacao_id: operacaoExistente.operacao.id,
+        venda_id: operacaoExistente.operacao.venda_id,
+        recuperacao: true,
+        venda_concluida: operacaoExistente.operacao.status === 'FINALIZADA',
+        total: payloadPersistido.total,
+        desconto: payloadPersistido.desconto || 0,
+        valor_composicao_bruto: payloadPersistido.valor_composicao_bruto || payloadPersistido.total,
+        cliente_id: payloadPersistido.cliente_id || null,
+        itens: payloadPersistido.itens,
+        fingerprint: payloadPersistido.fingerprint
+      });
+    }
+    const composicao = await prepararComposicaoPedidoPdv({
+      pedidoId: req.params.id,
+      empresaId
+    }, { db });
+    const payload = {
+      pedidoId: composicao.pedidoId,
+      empresaId: composicao.empresaId,
+      fingerprint: composicao.fingerprint,
+      total: composicao.valorFinalCentavos / 100,
+      desconto: composicao.desconto,
+      valor_composicao_bruto: composicao.valorCompostoBrutoCentavos / 100,
+      cliente_id: composicao.clienteId,
+      itens: composicao.itens
+    };
+    const preparacao = await PedidoFaturamentoOperacaoRepository.prepararOperacaoPdv(
+      composicao.pedidoId,
+      empresaId,
+      payload
+    );
+    res.json({
+      success: true,
+      pedido_id: composicao.pedidoId,
+      empresa_id: empresaId,
+      operacao_id: preparacao.operacao.id,
+      venda_id: preparacao.operacao.venda_id || null,
+      recuperacao: preparacao.recuperacao,
+      venda_concluida: preparacao.operacao.status === 'FINALIZADA',
+      total: payload.total,
+      desconto: payload.desconto,
+      valor_composicao_bruto: payload.valor_composicao_bruto,
+      cliente_id: preparacao.payload.cliente_id || null,
+      itens: preparacao.payload.itens,
+      fingerprint: preparacao.payload.fingerprint
+    });
+  } catch (err) {
+    responderErro(res, err);
+  }
+});
+
+router.post('/:id/finalizar-venda-pdv', async (req, res) => {
+  try {
+    const out = await FaturamentoService.finalizarVendaPdvPedido(req.params.id, req);
+    res.json({
+      success: true,
+      pedido: out.pedido,
+      venda_id: out.venda_id,
+      idempotente: out.idempotente === true
+    });
   } catch (err) {
     responderErro(res, err);
   }

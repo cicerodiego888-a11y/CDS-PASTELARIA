@@ -5672,8 +5672,53 @@ async function buscarChaveCentralEntradas() {
             ]);
             await selecionarDocumentoCentral(resultado.documento.id);
             showNotification(resultado.novo ? 'Nota importada da SEFAZ.' : 'Nota localizada na Central.', 'success');
+            return;
+        }
+
+        // Ausente localmente: oferece SEFAZ via consChNFe (OPERACAO_REAL).
+        try {
+            await carregarStatusOperacaoFiscalRealCentral();
+        } catch { /* opcional */ }
+        const opReal = centralEntradasState.operacaoFiscalReal;
+        if (!opReal?.ativa) {
+            showNotification(
+                (resultado.mensagem || 'Nota não está na Central.')
+                + ' Habilite Operação fiscal real para consultar a SEFAZ pela chave.',
+                'warning'
+            );
+            return;
+        }
+        if (!confirm(
+            'Nota não encontrada na Central.\n\n'
+            + 'Consultar a SEFAZ pela chave agora? (produção · consChNFe)\n'
+            + 'Não altera NSU e não envia manifestação.'
+        )) {
+            showNotification(resultado.mensagem || 'Nota não encontrada na Central.', 'info');
+            return;
+        }
+        const sefaz = await centralEntradasFetch('/operacao-fiscal-real/consultar-chave', {
+            method: 'POST',
+            body: JSON.stringify({
+                chave,
+                confirmacaoConsultaReal: true,
+                confirmacaoAmbienteProducao: true
+            })
+        });
+        if (sefaz.documento?.id) {
+            await Promise.all([
+                carregarDashboardCentral(),
+                carregarDocumentosCentral({ pagina: 1 })
+            ]);
+            await selecionarDocumentoCentral(sefaz.documento.id);
+            showNotification(
+                sefaz.novo ? 'Nota recuperada da SEFAZ pela chave.' : 'Nota localizada na Central.',
+                'success'
+            );
         } else {
-            showNotification(resultado.mensagem || 'Nota não encontrada.', 'info');
+            showNotification(
+                sefaz.xMotivo || sefaz.mensagem || 'SEFAZ não devolveu a nota para esta chave.',
+                sefaz.cStat === '138' ? 'success' : 'warning'
+            );
         }
     } catch (error) {
         showNotification('Erro na busca por chave: ' + error.message, 'danger');

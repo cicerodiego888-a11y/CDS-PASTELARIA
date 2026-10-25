@@ -586,6 +586,89 @@ class CentralEntradasOrchestrator {
     return this.executarSincronizacao({ origem: ORIGENS.ABRIR_CENTRAL });
   }
 
+  /**
+   * Recuperação pontual por chave (consChNFe) com OPERACAO_REAL.
+   * Não altera NSU. Não envia 210210. Exige confirmações explícitas.
+   */
+  async consultarChaveReal(params = {}) {
+    const chaveLimpa = String(params.chave || '').replace(/\D/g, '');
+    if (chaveLimpa.length !== 44) {
+      const err = new Error('Informe uma chave de acesso com 44 dígitos.');
+      err.code = 'CHAVE_INVALIDA';
+      err.statusCode = 400;
+      throw err;
+    }
+    if (params.confirmacaoConsultaReal !== true || params.confirmacaoAmbienteProducao !== true) {
+      const err = new Error(
+        'Consulta por chave exige confirmação explícita de ambiente e operação.'
+      );
+      err.code = 'CONFIRMACAO_CONSULTA_OBRIGATORIA';
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const empresaId = Number(params.empresaId);
+    const opReal = this._operacaoFiscalReal();
+    const local = await this._sincronizacaoService.buscarPorChave(chaveLimpa, {
+      empresaId,
+      modo: params.modo
+    });
+    if (local.documento?.id) {
+      return {
+        ...local,
+        operacaoReal: true,
+        sefazConsultada: false,
+        mensagem: 'Documento já existe na Central. A SEFAZ não foi consultada.'
+      };
+    }
+
+    // consChNFe não usa FILA DistDFe; só bloqueia em cooldown explícito 656.
+    const emitido = await opReal.emitirAutorizacaoConsultaChaveReal({
+      empresaId,
+      usuario: params.usuario,
+      confirmacaoConsultaReal: true,
+      confirmacaoAmbienteProducao: true
+    });
+
+    const CentralDfePersistenciaService = require('./services/CentralDfePersistenciaService');
+    const { consultarNotaPorChave } = require('../../services/fiscal/distribuicaoDFe');
+    const persistencia = new CentralDfePersistenciaService({
+      documentosRepository: this._documentosRepository,
+      empresaId
+    });
+    const ctx = emitido.contexto;
+    const resultado = await consultarNotaPorChave(chaveLimpa, {
+      contextoCentral: {
+        ...ctx,
+        empresaId,
+        modo: params.modo || 'MULTIEMPRESA'
+      },
+      empresaId,
+      modo: params.modo || 'MULTIEMPRESA',
+      permitirConfigFiscalGlobal: false,
+      autorizacaoTransmissaoSefaz: emitido.autorizacao,
+      operacaoFiscalRealService: opReal,
+      persistenciaService: persistencia,
+      origemConsulta: 'CONSULTA_CHAVE_REAL',
+      correlationId: params.correlationId || null
+    });
+
+    const apos = await this._sincronizacaoService.buscarPorChave(chaveLimpa, {
+      empresaId,
+      modo: params.modo
+    });
+    if (apos.documento?.id && resultado.notasNovas > 0) {
+      await this.processarDocumentosPendentes({ limite: 5, empresaId });
+    }
+    return {
+      ...resultado,
+      operacaoReal: true,
+      documento: apos.documento || null,
+      novo: Number(resultado.notasNovas) > 0,
+      autorizacaoModo: 'OPERACAO_REAL'
+    };
+  }
+
   async uploadDocumentos(arquivos = [], opcoes = {}) {
     return this._uploadService.processarUpload(arquivos, opcoes);
   }

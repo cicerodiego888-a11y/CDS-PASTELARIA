@@ -464,8 +464,14 @@ async function gerarRelatorioReceber(filtros) {
 
 async function gerarRelatorioPagar(filtros) {
   try {
+    const params = new URLSearchParams({
+      dataInicio: filtros.dataInicio || '',
+      dataFim: filtros.dataFim || '',
+      status: filtros.status || 'todos',
+      fornecedor: filtros.fornecedor || ''
+    });
     const response = await fetch(
-      `/api/financeiro/relatorios/pagar?dataInicio=${filtros.dataInicio}&dataFim=${filtros.dataFim}&status=${filtros.status}&fornecedor=${encodeURIComponent(filtros.fornecedor || '')}`,
+      `/api/contas-pagar?${params.toString()}`,
       {
         headers: {
           'Accept': 'application/json',
@@ -485,7 +491,16 @@ async function gerarRelatorioPagar(filtros) {
     }
 
     if (dados.success) {
-      renderizarRelatorio('pagar', 'Contas a Pagar', dados, filtros);
+      const dadosRelatorio = {
+        ...dados,
+        contas: (dados.contas || []).map(conta => ({
+          ...conta,
+          fornecedor: conta.pessoa_nome || conta.fornecedor_nome || '-',
+          valor: conta.valor_original,
+          dataVencimento: conta.data_vencimento
+        }))
+      };
+      renderizarRelatorio('pagar', 'Contas a Pagar', dadosRelatorio, filtros);
     }
   } catch (error) {
     console.error('Erro ao gerar relatório pagar:', error);

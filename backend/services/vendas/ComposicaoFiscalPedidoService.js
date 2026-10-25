@@ -598,8 +598,10 @@ function buscarComposicao(
   capacidadePorCategoria,
   alvoMaximo,
   alvoMinimo = 0,
-  limiteEstados = LIMITE_ESTADOS_BUSCA
+  limiteEstados = LIMITE_ESTADOS_BUSCA,
+  opcoes = {}
 ) {
+  const minimizar = opcoes.objetivo === 'MINIMO';
   const budgetsIniciais = { ...capacidadePorCategoria };
   const sufixosMaximos = new Array(modelos.length + 1).fill(0);
   for (let i = modelos.length - 1; i >= 0; i -= 1) {
@@ -607,17 +609,21 @@ function buscarComposicao(
     const maximoVolume = Math.floor(
       budgetsIniciais[modelo.categoriaFiscal] / modelo.volumeMlPorUnidade
     );
+    const maximoEstoque = Number.isSafeInteger(modelo.quantidadeMaxima)
+      ? Math.max(0, modelo.quantidadeMaxima)
+      : maximoVolume;
     const quantidadeMaxima = Number(
       quantidadeMaximaPorValor(modelo, alvoMaximo) < BigInt(maximoVolume)
         ? quantidadeMaximaPorValor(modelo, alvoMaximo)
         : BigInt(maximoVolume)
     );
+    const quantidadeLimitada = Math.min(quantidadeMaxima, maximoEstoque);
     // Sem monotonicidade (atacado): o limite é o maior subtotal utilizável entre todas as quantidades.
     // Acima do limite de varredura, usa-se o próprio residual, que continua sendo limite seguro.
     let contribuicao = alvoMaximo;
-    if (quantidadeMaxima <= LIMITE_QUANTIDADES_PARA_PODA) {
+    if (quantidadeLimitada <= LIMITE_QUANTIDADES_PARA_PODA) {
       contribuicao = 0;
-      for (let q = 1; q <= quantidadeMaxima; q += 1) {
+      for (let q = 1; q <= quantidadeLimitada; q += 1) {
         const subtotal = subtotalCotado(modelo, q);
         if (subtotal <= alvoMaximo && subtotal > contribuicao) contribuicao = subtotal;
       }
@@ -643,14 +649,21 @@ function buscarComposicao(
     estados += 1;
 
     const usadoCentavos = alvoMaximo - restanteCentavos;
-    const melhorAlvo = Math.max(alvoMinimo, melhorCentavos);
+    const melhorAlvo = minimizar ? alvoMinimo : Math.max(alvoMinimo, melhorCentavos);
     if (sufixosMaximos[indice] < melhorAlvo - usadoCentavos) return;
+    if (minimizar && melhorCentavos >= 0 && usadoCentavos >= melhorCentavos) return;
     if (indice === modelos.length) {
       const composicaoNaoVazia = alvoMaximo === 0 || usadoCentavos > 0;
-      if (composicaoNaoVazia && usadoCentavos >= alvoMinimo && usadoCentavos > melhorCentavos) {
+      const melhoraResultado = minimizar
+        ? melhorCentavos < 0 || usadoCentavos < melhorCentavos
+        : usadoCentavos > melhorCentavos;
+      if (composicaoNaoVazia
+        && usadoCentavos >= alvoMinimo
+        && usadoCentavos <= alvoMaximo
+        && melhoraResultado) {
         melhorCentavos = usadoCentavos;
         melhorCaminho = caminho.slice();
-        if (usadoCentavos === alvoMaximo) encontrouExato = true;
+        if (!minimizar && usadoCentavos === alvoMaximo) encontrouExato = true;
       }
       return;
     }
@@ -663,9 +676,12 @@ function buscarComposicao(
       (budgets[modelo.categoriaFiscal] || 0) / modelo.volumeMlPorUnidade
     );
     const maximoPorValor = quantidadeMaximaPorValor(modelo, restanteCentavos);
-    const quantidadeMaxima = Number(
+    const quantidadeMaximaPorVolume = Number(
       maximoPorValor < BigInt(maximoVolume) ? maximoPorValor : BigInt(maximoVolume)
     );
+    const quantidadeMaxima = Number.isSafeInteger(modelo.quantidadeMaxima)
+      ? Math.min(quantidadeMaximaPorVolume, Math.max(0, modelo.quantidadeMaxima))
+      : quantidadeMaximaPorVolume;
     for (let quantidade = quantidadeMaxima; quantidade >= 0; quantidade -= 1) {
       const subtotalCentavos = subtotalCotado(modelo, quantidade);
       if (subtotalCentavos > restanteCentavos) {
@@ -702,7 +718,7 @@ function buscarComposicao(
     encontrouExato,
     completa: !limiteAtingido,
     limiteAtingido,
-    otimalidadeComprovada: encontrouExato || !limiteAtingido
+    otimalidadeComprovada: !limiteAtingido
   };
 }
 
@@ -939,7 +955,11 @@ module.exports = {
   simularComposicao,
   internos: {
     dinheiroEmCentavos,
+    quantidadeMaximaPorValor,
     buscarComposicao,
+    carregarPedido,
+    converterVolumeParaMl,
+    comporItens,
     criarFingerprint,
     LIMITE_ESTADOS_BUSCA,
     LIMITE_QUANTIDADES_PARA_PODA,

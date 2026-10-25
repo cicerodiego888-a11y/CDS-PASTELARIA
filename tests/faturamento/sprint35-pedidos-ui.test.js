@@ -64,6 +64,29 @@ describe('Sprint 3.5 — frontend e rotas', () => {
     assert.doesNotMatch(svc, /enviarParaFaturamento/);
   });
 
+  it('oferece geração e recuperação no PDV pela listagem após persistência', () => {
+    const rotas = fs.readFileSync(path.join(__dirname, '../../backend/rotas/pedidos.js'), 'utf8');
+    const ui = fs.readFileSync(path.join(__dirname, '../../frontend/erp/js/pedidos.js'), 'utf8');
+    const pdv = fs.readFileSync(path.join(__dirname, '../../frontend/pdv/js/pdv.js'), 'utf8');
+
+    assert.match(rotas, /preparar-venda-pdv/);
+    assert.match(rotas, /finalizar-venda-pdv/);
+    assert.match(ui, /Pedido salvo com sucesso\. Deseja gerar a venda deste pedido no PDV\?/);
+    assert.match(ui, /!data\.idempotente/);
+    assert.match(ui, /ped-gerar-venda-pdv/);
+    assert.match(ui, /Gerar venda no PDV/);
+    assert.match(ui, /ped-recuperar-venda-pdv/);
+    assert.match(ui, /Concluir vínculo/);
+    assert.match(ui, /venda_pdv_status/);
+    assert.match(ui, /id: 'concluidos', label: 'Concluídos', status: 'FATURADO'/);
+    assert.match(ui, /operacoesVendaPdvPendentes/);
+    assert.match(pdv, /pedido_faturamento_operacao_id/);
+    assert.match(pdv, /O total do carrinho diverge/);
+    assert.match(rotas, /desconto: composicao\.desconto/);
+    assert.match(pdv, /descontoHandoffCentavos/);
+    assert.match(pdv, /brutoHandoffCentavos - descontoHandoffCentavos !== totalHandoffCentavos/);
+  });
+
   it('Núcleo e FaturamentoService não referenciam UI pedidos', () => {
     const root = path.join(__dirname, '../..');
     const app = fs.readFileSync(path.join(root, 'backend/services/vendas/VendaApplicationService.js'), 'utf8');

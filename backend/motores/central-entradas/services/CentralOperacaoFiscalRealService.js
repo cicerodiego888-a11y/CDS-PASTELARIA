@@ -462,6 +462,8 @@ class CentralOperacaoFiscalRealService {
       ambienteExigido: 1,
       tiposPermitidos: [...TIPOS_CONSULTA_DFE_SEFAZ],
       manifestacaoAutomatica: false,
+      // Consentimento admin para DistDFe em background/abrir (sem 210210).
+      distDfeAutomatico: true,
       tokenSeed: seed,
       cnpj: pre.contexto.cnpj
     };
@@ -666,6 +668,219 @@ class CentralOperacaoFiscalRealService {
         ativadaEm: ativacao.ativadaEm,
         tiposPermitidos: tiposLimpos,
         cnpj: normalizarCnpjAuth(pre.contexto.cnpj)
+      }
+    };
+  }
+
+  /**
+   * Autorização OPERACAO_REAL para consChNFe pontual (recuperação por chave).
+   * Não bloqueia por FILA DistDFe; só por cooldown explícito 656 / cert / ativação.
+   */
+  async emitirAutorizacaoConsultaChaveReal(params = {}) {
+    const id = empresaIdValido(params.empresaId);
+    if (!id) {
+      const err = montarErroConsultaDfe({
+        codigo: 'EMPRESA_OBRIGATORIA',
+        mensagem: 'empresaId obrigatório para consulta por chave.',
+        statusCode: 400,
+        etapa: ETAPAS_BLOQUEIO.EMPRESA
+      });
+      throw err;
+    }
+    if (params.confirmacaoConsultaReal !== true || params.confirmacaoAmbienteProducao !== true) {
+      const err = montarErroConsultaDfe({
+        codigo: 'CONFIRMACAO_CONSULTA_OBRIGATORIA',
+        mensagem: 'Consulta por chave exige confirmação explícita de ambiente e operação.',
+        statusCode: 400,
+        etapa: ETAPAS_BLOQUEIO.CONFIRMACAO
+      });
+      throw err;
+    }
+    const ativacao = await this._lerAtivacao(id);
+    if (!ativacao || !ativacao.ativa || !ativacao.tokenSeed) {
+      const err = montarErroConsultaDfe({
+        codigo: 'OPERACAO_REAL_DESABILITADA',
+        mensagem: 'Operação fiscal real desabilitada para esta empresa.',
+        statusCode: 403,
+        etapa: ETAPAS_BLOQUEIO.ATIVACAO
+      });
+      throw err;
+    }
+
+    const ctxRes = await this._configuracao.obterContextoOperacional({
+      empresaId: id,
+      permitirFallbackGlobal: false
+    });
+    if (!ctxRes.ok || !ctxRes.contexto?.cnpj) {
+      const err = montarErroConsultaDfe({
+        codigo: ctxRes.codigoErro || 'CONTEXTO_INVALIDO',
+        mensagem: ctxRes.mensagem || 'Contexto fiscal indisponível.',
+        statusCode: 422,
+        etapa: ETAPAS_BLOQUEIO.EMPRESA
+      });
+      throw err;
+    }
+    const ctx = ctxRes.contexto;
+    const ambiente = Number(ctx.ambiente);
+    if (ambiente !== 1) {
+      const err = montarErroConsultaDfe({
+        codigo: 'AMBIENTE_NAO_PRODUCAO',
+        mensagem: 'Consulta por chave real exige ambiente de produção.',
+        statusCode: 422,
+        etapa: ETAPAS_BLOQUEIO.AMBIENTE
+      });
+      throw err;
+    }
+
+    try {
+      await this._exigirCert({
+        empresaId: id,
+        db: this._db,
+        persistirSnapshot: false
+      });
+    } catch (errCert) {
+      const err = montarErroConsultaDfe({
+        codigo: errCert.code || 'CERTIFICADO_INVALIDO',
+        mensagem: errCert.message || 'Certificado inválido.',
+        statusCode: 422,
+        etapa: ETAPAS_BLOQUEIO.CERTIFICADO
+      });
+      throw err;
+    }
+
+    const controle = await this._nsuService.buscarPorCnpjAmbiente(ctx.cnpj, ambiente);
+    const cooldown = this._nsuService.avaliarCooldown(controle);
+    if (cooldown.ativo && cooldown.motivo === 'COOLDOWN_EXPLICITO') {
+      const err = montarErroConsultaDfe({
+        codigo: 'COOLDOWN_ATIVO',
+        mensagem: CentralNsuService.montarMensagemCooldown(cooldown),
+        mensagemAmigavel: CentralNsuService.montarMensagemCooldown(cooldown),
+        statusCode: 422,
+        etapa: ETAPAS_BLOQUEIO.COOLDOWN,
+        proximaConsultaEm: cooldown.proximaConsultaEm
+      });
+      throw err;
+    }
+
+    const cnpj = normalizarCnpjAuth(ctx.cnpj);
+    const autorizacao = criarAutorizacaoOperacaoReal({
+      empresaId: id,
+      cnpj,
+      tiposConsulta: [TIPOS_CONSULTA_SEFAZ.CONS_CH_NFE],
+      tokenSeed: ativacao.tokenSeed,
+      usuarioId: params.usuario?.id || null,
+      confirmacaoConsultaReal: true,
+      confirmacaoAmbienteProducao: true
+    });
+    await this.assertAutorizacaoViva(autorizacao, {
+      empresaId: id,
+      cnpj,
+      tipoConsulta: TIPOS_CONSULTA_SEFAZ.CONS_CH_NFE
+    });
+
+    return {
+      autorizacao,
+      contexto: ctx,
+      ativacao: { empresaId: id, cnpj, tiposPermitidos: [TIPOS_CONSULTA_SEFAZ.CONS_CH_NFE] }
+    };
+  }
+
+  /**
+   * Emite OPERACAO_REAL curta para DistDFe automático (background / abrir_central).
+   * Exige ativação admin com distDfeAutomatico !== false. Não envia 210210.
+   * Pré-voo com cooldown/FILA — não contorna 656.
+   *
+   * @param {{ empresaId: number, origem?: string, cnpj?: string|null }} params
+   * @returns {Promise<{ autorizacao: object, preVoo: object, ativacao: object }>}
+   */
+  async emitirAutorizacaoSyncControlado(params = {}) {
+    const id = empresaIdValido(params.empresaId);
+    if (!id) {
+      const err = montarErroConsultaDfe({
+        codigo: 'EMPRESA_OBRIGATORIA',
+        mensagem: 'empresaId obrigatório para sync DistDFe controlado.',
+        statusCode: 400,
+        etapa: ETAPAS_BLOQUEIO.EMPRESA
+      });
+      throw err;
+    }
+    const origemNorm = String(params.origem || '').toLowerCase();
+    const origensAuto = new Set(['background', 'abrir_central']);
+    if (!origensAuto.has(origemNorm)) {
+      const err = montarErroConsultaDfe({
+        codigo: 'ORIGEM_SYNC_NAO_AUTORIZADA',
+        mensagem: 'Sync DistDFe controlado só para background/abrir_central.',
+        statusCode: 403,
+        etapa: ETAPAS_BLOQUEIO.AUTORIZACAO
+      });
+      throw err;
+    }
+
+    const ativacao = await this._lerAtivacao(id);
+    if (!ativacao || !ativacao.ativa || !ativacao.tokenSeed) {
+      const err = montarErroConsultaDfe({
+        codigo: 'OPERACAO_REAL_DESABILITADA',
+        mensagem: 'Operação fiscal real desabilitada — DistDFe automático bloqueado.',
+        statusCode: 403,
+        etapa: ETAPAS_BLOQUEIO.ATIVACAO
+      });
+      throw err;
+    }
+    // Ativações antigas sem o campo: default true (admin já habilitou OPERACAO_REAL).
+    if (ativacao.distDfeAutomatico === false) {
+      const err = montarErroConsultaDfe({
+        codigo: 'DISTDFE_AUTOMATICO_DESABILITADO',
+        mensagem: 'DistDFe automático desabilitado na ativação desta empresa.',
+        statusCode: 403,
+        etapa: ETAPAS_BLOQUEIO.ATIVACAO
+      });
+      throw err;
+    }
+
+    const pre = await this.executarPreVoo(id, { exigirProducao: true, bloquearPorCooldown: true });
+    if (!pre.ok) {
+      const err = montarErroConsultaDfe({
+        codigo: pre.codigo || 'PRE_VOO_BLOQUEADO',
+        mensagem: pre.mensagem || 'Pré-voo bloqueou DistDFe automático.',
+        mensagemAmigavel: pre.mensagemAmigavel || pre.mensagem,
+        statusCode: 422,
+        preVoo: pre,
+        etapa: pre.etapa || etapaPorCodigoPreVoo(pre.codigo)
+      });
+      throw err;
+    }
+
+    const cnpj = normalizarCnpjAuth(pre.contexto.cnpj)
+      || normalizarCnpjAuth(ativacao.cnpj)
+      || normalizarCnpjAuth(params.cnpj);
+    if (!cnpj) {
+      const err = montarErroConsultaDfe({
+        codigo: 'CNPJ_AUSENTE',
+        mensagem: 'CNPJ ausente para DistDFe automático.',
+        statusCode: 422,
+        etapa: ETAPAS_BLOQUEIO.CNPJ
+      });
+      throw err;
+    }
+
+    return {
+      autorizacao: criarAutorizacaoOperacaoReal({
+        empresaId: id,
+        cnpj,
+        tiposConsulta: [TIPOS_CONSULTA_SEFAZ.DIST_NSU],
+        tokenSeed: ativacao.tokenSeed,
+        usuarioId: null,
+        confirmacaoConsultaReal: true,
+        confirmacaoAmbienteProducao: true
+      }),
+      preVoo: pre,
+      ativacao: {
+        empresaId: id,
+        ativadaEm: ativacao.ativadaEm,
+        tiposPermitidos: [TIPOS_CONSULTA_SEFAZ.DIST_NSU],
+        cnpj,
+        distDfeAutomatico: true,
+        origemSync: origemNorm
       }
     };
   }
