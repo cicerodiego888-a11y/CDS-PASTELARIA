@@ -14,9 +14,15 @@ const {
   statusDeErroEmpresa
 } = require('../services/financeiro/FinanceiroEmpresaContextoService');
 const ContasPagarService = require('../motores/mcf/services/ContasPagarService');
+const UsuarioEmpresaService = require('../services/empresas/UsuarioEmpresaService');
+const ContasPagarReconciliacaoHistoricaDryRunService = require(
+  '../motores/mcf/services/ContasPagarReconciliacaoHistoricaDryRunService'
+);
+const ContasPagarReconciliacaoHistoricaSimulacaoService = require(
+  '../motores/mcf/services/ContasPagarReconciliacaoHistoricaSimulacaoService'
+);
 
 const anexarEmpresa = middlewareResolverEmpresaFinanceiro({ db });
-router.use(anexarEmpresa);
 
 function responderErro(res, err) {
   const status = err.statusCode || statusDeErroEmpresa(err) || 500;
@@ -46,6 +52,79 @@ function dbAll(sql, params = []) {
   });
 }
 
+router.get('/multiempresa', async (req, res) => {
+  if (!req.user || !req.user.id) {
+    return res.status(401).json({
+      success: false,
+      error: 'Autenticação obrigatória para consultar Contas a Pagar.',
+      code: 'USUARIO_OBRIGATORIO'
+    });
+  }
+
+  try {
+    const empresas = await UsuarioEmpresaService.listarEmpresasPermitidas(req.user, { db });
+    const empresaIds = empresas.map((empresa) => Number(empresa.id));
+    if (empresaIds.length === 0) {
+      return res.status(403).json({
+        success: false,
+        error: 'Usuário não possui empresas autorizadas para consultar Contas a Pagar.',
+        code: 'EMPRESA_NAO_AUTORIZADA'
+      });
+    }
+    if (
+      empresaIds.some((id) => !Number.isSafeInteger(id) || id <= 0)
+      || new Set(empresaIds).size !== empresaIds.length
+    ) {
+      throw new Error('A lista de empresas autorizadas possui identificadores inválidos ou duplicados.');
+    }
+
+    const limite = Math.min(Math.max(Number(req.query.limite) || 100, 1), 500);
+    const resultados = await Promise.all(empresas.map(async (empresa) => {
+      const empresaId = Number(empresa.id);
+      const contas = await ContasPagarService.listar({
+        db,
+        empresaId,
+        status: req.query.status,
+        fornecedor_id: req.query.fornecedor_id,
+        fornecedor: req.query.fornecedor,
+        dataInicio: req.query.dataInicio,
+        dataFim: req.query.dataFim,
+        limite: 500
+      });
+      return contas.map((conta) => ({
+        ...conta,
+        empresa_id: empresaId,
+        empresa_nome: empresa.nome_fantasia || empresa.razao_social || `Empresa #${empresaId}`,
+        empresa_cnpj: empresa.cnpj || null
+      }));
+    }));
+    const contas = resultados.flat()
+      .sort((a, b) => {
+        const dataA = String(a.data_vencimento || '');
+        const dataB = String(b.data_vencimento || '');
+        if (dataA !== dataB) return dataA.localeCompare(dataB);
+        return Number(a.empresa_id) - Number(b.empresa_id) || Number(a.id) - Number(b.id);
+      })
+      .slice(0, limite);
+
+    return res.json({
+      success: true,
+      escopo: 'todas',
+      empresas: empresas.map((empresa) => ({
+        empresa_id: Number(empresa.id),
+        empresa_nome: empresa.nome_fantasia || empresa.razao_social || `Empresa #${empresa.id}`,
+        empresa_cnpj: empresa.cnpj || null
+      })),
+      contas
+    });
+  } catch (err) {
+    console.error('Erro na consulta multiempresa de Contas a Pagar:', err);
+    return responderErro(res, err);
+  }
+});
+
+router.use(anexarEmpresa);
+
 function exigirAdminFinanceiro(req, res) {
   if (!req.user || req.user.role !== 'admin') {
     res.status(403).json({ success: false, error: 'Apenas o administrador pode cancelar títulos a pagar.' });
@@ -67,6 +146,65 @@ router.get('/', async (req, res) => {
       limite: req.query.limite
     });
     return res.json({ success: true, contas });
+  } catch (err) {
+    return responderErro(res, err);
+  }
+});
+
+/**
+ * MCF-02.2 — Dry-run reconciliação histórica (SOMENTE LEITURA).
+ * Deve permanecer antes de /:id.
+ */
+router.get('/reconciliacao-historica/dry-run', async (req, res) => {
+  if (!exigirAdminFinanceiro(req, res)) return;
+  try {
+    const empresasPermitidas = await UsuarioEmpresaService.listarEmpresasPermitidas(req.user, { db });
+    const empresaIdsPermitidas = empresasPermitidas.map((empresa) => Number(empresa.id));
+    if (empresaIdsPermitidas.length === 0) {
+      return res.status(403).json({
+        success: false,
+        error: 'Usuário não possui empresas autorizadas para consultar o dry-run.',
+        code: 'EMPRESA_NAO_AUTORIZADA'
+      });
+    }
+
+    const multi = String(req.query.multiempresa || '') === '1'
+      || String(req.query.todas_empresas || '') === '1';
+    if (multi) {
+      const relatorio = await ContasPagarReconciliacaoHistoricaDryRunService.executarDryRunMultiempresa({
+        db,
+        empresaIds: empresaIdsPermitidas
+      });
+      return res.json({ success: true, ...relatorio });
+    }
+    if (!empresaIdsPermitidas.includes(Number(req.empresaId))) {
+      return res.status(403).json({
+        success: false,
+        error: 'Usuário não está autorizado a consultar esta empresa.',
+        code: 'EMPRESA_NAO_AUTORIZADA'
+      });
+    }
+    const relatorio = await ContasPagarReconciliacaoHistoricaDryRunService.executarDryRun({
+      db,
+      empresaId: req.empresaId
+    });
+    return res.json({ success: true, ...relatorio });
+  } catch (err) {
+    return responderErro(res, err);
+  }
+});
+
+/**
+ * MCF-02.3 — Simulação da reconciliação (SOMENTE LEITURA; sem persistência).
+ */
+router.get('/reconciliacao-historica/simulacao', async (req, res) => {
+  if (!exigirAdminFinanceiro(req, res)) return;
+  try {
+    const relatorio = await ContasPagarReconciliacaoHistoricaSimulacaoService.executarSimulacao({
+      db,
+      empresaId: req.empresaId
+    });
+    return res.json({ success: true, ...relatorio });
   } catch (err) {
     return responderErro(res, err);
   }

@@ -27,6 +27,23 @@ function sqlExcluirFinanceiroVendaCancelada(alias = 'f') {
   )`;
 }
 
+function sqlExcluirFinanceiroReceberComContaCanonica(alias = 'f') {
+  const contaVenda = `COALESCE(${alias}.venda_id, CASE
+    WHEN ${alias}.referencia_tipo = 'venda' THEN ${alias}.referencia_id
+    ELSE NULL
+  END)`;
+  return `(COALESCE(${alias}.tipo, '') != 'receita' OR NOT EXISTS (
+    SELECT 1
+    FROM contas_receber cr
+    WHERE cr.empresa_id = ${alias}.empresa_id
+      AND cr.venda_id = ${contaVenda}
+      AND (
+        cr.numero_parcela = ${alias}.numero_parcela
+        OR (cr.numero_parcela IS NULL AND ${alias}.numero_parcela IS NULL)
+      )
+  ))`;
+}
+
 function dbRun(sql, params = []) {
   return new Promise((resolve, reject) => {
     db.run(sql, params, function onRun(err) {
@@ -47,6 +64,21 @@ function dbAll(sql, params = []) {
 
 function arredondarCentavos(valor) {
   return Math.round(Number(valor || 0) * 100) / 100;
+}
+
+function resolverEmpresaVendaFinanceira(vendaId, venda, empresaId) {
+  if (!venda || Number(venda.id) !== Number(vendaId)) {
+    const err = new Error('Venda de origem não validada para a operação financeira.');
+    err.code = 'FINANCEIRO_EMPRESA_OBRIGATORIA';
+    err.statusCode = 400;
+    throw err;
+  }
+
+  const { resolverEmpresaDaOrigemFinanceira } = require('../financeiro/FinanceiroEmpresaContextoService');
+  const empresaDaVenda = resolverEmpresaDaOrigemFinanceira({ venda });
+  return empresaId == null
+    ? empresaDaVenda
+    : resolverEmpresaDaOrigemFinanceira({ venda, empresaId });
 }
 
 function agoraLocalBrasil() {
@@ -119,7 +151,7 @@ function validarSomaPagamentosVenda(pagamentosVenda, total, opcoes = {}) {
   return 'A soma dos pagamentos precisa ser igual ao total da venda.';
 }
 
-async function executarCancelamentoFinanceiro(vendaId, observacao) {
+async function executarCancelamentoFinanceiro(vendaId, empresaId, observacao) {
   const financeiroPorVenda = await dbRun(
     `
     UPDATE financeiro
@@ -127,9 +159,10 @@ async function executarCancelamentoFinanceiro(vendaId, observacao) {
       status = 'cancelado',
       observacao = COALESCE(observacao, '') || ' | ' || ?
     WHERE venda_id = ?
+      AND empresa_id = ?
       AND COALESCE(status, '') != 'cancelado'
     `,
-    [observacao, vendaId]
+    [observacao, vendaId, empresaId]
   );
 
   const financeiroPorReferencia = await dbRun(
@@ -140,9 +173,10 @@ async function executarCancelamentoFinanceiro(vendaId, observacao) {
       observacao = COALESCE(observacao, '') || ' | ' || ?
     WHERE referencia_id = ?
       AND referencia_tipo = 'venda'
+      AND empresa_id = ?
       AND COALESCE(status, '') != 'cancelado'
     `,
-    [observacao, vendaId]
+    [observacao, vendaId, empresaId]
   );
 
   const contasReceber = await dbRun(
@@ -153,9 +187,10 @@ async function executarCancelamentoFinanceiro(vendaId, observacao) {
       valor_restante = 0,
       observacao = COALESCE(observacao, '') || ' | ' || ?
     WHERE venda_id = ?
+      AND empresa_id = ?
       AND COALESCE(status, '') != 'cancelado'
     `,
-    [observacao, vendaId]
+    [observacao, vendaId, empresaId]
   );
 
   return {
@@ -167,19 +202,20 @@ async function executarCancelamentoFinanceiro(vendaId, observacao) {
 /**
  * Cancela lançamentos financeiros e contas a receber vinculados a uma venda.
  * @param {number|string} vendaId
- * @param {{ observacao?: string, gerenciarTransacao?: boolean }} opcoes
+ * @param {{ venda: object, empresaId?: number|string, observacao?: string, gerenciarTransacao?: boolean }} opcoes
  */
 async function cancelarFinanceiroVenda(vendaId, opcoes = {}) {
+  const empresaId = resolverEmpresaVendaFinanceira(vendaId, opcoes.venda, opcoes.empresaId);
   const observacao = opcoes.observacao || `Cancelado automaticamente pela venda #${vendaId}`;
 
   if (opcoes.gerenciarTransacao === false) {
-    return executarCancelamentoFinanceiro(vendaId, observacao);
+    return executarCancelamentoFinanceiro(vendaId, empresaId, observacao);
   }
 
   await dbRun('BEGIN IMMEDIATE');
 
   try {
-    const resultado = await executarCancelamentoFinanceiro(vendaId, observacao);
+    const resultado = await executarCancelamentoFinanceiro(vendaId, empresaId, observacao);
     await dbRun('COMMIT');
     return resultado;
   } catch (err) {
@@ -198,7 +234,7 @@ async function cancelarFinanceiroVenda(vendaId, opcoes = {}) {
 async function sincronizarFinanceiroVendasCanceladas() {
   const vendasCanceladas = await dbAll(
     `
-    SELECT id
+    SELECT id, empresa_id
     FROM vendas
     WHERE COALESCE(cancelada, 0) = 1 OR LOWER(COALESCE(status, '')) = 'cancelada'
     `
@@ -208,6 +244,7 @@ async function sincronizarFinanceiroVendasCanceladas() {
 
   for (const venda of vendasCanceladas) {
     const resultado = await cancelarFinanceiroVenda(venda.id, {
+      venda,
       observacao: 'Correção automática na inicialização',
       gerenciarTransacao: true
     });
@@ -220,7 +257,7 @@ async function sincronizarFinanceiroVendasCanceladas() {
   };
 }
 
-async function reduzirValorPendenteFinanceiro(vendaId, valorReduzir, observacao) {
+async function reduzirValorPendenteFinanceiro(vendaId, empresaId, valorReduzir, observacao) {
   let restante = arredondarCentavos(valorReduzir);
   let atualizados = 0;
 
@@ -235,13 +272,14 @@ async function reduzirValorPendenteFinanceiro(vendaId, valorReduzir, observacao)
     WHERE tipo = 'receita'
       AND status = 'pendente'
       AND valor > 0
+      AND empresa_id = ?
       AND (
         venda_id = ?
         OR (referencia_id = ? AND referencia_tipo = 'venda')
       )
     ORDER BY COALESCE(numero_parcela, 0) DESC, id DESC
     `,
-    [vendaId, vendaId]
+    [empresaId, vendaId, vendaId]
   );
 
   for (const registro of registros) {
@@ -292,8 +330,7 @@ async function recalcularFinanceiroDevolucaoVenda(vendaId, valorDevolvido, venda
     return { contas_receber: 0, financeiro: 0, estorno: 0 };
   }
 
-  const { resolverEmpresaDaOrigemFinanceira } = require('../financeiro/FinanceiroEmpresaContextoService');
-  const empresaIdFin = resolverEmpresaDaOrigemFinanceira({ venda });
+  const empresaIdFin = resolverEmpresaVendaFinanceira(vendaId, venda);
 
   const observacao = opcoes.observacao || `Devolução parcial venda #${vendaId}`;
   let restante = valor;
@@ -304,11 +341,12 @@ async function recalcularFinanceiroDevolucaoVenda(vendaId, valorDevolvido, venda
     SELECT id, valor_restante
     FROM contas_receber
     WHERE venda_id = ?
+      AND empresa_id = ?
       AND status IN ('aberto', 'parcial')
       AND valor_restante > 0
     ORDER BY numero_parcela DESC, id DESC
     `,
-    [vendaId]
+    [vendaId, empresaIdFin]
   );
 
   for (const conta of contas) {
@@ -318,7 +356,7 @@ async function recalcularFinanceiroDevolucaoVenda(vendaId, valorDevolvido, venda
     const reduzir = arredondarCentavos(Math.min(restante, saldo));
     const novoRestante = arredondarCentavos(saldo - reduzir);
 
-    await dbRun(
+    const linhasAtualizadas = await dbRun(
       `
       UPDATE contas_receber
       SET
@@ -326,15 +364,28 @@ async function recalcularFinanceiroDevolucaoVenda(vendaId, valorDevolvido, venda
         status = CASE WHEN ? <= 0.009 THEN 'pago' ELSE status END,
         observacao = COALESCE(observacao, '') || ' | ' || ?
       WHERE id = ?
+        AND venda_id = ?
+        AND empresa_id = ?
       `,
-      [novoRestante, novoRestante, observacao, conta.id]
+      [novoRestante, novoRestante, observacao, conta.id, vendaId, empresaIdFin]
     );
+    if (linhasAtualizadas !== 1) {
+      const err = new Error('A conta a receber mudou durante a devolução.');
+      err.code = 'FINANCEIRO_EMPRESA_DIVERGENTE';
+      err.statusCode = 409;
+      throw err;
+    }
 
     contasAtualizadas += 1;
     restante = arredondarCentavos(restante - reduzir);
   }
 
-  const financeiroPendente = await reduzirValorPendenteFinanceiro(vendaId, restante, observacao);
+  const financeiroPendente = await reduzirValorPendenteFinanceiro(
+    vendaId,
+    empresaIdFin,
+    restante,
+    observacao
+  );
   restante = financeiroPendente.restante;
 
   let estorno = 0;
@@ -365,14 +416,21 @@ async function recalcularFinanceiroDevolucaoVenda(vendaId, valorDevolvido, venda
     estorno = restante;
   }
 
-  await dbRun(
+  const vendaAtualizada = await dbRun(
     `
     UPDATE vendas
     SET total = CASE WHEN (total - ?) < 0 THEN 0 ELSE (total - ?) END
     WHERE id = ?
+      AND empresa_id = ?
     `,
-    [valor, valor, vendaId]
+    [valor, valor, vendaId, empresaIdFin]
   );
+  if (vendaAtualizada !== 1) {
+    const err = new Error('A venda mudou durante o recálculo financeiro.');
+    err.code = 'FINANCEIRO_EMPRESA_DIVERGENTE';
+    err.statusCode = 409;
+    throw err;
+  }
 
   if (venda?.cliente_id && ['prazo', 'credito'].includes(String(venda.forma_pagamento || '').toLowerCase())) {
     await dbRun(
@@ -402,5 +460,6 @@ module.exports = {
   sincronizarFinanceiroVendasCanceladas,
   recalcularFinanceiroDevolucaoVenda,
   sqlExcluirContaVendaCancelada,
-  sqlExcluirFinanceiroVendaCancelada
+  sqlExcluirFinanceiroVendaCancelada,
+  sqlExcluirFinanceiroReceberComContaCanonica
 };

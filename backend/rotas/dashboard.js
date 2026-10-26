@@ -16,7 +16,8 @@ const {
 } = require('../services/reportFiscalHelpers');
 const {
   sqlExcluirContaVendaCancelada,
-  sqlExcluirFinanceiroVendaCancelada
+  sqlExcluirFinanceiroVendaCancelada,
+  sqlExcluirFinanceiroReceberComContaCanonica
 } = require('../services/vendas/VendaFinanceiroService');
 const {
   resolverEmpresaIdParaMis,
@@ -247,17 +248,17 @@ router.get('/resumo', verificarPermissaoEspecifica('relatorios'), async (req, re
           AND f.status NOT IN ('recebido', 'pago', 'cancelado')
           AND f.empresa_id = ?
           AND ${sqlExcluirFinanceiroVendaCancelada('f')}
+          AND ${sqlExcluirFinanceiroReceberComContaCanonica('f')}
       `, [empresaId]),
 
+      // MCF-02.1 — AP canônica em contas_pagar (evita somar título + projeção legado)
       dbGet(`
         SELECT
-          COALESCE(SUM(valor), 0) AS total,
+          COALESCE(SUM(valor_restante), 0) AS total,
           COUNT(*) AS quantidade
-        FROM financeiro f
-        WHERE f.tipo = 'despesa'
-          AND f.status NOT IN ('pago', 'recebido', 'cancelado')
-          AND f.empresa_id = ?
-          AND ${sqlExcluirFinanceiroVendaCancelada('f')}
+        FROM contas_pagar cp
+        WHERE cp.empresa_id = ?
+          AND cp.status IN ('aberto', 'parcial')
       `, [empresaId]),
 
       dbAll(`

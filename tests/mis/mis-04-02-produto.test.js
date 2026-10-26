@@ -70,7 +70,7 @@ async function setup() {
   )`);
   await run(db, `CREATE TABLE vendas (
     id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER, data_venda TEXT,
-    total REAL DEFAULT 0, status TEXT DEFAULT 'concluida',
+    total REAL DEFAULT 0, status TEXT DEFAULT 'concluida', cancelada INTEGER DEFAULT 0,
     valor_fiscal REAL DEFAULT 0, valor_nao_fiscal REAL DEFAULT 0
   )`);
   await run(db, `CREATE TABLE vendas_itens (

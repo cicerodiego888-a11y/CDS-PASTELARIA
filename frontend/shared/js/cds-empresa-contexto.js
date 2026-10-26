@@ -82,13 +82,34 @@
     } catch (e) { /* ignore */ }
   }
 
-  function headersJson() {
-    const h = { 'Content-Type': 'application/json' };
+  /**
+   * Cabeçalhos de autenticação + contexto empresarial para /api.
+   * Inclui X-Empresa-Id somente quando há empresa selecionada (sem fallback inventado).
+   */
+  function headersAuth(extra) {
+    const h = { Accept: 'application/json' };
     const t = token();
     if (t) h.Authorization = 'Bearer ' + t;
     const id = lerEmpresaId();
     if (id) h[HEADER] = String(id);
+    if (extra && typeof extra === 'object') {
+      Object.keys(extra).forEach((k) => {
+        if (extra[k] != null) h[k] = extra[k];
+      });
+    }
     return h;
+  }
+
+  function headersJson(extra) {
+    return headersAuth(Object.assign({ 'Content-Type': 'application/json' }, extra || {}));
+  }
+
+  function temEmpresaSelecionada() {
+    return lerEmpresaId() != null;
+  }
+
+  function mensagemEmpresaObrigatoria() {
+    return 'Selecione a empresa no seletor da barra lateral para continuar.';
   }
 
   async function fetchJson(url, opcoes) {
@@ -153,6 +174,14 @@
       '</div>';
   }
 
+  function renderFalha(host) {
+    host.hidden = false;
+    host.innerHTML =
+      '<div class="cds-empresa-seletor__erro small" role="alert">' +
+      'Não foi possível carregar as empresas. Verifique a conexão e tente novamente.' +
+      '</div>';
+  }
+
   function renderLista(host, empresas, selecionadaId) {
     host.hidden = false;
     const opts = empresas.map((e) => {
@@ -196,7 +225,8 @@
     try {
       disponiveis = await listarDisponiveis();
     } catch (e) {
-      renderVazio(host);
+      console.error('Contexto empresarial: falha ao carregar empresas.', e);
+      renderFalha(host);
       return;
     }
 
@@ -236,7 +266,10 @@
     lerEmpresa: lerEmpresa,
     persistir: persistir,
     limpar: limpar,
+    headersAuth: headersAuth,
     headersJson: headersJson,
+    temEmpresaSelecionada: temEmpresaSelecionada,
+    mensagemEmpresaObrigatoria: mensagemEmpresaObrigatoria,
     anexarHeaderXhr: anexarHeaderXhr,
     listarDisponiveis: listarDisponiveis,
     empresaPadrao: empresaPadrao,

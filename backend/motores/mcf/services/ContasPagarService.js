@@ -121,6 +121,9 @@ function statusFinanceiroProjecao(status) {
   return 'pendente';
 }
 
+/** Marcador inequívoco de projeção criada pelo MCF (não é lançamento histórico de cliente). */
+const MARCADOR_PROJECAO_SINTETICA = '[MCF_PROJECAO_SINTETICA]';
+
 async function assegurarProjecaoFinanceira(db, empresaId, contaId) {
   const vinculo = await dbGet(
     db,
@@ -156,6 +159,10 @@ async function assegurarProjecaoFinanceira(db, empresaId, contaId) {
   if (!conta) {
     throw erroMcf(ERROS_MCF.CONTA_NAO_ENCONTRADA, 'Conta a pagar não encontrada.', 404);
   }
+  const observacaoBase = conta.observacao != null ? String(conta.observacao) : '';
+  const observacaoProj = observacaoBase.includes(MARCADOR_PROJECAO_SINTETICA)
+    ? observacaoBase
+    : `${observacaoBase ? `${observacaoBase} ` : ''}${MARCADOR_PROJECAO_SINTETICA}`.trim();
   const financeiro = await dbRun(
     db,
     `INSERT INTO financeiro (
@@ -181,7 +188,7 @@ async function assegurarProjecaoFinanceira(db, empresaId, contaId) {
       conta.total_parcelas,
       conta.referencia_tipo === 'compra' ? conta.referencia_id : null,
       conta.pessoa_nome || conta.fornecedor_nome,
-      conta.observacao,
+      observacaoProj,
       empresaId
     ]
   );
@@ -518,7 +525,9 @@ async function criarNaTransacaoAtual(params = {}) {
         ]
       );
       const conta = await obter({ db, empresaId, id: r.lastID });
-      await assegurarProjecaoFinanceira(db, empresaId, r.lastID);
+      if (params.omitirProjecao !== true) {
+        await assegurarProjecaoFinanceira(db, empresaId, r.lastID);
+      }
       return conta;
     } catch (err) {
       if (!err || err.code !== 'SQLITE_CONSTRAINT') throw err;
@@ -574,7 +583,9 @@ async function criarNaTransacaoAtual(params = {}) {
       ]
     );
     const conta = await obter({ db, empresaId, id: r.lastID });
-    await assegurarProjecaoFinanceira(db, empresaId, r.lastID);
+    if (params.omitirProjecao !== true) {
+      await assegurarProjecaoFinanceira(db, empresaId, r.lastID);
+    }
     return conta;
   } catch (err) {
     if (!chaveIdempotencia || !err || err.code !== 'SQLITE_CONSTRAINT') throw err;
@@ -1010,6 +1021,9 @@ module.exports = {
   baixarNaTransacaoAtual,
   cancelar,
   cancelarNaTransacaoAtual,
+  assegurarProjecaoFinanceira,
+  sincronizarProjecaoFinanceira,
+  MARCADOR_PROJECAO_SINTETICA,
   STATUS_CONTA_PAGAR,
   ERROS_MCF,
   round2,

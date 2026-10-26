@@ -1,45 +1,58 @@
 <div class="financeiro-page">
-  <div id="financeiro-page-shell"></div>
-  <div class="financeiro-header d-none">
-    <h3 align="left">Financeiro</h3>
-  </div>
-
-  <div class="financeiro-header-actions cds-page-header__toolbar-host">
-    <div class="row g-2 align-items-end">
-      <div class="col-md-2">
-        <label class="form-label">Período</label>
-        <select id="financeiroPeriodo" class="form-select">
-          <option value="hoje">Hoje</option>
-          <option value="7dias">Últimos 7 Dias</option>
-          <option value="mes-atual">Mês Atual</option>
-          <option value="personalizado">Personalizado</option>
-        </select>
-      </div>
-      <div class="col-md-2 d-none" id="financeiroPeriodoInicioWrapper">
-        <label class="form-label">Data Início</label>
-        <input type="date" id="financeiroDataInicio" class="form-control">
-      </div>
-      <div class="col-md-2 d-none" id="financeiroPeriodoFimWrapper">
-        <label class="form-label">Data Fim</label>
-        <input type="date" id="financeiroDataFim" class="form-control">
-      </div>
-      <div class="col-md-2">
-        <button type="button" id="btnAtualizarFinanceiro" class="btn btn-primary w-100">
-          <i class="fas fa-sync-alt"></i> Atualizar
+  <header class="financeiro-page-header">
+    <div class="financeiro-page-heading">
+      <span class="financeiro-page-eyebrow">GESTÃO FINANCEIRA</span>
+      <h1>Financeiro</h1>
+      <p>Contas a receber, pagar e visão geral do grupo de empresas.</p>
+    </div>
+    <div class="financeiro-header-actions cds-page-header__toolbar-host">
+      <div class="financeiro-periodo-controls">
+        <div class="financeiro-periodo-field financeiro-empresa-field">
+          <label for="financeiroEmpresaSelect" class="form-label">Empresa</label>
+          <div class="financeiro-select-com-icone">
+            <i class="fas fa-building" aria-hidden="true"></i>
+            <select id="financeiroEmpresaSelect" class="form-select" aria-label="Escopo empresarial financeiro">
+              <option value="todas">Todas as empresas</option>
+            </select>
+          </div>
+          <span id="financeiroEmpresaEstado" class="financeiro-empresa-estado" role="status" aria-live="polite" hidden></span>
+        </div>
+        <div class="financeiro-periodo-field financeiro-periodo-field--preset">
+          <label for="financeiroPeriodo" class="form-label">Período</label>
+          <div class="financeiro-select-com-icone">
+            <i class="far fa-calendar-alt" aria-hidden="true"></i>
+            <select id="financeiroPeriodo" class="form-select">
+              <option value="hoje">Hoje</option>
+              <option value="7dias">Últimos 7 dias</option>
+              <option value="mes-atual">Mês atual</option>
+              <option value="personalizado">Personalizado</option>
+            </select>
+          </div>
+        </div>
+        <div class="financeiro-periodo-field d-none" id="financeiroPeriodoInicioWrapper">
+          <label for="financeiroDataInicio" class="form-label">Data inicial</label>
+          <input type="date" id="financeiroDataInicio" class="form-control">
+        </div>
+        <div class="financeiro-periodo-field d-none" id="financeiroPeriodoFimWrapper">
+          <label for="financeiroDataFim" class="form-label">Data final</label>
+          <input type="date" id="financeiroDataFim" class="form-control">
+        </div>
+        <button type="button" id="btnAtualizarFinanceiro" class="btn btn-primary financeiro-btn-atualizar">
+          <i class="fas fa-sync-alt" aria-hidden="true"></i> Atualizar
         </button>
       </div>
     </div>
-  </div>
+  </header>
 
-  <div class="financeiro-tabs">
-    <button class="financeiro-tab active" data-aba="dashboard">Dashboard</button>
-    <button class="financeiro-tab" data-aba="receber">Contas a Receber</button>
-    <button class="financeiro-tab" data-aba="duplicata">Dívidas por Cliente</button>
-    <button class="financeiro-tab" data-aba="pagar">Contas a Pagar</button>
-    <button class="financeiro-tab" data-aba="condicoes">Condições de Pagamento</button>
-    <button class="financeiro-tab" data-aba="historico">Histórico</button>
-    <button class="financeiro-tab" data-aba="relatorios">Relatórios</button>
-  </div>
+  <nav class="financeiro-tabs" aria-label="Seções do Financeiro">
+    <button type="button" class="financeiro-tab active" data-aba="dashboard">Dashboard</button>
+    <button type="button" class="financeiro-tab" data-aba="receber">Contas a Receber</button>
+    <button type="button" class="financeiro-tab" data-aba="duplicata">Dívidas por Cliente</button>
+    <button type="button" class="financeiro-tab" data-aba="pagar">Contas a Pagar</button>
+    <button type="button" class="financeiro-tab" data-aba="condicoes">Condições de Pagamento</button>
+    <button type="button" class="financeiro-tab" data-aba="historico">Histórico</button>
+    <button type="button" class="financeiro-tab" data-aba="relatorios">Relatórios</button>
+  </nav>
 
   <div id="financeiroConteudo" class="financeiro-conteudo">
     <!-- Conteúdo das abas será carregado aqui -->

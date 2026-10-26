@@ -1,0 +1,7 @@
+{
+  "ambiente_id": "MCF-02.4-ENSAIO-CONTROLADO",
+  "db_path": "C:\\projetos\\CDS-SISTEMAS PASTELARIA\\tests\\fixtures\\mcf-02.4-ensaio\\ensaio-contas-pagar.sqlite",
+  "backup_path": "C:\\projetos\\CDS-SISTEMAS PASTELARIA\\tests\\fixtures\\mcf-02.4-ensaio\\ensaio-contas-pagar.backup.sqlite",
+  "criado_em": "2026-10-25T20:06:05.612Z",
+  "aviso": "COPIA_ISOLADA — nao operacional / nao cliente"
+}

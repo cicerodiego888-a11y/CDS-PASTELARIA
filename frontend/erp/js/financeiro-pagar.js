@@ -5,8 +5,65 @@ window.__financeiroPagarState = window.__financeiroPagarState || {
   contaPagamentoAtual: null,
   pagamentoIdempotencyKey: null,
   criacaoIdempotencyKey: null,
-  cancelamentoIdempotencyKeys: {}
+  cancelamentoIdempotencyKeys: {},
+  ultimaListaContas: [],
+  carregandoLista: false
 };
+
+function headersAuthPagar(extra = {}) {
+  if (typeof headersFinanceiro === 'function') {
+    return headersFinanceiro(extra);
+  }
+  if (typeof CdsEmpresaContexto !== 'undefined' && typeof CdsEmpresaContexto.headersAuth === 'function') {
+    return CdsEmpresaContexto.headersAuth(extra);
+  }
+  return Object.assign({
+    Accept: 'application/json',
+    Authorization: 'Bearer ' + (localStorage.getItem('token') || '')
+  }, extra);
+}
+
+function headersAuthPagarDaEmpresa(empresaId, extra = {}) {
+  const id = Number(empresaId);
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw new Error('Selecione a empresa proprietária deste título para continuar.');
+  }
+  if (typeof headersFinanceiroDaEmpresa === 'function') {
+    return headersFinanceiroDaEmpresa(id, extra);
+  }
+  return Object.assign(headersAuthPagar(extra), { 'X-Empresa-Id': String(id) });
+}
+
+function empresaIdPagarParaAcao(empresaId) {
+  if (empresaId != null && Number.isSafeInteger(Number(empresaId)) && Number(empresaId) > 0) {
+    return Number(empresaId);
+  }
+  if (
+    typeof financeiroEscopoEmpresa !== 'undefined'
+    && financeiroEscopoEmpresa !== 'todas'
+    && Number.isSafeInteger(Number(financeiroEscopoEmpresa))
+  ) {
+    return Number(financeiroEscopoEmpresa);
+  }
+  return null;
+}
+
+function nomeEmpresaPagar(conta) {
+  return conta?.empresa_nome
+    || (typeof nomeEmpresaFinanceiro === 'function' ? nomeEmpresaFinanceiro(conta?.empresa_id) : '');
+}
+
+function mensagemErroMcfPagar(response, dados) {
+  if (response.status === 401) return 'Sessão expirada. Faça login novamente.';
+  if (response.status === 403) return dados.error || 'Sem permissão para esta operação.';
+  if (response.status === 409) {
+    if (dados.idempotente || /idempot/i.test(String(dados.error || ''))) {
+      return dados.error || 'Conflito de idempotência: operação já processada com dados divergentes.';
+    }
+    return dados.error || 'Conflito ao processar a operação.';
+  }
+  return dados.error || dados.message || 'Erro na operação de Contas a Pagar.';
+}
 
 // Contas a Pagar
 function renderContasPagar(periodo) {
@@ -15,60 +72,80 @@ function renderContasPagar(periodo) {
   if (!conteudo) return;
 
   conteudo.innerHTML = `
-    <div class="financeiro-filtros">
-      <div class="financeiro-filtro-grupo">
-        <label for="filtroStatusPagar">Status:</label>
-        <select id="filtroStatusPagar" class="form-control">
-          <option value="todos">Todos</option>
-          <option value="aberto">Aberto</option>
-          <option value="parcial">Parcial</option>
-          <option value="quitada">Quitada</option>
-          <option value="vencido">Vencido</option>
-          <option value="cancelada">Cancelada</option>
-        </select>
+    <section class="financeiro-pagar" aria-labelledby="financeiroPagarTitulo">
+      <header class="financeiro-pagar-cabecalho">
+        <div>
+          <span class="financeiro-pagar-eyebrow">OBRIGAÇÕES FINANCEIRAS · MCF</span>
+          <h2 id="financeiroPagarTitulo">Contas a Pagar</h2>
+          <p>Títulos, vencimentos e pagamentos registrados no escopo empresarial selecionado.</p>
+        </div>
+      </header>
+
+      <section class="financeiro-pagar-filtros" aria-label="Filtros e ações de Contas a Pagar">
+        <div class="financeiro-pagar-campo financeiro-pagar-campo--fornecedor">
+          <label for="filtroFornecedorPagar">Buscar fornecedor ou título</label>
+          <input
+            type="search"
+            id="filtroFornecedorPagar"
+            class="form-control"
+            placeholder="Fornecedor, documento ou descrição"
+            autocomplete="off"
+          >
+        </div>
+
+        <div class="financeiro-pagar-campo financeiro-pagar-campo--status">
+          <label for="filtroStatusPagar">Status</label>
+          <select id="filtroStatusPagar" class="form-select">
+            <option value="todos">Todos os status</option>
+            <option value="aberto">Aberto</option>
+            <option value="parcial">Parcial</option>
+            <option value="quitada">Quitada</option>
+            <option value="vencido">Vencido</option>
+            <option value="cancelada">Cancelada</option>
+          </select>
+        </div>
+
+        <div class="financeiro-pagar-acoes">
+          <button type="button" class="btn btn-primary" onclick="novaDespesa()">
+            <i class="fas fa-plus" aria-hidden="true"></i> Nova despesa
+          </button>
+          <button type="button" class="btn btn-outline-secondary" onclick="exportarPagar()">
+            <i class="fas fa-download" aria-hidden="true"></i> Exportar
+          </button>
+          ${typeof podeAdministrarFinanceiro === 'function' && podeAdministrarFinanceiro()
+            ? `<button type="button" class="btn btn-light" onclick="executarDryRunReconciliacaoHistorica()">
+                <i class="fas fa-search" aria-hidden="true"></i> Dry-run histórico
+              </button>`
+            : ''}
+        </div>
+      </section>
+
+      <div id="contasPagarStatus" class="financeiro-pagar-status" role="status" aria-live="polite" hidden></div>
+      <div id="contasPagarEstadoVazio" class="financeiro-empty-state financeiro-pagar-vazio" hidden>
+        <span class="financeiro-empty-state__icon" aria-hidden="true"><i class="fas fa-file-invoice-dollar"></i></span>
+        <h3>Nenhum título encontrado</h3>
+        <p>Altere os filtros ou confira o período selecionado no escopo atual.</p>
       </div>
 
-      <div class="financeiro-filtro-grupo">
-        <label for="filtroFornecedorPagar">Fornecedor:</label>
-        <input
-          type="text"
-          id="filtroFornecedorPagar"
-          class="form-control"
-          placeholder="Nome, CPF ou CNPJ do fornecedor"
-        />
+      <div class="financeiro-tabela financeiro-tabela--pagar" id="financeiroTabelaPagar" hidden>
+        <div class="table-responsive">
+          <table id="tabelaPagar">
+            <thead>
+              <tr>
+                <th>Documento</th>
+                <th>Fornecedor / título</th>
+                <th>Vencimento</th>
+                <th class="financeiro-pagar-valor">Valor original</th>
+                <th class="financeiro-pagar-valor">Saldo restante</th>
+                <th>Status</th>
+                <th class="financeiro-pagar-coluna-acoes">Ações</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
       </div>
-
-      <div class="financeiro-acoes">
-        <button class="btn btn-danger" onclick="novaDespesa()">
-          <i class="fas fa-plus"></i> Nova Despesa
-        </button>
-        <button class="btn btn-success" onclick="exportarPagar()">
-          <i class="fas fa-download"></i> Exportar
-        </button>
-      </div>
-    </div>
-
-    <div class="financeiro-tabela">
-      <table id="tabelaPagar">
-        <thead>
-          <tr>
-            <th>Data</th>
-            <th>Vencimento</th>
-            <th>Fornecedor</th>
-            <th>Categoria</th>
-            <th>Descrição</th>
-            <th>Valor</th>
-            <th>Status</th>
-            <th>Ações</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td colspan="8" class="text-center">Carregando...</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    </section>
 
     <div class="modal fade" id="modalNovaDespesa" tabindex="-1" aria-labelledby="modalNovaDespesaLabel" aria-hidden="true">
       <div class="modal-dialog modal-lg">
@@ -232,6 +309,12 @@ function carregarContasPagar(filtros) {
 }
 
 async function carregarContasPagarDados(filtros) {
+  const tbody = document.querySelector('#tabelaPagar tbody');
+  const tabela = document.getElementById('financeiroTabelaPagar');
+  const estadoVazio = document.getElementById('contasPagarEstadoVazio');
+  const estadoStatus = document.getElementById('contasPagarStatus');
+  atualizarEstadoContasPagar('carregando');
+  window.__financeiroPagarState.carregandoLista = true;
   try {
     const params = new URLSearchParams();
     if (filtros.dataInicio) params.set('dataInicio', filtros.dataInicio);
@@ -239,64 +322,192 @@ async function carregarContasPagarDados(filtros) {
     if (filtros.status) params.set('status', filtros.status);
     if (filtros.fornecedor) params.set('fornecedor', filtros.fornecedor);
 
-    const response = await fetch(`/api/contas-pagar?${params.toString()}`, {
-      headers: {
-        'Accept': 'application/json',
-        'Authorization': 'Bearer ' + localStorage.getItem('token')
-      }
+    const endpoint = typeof financeiroEscopoTodasEmpresas === 'function' && financeiroEscopoTodasEmpresas()
+      ? '/api/contas-pagar/multiempresa'
+      : '/api/contas-pagar';
+    const response = await fetch(`${endpoint}?${params.toString()}`, {
+      headers: headersAuthPagar()
     });
-
-    if (response.status === 401) {
-      throw new Error('Sessão expirada. Faça login novamente.');
-    }
-
-    const dados = await response.json();
+    const dados = await response.json().catch(() => ({}));
 
     if (!response.ok) {
-      throw new Error(dados.error || 'Erro ao carregar contas a pagar');
+      throw new Error(mensagemErroMcfPagar(response, dados));
     }
 
-    const tbody = document.querySelector('#tabelaPagar tbody');
-    if (!tbody) return;
+    if (!tbody || !tabela || !estadoVazio || !estadoStatus) return;
 
-    if (dados.success && Array.isArray(dados.contas) && dados.contas.length > 0) {
-      tbody.innerHTML = dados.contas.map(conta => {
+    if (!dados.success || !Array.isArray(dados.contas)) {
+      throw new Error(dados.error || 'A resposta de Contas a Pagar está fora do formato esperado.');
+    }
+    const contas = dados.contas;
+    if (contas.some(conta => !Number.isSafeInteger(Number(conta.id)) || Number(conta.id) <= 0)) {
+      throw new Error('A lista contém um título com identificador inválido.');
+    }
+    window.__financeiroPagarState.ultimaListaContas = contas;
+
+    if (contas.length > 0) {
+      tbody.innerHTML = contas.map(conta => {
         const vencida = ['aberto', 'parcial'].includes(conta.status)
           && conta.data_vencimento
           && conta.data_vencimento < new Date().toISOString().slice(0, 10);
         const statusExibicao = vencida ? 'vencido' : conta.status;
         const podePagar = ['aberto', 'parcial'].includes(conta.status);
+        const podeCancelar = podePagar
+          && typeof podeAdministrarFinanceiro === 'function'
+          && podeAdministrarFinanceiro();
+        const statusClasses = {
+          aberto: 'aberto',
+          parcial: 'parcial',
+          quitada: 'quitada',
+          cancelada: 'cancelada',
+          vencido: 'vencido'
+        };
+        const statusRotulos = {
+          aberto: 'Aberto',
+          parcial: 'Parcial',
+          quitada: 'Quitada',
+          cancelada: 'Cancelada',
+          vencido: 'Vencido'
+        };
+        const statusClasse = statusClasses[statusExibicao] || 'desconhecido';
+        const statusRotulo = statusRotulos[statusExibicao] || 'Status não reconhecido';
+        const id = Number(conta.id);
         return `
-        <tr>
-          <td>${formatarDataPagar(conta.data_emissao)}</td>
-          <td>${formatarDataPagar(conta.data_vencimento)}</td>
-          <td>${escapeHtmlFinanceiro(conta.pessoa_nome || conta.fornecedor_nome || '-')}</td>
-          <td>${escapeHtmlFinanceiro(conta.categoria || '-')}</td>
-          <td>${escapeHtmlFinanceiro(conta.descricao || '')}</td>
-          <td class="font-weight-bold">
-            ${formatarMoedaPagar(conta.valor_restante)}
-            <small class="d-block text-muted">Original: ${formatarMoedaPagar(conta.valor_original)}</small>
-          </td>
-          <td><span class="status-${statusExibicao}">${escapeHtmlFinanceiro(statusExibicao)}</span></td>
-          <td>
-            <button class="btn btn-sm btn-outline-primary" onclick="abrirDetalhesPagar(${conta.id})">
-              <i class="fas fa-eye"></i>
-            </button>
-            ${podePagar ? `<button class="btn btn-sm btn-outline-success" onclick="pagarConta(${conta.id})">
-              <i class="fas fa-check"></i>
-            </button>` : ''}
-          </td>
-        </tr>
-      `}).join('');
+          <tr>
+            <td>
+              <span class="financeiro-pagar-documento">${escapeHtmlFinanceiro(conta.documento || '—')}</span>
+            </td>
+            <td>
+              <span class="financeiro-pagar-fornecedor">${escapeHtmlFinanceiro(conta.pessoa_nome || conta.fornecedor_nome || 'Fornecedor não informado')}</span>
+              <small class="financeiro-pagar-descricao">${escapeHtmlFinanceiro(conta.descricao || 'Título sem descrição')}</small>
+              ${nomeEmpresaPagar(conta) ? `<small class="financeiro-pagar-descricao">${escapeHtmlFinanceiro(nomeEmpresaPagar(conta))}</small>` : ''}
+            </td>
+            <td class="${vencida ? 'financeiro-pagar-vencimento--atrasado' : ''}">${formatarDataPagar(conta.data_vencimento)}</td>
+            <td class="financeiro-pagar-valor">${formatarMoedaPagar(conta.valor_original)}</td>
+            <td class="financeiro-pagar-valor financeiro-pagar-saldo">${formatarMoedaPagar(conta.valor_restante)}</td>
+            <td><span class="financeiro-pagar-status-badge status-${statusClasse}">${statusRotulo}</span></td>
+            <td>
+              <div class="financeiro-pagar-acoes-linha">
+                <button type="button" class="btn btn-sm btn-light financeiro-pagar-acao-detalhes"
+                  aria-label="Consultar detalhes do título ${id}" title="Consultar detalhes"
+                  onclick="abrirDetalhesPagar(${id}, ${Number(conta.empresa_id) || 0})">
+                  <i class="fas fa-eye" aria-hidden="true"></i>
+                </button>
+                ${podePagar ? `<button type="button" class="btn btn-sm btn-success"
+                  aria-label="Registrar pagamento do título ${id}" title="Registrar pagamento"
+                  onclick="pagarConta(${id}, ${Number(conta.empresa_id) || 0})">
+                  <i class="fas fa-money-bill-wave" aria-hidden="true"></i> Pagar
+                </button>` : ''}
+                ${podeCancelar ? `<button type="button" class="btn btn-sm btn-outline-danger"
+                  aria-label="Cancelar título ${id}" title="Cancelar título"
+                  onclick="cancelarContaPagar(${id}, ${Number(conta.empresa_id) || 0})">
+                  <i class="fas fa-ban" aria-hidden="true"></i>
+                </button>` : ''}
+              </div>
+            </td>
+          </tr>
+        `;
+      }).join('');
+      atualizarEstadoContasPagar('dados');
     } else {
-      tbody.innerHTML = '<tr><td colspan="8" class="text-center">Nenhuma conta a pagar encontrada</td></tr>';
+      tbody.innerHTML = '';
+      atualizarEstadoContasPagar('vazio');
     }
   } catch (error) {
     console.error('Erro ao carregar contas a pagar:', error);
-    const tbody = document.querySelector('#tabelaPagar tbody');
-    if (tbody) {
-      tbody.innerHTML = '<tr><td colspan="8" class="text-center text-danger">Erro ao carregar dados</td></tr>';
+    window.__financeiroPagarState.ultimaListaContas = [];
+    if (tbody) tbody.innerHTML = '';
+    if (estadoStatus) {
+      estadoStatus.textContent = `Não foi possível carregar os títulos. ${error.message || 'Tente novamente.'}`;
     }
+    atualizarEstadoContasPagar('erro');
+  } finally {
+    window.__financeiroPagarState.carregandoLista = false;
+  }
+}
+
+function atualizarEstadoContasPagar(estado) {
+  const tabela = document.getElementById('financeiroTabelaPagar');
+  const estadoVazio = document.getElementById('contasPagarEstadoVazio');
+  const estadoStatus = document.getElementById('contasPagarStatus');
+  if (!tabela || !estadoVazio || !estadoStatus) return;
+
+  tabela.hidden = estado !== 'dados';
+  estadoVazio.hidden = estado !== 'vazio';
+  estadoStatus.hidden = !['carregando', 'erro'].includes(estado);
+  estadoStatus.classList.toggle('is-error', estado === 'erro');
+  if (estado === 'carregando') {
+    estadoStatus.innerHTML = '<span class="spinner-border spinner-border-sm" aria-hidden="true"></span> Carregando títulos MCF...';
+  }
+}
+
+function exportarPagar() {
+  const contas = window.__financeiroPagarState.ultimaListaContas || [];
+  if (!contas.length) {
+    alert('Não há contas para exportar. Carregue a lista primeiro.');
+    return;
+  }
+  const cabecalho = [
+    'id', 'empresa_id', 'empresa_nome', 'data_emissao', 'data_vencimento', 'fornecedor', 'categoria',
+    'descricao', 'valor_original', 'valor_restante', 'status', 'documento', 'origem'
+  ];
+  const linhas = contas.map((c) => [
+    c.id,
+    c.empresa_id || '',
+    (nomeEmpresaPagar(c) || '').replace(/"/g, '""'),
+    c.data_emissao || '',
+    c.data_vencimento || '',
+    (c.pessoa_nome || c.fornecedor_nome || '').replace(/"/g, '""'),
+    (c.categoria || '').replace(/"/g, '""'),
+    (c.descricao || '').replace(/"/g, '""'),
+    c.valor_original,
+    c.valor_restante,
+    c.status || '',
+    (c.documento || '').replace(/"/g, '""'),
+    c.origem || ''
+  ].map((v) => `"${v}"`).join(';'));
+  const csv = [cabecalho.join(';'), ...linhas].join('\n');
+  const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `contas-pagar-mcf-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function executarDryRunReconciliacaoHistorica() {
+  if (typeof podeAdministrarFinanceiro === 'function' && !podeAdministrarFinanceiro()) {
+    alert('Apenas administradores podem executar o dry-run histórico.');
+    return;
+  }
+  try {
+    const response = await fetch('/api/contas-pagar/reconciliacao-historica/dry-run', {
+      headers: headersAuthPagar()
+    });
+    const dados = await response.json().catch(() => ({}));
+    if (!response.ok || !dados.success) {
+      throw new Error(mensagemErroMcfPagar(response, dados));
+    }
+    const gerais = dados.totais_empresa?.gerais || {};
+    const porAcao = dados.totais_empresa?.por_acao || {};
+    const resumo = [
+      `Dry-run somente leitura (empresa ${dados.empresa_id}).`,
+      `Candidatos: ${gerais.quantidade || 0}`,
+      `Valor conhecido: ${formatarMoedaPagar(gerais.valor_conhecido || 0)}`,
+      `Vincular: ${porAcao.vincular?.quantidade || 0}`,
+      `Criar título: ${porAcao.criar_titulo?.quantidade || 0}`,
+      `Ignorar: ${porAcao.ignorar?.quantidade || 0}`,
+      `Revisão manual: ${porAcao.revisao_manual?.quantidade || 0}`,
+      `Projeções excluídas do universo: ${dados.meta?.projecoes_excluidas_do_universo || 0}`,
+      '',
+      'Nenhuma escrita foi executada. Detalhes no console.'
+    ].join('\n');
+    console.info('[MCF-02.2 dry-run]', dados);
+    alert(resumo);
+  } catch (error) {
+    console.error('Erro no dry-run histórico:', error);
+    alert(error.message || 'Falha no dry-run.');
   }
 }
 
@@ -386,6 +597,7 @@ async function novaDespesa() {
   window.__financeiroPagarState.criacaoIdempotencyKey = null;
   if (observacao) observacao.value = '';
   if (erro) erro.innerText = '';
+  prepararSeletorEmpresaNovaDespesa();
 
   await carregarCategoriasDespesa();
 
@@ -394,12 +606,65 @@ async function novaDespesa() {
   }
 }
 
+function prepararSeletorEmpresaNovaDespesa() {
+  const formulario = document.getElementById('formNovaDespesa');
+  const modalBody = formulario?.querySelector('.modal-body');
+  if (!formulario || !modalBody) return;
+
+  let grupo = document.getElementById('despesaEmpresaAcaoGrupo');
+  if (!grupo) {
+    grupo = document.createElement('div');
+    grupo.id = 'despesaEmpresaAcaoGrupo';
+    grupo.className = 'mb-3';
+    const label = document.createElement('label');
+    label.className = 'form-label';
+    label.htmlFor = 'despesaEmpresaAcao';
+    label.textContent = 'Empresa proprietária';
+    const select = document.createElement('select');
+    select.id = 'despesaEmpresaAcao';
+    select.className = 'form-select';
+    select.required = true;
+    grupo.append(label, select);
+    modalBody.prepend(grupo);
+  }
+
+  const select = document.getElementById('despesaEmpresaAcao');
+  if (!select) return;
+  select.replaceChildren();
+  const allCompanies = typeof financeiroEscopoTodasEmpresas === 'function'
+    && financeiroEscopoTodasEmpresas();
+  const empresas = typeof financeiroEmpresasAutorizadas !== 'undefined'
+    && Array.isArray(financeiroEmpresasAutorizadas)
+    ? financeiroEmpresasAutorizadas
+    : [];
+  if (allCompanies) {
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = 'Selecione uma empresa para esta despesa';
+    select.appendChild(placeholder);
+    empresas.forEach((empresa) => {
+      const option = document.createElement('option');
+      option.value = String(Number(empresa.id));
+      option.textContent = empresa.nome_fantasia || empresa.razao_social || `Empresa #${empresa.id}`;
+      select.appendChild(option);
+    });
+    grupo.hidden = false;
+    select.value = '';
+  } else {
+    const empresaId = empresaIdPagarParaAcao();
+    const option = document.createElement('option');
+    option.value = empresaId ? String(empresaId) : '';
+    option.textContent = nomeEmpresaFinanceiro(empresaId) || 'Empresa selecionada';
+    select.appendChild(option);
+    grupo.hidden = true;
+    select.value = option.value;
+  }
+}
+
 async function carregarCategoriasDespesa() {
   try {
     const response = await fetch(`${API_URL}/categorias?tipo=despesa`, {
-      headers: {
-        'Authorization': 'Bearer ' + localStorage.getItem('token')
-      }
+      headers: headersAuthPagar()
     });
 
     const categorias = await response.json();
@@ -429,6 +694,15 @@ async function salvarNovaDespesa(event) {
   try {
     const erroEl = document.getElementById('erroNovaDespesa');
     if (erroEl) erroEl.innerText = '';
+    const empresaEscolhida = typeof financeiroEscopoTodasEmpresas === 'function'
+      && financeiroEscopoTodasEmpresas()
+      ? document.getElementById('despesaEmpresaAcao')?.value
+      : undefined;
+    const empresaIdAcao = empresaIdPagarParaAcao(empresaEscolhida);
+    if (!empresaIdAcao) {
+      if (erroEl) erroEl.innerText = 'Selecione a empresa proprietária desta despesa.';
+      return;
+    }
 
     const payload = {
       descricao: (document.getElementById('despesaDescricao')?.value || '').trim(),
@@ -487,31 +761,34 @@ async function salvarNovaDespesa(event) {
 
     const response = await fetch('/api/contas-pagar/lote', {
       method: 'POST',
-      headers: {
+      headers: headersAuthPagarDaEmpresa(empresaIdAcao, {
         'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + localStorage.getItem('token'),
         'Idempotency-Key': window.__financeiroPagarState.criacaoIdempotencyKey
-      },
+      }),
       body: JSON.stringify({
         ...payload,
         parcelas,
         idempotency_key: window.__financeiroPagarState.criacaoIdempotencyKey
       })
     });
-    const result = await response.json();
+    const result = await response.json().catch(() => ({}));
     if (!response.ok || !result.success) {
-      throw new Error(result.error || 'Erro ao cadastrar despesas.');
+      throw new Error(mensagemErroMcfPagar(response, result));
     }
+    const replay = result.idempotente === true;
     window.__financeiroPagarState.criacaoIdempotencyKey = null;
 
     if (window.__financeiroPagarState.modalNovaDespesaInstance) {
       window.__financeiroPagarState.modalNovaDespesaInstance.hide();
     }
 
+    const msgOk = replay
+      ? 'Despesa já registrada (replay idempotente).'
+      : 'Despesa cadastrada com sucesso.';
     if (typeof showNotification === 'function') {
-      showNotification('Despesa cadastrada com sucesso.', 'success');
+      showNotification(msgOk, 'success');
     } else {
-      alert('Despesa cadastrada com sucesso.');
+      alert(msgOk);
     }
 
     const periodo = obterPeriodoFinanceiro();
@@ -561,22 +838,21 @@ function inicializarModalPagamento() {
   }
 }
 
-function pagarConta(id) {
-  abrirModalPagamento(id);
+function pagarConta(id, empresaId) {
+  abrirModalPagamento(id, empresaId);
 }
 
-async function abrirModalPagamento(id) {
+async function abrirModalPagamento(id, empresaId) {
   try {
+    const empresaIdAcao = empresaIdPagarParaAcao(empresaId);
     const response = await fetch(`/api/contas-pagar/${id}/detalhes`, {
-      headers: {
-        'Authorization': 'Bearer ' + localStorage.getItem('token')
-      }
+      headers: headersAuthPagarDaEmpresa(empresaIdAcao)
     });
 
-    const dados = await response.json();
+    const dados = await response.json().catch(() => ({}));
 
     if (!response.ok || dados.error || !['aberto', 'parcial'].includes(dados.status)) {
-      throw new Error(dados.error || 'Erro ao carregar dados da conta.');
+      throw new Error(mensagemErroMcfPagar(response, dados) || 'Erro ao carregar dados da conta.');
     }
 
     window.__financeiroPagarState.contaPagamentoAtual = dados;
@@ -641,11 +917,10 @@ async function processarPagamento(event) {
     const idempotencyKey = window.__financeiroPagarState.pagamentoIdempotencyKey;
     const response = await fetch(`/api/contas-pagar/${conta.id}/baixar`, {
       method: 'POST',
-      headers: {
+      headers: headersAuthPagarDaEmpresa(conta.empresa_id, {
         'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + localStorage.getItem('token'),
         'Idempotency-Key': idempotencyKey
-      },
+      }),
       body: JSON.stringify({
         valor_pago: valor,
         forma_pagamento: formaPagamento,
@@ -653,10 +928,10 @@ async function processarPagamento(event) {
       })
     });
 
-    const result = await response.json();
+    const result = await response.json().catch(() => ({}));
 
     if (!response.ok || !result.success) {
-      throw new Error(result.error || 'Erro ao processar pagamento.');
+      throw new Error(mensagemErroMcfPagar(response, result));
     }
     window.__financeiroPagarState.pagamentoIdempotencyKey = null;
 
@@ -664,7 +939,9 @@ async function processarPagamento(event) {
       window.__financeiroPagarState.modalPagamentoInstance.hide();
     }
 
-    alert('Pagamento realizado com sucesso!');
+    alert(result.idempotente
+      ? 'Pagamento já registrado (replay idempotente).'
+      : 'Pagamento realizado com sucesso!');
 
     const periodo = obterPeriodoFinanceiro();
     carregarContasPagar(coletarFiltrosPagar(periodo));
@@ -683,7 +960,7 @@ async function baixarPagamento(id) {
   return pagarConta(id);
 }
 
-function abrirDetalhesPagar(id) {
+function abrirDetalhesPagar(id, empresaId) {
   inicializarModalDetalhesPagamento();
 
   const body = document.getElementById('modalDetalhesFinanceiroBody');
@@ -702,21 +979,25 @@ function abrirDetalhesPagar(id) {
   }
 
   fetch(`/api/contas-pagar/${id}/detalhes`, {
-    headers: {
-      'Authorization': 'Bearer ' + localStorage.getItem('token')
-    }
+    headers: headersAuthPagarDaEmpresa(empresaIdPagarParaAcao(empresaId))
   })
-    .then(response => response.json())
+    .then(async (response) => {
+      const dados = await response.json().catch(() => ({}));
+      if (!response.ok || dados.error) {
+        throw new Error(mensagemErroMcfPagar(response, dados));
+      }
+      return dados;
+    })
     .then(dados => {
-      if (!dados || dados.error) {
-        throw new Error(dados.error || 'Falha ao carregar detalhes da conta a pagar.');
+      if (!dados) {
+        throw new Error('Falha ao carregar detalhes da conta a pagar.');
       }
 
       const adminAcoes = podeAdministrarFinanceiro()
         && ['aberto', 'parcial'].includes(dados.status) ? `
         <hr>
         <div class="d-flex gap-2 justify-content-end flex-wrap">
-          <button class="btn btn-warning" onclick="cancelarContaPagar(${dados.id})">
+          <button class="btn btn-warning" onclick="cancelarContaPagar(${dados.id}, ${Number(dados.empresa_id) || Number(empresaId) || 0})">
             <i class="fas fa-ban"></i> Cancelar título
           </button>
         </div>
@@ -840,6 +1121,9 @@ function abrirDetalhesPagar(id) {
           <div class="col-12 col-md-6">
             <strong>Fornecedor:</strong> ${escapeHtmlFinanceiro(dados.pessoa_nome || dados.fornecedor_nome || '-')}
           </div>
+          <div class="col-12 col-md-6">
+            <strong>Empresa:</strong> ${escapeHtmlFinanceiro(nomeEmpresaPagar(dados) || '')}
+          </div>
 
           <div class="col-12 col-md-6">
             <strong>Documento:</strong> ${escapeHtmlFinanceiro(dados.documento || compra?.numero_nf || '-')}
@@ -851,15 +1135,17 @@ function abrirDetalhesPagar(id) {
           </div>
 
           <div class="col-12 col-md-6">
-            <strong>Data Movimento:</strong> ${formatarDataPagar(dados.data_movimento)}
+            <strong>Emissão:</strong> ${formatarDataPagar(dados.data_emissao || dados.data_movimento)}
           </div>
 
           <div class="col-12 col-md-6">
-            <strong>Vencimento:</strong> ${dados.vencimento ? formatarDataPagar(dados.vencimento) : '-'}
+            <strong>Vencimento:</strong> ${formatarDataPagar(dados.data_vencimento || dados.vencimento)}
           </div>
 
           <div class="col-12 col-md-6">
-            <strong>Data Pagamento:</strong> ${dados.baixado_em ? formatarDataPagar(dados.baixado_em) : '-'}
+            <strong>Último pagamento:</strong> ${(dados.pagamentos && dados.pagamentos.length)
+              ? formatarDataPagar(dados.pagamentos[dados.pagamentos.length - 1].data_pagamento)
+              : '-'}
           </div>
 
           <div class="col-12 col-md-6">
@@ -901,34 +1187,42 @@ function abrirDetalhesPagar(id) {
     });
 }
 
-async function cancelarContaPagar(id) {
+async function cancelarContaPagar(id, empresaId) {
   const motivo = prompt('Informe o motivo do cancelamento do título:');
   if (!motivo || !motivo.trim()) return;
   if (!confirm('Cancelar este título? Pagamentos já registrados serão preservados.')) return;
 
-  const chavesCancelamento = window.__financeiroPagarState.cancelamentoIdempotencyKeys;
-  if (!chavesCancelamento[id]) {
-    chavesCancelamento[id] = gerarChaveIdempotenciaPagar();
+  const empresaIdAcao = empresaIdPagarParaAcao(empresaId);
+  if (!empresaIdAcao) {
+    alert('Não foi possível identificar a empresa proprietária deste título.');
+    return;
   }
-  const idempotencyKey = chavesCancelamento[id];
+  const chavesCancelamento = window.__financeiroPagarState.cancelamentoIdempotencyKeys;
+  const chaveCancelamento = `${empresaIdAcao}:${id}`;
+  if (!chavesCancelamento[chaveCancelamento]) {
+    chavesCancelamento[chaveCancelamento] = gerarChaveIdempotenciaPagar();
+  }
+  const idempotencyKey = chavesCancelamento[chaveCancelamento];
   try {
     const response = await fetch(`/api/contas-pagar/${id}/cancelar`, {
       method: 'POST',
-      headers: {
+      headers: headersAuthPagarDaEmpresa(empresaIdAcao, {
         'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + localStorage.getItem('token'),
         'Idempotency-Key': idempotencyKey
-      },
+      }),
       body: JSON.stringify({
         motivo: motivo.trim(),
         idempotency_key: idempotencyKey
       })
     });
-    const result = await response.json();
+    const result = await response.json().catch(() => ({}));
     if (!response.ok || !result.success) {
-      throw new Error(result.error || 'Erro ao cancelar título.');
+      throw new Error(mensagemErroMcfPagar(response, result));
     }
-    delete chavesCancelamento[id];
+    delete chavesCancelamento[chaveCancelamento];
+    if (result.idempotente) {
+      alert('Cancelamento já registrado (replay idempotente).');
+    }
 
     if (window.__financeiroPagarState.modalDetalhesPagamento) {
       window.__financeiroPagarState.modalDetalhesPagamento.hide();
@@ -955,8 +1249,26 @@ function coletarFiltrosPagar(periodo) {
 
 function formatarDataPagar(data) {
   if (!data) return '-';
-  const d = new Date(data);
+  const dataTexto = String(data);
+  const dataSemHorario = dataTexto.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  const d = dataSemHorario
+    ? new Date(
+      Number(dataSemHorario[1]),
+      Number(dataSemHorario[2]) - 1,
+      Number(dataSemHorario[3])
+    )
+    : new Date(data);
   if (Number.isNaN(d.getTime())) return data;
+  if (
+    dataSemHorario
+    && (
+      d.getFullYear() !== Number(dataSemHorario[1])
+      || d.getMonth() !== Number(dataSemHorario[2]) - 1
+      || d.getDate() !== Number(dataSemHorario[3])
+    )
+  ) {
+    return data;
+  }
   return d.toLocaleDateString('pt-BR');
 }
 
@@ -1031,3 +1343,5 @@ window.abrirDetalhesPagar = abrirDetalhesPagar;
 window.pagarConta = pagarConta;
 window.cancelarContaPagar = cancelarContaPagar;
 window.filtrarPagar = filtrarPagar;
+window.exportarPagar = exportarPagar;
+window.executarDryRunReconciliacaoHistorica = executarDryRunReconciliacaoHistorica;

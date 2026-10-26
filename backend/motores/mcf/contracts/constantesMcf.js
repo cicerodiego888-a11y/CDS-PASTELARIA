@@ -27,7 +27,11 @@ const ERROS_MCF = Object.freeze({
   BAIXA_EXCEDE_RESTANTE: 'MCF_BAIXA_EXCEDE_RESTANTE',
   TITULO_CANCELADO: 'MCF_TITULO_CANCELADO',
   TITULO_QUITADO: 'MCF_TITULO_QUITADO',
-  INCONSISTENCIA: 'MCF_INCONSISTENCIA'
+  INCONSISTENCIA: 'MCF_INCONSISTENCIA',
+  /** MCF-02.1 — mutação direta da projeção legado bloqueada */
+  PROJECAO_IMUTAVEL: 'MCF_PROJECAO_IMUTAVEL',
+  /** MCF-02.1 — criação de despesa/AP deve usar /api/contas-pagar */
+  USE_CONTAS_PAGAR: 'MCF_USE_CONTAS_PAGAR'
 });
 
 function erroMcf(code, message, statusCode = 400, extra = {}) {
@@ -49,7 +53,7 @@ module.exports = {
   round2,
   VERSAO_MCF: Object.freeze({
     MOTOR: 'MCF',
-    SPRINT: 'MCF-01',
-    DESCRICAO: 'Fundação Contas a Pagar'
+    SPRINT: 'MCF-02.5',
+    DESCRICAO: 'Verificação final pré-migração (atomicidade, identidade, plano de proteção)'
   })
 };

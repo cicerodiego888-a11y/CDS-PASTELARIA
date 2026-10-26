@@ -221,6 +221,11 @@ html, body {
     line-height: 1.3;
 }
 
+.cds-empresa-seletor__erro {
+    color: #fecaca;
+    line-height: 1.3;
+}
+
 body.sidebar-collapsed .cds-empresa-seletor {
     display: none;
 }
@@ -1145,4 +1150,3 @@ a,
 #pedClienteSugestoes .list-group-item-action:focus:not(.active) .ped-sugestao-meta {
   color: #495057;
 }
-

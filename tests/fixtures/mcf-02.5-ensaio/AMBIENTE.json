@@ -1,0 +1,7 @@
+{
+  "ambiente_id": "MCF-02.5-ENSAIO-PRE-MIG",
+  "db_path": "C:\\projetos\\CDS-SISTEMAS PASTELARIA\\tests\\fixtures\\mcf-02.5-ensaio\\ensaio-pre-mig.sqlite",
+  "backup_path": "C:\\projetos\\CDS-SISTEMAS PASTELARIA\\tests\\fixtures\\mcf-02.5-ensaio\\ensaio-pre-mig.backup.sqlite",
+  "criado_em": "2026-10-25T20:06:05.616Z",
+  "aviso": "COPIA_ISOLADA_TESTE — nao operacional / nao cliente / nao producao"
+}

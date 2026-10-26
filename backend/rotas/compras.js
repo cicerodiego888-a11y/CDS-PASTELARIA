@@ -2102,6 +2102,8 @@ router.post('/:id/cancelar', async (req, res) => {
         };
 
         const finalizarCancelamento = () => {
+          // MCF-02.1 — projeções mcf_compatibilidade são sincronizadas pelo ContasPagarService
+          // (já canceladas acima via cancelarNaTransacaoAtual). Não tocá-las aqui.
           db.run(`
             UPDATE financeiro
             SET status = 'cancelado',
@@ -2109,6 +2111,8 @@ router.post('/:id/cancelar', async (req, res) => {
             WHERE compra_id = ?
               AND (empresa_id = ? OR empresa_id IS NULL)
               AND status NOT IN ('pago', 'recebido')
+              AND COALESCE(origem, '') <> 'mcf_compatibilidade'
+              AND COALESCE(referencia_tipo, '') <> 'contas_pagar_mcf'
           `, [id, empresaCompraId], (finErr) => {
             if (finErr) {
               db.run('ROLLBACK');

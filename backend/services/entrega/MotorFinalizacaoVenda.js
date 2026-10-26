@@ -180,6 +180,16 @@ async function _finalizarPrestacaoInterno({ vendaId, body = {}, req = {}, contex
     throw err;
   }
 
+  const {
+    resolverEmpresaDaOrigemFinanceira
+  } = require('../financeiro/FinanceiroEmpresaContextoService');
+  resolverEmpresaDaOrigemFinanceira({ venda });
+  const empresaIdFin = resolverEmpresaDaOrigemFinanceira({
+    venda,
+    operacao: req,
+    caixa: req.caixaSessao || req.caixa_sessao
+  });
+
   await audit(EntregaAuditoriaEventos.PRESTACAO_INICIADA, vendaId, {
     pagamento_previsto: venda.pagamento_previsto
   }, contextoAuditoria);
@@ -441,14 +451,6 @@ async function _finalizarPrestacaoInterno({ vendaId, body = {}, req = {}, contex
     await gravarRecebimentosAsync(vendaId, recebimentos);
 
     // Financeiro
-    const {
-      resolverEmpresaDaOrigemFinanceira
-    } = require('../financeiro/FinanceiroEmpresaContextoService');
-    const empresaIdFin = resolverEmpresaDaOrigemFinanceira({
-      venda,
-      caixa: req.caixaSessao || req.caixa_sessao
-    });
-
     await run(`DELETE FROM financeiro WHERE venda_id = ? AND origem = 'venda'`, [vendaId]);
     await run(
       `
@@ -479,10 +481,10 @@ async function _finalizarPrestacaoInterno({ vendaId, body = {}, req = {}, contex
         `
           INSERT INTO contas_receber (
             venda_id, cliente_id, numero_parcela, total_parcelas, valor_parcela,
-            valor_restante, data_vencimento, status
-          ) VALUES (?, ?, 1, 1, ?, ?, date('now', '+30 day'), 'aberto')
+            valor_restante, data_vencimento, status, empresa_id
+          ) VALUES (?, ?, 1, 1, ?, ?, date('now', '+30 day'), 'aberto', ?)
         `,
-        [vendaId, venda.cliente_id, totalNum, totalNum]
+          [vendaId, venda.cliente_id, totalNum, totalNum, empresaIdFin]
       );
       await run(
         `UPDATE clientes SET credito_atual = COALESCE(credito_atual, 0) + ? WHERE id = ?`,

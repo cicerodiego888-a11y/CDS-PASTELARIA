@@ -2,7 +2,7 @@ function isModoFiscalRelatorio(modoFiscal) {
   return modoFiscal === '1' || modoFiscal === true || modoFiscal === 'true';
 }
 
-const FILTRO_VENDA_VALIDA = `(v.status IS NULL OR v.status != 'cancelada')`;
+const FILTRO_VENDA_VALIDA = `(COALESCE(v.cancelada, 0) != 1 AND LOWER(COALESCE(v.status, '')) != 'cancelada')`;
 
 function getExprValorVenda(modoFiscal, alias = 'v') {
   if (isModoFiscalRelatorio(modoFiscal)) {

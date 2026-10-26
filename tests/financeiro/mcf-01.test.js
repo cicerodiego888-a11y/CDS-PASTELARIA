@@ -174,7 +174,8 @@ function request(base, method, urlPath, body, headers = {}) {
 describe('MCF-01 — Fundação Contas a Pagar', () => {
   it('T01 — versão e schema', async () => {
     const ctx = await setup();
-    assert.equal(VERSAO_MCF.SPRINT, 'MCF-01');
+    assert.equal(VERSAO_MCF.MOTOR, 'MCF');
+    assert.match(String(VERSAO_MCF.SPRINT), /^MCF-/);
     const tabs = await new Promise((resolve, reject) => {
       ctx.db.all(
         `SELECT name FROM sqlite_master WHERE type='table' AND name IN ('contas_pagar','contas_pagar_pagamentos')`,

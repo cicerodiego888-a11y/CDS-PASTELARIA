@@ -179,7 +179,11 @@ db.get('SELECT * FROM vendas WHERE id = ?', [id], (err, venda) => {
             return;
           }
 
-          cancelarFinanceiroVenda(id, { gerenciarTransacao: false })
+          cancelarFinanceiroVenda(id, {
+            venda,
+            empresaId: req.empresaId,
+            gerenciarTransacao: false
+          })
             .then(() => {
               db.run(`
                 INSERT INTO financeiro (
@@ -419,7 +423,11 @@ db.get(
                         );
 
                         const financeiroStarted = process.hrtime.bigint();
-                        cancelarFinanceiroVenda(vendaId, { gerenciarTransacao: false })
+                        cancelarFinanceiroVenda(vendaId, {
+                          venda,
+                          empresaId: req.empresaId,
+                          gerenciarTransacao: false
+                        })
                           .then(() => {
                             logFiscalRuntime('CANCELAMENTO_COMERCIAL', {
                               correlationId,

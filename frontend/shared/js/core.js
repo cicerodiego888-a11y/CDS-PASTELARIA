@@ -1168,7 +1168,11 @@ function inicializarShellModulo(options = {}) {
                     inicializarSidebarToggle();
                 }
                 if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.inicializar === 'function') {
-                    CdsEmpresaContexto.inicializar();
+                    try {
+                        await CdsEmpresaContexto.inicializar();
+                    } catch (_errEmpresaCtx) {
+                        console.warn('Contexto empresarial: falha ao inicializar seletor.', _errEmpresaCtx);
+                    }
                 }
 
                 currentPage = defaultPage;
@@ -1217,6 +1221,9 @@ $.ajaxSetup({
         const token = localStorage.getItem('token');
         if (token) {
             xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+        }
+        if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.anexarHeaderXhr === 'function') {
+            CdsEmpresaContexto.anexarHeaderXhr(xhr);
         }
     }
 });

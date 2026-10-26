@@ -1,0 +1,255 @@
+{
+  "pre_validacao": {
+    "lote_id": "lote-MCF-02.4-ENSAIO-CONTROLADO-1-1792958765628",
+    "fingerprint": "2:vincular:alta:1:100|3:criar_titulo:nenhuma::200|4:ignorar:nenhuma::20|6:revisao_manual:media:2:99|8:revisao_manual:nenhuma::40",
+    "automaticos": 3,
+    "revisao_manual": 2,
+    "cobertura": {
+      "despesas_totais_empresa": 6,
+      "projecoes_excluidas": 1,
+      "ja_vinculados_compat": 1,
+      "candidatos_elegiveis": 5,
+      "formula": "despesas_totais - projecoes - demais_ja_no_compat ≈ candidatos (aprox.)"
+    },
+    "totais": {
+      "por_acao": {
+        "vincular": {
+          "quantidade": 1,
+          "valor_conhecido": 100,
+          "valor_nao_verificavel_qtd": 0
+        },
+        "criar_titulo": {
+          "quantidade": 1,
+          "valor_conhecido": 200,
+          "valor_nao_verificavel_qtd": 0
+        },
+        "ignorar": {
+          "quantidade": 1,
+          "valor_conhecido": 20,
+          "valor_nao_verificavel_qtd": 0
+        },
+        "revisao_manual": {
+          "quantidade": 2,
+          "valor_conhecido": 139,
+          "valor_nao_verificavel_qtd": 0
+        }
+      },
+      "gerais": {
+        "quantidade": 5,
+        "valor_conhecido": 459,
+        "valor_nao_verificavel_qtd": 0
+      }
+    },
+    "indicadores_antes": {
+      "empresa_id": 1,
+      "mcf_abertos": {
+        "quantidade": 3,
+        "valor_original": 480,
+        "saldo_confirmado": 380
+      },
+      "mcf_quitados": {
+        "quantidade": 0,
+        "valor_original": 0
+      },
+      "mcf_cancelados": {
+        "quantidade": 0,
+        "valor_original": 0
+      },
+      "mcf_pagamentos": {
+        "quantidade": 1,
+        "valor": 100
+      },
+      "legado_historico_aberto_sem_projecao": {
+        "quantidade": 3,
+        "valor_conhecido": 399,
+        "nota": "Valor do lançamento; saldo residual não verificável só pelo status"
+      },
+      "projecoes_compat": {
+        "quantidade": 1,
+        "valor": 300,
+        "vinculos": 1,
+        "nota": "Não devem ser somadas aos títulos MCF nos indicadores"
+      },
+      "total_a_pagar_sem_dupla_contagem": 779
+    }
+  },
+  "snapshot_antes": {
+    "indicadores": {
+      "empresa_id": 1,
+      "mcf_abertos": {
+        "quantidade": 3,
+        "valor_original": 480,
+        "saldo_confirmado": 380
+      },
+      "mcf_quitados": {
+        "quantidade": 0,
+        "valor_original": 0
+      },
+      "mcf_cancelados": {
+        "quantidade": 0,
+        "valor_original": 0
+      },
+      "mcf_pagamentos": {
+        "quantidade": 1,
+        "valor": 100
+      },
+      "legado_historico_aberto_sem_projecao": {
+        "quantidade": 3,
+        "valor_conhecido": 399,
+        "nota": "Valor do lançamento; saldo residual não verificável só pelo status"
+      },
+      "projecoes_compat": {
+        "quantidade": 1,
+        "valor": 300,
+        "vinculos": 1,
+        "nota": "Não devem ser somadas aos títulos MCF nos indicadores"
+      },
+      "total_a_pagar_sem_dupla_contagem": 779
+    },
+    "contas_pagar": 3,
+    "pagamentos_qtd": 1,
+    "pagamentos_valor": 100,
+    "vinculos_compat": 1,
+    "financeiro_qtd": 6,
+    "dry_run_pos": {
+      "fingerprint": "2:vincular:alta:1:100|3:criar_titulo:nenhuma::200|4:ignorar:nenhuma::20|6:revisao_manual:media:2:99|8:revisao_manual:nenhuma::40",
+      "candidatos": 5,
+      "por_acao": {
+        "vincular": {
+          "quantidade": 1,
+          "valor_conhecido": 100,
+          "valor_nao_verificavel_qtd": 0
+        },
+        "criar_titulo": {
+          "quantidade": 1,
+          "valor_conhecido": 200,
+          "valor_nao_verificavel_qtd": 0
+        },
+        "ignorar": {
+          "quantidade": 1,
+          "valor_conhecido": 20,
+          "valor_nao_verificavel_qtd": 0
+        },
+        "revisao_manual": {
+          "quantidade": 2,
+          "valor_conhecido": 139,
+          "valor_nao_verificavel_qtd": 0
+        }
+      }
+    }
+  },
+  "interrupcao": {
+    "lote_id": "lote-MCF-02.4-ENSAIO-CONTROLADO-1-1792958765628",
+    "status": "interrupido",
+    "processados_nesta_execucao": 1,
+    "pendentes_restantes": 2,
+    "resultados": [
+      {
+        "financeiro_id": 2,
+        "status": "ok",
+        "conta_pagar_id": 1
+      }
+    ]
+  },
+  "retomada": {
+    "lote_id": "lote-MCF-02.4-ENSAIO-CONTROLADO-1-1792958765628",
+    "status": "concluido",
+    "processados_nesta_execucao": 2,
+    "pendentes_restantes": 0,
+    "resultados": [
+      {
+        "financeiro_id": 3,
+        "status": "ok",
+        "conta_pagar_id": 4
+      },
+      {
+        "financeiro_id": 4,
+        "status": "ok"
+      }
+    ]
+  },
+  "snapshot_depois": {
+    "indicadores": {
+      "empresa_id": 1,
+      "mcf_abertos": {
+        "quantidade": 4,
+        "valor_original": 680,
+        "saldo_confirmado": 580
+      },
+      "mcf_quitados": {
+        "quantidade": 0,
+        "valor_original": 0
+      },
+      "mcf_cancelados": {
+        "quantidade": 0,
+        "valor_original": 0
+      },
+      "mcf_pagamentos": {
+        "quantidade": 1,
+        "valor": 100
+      },
+      "legado_historico_aberto_sem_projecao": {
+        "quantidade": 1,
+        "valor_conhecido": 99,
+        "nota": "Valor do lançamento; saldo residual não verificável só pelo status"
+      },
+      "projecoes_compat": {
+        "quantidade": 3,
+        "valor": 600,
+        "vinculos": 3,
+        "nota": "Não devem ser somadas aos títulos MCF nos indicadores"
+      },
+      "total_a_pagar_sem_dupla_contagem": 679
+    },
+    "contas_pagar": 4,
+    "pagamentos_qtd": 1,
+    "pagamentos_valor": 100,
+    "vinculos_compat": 3,
+    "financeiro_qtd": 6,
+    "dry_run_pos": {
+      "fingerprint": "4:ignorar:nenhuma::20|6:revisao_manual:media:2:99|8:revisao_manual:nenhuma::40",
+      "candidatos": 3,
+      "por_acao": {
+        "vincular": {
+          "quantidade": 0,
+          "valor_conhecido": 0,
+          "valor_nao_verificavel_qtd": 0
+        },
+        "criar_titulo": {
+          "quantidade": 0,
+          "valor_conhecido": 0,
+          "valor_nao_verificavel_qtd": 0
+        },
+        "ignorar": {
+          "quantidade": 1,
+          "valor_conhecido": 20,
+          "valor_nao_verificavel_qtd": 0
+        },
+        "revisao_manual": {
+          "quantidade": 2,
+          "valor_conhecido": 139,
+          "valor_nao_verificavel_qtd": 0
+        }
+      }
+    }
+  },
+  "comparacao": {
+    "aprovado": true,
+    "divergencias": [],
+    "delta": {
+      "contas_pagar": 1,
+      "vinculos_compat": 2,
+      "financeiro_qtd": 0,
+      "saldo_mcf": 200
+    }
+  },
+  "auditoria_acoes": [
+    "preparar_lote",
+    "migracao_historica_vincular",
+    "migracao_historica_interrupcao",
+    "migracao_historica_criar",
+    "migracao_historica_ignorar",
+    "migracao_historica_execucao",
+    "migracao_historica_execucao"
+  ]
+}

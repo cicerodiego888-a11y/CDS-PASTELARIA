@@ -7,7 +7,8 @@ const { validarCaixaAberto } = require('../middleware/validarCaixaAberto');
 const { FILTRO_VENDA_VALIDA, isModoFiscalRelatorio } = require('../services/reportFiscalHelpers');
 const {
   sqlExcluirContaVendaCancelada,
-  sqlExcluirFinanceiroVendaCancelada
+  sqlExcluirFinanceiroVendaCancelada,
+  sqlExcluirFinanceiroReceberComContaCanonica
 } = require('../services/vendas/VendaFinanceiroService');
 const {
   middlewareResolverEmpresaFinanceiro,
@@ -17,8 +18,992 @@ const {
   obterMetaEmpresaPorId,
   statusDeErroEmpresa
 } = require('../services/financeiro/FinanceiroEmpresaContextoService');
+const ContasPagarService = require('../motores/mcf/services/ContasPagarService');
+const UsuarioEmpresaService = require('../services/empresas/UsuarioEmpresaService');
+const {
+  ehProjecaoMcfRow,
+  buscarVinculoPorFinanceiroId,
+  erroProjecaoImutavel,
+  sqlExcluirProjecaoMcf
+} = require('../motores/mcf/services/ContasPagarFinanceiroCompatGuard');
 
 const anexarEmpresaFinanceiro = middlewareResolverEmpresaFinanceiro({ db });
+
+async function obterEmpresasAutorizadasFinanceiro(req, res) {
+  if (!req.user || !req.user.id) {
+    res.status(401).json({
+      success: false,
+      error: 'Autenticação obrigatória para consultar o Financeiro.',
+      code: 'USUARIO_OBRIGATORIO'
+    });
+    return null;
+  }
+
+  const empresas = await UsuarioEmpresaService.listarEmpresasPermitidas(req.user, { db });
+  const ids = empresas.map((empresa) => Number(empresa.id));
+  if (ids.length === 0) {
+    res.status(403).json({
+      success: false,
+      error: 'Usuário não possui empresas autorizadas para consultar o Financeiro.',
+      code: 'EMPRESA_NAO_AUTORIZADA'
+    });
+    return null;
+  }
+  if (ids.some((id) => !Number.isSafeInteger(id) || id <= 0) || new Set(ids).size !== ids.length) {
+    throw new Error('A lista de empresas autorizadas possui identificadores inválidos ou duplicados.');
+  }
+  return empresas;
+}
+
+function metadadosEmpresaFinanceiro(empresa) {
+  const empresaId = Number(empresa.id);
+  return {
+    empresa_id: empresaId,
+    empresa_nome: empresa.nome_fantasia || empresa.razao_social || `Empresa #${empresaId}`,
+    empresa_cnpj: empresa.cnpj || null
+  };
+}
+
+router.get('/dashboard/multiempresa', async (req, res) => {
+  if (!req.user || !req.user.id) {
+    return res.status(401).json({
+      success: false,
+      error: 'Autenticação obrigatória para consultar o dashboard financeiro.',
+      code: 'USUARIO_OBRIGATORIO'
+    });
+  }
+
+  try {
+    const empresasAutorizadas = await UsuarioEmpresaService.listarEmpresasPermitidas(req.user, { db });
+    if (empresasAutorizadas.length === 0) {
+      return res.status(403).json({
+        success: false,
+        error: 'Usuário não possui empresas autorizadas para consultar o dashboard.',
+        code: 'EMPRESA_NAO_AUTORIZADA'
+      });
+    }
+
+    let empresasConsultadas = empresasAutorizadas;
+    const empresaSolicitada = req.query.empresaId;
+    if (empresaSolicitada != null && String(empresaSolicitada) !== 'todas') {
+      const empresaId = Number(empresaSolicitada);
+      if (!Number.isSafeInteger(empresaId) || empresaId <= 0) {
+        return res.status(400).json({
+          success: false,
+          error: 'empresaId inválido.',
+          code: 'EMPRESA_ID_INVALIDO'
+        });
+      }
+      empresasConsultadas = empresasAutorizadas.filter((empresa) => Number(empresa.id) === empresaId);
+      if (empresasConsultadas.length === 0) {
+        return res.status(403).json({
+          success: false,
+          error: 'Usuário não está autorizado a consultar esta empresa.',
+          code: 'EMPRESA_NAO_AUTORIZADA',
+          empresa_id: empresaId
+        });
+      }
+    }
+
+    const inicioInformado = req.query.dataInicio;
+    const fimInformado = req.query.dataFim;
+    if ((inicioInformado == null) !== (fimInformado == null)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Informe dataInicio e dataFim juntos.',
+        code: 'PERIODO_INVALIDO'
+      });
+    }
+
+    const dataFim = fimInformado == null ? moment().format('YYYY-MM-DD') : String(fimInformado);
+    const dataInicio = inicioInformado == null
+      ? moment().startOf('month').format('YYYY-MM-DD')
+      : String(inicioInformado);
+    const dataValida = (valor) => {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(valor)) return false;
+      return moment(valor, 'YYYY-MM-DD', true).isValid();
+    };
+    if (!dataValida(dataInicio) || !dataValida(dataFim) || dataInicio > dataFim) {
+      return res.status(400).json({
+        success: false,
+        error: 'Período inválido.',
+        code: 'PERIODO_INVALIDO'
+      });
+    }
+
+    const empresaIds = empresasConsultadas.map((empresa) => Number(empresa.id));
+    const placeholders = empresaIds.map(() => '?').join(', ');
+    const exclusoesFinanceiro = `
+      AND ${sqlExcluirFinanceiroVendaCancelada('f')}
+      AND ${sqlExcluirFinanceiroReceberComContaCanonica('f')}
+      ${sqlExcluirProjecaoMcf('f')}
+    `;
+
+    const movimentosPorDia = await dbAllAsync(`
+      SELECT empresa_id, data,
+        SUM(recebido) AS recebido,
+        SUM(pago) AS pago
+      FROM (
+        SELECT
+          f.empresa_id,
+          date(COALESCE(f.vencimento, f.data_movimento)) AS data,
+          SUM(CASE WHEN f.tipo = 'receita' THEN f.valor ELSE 0 END) AS recebido,
+          SUM(CASE WHEN f.tipo = 'despesa' THEN f.valor ELSE 0 END) AS pago
+        FROM financeiro f
+        WHERE f.empresa_id IN (${placeholders})
+          AND (
+            (f.tipo = 'receita' AND f.status IN ('recebido', 'pago'))
+            OR (f.tipo = 'despesa' AND f.status IN ('pago', 'recebido'))
+          )
+          AND date(COALESCE(f.vencimento, f.data_movimento)) BETWEEN date(?) AND date(?)
+          ${exclusoesFinanceiro}
+        GROUP BY f.empresa_id, date(COALESCE(f.vencimento, f.data_movimento))
+
+        UNION ALL
+
+        SELECT
+          cr.empresa_id,
+          date(crp.data_pagamento) AS data,
+          SUM(crp.valor_pago) AS recebido,
+          0 AS pago
+        FROM contas_receber_pagamentos crp
+        INNER JOIN contas_receber cr ON cr.id = crp.conta_receber_id
+        WHERE cr.empresa_id IN (${placeholders})
+          AND date(crp.data_pagamento) BETWEEN date(?) AND date(?)
+        GROUP BY cr.empresa_id, date(crp.data_pagamento)
+
+        UNION ALL
+
+        SELECT
+          p.empresa_id,
+          date(p.data_pagamento) AS data,
+          0 AS recebido,
+          SUM(p.valor_pago) AS pago
+        FROM contas_pagar_pagamentos p
+        WHERE p.empresa_id IN (${placeholders})
+          AND date(p.data_pagamento) BETWEEN date(?) AND date(?)
+        GROUP BY p.empresa_id, date(p.data_pagamento)
+      ) movimentos
+      GROUP BY empresa_id, data
+      ORDER BY data, empresa_id
+    `, [
+      ...empresaIds, dataInicio, dataFim,
+      ...empresaIds, dataInicio, dataFim,
+      ...empresaIds, dataInicio, dataFim
+    ]);
+
+    const contasLegadasAbertas = await dbAllAsync(`
+      SELECT
+        f.empresa_id,
+        SUM(CASE WHEN f.tipo = 'receita' THEN f.valor ELSE 0 END) AS receber,
+        SUM(CASE WHEN f.tipo = 'despesa' THEN f.valor ELSE 0 END) AS pagar
+      FROM financeiro f
+      WHERE f.empresa_id IN (${placeholders})
+        AND f.status NOT IN ('recebido', 'pago', 'cancelado')
+        AND f.tipo IN ('receita', 'despesa')
+        ${exclusoesFinanceiro}
+      GROUP BY f.empresa_id
+    `, empresaIds);
+
+    const contasReceberAbertas = await dbAllAsync(`
+      SELECT cr.empresa_id, SUM(cr.valor_restante) AS total
+      FROM contas_receber cr
+      LEFT JOIN vendas v
+        ON v.id = cr.venda_id
+       AND v.empresa_id = cr.empresa_id
+      WHERE cr.empresa_id IN (${placeholders})
+        AND cr.status IN ('aberto', 'parcial')
+        AND ${sqlExcluirContaVendaCanceladaDaEmpresa('cr', 'v')}
+      GROUP BY cr.empresa_id
+    `, empresaIds);
+
+    const contasPagarAbertas = await dbAllAsync(`
+      SELECT cp.empresa_id, SUM(cp.valor_restante) AS total
+      FROM contas_pagar cp
+      WHERE cp.empresa_id IN (${placeholders})
+        AND cp.status IN ('aberto', 'parcial')
+      GROUP BY cp.empresa_id
+    `, empresaIds);
+
+    const porEmpresa = new Map();
+    for (const empresa of empresasConsultadas) {
+      const id = Number(empresa.id);
+      porEmpresa.set(id, {
+        id,
+        nome: empresa.nome_fantasia || empresa.razao_social || `Empresa #${id}`,
+        cnpj: empresa.cnpj || null,
+        resumo: {
+          totalRecebido: 0,
+          totalPago: 0,
+          totalReceber: 0,
+          totalPagar: 0
+        }
+      });
+    }
+
+    const arredondar = (valor) => Math.round((valor + Number.EPSILON) * 100) / 100;
+    const seriePorData = new Map();
+    movimentosPorDia.forEach((movimento) => {
+      const empresa = porEmpresa.get(Number(movimento.empresa_id));
+      if (!empresa) return;
+      const recebido = arredondar(parseNumber(movimento.recebido));
+      const pago = arredondar(parseNumber(movimento.pago));
+      empresa.resumo.totalRecebido += recebido;
+      empresa.resumo.totalPago += pago;
+
+      const chaveData = String(movimento.data);
+      if (!seriePorData.has(chaveData)) {
+        seriePorData.set(chaveData, { data: chaveData, recebido: 0, pago: 0 });
+      }
+      const serie = seriePorData.get(chaveData);
+      serie.recebido += recebido;
+      serie.pago += pago;
+    });
+
+    contasLegadasAbertas.forEach((conta) => {
+      const empresa = porEmpresa.get(Number(conta.empresa_id));
+      if (!empresa) return;
+      empresa.resumo.totalReceber += parseNumber(conta.receber);
+      empresa.resumo.totalPagar += parseNumber(conta.pagar);
+    });
+    contasReceberAbertas.forEach((conta) => {
+      const empresa = porEmpresa.get(Number(conta.empresa_id));
+      if (empresa) empresa.resumo.totalReceber += parseNumber(conta.total);
+    });
+    contasPagarAbertas.forEach((conta) => {
+      const empresa = porEmpresa.get(Number(conta.empresa_id));
+      if (empresa) empresa.resumo.totalPagar += parseNumber(conta.total);
+    });
+
+    const empresas = Array.from(porEmpresa.values())
+      .sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+    empresas.forEach((empresa) => {
+      Object.keys(empresa.resumo).forEach((chave) => {
+        empresa.resumo[chave] = arredondar(empresa.resumo[chave]);
+      });
+    });
+    const resumo = empresas.reduce((total, empresa) => {
+      total.totalRecebido += empresa.resumo.totalRecebido;
+      total.totalPago += empresa.resumo.totalPago;
+      total.totalReceber += empresa.resumo.totalReceber;
+      total.totalPagar += empresa.resumo.totalPagar;
+      return total;
+    }, { totalRecebido: 0, totalPago: 0, totalReceber: 0, totalPagar: 0 });
+
+    Object.keys(resumo).forEach((chave) => {
+      resumo[chave] = arredondar(resumo[chave]);
+    });
+
+    return res.json({
+      success: true,
+      escopo: empresaSolicitada == null || String(empresaSolicitada) === 'todas' ? 'todas' : 'empresa',
+      periodo: {
+        dataInicio,
+        dataFim,
+        dataReferenciaAbertos: moment().format('YYYY-MM-DD')
+      },
+      resumo,
+      empresas,
+      serieTemporal: Array.from(seriePorData.values()).map((serie) => ({
+        data: serie.data,
+        recebido: arredondar(serie.recebido),
+        pago: arredondar(serie.pago)
+      }))
+    });
+  } catch (err) {
+    console.error('Erro no dashboard financeiro multiempresa:', err);
+    return res.status(Number(err.status) || 500).json({
+      success: false,
+      error: err.message || 'Não foi possível carregar o dashboard financeiro.',
+      code: err.code || 'DASHBOARD_FINANCEIRO_ERRO'
+    });
+  }
+});
+
+router.get('/multiempresa/receber', async (req, res) => {
+  try {
+    const empresas = await obterEmpresasAutorizadasFinanceiro(req, res);
+    if (!empresas) return;
+    const hoje = moment().format('YYYY-MM-DD');
+    const contasPorEmpresa = await Promise.all(empresas.map(async (empresa) => {
+      const empresaId = Number(empresa.id);
+      const legado = buildReceberQueryFilters(req.query, empresaId, {
+        excluirComContaCanonica: true
+      });
+      const canonico = buildReceberCanonicoQueryFilters(req.query, empresaId);
+      const [rowsLegado, rowsCanonico] = await Promise.all([
+        dbAllAsync(legado.sql, legado.params),
+        canonico.sql ? dbAllAsync(canonico.sql, canonico.params) : Promise.resolve([])
+      ]);
+      const metadados = metadadosEmpresaFinanceiro(empresa);
+      return [
+        ...rowsLegado.map((row) => ({
+          ...mapearLinhaReceberLegado(row, hoje),
+          ...metadados,
+          chave: `financeiro:${empresaId}:${row.id}`
+        })),
+        ...rowsCanonico.map((row) => ({
+          ...mapearLinhaReceberCanonico(row, hoje),
+          ...metadados,
+          chave: `contas_receber:${empresaId}:${row.id}`
+        }))
+      ];
+    }));
+    const contas = contasPorEmpresa.flat().sort((a, b) => {
+      const da = String(a.dataVencimento || '');
+      const dbv = String(b.dataVencimento || '');
+      if (da !== dbv) return dbv.localeCompare(da);
+      return String(a.chave).localeCompare(String(b.chave));
+    });
+    return res.json({
+      success: true,
+      uniao: true,
+      escopo: 'todas',
+      empresas: empresas.map(metadadosEmpresaFinanceiro),
+      contas
+    });
+  } catch (err) {
+    console.error('Erro na consulta multiempresa de contas a receber:', err);
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'Não foi possível carregar contas a receber.',
+      code: 'FINANCEIRO_MULTIEMPRESA_ERRO'
+    });
+  }
+});
+
+router.get('/multiempresa/dividas-cliente', async (req, res) => {
+  try {
+    const empresas = await obterEmpresasAutorizadasFinanceiro(req, res);
+    if (!empresas) return;
+    const empresaIds = empresas.map((empresa) => Number(empresa.id));
+    const placeholders = empresaIds.map(() => '?').join(', ');
+    const { cliente, status, dataInicio, dataFim } = req.query;
+    let sql = `
+      SELECT
+        cr.empresa_id,
+        c.id as cliente_id,
+        c.nome as nome_cliente,
+        COALESCE(c.cpf_cnpj, '') as cpf,
+        COALESCE(c.telefone, '') as telefone,
+        COUNT(DISTINCT v.id) as quantidade_vendas,
+        COUNT(cr.id) as quantidade_titulos,
+        COALESCE(SUM(CASE WHEN cr.status IN ('aberto','parcial') THEN cr.valor_restante ELSE 0 END), 0) as total_divida,
+        COALESCE(SUM(CASE WHEN cr.status = 'recebido' THEN cr.valor_parcela ELSE 0 END), 0) as total_pago,
+        COALESCE(SUM(CASE WHEN cr.status IN ('aberto','parcial') AND date(cr.data_vencimento) < date('now') THEN 1 ELSE 0 END), 0) as vencidas,
+        COALESCE(SUM(CASE WHEN cr.status IN ('aberto','parcial') AND date(cr.data_vencimento) >= date('now') THEN 1 ELSE 0 END), 0) as a_vencer
+      FROM contas_receber cr
+      JOIN clientes c ON c.id = cr.cliente_id
+      LEFT JOIN vendas v
+        ON v.id = cr.venda_id
+       AND v.empresa_id = cr.empresa_id
+      WHERE cr.status IN ('aberto','parcial')
+        AND cr.empresa_id IN (${placeholders})
+        AND ${sqlExcluirContaVendaCanceladaDaEmpresa('cr', 'v')}
+    `;
+    const params = empresaIds.slice();
+
+    if (cliente) {
+      sql += ' AND (c.nome LIKE ? OR c.cpf_cnpj LIKE ? OR c.telefone LIKE ?)';
+      params.push(`%${cliente}%`, `%${cliente}%`, `%${cliente}%`);
+    }
+    if (dataInicio && dataFim) {
+      sql += ' AND date(cr.data_vencimento) BETWEEN ? AND ?';
+      params.push(dataInicio, dataFim);
+    }
+    if (status && status !== 'todas') {
+      if (status === 'vencidas') {
+        sql += " AND date(cr.data_vencimento) < date('now')";
+      } else if (status === 'a_vencer') {
+        sql += " AND date(cr.data_vencimento) >= date('now')";
+      }
+    }
+    sql += ' GROUP BY cr.empresa_id, c.id, c.nome, c.cpf_cnpj, c.telefone';
+    sql += ' ORDER BY c.nome ASC, cr.empresa_id ASC';
+
+    const rows = await dbAllAsync(sql, params);
+    const empresasPorId = new Map(empresas.map((empresa) => [
+      Number(empresa.id),
+      metadadosEmpresaFinanceiro(empresa)
+    ]));
+    const clientes = rows.map((row) => ({
+      ...row,
+      ...(empresasPorId.get(Number(row.empresa_id)) || {}),
+      quantidade_vendas: parseNumber(row.quantidade_vendas),
+      quantidade_titulos: parseNumber(row.quantidade_titulos),
+      total_divida: parseNumber(row.total_divida),
+      total_pago: parseNumber(row.total_pago),
+      saldo_atual: parseNumber(row.total_divida),
+      vencidas: parseNumber(row.vencidas),
+      a_vencer: parseNumber(row.a_vencer)
+    }));
+    return res.json({ success: true, escopo: 'todas', empresas: Array.from(empresasPorId.values()), clientes });
+  } catch (err) {
+    console.error('Erro na consulta multiempresa de dívidas por cliente:', err);
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'Não foi possível carregar dívidas por cliente.',
+      code: 'FINANCEIRO_MULTIEMPRESA_ERRO'
+    });
+  }
+});
+
+router.get('/multiempresa/historico', async (req, res) => {
+  try {
+    const empresas = await obterEmpresasAutorizadasFinanceiro(req, res);
+    if (!empresas) return;
+    const empresaIds = empresas.map((empresa) => Number(empresa.id));
+    const placeholders = empresaIds.map(() => '?').join(', ');
+    const { dataInicio, dataFim, tipo, status, busca } = req.query;
+    let sql = `SELECT f.* FROM financeiro f
+      WHERE f.empresa_id IN (${placeholders})
+        AND ${sqlExcluirFinanceiroVendaCancelada('f')}
+        ${sqlExcluirProjecaoMcf('f')}`;
+    const params = empresaIds.slice();
+
+    if (dataInicio && dataFim) {
+      sql += ' AND date(f.data_movimento) BETWEEN ? AND ?';
+      params.push(dataInicio, dataFim);
+    }
+    if (tipo) {
+      sql += ' AND f.tipo = ?';
+      params.push(tipo);
+    }
+    if (status) {
+      sql += ' AND f.status = ?';
+      params.push(status);
+    }
+    if (busca) {
+      sql += ' AND (f.descricao LIKE ? OR f.documento LIKE ?)';
+      params.push(`%${busca}%`, `%${busca}%`);
+    }
+    sql += ' ORDER BY date(f.data_movimento) DESC, f.id DESC, f.empresa_id ASC';
+
+    const rows = await dbAllAsync(sql, params);
+    const empresasPorId = new Map(empresas.map((empresa) => [
+      Number(empresa.id),
+      metadadosEmpresaFinanceiro(empresa)
+    ]));
+    return res.json(rows.map((row) => ({
+      ...row,
+      ...(empresasPorId.get(Number(row.empresa_id)) || {})
+    })));
+  } catch (err) {
+    console.error('Erro na consulta multiempresa do histórico financeiro:', err);
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'Não foi possível carregar o histórico financeiro.',
+      code: 'FINANCEIRO_MULTIEMPRESA_ERRO'
+    });
+  }
+});
+
+router.get('/multiempresa/relatorios/resumo', async (req, res) => {
+  const { dataInicio, dataFim, modo_fiscal } = req.query;
+  try {
+    const empresas = await obterEmpresasAutorizadasFinanceiro(req, res);
+    if (!empresas) return;
+    const empresaIds = empresas.map((empresa) => Number(empresa.id));
+    const placeholders = empresaIds.map(() => '?').join(', ');
+    let sql = `
+      SELECT tipo, status, SUM(valor) AS total, COUNT(*) AS quantidade
+      FROM financeiro f
+      WHERE f.empresa_id IN (${placeholders})
+        AND ${sqlExcluirFinanceiroVendaCancelada('f')}
+        ${sqlExcluirProjecaoMcf('f')}
+        AND COALESCE(f.status, '') != 'cancelado'
+    `;
+    const params = empresaIds.slice();
+    if (dataInicio && dataFim) {
+      sql += ' AND f.data_movimento BETWEEN ? AND ?';
+      params.push(dataInicio, dataFim);
+    }
+    sql += ' GROUP BY tipo, status ORDER BY tipo, status';
+
+    const [rows, recebimentosPorEmpresa] = await Promise.all([
+      dbAllAsync(sql, params),
+      Promise.all(empresaIds.map((empresaId) => consultarRecebimentosVendaSplit(
+        dataInicio,
+        dataFim,
+        modo_fiscal,
+        empresaId
+      )))
+    ]);
+    const resumo = {
+      receitas: { total: 0, recebidas: 0, pendentes: 0, quantidade: 0 },
+      despesas: { total: 0, pagas: 0, pendentes: 0, quantidade: 0 }
+    };
+    rows.forEach((row) => {
+      const valor = parseNumber(row.total);
+      const quantidade = parseNumber(row.quantidade);
+      if (row.tipo === 'receita') {
+        resumo.receitas.total += valor;
+        resumo.receitas.quantidade += quantidade;
+        if (row.status === 'recebido') resumo.receitas.recebidas += valor;
+        else resumo.receitas.pendentes += valor;
+      } else if (row.tipo === 'despesa') {
+        resumo.despesas.total += valor;
+        resumo.despesas.quantidade += quantidade;
+        if (row.status === 'pago') resumo.despesas.pagas += valor;
+        else resumo.despesas.pendentes += valor;
+      }
+    });
+    const somaSplit = (chave, campo) => recebimentosPorEmpresa.reduce(
+      (total, item) => total + parseNumber(item[chave][campo]),
+      0
+    );
+    const fiscal = {
+      total: somaSplit('fiscal', 'total'),
+      quantidade: somaSplit('fiscal', 'quantidade')
+    };
+    const naoFiscal = {
+      total: somaSplit('nao_fiscal', 'total'),
+      quantidade: somaSplit('nao_fiscal', 'quantidade')
+    };
+    const total = {
+      total: somaSplit('total', 'total'),
+      quantidade: somaSplit('total', 'quantidade')
+    };
+    return res.json({
+      success: true,
+      escopo: 'todas',
+      empresas: empresas.map(metadadosEmpresaFinanceiro),
+      modo_fiscal_ativo: recebimentosPorEmpresa.some((item) => item.modo_fiscal_ativo),
+      resumo,
+      recebimentos_venda: { fiscal, nao_fiscal: naoFiscal, total },
+      periodo: { dataInicio, dataFim }
+    });
+  } catch (err) {
+    console.error('Erro no relatório multiempresa de resumo:', err);
+    return res.status(500).json({ success: false, error: err.message, code: 'FINANCEIRO_MULTIEMPRESA_ERRO' });
+  }
+});
+
+router.get('/multiempresa/relatorios/receber', async (req, res) => {
+  const { dataInicio, dataFim, status, cliente, modo_fiscal } = req.query;
+  const modoFiscalAtivo = isModoFiscalRelatorio(modo_fiscal);
+  const sqlDataLegado = 'date(COALESCE(f.vencimento, f.data_movimento))';
+  const sqlDataCanonica = 'date(cr.data_vencimento)';
+  try {
+    const empresas = await obterEmpresasAutorizadasFinanceiro(req, res);
+    if (!empresas) return;
+    const empresaIds = empresas.map((empresa) => Number(empresa.id));
+    const placeholders = empresaIds.map(() => '?').join(', ');
+    const paramsLegado = empresaIds.slice();
+    const paramsCanonicos = empresaIds.slice();
+    let filtrosLegado = `
+      f.tipo = 'receita'
+      AND f.empresa_id IN (${placeholders})
+      AND ${sqlExcluirFinanceiroVendaCancelada('f')}
+      AND ${sqlExcluirFinanceiroReceberComContaCanonica('f')}
+    `;
+    let filtrosCanonicos = `
+      cr.empresa_id IN (${placeholders})
+      AND (
+        cr.venda_id IS NULL
+        OR v.id IS NULL
+        OR (
+          COALESCE(v.cancelada, 0) != 1
+          AND LOWER(COALESCE(v.status, '')) != 'cancelada'
+        )
+      )
+    `;
+    if (dataInicio && dataFim) {
+      filtrosLegado += ` AND ${sqlDataLegado} BETWEEN date(?) AND date(?)`;
+      filtrosCanonicos += ` AND ${sqlDataCanonica} BETWEEN date(?) AND date(?)`;
+      paramsLegado.push(dataInicio, dataFim);
+      paramsCanonicos.push(dataInicio, dataFim);
+    }
+    if (status && status !== 'todas') {
+      if (status === 'vencido') {
+        filtrosLegado += ` AND f.status NOT IN ('recebido','pago','cancelado','cancelada')
+          AND ${sqlDataLegado} < date('now')`;
+        filtrosCanonicos += ` AND cr.status NOT IN ('recebido','pago','cancelado','cancelada')
+          AND ${sqlDataCanonica} < date('now')`;
+      } else if (status === 'pendente') {
+        filtrosLegado += " AND f.status = 'pendente'";
+        filtrosCanonicos += " AND cr.status = 'aberto'";
+      } else {
+        filtrosLegado += ' AND f.status = ?';
+        filtrosCanonicos += ' AND cr.status = ?';
+        paramsLegado.push(status);
+        paramsCanonicos.push(status);
+      }
+    }
+    if (cliente && String(cliente).trim() !== '') {
+      const termoCliente = `%${String(cliente).trim()}%`;
+      filtrosLegado += ' AND COALESCE(f.pessoa_nome, "") LIKE ?';
+      filtrosCanonicos += " AND COALESCE(c.nome, '') LIKE ?";
+      paramsLegado.push(termoCliente);
+      paramsCanonicos.push(termoCliente);
+    }
+    if (modoFiscalAtivo) {
+      filtrosLegado += ' AND (f.venda_id IS NULL OR COALESCE(v.valor_fiscal, 0) > 0)';
+      filtrosCanonicos += ' AND (cr.venda_id IS NULL OR COALESCE(v.valor_fiscal, 0) > 0)';
+    }
+
+    const [rowsLegado, rowsCanonicos] = await Promise.all([
+      dbAllAsync(`
+        SELECT
+          f.id,
+          f.empresa_id,
+          f.descricao,
+          f.documento,
+          f.valor,
+          f.data_movimento,
+          f.vencimento,
+          f.status,
+          f.origem,
+          f.pessoa_nome,
+          f.venda_id,
+          f.referencia_id,
+          f.referencia_tipo,
+          v.total AS venda_total,
+          v.valor_fiscal AS venda_valor_fiscal,
+          v.valor_nao_fiscal AS venda_valor_nao_fiscal
+        FROM financeiro f
+        LEFT JOIN vendas v
+          ON v.id = f.venda_id
+         AND v.empresa_id = f.empresa_id
+        WHERE ${filtrosLegado}
+        ORDER BY ${sqlDataLegado} DESC, f.id DESC
+      `, paramsLegado),
+      dbAllAsync(`
+        SELECT
+          cr.id,
+          cr.empresa_id,
+          cr.venda_id,
+          cr.numero_parcela,
+          cr.total_parcelas,
+          cr.componente,
+          cr.valor_parcela,
+          cr.valor_restante,
+          cr.data_vencimento,
+          cr.status,
+          c.nome AS cliente,
+          c.cpf_cnpj AS documento,
+          v.codigo AS venda_codigo,
+          v.total AS venda_total,
+          v.valor_fiscal AS venda_valor_fiscal,
+          v.valor_nao_fiscal AS venda_valor_nao_fiscal
+        FROM contas_receber cr
+        LEFT JOIN clientes c ON c.id = cr.cliente_id
+        LEFT JOIN vendas v
+          ON v.id = cr.venda_id
+         AND v.empresa_id = cr.empresa_id
+        WHERE ${filtrosCanonicos}
+        ORDER BY ${sqlDataCanonica} DESC, cr.id DESC
+      `, paramsCanonicos)
+    ]);
+    const hoje = moment().format('YYYY-MM-DD');
+    const empresasPorId = new Map(empresas.map((empresa) => [
+      Number(empresa.id),
+      metadadosEmpresaFinanceiro(empresa)
+    ]));
+    const contasLegadas = rowsLegado.map((row) => {
+      let statusFinal = row.status || 'pendente';
+      if (
+        !['recebido', 'pago', 'cancelado', 'cancelada'].includes(statusFinal)
+        && row.vencimento
+        && row.vencimento < hoje
+      ) statusFinal = 'vencido';
+
+      const metadados = empresasPorId.get(Number(row.empresa_id)) || {};
+      const { valorFiscal, valorNaoFiscal } = valoresMotorDaVenda(row);
+      const valorOriginal = parseNumber(row.valor);
+      const liquidado = ['recebido', 'pago'].includes(row.status);
+      const saldoConhecido = [
+        'recebido', 'pago', 'cancelado', 'cancelada', 'pendente', 'aberto'
+      ].includes(row.status);
+      const valorExibido = modoFiscalAtivo
+        ? (parseNumber(row.venda_valor_nao_fiscal) <= 0 ? valorOriginal : valorFiscal)
+        : valorOriginal;
+
+      return {
+        id: row.id,
+        ...metadados,
+        fonte: 'financeiro',
+        chave: `financeiro:${row.empresa_id}:${row.id}`,
+        cliente: row.pessoa_nome || '',
+        descricao: row.descricao || '',
+        documento: row.documento || '',
+        valor: valorExibido,
+        valor_fiscal: valorFiscal,
+        valor_nao_fiscal: valorNaoFiscal,
+        valor_total: valorOriginal,
+        valor_original: valorOriginal,
+        valor_recebido: saldoConhecido ? (liquidado ? valorOriginal : 0) : null,
+        valor_restante: saldoConhecido
+          ? (liquidado || ['cancelado', 'cancelada'].includes(row.status) ? 0 : valorOriginal)
+          : null,
+        dataEmissao: row.data_movimento || null,
+        dataVencimento: row.vencimento || null,
+        status: statusFinal,
+        status_persistido: row.status || 'pendente',
+        origem: row.origem || '',
+        venda_id: row.venda_id || null
+      };
+    });
+    const contasCanonicas = rowsCanonicos.map((row) => {
+      let statusFinal = row.status || 'aberto';
+      if (
+        !['recebido', 'pago', 'cancelado', 'cancelada'].includes(statusFinal)
+        && row.data_vencimento
+        && row.data_vencimento < hoje
+      ) statusFinal = 'vencido';
+
+      const metadados = empresasPorId.get(Number(row.empresa_id)) || {};
+      const valorOriginal = parseNumber(row.valor_parcela);
+      const valorRestante = parseNumber(row.valor_restante);
+      const { valorFiscal, valorNaoFiscal } = valoresMotorDaVenda({
+        venda_id: row.venda_id,
+        valor: valorOriginal,
+        venda_valor_fiscal: row.venda_valor_fiscal,
+        venda_valor_nao_fiscal: row.venda_valor_nao_fiscal
+      });
+      const valorExibido = modoFiscalAtivo
+        ? (parseNumber(row.venda_valor_nao_fiscal) <= 0 ? valorOriginal : valorFiscal)
+        : valorOriginal;
+
+      return {
+        id: row.id,
+        ...metadados,
+        fonte: 'contas_receber',
+        chave: `contas_receber:${row.empresa_id}:${row.id}`,
+        cliente: row.cliente || '',
+        descricao: `Parcela ${row.numero_parcela || '-'}/${row.total_parcelas || '-'} · ${row.componente === 'outros' ? 'Outros' : 'Produtos'} · Venda ${row.venda_codigo || row.venda_id || '-'}`,
+        documento: row.documento || '',
+        valor: valorExibido,
+        valor_fiscal: valorFiscal,
+        valor_nao_fiscal: valorNaoFiscal,
+        valor_total: valorOriginal,
+        valor_original: valorOriginal,
+        valor_recebido: valorOriginal - valorRestante,
+        valor_restante: valorRestante,
+        dataEmissao: null,
+        dataVencimento: row.data_vencimento || null,
+        status: statusFinal,
+        status_persistido: row.status || 'aberto',
+        origem: 'contas_receber',
+        venda_id: row.venda_id || null
+      };
+    });
+    const contas = [...contasLegadas, ...contasCanonicas]
+      .sort((a, b) => {
+        const dataA = String(a.dataVencimento || a.dataEmissao || '');
+        const dataB = String(b.dataVencimento || b.dataEmissao || '');
+        if (dataA !== dataB) return dataB.localeCompare(dataA);
+        return String(a.chave).localeCompare(String(b.chave));
+      })
+      .filter((conta) => !modoFiscalAtivo || parseNumber(conta.valor_fiscal) > 0);
+    return res.json({
+      success: true,
+      escopo: 'todas',
+      empresas: Array.from(empresasPorId.values()),
+      modo_fiscal_ativo: modoFiscalAtivo,
+      contas,
+      totais: totaisMotorSemDuplicarVenda(contas, modoFiscalAtivo),
+      periodo: { dataInicio, dataFim }
+    });
+  } catch (err) {
+    console.error('Erro no relatório multiempresa de contas a receber:', err);
+    return res.status(500).json({ success: false, error: err.message, code: 'FINANCEIRO_MULTIEMPRESA_ERRO' });
+  }
+});
+
+router.get('/multiempresa/relatorios/fluxo', async (req, res) => {
+  const { dataInicio, dataFim, modo_fiscal } = req.query;
+  try {
+    const empresas = await obterEmpresasAutorizadasFinanceiro(req, res);
+    if (!empresas) return;
+    const empresaIds = empresas.map((empresa) => Number(empresa.id));
+    const placeholders = empresaIds.map(() => '?').join(', ');
+    let sql = `
+      SELECT DATE(f.data_movimento) AS data, f.tipo, SUM(f.valor) AS valor
+      FROM financeiro f
+      WHERE f.empresa_id IN (${placeholders})
+        AND ${sqlExcluirFinanceiroVendaCancelada('f')}
+        ${sqlExcluirProjecaoMcf('f')}
+        AND COALESCE(f.status, '') != 'cancelado'
+    `;
+    const params = empresaIds.slice();
+    if (dataInicio && dataFim) {
+      sql += ' AND f.data_movimento BETWEEN ? AND ?';
+      params.push(dataInicio, dataFim);
+    }
+    sql += ' GROUP BY DATE(f.data_movimento), tipo ORDER BY data';
+
+    const [rows, recebimentosPorEmpresa] = await Promise.all([
+      dbAllAsync(sql, params),
+      Promise.all(empresaIds.map((empresaId) => consultarRecebimentosVendaSplit(
+        dataInicio,
+        dataFim,
+        modo_fiscal,
+        empresaId
+      )))
+    ]);
+    const entradasFinanceiro = rows
+      .filter((row) => row.tipo === 'receita')
+      .reduce((total, row) => total + parseNumber(row.valor), 0);
+    const saidas = rows
+      .filter((row) => row.tipo === 'despesa')
+      .reduce((total, row) => total + parseNumber(row.valor), 0);
+    const somaSplit = (chave) => recebimentosPorEmpresa.reduce(
+      (total, item) => total + parseNumber(item[chave].total),
+      0
+    );
+    const entradasFiscal = somaSplit('fiscal');
+    const entradasNaoFiscal = somaSplit('nao_fiscal');
+    const entradasTotal = somaSplit('total');
+    const modoFiscalAtivo = recebimentosPorEmpresa.some((item) => item.modo_fiscal_ativo);
+    return res.json({
+      success: true,
+      escopo: 'todas',
+      empresas: empresas.map(metadadosEmpresaFinanceiro),
+      modo_fiscal_ativo: modoFiscalAtivo,
+      entradas: modoFiscalAtivo ? entradasFiscal : entradasTotal,
+      entradas_financeiro: entradasFinanceiro,
+      entradas_venda: {
+        fiscal: entradasFiscal,
+        nao_fiscal: entradasNaoFiscal,
+        total: entradasTotal
+      },
+      saidas,
+      periodo: { dataInicio, dataFim }
+    });
+  } catch (err) {
+    console.error('Erro no relatório multiempresa de fluxo:', err);
+    return res.status(500).json({ success: false, error: err.message, code: 'FINANCEIRO_MULTIEMPRESA_ERRO' });
+  }
+});
+
+router.get('/multiempresa/relatorios/inadimplencia', async (req, res) => {
+  const { dataInicio, dataFim } = req.query;
+  try {
+    const empresas = await obterEmpresasAutorizadasFinanceiro(req, res);
+    if (!empresas) return;
+    const empresaIds = empresas.map((empresa) => Number(empresa.id));
+    const placeholders = empresaIds.map(() => '?').join(', ');
+    const filtroPeriodoMovimento = dataInicio && dataFim
+      ? ' AND f.data_movimento BETWEEN ? AND ?'
+      : '';
+    const filtroPeriodoRecebivel = dataInicio && dataFim
+      ? ' AND date(cr.data_vencimento) BETWEEN date(?) AND date(?)'
+      : '';
+    const filtroPeriodoPagar = dataInicio && dataFim
+      ? ' AND date(cp.data_vencimento) BETWEEN date(?) AND date(?)'
+      : '';
+    const parametrosFinanceiro = empresaIds.slice();
+    const parametrosReceber = empresaIds.slice();
+    const parametrosPagar = empresaIds.slice();
+    if (dataInicio && dataFim) {
+      parametrosFinanceiro.push(dataInicio, dataFim);
+      parametrosReceber.push(dataInicio, dataFim);
+      parametrosPagar.push(dataInicio, dataFim);
+    }
+
+    const [rowsFinanceiro, rowsReceber, rowsPagar] = await Promise.all([
+      dbAllAsync(`
+        SELECT
+          f.*,
+          CASE WHEN f.tipo = 'receita' THEN 'cliente'
+            WHEN f.tipo = 'despesa' THEN 'fornecedor' ELSE 'outros' END AS tipo_pessoa,
+          julianday('now') - julianday(f.vencimento) AS dias_atraso
+        FROM financeiro f
+        WHERE f.status NOT IN ('recebido', 'pago', 'cancelado')
+          AND f.vencimento < date('now')
+          AND f.empresa_id IN (${placeholders})
+          AND ${sqlExcluirFinanceiroVendaCancelada('f')}
+          AND ${sqlExcluirFinanceiroReceberComContaCanonica('f')}
+          ${sqlExcluirProjecaoMcf('f')}
+          ${filtroPeriodoMovimento}
+        ORDER BY f.vencimento ASC
+      `, parametrosFinanceiro),
+      dbAllAsync(`
+        SELECT
+          cr.id,
+          cr.empresa_id,
+          'cliente' AS tipo_pessoa,
+          'receita' AS tipo,
+          'Parcela da venda #' || cr.venda_id || ' - parcela ' || COALESCE(cr.numero_parcela, '-') AS descricao,
+          NULL AS documento,
+          NULL AS data_movimento,
+          cr.data_vencimento AS vencimento,
+          cr.valor_restante AS valor,
+          cr.status,
+          julianday('now') - julianday(cr.data_vencimento) AS dias_atraso
+        FROM contas_receber cr
+        WHERE cr.empresa_id IN (${placeholders})
+          AND cr.status IN ('aberto', 'parcial')
+          AND ${sqlExcluirContaVendaCancelada('cr')}
+          AND date(cr.data_vencimento) < date('now')
+          ${filtroPeriodoRecebivel}
+        ORDER BY cr.data_vencimento ASC
+      `, parametrosReceber),
+      dbAllAsync(`
+        SELECT
+          cp.id,
+          cp.empresa_id,
+          'fornecedor' AS tipo_pessoa,
+          'despesa' AS tipo,
+          cp.descricao,
+          cp.documento,
+          cp.data_emissao AS data_movimento,
+          cp.data_vencimento AS vencimento,
+          cp.valor_restante AS valor,
+          cp.status,
+          COALESCE(cp.pessoa_nome, f.nome) AS pessoa_nome,
+          julianday('now') - julianday(cp.data_vencimento) AS dias_atraso
+        FROM contas_pagar cp
+        LEFT JOIN fornecedores f ON f.id = cp.fornecedor_id
+        WHERE cp.empresa_id IN (${placeholders})
+          AND cp.status IN ('aberto', 'parcial')
+          AND date(cp.data_vencimento) < date('now')
+          ${filtroPeriodoPagar}
+        ORDER BY cp.data_vencimento ASC
+      `, parametrosPagar)
+    ]);
+    const empresasPorId = new Map(empresas.map((empresa) => [
+      Number(empresa.id),
+      metadadosEmpresaFinanceiro(empresa)
+    ]));
+    const enriquecer = (row, fonte) => ({
+      id: row.id,
+      ... (empresasPorId.get(Number(row.empresa_id)) || {}),
+      pessoa: row.pessoa_nome || null,
+      tipo_pessoa: row.tipo_pessoa,
+      descricao: row.descricao,
+      documento: row.documento,
+      valor: parseNumber(row.valor),
+      dataEmissao: row.data_movimento || null,
+      dataVencimento: row.vencimento,
+      status: row.status,
+      dias_atraso: Math.floor(parseNumber(row.dias_atraso)),
+      tipo: row.tipo,
+      fonte,
+      chave: `${fonte}:${row.empresa_id}:${row.id}`
+    });
+    const inadimplentes = [
+      ...rowsFinanceiro.map((row) => enriquecer(row, 'financeiro')),
+      ...rowsReceber.map((row) => enriquecer(row, 'contas_receber')),
+      ...rowsPagar.map((row) => enriquecer(row, 'contas_pagar'))
+    ].sort((a, b) => String(a.dataVencimento).localeCompare(String(b.dataVencimento)));
+    return res.json({
+      success: true,
+      escopo: 'todas',
+      empresas: Array.from(empresasPorId.values()),
+      vencidas: inadimplentes.filter((item) => item.dias_atraso > 0).length,
+      vencer7dias: inadimplentes.filter((item) => item.dias_atraso <= 7 && item.dias_atraso > 0).length,
+      valorAtraso: inadimplentes.reduce((total, item) => total + item.valor, 0),
+      contasAtraso: inadimplentes,
+      periodo: { dataInicio, dataFim }
+    });
+  } catch (err) {
+    console.error('Erro no relatório multiempresa de inadimplência:', err);
+    return res.status(500).json({ success: false, error: err.message, code: 'FINANCEIRO_MULTIEMPRESA_ERRO' });
+  }
+});
+
 router.use(anexarEmpresaFinanceiro);
 
 function parseNumber(value) {
@@ -30,7 +1015,7 @@ function arredondarCentavos(value) {
   return Math.round(parseNumber(value) * 100) / 100;
 }
 
-async function consultarRecebimentosVendaSplit(dataInicio, dataFim, modoFiscal) {
+async function consultarRecebimentosVendaSplit(dataInicio, dataFim, modoFiscal, empresaId) {
   const modoFiscalAtivo = isModoFiscalRelatorio(modoFiscal);
   const params = [];
   let dateFilter = '';
@@ -50,9 +1035,10 @@ async function consultarRecebimentosVendaSplit(dataInicio, dataFim, modoFiscal) 
     WHERE ${FILTRO_VENDA_VALIDA}
       AND COALESCE(vr.status, 'aprovado') != 'cancelado'
       ${modoFiscalAtivo ? "AND vr.tipo_recebimento = 'fiscal'" : ''}
+      AND v.empresa_id = ?
       ${dateFilter}
     GROUP BY vr.tipo_recebimento
-  `, params);
+  `, [Number(empresaId), ...params]);
 
   const map = (rows || []).reduce((acc, row) => {
     acc[row.tipo_recebimento || 'fiscal'] = {
@@ -156,6 +1142,17 @@ function filtroEmpresaSql(empresaId, alias = '') {
   return { sql: ` AND ${col} = ? `, param: Number(empresaId) };
 }
 
+function sqlExcluirContaVendaCanceladaDaEmpresa(aliasConta = 'cr', aliasVenda = 'v') {
+  return `(
+    ${aliasConta}.venda_id IS NULL
+    OR ${aliasVenda}.id IS NULL
+    OR (
+      COALESCE(${aliasVenda}.cancelada, 0) != 1
+      AND LOWER(COALESCE(${aliasVenda}.status, '')) != 'cancelada'
+    )
+  )`;
+}
+
 function responderErroEmpresa(res, err) {
   return res.status(statusDeErroEmpresa(err)).json({
     error: err.message,
@@ -233,32 +1230,36 @@ function inserirMovimentacao(data) {
 
 router.get('/', (req, res) => {
   const { dataInicio, dataFim, tipo, status, busca } = req.query;
-  const emp = filtroEmpresaSql(req.empresaId);
+  const emp = filtroEmpresaSql(req.empresaId, 'f');
 
-  let sql = `SELECT * FROM financeiro WHERE 1=1` + emp.sql;
+  // MCF-02.1 — não listar projeções MCF como obrigações independentes
+  let sql = `SELECT f.* FROM financeiro f WHERE 1=1`
+    + emp.sql
+    + ` AND ${sqlExcluirFinanceiroVendaCancelada('f')}`
+    + sqlExcluirProjecaoMcf('f');
   const params = [emp.param];
 
   if (dataInicio && dataFim) {
-    sql += ` AND date(data_movimento) BETWEEN ? AND ?`;
+    sql += ` AND date(f.data_movimento) BETWEEN ? AND ?`;
     params.push(dataInicio, dataFim);
   }
 
   if (tipo) {
-    sql += ` AND tipo = ?`;
+    sql += ` AND f.tipo = ?`;
     params.push(tipo);
   }
 
   if (status) {
-    sql += ` AND status = ?`;
+    sql += ` AND f.status = ?`;
     params.push(status);
   }
 
   if (busca) {
-    sql += ` AND (descricao LIKE ? OR documento LIKE ?)`;
+    sql += ` AND (f.descricao LIKE ? OR f.documento LIKE ?)`;
     params.push(`%${busca}%`, `%${busca}%`);
   }
 
-  sql += ` ORDER BY date(data_movimento) DESC, id DESC`;
+  sql += ` ORDER BY date(f.data_movimento) DESC, f.id DESC`;
 
   db.all(sql, params, (err, rows) => {
     if (err) {
@@ -269,7 +1270,7 @@ router.get('/', (req, res) => {
   });
 });
 
-router.get('/resumo', (req, res) => {
+router.get('/resumo', async (req, res) => {
   const { data_inicio, data_fim, tipo, categoria, forma_pagamento, status, origem } = req.query;
   const emp = filtroEmpresaSql(req.empresaId, 'f');
 
@@ -277,14 +1278,17 @@ router.get('/resumo', (req, res) => {
     SELECT 
       SUM(CASE WHEN tipo = 'receita' THEN valor ELSE 0 END) AS total_receitas,
       SUM(CASE WHEN tipo = 'despesa' THEN valor ELSE 0 END) AS total_despesas,
-      SUM(CASE WHEN tipo = 'receita' AND status IN ('recebido','pago') THEN valor ELSE 0 END) AS total_recebido,
+      SUM(CASE WHEN tipo = 'receita' AND status IN ('recebido','pago')
+        AND ${sqlExcluirFinanceiroReceberComContaCanonica('f')} THEN valor ELSE 0 END) AS total_recebido,
       SUM(CASE WHEN tipo = 'despesa' AND status IN ('pago','recebido') THEN valor ELSE 0 END) AS total_pago,
-      SUM(CASE WHEN tipo = 'receita' AND status = 'pendente' THEN valor ELSE 0 END) AS total_a_receber,
-      SUM(CASE WHEN tipo = 'despesa' AND status = 'pendente' THEN valor ELSE 0 END) AS total_a_pagar
+      SUM(CASE WHEN tipo = 'receita' AND status NOT IN ('recebido','pago','cancelado')
+        AND ${sqlExcluirFinanceiroReceberComContaCanonica('f')} THEN valor ELSE 0 END) AS total_a_receber,
+      SUM(CASE WHEN tipo = 'despesa' AND status NOT IN ('pago','recebido','cancelado') THEN valor ELSE 0 END) AS total_a_pagar
     FROM financeiro f
     WHERE 1=1
       ${emp.sql}
       AND ${sqlExcluirFinanceiroVendaCancelada('f')}
+      ${sqlExcluirProjecaoMcf('f')}
   `;
   const params = [emp.param];
 
@@ -313,11 +1317,8 @@ router.get('/resumo', (req, res) => {
     params.push(origem);
   }
 
-  db.get(sql, params, (err, row) => {
-    if (err) {
-      res.status(500).json({ error: err.message });
-      return;
-    }
+  try {
+    const row = await dbGetAsync(sql, params);
     const resumo = row || {};
     resumo.total_receitas = parseNumber(resumo.total_receitas);
     resumo.total_despesas = parseNumber(resumo.total_despesas);
@@ -325,9 +1326,155 @@ router.get('/resumo', (req, res) => {
     resumo.total_pago = parseNumber(resumo.total_pago);
     resumo.total_a_receber = parseNumber(resumo.total_a_receber);
     resumo.total_a_pagar = parseNumber(resumo.total_a_pagar);
+
+    if ((!tipo || tipo === 'receita') && !categoria && !origem && !forma_pagamento) {
+      const filtrosReceber = [
+        'cr.empresa_id = ?',
+        "cr.status IN ('aberto', 'parcial')",
+        sqlExcluirContaVendaCancelada('cr')
+      ];
+      const parametrosReceber = [Number(req.empresaId)];
+      if (data_inicio && data_fim) {
+        filtrosReceber.push('date(cr.data_vencimento) BETWEEN date(?) AND date(?)');
+        parametrosReceber.push(data_inicio, data_fim);
+      }
+      if (status === 'pendente' || status === 'aberto') {
+        filtrosReceber.push("cr.status = 'aberto'");
+      } else if (status === 'parcial') {
+        filtrosReceber.push("cr.status = 'parcial'");
+      } else if (status) {
+        filtrosReceber.push('1 = 0');
+      }
+      const contasReceber = await dbGetAsync(
+        `SELECT COALESCE(SUM(cr.valor_restante), 0) AS total
+         FROM contas_receber cr
+         WHERE ${filtrosReceber.join(' AND ')}`,
+        parametrosReceber
+      );
+      resumo.total_a_receber += parseNumber(contasReceber.total);
+
+      const filtrosRecebimentos = ['cr.empresa_id = ?'];
+      const parametrosRecebimentos = [Number(req.empresaId)];
+      if (data_inicio && data_fim) {
+        filtrosRecebimentos.push('date(crp.data_pagamento) BETWEEN date(?) AND date(?)');
+        parametrosRecebimentos.push(data_inicio, data_fim);
+      }
+      if (status) {
+        const statusConta = {
+          parcial: ['parcial'],
+          pago: ['pago'],
+          recebido: ['pago'],
+          cancelado: ['cancelado'],
+          quitada: ['pago']
+        }[status];
+        if (statusConta) {
+          filtrosRecebimentos.push(`cr.status IN (${statusConta.map(() => '?').join(', ')})`);
+          parametrosRecebimentos.push(...statusConta);
+        } else {
+          filtrosRecebimentos.push('1 = 0');
+        }
+      }
+      const recebimentos = await dbGetAsync(
+        `SELECT COALESCE(SUM(crp.valor_pago), 0) AS total
+         FROM contas_receber_pagamentos crp
+         JOIN contas_receber cr ON cr.id = crp.conta_receber_id
+         WHERE ${filtrosRecebimentos.join(' AND ')}`,
+        parametrosRecebimentos
+      );
+      resumo.total_recebido += parseNumber(recebimentos.total);
+    }
+
+    if (!tipo || tipo === 'despesa') {
+      const filtrosMcf = ['cp.empresa_id = ?'];
+      const paramsMcf = [Number(req.empresaId)];
+      if (data_inicio && data_fim) {
+        filtrosMcf.push('date(cp.data_vencimento) BETWEEN date(?) AND date(?)');
+        paramsMcf.push(data_inicio, data_fim);
+      }
+      if (categoria) {
+        filtrosMcf.push('cp.categoria = ?');
+        paramsMcf.push(categoria);
+      }
+      if (forma_pagamento) {
+        filtrosMcf.push('cp.forma_pagamento = ?');
+        paramsMcf.push(forma_pagamento);
+      }
+      if (origem) {
+        filtrosMcf.push('cp.origem = ?');
+        paramsMcf.push(origem);
+      }
+
+      const statusMcfAberto = !status || status === 'pendente' || status === 'aberto';
+      const statusMcfParcial = !status || status === 'parcial';
+      if (statusMcfAberto || statusMcfParcial) {
+        const estados = [];
+        if (statusMcfAberto) estados.push('aberto');
+        if (statusMcfParcial) estados.push('parcial');
+        const placeholders = estados.map(() => '?').join(', ');
+        const pendentesMcf = await dbGetAsync(
+          `SELECT COALESCE(SUM(cp.valor_restante), 0) AS total
+           FROM contas_pagar cp
+           WHERE ${filtrosMcf.join(' AND ')}
+             AND cp.status IN (${placeholders})`,
+          [...paramsMcf, ...estados]
+        );
+        resumo.total_a_pagar += parseNumber(pendentesMcf.total);
+      }
+
+      const filtrosPagamento = [
+        'cp.empresa_id = ?',
+        'date(p.data_pagamento) IS NOT NULL'
+      ];
+      const paramsPagamento = [Number(req.empresaId)];
+      if (data_inicio && data_fim) {
+        filtrosPagamento.push('date(p.data_pagamento) BETWEEN date(?) AND date(?)');
+        paramsPagamento.push(data_inicio, data_fim);
+      }
+      if (categoria) {
+        filtrosPagamento.push('cp.categoria = ?');
+        paramsPagamento.push(categoria);
+      }
+      if (origem) {
+        filtrosPagamento.push('cp.origem = ?');
+        paramsPagamento.push(origem);
+      }
+      if (forma_pagamento) {
+        filtrosPagamento.push('p.forma_pagamento = ?');
+        paramsPagamento.push(forma_pagamento);
+      }
+      if (status) {
+        const estadosStatus = {
+          pendente: ['aberto'],
+          aberto: ['aberto'],
+          parcial: ['parcial'],
+          pago: ['pago'],
+          recebido: ['pago'],
+          cancelado: ['cancelado'],
+          quitada: ['pago']
+        }[status];
+        if (estadosStatus) {
+          filtrosPagamento.push(`cp.status IN (${estadosStatus.map(() => '?').join(', ')})`);
+          paramsPagamento.push(...estadosStatus);
+        } else {
+          filtrosPagamento.push('1 = 0');
+        }
+      }
+      const pagamentosMcf = await dbGetAsync(
+        `SELECT COALESCE(SUM(p.valor_pago), 0) AS total
+         FROM contas_pagar_pagamentos p
+         JOIN contas_pagar cp ON cp.id = p.conta_pagar_id
+         WHERE ${filtrosPagamento.join(' AND ')}`,
+        paramsPagamento
+      );
+      resumo.total_pago += parseNumber(pagamentosMcf.total);
+    }
+
     resumo.saldo = resumo.total_recebido - resumo.total_pago;
     res.json(resumo);
-  });
+  } catch (err) {
+    console.error('Erro ao carregar resumo financeiro:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 router.post('/', (req, res) => {
@@ -356,6 +1503,88 @@ router.post('/', (req, res) => {
     return;
   }
 
+  // MCF-02.1 — despesa/AP canônica via Contas a Pagar (projeção compat automática).
+  if (tipo === 'despesa') {
+    ContasPagarService.criar({
+      db,
+      empresaId: req.empresaId,
+      descricao,
+      valor_original: valor,
+      data_emissao: data_movimento,
+      data_vencimento: vencimento || data_movimento,
+      categoria: categoria || null,
+      forma_pagamento: forma_pagamento || null,
+      documento: documento || null,
+      pessoa_nome: pessoa_nome || null,
+      observacao: observacao || null,
+      origem: 'manual',
+      referencia_tipo: compra_id ? 'compra' : null,
+      referencia_id: compra_id || null,
+      criado_por: req.user?.id || null
+    }).then(async (conta) => {
+      gravarAuditoria({
+        usuario_id: req.user?.id || null,
+        usuario_nome: req.user?.nome || req.user?.username || null,
+        modulo: 'financeiro',
+        acao: 'criar_despesa_via_mcf',
+        referencia_tipo: 'contas_pagar',
+        referencia_id: conta.id,
+        detalhes: { tipo, descricao, valor, data_movimento, categoria, conta_pagar_id: conta.id },
+        ip_requisicao: req.ip || null
+      }).catch((auditErr) => console.error('Erro ao gravar auditoria MCF despesa:', auditErr));
+
+      // Compat UI legada: devolve financeiro_id da projeção quando existir.
+      let financeiroId = null;
+      try {
+        const vinculo = await new Promise((resolve, reject) => {
+          db.get(
+            `SELECT financeiro_id FROM contas_pagar_financeiro_compat
+             WHERE empresa_id = ? AND conta_pagar_id = ?`,
+            [req.empresaId, conta.id],
+            (e, row) => (e ? reject(e) : resolve(row || null))
+          );
+        });
+        financeiroId = vinculo ? Number(vinculo.financeiro_id) : null;
+      } catch { /* ignore */ }
+
+      if (status && ['pago', 'recebido'].includes(String(status)) && Number(conta.valor_restante) > 0) {
+        try {
+          await ContasPagarService.baixar({
+            db,
+            empresaId: req.empresaId,
+            id: conta.id,
+            valor_pago: conta.valor_restante,
+            data_pagamento: data_movimento,
+            forma_pagamento: forma_pagamento || null,
+            usuario_id: req.user?.id || null,
+            origem_operacao: 'financeiro_post_despesa_pago'
+          });
+        } catch (baixaErr) {
+          return res.status(baixaErr.statusCode || 409).json({
+            error: baixaErr.message,
+            code: baixaErr.code || null,
+            conta_pagar_id: conta.id,
+            id: financeiroId
+          });
+        }
+      }
+
+      return res.json({
+        id: financeiroId != null ? financeiroId : conta.id,
+        conta_pagar_id: conta.id,
+        financeiro_id: financeiroId,
+        message: 'Despesa registrada via Contas a Pagar (MCF).',
+        code: 'MCF_DESPESA_CRIADA'
+      });
+    }).catch((err) => {
+      res.status(err.statusCode || 500).json({
+        error: err.message,
+        code: err.code || null
+      });
+    });
+    return;
+  }
+
   inserirMovimentacao({
     tipo,
     descricao,
@@ -370,7 +1599,7 @@ router.post('/', (req, res) => {
     pessoa_nome,
     origem: 'manual',
     referencia_tipo: 'manual',
-    status: status || (tipo === 'despesa' ? 'pendente' : 'recebido'),
+    status: status || 'recebido',
     empresa_id: req.empresaId
   }).then((id) => {
     // gravar auditoria de criação de movimentação financeira
@@ -408,7 +1637,7 @@ router.put('/:id', (req, res) => {
     status
   } = req.body;
 
-  db.get('SELECT * FROM financeiro WHERE id = ? AND empresa_id = ?', [id, req.empresaId], (findErr, row) => {
+  db.get('SELECT * FROM financeiro WHERE id = ? AND empresa_id = ?', [id, req.empresaId], async (findErr, row) => {
     if (findErr) {
       res.status(500).json({ error: findErr.message });
       return;
@@ -423,6 +1652,16 @@ router.put('/:id', (req, res) => {
       exigirRegistroDaEmpresa(row, req.empresaId, { rotulo: 'Movimentação financeira' });
     } catch (empErr) {
       return responderErroEmpresa(res, empErr);
+    }
+
+    // MCF-02.1 — projeção não é obrigação mutável no legado
+    if (ehProjecaoMcfRow(row) || await buscarVinculoPorFinanceiroId(db, req.empresaId, id)) {
+      const e = erroProjecaoImutavel('alterar');
+      return res.status(e.statusCode || 409).json({
+        error: e.message,
+        code: e.code,
+        conta_pagar_id: (await buscarVinculoPorFinanceiroId(db, req.empresaId, id))?.conta_pagar_id || null
+      });
     }
 
     const novoStatus = status || row.status || 'pendente';
@@ -685,7 +1924,7 @@ router.post('/pagar/:id/baixar', (req, res) => {
   const { valor, forma_pagamento } = req.body;
   const empresaId = req.empresaId;
 
-  db.get('SELECT id, tipo, status, valor AS valor_total, empresa_id FROM financeiro WHERE id = ?', [id], (err, row) => {
+  db.get('SELECT id, tipo, status, valor AS valor_total, empresa_id, origem, referencia_tipo FROM financeiro WHERE id = ?', [id], async (err, row) => {
     if (err) {
       res.status(500).json({ success: false, error: err.message });
       return;
@@ -699,6 +1938,21 @@ router.post('/pagar/:id/baixar', (req, res) => {
         code: empErr.code
       });
     }
+
+    // MCF-02.1 — baixa de AP deve ir pelo MCF
+    const vinculoBaixa = ehProjecaoMcfRow(row)
+      ? await buscarVinculoPorFinanceiroId(db, empresaId, id)
+      : await buscarVinculoPorFinanceiroId(db, empresaId, id);
+    if (ehProjecaoMcfRow(row) || vinculoBaixa) {
+      const e = erroProjecaoImutavel('pagar');
+      return res.status(e.statusCode || 409).json({
+        success: false,
+        error: e.message,
+        code: e.code,
+        conta_pagar_id: vinculoBaixa?.conta_pagar_id || null
+      });
+    }
+
     if (['recebido', 'pago'].includes(row.status)) {
       res.status(400).json({ success: false, error: 'Esta movimentação já foi baixada.' });
       return;
@@ -760,22 +2014,48 @@ router.get('/dashboard', async (req, res) => {
   const hoje = moment().format('YYYY-MM-DD');
   const daqui30 = moment().add(30, 'days').format('YYYY-MM-DD');
 
+  // MCF-02.1 — excluir projeções para evitar dupla contagem com títulos MCF
+  const exclProj = sqlExcluirProjecaoMcf('');
+
+  // Receitas e despesas históricas (sem projeções MCF). AP canônica vem de contas_pagar.
   const resumoSql = `
     SELECT
       COALESCE(SUM(CASE WHEN tipo = 'receita' AND status IN ('recebido','pago') THEN valor END), 0) AS totalRecebido,
-      COALESCE(SUM(CASE WHEN tipo = 'despesa' AND status IN ('pago','recebido') THEN valor END), 0) AS totalPago
-    FROM financeiro
+      COALESCE(SUM(CASE WHEN tipo = 'despesa' AND status IN ('pago','recebido') THEN valor END), 0) AS totalPagoHistorico
+    FROM financeiro f
     WHERE 1 = 1
     ${periodoFiltro}
+    AND ${sqlExcluirFinanceiroVendaCancelada('f')}
+    AND ${sqlExcluirFinanceiroReceberComContaCanonica('f')}
+    ${exclProj}
   `;
 
   const pendentesSql = `
     SELECT
-      COALESCE(SUM(CASE WHEN tipo = 'receita' AND status NOT IN ('recebido','pago') THEN valor END), 0) AS totalReceber,
-      COALESCE(SUM(CASE WHEN tipo = 'despesa' AND status NOT IN ('pago','recebido') THEN valor END), 0) AS totalPagar
-    FROM financeiro
+      COALESCE(SUM(CASE WHEN tipo = 'receita' AND status NOT IN ('recebido','pago','cancelado') THEN valor END), 0) AS totalReceber,
+      COALESCE(SUM(CASE WHEN tipo = 'despesa' AND status NOT IN ('pago','recebido','cancelado') THEN valor END), 0) AS totalPagarHistorico
+    FROM financeiro f
     WHERE 1 = 1
     ${emp.sql}
+    AND ${sqlExcluirFinanceiroVendaCancelada('f')}
+    AND ${sqlExcluirFinanceiroReceberComContaCanonica('f')}
+    ${exclProj}
+  `;
+
+  const crAReceberSql = `
+    SELECT COALESCE(SUM(cr.valor_restante), 0) AS total
+    FROM contas_receber cr
+    WHERE cr.empresa_id = ?
+      AND cr.status IN ('aberto', 'parcial')
+      AND ${sqlExcluirContaVendaCancelada('cr')}
+      ${dataInicio && dataFim ? 'AND date(cr.data_vencimento) BETWEEN date(?) AND date(?)' : ''}
+  `;
+  const crRecebidoSql = `
+    SELECT COALESCE(SUM(crp.valor_pago), 0) AS total
+    FROM contas_receber_pagamentos crp
+    JOIN contas_receber cr ON cr.id = crp.conta_receber_id
+    WHERE cr.empresa_id = ?
+      ${dataInicio && dataFim ? 'AND date(crp.data_pagamento) BETWEEN date(?) AND date(?)' : ''}
   `;
 
   const proximosRecebimentosSql = `
@@ -787,36 +2067,51 @@ router.get('/dashboard', async (req, res) => {
       pessoa_nome AS cliente,
       tipo,
       status
-    FROM financeiro
+    FROM financeiro f
     WHERE tipo = 'receita'
       ${emp.sql}
-      AND status NOT IN ('recebido','pago')
+      AND COALESCE(f.status, '') != 'cancelado'
+      AND ${sqlExcluirFinanceiroVendaCancelada('f')}
+      AND ${sqlExcluirFinanceiroReceberComContaCanonica('f')}
+      ${exclProj}
+      AND status NOT IN ('recebido','pago','cancelado')
       AND vencimento IS NOT NULL
       AND vencimento BETWEEN date('now') AND date('now', '+30 days')
     ORDER BY vencimento ASC
     LIMIT 10
   `;
 
-  const proximosPagamentosSql = `
+  // MCF-02.2 — próximos pagamentos / alertas AP a partir de contas_pagar (não somam projeção)
+  const mcfPagoPeriodoSql = `
+    SELECT COALESCE(SUM(p.valor_pago), 0) AS total
+    FROM contas_pagar_pagamentos p
+    WHERE p.empresa_id = ?
+      ${dataInicio && dataFim ? 'AND date(p.data_pagamento) BETWEEN date(?) AND date(?)' : ''}
+  `;
+  const mcfAPagarSql = `
+    SELECT COALESCE(SUM(valor_restante), 0) AS total
+    FROM contas_pagar
+    WHERE empresa_id = ?
+      AND status IN ('aberto', 'parcial')
+  `;
+  const proximosPagamentosMcfSql = `
     SELECT
-      id,
-      descricao,
-      valor,
-      vencimento,
-      pessoa_nome AS fornecedor,
-      tipo,
-      status
-    FROM financeiro
-    WHERE tipo = 'despesa'
-      ${emp.sql}
-      AND status NOT IN ('recebido','pago')
-      AND vencimento IS NOT NULL
-      AND vencimento BETWEEN date('now') AND date('now', '+30 days')
-    ORDER BY vencimento ASC
+      cp.id,
+      cp.descricao,
+      cp.valor_restante AS valor,
+      cp.data_vencimento AS vencimento,
+      COALESCE(cp.pessoa_nome, f.nome) AS fornecedor,
+      cp.status
+    FROM contas_pagar cp
+    LEFT JOIN fornecedores f ON f.id = cp.fornecedor_id
+    WHERE cp.empresa_id = ?
+      AND cp.status IN ('aberto', 'parcial')
+      AND cp.data_vencimento IS NOT NULL
+      AND date(cp.data_vencimento) BETWEEN date('now') AND date('now', '+30 days')
+    ORDER BY cp.data_vencimento ASC
     LIMIT 10
   `;
-
-  const alertasSql = `
+  const alertasReceberSql = `
     SELECT
       id,
       descricao,
@@ -825,43 +2120,114 @@ router.get('/dashboard', async (req, res) => {
       pessoa_nome AS pessoa,
       tipo,
       status,
-      CASE WHEN status NOT IN ('recebido','pago') AND vencimento < date('now') THEN 'vencido' ELSE status END AS status_exibicao
-    FROM financeiro
-    WHERE status NOT IN ('recebido','pago')
+      'vencido' AS status_exibicao
+    FROM financeiro f
+    WHERE tipo = 'receita'
+      AND status NOT IN ('recebido','pago','cancelado')
       ${emp.sql}
+      AND ${sqlExcluirFinanceiroVendaCancelada('f')}
+      AND ${sqlExcluirFinanceiroReceberComContaCanonica('f')}
+      ${exclProj}
       AND vencimento IS NOT NULL
       AND vencimento < date('now')
     ORDER BY vencimento ASC
-    LIMIT 10
+    LIMIT 5
+  `;
+  const alertasPagarMcfSql = `
+    SELECT
+      cp.id,
+      cp.descricao,
+      cp.valor_restante AS valor,
+      cp.data_vencimento AS vencimento,
+      COALESCE(cp.pessoa_nome, f.nome) AS pessoa,
+      'despesa' AS tipo,
+      cp.status,
+      'vencido' AS status_exibicao
+    FROM contas_pagar cp
+    LEFT JOIN fornecedores f ON f.id = cp.fornecedor_id
+    WHERE cp.empresa_id = ?
+      AND cp.status IN ('aberto', 'parcial')
+      AND cp.data_vencimento IS NOT NULL
+      AND date(cp.data_vencimento) < date('now')
+    ORDER BY cp.data_vencimento ASC
+    LIMIT 5
   `;
 
   const graficoSql = `
     SELECT
       COALESCE(SUM(CASE WHEN tipo = 'receita' AND status IN ('recebido','pago') THEN valor END), 0) AS recebido,
-      COALESCE(SUM(CASE WHEN tipo = 'despesa' AND status IN ('pago','recebido') THEN valor END), 0) AS pago,
-      COALESCE(SUM(CASE WHEN tipo = 'receita' AND status NOT IN ('recebido','pago') THEN valor END), 0) AS receber,
-      COALESCE(SUM(CASE WHEN tipo = 'despesa' AND status NOT IN ('pago','recebido') THEN valor END), 0) AS pagar
-    FROM financeiro
+      COALESCE(SUM(CASE WHEN tipo = 'receita' AND status NOT IN ('recebido','pago','cancelado') THEN valor END), 0) AS receber
+    FROM financeiro f
     WHERE 1 = 1
     ${periodoFiltro}
+    AND ${sqlExcluirFinanceiroVendaCancelada('f')}
+    AND ${sqlExcluirFinanceiroReceberComContaCanonica('f')}
+    ${exclProj}
   `;
 
   try {
     const empOnly = [emp.param];
     const resumo = await dbGetAsync(resumoSql, params);
     const pendentes = await dbGetAsync(pendentesSql, empOnly);
-    const proximosRecebimentos = await dbAllAsync(proximosRecebimentosSql, empOnly);
-    const proximosPagamentos = await dbAllAsync(proximosPagamentosSql, empOnly);
-    const alertas = await dbAllAsync(alertasSql, empOnly);
+    const parametrosPeriodoEmpresa = dataInicio && dataFim
+      ? [req.empresaId, dataInicio, dataFim]
+      : [req.empresaId];
+    const crAReceber = await dbGetAsync(crAReceberSql, parametrosPeriodoEmpresa);
+    const crRecebido = await dbGetAsync(crRecebidoSql, parametrosPeriodoEmpresa);
+    const recebimentosLegados = await dbAllAsync(proximosRecebimentosSql, empOnly);
+    const recebimentosCr = await dbAllAsync(`
+      SELECT cr.id, cr.venda_id, cr.valor_restante AS valor,
+        cr.data_vencimento AS vencimento, NULL AS cliente, cr.status
+      FROM contas_receber cr
+      WHERE cr.empresa_id = ?
+        AND cr.status IN ('aberto', 'parcial')
+        AND ${sqlExcluirContaVendaCancelada('cr')}
+        AND date(cr.data_vencimento) BETWEEN date('now') AND date('now', '+30 days')
+      ORDER BY cr.data_vencimento ASC
+      LIMIT 10
+    `, empOnly);
+    const mcfPagoParams = dataInicio && dataFim
+      ? [req.empresaId, dataInicio, dataFim]
+      : [req.empresaId];
+    const mcfPago = await dbGetAsync(mcfPagoPeriodoSql, mcfPagoParams);
+    const mcfAPagar = await dbGetAsync(mcfAPagarSql, [req.empresaId]);
+    const proximosPagamentos = await dbAllAsync(proximosPagamentosMcfSql, [req.empresaId]);
+    const alertasReceberLegado = await dbAllAsync(alertasReceberSql, empOnly);
+    const alertasReceberCr = await dbAllAsync(`
+      SELECT cr.id, cr.venda_id, cr.valor_restante AS valor,
+        cr.data_vencimento AS vencimento, NULL AS pessoa, cr.status,
+        'receita' AS tipo, 'vencido' AS status_exibicao
+      FROM contas_receber cr
+      WHERE cr.empresa_id = ?
+        AND cr.status IN ('aberto', 'parcial')
+        AND ${sqlExcluirContaVendaCancelada('cr')}
+        AND cr.data_vencimento IS NOT NULL
+        AND date(cr.data_vencimento) < date('now')
+      ORDER BY cr.data_vencimento ASC
+      LIMIT 5
+    `, empOnly);
+    const alertasPagar = await dbAllAsync(alertasPagarMcfSql, [req.empresaId]);
     const grafico = await dbGetAsync(graficoSql, params);
+
+    const totalRecebido = parseNumber(resumo.totalRecebido) + parseNumber(crRecebido.total);
+    const totalPago = parseNumber(resumo.totalPagoHistorico) + parseNumber(mcfPago.total);
+    const totalReceber = parseNumber(pendentes.totalReceber) + parseNumber(crAReceber.total);
+    const totalPagar = parseNumber(pendentes.totalPagarHistorico) + parseNumber(mcfAPagar.total);
+    const proximosRecebimentos = [...recebimentosLegados, ...recebimentosCr]
+      .sort((a, b) => String(a.vencimento).localeCompare(String(b.vencimento)))
+      .slice(0, 10);
+    const alertasReceber = [...alertasReceberLegado, ...alertasReceberCr]
+      .sort((a, b) => String(a.vencimento).localeCompare(String(b.vencimento)))
+      .slice(0, 5);
+    const alertas = [...alertasPagar, ...alertasReceber].slice(0, 10);
 
     res.json({
       success: true,
       resumo: {
-        totalRecebido: parseNumber(resumo.totalRecebido),
-        totalPago: parseNumber(resumo.totalPago),
-        totalReceber: parseNumber(pendentes.totalReceber),
-        totalPagar: parseNumber(pendentes.totalPagar)
+        totalRecebido,
+        totalPago,
+        totalReceber,
+        totalPagar
       },
       proximos_recebimentos: proximosRecebimentos.map(row => ({
         id: row.id,
@@ -877,7 +2243,8 @@ router.get('/dashboard', async (req, res) => {
         valor: parseNumber(row.valor),
         dataVencimento: row.vencimento,
         fornecedor: row.fornecedor,
-        status: row.status
+        status: row.status,
+        fonte: 'contas_pagar'
       })),
       alertas: alertas.map(row => ({
         id: row.id,
@@ -889,10 +2256,10 @@ router.get('/dashboard', async (req, res) => {
         status: row.status_exibicao
       })),
       grafico: {
-        recebido: parseNumber(grafico.recebido),
-        pago: parseNumber(grafico.pago),
-        receber: parseNumber(grafico.receber),
-        pagar: parseNumber(grafico.pagar)
+        recebido: totalRecebido,
+        pago: totalPago,
+        receber: totalReceber,
+        pagar: totalPagar
       }
     });
   } catch (err) {
@@ -914,12 +2281,15 @@ router.get('/proximos-vencimentos', (req, res) => {
       pessoa_nome as cliente,
       tipo,
       JULIANDAY(vencimento) - JULIANDAY('now') as diasRestantes
-    FROM financeiro
+    FROM financeiro f
     WHERE vencimento IS NOT NULL
-      AND status NOT IN ('recebido', 'pago')
+      AND status NOT IN ('recebido', 'pago', 'cancelado')
       AND vencimento >= date('now')
       AND vencimento <= date('now', '+30 days')
       AND empresa_id = ?
+      AND ${sqlExcluirFinanceiroVendaCancelada('f')}
+      ${sqlExcluirProjecaoMcf('f')}
+      AND COALESCE(f.status, '') != 'cancelado'
     ORDER BY vencimento ASC
     LIMIT 10
   `, [req.empresaId], (err, rows) => {
@@ -957,6 +2327,7 @@ router.get('/ultimas-movimentacoes', (req, res) => {
       status
     FROM financeiro
     WHERE empresa_id = ?
+      ${sqlExcluirProjecaoMcf('')}
     ORDER BY data_movimento DESC
     LIMIT 10
   `, [req.empresaId], (err, rows) => {
@@ -983,8 +2354,9 @@ router.get('/ultimas-movimentacoes', (req, res) => {
   });
 });
 
-function buildReceberQueryFilters(query, empresaId) {
+function buildReceberQueryFilters(query, empresaId, opcoes = {}) {
   const { dataInicio, dataFim, status, cliente, documento } = query;
+  const excluirComContaCanonica = opcoes.excluirComContaCanonica === true;
   const emp = filtroEmpresaSql(empresaId, 'f');
 
   let sql = `
@@ -1000,7 +2372,10 @@ function buildReceberQueryFilters(query, empresaId) {
       f.documento,
       f.numero_parcela,
       f.total_parcelas,
-      f.origem
+      f.origem,
+      f.venda_id,
+      f.referencia_id,
+      f.referencia_tipo
     FROM financeiro f
     LEFT JOIN clientes c
       ON (
@@ -1015,6 +2390,10 @@ function buildReceberQueryFilters(query, empresaId) {
 
   const params = [emp.param];
 
+  if (excluirComContaCanonica) {
+    sql += ` AND ${sqlExcluirFinanceiroReceberComContaCanonica('f')}`;
+  }
+
   if (dataInicio && dataFim) {
     sql += ' AND COALESCE(f.vencimento, f.data_movimento) BETWEEN ? AND ?';
     params.push(dataInicio, dataFim);
@@ -1027,6 +2406,8 @@ function buildReceberQueryFilters(query, empresaId) {
       sql += " AND f.status NOT IN ('recebido','pago') AND COALESCE(f.vencimento, f.data_movimento) >= date('now')";
     } else if (status === 'recebidas') {
       sql += " AND f.status IN ('recebido','pago')";
+    } else if (status === 'aberto' || status === 'pendente') {
+      sql += " AND f.status NOT IN ('recebido','pago','cancelado','cancelada')";
     } else {
       sql += ' AND f.status = ?';
       params.push(status);
@@ -1053,43 +2434,180 @@ function buildReceberQueryFilters(query, empresaId) {
   return { sql, params };
 }
 
-router.get('/receber', (req, res) => {
-  const { sql, params } = buildReceberQueryFilters(req.query, req.empresaId);
+/**
+ * FIN-INT-04 — consulta canônica para união da lista Contas a Receber.
+ * Uma linha por registro de contas_receber (componente); saldo = valor_restante.
+ */
+function buildReceberCanonicoQueryFilters(query, empresaId) {
+  const { dataInicio, dataFim, status, cliente, documento } = query;
 
-  db.all(sql, params, (err, rows) => {
-    if (err) {
-      console.error('Erro na query receber:', err);
-      res.status(500).json({ error: err.message });
-      return;
+  // Documento não existe em contas_receber: filtro documento restringe à origem legado.
+  if (documento && String(documento).trim() !== '') {
+    return { sql: null, params: [] };
+  }
+
+  let sql = `
+    SELECT
+      cr.id,
+      cr.venda_id,
+      cr.cliente_id,
+      cr.numero_parcela,
+      cr.total_parcelas,
+      cr.componente,
+      cr.valor_parcela,
+      cr.valor_restante,
+      cr.data_vencimento,
+      cr.data_pagamento,
+      cr.status,
+      c.nome AS cliente,
+      c.cpf_cnpj AS documento_cliente,
+      v.id AS venda_id_validado,
+      v.codigo AS venda_codigo
+    FROM contas_receber cr
+    LEFT JOIN clientes c ON c.id = cr.cliente_id
+    LEFT JOIN vendas v
+      ON v.id = cr.venda_id
+     AND v.empresa_id = cr.empresa_id
+    WHERE cr.empresa_id = ?
+      AND ${sqlExcluirContaVendaCanceladaDaEmpresa('cr', 'v')}
+  `;
+  const params = [Number(empresaId)];
+
+  if (dataInicio && dataFim) {
+    sql += ' AND date(cr.data_vencimento) BETWEEN date(?) AND date(?)';
+    params.push(dataInicio, dataFim);
+  }
+
+  if (status && status !== 'todas') {
+    if (status === 'vencidas') {
+      sql += " AND cr.status IN ('aberto','parcial') AND date(cr.data_vencimento) < date('now')";
+    } else if (status === 'a_vencer') {
+      sql += " AND cr.status IN ('aberto','parcial') AND date(cr.data_vencimento) >= date('now')";
+    } else if (status === 'recebidas') {
+      sql += " AND cr.status IN ('recebido','pago')";
+    } else if (status === 'aberto' || status === 'pendente') {
+      sql += " AND cr.status IN ('aberto','parcial')";
+    } else if (status === 'parcial') {
+      sql += " AND cr.status = 'parcial'";
+    } else {
+      sql += ' AND cr.status = ?';
+      params.push(status);
     }
+  }
 
+  if (cliente) {
+    sql += `
+      AND (
+        COALESCE(c.nome, '') LIKE ?
+        OR COALESCE(c.cpf_cnpj, '') LIKE ?
+        OR COALESCE(c.telefone, '') LIKE ?
+      )
+    `;
+    params.push(`%${cliente}%`, `%${cliente}%`, `%${cliente}%`);
+  }
+
+  sql += ' ORDER BY date(cr.data_vencimento) DESC, cr.id DESC';
+  return { sql, params };
+}
+
+function mapearStatusExibicaoReceber(statusPersistido, dataVencimento, hoje) {
+  const status = statusPersistido == null ? '' : String(statusPersistido);
+  const liquidados = ['recebido', 'pago', 'cancelado', 'cancelada'];
+  if (!liquidados.includes(status) && dataVencimento && String(dataVencimento) < hoje) {
+    return 'vencido';
+  }
+  return status || '—';
+}
+
+function mapearLinhaReceberLegado(row, hoje) {
+  const dataVencimento = row.dataVencimento || null;
+  return {
+    id: row.id,
+    fonte: 'financeiro',
+    chave: `financeiro:${row.id}`,
+    descricao: row.descricao,
+    valor: parseNumber(row.valor),
+    dataEmissao: row.dataEmissao || null,
+    dataVencimento,
+    cliente: row.cliente,
+    status: mapearStatusExibicaoReceber(row.status, dataVencimento, hoje),
+    status_persistido: row.status,
+    observacao: row.observacao,
+    documento: row.documento,
+    numero_parcela: row.numero_parcela,
+    total_parcelas: row.total_parcelas,
+    origem: row.origem || 'manual',
+    venda_id: row.venda_id || (row.referencia_tipo === 'venda' ? row.referencia_id : null) || null,
+    cliente_id: null,
+    componente: null,
+    acoes_disponiveis: ['baixar', 'detalhes', 'editar', 'renegociar', 'cancelar']
+  };
+}
+
+function mapearLinhaReceberCanonico(row, hoje) {
+  const dataVencimento = row.data_vencimento || null;
+  const componente = row.componente || 'produtos';
+  const rotuloComp = componente === 'outros' ? 'Outros' : 'Produtos';
+  const codigoVenda = row.venda_codigo || row.venda_id_validado || '-';
+  const statusPersistido = row.status;
+  const statusExibicao = mapearStatusExibicaoReceber(statusPersistido, dataVencimento, hoje);
+  const podeBaixar = statusPersistido === 'aberto' && parseNumber(row.valor_restante) > 0;
+  return {
+    id: row.id,
+    fonte: 'contas_receber',
+    chave: `contas_receber:${row.id}`,
+    descricao: `Parcela ${row.numero_parcela || '-'}/${row.total_parcelas || '-'} · ${rotuloComp} · Venda ${codigoVenda}`,
+    valor: parseNumber(row.valor_restante),
+    valor_parcela: parseNumber(row.valor_parcela),
+    dataEmissao: null,
+    dataVencimento,
+    cliente: row.cliente || null,
+    status: statusExibicao,
+    status_persistido: statusPersistido,
+    observacao: null,
+    documento: row.documento_cliente || null,
+    numero_parcela: row.numero_parcela,
+    total_parcelas: row.total_parcelas,
+    origem: 'contas_receber',
+    venda_id: row.venda_id || null,
+    cliente_id: row.cliente_id || null,
+    componente,
+    acoes_disponiveis: podeBaixar ? ['baixar', 'detalhes'] : ['detalhes']
+  };
+}
+
+router.get('/receber', async (req, res) => {
+  try {
     const hoje = moment().format('YYYY-MM-DD');
-    const contas = rows.map(row => {
-      let status = row.status;
-      if (!['recebido', 'pago'].includes(status) && row.vencimento && row.vencimento < hoje) {
-        status = 'vencido';
-      }
-      return {
-        id: row.id,
-        descricao: row.descricao,
-        valor: parseNumber(row.valor),
-        dataEmissao: row.dataEmissao,
-        dataVencimento: row.dataVencimento,
-        cliente: row.cliente,
-        status: status,
-        observacao: row.observacao,
-        documento: row.documento,
-        numero_parcela: row.numero_parcela,
-        total_parcelas: row.total_parcelas,
-        origem: row.origem
-      };
+    const legado = buildReceberQueryFilters(req.query, req.empresaId, {
+      excluirComContaCanonica: true
+    });
+    const canonico = buildReceberCanonicoQueryFilters(req.query, req.empresaId);
+
+    const rowsLegado = await dbAllAsync(legado.sql, legado.params);
+    const rowsCanonico = canonico.sql
+      ? await dbAllAsync(canonico.sql, canonico.params)
+      : [];
+
+    const contas = [
+      ...rowsLegado.map((row) => mapearLinhaReceberLegado(row, hoje)),
+      ...rowsCanonico.map((row) => mapearLinhaReceberCanonico(row, hoje))
+    ].sort((a, b) => {
+      const da = String(a.dataVencimento || '');
+      const dbv = String(b.dataVencimento || '');
+      if (da !== dbv) return dbv.localeCompare(da);
+      return String(b.chave).localeCompare(String(a.chave));
     });
 
     res.json({
       success: true,
-      contas: contas
+      uniao: true,
+      contas
     });
-  });
+  } catch (err) {
+    console.error('Erro na query receber (união):', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 router.get('/contas-receber', (req, res) => {
@@ -1137,7 +2655,7 @@ router.get('/receber/agrupado', async (req, res) => {
         c.nome as nome_cliente,
         COALESCE(c.cpf_cnpj, '') as cpf,
         COALESCE(c.telefone, '') as telefone,
-        COUNT(DISTINCT cr.venda_id) as quantidade_vendas,
+        COUNT(DISTINCT v.id) as quantidade_vendas,
         COUNT(cr.id) as quantidade_titulos,
         COALESCE(SUM(CASE WHEN cr.status IN ('aberto','parcial') THEN cr.valor_restante ELSE 0 END), 0) as total_divida,
         COALESCE(SUM(CASE WHEN cr.status = 'recebido' THEN cr.valor_parcela ELSE 0 END), 0) as total_pago,
@@ -1145,9 +2663,12 @@ router.get('/receber/agrupado', async (req, res) => {
         COALESCE(SUM(CASE WHEN cr.status IN ('aberto','parcial') AND date(cr.data_vencimento) >= date('now') THEN 1 ELSE 0 END), 0) as a_vencer
       FROM clientes c
       JOIN contas_receber cr ON cr.cliente_id = c.id
+      LEFT JOIN vendas v
+        ON v.id = cr.venda_id
+       AND v.empresa_id = cr.empresa_id
       WHERE cr.status IN ('aberto','parcial')
         AND cr.empresa_id = ?
-        AND ${sqlExcluirContaVendaCancelada('cr')}
+        AND ${sqlExcluirContaVendaCanceladaDaEmpresa('cr', 'v')}
     `;
 
     const params = [req.empresaId];
@@ -1215,7 +2736,13 @@ router.get('/receber/agrupado/:clienteId', async (req, res) => {
         cep
       FROM clientes
       WHERE id = ?
-    `, [clienteId]);
+        AND EXISTS (
+          SELECT 1
+          FROM contas_receber cr
+          WHERE cr.cliente_id = clientes.id
+            AND cr.empresa_id = ?
+        )
+    `, [clienteId, req.empresaId]);
 
     if (!cliente) {
       return res.status(404).json({ success: false, error: 'Cliente não encontrado' });
@@ -1240,10 +2767,12 @@ router.get('/receber/agrupado/:clienteId', async (req, res) => {
         cr.data_vencimento,
         cr.status
       FROM contas_receber cr
-      JOIN vendas v ON v.id = cr.venda_id
+      JOIN vendas v
+        ON v.id = cr.venda_id
+       AND v.empresa_id = cr.empresa_id
       WHERE cr.cliente_id = ? AND cr.status IN ('aberto', 'parcial')
         AND cr.empresa_id = ?
-        AND ${sqlExcluirContaVendaCancelada('cr')}
+        AND ${sqlExcluirContaVendaCanceladaDaEmpresa('cr', 'v')}
       ORDER BY v.data_venda ASC, cr.data_vencimento ASC
     `, [clienteId, req.empresaId]);
 
@@ -1265,9 +2794,12 @@ router.get('/receber/agrupado/:clienteId', async (req, res) => {
           vi.preco_unitario,
           vi.subtotal
         FROM vendas_itens vi
+        JOIN vendas v
+          ON v.id = vi.venda_id
+         AND v.empresa_id = ?
         LEFT JOIN produtos p ON p.id = vi.produto_id
         WHERE vi.venda_id IN (${placeholders})
-      `, vendaIds);
+      `, [req.empresaId, ...vendaIds]);
     }
 
     const vendasMap = new Map();
@@ -1385,7 +2917,13 @@ router.get('/receber/agrupado/:clienteId/extrato', async (req, res) => {
       SELECT id, nome, cpf_cnpj AS cpf, telefone, endereco, rua, numero, bairro, cidade, uf, cep
       FROM clientes
       WHERE id = ?
-    `, [clienteId]);
+        AND EXISTS (
+          SELECT 1
+          FROM contas_receber cr
+          WHERE cr.cliente_id = clientes.id
+            AND cr.empresa_id = ?
+        )
+    `, [clienteId, req.empresaId]);
 
     if (!cliente) {
       return res.status(404).json({ success: false, error: 'Cliente não encontrado' });
@@ -1410,7 +2948,9 @@ router.get('/receber/agrupado/:clienteId/extrato', async (req, res) => {
         cr.data_vencimento,
         cr.status
       FROM contas_receber cr
-      JOIN vendas v ON v.id = cr.venda_id
+      JOIN vendas v
+        ON v.id = cr.venda_id
+       AND v.empresa_id = cr.empresa_id
       WHERE cr.cliente_id = ?
         AND cr.empresa_id = ?
       ORDER BY v.data_venda ASC, cr.data_vencimento ASC
@@ -1433,9 +2973,12 @@ router.get('/receber/agrupado/:clienteId/extrato', async (req, res) => {
           vi.preco_unitario,
           vi.subtotal
         FROM vendas_itens vi
+        JOIN vendas v
+          ON v.id = vi.venda_id
+         AND v.empresa_id = ?
         LEFT JOIN produtos p ON p.id = vi.produto_id
         WHERE vi.venda_id IN (${placeholders})
-      `, vendaIds);
+      `, [req.empresaId, ...vendaIds]);
     }
 
     const vendasMap = new Map();
@@ -1540,13 +3083,15 @@ router.get('/receber/agrupado/:clienteId/pagamentos', async (req, res) => {
         crp.forma_pagamento,
         crp.observacao,
         crp.created_at,
-        cr.conta_receber_id,
+        cr.id AS conta_receber_id,
         v.codigo as venda_codigo,
         cr.numero_parcela,
         cr.total_parcelas
       FROM contas_receber_pagamentos crp
       JOIN contas_receber cr ON cr.id = crp.conta_receber_id
-      JOIN vendas v ON v.id = cr.venda_id
+      JOIN vendas v
+        ON v.id = cr.venda_id
+       AND v.empresa_id = cr.empresa_id
       WHERE crp.cliente_id = ?
         AND cr.empresa_id = ?
       ORDER BY crp.data_pagamento DESC, crp.created_at DESC
@@ -1629,11 +3174,44 @@ router.post('/receber/agrupado/:clienteId/pagamento-parcial', async (req, res) =
       db.serialize(() => {
         db.run('BEGIN IMMEDIATE');
 
+        let contasValidadas;
+        try {
+          contasValidadas = contas.map(conta => {
+            if (Number(conta.empresa_id) !== Number(req.empresaId)) {
+              const err = new Error('A conta a receber não pertence à empresa ativa.');
+              err.code = 'FINANCEIRO_EMPRESA_DIVERGENTE';
+              err.statusCode = 409;
+              throw err;
+            }
+
+            if (
+              conta.venda_id != null &&
+              (!Number.isInteger(Number(conta.venda_empresa_id)) || Number(conta.venda_empresa_id) <= 0)
+            ) {
+              const err = new Error('A empresa da venda vinculada não pôde ser validada.');
+              err.code = 'FINANCEIRO_EMPRESA_OBRIGATORIA';
+              err.statusCode = 400;
+              throw err;
+            }
+
+            const empresaIdFin = resolverEmpresaDaOrigemFinanceira({
+              venda: conta.venda_id == null
+                ? null
+                : { empresa_id: conta.venda_empresa_id },
+              empresaId: req.empresaId
+            });
+            return { ...conta, empresaIdFin };
+          });
+        } catch (ownErr) {
+          db.run('ROLLBACK', () => reject(ownErr));
+          return;
+        }
+
         let valorRestantePagamento = arredondarCentavos(valorPago);
         const pagamentos = [];
 
         const processarConta = (index) => {
-          if (index >= contas.length || valorRestantePagamento <= 0) {
+          if (index >= contasValidadas.length || valorRestantePagamento <= 0) {
             db.run(`
               UPDATE vendas
               SET status_pagamento = 'quitada'
@@ -1668,7 +3246,7 @@ router.post('/receber/agrupado/:clienteId/pagamento-parcial', async (req, res) =
             return;
           }
 
-          const conta = contas[index];
+          const conta = contasValidadas[index];
           const saldoAtualConta = parseNumber(conta.valor_restante);
           const valorAbater = Math.min(saldoAtualConta, valorRestantePagamento);
 
@@ -1728,18 +3306,7 @@ router.post('/receber/agrupado/:clienteId/pagamento-parcial', async (req, res) =
               }
 
               const descricaoFinanceiro = `Recebimento venda #${conta.numero_venda || conta.venda_id} - Parcela ${conta.numero_parcela || '-'} / ${conta.total_parcelas || '-'}`;
-
-              let empresaIdFin;
-              try {
-                empresaIdFin = resolverEmpresaDaOrigemFinanceira({
-                  venda: { empresa_id: conta.venda_empresa_id },
-                  empresaId: req.empresaId
-                });
-              } catch (ownErr) {
-                db.run('ROLLBACK');
-                reject(ownErr);
-                return;
-              }
+              const empresaIdFin = conta.empresaIdFin;
 
               db.get(`
                 SELECT id
@@ -1931,6 +3498,7 @@ function buildPagarQueryFilters(query, empresaId) {
       )
     WHERE f.tipo = 'despesa'
       ${emp.sql}
+      ${sqlExcluirProjecaoMcf('f')}
   `;
 
   const params = [emp.param];
@@ -2071,9 +3639,12 @@ router.get('/relatorios/resumo', async (req, res) => {
       status,
       SUM(valor) as total,
       COUNT(*) as quantidade
-    FROM financeiro
+    FROM financeiro f
     WHERE 1=1
       ${emp.sql}
+      AND ${sqlExcluirFinanceiroVendaCancelada('f')}
+      ${sqlExcluirProjecaoMcf('f')}
+      AND COALESCE(f.status, '') != 'cancelado'
   `;
 
   const params = [emp.param];
@@ -2087,7 +3658,12 @@ router.get('/relatorios/resumo', async (req, res) => {
 
   try {
     const rows = await dbAllAsync(sql, params);
-    const recebimentosVenda = await consultarRecebimentosVendaSplit(dataInicio, dataFim, modo_fiscal);
+    const recebimentosVenda = await consultarRecebimentosVendaSplit(
+      dataInicio,
+      dataFim,
+      modo_fiscal,
+      req.empresaId
+    );
 
     const resumo = {
       receitas: {
@@ -2143,75 +3719,124 @@ router.get('/relatorios/resumo', async (req, res) => {
 });
 
 // Relatório de Contas a Receber
-router.get('/relatorios/receber', (req, res) => {
+router.get('/relatorios/receber', async (req, res) => {
   const { dataInicio, dataFim, status, cliente, modo_fiscal } = req.query;
   const modoFiscalAtivo = isModoFiscalRelatorio(modo_fiscal);
-
-  let sql = `
-    SELECT
-      f.id,
-      f.descricao,
-      f.documento,
-      f.valor,
-      f.data_movimento,
-      f.vencimento,
-      f.status,
-      f.origem,
-      f.pessoa_nome,
-      f.venda_id,
-      v.total AS venda_total,
-      v.valor_fiscal AS venda_valor_fiscal,
-      v.valor_nao_fiscal AS venda_valor_nao_fiscal
-    FROM financeiro f
-    LEFT JOIN vendas v ON v.id = f.venda_id
-    WHERE f.tipo = 'receita'
-      AND f.empresa_id = ?
-      AND ${sqlExcluirFinanceiroVendaCancelada('f')}
+  const sqlDataLegado = 'date(COALESCE(f.vencimento, f.data_movimento))';
+  const sqlDataCanonica = 'date(cr.data_vencimento)';
+  const paramsLegado = [req.empresaId];
+  const paramsCanonicos = [req.empresaId];
+  let filtrosLegado = `
+    f.tipo = 'receita'
+    AND f.empresa_id = ?
+    AND ${sqlExcluirFinanceiroVendaCancelada('f')}
+    AND ${sqlExcluirFinanceiroReceberComContaCanonica('f')}
+  `;
+  let filtrosCanonicos = `
+    cr.empresa_id = ?
+    AND (
+      cr.venda_id IS NULL
+      OR v.id IS NULL
+      OR (
+        COALESCE(v.cancelada, 0) != 1
+        AND LOWER(COALESCE(v.status, '')) != 'cancelada'
+      )
+    )
   `;
 
-  const params = [req.empresaId];
-
   if (dataInicio && dataFim) {
-    sql += ' AND date(COALESCE(f.vencimento, f.data_movimento)) BETWEEN date(?) AND date(?)';
-    params.push(dataInicio, dataFim);
+    filtrosLegado += ` AND ${sqlDataLegado} BETWEEN date(?) AND date(?)`;
+    filtrosCanonicos += ` AND ${sqlDataCanonica} BETWEEN date(?) AND date(?)`;
+    paramsLegado.push(dataInicio, dataFim);
+    paramsCanonicos.push(dataInicio, dataFim);
   }
 
   if (status && status !== 'todas') {
     if (status === 'vencido') {
-      sql += " AND f.status NOT IN ('recebido','pago') AND date(COALESCE(f.vencimento, f.data_movimento)) < date('now')";
+      filtrosLegado += ` AND f.status NOT IN ('recebido','pago','cancelado','cancelada')
+        AND ${sqlDataLegado} < date('now')`;
+      filtrosCanonicos += ` AND cr.status NOT IN ('recebido','pago','cancelado','cancelada')
+        AND ${sqlDataCanonica} < date('now')`;
+    } else if (status === 'pendente') {
+      filtrosLegado += " AND f.status = 'pendente'";
+      filtrosCanonicos += " AND cr.status = 'aberto'";
     } else {
-      sql += ' AND f.status = ?';
-      params.push(status);
+      filtrosLegado += ' AND f.status = ?';
+      filtrosCanonicos += ' AND cr.status = ?';
+      paramsLegado.push(status);
+      paramsCanonicos.push(status);
     }
   }
 
-  if (cliente && cliente.trim() !== '') {
-    sql += ' AND COALESCE(f.pessoa_nome, "") LIKE ?';
-    params.push(`%${cliente.trim()}%`);
+  if (cliente && String(cliente).trim() !== '') {
+    const termoCliente = `%${String(cliente).trim()}%`;
+    filtrosLegado += ' AND COALESCE(f.pessoa_nome, "") LIKE ?';
+    filtrosCanonicos += " AND COALESCE(c.nome, '') LIKE ?";
+    paramsLegado.push(termoCliente);
+    paramsCanonicos.push(termoCliente);
   }
 
   if (modoFiscalAtivo) {
-    sql += ` AND (
-      f.venda_id IS NULL
-      OR COALESCE(v.valor_fiscal, 0) > 0
-    )`;
+    filtrosLegado += ` AND (f.venda_id IS NULL OR COALESCE(v.valor_fiscal, 0) > 0)`;
+    filtrosCanonicos += ` AND (cr.venda_id IS NULL OR COALESCE(v.valor_fiscal, 0) > 0)`;
   }
 
-  sql += ' ORDER BY date(COALESCE(f.vencimento, f.data_movimento)) DESC, f.id DESC';
-
-  db.all(sql, params, (err, rows) => {
-    if (err) {
-      console.error('Erro no relatório receber:', err);
-      return res.status(500).json({ success: false, error: err.message });
-    }
-
+  try {
+    const [rowsLegado, rowsCanonicos] = await Promise.all([
+      dbAllAsync(`
+        SELECT
+          f.id,
+          f.descricao,
+          f.documento,
+          f.valor,
+          f.data_movimento,
+          f.vencimento,
+          f.status,
+          f.origem,
+          f.pessoa_nome,
+          f.venda_id,
+          f.referencia_id,
+          f.referencia_tipo,
+          v.total AS venda_total,
+          v.valor_fiscal AS venda_valor_fiscal,
+          v.valor_nao_fiscal AS venda_valor_nao_fiscal
+        FROM financeiro f
+        LEFT JOIN vendas v ON v.id = f.venda_id
+        WHERE ${filtrosLegado}
+        ORDER BY ${sqlDataLegado} DESC, f.id DESC
+      `, paramsLegado),
+      dbAllAsync(`
+        SELECT
+          cr.id,
+          cr.venda_id,
+          cr.numero_parcela,
+          cr.total_parcelas,
+          cr.componente,
+          cr.valor_parcela,
+          cr.valor_restante,
+          cr.data_vencimento,
+          cr.status,
+          c.nome AS cliente,
+          c.cpf_cnpj AS documento,
+          v.codigo AS venda_codigo,
+          v.total AS venda_total,
+          v.valor_fiscal AS venda_valor_fiscal,
+          v.valor_nao_fiscal AS venda_valor_nao_fiscal
+        FROM contas_receber cr
+        LEFT JOIN clientes c ON c.id = cr.cliente_id
+        LEFT JOIN vendas v
+          ON v.id = cr.venda_id
+         AND v.empresa_id = cr.empresa_id
+        WHERE ${filtrosCanonicos}
+        ORDER BY ${sqlDataCanonica} DESC, cr.id DESC
+      `, paramsCanonicos)
+    ]);
     const hoje = moment().format('YYYY-MM-DD');
 
-    const contas = (rows || []).map(row => {
+    const contasLegadas = rowsLegado.map(row => {
       let statusFinal = row.status || 'pendente';
-
       if (
-        !['recebido', 'pago'].includes(statusFinal) &&
+        !['recebido', 'pago', 'cancelado', 'cancelada'].includes(statusFinal) &&
         row.vencimento &&
         row.vencimento < hoje
       ) {
@@ -2219,27 +3844,86 @@ router.get('/relatorios/receber', (req, res) => {
       }
 
       const { valorFiscal, valorNaoFiscal } = valoresMotorDaVenda(row);
+      const valorOriginal = parseNumber(row.valor);
+      const liquidado = ['recebido', 'pago'].includes(row.status);
+      const saldoConhecido = ['recebido', 'pago', 'cancelado', 'cancelada', 'pendente', 'aberto'].includes(row.status);
       const valorExibido = modoFiscalAtivo
         ? (parseNumber(row.venda_valor_nao_fiscal) <= 0
-          ? parseNumber(row.valor)
+          ? valorOriginal
           : valorFiscal)
-        : parseNumber(row.valor);
+        : valorOriginal;
 
       return {
         id: row.id,
+        fonte: 'financeiro',
+        chave: `financeiro:${row.id}`,
         cliente: row.pessoa_nome || '',
         descricao: row.descricao || '',
         documento: row.documento || '',
         valor: valorExibido,
         valor_fiscal: valorFiscal,
         valor_nao_fiscal: valorNaoFiscal,
-        valor_total: parseNumber(row.valor),
+        valor_total: valorOriginal,
+        valor_original: valorOriginal,
+        valor_recebido: saldoConhecido ? (liquidado ? valorOriginal : 0) : null,
+        valor_restante: saldoConhecido ? (liquidado || ['cancelado', 'cancelada'].includes(row.status) ? 0 : valorOriginal) : null,
         dataEmissao: row.data_movimento || null,
         dataVencimento: row.vencimento || null,
         status: statusFinal,
+        status_persistido: row.status || 'pendente',
         origem: row.origem || '',
         venda_id: row.venda_id || null
       };
+    });
+    const contasCanonicas = rowsCanonicos.map(row => {
+      let statusFinal = row.status || 'aberto';
+      if (
+        !['recebido', 'pago', 'cancelado', 'cancelada'].includes(statusFinal) &&
+        row.data_vencimento &&
+        row.data_vencimento < hoje
+      ) {
+        statusFinal = 'vencido';
+      }
+
+      const valorOriginal = parseNumber(row.valor_parcela);
+      const valorRestante = parseNumber(row.valor_restante);
+      const { valorFiscal, valorNaoFiscal } = valoresMotorDaVenda({
+        venda_id: row.venda_id,
+        valor: valorOriginal,
+        venda_valor_fiscal: row.venda_valor_fiscal,
+        venda_valor_nao_fiscal: row.venda_valor_nao_fiscal
+      });
+      const valorExibido = modoFiscalAtivo
+        ? (parseNumber(row.venda_valor_nao_fiscal) <= 0 ? valorOriginal : valorFiscal)
+        : valorOriginal;
+
+      return {
+        id: row.id,
+        fonte: 'contas_receber',
+        chave: `contas_receber:${row.id}`,
+        cliente: row.cliente || '',
+        descricao: `Parcela ${row.numero_parcela || '-'}/${row.total_parcelas || '-'} · ${row.componente === 'outros' ? 'Outros' : 'Produtos'} · Venda ${row.venda_codigo || row.venda_id || '-'}`,
+        documento: row.documento || '',
+        valor: valorExibido,
+        valor_fiscal: valorFiscal,
+        valor_nao_fiscal: valorNaoFiscal,
+        valor_total: valorOriginal,
+        valor_original: valorOriginal,
+        valor_recebido: valorOriginal - valorRestante,
+        valor_restante: valorRestante,
+        dataEmissao: null,
+        dataVencimento: row.data_vencimento || null,
+        status: statusFinal,
+        status_persistido: row.status || 'aberto',
+        origem: 'contas_receber',
+        venda_id: row.venda_id || null
+      };
+    });
+    const contas = [...contasLegadas, ...contasCanonicas].sort((a, b) => {
+      const dataA = String(a.dataVencimento || a.dataEmissao || '');
+      const dataB = String(b.dataVencimento || b.dataEmissao || '');
+      if (dataA !== dataB) return dataB.localeCompare(dataA);
+      return Number(b.id) - Number(a.id) || String(a.fonte).localeCompare(String(b.fonte));
     }).filter((conta) => {
       if (!modoFiscalAtivo) return true;
       return parseNumber(conta.valor_fiscal) > 0;
@@ -2252,7 +3936,10 @@ router.get('/relatorios/receber', (req, res) => {
       totais: totaisMotorSemDuplicarVenda(contas, modoFiscalAtivo),
       periodo: { dataInicio, dataFim }
     });
-  });
+  } catch (err) {
+    console.error('Erro no relatório receber:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // Relatório de Contas a Pagar
@@ -2311,12 +3998,15 @@ router.get('/relatorios/fluxo', async (req, res) => {
 
   let sql = `
     SELECT
-      DATE(data_movimento) as data,
-      tipo,
-      SUM(valor) as valor
-    FROM financeiro
+      DATE(f.data_movimento) as data,
+      f.tipo,
+      SUM(f.valor) as valor
+    FROM financeiro f
     WHERE 1=1
       ${emp.sql}
+      AND ${sqlExcluirFinanceiroVendaCancelada('f')}
+      ${sqlExcluirProjecaoMcf('f')}
+      AND COALESCE(f.status, '') != 'cancelado'
   `;
 
   const params = [emp.param];
@@ -2330,7 +4020,12 @@ router.get('/relatorios/fluxo', async (req, res) => {
 
   try {
     const rows = await dbAllAsync(sql, params);
-    const recebimentosVenda = await consultarRecebimentosVendaSplit(dataInicio, dataFim, modo_fiscal);
+    const recebimentosVenda = await consultarRecebimentosVendaSplit(
+      dataInicio,
+      dataFim,
+      modo_fiscal,
+      req.empresaId
+    );
 
     const fluxo = {};
     rows.forEach(row => {
@@ -2371,7 +4066,7 @@ router.get('/relatorios/fluxo', async (req, res) => {
 });
 
 // Relatório de Inadimplência
-router.get('/relatorios/inadimplencia', (req, res) => {
+router.get('/relatorios/inadimplencia', async (req, res) => {
   const { dataInicio, dataFim } = req.query;
 
   let sql = `
@@ -2385,8 +4080,11 @@ router.get('/relatorios/inadimplencia', (req, res) => {
       END as tipo_pessoa,
       julianday('now') - julianday(f.vencimento) as dias_atraso
     FROM financeiro f
-    WHERE (f.status != 'recebido' AND f.status != 'pago') AND f.vencimento < date('now')
+    WHERE f.status NOT IN ('recebido', 'pago', 'cancelado') AND f.vencimento < date('now')
       AND f.empresa_id = ?
+      AND ${sqlExcluirFinanceiroVendaCancelada('f')}
+      AND ${sqlExcluirFinanceiroReceberComContaCanonica('f')}
+      ${sqlExcluirProjecaoMcf('f')}
   `;
 
   const params = [req.empresaId];
@@ -2398,26 +4096,100 @@ router.get('/relatorios/inadimplencia', (req, res) => {
 
   sql += ' ORDER BY f.vencimento ASC';
 
-  db.all(sql, params, (err, rows) => {
-    if (err) {
-      console.error('Erro no relatório inadimplência:', err);
-      res.status(500).json({ error: err.message });
-      return;
+  try {
+    const rowsFinanceiro = await dbAllAsync(sql, params);
+    const parametrosEmpresa = [Number(req.empresaId)];
+    if (dataInicio && dataFim) {
+      parametrosEmpresa.push(dataInicio, dataFim);
     }
 
-    const inadimplentes = rows.map(row => ({
-      id: row.id,
-      pessoa: row.pessoa_nome,
-      tipo_pessoa: row.tipo_pessoa,
-      descricao: row.descricao,
-      documento: row.documento,
-      valor: parseNumber(row.valor),
-      dataEmissao: row.data_movimento,
-      dataVencimento: row.vencimento,
-      status: row.status,
-      dias_atraso: Math.floor(row.dias_atraso),
-      tipo: row.tipo
-    }));
+    const rowsReceber = await dbAllAsync(`
+      SELECT
+        cr.id,
+        'cliente' AS tipo_pessoa,
+        'receita' AS tipo,
+        'Parcela da venda #' || cr.venda_id || ' - parcela ' || COALESCE(cr.numero_parcela, '-') AS descricao,
+        NULL AS documento,
+        NULL AS data_movimento,
+        cr.data_vencimento AS vencimento,
+        cr.valor_restante AS valor,
+        cr.status,
+        julianday('now') - julianday(cr.data_vencimento) AS dias_atraso
+      FROM contas_receber cr
+      WHERE cr.empresa_id = ?
+        AND cr.status IN ('aberto', 'parcial')
+        AND ${sqlExcluirContaVendaCancelada('cr')}
+        AND date(cr.data_vencimento) < date('now')
+        ${dataInicio && dataFim ? 'AND date(cr.data_vencimento) BETWEEN date(?) AND date(?)' : ''}
+      ORDER BY cr.data_vencimento ASC
+    `, parametrosEmpresa);
+
+    const rowsPagar = await dbAllAsync(`
+      SELECT
+        cp.id,
+        'fornecedor' AS tipo_pessoa,
+        'despesa' AS tipo,
+        cp.descricao,
+        cp.documento,
+        cp.data_emissao AS data_movimento,
+        cp.data_vencimento AS vencimento,
+        cp.valor_restante AS valor,
+        cp.status,
+        COALESCE(cp.pessoa_nome, f.nome) AS pessoa_nome,
+        julianday('now') - julianday(cp.data_vencimento) AS dias_atraso
+      FROM contas_pagar cp
+      LEFT JOIN fornecedores f ON f.id = cp.fornecedor_id
+      WHERE cp.empresa_id = ?
+        AND cp.status IN ('aberto', 'parcial')
+        AND date(cp.data_vencimento) < date('now')
+        ${dataInicio && dataFim ? 'AND date(cp.data_vencimento) BETWEEN date(?) AND date(?)' : ''}
+      ORDER BY cp.data_vencimento ASC
+    `, parametrosEmpresa);
+
+    const inadimplentes = [
+      ...rowsFinanceiro.map(row => ({
+        id: row.id,
+        pessoa: row.pessoa_nome,
+        tipo_pessoa: row.tipo_pessoa,
+        descricao: row.descricao,
+        documento: row.documento,
+        valor: parseNumber(row.valor),
+        dataEmissao: row.data_movimento,
+        dataVencimento: row.vencimento,
+        status: row.status,
+        dias_atraso: Math.floor(row.dias_atraso),
+        tipo: row.tipo,
+        fonte: 'financeiro'
+      })),
+      ...rowsReceber.map(row => ({
+        id: row.id,
+        pessoa: row.pessoa_nome || null,
+        tipo_pessoa: row.tipo_pessoa,
+        descricao: row.descricao,
+        documento: row.documento,
+        valor: parseNumber(row.valor),
+        dataEmissao: row.data_movimento,
+        dataVencimento: row.vencimento,
+        status: row.status,
+        dias_atraso: Math.floor(row.dias_atraso),
+        tipo: row.tipo,
+        fonte: 'contas_receber'
+      })),
+      ...rowsPagar.map(row => ({
+        id: row.id,
+        pessoa: row.pessoa_nome,
+        tipo_pessoa: row.tipo_pessoa,
+        descricao: row.descricao,
+        documento: row.documento,
+        valor: parseNumber(row.valor),
+        dataEmissao: row.data_movimento,
+        dataVencimento: row.vencimento,
+        status: row.status,
+        dias_atraso: Math.floor(row.dias_atraso),
+        tipo: row.tipo,
+        fonte: 'contas_pagar'
+      }))
+    ].sort((a, b) => String(a.dataVencimento).localeCompare(String(b.dataVencimento)));
 
     const vencidas = inadimplentes.filter(item => item.dias_atraso > 0).length;
     const vencer7dias = inadimplentes.filter(item => item.dias_atraso <= 7 && item.dias_atraso > 0).length;
@@ -2425,13 +4197,16 @@ router.get('/relatorios/inadimplencia', (req, res) => {
 
     res.json({
       success: true,
-      vencidas: vencidas,
-      vencer7dias: vencer7dias,
-      valorAtraso: valorAtraso,
+      vencidas,
+      vencer7dias,
+      valorAtraso,
       contasAtraso: inadimplentes,
       periodo: { dataInicio, dataFim }
     });
-  });
+  } catch (err) {
+    console.error('Erro no relatório inadimplência:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Nova rota para detalhes de conta a pagar com dados da compra
@@ -2504,7 +4279,7 @@ router.delete('/:id(\\d+)', (req, res) => {
 
   const { id } = req.params;
 
-  db.get('SELECT * FROM financeiro WHERE id = ? AND empresa_id = ?', [id, req.empresaId], (err, row) => {
+  db.get('SELECT * FROM financeiro WHERE id = ? AND empresa_id = ?', [id, req.empresaId], async (err, row) => {
     if (err) {
       res.status(500).json({ error: err.message });
       return;
@@ -2519,6 +4294,17 @@ router.delete('/:id(\\d+)', (req, res) => {
       exigirRegistroDaEmpresa(row, req.empresaId);
     } catch (empErr) {
       return responderErroEmpresa(res, empErr);
+    }
+
+    // MCF-02.1 — projeção não se exclui no legado
+    if (ehProjecaoMcfRow(row) || await buscarVinculoPorFinanceiroId(db, req.empresaId, id)) {
+      const e = erroProjecaoImutavel('cancelar');
+      const vinculo = await buscarVinculoPorFinanceiroId(db, req.empresaId, id);
+      return res.status(e.statusCode || 409).json({
+        error: e.message,
+        code: e.code,
+        conta_pagar_id: vinculo?.conta_pagar_id || null
+      });
     }
 
     if (row.origem && row.origem !== 'manual') {

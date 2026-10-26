@@ -25,5 +25,12 @@ module.exports = {
   },
   get ComprovantePrintService() {
     return require('./impressao/ComprovantePrintService');
+  },
+  /** MUV-CAP-01 — capacidade/seleção pura (somente leitura; sem integração PDV). */
+  get ServicoCapacidadeCarrinhoEmpresa() {
+    return require('./capacidade/ServicoCapacidadeCarrinhoEmpresa');
+  },
+  get selecionarEmpresaCapacidade() {
+    return require('./capacidade/selecionarEmpresaCapacidade').selecionarEmpresaCapacidade;
   }
 };
