@@ -9,6 +9,8 @@
  * Sprint 03.02: POST /api/vendas (PDV Normal e origens que concluem) usa
  *               VendaPagamentoService também em MULTIEMPRESA.
  *               MUV/criarAtendimento não persiste a venda oficial.
+ * Sprint PDV-SEL-01: MULTIEMPRESA + origem PDV → seleção automática de
+ *               empresa (capacidade) antes do núcleo; X-Empresa-Id não prevalece.
  *
  * Política de porta:
  * - origem PDV / FATURAMENTO / NF_AVULSA → VendaPagamentoService
@@ -175,7 +177,31 @@ function criarVendaComContexto(contract, context, req, res, opcoes) {
       return concluirVendaNoNucleoOficial(req, res, ctx, ctr);
     },
     MULTIEMPRESA() {
-      return concluirVendaNoNucleoOficial(req, res, ctx, ctr);
+      const {
+        aplicarSelecaoEmpresaNaVendaPdv,
+        responderBloqueioSelecao
+      } = opcoes.SelecaoEmpresaVendaPdvService
+        || require('./SelecaoEmpresaVendaPdvService');
+
+      return Promise.resolve()
+        .then(() => aplicarSelecaoEmpresaNaVendaPdv(req, ctx, ctr, opcoes))
+        .then((sel) => {
+          if (sel && sel.aplicada) {
+            ctx.selecao_empresa_pdv = req.selecaoEmpresaPdv || null;
+            req.vendaContext = ctx;
+          }
+          return concluirVendaNoNucleoOficial(req, res, ctx, ctr);
+        })
+        .catch((err) => {
+          if (res && typeof res.status === 'function') {
+            return responderBloqueioSelecao(res, err || {
+              code: 'SELECAO_EMPRESA_ERRO',
+              message: 'Falha na seleção automática de empresa.',
+              statusCode: 500
+            });
+          }
+          throw err;
+        });
     }
   });
 }

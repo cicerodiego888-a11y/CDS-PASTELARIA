@@ -281,6 +281,141 @@ async function carregarModelosRefrigerante(empresaId, pedidoId, residualCentavos
   };
 }
 
+function produtoComercialAtivoNoPedido(produto) {
+  return Boolean(produto)
+    && Number(produto.ativo) === 1
+    && String(produto.tipo_operacional || '').toUpperCase() !== 'INSUMO'
+    && String(produto.categoria_tipo || 'produto').trim().toLowerCase() === 'produto';
+}
+
+/**
+ * Pedidos sem pastéis elegíveis: envia as linhas comerciais originais ao PDV
+ * (refrigerantes e demais produtos independentes), sem composição residual nem
+ * inclusão artificial de pastel. A composição pastel→refrigerante permanece
+ * obrigatória apenas quando há pelo menos um pastel elegível.
+ */
+async function prepararPassthroughPedidoPdv({
+  empresaId,
+  pedidoId,
+  pedido,
+  itens,
+  totalCentavos,
+  produtoPorId,
+  agora
+}) {
+  const itensVenda = [];
+  for (const item of itens) {
+    const produtoId = Number(item.produto_id);
+    const produto = produtoPorId.get(produtoId);
+    if (!produtoComercialAtivoNoPedido(produto)) continue;
+
+    const quantidade = Number(item.quantidade);
+    if (!Number.isFinite(quantidade) || quantidade <= 0) {
+      throw erro(
+        'QUANTIDADE_ITEM_INVALIDA',
+        `O item ${produto.nome || produtoId} precisa ter quantidade positiva para gerar a venda.`,
+        { produto_id: produtoId, quantidade: item.quantidade }
+      );
+    }
+    const precoUnitario = Number(item.preco_unitario);
+    const subtotalCentavos = Math.round(Number(item.subtotal) * 100);
+    if (!Number.isFinite(precoUnitario) || precoUnitario <= 0
+      || !Number.isSafeInteger(subtotalCentavos) || subtotalCentavos <= 0) {
+      throw erro(
+        'PRECO_ITEM_INVALIDO',
+        `O item ${produto.nome || produtoId} não possui preço/subtotal válido no Pedido.`,
+        { produto_id: produtoId }
+      );
+    }
+    itensVenda.push(mapearItemVenda(
+      produtoId,
+      quantidade,
+      precoUnitario,
+      subtotalCentavos,
+      {
+        desconto_percentual: 0,
+        desconto_valor: 0,
+        desconto_atacado: 0,
+        desconto_manual: 0,
+        tipo_preco: 'varejo',
+        promocao_id: null,
+        preco_origem: Number(precoUnitario.toFixed(6))
+      }
+    ));
+  }
+
+  if (!itensVenda.length) {
+    throw erro(
+      'PEDIDO_SEM_ITENS_ELEGIVEIS',
+      'O Pedido não contém produtos comerciais ativos elegíveis para gerar a venda no PDV.'
+    );
+  }
+
+  itensVenda.sort((a, b) => (
+    a.produto_id - b.produto_id || a.tipo_venda.localeCompare(b.tipo_venda)
+  ));
+  const totalCompostoCentavos = itensVenda.reduce(
+    (total, item) => somarCentavos(total, item.subtotal),
+    0
+  );
+  const descontoCentavos = Math.round(Number(pedido.desconto || 0) * 100);
+  const totalLiquidoCentavos = totalCompostoCentavos - descontoCentavos;
+  if (!Number.isSafeInteger(descontoCentavos) || descontoCentavos < 0
+    || !Number.isSafeInteger(totalLiquidoCentavos)
+    || totalLiquidoCentavos !== totalCentavos) {
+    throw erro(
+      'TOTAL_COMPOSICAO_DIVERGENTE',
+      'O total dos itens elegíveis, após o desconto do Pedido, não corresponde ao total persistido; a geração foi bloqueada.',
+      {
+        total_pedido_centavos: totalCentavos,
+        total_itens_centavos: totalCompostoCentavos,
+        desconto_centavos: descontoCentavos,
+        total_liquido_centavos: totalLiquidoCentavos
+      }
+    );
+  }
+
+  const fingerprint = ComposicaoInterna.criarFingerprint({
+    empresaId,
+    pedidoId,
+    pedidoStatus: pedido.status,
+    pedidoUpdatedAt: pedido.updated_at || null,
+    totalCentavos,
+    descontoCentavos,
+    itensPedido: itens.map((item) => ({
+      id: Number(item.id),
+      produtoId: Number(item.produto_id),
+      quantidade: Number(item.quantidade),
+      subtotalCentavos: Math.round(Number(item.subtotal) * 100)
+    })),
+    itensVenda,
+    modelos: []
+  });
+
+  return {
+    sucesso: true,
+    modo: 'PASSTHROUGH',
+    pedidoId,
+    empresaId,
+    pedidoCodigo: pedido.codigo || null,
+    clienteId: pedido.cliente_id || null,
+    valorOriginalCentavos: totalCentavos,
+    valorPastelCentavos: 0,
+    valorResidualCentavos: 0,
+    valorCompostoBrutoCentavos: totalCompostoCentavos,
+    descontoCentavos,
+    desconto: descontoCentavos / 100,
+    valorFinalCentavos: totalLiquidoCentavos,
+    itens: itensVenda.map((item) => ({
+      ...item,
+      subtotal: item.subtotal / 100
+    })),
+    fingerprint,
+    dataReferenciaCotacao: agora.toISOString(),
+    efeitosOperacionais: false
+  };
+}
+
 async function prepararComposicaoPedidoPdv(params = {}, opts = {}) {
   const db = opts.db;
   if (!db) throw erro('DB_OBRIGATORIO', 'A composição exige uma conexão de banco explícita.');
@@ -302,9 +437,7 @@ async function prepararComposicaoPedidoPdv(params = {}, opts = {}) {
     const produto = produtoPorId.get(Number(item.produto_id));
     if (!produto
       || String(produto.categoria_nome || '').trim().toUpperCase() !== CATEGORIA_PASTEIS
-      || String(produto.categoria_tipo || 'produto').trim().toLowerCase() !== 'produto'
-      || String(produto.tipo_operacional || '').toUpperCase() === 'INSUMO'
-      || Number(produto.ativo) !== 1) {
+      || !produtoComercialAtivoNoPedido(produto)) {
       continue;
     }
     const quantidade = Number(item.quantidade);
@@ -322,10 +455,15 @@ async function prepararComposicaoPedidoPdv(params = {}, opts = {}) {
   }
 
   if (!quantidadePastelPorProduto.size) {
-    throw erro(
-      'PASTEL_ELEGIVEL_AUSENTE',
-      'O Pedido não contém pastéis ativos da categoria “Pasteis”; a venda não será composta.'
-    );
+    return prepararPassthroughPedidoPdv({
+      empresaId,
+      pedidoId,
+      pedido,
+      itens,
+      totalCentavos,
+      produtoPorId,
+      agora
+    });
   }
 
   const itensPastel = [];
@@ -532,6 +670,7 @@ async function prepararComposicaoPedidoPdv(params = {}, opts = {}) {
 
   return {
     sucesso: true,
+    modo: 'COMPOSICAO_PASTEL_REFRIGERANTE',
     pedidoId,
     empresaId,
     pedidoCodigo: pedido.codigo || null,

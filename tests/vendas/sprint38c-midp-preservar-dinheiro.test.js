@@ -111,10 +111,10 @@ describe('Sprint 3.8C — política oficial PRESERVAR DINHEIRO', () => {
     assert.equal(r.preservacaoAplicada, false);
   });
 
-  it('pipeline oficial: total inalterado; produtos/preços intactos', () => {
+  it('pipeline oficial: total inalterado; produtos/preços intactos (bucket fiscal exclusivo M08)', () => {
     const item = { produto_id: 1, quantidade: 105, preco_unitario: 10, subtotal: 1050 };
     const out = distribuirItensVendaComValorFiscalEfetivo(
-      [{ item, saldoFiscal: 55, saldoNaoFiscal: 55 }],
+      [{ item, saldoFiscal: 105, saldoNaoFiscal: 55 }],
       true,
       {
         midpAtivo: true,
@@ -124,7 +124,10 @@ describe('Sprint 3.8C — política oficial PRESERVAR DINHEIRO', () => {
         ]
       }
     );
+    assert.equal(out.sucesso, true);
     assert.equal(out.totalVenda, 1050);
+    assert.equal(out.itens[0].quantidade_fiscal, 105);
+    assert.equal(out.itens[0].quantidade_nao_fiscal, 0);
     assert.equal(out.valorFiscalEfetivo + out.valorNaoFiscal, 1050);
     assert.equal(out.itens[0].quantidade, 105);
     assert.equal(out.itens[0].preco_unitario, 10);

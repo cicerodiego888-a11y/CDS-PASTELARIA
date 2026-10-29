@@ -63,7 +63,11 @@ function main() {
 
   run('npm', ['run', 'test:muc-certificacao']);
 
-  run('node', ['tests/e2e/release-certification/run.js']);
+  run('node', [
+    '-r',
+    './tests/central-entradas/helpers/preloadIsolamentoBanco.js',
+    'tests/e2e/release-certification/run.js'
+  ]);
 
   const manifesto = gerarManifesto(root, { modulo: 'erp' });
   escreverManifesto(root, manifesto);
@@ -96,7 +100,12 @@ function main() {
     fail(`pós-build: asar inválido\n${cmp.erros.join('\n')}\ncamadas=${JSON.stringify(cmp.porCamada)}`);
   }
 
-  run('node', ['tests/muc/rc431-build-certificacao.test.js', '--require-asar']);
+  run('node', [
+    '-r',
+    './tests/central-entradas/helpers/preloadIsolamentoBanco.js',
+    'tests/muc/rc431-build-certificacao.test.js',
+    '--require-asar'
+  ]);
 
   const smoke = executarSmokeTestAsar(asarPath);
   if (!smoke.ok) {

@@ -255,6 +255,61 @@ router.get('/:id/detalhes', anexarEmpresaVenda, (req, res) => {
 
 router.post('/pre-calcular-distribuicao', validarCaixaAberto, preCalcularDistribuicao);
 
+/** PDV-SEL-01 — preview somente leitura da empresa selecionável para o carrinho (sem persistir venda). */
+router.post('/selecao-empresa', async (req, res) => {
+  try {
+    const {
+      avaliarSelecaoEmpresaPdv,
+      responderBloqueioSelecao
+    } = require('../services/vendas/SelecaoEmpresaVendaPdvService');
+    const { resolverModoOperacaoVendaAtivo } = require('../motores/muv');
+    let modo;
+    try {
+      modo = resolverModoOperacaoVendaAtivo();
+    } catch (e) {
+      return res.status(500).json({ success: false, code: e.code, error: e.message });
+    }
+    if (modo !== 'MULTIEMPRESA') {
+      return res.status(200).json({
+        success: true,
+        aplicada: false,
+        motivo: 'EMPRESA_SIMPLES',
+        mensagem: 'Seleção automática não se aplica em EMPRESA_SIMPLES.'
+      });
+    }
+    const usuarioId = req.user && (req.user.id != null ? req.user.id : req.user.usuario_id);
+    const out = await avaliarSelecaoEmpresaPdv({
+      body: req.body || {},
+      itens: (req.body && req.body.itens) || [],
+      usuarioId
+    });
+    if (out.bloqueio) {
+      return res.status(409).json({
+        success: false,
+        code: out.bloqueio.codigo,
+        error: out.bloqueio.mensagem,
+        mensagem: out.bloqueio.mensagem,
+        selecao: out,
+        venda_concluida: false
+      });
+    }
+    return res.status(200).json({
+      success: true,
+      aplicada: true,
+      empresa_id: out.selecionada.empresaId,
+      justificativa: out.justificativa,
+      hash_carrinho: out.hashCarrinho,
+      tipo_saldo: out.tipoSaldo,
+      matriz_id: out.capacidade && out.capacidade.matrizId,
+      capacidade: out.capacidade
+    });
+  } catch (err) {
+    const { responderBloqueioSelecao } = require('../services/vendas/SelecaoEmpresaVendaPdvService');
+    if (err && err.code) return responderBloqueioSelecao(res, err);
+    return res.status(500).json({ success: false, error: err.message || 'Erro na seleção de empresa.' });
+  }
+});
+
 // Sprint 2.2: PDV exige caixa; demais origens reconhecidas sem validarCaixaAberto
 router.post('/', validarCaixaSeOrigemPdv, criarVenda);
 

@@ -2800,6 +2800,57 @@ function calcularSubtotalFinanceiroItemCompra(item = {}) {
     return Number((quantidade * preco).toFixed(2));
 }
 
+function tipoOperacionalCadastroCompra(produto) {
+    const tipo = String(produto?.tipo_operacional || '').trim().toUpperCase();
+    return ['COMERCIAL', 'INSUMO'].includes(tipo) ? tipo : '';
+}
+
+function resolverClassificacaoMiipCadastro(item, produtos = produtosCompraList) {
+    const produtoId = Number(item?.produto_id);
+    const sugestaoConfirmada = item?.miip_sugestao?.status === 'confirmado'
+        ? extrairProdutoIdSugestaoMiip(item.miip_sugestao, item)
+        : null;
+    const resultado = item?.miip_resultado;
+    const produtoIdAutomatico = resultado?.associadoAutomaticamente === true
+        ? Number(resultado?.produtoEncontrado?.id)
+        : null;
+    const produtoIdRevisaoConfirmada = item?.miip_revisao_status === 'confirmado'
+        ? Number(item?.produto_id)
+        : null;
+    const produtoIdMiip = sugestaoConfirmada || produtoIdAutomatico || produtoIdRevisaoConfirmada;
+
+    if (!Number.isFinite(produtoIdMiip) || produtoIdMiip <= 0) return null;
+
+    const estadoAnterior = String(item?.classificacao_operacional_status || '');
+    const tipoInformado = String(item?.tipo_operacional || '').trim().toUpperCase();
+    if (['miip_divergente', 'miip_sem_classificacao', 'miip_cadastro_nao_encontrado', 'miip_vinculo_divergente'].includes(estadoAnterior)
+        && !item?.classificacao_operacional_confirmada
+        && !tipoInformado) {
+        return { status: estadoAnterior, tipo_operacional: '' };
+    }
+
+    if (!Number.isFinite(produtoId) || produtoId <= 0) return null;
+    if (produtoId !== produtoIdMiip) {
+        return { status: 'miip_vinculo_divergente', tipo_operacional: '' };
+    }
+
+    const produto = (produtos || []).find((p) => Number(p.id) === produtoId);
+    if (!produto) {
+        return { status: 'miip_cadastro_nao_encontrado', tipo_operacional: '' };
+    }
+
+    const tipoCadastro = tipoOperacionalCadastroCompra(produto);
+    if (!tipoCadastro) {
+        return { status: 'miip_sem_classificacao', tipo_operacional: '' };
+    }
+
+    if (tipoInformado && tipoInformado !== tipoCadastro) {
+        return { status: 'miip_divergente', tipo_operacional: '' };
+    }
+
+    return { status: 'miip_classificado', tipo_operacional: tipoCadastro };
+}
+
 function prepararItemQuantidadesImportacaoCentral(itemBruto = {}) {
     const item = clonarDadosItemCompra(itemBruto) || {};
     const qCom = Number(item.quantidade_comercial ?? item.quantidade ?? 0);
@@ -2907,16 +2958,34 @@ function normalizeItemCompra(itemBruto = {}) {
                 || (itemCompraTemMargemGravada(item) ? 'item' : (margemInfo.fallback ? 'fallback' : 'cadastro'))));
     const linhaId = item.linha_id || item.linhaId || gerarLinhaIdCompra();
     const origemCentralNfe = isOrigemCompraCentralNfe();
+    const classificacaoMiip = origemCentralNfe
+        ? resolverClassificacaoMiipCadastro(item)
+        : null;
     const classificacaoConfirmada = item.classificacao_operacional_confirmada === true;
-    const tipoOperacional = origemCentralNfe && !classificacaoConfirmada
-        ? ''
-        : String(item.tipo_operacional || '').trim().toUpperCase();
+    const tipoOperacionalInformado = String(item.tipo_operacional || '').trim().toUpperCase();
+    const tipoOperacional = classificacaoMiip?.status === 'miip_vinculo_divergente'
+        ? (classificacaoConfirmada && ['COMERCIAL', 'INSUMO'].includes(tipoOperacionalInformado)
+            ? tipoOperacionalInformado
+            : '')
+        : (classificacaoMiip
+            ? classificacaoMiip.tipo_operacional
+            : (origemCentralNfe && !classificacaoConfirmada
+                ? ''
+                : tipoOperacionalInformado));
     const criacaoProdutoConfirmada = item.criacao_produto_confirmada === true;
     const normalizado = {
         linha_id: linhaId,
         produto_id: item.produto_id ? Number(item.produto_id) : '',
         tipo_operacional: tipoOperacional,
-        classificacao_operacional_confirmada: classificacaoConfirmada,
+        classificacao_operacional_confirmada: classificacaoMiip
+            ? (classificacaoMiip.status === 'miip_classificado'
+                || (classificacaoMiip.status === 'miip_vinculo_divergente'
+                    && classificacaoConfirmada
+                    && ['COMERCIAL', 'INSUMO'].includes(tipoOperacionalInformado)))
+            : classificacaoConfirmada,
+        classificacao_operacional_status: classificacaoMiip?.status
+            || item.classificacao_operacional_status
+            || '',
         criar_produto: origemCentralNfe
             ? (criacaoProdutoConfirmada && (item.criar_produto === true || Number(item.criar_produto) === 1))
             : (item.criar_produto === true || Number(item.criar_produto) === 1),
@@ -3241,10 +3310,6 @@ function alterarTipoFiscalItemCompra(index, tipo) {
     renderItensCompraTabelaCore();
 }
 
-function tipoOperacionalCadastroCompra(produto) {
-    return String(produto?.tipo_operacional || 'COMERCIAL').trim().toUpperCase();
-}
-
 function alterarTipoOperacionalItemNfeCompra(index, tipo) {
     const valor = String(tipo || '').trim().toUpperCase();
     if (valor && !['COMERCIAL', 'INSUMO'].includes(valor)) {
@@ -3259,6 +3324,7 @@ function alterarTipoOperacionalItemNfeCompra(index, tipo) {
         }
         draft.tipo_operacional = valor;
         draft.classificacao_operacional_confirmada = Boolean(valor);
+        draft.classificacao_operacional_status = valor ? 'manual' : '';
         if (!draft.produto_id) return;
         const produto = produtosCompraList.find((p) => String(p.id) === String(draft.produto_id));
         if (!produto || tipoOperacionalCadastroCompra(produto) !== valor) {
@@ -3299,6 +3365,13 @@ function renderAssociacaoProdutoItemCompra(item, index, optionsProdutos) {
     const produtoAtual = item.produto_id
         ? produtosCompraList.find((p) => String(p.id) === String(item.produto_id))
         : null;
+    const classificacaoMiipAtual = resolverClassificacaoMiipCadastro(item, produtosCompraList);
+    const vinculoMiipValidado = Number(item.produto_id) > 0
+        && (classificacaoMiipAtual?.status === 'miip_classificado'
+            || (item.classificacao_operacional_status === 'miip_classificado'
+                && item.classificacao_operacional_confirmada === true))
+        && produtoAtual
+        && tipoOperacionalCadastroCompra(produtoAtual) === tipo;
     const produtosDoTipo = tipo
         ? produtosCompraList.filter((p) => tipoOperacionalCadastroCompra(p) === tipo)
         : [];
@@ -3314,21 +3387,43 @@ function renderAssociacaoProdutoItemCompra(item, index, optionsProdutos) {
             ? `<button type="button" class="btn btn-sm btn-outline-primary mt-1" onclick="marcarCriacaoProdutoNfeCompra(${index})">Criar novo ${tipo === 'INSUMO' ? 'Insumo' : 'Produto Comercial'}</button>`
             : '');
 
-    return `
+    const avisosClassificacao = {
+        miip_divergente: 'A classificação informada diverge do cadastro vinculado. Revise antes de continuar.',
+        miip_sem_classificacao: 'O cadastro vinculado não possui classificação operacional válida. Selecione uma classificação.',
+        miip_cadastro_nao_encontrado: 'O cadastro vinculado pelo MIIP não foi encontrado no catálogo carregado. Revise o vínculo.',
+        miip_vinculo_divergente: 'O vínculo MIIP diverge do cadastro selecionado. Revise a associação e a classificação.'
+    };
+    const classificacaoInformativa = item.classificacao_operacional_status === 'miip_classificado'
+        ? `<div class="small text-success mb-1"><i class="fas fa-check-circle me-1"></i>${tipo === 'INSUMO' ? 'Insumo' : 'Produto Comercial'} — classificação do cadastro vinculado</div>`
+        : '';
+    const produtoVinculadoInformativo = vinculoMiipValidado
+        ? `<div class="small text-body mb-1"><i class="fas fa-link me-1"></i>Produto vinculado: <strong>${escapeHtml(produtoAtual.nome || `Cadastro #${produtoAtual.id}`)}</strong></div>`
+        : '';
+    const avisoClassificacao = avisosClassificacao[item.classificacao_operacional_status]
+        ? `<div class="small text-warning mb-1" role="alert"><i class="fas fa-exclamation-triangle me-1"></i>${avisosClassificacao[item.classificacao_operacional_status]}</div>`
+        : '';
+    const seletorClassificacao = item.classificacao_operacional_status === 'miip_classificado'
+        ? classificacaoInformativa
+        : `${avisoClassificacao}
         <label class="form-label small mb-1">Classificação do item</label>
         <select class="form-select form-select-sm mb-1" aria-label="Classificação operacional do item ${index + 1}"
             onchange="alterarTipoOperacionalItemNfeCompra(${index}, this.value)">
             <option value="">Selecione o tipo</option>
             <option value="COMERCIAL"${tipo === 'COMERCIAL' ? ' selected' : ''}>Produto Comercial (COMERCIAL)</option>
             <option value="INSUMO"${tipo === 'INSUMO' ? ' selected' : ''}>Insumo (INSUMO)</option>
-        </select>
-        <select class="form-select form-select-sm mb-1" aria-label="Cadastro vinculado ao item ${index + 1}"
-            ${tipo ? '' : 'disabled'}
-            onchange="alterarProdutoItemCompra(${index}, this.value)">
-            <option value="">${tipo ? 'Selecione um cadastro existente' : 'Escolha o tipo primeiro'}</option>
-            ${avisoVinculo}
-            ${opcoesProduto}
-        </select>
+        </select>`;
+
+    return `
+        ${seletorClassificacao}
+        ${vinculoMiipValidado
+            ? produtoVinculadoInformativo
+            : `<select class="form-select form-select-sm mb-1" aria-label="Cadastro vinculado ao item ${index + 1}"
+                ${tipo ? '' : 'disabled'}
+                onchange="alterarProdutoItemCompra(${index}, this.value)">
+                <option value="">${tipo ? 'Selecione um cadastro existente' : 'Escolha o tipo primeiro'}</option>
+                ${avisoVinculo}
+                ${opcoesProduto}
+            </select>`}
         ${criar}`;
 }
 

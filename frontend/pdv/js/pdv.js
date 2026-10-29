@@ -20,6 +20,9 @@ let pdvCarregandoHandoff = false;
 let pdvPedidoHandoffFinalizado = false;
 /** Escolha explícita do operador: emitir NFC-e nesta venda (null = ainda não definido). */
 let pdvEmitirFiscalNaVenda = null;
+/** PDV-SEL-01 — snapshot informativo da empresa selecionada pelo servidor (não editável). */
+let selecaoEmpresaPdvSnapshot = null;
+let selecaoEmpresaPdvTimer = null;
 
 /** Expõe o carrinho para módulos PDV (entrega, widgets) — `let` não cria window.carrinho. */
 function sincronizarCarrinhoGlobalPdv() {
@@ -1311,36 +1314,38 @@ async function confirmarRecebimentoFiscalManual(valorFiscal) {
     });
 }
 
+/** Alinhado ao Motor F×NF (PDV-MULTIEMPRESA-08): bucket exclusivo, sem cruzamento. */
 function distribuirQuantidadeVendaLocal(quantidadeVendida, saldoFiscal, saldoNaoFiscal, vendaFiscal = false) {
     quantidadeVendida = Number(quantidadeVendida || 0);
     saldoFiscal = Number(saldoFiscal || 0);
     saldoNaoFiscal = Number(saldoNaoFiscal || 0);
     const priorizarFiscal = vendaFiscal === true;
-
     const estoqueTotal = saldoFiscal + saldoNaoFiscal;
 
-    if (quantidadeVendida > estoqueTotal) {
+    if (!(quantidadeVendida > 0)) {
+        return { sucesso: true, quantidadeFiscal: 0, quantidadeNaoFiscal: 0, estoqueTotal };
+    }
+
+    if (priorizarFiscal) {
+        if (quantidadeVendida > saldoFiscal + 1e-9) {
+            return { sucesso: false, estoqueTotal, disponivelBucket: saldoFiscal };
+        }
         return {
-            sucesso: false,
+            sucesso: true,
+            quantidadeFiscal: quantidadeVendida,
+            quantidadeNaoFiscal: 0,
             estoqueTotal
         };
     }
 
-    let quantidadeFiscal;
-    let quantidadeNaoFiscal;
-
-    if (priorizarFiscal) {
-        quantidadeFiscal = Math.min(quantidadeVendida, saldoFiscal);
-        quantidadeNaoFiscal = quantidadeVendida - quantidadeFiscal;
-    } else {
-        quantidadeNaoFiscal = Math.min(quantidadeVendida, saldoNaoFiscal);
-        quantidadeFiscal = quantidadeVendida - quantidadeNaoFiscal;
+    if (quantidadeVendida > saldoNaoFiscal + 1e-9) {
+        return { sucesso: false, estoqueTotal, disponivelBucket: saldoNaoFiscal };
     }
-
     return {
         sucesso: true,
-        quantidadeFiscal,
-        quantidadeNaoFiscal
+        quantidadeFiscal: 0,
+        quantidadeNaoFiscal: quantidadeVendida,
+        estoqueTotal
     };
 }
 
@@ -1369,9 +1374,12 @@ function calcularDistribuicaoFiscalLocal(itens, vendaFiscal = false) {
         );
 
         if (!resultado.sucesso) {
+            const disp = resultado.disponivelBucket != null
+                ? resultado.disponivelBucket
+                : resultado.estoqueTotal;
             return {
                 sucesso: false,
-                error: `Saldo insuficiente para ${produto?.nome || 'produto'}. Disponível: ${resultado.estoqueTotal}`
+                error: `Saldo insuficiente para ${produto?.nome || 'produto'}. Disponível no bucket: ${disp}`
             };
         }
 
@@ -1956,6 +1964,24 @@ function pdvModoFiscalAtivo() {
     return localStorage.getItem('pdv_modo_fiscal_ativo') === '1';
 }
 
+/**
+ * PDV-MULTIEMPRESA-14 — critério de bucket da operação (espelha preview selecao-empresa + finalização).
+ * true → saldo fiscal; false → saldo não fiscal. Não soma CNPJs; não cruza buckets.
+ */
+function pdvOperacaoVendaFiscal() {
+    if (pdvEmitirFiscalNaVenda === true) return true;
+    if (pdvEmitirFiscalNaVenda === false) return false;
+    return pdvModoFiscalAtivo() === true;
+}
+
+function pdvProdutoUsaFichaTecnica(produto) {
+    if (!produto) return false;
+    const flag = produto.utiliza_ficha_tecnica != null
+        ? produto.utiliza_ficha_tecnica
+        : produto.usa_ficha_tecnica;
+    return Number(flag) === 1 || flag === true;
+}
+
 function pdvResolverSaldosProduto(produto) {
     let item = produto || {};
     if (typeof enriquecerProdutoComCacheEstoque === 'function') {
@@ -1981,6 +2007,33 @@ function pdvResolverSaldosProduto(produto) {
     };
 }
 
+/**
+ * Saldo utilizável na operação atual (produto sem ficha).
+ * Com ficha: elegível local é null — insumos ficam a cargo do seletor/capacidade.
+ */
+function pdvSaldoElegivelOperacao(produto, vendaFiscal) {
+    const saldos = pdvResolverSaldosProduto(produto);
+    const exigeFiscal = vendaFiscal === true;
+    if (pdvProdutoUsaFichaTecnica(produto)) {
+        return {
+            ficha: true,
+            bucket: null,
+            elegivel: null,
+            saldo_fiscal: saldos.saldo_fiscal,
+            saldo_nao_fiscal: saldos.saldo_nao_fiscal,
+            estoque_atual: saldos.estoque_atual
+        };
+    }
+    return {
+        ficha: false,
+        bucket: exigeFiscal ? 'FISCAL' : 'NAO_FISCAL',
+        elegivel: exigeFiscal ? saldos.saldo_fiscal : saldos.saldo_nao_fiscal,
+        saldo_fiscal: saldos.saldo_fiscal,
+        saldo_nao_fiscal: saldos.saldo_nao_fiscal,
+        estoque_atual: saldos.estoque_atual
+    };
+}
+
 function produtoControlaEstoquePdv(produto) {
     if (produto == null) return true;
     if (
@@ -1993,59 +2046,54 @@ function produtoControlaEstoquePdv(produto) {
     return Number(produto.controla_estoque) !== 0;
 }
 
+/**
+ * Validação local de estoque (UX). Autoridade final: capacidade multiempresa no servidor.
+ * Produto sem ficha: bucket exclusivo da operação (M08/M13). Não usa total F+NF como elegível.
+ */
 function validarEstoqueVenda(produto, quantidade, modoFiscal) {
     if (!produtoControlaEstoquePdv(produto)) {
         return { sucesso: true };
     }
 
-    const saldos = pdvResolverSaldosProduto(produto);
-    const saldoFiscal = saldos.saldo_fiscal;
-    const saldoNaoFiscal = saldos.saldo_nao_fiscal;
-    const saldoTotal = saldos.estoque_atual;
+    const exigeFiscal = modoFiscal === true;
+    const info = pdvSaldoElegivelOperacao(produto, exigeFiscal);
 
-    if (modoFiscal) {
-        if (saldoFiscal <= 0) {
-            return {
-                sucesso: false,
-                mensagem:
-`Saldo insuficiente.
-
-Disponível: 0${saldoNaoFiscal > 0 ? '*' : ''}
-
-${saldoNaoFiscal > 0 ? '* Consulte o estoque disponível.' : ''}`
-            };
-        }
-
-        if (quantidade > saldoTotal) {
-            return {
-                sucesso: false,
-                mensagem:
-`Saldo insuficiente.
-
-Disponível: ${saldoFiscal}${saldoNaoFiscal > 0 ? '*' : ''}
-
-${saldoNaoFiscal > 0 ? '* Consulte o estoque disponível.' : ''}`
-            };
-        }
-
-        return { sucesso: true };
+    // Ficha: não validar saldo do acabado localmente (insumos = seletor).
+    if (info.ficha) {
+        return { sucesso: true, diferidoSeletor: true, ficha: true };
     }
 
-    if (quantidade > saldoTotal) {
+    const elegivel = Number(info.elegivel || 0);
+    const qty = Number(quantidade);
+    if (!(qty > elegivel + 1e-9)) {
         return {
-            sucesso: false,
-            mensagem:
-`Saldo insuficiente.
-
-Disponível: ${saldoTotal}`
+            sucesso: true,
+            disponivelElegivel: elegivel,
+            bucket: info.bucket
         };
     }
 
-    return { sucesso: true };
+    const rotuloBucket = exigeFiscal ? 'fiscal' : 'não fiscal';
+    const outro = exigeFiscal ? info.saldo_nao_fiscal : info.saldo_fiscal;
+    const rotuloOutro = exigeFiscal ? 'não fiscal' : 'fiscal';
+    let mensagem =
+`Saldo insuficiente.
+
+Disponível (${rotuloBucket}): ${elegivel}`;
+    if (outro > 0) {
+        mensagem += `\nSaldo ${rotuloOutro}: ${outro} (não elegível nesta operação)`;
+    }
+
+    return {
+        sucesso: false,
+        mensagem,
+        disponivelElegivel: elegivel,
+        bucket: info.bucket
+    };
 }
 
 function pdvValidarEstoqueVenda(produto, quantidade) {
-    return validarEstoqueVenda(produto, quantidade, pdvModoFiscalAtivo());
+    return validarEstoqueVenda(produto, quantidade, pdvOperacaoVendaFiscal());
 }
 
 function pdvNotificarEstoqueInsuficiente(produto, quantidade) {
@@ -2061,20 +2109,26 @@ function pdvNotificarEstoqueInsuficiente(produto, quantidade) {
 }
 
 function pdvEstoqueDisponivel(produto) {
-    if (typeof obterEstoqueDisponivelProduto === 'function') {
-        return obterEstoqueDisponivelProduto(produto);
+    if (!produtoControlaEstoquePdv(produto)) {
+        return Number(produto?.estoque_atual || 0);
     }
-    return Number(produto?.estoque_atual || 0);
+    const info = pdvSaldoElegivelOperacao(produto, pdvOperacaoVendaFiscal());
+    if (info.ficha) {
+        // Não exibir total do acabado como se fosse elegível à venda.
+        return null;
+    }
+    return Number(info.elegivel || 0);
 }
 
 function pdvRotuloEstoque(produto) {
-    if (pdvModoFiscalAtivo()) {
-        return `Estoque fiscal: ${pdvEstoqueDisponivel(produto)}`;
+    const info = pdvSaldoElegivelOperacao(produto, pdvOperacaoVendaFiscal());
+    if (info.ficha) {
+        return 'Estoque: ficha técnica (insumos validados na capacidade)';
     }
-    const fiscal = Number(produto?.saldo_fiscal ?? 0);
-    const naoFiscal = Number(produto?.saldo_nao_fiscal ?? 0);
-    const total = Number(produto?.estoque_atual ?? (fiscal + naoFiscal));
-    return `F: ${fiscal} | NF: ${naoFiscal} | Total: ${total}`;
+    if (info.bucket === 'FISCAL') {
+        return `Disponível (fiscal): ${info.elegivel}`;
+    }
+    return `Disponível (não fiscal): ${info.elegivel}`;
 }
 
 function aplicarModoFiscalPdv() {
@@ -4082,8 +4136,271 @@ function limparCarrinho() {
     showNotification('Carrinho limpo com sucesso.', 'info');
 }
 
+/**
+ * PDV-MULTIEMPRESA-12 — mensagem curta ao operador (sem gargalos técnicos).
+ * Detalhes permanecem só no diagnóstico/console.
+ */
+function resumirMensagemSelecaoEmpresaPdv(estado = {}) {
+    const code = String(estado.code || estado.codigo || '').toUpperCase();
+    const bruto = String(estado.mensagem || estado.error || estado.mensagemBruta || '');
+    if (/CAIXA_INCOMPATIVEL/.test(code) || /caixa/i.test(bruto) && /empresa/i.test(bruto)) {
+        return 'Caixa incompatível com a empresa da venda. Abra o caixa na empresa correta.';
+    }
+    if (/TIPO_SALDO/.test(code)) {
+        return 'Não foi possível definir o tipo fiscal da venda.';
+    }
+    if (/MATRIZ_AUSENTE|MATRIZ_AMBIGUA/.test(code)) {
+        return 'Cadastro de empresas incompleto para seleção automática.';
+    }
+    if (/NENHUMA_EMPRESA|ESTOQUE_INSUFICIENTE|INSUMO_INSUFICIENTE|Gargalos:/i.test(code + bruto)) {
+        return 'Estoque insuficiente para a venda nesta empresa. Ajuste quantidades ou o tipo fiscal.';
+    }
+    if (/SELECAO|EMPRESA|SELETOR/i.test(code)) {
+        return 'Não foi possível definir a empresa da venda.';
+    }
+    if (bruto && !/Gargalos:|necessário \d|disponível \d|INSUMO_|ESTOQUE_INSUFICIENTE/i.test(bruto)) {
+        const curta = bruto.replace(/\s+/g, ' ').trim();
+        return curta.length > 120 ? `${curta.slice(0, 117)}…` : curta;
+    }
+    return 'Não foi possível concluir a seleção automática da empresa.';
+}
+
+function registrarDiagnosticoSelecaoEmpresaPdv(estado = {}) {
+    try {
+        const detalhe = {
+            code: estado.code || estado.codigo || null,
+            mensagem: estado.mensagemBruta || estado.mensagem || estado.error || null,
+            selecao: estado.selecao || null,
+            gargalos: estado.gargalos || null
+        };
+        if (typeof console !== 'undefined' && console.warn) {
+            console.warn('[PDV][selecao-empresa]', detalhe);
+        }
+    } catch (_) { /* diagnóstico best-effort */ }
+}
+
+function garantirBannerSelecaoEmpresaPdv() {
+    let el = document.getElementById('pdv-selecao-empresa-info');
+    if (el) {
+        // Corrige banner legado inserido dentro de <table> (antes do tbody).
+        if (el.parentElement && el.parentElement.tagName === 'TABLE') {
+            el.remove();
+            el = null;
+        } else {
+            return el;
+        }
+    }
+    // Área própria: fora da tabela de itens (não deforma a lista de produtos).
+    const secaoItens = document.querySelector('.pdv-itens')
+        || document.querySelector('.pdv-card.pdv-itens');
+    const header = secaoItens && secaoItens.querySelector('.pdv-card-header');
+    const scroll = secaoItens && secaoItens.querySelector('.pdv-itens-scroll');
+    const ancoraForaTabela = scroll
+        || document.querySelector('.pdv-resumo')
+        || document.querySelector('#pdv-content')
+        || document.body;
+
+    el = document.createElement('div');
+    el.id = 'pdv-selecao-empresa-info';
+    el.className = 'pdv-selecao-empresa-info';
+    el.setAttribute('role', 'status');
+    el.setAttribute('aria-live', 'polite');
+    el.style.cssText = [
+        'font-size:0.82rem',
+        'line-height:1.35',
+        'padding:0.4rem 0.65rem',
+        'margin:0.4rem 0.75rem 0.25rem',
+        'border-radius:4px',
+        'background:#f1f5f9',
+        'color:#334155',
+        'max-height:2.8em',
+        'overflow:hidden',
+        'text-overflow:ellipsis',
+        'white-space:nowrap',
+        'flex-shrink:0'
+    ].join(';');
+    el.textContent = 'Empresa da venda: aguardando avaliação do carrinho…';
+
+    if (header && header.parentNode) {
+        if (scroll && scroll.parentNode === header.parentNode) {
+            header.parentNode.insertBefore(el, scroll);
+        } else {
+            header.insertAdjacentElement('afterend', el);
+        }
+    } else if (ancoraForaTabela && ancoraForaTabela.parentNode && ancoraForaTabela !== document.body) {
+        ancoraForaTabela.parentNode.insertBefore(el, ancoraForaTabela);
+    } else {
+        document.body.prepend(el);
+    }
+    return el;
+}
+
+function renderBannerSelecaoEmpresaPdv(estado) {
+    const el = garantirBannerSelecaoEmpresaPdv();
+    if (!estado || estado.aplicada === false) {
+        el.style.background = '#f1f5f9';
+        el.style.color = '#334155';
+        el.style.whiteSpace = 'nowrap';
+        el.textContent = estado && estado.mensagem
+            ? String(estado.mensagem)
+            : 'Empresa da venda: definida automaticamente pelo servidor.';
+        el.title = '';
+        return;
+    }
+    if (estado.bloqueio || estado.error) {
+        const bruto = estado.mensagemBruta || estado.mensagem || estado.error || '';
+        const curta = resumirMensagemSelecaoEmpresaPdv({
+            ...estado,
+            mensagem: bruto,
+            mensagemBruta: bruto
+        });
+        registrarDiagnosticoSelecaoEmpresaPdv({
+            ...estado,
+            mensagemBruta: bruto
+        });
+        el.style.background = '#fef2f2';
+        el.style.color = '#991b1b';
+        el.style.whiteSpace = 'normal';
+        el.style.maxHeight = '3.6em';
+        el.style.overflow = 'hidden';
+        el.textContent = curta;
+        el.title = curta;
+        return;
+    }
+    el.style.background = '#ecfdf5';
+    el.style.color = '#065f46';
+    el.style.whiteSpace = 'nowrap';
+    el.style.maxHeight = '2.8em';
+    const emp = estado.empresa_id != null ? estado.empresa_id : (estado.selecionada && estado.selecionada.empresaId);
+    el.textContent = `Empresa da venda: #${emp} (automática)`;
+    el.title = estado.justificativa ? String(estado.justificativa) : '';
+}
+
+function agendarAtualizacaoSelecaoEmpresaPdv() {
+    if (selecaoEmpresaPdvTimer) clearTimeout(selecaoEmpresaPdvTimer);
+    selecaoEmpresaPdvTimer = setTimeout(() => {
+        atualizarSelecaoEmpresaPdv({ silencioso: true }).catch(() => { /* preview best-effort */ });
+    }, 400);
+}
+
+/**
+ * PDV-MULTIEMPRESA-05 — monta itens do preview de seleção de empresa.
+ * Propaga apenas campos já presentes e confiáveis no carrinho/contrato.
+ * Não inventa tipo_saldo a partir de item_fiscal.
+ * @param {Array} itensCarrinho
+ * @returns {Array<object>}
+ */
+function montarItensSelecaoEmpresaPreviewPdv(itensCarrinho) {
+    const saida = [];
+    for (const item of itensCarrinho || []) {
+        const produtoId = Number(item && (item.id != null ? item.id : item.produto_id));
+        const quantidade = Number(item && item.quantidade);
+        if (!Number.isInteger(produtoId) || produtoId <= 0) continue;
+        if (!(quantidade > 0)) continue;
+
+        const out = {
+            produto_id: produtoId,
+            quantidade
+        };
+
+        if (item.unidade != null && String(item.unidade).trim() !== '') {
+            out.unidade = String(item.unidade).trim();
+        }
+
+        const tipoRaw = item.tipo_saldo != null ? item.tipo_saldo : item.tipoSaldo;
+        if (tipoRaw != null && tipoRaw !== '') {
+            const normalizado = String(tipoRaw)
+                .trim()
+                .toUpperCase()
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .replace(/[\s-]+/g, '_');
+            if (normalizado === 'FISCAL') {
+                out.tipo_saldo = 'FISCAL';
+            } else if (normalizado === 'NAO_FISCAL' || normalizado === 'NAOFISCAL') {
+                out.tipo_saldo = 'NAO_FISCAL';
+            }
+            // inválido → omite (fallback operacional no servidor)
+        }
+
+        const qF = item.quantidade_fiscal != null ? item.quantidade_fiscal : item.quantidadeFiscal;
+        const qNf = item.quantidade_nao_fiscal != null
+            ? item.quantidade_nao_fiscal
+            : item.quantidadeNaoFiscal;
+        const hasQf = qF != null && qF !== '' && Number.isFinite(Number(qF));
+        const hasQnf = qNf != null && qNf !== '' && Number.isFinite(Number(qNf));
+        if (hasQf) out.quantidade_fiscal = Number(qF);
+        if (hasQnf) out.quantidade_nao_fiscal = Number(qNf);
+
+        // Metadado do contrato de venda — NÃO escolhe bucket sozinho no motor.
+        if (item.item_fiscal != null && item.item_fiscal !== '') {
+            const flag = Number(item.item_fiscal);
+            if (Number.isFinite(flag)) out.item_fiscal = flag;
+        }
+
+        saida.push(out);
+    }
+    return saida;
+}
+
+async function atualizarSelecaoEmpresaPdv(opcoes = {}) {
+    if (!Array.isArray(carrinho) || carrinho.length === 0) {
+        selecaoEmpresaPdvSnapshot = null;
+        renderBannerSelecaoEmpresaPdv({ aplicada: false, mensagem: 'Empresa da venda: carrinho vazio.' });
+        return null;
+    }
+    const itens = montarItensSelecaoEmpresaPreviewPdv(carrinho);
+    // PDV-MULTIEMPRESA-14: mesmo critério de bucket da validação local / operação pretendida.
+    const emitir = pdvOperacaoVendaFiscal();
+    const headers = { 'Content-Type': 'application/json' };
+    const token = localStorage.getItem('token');
+    if (token) headers.Authorization = `Bearer ${token}`;
+    if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.headersJson === 'function') {
+        Object.assign(headers, CdsEmpresaContexto.headersJson());
+    }
+    const resp = await fetch(`${API_URL}/vendas/selecao-empresa`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+            itens,
+            emitir_fiscal: emitir,
+            // Alinha ao Motor F×NF (RC3.15.11): preview usa o mesmo sinal da operação.
+            venda_fiscal: emitir,
+            origem: 'PDV'
+        })
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+        selecaoEmpresaPdvSnapshot = null;
+        const bruto = data.mensagem || data.error || '';
+        const estadoBloqueio = {
+            bloqueio: true,
+            code: data.code || (data.selecao && data.selecao.bloqueio && data.selecao.bloqueio.codigo),
+            error: bruto,
+            mensagem: bruto,
+            mensagemBruta: bruto,
+            selecao: data.selecao || null,
+            gargalos: data.gargalos || null
+        };
+        renderBannerSelecaoEmpresaPdv(estadoBloqueio);
+        if (!opcoes.silencioso) {
+            showNotification(resumirMensagemSelecaoEmpresaPdv(estadoBloqueio), 'danger');
+        }
+        return data;
+    }
+    selecaoEmpresaPdvSnapshot = {
+        empresa_id: data.empresa_id,
+        justificativa: data.justificativa,
+        hash_carrinho: data.hash_carrinho,
+        tipo_saldo: data.tipo_saldo
+    };
+    renderBannerSelecaoEmpresaPdv(data);
+    return data;
+}
+
 function atualizarCarrinho() {
     sincronizarCarrinhoGlobalPdv();
+    agendarAtualizacaoSelecaoEmpresaPdv();
     const tbody = $('#tabelaItensVendaPdv');
     if (tbody.length) {
         tbody.html(renderCarrinhoItens());
@@ -5358,6 +5675,10 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
 
     function enviarVenda(payload) {
         payload = getTerminalRequestData(payload);
+        // PDV-SEL-01: snapshot informativo; servidor recalcula e prevalece sobre X-Empresa-Id.
+        if (selecaoEmpresaPdvSnapshot && selecaoEmpresaPdvSnapshot.hash_carrinho) {
+            payload.selecao_hash = selecaoEmpresaPdvSnapshot.hash_carrinho;
+        }
         let handoffNaoFiscal = false;
 
         $.ajax({
@@ -5492,7 +5813,23 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
                     return;
                 }
 
-                showNotification(xhr.responseJSON?.error || 'Erro ao finalizar a venda.', 'danger');
+                const bodyErr = xhr.responseJSON || {};
+                const msgSel = bodyErr.mensagem || bodyErr.error || 'Erro ao finalizar a venda.';
+                if (bodyErr.code && /EMPRESA|SELECAO|MATRIZ|CAIXA_INCOMPATIVEL|NENHUMA_EMPRESA|TIPO_SALDO/i.test(String(bodyErr.code))) {
+                    const estadoBloqueio = {
+                        bloqueio: true,
+                        code: bodyErr.code,
+                        mensagem: msgSel,
+                        mensagemBruta: msgSel,
+                        error: msgSel,
+                        selecao: bodyErr.selecao || null,
+                        gargalos: bodyErr.gargalos || null
+                    };
+                    renderBannerSelecaoEmpresaPdv(estadoBloqueio);
+                    showNotification(resumirMensagemSelecaoEmpresaPdv(estadoBloqueio), 'danger');
+                } else {
+                    showNotification(msgSel, 'danger');
+                }
             }
         });
     }
@@ -6967,10 +7304,11 @@ function renderizarProdutosConsultaPDV(produtos) {
     }
 
     const linhas = produtos.map(p => {
-        const estoque = pdvEstoqueDisponivel(p);
+        const estoqueRaw = pdvEstoqueDisponivel(p);
+        const estoque = estoqueRaw == null ? 0 : Number(estoqueRaw);
         const preco = Number(p.preco_venda || 0);
         const precoCompra = Number(p.preco_compra || 0);
-        const estoqueBaixo = estoque <= Number(p.estoque_minimo || 0);
+        const estoqueBaixo = estoqueRaw != null && estoque <= Number(p.estoque_minimo || 0);
         const semEstoque = !pdvValidarEstoqueVenda(p, 1).sucesso;
         const temPromocao = p.tem_promocao === 1 || p.tem_promocao === true;
         const precoPromocional = Number(p.preco_promocional || 0);
@@ -6998,8 +7336,9 @@ function renderizarProdutosConsultaPDV(produtos) {
                 <td>${formatarVendaUnidadeConsulta(p)}</td>
                 <td>${formatarPrecoUnidadeConsulta(p)}</td>
                 <td>
-                    <span class="badge ${semEstoque ? 'bg-danger' : estoqueBaixo ? 'bg-warning text-dark' : 'bg-success'}">
-                        ${estoque}
+                    <span class="badge ${semEstoque ? 'bg-danger' : estoqueBaixo ? 'bg-warning text-dark' : 'bg-success'}"
+                          title="${escapeHtml(pdvRotuloEstoque(p))}">
+                        ${estoqueRaw == null ? 'ficha' : estoque}
                     </span>
                 </td>
                 <td class="text-end">

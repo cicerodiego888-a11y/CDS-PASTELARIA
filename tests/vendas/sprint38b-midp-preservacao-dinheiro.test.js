@@ -65,7 +65,7 @@ describe('Sprint 3.8B — Motor Valor Fiscal Efetivo', () => {
     assert.equal(r.preservacaoAplicada, false);
   });
 
-  it('pipeline itens: preserva total e reduz fiscal efetivo', () => {
+  it('pipeline itens: PDV-MULTIEMPRESA-08 bloqueia cruzamento 105/55/55 (bucket fiscal exclusivo)', () => {
     const item = { produto_id: 1, quantidade: 105, preco_unitario: 10, subtotal: 1050 };
     const out = distribuirItensVendaComValorFiscalEfetivo(
       [{ item, saldoFiscal: 55, saldoNaoFiscal: 55 }],
@@ -78,27 +78,28 @@ describe('Sprint 3.8B — Motor Valor Fiscal Efetivo', () => {
         ]
       }
     );
-    assert.equal(out.sucesso, true);
-    assert.equal(out.valorFiscalMaximo, 550);
-    assert.equal(out.valorFiscalMinimo, 500);
-    assert.equal(out.valorFiscalEfetivo, 500);
-    assert.equal(out.valorNaoFiscal, 550);
-    assert.equal(out.totalVenda, 1050);
-    assert.equal(out.preservacaoAplicada, true);
-    const soma = Number(out.itens[0].valor_fiscal) + Number(out.itens[0].valor_nao_fiscal);
-    assert.equal(Number(soma.toFixed(2)), 1050);
+    assert.equal(out.sucesso, false);
   });
 
-  it('legado distribuirItemVenda inalterado (prioriza fiscal)', () => {
-    const r = distribuirItemVenda(
+  it('distribuirItemVenda: bucket fiscal exclusivo (não cruza para NF)', () => {
+    const insuficiente = distribuirItemVenda(
       { quantidade: 105, preco_unitario: 10 },
       55,
       55,
       true
     );
-    assert.equal(r.sucesso, true);
-    assert.equal(r.quantidadeFiscal, 55);
-    assert.equal(r.valorFiscal, 550);
+    assert.equal(insuficiente.sucesso, false);
+
+    const ok = distribuirItemVenda(
+      { quantidade: 40, preco_unitario: 10 },
+      55,
+      55,
+      true
+    );
+    assert.equal(ok.sucesso, true);
+    assert.equal(ok.quantidadeFiscal, 40);
+    assert.equal(ok.quantidadeNaoFiscal, 0);
+    assert.equal(ok.valorFiscal, 400);
   });
 });
 

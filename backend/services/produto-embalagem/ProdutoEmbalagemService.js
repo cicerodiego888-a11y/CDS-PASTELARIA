@@ -12,8 +12,7 @@ const {
   TIPOS_APRESENTACAO
 } = require('./tiposApresentacao');
 const { inferirTipoConversao, normalizarTipoConversao } = require('../../motores/muc/constants/tiposConversao');
-const { isUnidadeConhecida } = require('../../motores/muc/core/unidadesSi');
-const { criarProdutoApresentacaoDTO } = require('../../motores/muc');
+const { criarProdutoApresentacaoDTO, isUnidadeConhecida } = require('../../motores/muc');
 
 function num(v, casas = 4) {
   const n = Number(v);

@@ -1,13 +1,20 @@
 /**
  * RC4.31.1 — Certificação final de contratos públicos MUC + bootstrap ERP
  * Executar: node tests/muc/rc431-build-certificacao.test.js
+ * Preferível: node -r ./tests/central-entradas/helpers/preloadIsolamentoBanco.js tests/muc/rc431-build-certificacao.test.js
  * Pipeline: npm run test:muc-certificacao
+ *
+ * Isolamento de banco ANTES de qualquer smoke require de rotas (compras/produtos),
+ * para não cair no fallback ProgramData nem exigir CDS_ALLOW_OFFICIAL_DB.
  */
 'use strict';
 
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+
+const { isolarBancoTeste } = require('../central-entradas/helpers/isolarBancoTeste');
+isolarBancoTeste('muc-rc431-');
 
 const ROOT = path.join(__dirname, '../..');
 
@@ -86,7 +93,7 @@ const CONSUMIDORES_ERP = Object.freeze([
   {
     arquivo: 'backend/services/produto-embalagem/ProdutoEmbalagemService.js',
     importDe: 'backend/motores/muc/index.js',
-    simbolos: ['criarProdutoApresentacaoDTO']
+    simbolos: ['criarProdutoApresentacaoDTO', 'isUnidadeConhecida']
   },
   {
     arquivo: 'backend/services/produto-embalagem/ProdutoEmbalagemService.js',

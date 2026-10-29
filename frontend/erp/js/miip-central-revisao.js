@@ -1507,6 +1507,24 @@
           </div>
         </div>
       </div>
+      <div class="modal fade" id="miipCentralEscolhaCadastroModal" tabindex="-1" aria-labelledby="miipCentralEscolhaCadastroTitulo">
+        <div class="modal-dialog modal-dialog-centered">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title" id="miipCentralEscolhaCadastroTitulo">O que deseja cadastrar?</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cancelar"></button>
+            </div>
+            <div class="modal-body">
+              <p>Escolha o tipo de cadastro para este item da NF-e.</p>
+              <div class="d-grid gap-2">
+                <button type="button" class="btn btn-primary" data-miip-tipo-cadastro="COMERCIAL">Produto comercial</button>
+                <button type="button" class="btn btn-outline-primary" data-miip-tipo-cadastro="INSUMO">Insumo</button>
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     `;
 
     $('#miipCentralRevisaoRoot').remove();
@@ -2380,7 +2398,7 @@
    * já com os dados do XML preenchidos.
    * RC8.5.3.1 / RC8.5.3.2 — decide MIE antes de abrir o Cadastro (um modal por vez).
    */
-  async function abrirCadastroProdutoPadrao(item, callback) {
+  async function abrirCadastroProdutoPadrao(item, callback, tipoCadastro) {
     if (estado?._abrindoCadastroProduto) {
       return;
     }
@@ -2407,7 +2425,7 @@
       await encerrarModalTemporarioCompleto(document.getElementById('miipPerguntaEmbalagemModal'));
 
       // Anexa ao body (não ao #modal-container) e já abre — não mover depois do show.
-      const tipoOperacional = String(item?.tipo_operacional || '').trim().toUpperCase();
+      const tipoOperacional = String(tipoCadastro || item?.tipo_operacional || '').trim().toUpperCase();
       showProdutoModal(null, {
         origem: 'MIIP',
         preservarOutrosModais: true,
@@ -2507,6 +2525,33 @@
     }
   }
 
+  function abrirEscolhaTipoCadastro(onSelecionar) {
+    const el = document.getElementById('miipCentralEscolhaCadastroModal');
+    if (!el || el.classList.contains('show')) return;
+
+    let tipoSelecionado = '';
+    const modal = new bootstrap.Modal(el);
+    const $modal = $(el);
+
+    $modal.off('click.miipEscolhaCadastro').on('click.miipEscolhaCadastro', '[data-miip-tipo-cadastro]', function (event) {
+      event.preventDefault();
+      tipoSelecionado = String(this.dataset.miipTipoCadastro || '').trim().toUpperCase();
+      if (!['COMERCIAL', 'INSUMO'].includes(tipoSelecionado)) {
+        tipoSelecionado = '';
+        return;
+      }
+      modal.hide();
+    });
+
+    el.addEventListener('hidden.bs.modal', () => {
+      $modal.off('.miipEscolhaCadastro');
+      modal.dispose();
+      if (tipoSelecionado) onSelecionar(tipoSelecionado);
+    }, { once: true });
+
+    modal.show();
+  }
+
   async function cadastrarNovo() {
     const pendencia = estado.sessao.pendencias[estado.sessao.indiceAtual];
     if (!pendencia || !pendenciaAberta(estado.sessao, pendencia)) {
@@ -2521,8 +2566,9 @@
       }
     };
 
-    // Sempre usa o fluxo empilhado sobre a Central (não abre a busca F2).
-    await abrirCadastroProdutoPadrao(item, aoCadastrar);
+    abrirEscolhaTipoCadastro((tipoCadastro) => {
+      abrirCadastroProdutoPadrao(item, aoCadastrar, tipoCadastro);
+    });
   }
 
   function concluirRevisao(meta) {
@@ -2570,6 +2616,8 @@
 
   function onKeydown(event) {
     if (!estado || !document.getElementById('miipCentralRevisaoModal')?.classList.contains('show')) return;
+
+    if (document.getElementById('miipCentralEscolhaCadastroModal')?.classList.contains('show')) return;
 
     // Cadastro de produto aberto na frente: não interceptar atalhos da revisão.
     if (document.getElementById('produtoModal')?.classList.contains('show')) return;

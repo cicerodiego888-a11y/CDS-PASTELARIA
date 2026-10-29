@@ -379,8 +379,9 @@ function corrigirIntegridadeQuantidadesFiscais(itens = [], opcoes = {}) {
 }
 
 /**
- * Faixa válida de quantidade fiscal (estoque).
- * min = o que não cabe no saldo não fiscal; max = o que cabe no saldo fiscal.
+ * Faixa teórica de quantidade fiscal sob estoque total (F+NF).
+ * Mantida para auditoria/MIDP legado; a distribuição autoritativa (PDV-MULTIEMPRESA-08)
+ * usa buckets exclusivos via `distribuirQuantidadeVenda` — não substitui o bucket exigido.
  */
 function obterFaixaQuantidadeFiscal(quantidadeVendida, saldoFiscal, saldoNaoFiscal) {
   const quantidadeVendidaNum = Number(quantidadeVendida || 0);
@@ -406,7 +407,12 @@ function obterFaixaQuantidadeFiscal(quantidadeVendida, saldoFiscal, saldoNaoFisc
 
 /**
  * Distribui quantidade vendida entre saldo fiscal e não fiscal.
- * @param {boolean} vendaFiscal - true: consome fiscal primeiro; false: consome não fiscal primeiro
+ * PDV-MULTIEMPRESA-08 / Opção A — compatibilidade exclusiva de bucket (sem ficha):
+ * - venda fiscal → consome somente saldo_fiscal (qNF = 0)
+ * - venda não fiscal → consome somente saldo_nao_fiscal (qF = 0)
+ * Insuficiência no bucket exigido bloqueia; não usa estoque total como substituto.
+ *
+ * @param {boolean} vendaFiscal - true: bucket FISCAL; false: bucket NAO_FISCAL
  */
 function distribuirQuantidadeVenda(
   quantidadeVendida,
@@ -418,34 +424,62 @@ function distribuirQuantidadeVenda(
   saldoFiscal = Number(saldoFiscal || 0);
   saldoNaoFiscal = Number(saldoNaoFiscal || 0);
   const priorizarFiscal = parseVendaFiscalFlag(vendaFiscal);
+  const estoqueTotal = saldoFiscal + saldoNaoFiscal;
 
-  const faixa = obterFaixaQuantidadeFiscal(quantidadeVendida, saldoFiscal, saldoNaoFiscal);
-  if (!faixa.sucesso) {
+  if (!(quantidadeVendida > 0)) {
     return {
-      sucesso: false,
-      estoqueTotal: faixa.estoqueTotal,
-      mensagem: faixa.mensagem
+      sucesso: true,
+      quantidadeFiscal: 0,
+      quantidadeNaoFiscal: 0,
+      estoqueTotal,
+      quantidadeFiscalMin: 0,
+      quantidadeFiscalMax: 0,
+      bucketExclusivo: priorizarFiscal ? 'FISCAL' : 'NAO_FISCAL'
     };
   }
 
-  let quantidadeFiscal;
-  let quantidadeNaoFiscal;
-
   if (priorizarFiscal) {
-    quantidadeFiscal = faixa.quantidadeFiscalMax;
-    quantidadeNaoFiscal = quantidadeVendida - quantidadeFiscal;
-  } else {
-    quantidadeFiscal = faixa.quantidadeFiscalMin;
-    quantidadeNaoFiscal = quantidadeVendida - quantidadeFiscal;
+    if (quantidadeVendida > saldoFiscal + 1e-9) {
+      return {
+        sucesso: false,
+        estoqueTotal,
+        disponivelBucket: saldoFiscal,
+        bucketExclusivo: 'FISCAL',
+        mensagem:
+          `Saldo fiscal insuficiente. Necessário: ${quantidadeVendida}, `
+          + `disponível fiscal: ${saldoFiscal}`
+      };
+    }
+    return {
+      sucesso: true,
+      quantidadeFiscal: quantidadeVendida,
+      quantidadeNaoFiscal: 0,
+      estoqueTotal,
+      quantidadeFiscalMin: quantidadeVendida,
+      quantidadeFiscalMax: quantidadeVendida,
+      bucketExclusivo: 'FISCAL'
+    };
   }
 
+  if (quantidadeVendida > saldoNaoFiscal + 1e-9) {
+    return {
+      sucesso: false,
+      estoqueTotal,
+      disponivelBucket: saldoNaoFiscal,
+      bucketExclusivo: 'NAO_FISCAL',
+      mensagem:
+        `Saldo não fiscal insuficiente. Necessário: ${quantidadeVendida}, `
+        + `disponível não fiscal: ${saldoNaoFiscal}`
+    };
+  }
   return {
     sucesso: true,
-    quantidadeFiscal,
-    quantidadeNaoFiscal,
-    estoqueTotal: faixa.estoqueTotal,
-    quantidadeFiscalMin: faixa.quantidadeFiscalMin,
-    quantidadeFiscalMax: faixa.quantidadeFiscalMax
+    quantidadeFiscal: 0,
+    quantidadeNaoFiscal: quantidadeVendida,
+    estoqueTotal,
+    quantidadeFiscalMin: 0,
+    quantidadeFiscalMax: 0,
+    bucketExclusivo: 'NAO_FISCAL'
   };
 }
 
@@ -509,7 +543,9 @@ function distribuirItemVenda(item, saldoFiscal, saldoNaoFiscal, vendaFiscal = tr
 }
 
 /**
- * Distribuição no extremo oposto (mínimo fiscal / máximo não fiscal possível).
+ * Distribuição no extremo não fiscal (bucket exclusivo NAO_FISCAL — M08).
+ * O pipeline `distribuirItensVendaComValorFiscalEfetivo` não usa mais o extremo
+ * oposto para montar faixa MIDP (faixa colapsa no bucket da operação).
  */
 function distribuirItemVendaMinimoFiscal(item, saldoFiscal, saldoNaoFiscal) {
   return distribuirItemVenda(item, saldoFiscal, saldoNaoFiscal, false);
@@ -726,15 +762,14 @@ function distribuirItensVendaComValorFiscalEfetivo(entradas = [], vendaFiscal = 
     const saldoFiscal = Number(entrada.saldoFiscal != null ? entrada.saldoFiscal : 0);
     const saldoNaoFiscal = Number(entrada.saldoNaoFiscal != null ? entrada.saldoNaoFiscal : 0);
 
+    // PDV-MULTIEMPRESA-08: bucket exclusivo conforme vendaFiscal.
+    // Faixa min/max colapsa no mesmo extremo — impede MIDP/ajuste de reintroduzir
+    // consumo cruzado (débito incompatível com o tipo da venda).
     const maxRes = distribuirItemVenda(item, saldoFiscal, saldoNaoFiscal, vendaFiscal);
     if (!maxRes.sucesso) {
       return { sucesso: false, erro: maxRes, item };
     }
-
-    const minRes = distribuirItemVendaMinimoFiscal(item, saldoFiscal, saldoNaoFiscal);
-    if (!minRes.sucesso) {
-      return { sucesso: false, erro: minRes, item };
-    }
+    const minRes = maxRes;
 
     valorFiscalMinimo = round2(valorFiscalMinimo + minRes.valorFiscal);
 

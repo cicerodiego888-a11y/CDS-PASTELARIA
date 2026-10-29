@@ -319,6 +319,8 @@ module.exports = {
   criarRegraConversaoDTO,
   resultadoParaJson,
   resultadoFromJson,
+  /** Validação de unidade (SI/embalagem) sem exigir import de muc/core nos consumidores ERP. */
+  isUnidadeConhecida,
   // @internal — exposto apenas para testes de certificação RC1/RC2 e bootstrap
   MotorUniversalConversao,
   PipelineMuc,
