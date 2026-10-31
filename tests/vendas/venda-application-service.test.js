@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
 const path = require('path');
 
 describe('VendaApplicationService — Sprint 2.0 / 2.2', () => {
-  it('criarVenda (PDV) delega integralmente para VendaPagamentoService.criarVenda', () => {
+  it('criarVenda (PDV) delega integralmente para VendaPagamentoService.criarVenda', async () => {
     const pagamentoPath = require.resolve('../../backend/services/vendas/VendaPagamentoService');
     const appPath = path.resolve(__dirname, '../../backend/services/vendas/VendaApplicationService.js');
 
@@ -30,9 +30,15 @@ describe('VendaApplicationService — Sprint 2.0 / 2.2', () => {
 
     try {
       const VendaApplicationService = require('../../backend/services/vendas/VendaApplicationService');
+      const pdvStub = {
+        aplicarModeloEmpresaPdvNaRequisicao: async () => ({ aplicada: false, motivo: 'PDV_MULTIPLAS' })
+      };
       const req = { body: { total: 10 } };
       const res = { statusCode: 200 };
-      const result = VendaApplicationService.criarVenda(req, res);
+      const result = await VendaApplicationService.criarVenda(req, res, {
+        obterModoOperacaoVenda: () => 'EMPRESA_UNICA',
+        PdvModeloEmpresaService: pdvStub
+      });
 
       assert.equal(result, 'DELEGATED_OK');
       assert.equal(calledWith.req, req);
@@ -43,8 +49,13 @@ describe('VendaApplicationService — Sprint 2.0 / 2.2', () => {
 
       const reqMulti = { body: { total: 10, origem: 'PDV' } };
       const resMulti = { statusCode: 200 };
-      const resultMulti = VendaApplicationService.criarVenda(reqMulti, resMulti, {
-        obterModoOperacaoVenda: () => 'MULTIEMPRESA'
+      const resultMulti = await VendaApplicationService.criarVenda(reqMulti, resMulti, {
+        obterModoOperacaoVenda: () => 'MULTIEMPRESA',
+        PdvModeloEmpresaService: pdvStub,
+        SelecaoEmpresaVendaPdvService: {
+          aplicarSelecaoEmpresaNaVendaPdv: async () => ({ aplicada: false }),
+          responderBloqueioSelecao: (r, e) => r
+        }
       });
       assert.equal(resultMulti, 'DELEGATED_OK');
       assert.equal(reqMulti.vendaContext.modo_operacao_venda, 'MULTIEMPRESA');

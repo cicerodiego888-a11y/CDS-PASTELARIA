@@ -70,6 +70,25 @@ function exigirUsuarioId(fonte) {
   return id;
 }
 
+/**
+ * Administrador operacional: mesma faixa de empresas do SUPER ADMIN.
+ * Perfil ADMIN entra mesmo sem role admin. Não inclui configurações avançadas.
+ * Não grava vínculo.
+ */
+function administradorOperacional(usuario) {
+  if (!usuario || typeof usuario !== 'object') return false;
+  const role = String(usuario.role || '').trim().toLowerCase();
+  const perfil = String(usuario.perfil || '').trim().toUpperCase();
+  return role === 'admin' || perfil === 'ADMIN' || perfil === 'SUPER_ADMIN';
+}
+
+function sujeitoAutorizacao(usuarioFonte, opts = {}) {
+  if (usuarioFonte && typeof usuarioFonte === 'object') return usuarioFonte;
+  if (opts.user && typeof opts.user === 'object') return opts.user;
+  if (opts.usuario && typeof opts.usuario === 'object') return opts.usuario;
+  return null;
+}
+
 async function buscarVinculo(usuarioId, empresaId, opts = {}) {
   const db = getDb(opts.db);
   return dbGet(
@@ -83,6 +102,16 @@ async function usuarioPodeAcessarEmpresa(usuarioId, empresaId, opts = {}) {
   const uid = resolverUsuarioId(usuarioId);
   const eid = Number(empresaId);
   if (!uid || !Number.isInteger(eid) || eid <= 0) return false;
+
+  if (administradorOperacional(sujeitoAutorizacao(usuarioId, opts))) {
+    try {
+      const empresa = await EmpresaService.buscarEmpresaPorId(eid, opts);
+      return !!(empresa && empresa.ativo === 1);
+    } catch (err) {
+      if (err && err.code === 'EMPRESA_NAO_ENCONTRADA') return false;
+      throw err;
+    }
+  }
 
   const vinculo = await buscarVinculo(uid, eid, opts);
   if (!vinculo || Number(vinculo.ativo) !== 1) return false;
@@ -103,7 +132,7 @@ async function exigirEmpresaAutorizada(usuarioFonte, empresaId, opts = {}) {
     throw erroVinculo('EMPRESA_ID_OBRIGATORIO', 'empresaId é obrigatório.', 400);
   }
 
-  const autorizado = await usuarioPodeAcessarEmpresa(uid, eid, opts);
+  const autorizado = await usuarioPodeAcessarEmpresa(usuarioFonte, eid, opts);
   if (!autorizado) {
     throw erroVinculo(
       'EMPRESA_NAO_AUTORIZADA',
@@ -121,6 +150,11 @@ async function exigirEmpresaAutorizada(usuarioFonte, empresaId, opts = {}) {
 async function listarEmpresasPermitidas(usuarioFonte, opts = {}) {
   const uid = exigirUsuarioId(usuarioFonte);
   const db = getDb(opts.db);
+
+  if (administradorOperacional(sujeitoAutorizacao(usuarioFonte, opts))) {
+    const ativas = await EmpresaService.listarEmpresas({ ativo: 1 }, { db });
+    return ativas.map((empresa) => EmpresaService.dtoContextoEmpresa(empresa));
+  }
 
   const rows = await dbAll(
     db,
@@ -271,6 +305,7 @@ module.exports = {
   usuarioPodeAcessarEmpresa,
   exigirEmpresaAutorizada,
   listarEmpresasPermitidas,
+  administradorOperacional,
   listarVinculosDoUsuario,
   vincularUsuarioEmpresa,
   inativarVinculo,

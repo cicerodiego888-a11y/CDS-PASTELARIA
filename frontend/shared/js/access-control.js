@@ -44,7 +44,8 @@ const PERMISSOES_PAGINAS = {
     relatorios: 'relatorios',
     auditoria: 'auditoria',
     'configuracoes-avancadas': 'configuracoes',
-    estoque: 'produtos'
+    estoque: 'produtos',
+    'contagem-estoque': 'produtos'
 };
 
 /** Permissões que habilitam acesso à retaguarda (ERP). */
@@ -280,6 +281,12 @@ function redirecionarSeModuloNegado(moduloAtual) {
 
     localStorage.removeItem('token');
     localStorage.removeItem('user');
+    if (window.CdsEmpresaContexto && typeof window.CdsEmpresaContexto.limpar === 'function') {
+        window.CdsEmpresaContexto.limpar();
+    } else {
+        localStorage.removeItem('cds_empresa_id');
+        localStorage.removeItem('cds_empresa');
+    }
     window.location.replace('/login');
     return true;
 }

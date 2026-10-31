@@ -74,6 +74,11 @@ const centralEntradasState = {
         recuperacaoPortalNacional: false
     },
     empresasPermitidas: [],
+    empresasUsuarioId: null,
+    empresasEstado: 'vazio',
+    empresasErro: null,
+    inicializando: false,
+    ignorarProximoEventoEmpresa: false,
     vistaEmpresas: 'contexto',
     buscaEmpresaUi: '',
     contextoSeq: 0,
@@ -386,6 +391,57 @@ function qsComEscopoEmpresaCentral(params) {
     return qs;
 }
 
+function idUsuarioCentralAtual() {
+    const usuario = obterUsuarioLogadoCentral();
+    return usuario && usuario.id != null ? Number(usuario.id) : null;
+}
+
+function leituraConsolidadaAtivaCentral() {
+    return centralEntradasState.vistaEmpresas === 'todas' && !centralModoEmpresaSimples();
+}
+
+function opcoesLeituraCentral() {
+    return leituraConsolidadaAtivaCentral() ? { leituraConsolidada: true } : {};
+}
+
+function contextoIndividualResolvidoCentral() {
+    const Ctx = typeof CdsEmpresaContexto !== 'undefined' ? CdsEmpresaContexto : null;
+    const id = Ctx && typeof Ctx.lerEmpresaId === 'function' ? Number(Ctx.lerEmpresaId()) : NaN;
+    return Number.isInteger(id) && id > 0;
+}
+
+function podeLerCentralNoEscopoAtual() {
+    if (centralEntradasState.empresasEstado === 'erro') return false;
+    if (leituraConsolidadaAtivaCentral()) return centralEntradasState.empresasEstado === 'ok';
+    return contextoIndividualResolvidoCentral();
+}
+
+function mensagemEscopoCentralBloqueado() {
+    if (centralEntradasState.empresasEstado === 'erro') {
+        return centralEntradasState.empresasErro
+            || 'Não foi possível carregar as empresas autorizadas. Os dados anteriores foram descartados.';
+    }
+    return 'Selecione uma empresa para carregar a Central.';
+}
+
+function invalidarEmpresasCentralSeUsuarioMudou() {
+    const uid = idUsuarioCentralAtual();
+    if (centralEntradasState.empresasUsuarioId === uid && centralEntradasState.empresasEstado === 'ok') {
+        return false;
+    }
+    if (centralEntradasState.empresasUsuarioId !== uid) {
+        centralEntradasState.empresasPermitidas = [];
+        centralEntradasState.empresasUsuarioId = uid;
+        centralEntradasState.empresasEstado = 'vazio';
+        centralEntradasState.empresasErro = null;
+        centralEntradasState.documentos = [];
+        centralEntradasState.total = 0;
+        centralEntradasState.ultimoDashboardContadores = null;
+        return true;
+    }
+    return false;
+}
+
 async function alinharContextoComDocumentoCentral(doc) {
     if (centralModoEmpresaSimples()) return;
     if (centralEntradasState.vistaEmpresas !== 'todas' || !doc) return;
@@ -396,7 +452,12 @@ async function alinharContextoComDocumentoCentral(doc) {
     const atual = Ctx && typeof Ctx.lerEmpresaId === 'function' ? Number(Ctx.lerEmpresaId()) : null;
     if (atual === empDoc) return;
     if (Ctx && typeof Ctx.selecionar === 'function') {
-        await Ctx.selecionar(empDoc);
+        centralEntradasState.ignorarProximoEventoEmpresa = true;
+        try {
+            await Ctx.selecionar(empDoc);
+        } finally {
+            centralEntradasState.ignorarProximoEventoEmpresa = false;
+        }
     }
 }
 
@@ -407,12 +468,15 @@ async function centralEntradasFetch(path, options = {}) {
         Authorization: `Bearer ${token}`,
         ...(options.headers || {})
     };
-    const emp = (typeof CdsEmpresaContexto !== 'undefined' && CdsEmpresaContexto.lerEmpresaId)
+    const leituraConsolidada = options.leituraConsolidada === true;
+    const fetchOptions = { ...options };
+    delete fetchOptions.leituraConsolidada;
+    const emp = (!leituraConsolidada && typeof CdsEmpresaContexto !== 'undefined' && CdsEmpresaContexto.lerEmpresaId)
         ? CdsEmpresaContexto.lerEmpresaId()
         : null;
     if (emp) headers['X-Empresa-Id'] = String(emp);
     const response = await fetch(`${API_URL}/central-entradas${path}`, {
-        ...options,
+        ...fetchOptions,
         headers
     });
 
@@ -433,7 +497,11 @@ async function centralEntradasFetch(path, options = {}) {
 
 async function garantirEmpresaAtivaParaCentral() {
     const Ctx = typeof CdsEmpresaContexto !== 'undefined' ? CdsEmpresaContexto : null;
+    invalidarEmpresasCentralSeUsuarioMudou();
     if (!Ctx || typeof Ctx.listarDisponiveis !== 'function' || typeof Ctx.selecionar !== 'function') {
+        centralEntradasState.empresasPermitidas = [];
+        centralEntradasState.empresasEstado = 'erro';
+        centralEntradasState.empresasErro = 'Contexto empresarial indisponível.';
         return;
     }
     const atual = Ctx.lerEmpresaId();
@@ -441,10 +509,29 @@ async function garantirEmpresaAtivaParaCentral() {
     try {
         lista = await Ctx.listarDisponiveis();
     } catch (_e) {
+        centralEntradasState.empresasPermitidas = [];
+        centralEntradasState.empresasUsuarioId = idUsuarioCentralAtual();
+        centralEntradasState.empresasEstado = 'erro';
+        centralEntradasState.empresasErro = 'Não foi possível consultar as empresas autorizadas.';
+        if (typeof Ctx.limpar === 'function') Ctx.limpar();
         return;
     }
-    if (!Array.isArray(lista) || !lista.length) return;
+    if (!Array.isArray(lista)) {
+        centralEntradasState.empresasPermitidas = [];
+        centralEntradasState.empresasEstado = 'erro';
+        centralEntradasState.empresasErro = 'Resposta de empresas inválida.';
+        if (typeof Ctx.limpar === 'function') Ctx.limpar();
+        return;
+    }
     centralEntradasState.empresasPermitidas = lista;
+    centralEntradasState.empresasUsuarioId = idUsuarioCentralAtual();
+    centralEntradasState.empresasEstado = 'ok';
+    centralEntradasState.empresasErro = null;
+    if (!lista.length) {
+        if (typeof Ctx.limpar === 'function') Ctx.limpar();
+        if (!centralModoEmpresaSimples()) centralEntradasState.vistaEmpresas = 'todas';
+        return;
+    }
     if (centralModoEmpresaSimples()) {
         const opId = empresaOperacionalIdCentralUi();
         if (Number.isInteger(opId) && opId > 0 && lista.some((e) => Number(e.id) === opId)) {
@@ -496,13 +583,28 @@ function kpisContextoDashboardCentral() {
 
 async function carregarEmpresasPermitidasCentral() {
     const Ctx = typeof CdsEmpresaContexto !== 'undefined' ? CdsEmpresaContexto : null;
-    if (!Ctx || typeof Ctx.listarDisponiveis !== 'function') return;
-    if ((centralEntradasState.empresasPermitidas || []).length) return;
+    if (!Ctx || typeof Ctx.listarDisponiveis !== 'function') {
+        centralEntradasState.empresasPermitidas = [];
+        centralEntradasState.empresasEstado = 'erro';
+        centralEntradasState.empresasErro = 'Contexto empresarial indisponível.';
+        return;
+    }
+    invalidarEmpresasCentralSeUsuarioMudou();
+    if (centralEntradasState.empresasEstado === 'erro') return;
+    if (centralEntradasState.empresasEstado === 'ok'
+        && centralEntradasState.empresasUsuarioId === idUsuarioCentralAtual()) return;
     try {
         const lista = await Ctx.listarDisponiveis();
-        centralEntradasState.empresasPermitidas = Array.isArray(lista) ? lista : [];
-    } catch (_e) {
-        centralEntradasState.empresasPermitidas = centralEntradasState.empresasPermitidas || [];
+        if (!Array.isArray(lista)) throw new Error('Resposta de empresas inválida.');
+        centralEntradasState.empresasPermitidas = lista;
+        centralEntradasState.empresasUsuarioId = idUsuarioCentralAtual();
+        centralEntradasState.empresasEstado = 'ok';
+        centralEntradasState.empresasErro = null;
+    } catch (e) {
+        centralEntradasState.empresasPermitidas = [];
+        centralEntradasState.empresasEstado = 'erro';
+        centralEntradasState.empresasErro = (e && e.message) || 'Falha ao carregar empresas.';
+        if (typeof Ctx.limpar === 'function') Ctx.limpar();
     }
 }
 
@@ -577,12 +679,16 @@ function renderAreaEmpresasCentral() {
             </select>
             <span class="central-0577-empresas-contador">${simples
                 ? 'empresa operacional'
-                : `${n} empresa${n === 1 ? '' : 's'} ativas`}</span>
+                : (centralEntradasState.empresasEstado === 'erro'
+                    ? 'empresas indisponíveis'
+                    : `${n} empresa${n === 1 ? '' : 's'} ativas`)}</span>
         </div>
         ${compacto || simples ? '' : `<div class="central-0577-chips">${chips}</div>`}
-        <p class="small text-muted mb-0 mt-2">${simples
+        ${centralEntradasState.empresasEstado === 'erro'
+            ? `<p class="small text-danger mb-0 mt-2">${escapeHtmlCentralEntradas(centralEntradasState.empresasErro || 'Não foi possível carregar as empresas. Nenhum dado anterior foi reutilizado.')}</p>`
+            : `<p class="small text-muted mb-0 mt-2">${simples
             ? `Modo Empresa Simples: a Central opera somente na empresa operacional. Última sincronização: ${escapeHtmlCentralEntradas(syncLabel)}.`
-            : `“Todas as empresas” lista documentos das empresas autorizadas ao usuário (sem cruzar com outras). Indicadores da lista seguem o mesmo recorte. Monitoramento SEFAZ permanece da empresa do contexto. Última sincronização do contexto: ${escapeHtmlCentralEntradas(syncLabel)}.`}</p>
+            : `“Todas as empresas” lista documentos das empresas autorizadas ao usuário (sem cruzar com outras). Indicadores da lista seguem o mesmo recorte. Monitoramento SEFAZ permanece da empresa do contexto. Última sincronização do contexto: ${escapeHtmlCentralEntradas(syncLabel)}.`}</p>`}
     `;
 
     const toolbarSel = document.getElementById('centralFiltroEmpresaToolbar');
@@ -618,7 +724,12 @@ async function aplicarVistaEmpresaCentral(valor) {
     const mesmoContexto = contextoAtual === id && centralEntradasState.vistaEmpresas === id;
     centralEntradasState.vistaEmpresas = id;
     if (Ctx && typeof Ctx.selecionar === 'function' && contextoAtual !== id) {
-        await Ctx.selecionar(id);
+        centralEntradasState.ignorarProximoEventoEmpresa = true;
+        try {
+            await Ctx.selecionar(id);
+        } finally {
+            centralEntradasState.ignorarProximoEventoEmpresa = false;
+        }
     }
     if (contextoAtual !== id) {
         await aplicarPeriodoPadraoCentral();
@@ -670,6 +781,7 @@ async function aplicarPeriodoPadraoCentral() {
     const ini = document.getElementById('centralFiltroDataInicio');
     const fim = document.getElementById('centralFiltroDataFim');
     if (!ini || !fim) return null;
+    if (!contextoIndividualResolvidoCentral()) return null;
     try {
         const cfg = await centralEntradasFetch('/configuracao/periodo-padrao');
         centralEntradasState.periodoPadrao = cfg;
@@ -1914,7 +2026,11 @@ async function carregarInteligenciaCentral() {
         if (filtros.dataEmissaoInicio) params.set('data_emissao_inicio', filtros.dataEmissaoInicio);
         if (filtros.dataEmissaoFim) params.set('data_emissao_fim', filtros.dataEmissaoFim);
 
-        const inteligencia = await centralEntradasFetch(`/inteligencia?${qsComEscopoEmpresaCentral(params).toString()}`);
+        if (!podeLerCentralNoEscopoAtual()) return;
+        const inteligencia = await centralEntradasFetch(
+            `/inteligencia?${qsComEscopoEmpresaCentral(params).toString()}`,
+            opcoesLeituraCentral()
+        );
         if (contextoSeqAtualCentral() !== seq) return;
 
         centralEntradasState.operacional = inteligencia.operacional;
@@ -1958,8 +2074,12 @@ async function carregarIndicadoresFiscaisCentral() {
         if (filtros.dataEmissaoInicio) params.set('data_emissao_inicio', filtros.dataEmissaoInicio);
         if (filtros.dataEmissaoFim) params.set('data_emissao_fim', filtros.dataEmissaoFim);
 
+        if (!podeLerCentralNoEscopoAtual()) return;
         const qs = qsComEscopoEmpresaCentral(params).toString();
-        const indicadores = await centralEntradasFetch(`/indicadores-fiscais${qs ? `?${qs}` : ''}`);
+        const indicadores = await centralEntradasFetch(
+            `/indicadores-fiscais${qs ? `?${qs}` : ''}`,
+            opcoesLeituraCentral()
+        );
         if (contextoSeqAtualCentral() !== seq) return;
         centralEntradasState.indicadoresFiscais = indicadores;
         if (centralEntradasState.operacional) {
@@ -3315,6 +3435,10 @@ if (typeof document !== 'undefined' && !window.__centralCfgEmpresaListener) {
     window.__centralCfgEmpresaListener = true;
     document.addEventListener('cds-empresa-contexto-alterado', () => {
         if (document.getElementById('centralConfigForm')?.offsetParent) carregarConfigCentral();
+        if (centralEntradasState.inicializando) return;
+        if (centralEntradasState.ignorarProximoEventoEmpresa) return;
+        if (!document.getElementById('centralEmpresasWrap')) return;
+        recarregarDadosCentralAposTrocaEmpresa();
     });
 }
 
@@ -3725,6 +3849,10 @@ async function liberarFilaEsgotadaCentral() {
 }
 
 async function consultarDfeRealCentral() {
+    if (!contextoIndividualResolvidoCentral()) {
+        showNotification('Consulta SEFAZ exige uma empresa específica selecionada.', 'warning');
+        return;
+    }
     let st = centralEntradasState.operacaoFiscalReal;
     try {
         st = await carregarStatusOperacaoFiscalRealCentral();
@@ -3887,14 +4015,28 @@ function sincronizarAoAbrirCentralSuave() {
         });
     }
 
+    if (!contextoIndividualResolvidoCentral()) {
+        return Promise.resolve({
+            sucesso: false,
+            ignorado: true,
+            consultaExecutada: false,
+            codigo: 'EMPRESA_CENTRAL_AUSENTE'
+        });
+    }
+
     centralEntradasState.syncAoAbrirEmVoo = true;
     const token = localStorage.getItem('token');
+    const headers = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`
+    };
+    const emp = (typeof CdsEmpresaContexto !== 'undefined' && CdsEmpresaContexto.lerEmpresaId)
+        ? CdsEmpresaContexto.lerEmpresaId()
+        : null;
+    if (emp) headers['X-Empresa-Id'] = String(emp);
     return fetch(`${API_URL}/central-entradas/sincronizar-ao-abrir`, {
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`
-        }
+        headers
     })
         .then(async (response) => {
             const data = await response.json().catch(() => ({}));
@@ -4925,6 +5067,16 @@ async function carregarDashboardCentral() {
     const seq = contextoSeqAtualCentral();
     const cardsContainer = document.getElementById('centralEntradasCards');
 
+    if (!podeLerCentralNoEscopoAtual()) {
+        centralEntradasState.carregandoDashboard = false;
+        centralEntradasState.ultimoDashboardContadores = null;
+        centralEntradasState.indicadores = null;
+        if (cardsContainer) {
+            cardsContainer.innerHTML = `<div class="col-12 text-muted small">${escapeHtmlCentralEntradas(mensagemEscopoCentralBloqueado())}</div>`;
+        }
+        return;
+    }
+
     centralEntradasState.carregandoDashboard = true;
     if (cardsContainer) {
         cardsContainer.className = 'central-rc40-kpis';
@@ -4940,7 +5092,10 @@ async function carregarDashboardCentral() {
     }
 
     try {
-        const dashboard = await centralEntradasFetch(`/dashboard?${qsComEscopoEmpresaCentral(new URLSearchParams()).toString()}`);
+        const dashboard = await centralEntradasFetch(
+            `/dashboard?${qsComEscopoEmpresaCentral(new URLSearchParams()).toString()}`,
+            opcoesLeituraCentral()
+        );
         if (contextoSeqAtualCentral() !== seq) return;
         if (dashboard.modo) centralEntradasState.modoOperacional = dashboard.modo;
         if (dashboard.empresaId != null) centralEntradasState.empresaOperacionalId = dashboard.empresaId;
@@ -5033,6 +5188,10 @@ function atualizarIndicadorSyncBotao() {
 
 async function sincronizarCentralEntradas() {
     if (centralEntradasState.sincronizando) return;
+    if (!contextoIndividualResolvidoCentral()) {
+        showNotification('Sincronização SEFAZ exige uma empresa específica selecionada.', 'warning');
+        return;
+    }
 
     const UX = centralUx();
     const cooldown = UX.resolverCooldownSefaz656Ux?.(centralEntradasState);
@@ -5782,6 +5941,16 @@ async function exportarXmlCentral(documentoId) {
 async function carregarDocumentosCentral(opcoes = {}) {
     const seq = contextoSeqAtualCentral();
     if (centralEntradasState.carregando) return;
+    const listaPre = document.getElementById('centralEntradasLista');
+    if (!podeLerCentralNoEscopoAtual()) {
+        centralEntradasState.documentos = [];
+        centralEntradasState.total = 0;
+        centralEntradasState.carregando = false;
+        if (listaPre) {
+            listaPre.innerHTML = `<div class="alert alert-light border small m-2" role="status">${escapeHtmlCentralEntradas(mensagemEscopoCentralBloqueado())}</div>`;
+        }
+        return;
+    }
     centralEntradasState.carregando = true;
     centralEntradasState.loadingFase = 'preparando';
     const lista = document.getElementById('centralEntradasLista');
@@ -5823,7 +5992,10 @@ async function carregarDocumentosCentral(opcoes = {}) {
         });
 
         centralEntradasState.loadingFase = 'atualizando';
-        const resultado = await centralEntradasFetch(`/?${qsComEscopoEmpresaCentral(params).toString()}`);
+        const resultado = await centralEntradasFetch(
+            `/?${qsComEscopoEmpresaCentral(params).toString()}`,
+            opcoesLeituraCentral()
+        );
         if (contextoSeqAtualCentral() !== seq) return;
         centralEntradasState.documentos = resultado.documentos || [];
         centralEntradasState.total = resultado.paginacao?.total || 0;
@@ -6530,6 +6702,8 @@ function bindEventosCentralEntradas() {
  * ============================================================ */
 
 function loadCentralEntradas() {
+    centralEntradasState.inicializando = true;
+    invalidarEmpresasCentralSeUsuarioMudou();
     centralEntradasState.pagina = 1;
     centralEntradasState.documentoSelecionadoId = null;
     centralEntradasState.documentos = [];
@@ -6847,6 +7021,7 @@ function loadCentralEntradas() {
             showNotification('Erro ao inicializar Central: ' + error.message, 'danger');
         })
         .finally(() => {
+            centralEntradasState.inicializando = false;
             // RC7.3.1 — garante fim de qualquer skeleton residual.
             centralEntradasState.carregando = false;
             centralEntradasState.carregandoDashboard = false;

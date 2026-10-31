@@ -23,6 +23,8 @@ let pdvEmitirFiscalNaVenda = null;
 /** PDV-SEL-01 — snapshot informativo da empresa selecionada pelo servidor (não editável). */
 let selecaoEmpresaPdvSnapshot = null;
 let selecaoEmpresaPdvTimer = null;
+/** CDS-PDV-EMPRESA-UNICA-02 — snapshot do modelo exclusivo do PDV (servidor prevalece). */
+let pdvModeloEmpresaSnapshot = null;
 
 /** Expõe o carrinho para módulos PDV (entrega, widgets) — `let` não cria window.carrinho. */
 function sincronizarCarrinhoGlobalPdv() {
@@ -529,6 +531,9 @@ function aplicarHandoffPedidoPdv() {
         pdvCarregandoHandoff = false;
     }
 }
+
+// CDS-PDV-VALOR-PASTEIS-02 — handoff reutilizável pela UI de venda por valor
+window.aplicarHandoffPedidoPdv = aplicarHandoffPedidoPdv;
 
 /**
  * Sprint 09 — flag global não controla mais o PDV (MIP é oficial).
@@ -1852,6 +1857,45 @@ async function processarPagamentosMistosTEF(pagamentos) {
     return pagamentosProcessados;
 }
 
+async function alinharContextoPdvModeloEmpresa() {
+    try {
+        const headers = { Accept: 'application/json' };
+        const token = localStorage.getItem('token');
+        if (token) headers.Authorization = `Bearer ${token}`;
+        if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.headersJson === 'function') {
+            Object.assign(headers, CdsEmpresaContexto.headersJson());
+        }
+        const resp = await fetch(`${API_URL}/vendas/pdv-modelo-empresa`, { headers });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) return null;
+        pdvModeloEmpresaSnapshot = {
+            pdv_modelo_empresa: data.pdv_modelo_empresa || 'MULTIPLAS',
+            pdv_empresa_id: data.pdv_empresa_id != null ? Number(data.pdv_empresa_id) : null
+        };
+        if (
+            pdvModeloEmpresaSnapshot.pdv_modelo_empresa === 'UNICA'
+            && pdvModeloEmpresaSnapshot.pdv_empresa_id
+            && window.CdsEmpresaContexto
+            && typeof CdsEmpresaContexto.selecionar === 'function'
+        ) {
+            const atual = typeof CdsEmpresaContexto.lerEmpresaId === 'function'
+                ? CdsEmpresaContexto.lerEmpresaId()
+                : null;
+            if (Number(atual) !== Number(pdvModeloEmpresaSnapshot.pdv_empresa_id)) {
+                await CdsEmpresaContexto.selecionar(pdvModeloEmpresaSnapshot.pdv_empresa_id);
+            }
+            renderBannerSelecaoEmpresaPdv({
+                aplicada: false,
+                mensagem: `PDV Empresa única: vendas na empresa #${pdvModeloEmpresaSnapshot.pdv_empresa_id} (servidor).`
+            });
+        }
+        return pdvModeloEmpresaSnapshot;
+    } catch (e) {
+        console.warn('[PDV] modelo empresa:', e && e.message ? e.message : e);
+        return null;
+    }
+}
+
 function inicializarPDV() {
     const usuarioLogado = JSON.parse(localStorage.getItem('user') || '{}');
     const nomeOperador = usuarioLogado.nome || usuarioLogado.username || 'Usuário';
@@ -1862,6 +1906,8 @@ function inicializarPDV() {
     if (typeof aplicarModoFiscalPdv === 'function') {
         aplicarModoFiscalPdv();
     }
+
+    void alinharContextoPdvModeloEmpresa();
 
     verificarStatusCaixa();
     atualizarCarrinho();
@@ -1885,6 +1931,11 @@ function inicializarPDV() {
     // UX-01 — botão Entrega (visível só com módulo + itens)
     if (window.PdvVendaEntrega && typeof PdvVendaEntrega.initUi === 'function') {
         PdvVendaEntrega.initUi();
+    }
+
+    // CDS-PDV-VALOR-PASTEIS-02 — Venda por valor no PDV Express
+    if (window.PdvVendaPorValor && typeof PdvVendaPorValor.initUi === 'function') {
+        PdvVendaPorValor.initUi();
     }
 
     // Verificar status do caixa a cada 30 segundos
@@ -4386,6 +4437,15 @@ async function atualizarSelecaoEmpresaPdv(opcoes = {}) {
         if (!opcoes.silencioso) {
             showNotification(resumirMensagemSelecaoEmpresaPdv(estadoBloqueio), 'danger');
         }
+        return data;
+    }
+    if (data.motivo === 'PDV_EMPRESA_UNICA') {
+        selecaoEmpresaPdvSnapshot = null;
+        renderBannerSelecaoEmpresaPdv({
+            aplicada: false,
+            mensagem: data.mensagem
+                || `PDV Empresa única: empresa #${data.empresa_id || pdvModeloEmpresaSnapshot?.pdv_empresa_id || '—'} (servidor).`
+        });
         return data;
     }
     selecaoEmpresaPdvSnapshot = {

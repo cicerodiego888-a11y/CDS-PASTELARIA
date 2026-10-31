@@ -11,6 +11,8 @@
  *               MUV/criarAtendimento não persiste a venda oficial.
  * Sprint PDV-SEL-01: MULTIEMPRESA + origem PDV → seleção automática de
  *               empresa (capacidade) antes do núcleo; X-Empresa-Id não prevalece.
+ * CDS-PDV-EMPRESA-UNICA-02: pdv_modelo_empresa=UNICA (origem PDV) força
+ *               pdv_empresa_id e dispensa PDV-SEL; independente do modo global.
  *
  * Política de porta:
  * - origem PDV / FATURAMENTO / NF_AVULSA → VendaPagamentoService
@@ -148,7 +150,21 @@ function concluirVendaNoNucleoOficial(req, res, ctx, ctr) {
  * @param {object} [opcoes] injeção de leitura do modo (testes). Express `next` é ignorado.
  * @returns {*}
  */
-function criarVendaComContexto(contract, context, req, res, opcoes) {
+function responderErroPdvModelo(res, err) {
+  if (res && typeof res.status === 'function') {
+    return res.status(err.statusCode || err.status || 400).json({
+      success: false,
+      code: err.code || 'PDV_MODELO_EMPRESA_ERRO',
+      error: err.message,
+      mensagem: err.message,
+      empresa_id: err.empresa_id != null ? err.empresa_id : undefined,
+      venda_concluida: false
+    });
+  }
+  throw err;
+}
+
+function criarVendaComContexto(contract, context, req, res, opcoes = {}) {
   const ctx = context && context.origem
     ? context
     : criarVendaContext(req);
@@ -172,38 +188,69 @@ function criarVendaComContexto(contract, context, req, res, opcoes) {
   ctx.modo_operacao_venda = modo;
   req.vendaContext = ctx;
 
-  return executarNoModoOperacaoVenda(modo, {
-    EMPRESA_UNICA() {
-      return concluirVendaNoNucleoOficial(req, res, ctx, ctr);
-    },
-    MULTIEMPRESA() {
-      const {
-        aplicarSelecaoEmpresaNaVendaPdv,
-        responderBloqueioSelecao
-      } = opcoes.SelecaoEmpresaVendaPdvService
-        || require('./SelecaoEmpresaVendaPdvService');
+  const {
+    aplicarModeloEmpresaPdvNaRequisicao
+  } = opcoes.PdvModeloEmpresaService
+    || require('../pdv/PdvModeloEmpresaService');
 
-      return Promise.resolve()
-        .then(() => aplicarSelecaoEmpresaNaVendaPdv(req, ctx, ctr, opcoes))
-        .then((sel) => {
-          if (sel && sel.aplicada) {
-            ctx.selecao_empresa_pdv = req.selecaoEmpresaPdv || null;
-            req.vendaContext = ctx;
-          }
+  return Promise.resolve()
+    .then(() => aplicarModeloEmpresaPdvNaRequisicao(req, {
+      ...opcoes,
+      db: opcoes.db != null ? opcoes.db : (req && req.db != null ? req.db : undefined)
+    }))
+    .then((pdvModelo) => {
+      ctx.pdv_modelo_empresa = pdvModelo || null;
+      req.vendaContext = ctx;
+
+      if (pdvModelo && pdvModelo.aplicada === true) {
+        return concluirVendaNoNucleoOficial(req, res, ctx, ctr);
+      }
+
+      return executarNoModoOperacaoVenda(modo, {
+        EMPRESA_UNICA() {
           return concluirVendaNoNucleoOficial(req, res, ctx, ctr);
-        })
-        .catch((err) => {
-          if (res && typeof res.status === 'function') {
-            return responderBloqueioSelecao(res, err || {
-              code: 'SELECAO_EMPRESA_ERRO',
-              message: 'Falha na seleção automática de empresa.',
-              statusCode: 500
+        },
+        MULTIEMPRESA() {
+          const {
+            aplicarSelecaoEmpresaNaVendaPdv,
+            responderBloqueioSelecao
+          } = opcoes.SelecaoEmpresaVendaPdvService
+            || require('./SelecaoEmpresaVendaPdvService');
+
+          return Promise.resolve()
+            .then(() => aplicarSelecaoEmpresaNaVendaPdv(req, ctx, ctr, opcoes))
+            .then((sel) => {
+              if (sel && sel.aplicada) {
+                ctx.selecao_empresa_pdv = req.selecaoEmpresaPdv || null;
+                req.vendaContext = ctx;
+              }
+              return concluirVendaNoNucleoOficial(req, res, ctx, ctr);
+            })
+            .catch((err) => {
+              if (res && typeof res.status === 'function') {
+                return responderBloqueioSelecao(res, err || {
+                  code: 'SELECAO_EMPRESA_ERRO',
+                  message: 'Falha na seleção automática de empresa.',
+                  statusCode: 500
+                });
+              }
+              throw err;
             });
-          }
-          throw err;
-        });
-    }
-  });
+        }
+      });
+    })
+    .catch((err) => {
+      if (err && (
+        err.code === 'PDV_EMPRESA_ID_AUSENTE'
+        || err.code === 'PDV_EMPRESA_INVALIDA'
+        || err.code === 'PDV_MODELO_EMPRESA_INVALIDO'
+        || err.code === 'EMPRESA_NAO_ENCONTRADA'
+        || err.code === 'EMPRESA_INATIVA'
+      )) {
+        return responderErroPdvModelo(res, err);
+      }
+      throw err;
+    });
 }
 
 /**

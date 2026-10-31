@@ -29,7 +29,8 @@ const STATUS_POR_CODIGO = {
   USUARIO_OBRIGATORIO: 400,
   EMPRESA_CONFIGURACAO_DIVERGENTE: 409,
   CONFIGURACAO_FISCAL_EMPRESA_INVALIDA: 400,
-  CONFIGURACAO_FISCAL_EMPRESA_AUSENTE: 409
+  CONFIGURACAO_FISCAL_EMPRESA_AUSENTE: 409,
+  MODO_ESTOQUE_INVALIDO: 400
 };
 
 function responderErro(res, err) {
@@ -130,6 +131,31 @@ router.put('/:empresaId/configuracao-fiscal', async (req, res) => {
       req.body || {},
       { db }
     );
+    return res.json(dto);
+  } catch (err) {
+    return responderErro(res, err);
+  }
+});
+
+router.get('/:empresaId/configuracao-estoque', exigirContexto, async (req, res) => {
+  try {
+    const empresaId = exigirEmpresaAlvoDoContexto(req.empresaId, req.params.empresaId);
+    const EmpresaModoEstoqueService = require('../services/empresas/EmpresaModoEstoqueService');
+    const dto = await EmpresaModoEstoqueService.obterModoEstoqueEmpresa(db, empresaId);
+    return res.json(dto);
+  } catch (err) {
+    return responderErro(res, err);
+  }
+});
+
+router.put('/:empresaId/configuracao-estoque', exigirContexto, async (req, res) => {
+  try {
+    const empresaId = exigirEmpresaAlvoDoContexto(req.empresaId, req.params.empresaId);
+    const EmpresaModoEstoqueService = require('../services/empresas/EmpresaModoEstoqueService');
+    const modo = req.body && (req.body.modo != null ? req.body.modo : req.body.modo_estoque);
+    const dto = await EmpresaModoEstoqueService.salvarModoEstoqueEmpresa(db, empresaId, modo, {
+      usuarioId: req.user && req.user.id
+    });
     return res.json(dto);
   } catch (err) {
     return responderErro(res, err);

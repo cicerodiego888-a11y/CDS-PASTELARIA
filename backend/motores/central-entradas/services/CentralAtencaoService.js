@@ -5,6 +5,7 @@
  */
 
 const CentralAlertasService = require('./CentralAlertasService');
+const { escopoEmpresaConsulta } = require('./CentralAlertasService');
 const CentralPendenciasService = require('./CentralPendenciasService');
 const { DocumentoFiscalStatus } = require('../core/DocumentoFiscalStatus');
 
@@ -33,12 +34,14 @@ class CentralAtencaoService {
    * @returns {Promise<{ total: number, itens: Object[] }>}
    */
   async obterItensAtencao(opcoes = {}) {
+    const escopo = escopoEmpresaConsulta(opcoes);
     const alertas = opcoes.alertasResultado
-      ?? await this._alertasService.listarAlertas();
+      ?? await this._alertasService.listarAlertas(escopo);
     const pendencias = opcoes.pendenciasResultado
       ?? await this._pendenciasService.obterPendencias({
         limite: opcoes.limitePendencias ?? 5,
-        alertasResultado: alertas
+        alertasResultado: alertas,
+        ...escopo
       });
 
     const itens = [];

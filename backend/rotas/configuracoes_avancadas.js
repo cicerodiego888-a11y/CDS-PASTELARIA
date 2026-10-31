@@ -39,6 +39,15 @@ router.get('/contrato-operacional', async (req, res) => {
   }
 });
 
+router.get('/pdv-modelo-empresa', (req, res) => {
+  try {
+    const { obterPdvModeloEmpresaPublico } = require('../services/pdv/PdvModeloEmpresaService');
+    res.json(obterPdvModeloEmpresaPublico());
+  } catch (err) {
+    res.status(500).json({ error: err.message, code: err.code || undefined });
+  }
+});
+
 router.get('/padrao-fiscal', (req, res) => {
   try {
     res.json(configService.getPadraoFiscal());
@@ -69,7 +78,7 @@ router.get('/', exigirSuperAdmin, (req, res) => {
   }
 });
 
-router.post('/', exigirSuperAdmin, (req, res) => {
+router.post('/', exigirSuperAdmin, async (req, res) => {
   try {
     const data = req.body || {};
     const validation = configService.validateConfig(data);
@@ -81,7 +90,8 @@ router.post('/', exigirSuperAdmin, (req, res) => {
       });
     }
 
-    const saved = configService.saveConfig(data);
+    const db = require('../database');
+    const saved = await configService.saveConfigComValidacaoPdv(data, { db });
 
     res.json({
       success: true,
@@ -92,7 +102,15 @@ router.post('/', exigirSuperAdmin, (req, res) => {
   } catch (err) {
     const status = err.code === 'MODO_OPERACIONAL_ALTERACAO_REQUER_CONFIRMACAO'
       ? 409
-      : (err.details ? 400 : 500);
+      : (
+        err.code === 'PDV_EMPRESA_ID_AUSENTE'
+        || err.code === 'PDV_EMPRESA_INVALIDA'
+        || err.code === 'EMPRESA_NAO_ENCONTRADA'
+        || err.code === 'EMPRESA_INATIVA'
+        || err.details
+          ? (err.statusCode || err.status || 400)
+          : 500
+      );
     res.status(status).json({
       error: err.message,
       details: err.details || undefined,

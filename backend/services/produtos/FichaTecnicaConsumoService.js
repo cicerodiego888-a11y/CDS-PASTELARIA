@@ -424,6 +424,16 @@ async function consumirFichaTecnicaDaVenda(params = {}) {
   }
 
   const empresaId = resolverEmpresaDoConsumo(params.empresaId != null ? params.empresaId : params.empresa_id);
+  const { empresaPermiteBaixaAutomaticaEstoque } = require('../empresas/EmpresaModoEstoqueService');
+  if (!(await empresaPermiteBaixaAutomaticaEstoque(db, empresaId))) {
+    return {
+      venda_id: vendaId,
+      empresa_id: empresaId,
+      consumido: false,
+      modo_estoque: 'MANUAL',
+      itens: []
+    };
+  }
   await garantirSchemaVendaFichaConsumoAsync(db);
 
   const jaConsumiu = await dbGet(db, 'SELECT id FROM venda_ficha_consumo WHERE venda_id = ?', [vendaId]);

@@ -51,6 +51,14 @@ const {
 } = require('../services/vendas/VendaEmpresaContextoService');
 
 const anexarEmpresaVenda = middlewareResolverEmpresaVenda({ db, exigirAutorizacaoUsuario: false });
+const {
+  middlewareAplicarPdvModeloEmpresa,
+  obterPdvModeloEmpresaPublico,
+  lerConfigPdvModelo,
+  PDV_MODELO_UNICA
+} = require('../services/pdv/PdvModeloEmpresaService');
+// CDS-PDV-EMPRESA-UNICA-06: canal HTTP confiável — política PDV não depende de body.origem.
+const aplicarPdvModeloEmpresa = middlewareAplicarPdvModeloEmpresa({ db, canalHttpVendas: true });
 
 router.use(criarMiddlewareContextoEmpresa(db));
 
@@ -149,6 +157,84 @@ router.get('/', anexarEmpresaVenda, (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     res.json(rows || []);
   });
+});
+
+/** CDS-PDV-EMPRESA-UNICA-02 — leitura do modelo exclusivo do PDV (antes de GET /:id). */
+router.get('/pdv-modelo-empresa', (req, res) => {
+  try {
+    return res.json({ success: true, ...obterPdvModeloEmpresaPublico() });
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      error: err.message || 'Falha ao ler modelo de empresa do PDV.',
+      code: err.code || undefined
+    });
+  }
+});
+
+/** PDV-SEL-01 — preview somente leitura (rota estática antes de /:id). */
+router.post('/selecao-empresa', async (req, res) => {
+  try {
+    const {
+      avaliarSelecaoEmpresaPdv,
+      responderBloqueioSelecao
+    } = require('../services/vendas/SelecaoEmpresaVendaPdvService');
+    const { resolverModoOperacaoVendaAtivo } = require('../motores/muv');
+    const pdvCfg = lerConfigPdvModelo();
+    if (pdvCfg.pdv_modelo_empresa === PDV_MODELO_UNICA) {
+      return res.status(200).json({
+        success: true,
+        aplicada: false,
+        motivo: 'PDV_EMPRESA_UNICA',
+        empresa_id: pdvCfg.pdv_empresa_id,
+        mensagem: 'PDV em modo Empresa única: a empresa configurada prevalece; seleção automática não se aplica.'
+      });
+    }
+    let modo;
+    try {
+      modo = resolverModoOperacaoVendaAtivo();
+    } catch (e) {
+      return res.status(500).json({ success: false, code: e.code, error: e.message });
+    }
+    if (modo !== 'MULTIEMPRESA') {
+      return res.status(200).json({
+        success: true,
+        aplicada: false,
+        motivo: 'EMPRESA_SIMPLES',
+        mensagem: 'Seleção automática não se aplica em EMPRESA_SIMPLES.'
+      });
+    }
+    const usuarioId = req.user && (req.user.id != null ? req.user.id : req.user.usuario_id);
+    const out = await avaliarSelecaoEmpresaPdv({
+      body: req.body || {},
+      itens: (req.body && req.body.itens) || [],
+      usuarioId
+    });
+    if (out.bloqueio) {
+      return res.status(409).json({
+        success: false,
+        code: out.bloqueio.codigo,
+        error: out.bloqueio.mensagem,
+        mensagem: out.bloqueio.mensagem,
+        selecao: out,
+        venda_concluida: false
+      });
+    }
+    return res.status(200).json({
+      success: true,
+      aplicada: true,
+      empresa_id: out.selecionada.empresaId,
+      justificativa: out.justificativa,
+      hash_carrinho: out.hashCarrinho,
+      tipo_saldo: out.tipoSaldo,
+      matriz_id: out.capacidade && out.capacidade.matrizId,
+      capacidade: out.capacidade
+    });
+  } catch (err) {
+    const { responderBloqueioSelecao } = require('../services/vendas/SelecaoEmpresaVendaPdvService');
+    if (err && err.code) return responderBloqueioSelecao(res, err);
+    return res.status(500).json({ success: false, error: err.message || 'Erro na seleção de empresa.' });
+  }
 });
 
 // Buscar venda por ID — ownership obrigatório (outra empresa / legado NULL = 404)
@@ -255,63 +341,9 @@ router.get('/:id/detalhes', anexarEmpresaVenda, (req, res) => {
 
 router.post('/pre-calcular-distribuicao', validarCaixaAberto, preCalcularDistribuicao);
 
-/** PDV-SEL-01 — preview somente leitura da empresa selecionável para o carrinho (sem persistir venda). */
-router.post('/selecao-empresa', async (req, res) => {
-  try {
-    const {
-      avaliarSelecaoEmpresaPdv,
-      responderBloqueioSelecao
-    } = require('../services/vendas/SelecaoEmpresaVendaPdvService');
-    const { resolverModoOperacaoVendaAtivo } = require('../motores/muv');
-    let modo;
-    try {
-      modo = resolverModoOperacaoVendaAtivo();
-    } catch (e) {
-      return res.status(500).json({ success: false, code: e.code, error: e.message });
-    }
-    if (modo !== 'MULTIEMPRESA') {
-      return res.status(200).json({
-        success: true,
-        aplicada: false,
-        motivo: 'EMPRESA_SIMPLES',
-        mensagem: 'Seleção automática não se aplica em EMPRESA_SIMPLES.'
-      });
-    }
-    const usuarioId = req.user && (req.user.id != null ? req.user.id : req.user.usuario_id);
-    const out = await avaliarSelecaoEmpresaPdv({
-      body: req.body || {},
-      itens: (req.body && req.body.itens) || [],
-      usuarioId
-    });
-    if (out.bloqueio) {
-      return res.status(409).json({
-        success: false,
-        code: out.bloqueio.codigo,
-        error: out.bloqueio.mensagem,
-        mensagem: out.bloqueio.mensagem,
-        selecao: out,
-        venda_concluida: false
-      });
-    }
-    return res.status(200).json({
-      success: true,
-      aplicada: true,
-      empresa_id: out.selecionada.empresaId,
-      justificativa: out.justificativa,
-      hash_carrinho: out.hashCarrinho,
-      tipo_saldo: out.tipoSaldo,
-      matriz_id: out.capacidade && out.capacidade.matrizId,
-      capacidade: out.capacidade
-    });
-  } catch (err) {
-    const { responderBloqueioSelecao } = require('../services/vendas/SelecaoEmpresaVendaPdvService');
-    if (err && err.code) return responderBloqueioSelecao(res, err);
-    return res.status(500).json({ success: false, error: err.message || 'Erro na seleção de empresa.' });
-  }
-});
-
+// CDS-PDV-EMPRESA-UNICA-02: fixa empresa PDV UNICA antes do caixa; depois núcleo.
 // Sprint 2.2: PDV exige caixa; demais origens reconhecidas sem validarCaixaAberto
-router.post('/', validarCaixaSeOrigemPdv, criarVenda);
+router.post('/', aplicarPdvModeloEmpresa, validarCaixaSeOrigemPdv, criarVenda);
 
 router.get('/:id/pagamento-nao-fiscal', consultarPagamentoNaoFiscal);
 

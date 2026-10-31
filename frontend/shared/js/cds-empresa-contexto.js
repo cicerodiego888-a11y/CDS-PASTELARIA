@@ -226,6 +226,7 @@
       disponiveis = await listarDisponiveis();
     } catch (e) {
       console.error('Contexto empresarial: falha ao carregar empresas.', e);
+      limpar();
       renderFalha(host);
       return;
     }

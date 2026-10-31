@@ -593,6 +593,39 @@ async function carregarOrcamentosCategoria(empresaId, pedidoId, categorias, db, 
   return orcamentos;
 }
 
+/**
+ * Sprint 12 — resolve alvo mínimo efetivo com margem de tolerância em dinheiro.
+ * A margem NÃO é desconto nem classificação F/NF; só restringe a faixa aceitável
+ * [alvoMaximo - margem, alvoMaximo] no modo de maximização.
+ * Sem margem (ou objetivo MINIMO): preserva alvoMinimo informado (compatibilidade).
+ */
+function resolverAlvoMinimoComToleranciaDinheiro(alvoMaximo, alvoMinimo, opcoes = {}) {
+  const minimizar = opcoes.objetivo === 'MINIMO';
+  const margemRaw = opcoes.margemToleranciaCentavos;
+  const margemInformada = margemRaw != null && margemRaw !== '';
+  if (minimizar || !margemInformada) {
+    return {
+      alvoMinimoEfetivo: alvoMinimo,
+      margemToleranciaCentavos: null,
+      aplicouRegraToleranciaDinheiro: false
+    };
+  }
+  const margem = Number(margemRaw);
+  if (!Number.isSafeInteger(margem) || margem < 0) {
+    throw erro(
+      'MARGEM_TOLERANCIA_INVALIDA',
+      'margemToleranciaCentavos deve ser um inteiro não negativo (centavos).',
+      { margemToleranciaCentavos: margemRaw }
+    );
+  }
+  const minimoPorTolerancia = Math.max(0, Number(alvoMaximo) - margem);
+  return {
+    alvoMinimoEfetivo: Math.max(Number(alvoMinimo) || 0, minimoPorTolerancia),
+    margemToleranciaCentavos: margem,
+    aplicouRegraToleranciaDinheiro: true
+  };
+}
+
 function buscarComposicao(
   modelos,
   capacidadePorCategoria,
@@ -602,6 +635,11 @@ function buscarComposicao(
   opcoes = {}
 ) {
   const minimizar = opcoes.objetivo === 'MINIMO';
+  const {
+    alvoMinimoEfetivo,
+    margemToleranciaCentavos,
+    aplicouRegraToleranciaDinheiro
+  } = resolverAlvoMinimoComToleranciaDinheiro(alvoMaximo, alvoMinimo, opcoes);
   const budgetsIniciais = { ...capacidadePorCategoria };
   const sufixosMaximos = new Array(modelos.length + 1).fill(0);
   for (let i = modelos.length - 1; i >= 0; i -= 1) {
@@ -649,7 +687,7 @@ function buscarComposicao(
     estados += 1;
 
     const usadoCentavos = alvoMaximo - restanteCentavos;
-    const melhorAlvo = minimizar ? alvoMinimo : Math.max(alvoMinimo, melhorCentavos);
+    const melhorAlvo = minimizar ? alvoMinimoEfetivo : Math.max(alvoMinimoEfetivo, melhorCentavos);
     if (sufixosMaximos[indice] < melhorAlvo - usadoCentavos) return;
     if (minimizar && melhorCentavos >= 0 && usadoCentavos >= melhorCentavos) return;
     if (indice === modelos.length) {
@@ -658,7 +696,7 @@ function buscarComposicao(
         ? melhorCentavos < 0 || usadoCentavos < melhorCentavos
         : usadoCentavos > melhorCentavos;
       if (composicaoNaoVazia
-        && usadoCentavos >= alvoMinimo
+        && usadoCentavos >= alvoMinimoEfetivo
         && usadoCentavos <= alvoMaximo
         && melhoraResultado) {
         melhorCentavos = usadoCentavos;
@@ -711,6 +749,17 @@ function buscarComposicao(
   }
 
   visitar(0, alvoMaximo, budgetsIniciais);
+
+  const diferencaAoAlvoCentavos = melhorCentavos >= 0
+    ? alvoMaximo - melhorCentavos
+    : null;
+  const dentroDaMargemTolerancia = melhorCentavos >= 0
+    && (
+      !aplicouRegraToleranciaDinheiro
+      || (margemToleranciaCentavos != null
+        && diferencaAoAlvoCentavos <= margemToleranciaCentavos)
+    );
+
   return {
     totalCentavos: melhorCentavos,
     quantidades: melhorCaminho,
@@ -718,7 +767,16 @@ function buscarComposicao(
     encontrouExato,
     completa: !limiteAtingido,
     limiteAtingido,
-    otimalidadeComprovada: !limiteAtingido
+    otimalidadeComprovada: !limiteAtingido,
+    // Sprint 12 — metadados da regra de tolerância (não autorizam desconto/F×NF)
+    aplicouRegraToleranciaDinheiro,
+    margemToleranciaCentavos,
+    alvoMinimoEfetivoCentavos: alvoMinimoEfetivo,
+    diferencaAoAlvoCentavos,
+    dentroDaMargemTolerancia,
+    naoAutorizaDesconto: true,
+    naoClassificaResidualComoNaoFiscal: true,
+    valorFiscalOficialAutorizado: null
   };
 }
 
@@ -957,6 +1015,7 @@ module.exports = {
     dinheiroEmCentavos,
     quantidadeMaximaPorValor,
     buscarComposicao,
+    resolverAlvoMinimoComToleranciaDinheiro,
     carregarPedido,
     converterVolumeParaMl,
     comporItens,

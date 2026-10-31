@@ -1060,6 +1060,36 @@ async function registrarConsumo({
     throw erro('PEDIDO_CANCELADO', 'Pedido cancelado não pode consumir estoque.', 409);
   }
 
+  const { empresaPermiteBaixaAutomaticaEstoque } = require('../empresas/EmpresaModoEstoqueService');
+  if (!(await empresaPermiteBaixaAutomaticaEstoque(db, empresa))) {
+    await MotorComercial.liberarReservasDoPedido(id, depsMotorNaTransacao(db));
+    const operacaoIdManual = crypto.randomUUID();
+    const cabManual = await dbRun(
+      db,
+      `INSERT INTO pedido_estoque_consumos (pedido_id, empresa_id, operacao_id)
+       VALUES (?, ?, ?)`,
+      [id, empresa, operacaoIdManual]
+    );
+    const consumoIdManual = Number(cabManual.lastID);
+    await consumirReservasPedidoNaVenda(id, venda, { db, empresaId: empresa, usuarioId });
+    await dbRun(
+      db,
+      `INSERT INTO pedido_estoque_consumo_finalizacoes
+        (pedido_id, consumo_id, venda_id, empresa_id)
+       VALUES (?, ?, ?, ?)`,
+      [id, consumoIdManual, venda, empresa]
+    );
+    return {
+      pedido_id: id,
+      empresa_id: empresa,
+      venda_id: venda,
+      modo_estoque: 'MANUAL',
+      ja_consumido: false,
+      consumido: false,
+      itens: []
+    };
+  }
+
   const requisitos = await montarRequisitos(itens, db);
   const resumoDesejado = agregarRequisitosPorEstoque(requisitos);
   const consumoExistente = await carregarConsumoPedido(id, db);

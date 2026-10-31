@@ -28,6 +28,7 @@ const CentralProcessamentoService = require('./services/CentralProcessamentoServ
 const CentralComprasBridgeService = require('./services/CentralComprasBridgeService');
 const CentralScoreDocumentoService = require('./services/CentralScoreDocumentoService');
 const CentralAlertasService = require('./services/CentralAlertasService');
+const { escopoEmpresaConsulta } = require('./services/CentralAlertasService');
 const CentralScoreFornecedorService = require('./services/CentralScoreFornecedorService');
 const CentralPendenciasService = require('./services/CentralPendenciasService');
 const CentralOperacionalDashboardService = require('./services/CentralOperacionalDashboardService');
@@ -483,7 +484,8 @@ class CentralEntradasOrchestrator {
         usuarioId: opcoes.usuarioId,
         bloqueadoConsultaAte,
         limite: opcoes.limiteManifestacao,
-        apenasManifestacao: true
+        apenasManifestacao: true,
+        empresaId: opcoes.empresaId || null
       });
     }
 
@@ -492,8 +494,12 @@ class CentralEntradasOrchestrator {
         listarAlvosSincronizacaoCentral
       } = require('../../services/central-entradas/CentralEntradasEmpresaContextoService');
       const { alvos } = await listarAlvosSincronizacaoCentral();
+      const empresaAutorizada = opcoes.empresaId != null ? Number(opcoes.empresaId) : null;
+      const alvosProcessamento = empresaAutorizada
+        ? alvos.filter((alvo) => Number(alvo.empresaId) === empresaAutorizada)
+        : alvos;
       const processamentos = [];
-      for (const alvo of alvos) {
+      for (const alvo of alvosProcessamento) {
         // eslint-disable-next-line no-await-in-loop
         const lote = await this.processarDocumentosPendentes({
           usuarioId: opcoes.usuarioId,
@@ -580,10 +586,14 @@ class CentralEntradasOrchestrator {
     };
   }
 
-  async sincronizarAoAbrir() {
+  async sincronizarAoAbrir(opcoes = {}) {
     const cfg = await this._configuracaoService.obterResumoSync();
     if (!cfg.syncAoAbrir) return null;
-    return this.executarSincronizacao({ origem: ORIGENS.ABRIR_CENTRAL });
+    return this.executarSincronizacao({
+      origem: ORIGENS.ABRIR_CENTRAL,
+      empresaId: opcoes.empresaId || null,
+      usuarioId: opcoes.usuarioId
+    });
   }
 
   /**
@@ -799,35 +809,41 @@ class CentralEntradasOrchestrator {
     return this._comprasBridgeService.vincularCompra(documentoId, compraId, opcoes);
   }
 
-  async listarAlertas() {
-    return this._alertasService.listarAlertas();
+  async listarAlertas(opcoes = {}) {
+    return this._alertasService.listarAlertas(escopoEmpresaConsulta(opcoes));
   }
 
   async obterPendencias(opcoes = {}) {
+    const escopo = escopoEmpresaConsulta(opcoes);
     const alertasResultado = opcoes.alertasResultado
-      ?? await this._alertasService.listarAlertas();
+      ?? await this._alertasService.listarAlertas(escopo);
     return this._pendenciasService.obterPendencias({
       ...opcoes,
+      ...escopo,
       alertasResultado
     });
   }
 
   async obterOperacional(opcoes = {}) {
-    const alertasResultado = await this._alertasService.listarAlertas();
-    return this._operacionalService.obterIndicadores({ alertasResultado, ...opcoes });
+    const escopo = escopoEmpresaConsulta(opcoes);
+    const alertasResultado = await this._alertasService.listarAlertas(escopo);
+    return this._operacionalService.obterIndicadores({ alertasResultado, ...opcoes, ...escopo });
   }
 
   async obterItensAtencao(opcoes = {}) {
+    const escopo = escopoEmpresaConsulta(opcoes);
     const alertasResultado = opcoes.alertasResultado
-      ?? await this._alertasService.listarAlertas();
+      ?? await this._alertasService.listarAlertas(escopo);
     const pendenciasResultado = opcoes.pendenciasResultado
       ?? await this._pendenciasService.obterPendencias({
         limite: opcoes.limitePendencias ?? 5,
-        alertasResultado
+        alertasResultado,
+        ...escopo
       });
     return this._atencaoService.obterItensAtencao({
       alertasResultado,
-      pendenciasResultado
+      pendenciasResultado,
+      ...escopo
     });
   }
 
@@ -839,10 +855,12 @@ class CentralEntradasOrchestrator {
    * @returns {Promise<Object>}
    */
   async obterInteligenciaOperacional(opcoes = {}) {
-    const alertas = await this._alertasService.listarAlertas();
+    const escopo = escopoEmpresaConsulta(opcoes);
+    const alertas = await this._alertasService.listarAlertas(escopo);
     const pendencias = await this._pendenciasService.obterPendencias({
       limite: opcoes.limitePendencias ?? 20,
-      alertasResultado: alertas
+      alertasResultado: alertas,
+      ...escopo
     });
     const [operacional, atencao] = await Promise.all([
       this._operacionalService.obterIndicadores({
@@ -852,8 +870,8 @@ class CentralEntradasOrchestrator {
         competencia: opcoes.competencia,
         dataEmissaoInicio: opcoes.dataEmissaoInicio || opcoes.data_emissao_inicio || null,
         dataEmissaoFim: opcoes.dataEmissaoFim || opcoes.data_emissao_fim || null,
-        empresaId: opcoes.empresaId ?? opcoes.empresa_id,
-        empresaIds: opcoes.empresaIds || opcoes.empresa_ids
+        empresaId: escopo.empresaId,
+        empresaIds: escopo.empresaIds
       }),
       this._atencaoService.obterItensAtencao({
         alertasResultado: alertas,

@@ -132,14 +132,15 @@ function t02ReaderPrincipalChave() {
   assert.ok(fnFiscal.includes('WHERE empresa_id = ?'), '05.76 ultimaEntradaFiscal isolada');
   const repoSrcT02 = src('backend/motores/central-entradas/repositories/CentralDocumentosRepository.js');
   const forn = repoSrcT02.slice(
-    repoSrcT02.indexOf('async listarFornecedoresNovos()'),
+    repoSrcT02.indexOf('async listarFornecedoresNovos'),
     repoSrcT02.indexOf('async listarValorAcimaMediaFornecedor')
   );
-  if (forn.includes('FROM') && !forn.includes('empresa_id')) {
+  if (forn.includes('FROM') && !forn.includes('empresa_id') && !forn.includes('_fragmentoSqlEmpresa')) {
     riscos.push('listarFornecedoresNovos sem empresa_id');
   }
-  assert.ok(riscos.length >= 1, 'auditoria deveria encontrar leitores globais residuais');
-  console.log('  T02 lookup principal chave+empresa; globais residuais:', riscos.join(' | '));
+  assert.ok(forn.includes('_fragmentoSqlEmpresa'), 'listarFornecedoresNovos deve filtrar empresa');
+  assert.ok(!riscos.includes('listarFornecedoresNovos sem empresa_id'));
+  console.log('  T02 lookup principal chave+empresa; globais residuais:', riscos.join(' | ') || '(nenhum neste recorte)');
 }
 
 async function t03exigeEmpresa() {

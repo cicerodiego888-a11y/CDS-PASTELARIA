@@ -6,6 +6,7 @@
 
 const { DocumentoFiscalStatus } = require('../core/DocumentoFiscalStatus');
 const CentralAlertasService = require('./CentralAlertasService');
+const { escopoEmpresaConsulta } = require('./CentralAlertasService');
 const { extrairPendencias } = require('../../miip/utils/miipCentralRevisaoUtils');
 
 class CentralPendenciasService {
@@ -29,6 +30,7 @@ class CentralPendenciasService {
    */
   async obterPendencias(opcoes = {}) {
     const limite = Math.min(Number(opcoes.limite) || 30, 100);
+    const escopo = escopoEmpresaConsulta(opcoes);
 
     const [
       aguardandoRevisao,
@@ -37,13 +39,13 @@ class CentralPendenciasService {
       xmlInvalido,
       alertasResultado
     ] = await Promise.all([
-      this._documentosRepository.listarPorStatus(DocumentoFiscalStatus.AGUARDANDO_REVISAO, limite),
-      this._documentosRepository.listarComprasAbertas(limite),
-      this._documentosRepository.listarPorStatus(DocumentoFiscalStatus.ERRO, limite),
-      this._documentosRepository.listarXmlInvalido(limite),
+      this._documentosRepository.listarPorStatus(DocumentoFiscalStatus.AGUARDANDO_REVISAO, limite, escopo),
+      this._documentosRepository.listarComprasAbertas(limite, escopo),
+      this._documentosRepository.listarPorStatus(DocumentoFiscalStatus.ERRO, limite, escopo),
+      this._documentosRepository.listarXmlInvalido(limite, escopo),
       opcoes.alertasResultado
         ? Promise.resolve(opcoes.alertasResultado)
-        : this._alertasService.listarAlertas()
+        : this._alertasService.listarAlertas(escopo)
     ]);
 
     const falhasSincronizacao = (alertasResultado.alertas || [])

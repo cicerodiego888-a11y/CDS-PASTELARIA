@@ -1729,6 +1729,32 @@ function criarTabelas() {
       console.error('Erro ao carregar schema estoque_empresa:', requireErr.message);
     }
 
+    // CDS-ESTOQUE-MANUAL-01 — modo de estoque por empresa + contagem física
+    try {
+      const {
+        garantirSchemaEmpresasConfiguracaoEstoque
+      } = require('./services/empresas/empresasConfiguracaoEstoqueSchema');
+      garantirSchemaEmpresasConfiguracaoEstoque(db, (schemaErr) => {
+        if (schemaErr) {
+          console.error('Erro ao garantir schema empresas_configuracao_estoque:', schemaErr.message);
+        }
+      });
+    } catch (requireErr) {
+      console.error('Erro ao carregar schema empresas_configuracao_estoque:', requireErr.message);
+    }
+    try {
+      const {
+        garantirSchemaEstoqueContagemFisica
+      } = require('./services/estoque/estoqueContagemFisicaSchema');
+      garantirSchemaEstoqueContagemFisica(db, (schemaErr) => {
+        if (schemaErr) {
+          console.error('Erro ao garantir schema estoque_contagens_fisicas:', schemaErr.message);
+        }
+      });
+    } catch (requireErr) {
+      console.error('Erro ao carregar schema estoque_contagens_fisicas:', requireErr.message);
+    }
+
     // Sprint 03.03 — tipo operacional + ficha técnica (catálogo compartilhado)
     try {
       const { garantirColunaTipoOperacional } = require('./services/produtos/tipoOperacionalProduto');

@@ -7,6 +7,19 @@
 const { obterMetaAlerta, pesoGravidade } = require('../config/centralAlertasTipos');
 const { DocumentoFiscalStatus } = require('../core/DocumentoFiscalStatus');
 
+/**
+ * Escopo já autorizado pela sessão. Sem lista e sem id, a consulta fecha (não há fallback global).
+ * @param {Object} [opcoes]
+ * @returns {{ empresaIds?: number[], empresaId?: number }}
+ */
+function escopoEmpresaConsulta(opcoes = {}) {
+  if (Array.isArray(opcoes.empresaIds)) return { empresaIds: opcoes.empresaIds };
+  if (Array.isArray(opcoes.empresa_ids)) return { empresaIds: opcoes.empresa_ids };
+  if (opcoes.empresaId != null && opcoes.empresaId !== '') return { empresaId: opcoes.empresaId };
+  if (opcoes.empresa_id != null && opcoes.empresa_id !== '') return { empresaId: opcoes.empresa_id };
+  return { empresaIds: [] };
+}
+
 class CentralAlertasService {
   /**
    * @param {Object} [deps]
@@ -23,9 +36,11 @@ class CentralAlertasService {
   }
 
   /**
+   * @param {Object} [opcoes] empresaId ou empresaIds já autorizados
    * @returns {Promise<{ total: number, alertas: Object[] }>}
    */
-  async listarAlertas() {
+  async listarAlertas(opcoes = {}) {
+    const escopo = escopoEmpresaConsulta(opcoes);
     const [
       fornecedoresNovos,
       duplicadas,
@@ -34,18 +49,16 @@ class CentralAlertasService {
       sincronizadasNaoProcessadas,
       comprasAbertas,
       erros,
-      xmlInvalido,
-      syncAtrasada
+      xmlInvalido
     ] = await Promise.all([
-      this._documentosRepository.listarFornecedoresNovos(),
-      this._documentosRepository.listarPorStatus(DocumentoFiscalStatus.DUPLICADA, 50),
-      this._documentosRepository.listarValorAcimaMediaFornecedor(2.0, 20),
-      this._documentosRepository.listarRevisaoParada(3, 50),
-      this._documentosRepository.listarSincronizadasNaoProcessadas(1, 50),
-      this._documentosRepository.listarComprasAbertas(50),
-      this._documentosRepository.listarPorStatus(DocumentoFiscalStatus.ERRO, 50),
-      this._documentosRepository.listarXmlInvalido(50),
-      this._nsuRepository.obterUltimaSincronizacao()
+      this._documentosRepository.listarFornecedoresNovos(escopo),
+      this._documentosRepository.listarPorStatus(DocumentoFiscalStatus.DUPLICADA, 50, escopo),
+      this._documentosRepository.listarValorAcimaMediaFornecedor(2.0, 20, escopo),
+      this._documentosRepository.listarRevisaoParada(3, 50, escopo),
+      this._documentosRepository.listarSincronizadasNaoProcessadas(1, 50, escopo),
+      this._documentosRepository.listarComprasAbertas(50, escopo),
+      this._documentosRepository.listarPorStatus(DocumentoFiscalStatus.ERRO, 50, escopo),
+      this._documentosRepository.listarXmlInvalido(50, escopo)
     ]);
 
     const alertas = [];
@@ -111,20 +124,8 @@ class CentralAlertasService {
       })));
     }
 
-    const horasDesdeSync = this._horasDesde(syncAtrasada?.dataSincronizacao || syncAtrasada?.updatedAt);
-    if (horasDesdeSync === null || horasDesdeSync > 24) {
-      const meta = obterMetaAlerta('FALHA_SINCRONIZACAO');
-      alertas.push({
-        ...meta,
-        quantidade: 1,
-        descricao: horasDesdeSync === null
-          ? 'Nenhuma sincronização SEFAZ registrada.'
-          : `Última sincronização há ${Math.floor(horasDesdeSync)} hora(s).`,
-        acaoSugerida: meta.acaoSugerida,
-        ultimaSincronizacao: syncAtrasada?.dataSincronizacao || syncAtrasada?.updatedAt || null,
-        documentoIds: []
-      });
-    }
+    // O carimbo de NSU (obterUltimaSincronizacao) não tem empresa_id.
+    // Não entra neste recorte: reutilizá-lo mostraria o sinal de sincronização de outra empresa.
 
     alertas.sort((a, b) => pesoGravidade(a.gravidade) - pesoGravidade(b.gravidade));
 
@@ -153,17 +154,7 @@ class CentralAlertasService {
     };
   }
 
-  /**
-   * @private
-   * @param {string|null} data
-   * @returns {number|null}
-   */
-  _horasDesde(data) {
-    if (!data) return null;
-    const inicio = new Date(data).getTime();
-    if (Number.isNaN(inicio)) return null;
-    return (Date.now() - inicio) / 3600000;
-  }
 }
 
 module.exports = CentralAlertasService;
+module.exports.escopoEmpresaConsulta = escopoEmpresaConsulta;

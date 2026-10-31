@@ -450,7 +450,10 @@ class CentralManifestacaoDfeService {
         1,
         Math.min(Number(opcoes.limite) || LIMITE_CANDIDATOS_PADRAO, 50)
       );
-      const selecao = await this._selecionarCandidatosManifestacao({ limite });
+      const selecao = await this._selecionarCandidatosManifestacao({
+        limite,
+        empresaId: opcoes.empresaId
+      });
       const candidatos = selecao.selecionados;
       await this._registrarTelemetriaSelecao(selecao, opcoes);
       const resultados = [];
@@ -753,9 +756,13 @@ class CentralManifestacaoDfeService {
     }
   }
 
-  async _selecionarCandidatosManifestacao({ limite = LIMITE_CANDIDATOS_PADRAO } = {}) {
+  async _selecionarCandidatosManifestacao({ limite = LIMITE_CANDIDATOS_PADRAO, empresaId = null } = {}) {
     const agora = this._agora();
-    const pendentes = await this._listarPendentesManifestacao();
+    let pendentes = await this._listarPendentesManifestacao();
+    if (empresaId != null) {
+      const alvo = Number(empresaId);
+      pendentes = pendentes.filter((documento) => Number(resolverEmpresaIdDocumento(documento)) === alvo);
+    }
     const permitirSemEmpresa = permitirFallbackGlobalPorModo(this._opcoesModo());
     const cacheContexto = new Map();
     const cacheGate = new Map();

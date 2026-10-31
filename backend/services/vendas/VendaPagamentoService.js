@@ -183,55 +183,68 @@ function reduzirEstoqueDistribuido(
   if (opcoes.pedidoJaConsumido) {
     return callback(null);
   }
+  if (opcoes.baixaAutomatica === false || opcoes.modoEstoque === 'MANUAL') {
+    return callback(null);
+  }
 
-  dbConn.get(
-    `SELECT COALESCE(controla_estoque, 1) AS controla_estoque FROM produtos WHERE id = ?`,
-    [produtoId],
-    (errFlag, rowFlag) => {
-      if (errFlag) return callback(errFlag);
-      if (!produtoControlaEstoque(rowFlag || {})) {
-        return callback(null);
-      }
-
-      const executarNaoFiscal = () => {
-
-        if (Number(quantidadeNaoFiscal || 0) <= 0) {
+  const executarBaixaProduto = () => {
+    dbConn.get(
+      `SELECT COALESCE(controla_estoque, 1) AS controla_estoque FROM produtos WHERE id = ?`,
+      [produtoId],
+      (errFlag, rowFlag) => {
+        if (errFlag) return callback(errFlag);
+        if (!produtoControlaEstoque(rowFlag || {})) {
           return callback(null);
+        }
+
+        const executarNaoFiscal = () => {
+          if (Number(quantidadeNaoFiscal || 0) <= 0) {
+            return callback(null);
+          }
+          reduzirEstoqueComFEFO(
+            vendaItemId,
+            produtoId,
+            quantidadeNaoFiscal,
+            0,
+            callback,
+            opcoes
+          );
+        };
+
+        if (Number(quantidadeFiscal || 0) <= 0) {
+          return executarNaoFiscal();
         }
 
         reduzirEstoqueComFEFO(
           vendaItemId,
           produtoId,
-          quantidadeNaoFiscal,
-          0,
-          callback,
+          quantidadeFiscal,
+          1,
+          (err) => {
+            if (err) {
+              return callback(err);
+            }
+            executarNaoFiscal();
+          },
           opcoes
         );
-
-      };
-
-      if (Number(quantidadeFiscal || 0) <= 0) {
-        return executarNaoFiscal();
       }
+    );
+  };
 
-      reduzirEstoqueComFEFO(
-        vendaItemId,
-        produtoId,
-        quantidadeFiscal,
-        1,
-        (err) => {
+  if (opcoes.baixaAutomatica === true) {
+    return executarBaixaProduto();
+  }
 
-          if (err) {
-            return callback(err);
-          }
-
-          executarNaoFiscal();
-
-        },
-        opcoes
-      );
-    }
-  );
+  const empresaIdModo = opcoes.empresaId != null ? opcoes.empresaId : opcoes.empresa_id;
+  const { empresaPermiteBaixaAutomaticaEstoque } = require('../empresas/EmpresaModoEstoqueService');
+  Promise.resolve()
+    .then(() => empresaPermiteBaixaAutomaticaEstoque(dbConn, empresaIdModo))
+    .then((permite) => {
+      if (!permite) return callback(null);
+      executarBaixaProduto();
+    })
+    .catch(callback);
 }
 
 function atualizarStatusPagamentoVenda(vendaId, status, tefTransacaoId) {
@@ -1012,6 +1025,18 @@ const opcoesBaixaEstoque = {
   ...montarOpcoesBaixaEstoqueVenda(req, 'baixa_venda', db),
   exigirEmpresa: true
 };
+{
+  const { empresaPermiteBaixaAutomaticaEstoque } = require('../empresas/EmpresaModoEstoqueService');
+  // Resolve o modo uma vez por venda; legado sem config = AUTOMATICO.
+  // Falha de leitura não bloqueia a venda — trata como AUTOMATICO só se empresa inválida?
+  // Exigimos resolução síncrona via Promise no fluxo async abaixo após validações iniciais.
+  opcoesBaixaEstoque.__resolverModoEstoque = () => empresaPermiteBaixaAutomaticaEstoque(db, empresaIdVenda)
+    .then((permite) => {
+      opcoesBaixaEstoque.baixaAutomatica = permite === true;
+      opcoesBaixaEstoque.modoEstoque = permite ? 'AUTOMATICO' : 'MANUAL';
+      return opcoesBaixaEstoque.baixaAutomatica;
+    });
+}
 const tipoVendaCanal = String(req.body?.tipo_venda || 'BALCAO').toUpperCase();
 if (tipoVendaCanal === 'ENTREGA') {
   const { criarVendaEntrega } = require('../entrega/CriarVendaEntregaService');
@@ -1224,6 +1249,8 @@ db.all(`
       });
       return;
     }
+
+    const seguirComCredito = async () => {
     const creditoPorProduto = (creditoReserva && creditoReserva.por_produto) || {};
     const pedidoJaConsumido = Boolean(
       (creditoReserva && creditoReserva.consumo_confirmado) || vendaPedidoOperacional
@@ -1278,6 +1305,69 @@ db.all(`
       ? [{ forma_pagamento, valor: Number(total || 0) }]
       : []);
 
+  // Sprint 10–16 — diagnóstico isolado de recomposição (antes do Motor F×NF).
+  // Flags internas: CDS_RECOMPOSICAO_DIAGNOSTICO*, HOMOLOGACAO, APLICAR_DISTRIBUICAO.
+  // Sprint 17: CDS_RECOMPOSICAO_HOMOLOGACAO_DISTRIBUIR encaminha a proposta validada
+  // ao distribuidor oficial. Não lê body. A flag APLICAR_DISTRIBUICAO continua bloqueio.
+  // O objeto resultadoMotor legado não é mutado.
+  let __cdsRecomposicaoPipeline = null;
+  try {
+    const {
+      executarDiagnosticoRecomposicaoNoFechamento,
+      resolverDiagnosticoInternoParaFechamento,
+      obterAtivacaoHomologacaoInterna,
+      resolverModoOperacionalRecomposicao
+    } = require('./RecomposicaoFiscalFechamentoAdaptadorService');
+    const diagnosticoInterno = resolverDiagnosticoInternoParaFechamento({
+      harnessReq: req.__cdsRecomposicaoDiagnostico || null
+    });
+    const ativacaoHomolog = obterAtivacaoHomologacaoInterna(
+      process.env,
+      req.__cdsRecomposicaoHomologacao || null
+    );
+    const modoInfo = resolverModoOperacionalRecomposicao({
+      env: process.env,
+      diagnosticoInterno,
+      harnessHomologacao: req.__cdsRecomposicaoHomologacao || null,
+      harnessAplicar: req.__cdsRecomposicaoAplicar || null
+    });
+    const diagRecomposicao = await executarDiagnosticoRecomposicaoNoFechamento({
+      totalComercial: totalNum,
+      pagamentos: pagamentosVenda,
+      itens,
+      diagnosticoInterno,
+      pedidoId: pedidoIdVenda,
+      empresaId: empresaIdVenda,
+      db
+    });
+    if (diagRecomposicao && diagRecomposicao.evento) {
+      console.info(
+        '[cds-recomposicao-diagnostico]',
+        diagRecomposicao.evento,
+        diagRecomposicao.resumoSeguro || {}
+      );
+    }
+    if (ativacaoHomolog.ativa || diagnosticoInterno
+      || modoInfo.modo_efetivo !== 'DESLIGADO') {
+      __cdsRecomposicaoPipeline = {
+        ativacao: ativacaoHomolog,
+        modoInfo,
+        diagnostico: diagRecomposicao
+      };
+    }
+  } catch (diagRecomposicaoErr) {
+    console.warn(
+      '[cds-recomposicao-diagnostico]',
+      'erro_isolado',
+      diagRecomposicaoErr && (diagRecomposicaoErr.code || diagRecomposicaoErr.codigo)
+        ? (diagRecomposicaoErr.code || diagRecomposicaoErr.codigo)
+        : 'ERRO',
+      diagRecomposicaoErr && diagRecomposicaoErr.message
+        ? String(diagRecomposicaoErr.message).slice(0, 200)
+        : ''
+    );
+  }
+
   const resultadoMotor = distribuirItensVendaComValorFiscalEfetivo(
     entradasMotor,
     vendaFiscal,
@@ -1290,17 +1380,127 @@ db.all(`
     }
   );
 
-  if (!resultadoMotor.sucesso) {
-    const produtoErro = resultadoMotor.item
-      ? produtoMap[resultadoMotor.item.produto_id]
+  // Sprint 15/17 — validação após o Motor. A distribuição da recomposição,
+  // quando autorizada, é outra chamada ao distribuidor oficial; resultadoMotor não é mutado.
+  let resultadoParaFechamento = resultadoMotor;
+  if (__cdsRecomposicaoPipeline) {
+    try {
+      const {
+        validarPropostaContraContratoMotorFxnf,
+        montarRelatorioOperacionalRecomposicao,
+        obterAutorizacaoDistribuicaoOficialInterna,
+        encaminharPropostaValidadaAoDistribuidorOficial
+      } = require('./RecomposicaoFiscalFechamentoAdaptadorService');
+      const validacao = validarPropostaContraContratoMotorFxnf({
+        diagnostico: __cdsRecomposicaoPipeline.diagnostico,
+        resultadoMotorOficial: resultadoMotor,
+        totalComercial: totalNum,
+        pagamentos: pagamentosVenda,
+        itens
+      });
+      const authDist = obterAutorizacaoDistribuicaoOficialInterna(
+        process.env,
+        req.__cdsRecomposicaoDistribuicaoOficial || null
+      );
+      const modoBloqueia = __cdsRecomposicaoPipeline.modoInfo
+        && __cdsRecomposicaoPipeline.modoInfo.modo_efetivo === 'APLICACAO_BLOQUEADA';
+      let aplicacaoOficial = null;
+      if (authDist.ativa && !modoBloqueia && validacao.composicao_validada_em_homologacao === true) {
+        const saldosPorProduto = {};
+        for (const entrada of entradasMotor) {
+          const pid = Number(entrada.item && entrada.item.produto_id);
+          saldosPorProduto[pid] = {
+            saldoFiscal: entrada.saldoFiscal,
+            saldoNaoFiscal: entrada.saldoNaoFiscal
+          };
+        }
+        aplicacaoOficial = await encaminharPropostaValidadaAoDistribuidorOficial({
+          env: process.env,
+          autorizacao: authDist,
+          diagnostico: __cdsRecomposicaoPipeline.diagnostico,
+          validacao,
+          itensVendidos: itens,
+          pagamentos: pagamentosVenda,
+          totalComercial: totalNum,
+          desconto: Number(desconto || 0),
+          acrescimo: Number(acrescimo || 0),
+          empresaId: empresaIdVenda,
+          db,
+          saldosPorProduto,
+          aplicarSaldo: false,
+          harnessAplicar: req.__cdsRecomposicaoAplicar || null,
+          modelos: req.__cdsRecomposicaoDiagnostico
+            && req.__cdsRecomposicaoDiagnostico.modelos,
+          capacidade_por_categoria: req.__cdsRecomposicaoDiagnostico
+            && req.__cdsRecomposicaoDiagnostico.capacidade_por_categoria
+        });
+        if (
+          aplicacaoOficial
+          && aplicacaoOficial.distribuicao_aplicada === true
+          && aplicacaoOficial.resultado_oficial
+          && aplicacaoOficial.resultado_oficial.sucesso === true
+        ) {
+          resultadoParaFechamento = aplicacaoOficial.resultado_oficial;
+        }
+      }
+      const relatorio = montarRelatorioOperacionalRecomposicao({
+        modoInfo: __cdsRecomposicaoPipeline.modoInfo,
+        diagnostico: __cdsRecomposicaoPipeline.diagnostico,
+        validacao,
+        totalComercial: totalNum,
+        itensVenda: itens,
+        resultado_motor_inalterado: true,
+        distribuicaoAplicada: aplicacaoOficial
+          && aplicacaoOficial.distribuicao_aplicada === true,
+        resultadoOficial: aplicacaoOficial && aplicacaoOficial.resultado_oficial
+      });
+      req.__cdsRecomposicaoHomologacaoResultado = Object.freeze({
+        ativacao: __cdsRecomposicaoPipeline.ativacao,
+        diagnostico: __cdsRecomposicaoPipeline.diagnostico,
+        validacao,
+        relatorio_operacional: relatorio,
+        resultado_motor_inalterado: true,
+        distribuicao_aplicada: relatorio.distribuicao_aplicada === true,
+        aplicacao_oficial: aplicacaoOficial
+      });
+      req.__cdsRecomposicaoOperacional = relatorio;
+      console.info(
+        '[cds-recomposicao-operacional]',
+        relatorio.modo_efetivo,
+        {
+          proposta_calculada: relatorio.proposta_calculada,
+          proposta_validada: relatorio.proposta_validada,
+          distribuicao_aplicada: relatorio.distribuicao_aplicada,
+          valor_composicao: relatorio.valor_composicao,
+          compativel_itens: relatorio.compatibilidade_itens_vendidos
+            ? relatorio.compatibilidade_itens_vendidos.compativel
+            : null
+        }
+      );
+    } catch (homologErr) {
+      console.warn(
+        '[cds-recomposicao-operacional]',
+        'erro_isolado',
+        homologErr && homologErr.message
+          ? String(homologErr.message).slice(0, 200)
+          : 'ERRO'
+      );
+      // Fechamento segue com resultadoMotor oficial — sem estado parcial.
+      resultadoParaFechamento = resultadoMotor;
+    }
+  }
+
+  if (!resultadoParaFechamento.sucesso) {
+    const produtoErro = resultadoParaFechamento.item
+      ? produtoMap[resultadoParaFechamento.item.produto_id]
       : null;
     return res.status(400).json({
       error:
         `Saldo insuficiente para ${produtoErro?.nome || 'produto'}. ` +
-        `Disponível: ${resultadoMotor.erro?.estoqueTotal}`
+        `Disponível: ${resultadoParaFechamento.erro?.estoqueTotal}`
     });
   }
-  for (const row of resultadoMotor.itens) {
+  for (const row of resultadoParaFechamento.itens) {
     distribuicaoItens.push({
       ...row,
       quantidade_fiscal: row.quantidade_fiscal,
@@ -1311,6 +1511,9 @@ db.all(`
   }
   async function aposBaixaItensDaVenda(vendaId, transacaoDb) {
     if (pedidoJaConsumido) {
+      return;
+    }
+    if (opcoesBaixaEstoque.baixaAutomatica === false || opcoesBaixaEstoque.modoEstoque === 'MANUAL') {
       return;
     }
     const { consumirFichaTecnicaDaVendaCb } = require('../produtos/FichaTecnicaConsumoService');
@@ -1521,7 +1724,7 @@ db.all(`
 
     // HOTFIX FISCAL-4.0.2 — validação sempre sobre Valor Fiscal Líquido do Motor
     const totaisLiquidosPrazo = resolverTotaisFiscaisLiquidosMotor(
-      resultadoMotor,
+      resultadoParaFechamento,
       distribuicaoItens
     );
     const totalFiscal = totaisLiquidosPrazo.totalFiscal;
@@ -1557,13 +1760,13 @@ db.all(`
       pagamentos: req.body.pagamentos || [],
       tefHabilitado,
       modoConfirmacaoFiscal,
-      valorFiscalMaximo: resultadoMotor.valorFiscalMaximo,
-      preservacaoAplicada: resultadoMotor.preservacaoAplicada,
+      valorFiscalMaximo: resultadoParaFechamento.valorFiscalMaximo,
+      preservacaoAplicada: resultadoParaFechamento.preservacaoAplicada,
       midpAtivo,
       desconto: Number(desconto || 0),
       acrescimo: Number(acrescimo || 0),
       totalOutros: valorOutros,
-      subtotalBruto: Number(resultadoMotor.totalVendaBruto || 0),
+      subtotalBruto: Number(resultadoParaFechamento.totalVendaBruto || 0),
       debugDescontoFiscal: process.env.CDS_DEBUG_DESCONTO_FISCAL === '1'
     });
 
@@ -1740,7 +1943,7 @@ const executarVenda = async () => {
 
   // HOTFIX FISCAL-4.0.2 — validação sempre sobre Valor Fiscal Líquido do Motor
   const totaisLiquidos = resolverTotaisFiscaisLiquidosMotor(
-    resultadoMotor,
+    resultadoParaFechamento,
     distribuicaoItens
   );
   const totalFiscal = totaisLiquidos.totalFiscal;
@@ -1776,13 +1979,13 @@ const executarVenda = async () => {
     pagamentos: req.body.pagamentos || [],
     tefHabilitado,
     modoConfirmacaoFiscal,
-    valorFiscalMaximo: resultadoMotor.valorFiscalMaximo,
-    preservacaoAplicada: resultadoMotor.preservacaoAplicada,
+    valorFiscalMaximo: resultadoParaFechamento.valorFiscalMaximo,
+    preservacaoAplicada: resultadoParaFechamento.preservacaoAplicada,
     midpAtivo,
     desconto: Number(desconto || 0),
     acrescimo: Number(acrescimo || 0),
     totalOutros: valorOutros,
-    subtotalBruto: Number(resultadoMotor.totalVendaBruto || 0),
+    subtotalBruto: Number(resultadoParaFechamento.totalVendaBruto || 0),
     debugDescontoFiscal: process.env.CDS_DEBUG_DESCONTO_FISCAL === '1'
   });
 
@@ -1960,6 +2163,17 @@ if (forma_pagamento === 'credito') {
 } else {
   executarVenda();
 }
+    }; // seguirComCredito
+
+    const resolverModo = typeof opcoesBaixaEstoque.__resolverModoEstoque === 'function'
+      ? opcoesBaixaEstoque.__resolverModoEstoque()
+      : Promise.resolve(true);
+    resolverModo.then(() => seguirComCredito()).catch((modoErr) => {
+      res.status(modoErr.status || modoErr.statusCode || 500).json({
+        error: modoErr.message || 'Falha ao resolver modo de estoque da empresa.',
+        code: modoErr.code || 'MODO_ESTOQUE_FALHOU'
+      });
+    });
   });
   });
 }

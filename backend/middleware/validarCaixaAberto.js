@@ -59,8 +59,13 @@ function montarConsultaSessaoAberta({ sessaoId, terminalId, empresaId }) {
  * Sprint 2.2 — política de porta por origem.
  * PDV: exige caixa aberto (comportamento atual).
  * Demais origens: não executa validarCaixaAberto.
+ * CDS-PDV-EMPRESA-UNICA-06: canal HTTP POST /api/vendas marca canalVendaHttp=PDV
+ * e exige caixa pela política efetiva do canal (não pelo body.origem forjado).
  */
 function validarCaixaSeOrigemPdv(req, res, next) {
+  if (req && req.canalVendaHttp === 'PDV') {
+    return validarCaixaAberto(req, res, next);
+  }
   const origemRaw = req.body?.origem ?? req.query?.origem ?? req.headers?.['x-venda-origem'];
   if (origemExigeCaixa(origemRaw)) {
     return validarCaixaAberto(req, res, next);

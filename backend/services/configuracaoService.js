@@ -17,6 +17,29 @@ const {
 } = require('../core/modo-operacional/compatibilidadeModoVenda');
 const { normalizarEmpresaOperacionalId } = require('../core/modo-operacional/PoliticaEmpresaSimples');
 
+const DEFAULT_PDV_MODELO_EMPRESA = 'MULTIPLAS';
+const PDV_MODELOS_EMPRESA = Object.freeze(['MULTIPLAS', 'UNICA']);
+
+function normalizarPdvModeloEmpresa(valor) {
+  if (valor === null || valor === undefined || String(valor).trim() === '') {
+    return DEFAULT_PDV_MODELO_EMPRESA;
+  }
+  const normalizado = String(valor).toUpperCase().trim();
+  if (!PDV_MODELOS_EMPRESA.includes(normalizado)) {
+    const err = new Error('pdv_modelo_empresa inválido. Use MULTIPLAS ou UNICA.');
+    err.code = 'PDV_MODELO_EMPRESA_INVALIDO';
+    throw err;
+  }
+  return normalizado;
+}
+
+function normalizarPdvEmpresaId(valor) {
+  if (valor === null || valor === undefined || valor === '') return null;
+  const n = Number(valor);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  return n;
+}
+
 const LEGACY_CONFIG_PATH = path.join(__dirname, '..', '..', 'config', 'configuracoes.json');
 const LEGACY_ELECTRON_PATHS = [
   path.join(__dirname, '..', '..', 'storage', 'config-servidor.json'),
@@ -74,7 +97,10 @@ const DEFAULT = {
   modo_operacao_venda: DEFAULT_MODO_OPERACAO_VENDA,
   // Sprint 05.38.B — Modo Operacional Global oficial da instalação
   modo_operacional_global: DEFAULT_MODO_OPERACIONAL_GLOBAL,
-  empresa_operacional_id: null
+  empresa_operacional_id: null,
+  // CDS-PDV-EMPRESA-UNICA-02 — modelo exclusivo do PDV (independente do global)
+  pdv_modelo_empresa: DEFAULT_PDV_MODELO_EMPRESA,
+  pdv_empresa_id: null
 };
 
 const TIPOS = ['ERP_SEM_FISCAL', 'ERP_FISCAL', 'ERP_MULTICAIXA'];
@@ -559,6 +585,14 @@ function normalizeConfig(obj) {
         ? modoVendaParaModoGlobal(obj.modo_operacao_venda)
         : DEFAULT.modo_operacional_global),
     empresa_operacional_id: normalizarEmpresaOperacionalId(obj?.empresa_operacional_id),
+    pdv_modelo_empresa: (() => {
+      try {
+        return normalizarPdvModeloEmpresa(obj?.pdv_modelo_empresa);
+      } catch (_e) {
+        return DEFAULT_PDV_MODELO_EMPRESA;
+      }
+    })(),
+    pdv_empresa_id: normalizarPdvEmpresaId(obj?.pdv_empresa_id),
     ...normalizePadraoFiscal(obj)
   };
 }
@@ -730,6 +764,29 @@ function validateConfig(obj) {
     }
   }
 
+  if (Object.prototype.hasOwnProperty.call(obj || {}, 'pdv_modelo_empresa')) {
+    try {
+      config.pdv_modelo_empresa = normalizarPdvModeloEmpresa(obj.pdv_modelo_empresa);
+    } catch (e) {
+      errors.push('pdv_modelo_empresa inválido');
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(obj || {}, 'pdv_empresa_id')
+      && obj.pdv_empresa_id != null
+      && obj.pdv_empresa_id !== '') {
+    const id = normalizarPdvEmpresaId(obj.pdv_empresa_id);
+    if (id == null) {
+      errors.push('pdv_empresa_id inválido');
+    } else {
+      config.pdv_empresa_id = id;
+    }
+  }
+
+  if (config.pdv_modelo_empresa === 'UNICA' && config.pdv_empresa_id == null) {
+    errors.push('pdv_empresa_id é obrigatório quando pdv_modelo_empresa = UNICA');
+  }
+
   return { valid: errors.length === 0, errors, config };
 }
 
@@ -846,6 +903,24 @@ function resolverModoGlobalParaSalvar(current, obj, validation) {
   return modoNovo;
 }
 
+/**
+ * CDS-PDV-EMPRESA-UNICA-04 — persiste config somente após validar empresa PDV UNICA (ativa).
+ * Em falha, não chama saveConfig (nada é gravado).
+ */
+async function saveConfigComValidacaoPdv(obj, opts = {}) {
+  const {
+    validarPdvModeloEmpresaAntesDeSalvar
+  } = require('./pdv/PdvModeloEmpresaService');
+  await validarPdvModeloEmpresaAntesDeSalvar(obj || {}, {
+    db: opts.db,
+    configService: opts.configService || module.exports,
+    current: opts.current,
+    validarEmpresaPdv: opts.validarEmpresaPdv,
+    empresaContexto: opts.empresaContexto
+  });
+  return saveConfig(obj);
+}
+
 function saveConfig(obj) {
   const validation = validateConfig(obj);
   if (!validation.valid) {
@@ -948,7 +1023,20 @@ function saveConfig(obj) {
     empresa_operacional_id: Object.prototype.hasOwnProperty.call(obj || {}, 'empresa_operacional_id')
       ? normalizarEmpresaOperacionalId(validation.config.empresa_operacional_id)
       : normalizarEmpresaOperacionalId(current.empresa_operacional_id),
-    modo_operacao_venda: sincronizarModoOperacaoVendaLegado(modoGlobalSalvar)
+    modo_operacao_venda: sincronizarModoOperacaoVendaLegado(modoGlobalSalvar),
+    pdv_modelo_empresa: Object.prototype.hasOwnProperty.call(obj || {}, 'pdv_modelo_empresa')
+      ? normalizarPdvModeloEmpresa(validation.config.pdv_modelo_empresa)
+      : normalizarPdvModeloEmpresa(current.pdv_modelo_empresa),
+    pdv_empresa_id: (() => {
+      const modelo = Object.prototype.hasOwnProperty.call(obj || {}, 'pdv_modelo_empresa')
+        ? normalizarPdvModeloEmpresa(validation.config.pdv_modelo_empresa)
+        : normalizarPdvModeloEmpresa(current.pdv_modelo_empresa);
+      if (modelo !== 'UNICA') return null;
+      if (Object.prototype.hasOwnProperty.call(obj || {}, 'pdv_empresa_id')) {
+        return normalizarPdvEmpresaId(validation.config.pdv_empresa_id);
+      }
+      return normalizarPdvEmpresaId(current.pdv_empresa_id);
+    })()
   };
 
   ensureConfigFile();
@@ -1045,6 +1133,7 @@ module.exports = {
   getElectronConfigPath,
   readConfig,
   saveConfig,
+  saveConfigComValidacaoPdv,
   savePadraoFiscal,
   getPadraoFiscal,
   normalizePadraoFiscal,
@@ -1056,6 +1145,13 @@ module.exports = {
   obterEmpresaOperacionalId,
   validarAlteracaoModoOperacionalGlobal,
   obterModoOperacaoVenda,
+  obterPdvModeloEmpresa: () => {
+    const cfg = readConfig();
+    return {
+      pdv_modelo_empresa: normalizarPdvModeloEmpresa(cfg.pdv_modelo_empresa),
+      pdv_empresa_id: normalizarPdvEmpresaId(cfg.pdv_empresa_id)
+    };
+  },
   getRecursos,
   getLicenciamentoCds,
   resolveModuloFlag,

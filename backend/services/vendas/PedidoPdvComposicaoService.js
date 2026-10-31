@@ -692,4 +692,121 @@ async function prepararComposicaoPedidoPdv(params = {}, opts = {}) {
   };
 }
 
-module.exports = { prepararComposicaoPedidoPdv };
+/**
+ * Sprint 13/14 — contexto de composição para diagnóstico no fechamento.
+ * Reutiliza exclusivamente `carregarModelosRefrigerante` (mesma fonte do PDV).
+ * Somente leitura. Não inventa produtos, catálogo ou capacidade.
+ *
+ * Sprint 14: `pedidoId` é opcional. Em venda de balcão, a reserva de pedido
+ * fica vazia (`obterCreditoReservaPedido` já trata id inválido) e os modelos
+ * continuam vindo do catálogo/estoque/cotação isolados por `empresaId`.
+ *
+ * @param {object} opcoes
+ * @param {number} opcoes.empresaId
+ * @param {number} [opcoes.pedidoId] — opcional (balcão)
+ * @param {number} opcoes.residualCentavos — teto monetário da busca (centavos)
+ * @param {object} opcoes.db
+ * @param {Date} [opcoes.agora]
+ * @returns {Promise<object>}
+ */
+async function obterContextoComposicaoPdvParaDiagnostico(opcoes = {}) {
+  const origem = 'PedidoPdvComposicaoService.carregarModelosRefrigerante';
+  const empresaId = Number(opcoes.empresaId);
+  const pedidoBruto = opcoes.pedidoId != null && opcoes.pedidoId !== ''
+    ? Number(opcoes.pedidoId)
+    : null;
+  const pedidoId = Number.isInteger(pedidoBruto) && pedidoBruto > 0 ? pedidoBruto : null;
+  const modo = pedidoId != null ? 'pedido' : 'balcao';
+  const residualCentavos = Number(opcoes.residualCentavos);
+  const db = opcoes.db;
+  const agora = opcoes.agora instanceof Date ? opcoes.agora : new Date();
+
+  const baseInsuficiente = (motivo) => Object.freeze({
+    suficiente: false,
+    motivo,
+    origem,
+    modo,
+    empresa_id: Number.isInteger(empresaId) && empresaId > 0 ? empresaId : null,
+    pedido_id: pedidoId,
+    modelos: Object.freeze([]),
+    capacidade_por_categoria: Object.freeze({}),
+    invalidos: Object.freeze([])
+  });
+
+  if (!db) {
+    return baseInsuficiente('db_ausente');
+  }
+  if (!Number.isInteger(empresaId) || empresaId <= 0) {
+    return baseInsuficiente('empresa_id_ausente');
+  }
+  if (!Number.isSafeInteger(residualCentavos) || residualCentavos <= 0) {
+    return baseInsuficiente('residual_centavos_ausente');
+  }
+
+  let carregado;
+  try {
+    // pedidoId null = balcão: crédito de reserva = 0 (mecanismo existente).
+    carregado = await carregarModelosRefrigerante(
+      empresaId,
+      pedidoId,
+      residualCentavos,
+      db,
+      agora
+    );
+  } catch (err) {
+    return Object.freeze({
+      suficiente: false,
+      motivo: 'erro_carga_modelos_refrigerante',
+      origem,
+      modo,
+      empresa_id: empresaId,
+      pedido_id: pedidoId,
+      modelos: Object.freeze([]),
+      capacidade_por_categoria: Object.freeze({}),
+      invalidos: Object.freeze([]),
+      erro_carga: err && (err.code || err.codigo)
+        ? (err.code || err.codigo)
+        : (err && err.message ? String(err.message).slice(0, 120) : 'ERRO')
+    });
+  }
+
+  const modelos = Array.isArray(carregado.modelos) ? carregado.modelos : [];
+  if (!modelos.length) {
+    return Object.freeze({
+      suficiente: false,
+      motivo: 'modelos_vazios_apos_carga',
+      origem,
+      modo,
+      empresa_id: empresaId,
+      pedido_id: pedidoId,
+      modelos: Object.freeze([]),
+      capacidade_por_categoria: Object.freeze({}),
+      invalidos: Object.freeze(
+        Array.isArray(carregado.invalidos) ? carregado.invalidos.map((i) => ({ ...i })) : []
+      ),
+      capacidadeMl: Number(carregado.capacidadeMl) || 0
+    });
+  }
+
+  return Object.freeze({
+    suficiente: true,
+    motivo: null,
+    origem,
+    modo,
+    empresa_id: empresaId,
+    pedido_id: pedidoId,
+    modelos,
+    capacidade_por_categoria: Object.freeze({
+      REFRIGERANTE: Number(carregado.capacidadeMl) || 0
+    }),
+    capacidadeMl: Number(carregado.capacidadeMl) || 0,
+    invalidos: Object.freeze(
+      Array.isArray(carregado.invalidos) ? carregado.invalidos.map((i) => ({ ...i })) : []
+    )
+  });
+}
+
+module.exports = {
+  prepararComposicaoPedidoPdv,
+  obterContextoComposicaoPdvParaDiagnostico
+};

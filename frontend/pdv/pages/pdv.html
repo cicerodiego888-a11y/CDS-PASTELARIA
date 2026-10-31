@@ -61,9 +61,15 @@
       <section class="pdv-card pdv-itens">
       <div class="pdv-card-header">
         <h2>Itens da Venda</h2>
-        <button id="btnLimparVendaPdv" class="btn-secundario" type="button">
-          <i class="fas fa-trash-alt"></i> Limpar
-        </button>
+        <div class="pdv-card-header-acoes">
+          <button id="btnVendaPorValorPdvTopo" class="btn-venda-por-valor-inline" type="button"
+            title="Informar valor total e quantidade de pastéis">
+            <i class="fas fa-calculator" aria-hidden="true"></i> Venda por valor
+          </button>
+          <button id="btnLimparVendaPdv" class="btn-secundario" type="button">
+            <i class="fas fa-trash-alt"></i> Limpar
+          </button>
+        </div>
       </div>
 
       <div class="pdv-itens-scroll">
@@ -162,6 +168,15 @@
         </div>
       </div>
 
+      <button id="btnVendaPorValorPdv" class="btn-venda-por-valor" type="button"
+        title="Informar valor total do pedido e quantidade de pastéis">
+        <span class="btn-venda-por-valor-icone pdv-btn-icone" aria-hidden="true"><i class="fas fa-calculator"></i></span>
+        <span class="btn-finalizar-textos">
+          <span class="btn-venda-por-valor-titulo">VENDA POR VALOR</span>
+          <span class="btn-finalizar-sub">Digite o valor + qtd de pastéis</span>
+        </span>
+      </button>
+
       <button id="btnFinalizarVendaPdv" class="btn-finalizar" type="button">
         <span class="btn-finalizar-icone pdv-btn-icone" aria-hidden="true"><i class="fas fa-coins"></i></span>
         <span class="btn-finalizar-textos">
@@ -221,6 +236,7 @@
 
   <footer class="pdv-atalhos">
     <span class="pdv-atalho-chip">F1 Buscar</span>
+    <span class="pdv-atalho-chip pdv-atalho-chip--destaque" id="atalhoVendaPorValorPdv" role="button" tabindex="0" title="Abrir venda por valor">Venda por valor</span>
     <span class="pdv-atalho-chip">F4 Quantidade</span>
     <span class="pdv-atalho-chip">F7 Fechar Caixa</span>
     <span class="pdv-atalho-chip">F8 Desconto</span>

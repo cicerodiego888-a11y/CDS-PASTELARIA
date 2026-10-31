@@ -19,7 +19,8 @@ const {
   autorizarDocumentoCentralHttp,
   responderErroDocumentoCentral,
   resolverEmpresaParaCentral,
-  aplicarFiltroLeituraEmpresasCentral
+  aplicarFiltroLeituraEmpresasCentral,
+  resolverLeituraCentral
 } = require('../services/central-entradas/CentralEntradasEmpresaContextoService');
 
 const router = express.Router();
@@ -579,19 +580,19 @@ router.get('/feature-flags', (req, res) => {
 router.get('/dashboard', async (req, res) => {
   try {
     const filtros = montarFiltrosQuery(req.query);
-    const ctx = await resolverEmpresaParaCentral({
+    const leitura = await resolverLeituraCentral({
       req,
-      empresaId: req.empresaId
-    });
-    const visao = await aplicarFiltroLeituraEmpresasCentral({ req, ctx, dest: filtros });
+      empresaId: req.empresaId,
+      dest: filtros
+    }, { resolverEmpresa: resolverEmpresaParaCentral });
     const dashboard = await centralEntradasService.obterDashboard(filtros);
     return res.json({
       ...dashboard,
       featureFlags: obterFeatureFlagsPublicas(),
-      empresaId: ctx.empresaId,
-      visao: visao.visao,
-      modo: ctx.modo,
-      origem: ctx.origem
+      empresaId: leitura.ctx.empresaId,
+      visao: leitura.visao.visao,
+      modo: leitura.ctx.modo,
+      origem: leitura.ctx.origem
     });
   } catch (error) {
     return responderErroDocumentoCentral(res, error);
@@ -600,32 +601,44 @@ router.get('/dashboard', async (req, res) => {
 
 router.get('/alertas', async (req, res) => {
   try {
-    const alertas = await centralEntradasService.listarAlertas();
+    const dest = {};
+    await resolverLeituraCentral({
+      req,
+      empresaId: req.empresaId,
+      dest
+    }, { resolverEmpresa: resolverEmpresaParaCentral });
+    const alertas = await centralEntradasService.listarAlertas(dest);
     return res.json(alertas);
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    return responderErroDocumentoCentral(res, error);
   }
 });
 
 router.get('/pendencias', async (req, res) => {
   try {
-    const pendencias = await centralEntradasService.obterPendencias({
+    const dest = {
       limite: req.query.limite != null ? Number(req.query.limite) : undefined
-    });
+    };
+    await resolverLeituraCentral({
+      req,
+      empresaId: req.empresaId,
+      dest
+    }, { resolverEmpresa: resolverEmpresaParaCentral });
+    const pendencias = await centralEntradasService.obterPendencias(dest);
     return res.json(pendencias);
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    return responderErroDocumentoCentral(res, error);
   }
 });
 
 router.get('/operacional', async (req, res) => {
   try {
-    const ctx = await resolverEmpresaParaCentral({
-      req,
-      empresaId: req.empresaId
-    });
     const dest = { ...montarPeriodoIndicadoresQuery(req.query) };
-    await aplicarFiltroLeituraEmpresasCentral({ req, ctx, dest });
+    await resolverLeituraCentral({
+      req,
+      empresaId: req.empresaId,
+      dest
+    }, { resolverEmpresa: resolverEmpresaParaCentral });
     const operacional = await centralEntradasService.obterOperacional(dest);
     return res.json(operacional);
   } catch (error) {
@@ -635,13 +648,9 @@ router.get('/operacional', async (req, res) => {
 
 router.get('/indicadores-fiscais', async (req, res) => {
   try {
-    const ctx = await resolverEmpresaParaCentral({
-      req,
-      empresaId: req.empresaId
-    });
-    const IndicadoresFiscaisService = require('../services/IndicadoresFiscaisService');
     const dest = { ...montarPeriodoIndicadoresQuery(req.query) };
-    await aplicarFiltroLeituraEmpresasCentral({ req, ctx, dest });
+    await resolverLeituraCentral({ req, empresaId: req.empresaId, dest }, { resolverEmpresa: resolverEmpresaParaCentral });
+    const IndicadoresFiscaisService = require('../services/IndicadoresFiscaisService');
     const indicadores = await IndicadoresFiscaisService.obterIndicadoresCentral(dest);
     return res.json(indicadores);
   } catch (error) {
@@ -651,15 +660,11 @@ router.get('/indicadores-fiscais', async (req, res) => {
 
 router.get('/inteligencia', async (req, res) => {
   try {
-    const ctx = await resolverEmpresaParaCentral({
-      req,
-      empresaId: req.empresaId
-    });
     const dest = {
       limitePendencias: req.query.limite != null ? Number(req.query.limite) : 20,
       ...montarPeriodoIndicadoresQuery(req.query)
     };
-    await aplicarFiltroLeituraEmpresasCentral({ req, ctx, dest });
+    await resolverLeituraCentral({ req, empresaId: req.empresaId, dest }, { resolverEmpresa: resolverEmpresaParaCentral });
     const inteligencia = await centralEntradasService.obterInteligenciaOperacional(dest);
     return res.json(inteligencia);
   } catch (error) {
@@ -669,10 +674,16 @@ router.get('/inteligencia', async (req, res) => {
 
 router.get('/atencao', async (req, res) => {
   try {
-    const atencao = await centralEntradasService.obterItensAtencao();
+    const dest = {};
+    await resolverLeituraCentral({
+      req,
+      empresaId: req.empresaId,
+      dest
+    }, { resolverEmpresa: resolverEmpresaParaCentral });
+    const atencao = await centralEntradasService.obterItensAtencao(dest);
     return res.json(atencao);
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    return responderErroDocumentoCentral(res, error);
   }
 });
 
@@ -937,8 +948,17 @@ router.get('/homologacao/:id/exportar', comDocumentoAutorizado(async (req, res) 
 }));
 
 router.post('/sincronizar-ao-abrir', async (req, res) => {
+  let ctx;
   try {
-    const resultado = await centralEntradasService.sincronizarAoAbrir();
+    ctx = await resolverEmpresaParaCentral({ req, empresaId: req.empresaId });
+  } catch (error) {
+    return responderErroDocumentoCentral(res, error);
+  }
+  try {
+    const resultado = await centralEntradasService.sincronizarAoAbrir({
+      empresaId: ctx.empresaId,
+      usuarioId: req.user && (req.user.id || req.user.usuario_id)
+    });
     if (!resultado) {
       return res.json({
         ignorado: true,
@@ -980,11 +1000,11 @@ router.get('/fornecedor/:cnpj/estatisticas', async (req, res) => {
 router.get('/', async (req, res) => {
   try {
     const filtros = montarFiltrosQuery(req.query);
-    const ctx = await resolverEmpresaParaCentral({
+    await resolverLeituraCentral({
       req,
-      empresaId: req.empresaId
-    });
-    await aplicarFiltroLeituraEmpresasCentral({ req, ctx, dest: filtros });
+      empresaId: req.empresaId,
+      dest: filtros
+    }, { resolverEmpresa: resolverEmpresaParaCentral });
     const resultado = await centralEntradasService.listarDocumentos(filtros);
     return res.json(resultado);
   } catch (error) {
@@ -993,10 +1013,19 @@ router.get('/', async (req, res) => {
 });
 
 router.post('/sincronizar', async (req, res) => {
+  let ctx;
+  try {
+    ctx = await resolverEmpresaParaCentral({ req, empresaId: req.empresaId });
+  } catch (error) {
+    return responderErroDocumentoCentral(res, error);
+  }
   try {
     // P0.9 — /sincronizar nunca aceita autorização OPERACAO_REAL do cliente.
     // Consulta real: POST /operacao-fiscal-real/consultar-dfe
-    const resultado = await centralEntradasService.sincronizar();
+    const resultado = await centralEntradasService.sincronizar({
+      empresaId: ctx.empresaId,
+      usuarioId: req.user && (req.user.id || req.user.usuario_id)
+    });
     return res.status(statusHttpSync(resultado)).json(jsonSyncCentral(resultado));
   } catch (error) {
     return res.status(422).json({

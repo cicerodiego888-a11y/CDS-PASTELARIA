@@ -612,6 +612,12 @@ function alternarModoFiscalGlobal() {
 function handleUnauthorized() {
     localStorage.removeItem('token');
     localStorage.removeItem('user');
+    if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.limpar === 'function') {
+        CdsEmpresaContexto.limpar();
+    } else {
+        localStorage.removeItem('cds_empresa_id');
+        localStorage.removeItem('cds_empresa');
+    }
     window.location.href = '/login';
 }
 

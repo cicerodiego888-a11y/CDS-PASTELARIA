@@ -738,8 +738,93 @@
 
 .btn-finalizar,
 .btn-venda-entrega,
+.btn-venda-por-valor,
 .btn-cancelar {
   transition: transform 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease, filter 0.15s ease;
+}
+
+.pdv-card-header-acoes {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.btn-venda-por-valor-inline {
+  border: 2px solid #ea580c;
+  background: #fff7ed;
+  color: #c2410c;
+  font-weight: 800;
+  font-size: 0.78rem;
+  letter-spacing: 0.02em;
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  box-shadow: 0 1px 4px rgba(234, 88, 12, 0.18);
+}
+
+.btn-venda-por-valor-inline:hover {
+  background: #ea580c;
+  color: #fff;
+}
+
+.btn-venda-por-valor {
+  width: 100%;
+  background: linear-gradient(180deg, #f97316 0%, #ea580c 100%);
+  color: #fff;
+  font-size: 14px;
+  margin-top: auto;
+  margin-bottom: 8px;
+  padding: 12px 14px;
+  border: 2px solid #fdba74;
+  border-radius: 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  box-shadow: 0 4px 16px rgba(234, 88, 12, 0.4);
+  min-height: 52px;
+}
+
+.btn-venda-por-valor:hover {
+  background: linear-gradient(180deg, #fb923c 0%, #f97316 100%);
+  color: #fff;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(234, 88, 12, 0.48);
+}
+
+.btn-venda-por-valor:active {
+  transform: translateY(0);
+}
+
+.btn-venda-por-valor-icone {
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+.btn-venda-por-valor-titulo {
+  font-size: 0.95rem;
+  letter-spacing: 0.04em;
+}
+
+.pdv-atalho-chip--destaque {
+  background: #ea580c !important;
+  color: #fff !important;
+  border-color: #c2410c !important;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.pdv-atalho-chip--destaque:hover {
+  filter: brightness(1.08);
 }
 
 .btn-finalizar {
@@ -747,7 +832,7 @@
   background: #16a34a;
   color: white;
   font-size: 13px;
-  margin-top: auto;
+  margin-top: 0;
   padding: 8px 12px;
   border: none;
   border-radius: 10px;
@@ -1564,6 +1649,7 @@ body.modo-fiscal-ativo #btnFinalizarVendaPdv {
   .pdv-itens tbody tr,
   .btn-finalizar,
   .btn-venda-entrega,
+  .btn-venda-por-valor,
   .btn-cancelar,
   .pdv-footer-widget,
   .pdv-itens tbody tr.pdv-item-recem,
@@ -1726,7 +1812,8 @@ body.modo-fiscal-ativo #btnFinalizarVendaPdv {
 
   .btn-finalizar,
   .btn-cancelar,
-  .btn-venda-entrega {
+  .btn-venda-entrega,
+  .btn-venda-por-valor {
     min-height: 36px;
     padding: 6px 10px;
   }
@@ -1824,7 +1911,8 @@ body.modo-fiscal-ativo #btnFinalizarVendaPdv {
 
   .btn-finalizar-titulo,
   .btn-cancelar-titulo,
-  .btn-venda-entrega-titulo {
+  .btn-venda-entrega-titulo,
+  .btn-venda-por-valor-titulo {
     font-size: 0.78rem;
   }
 
@@ -2015,7 +2103,7 @@ body.modo-fiscal-ativo #btnFinalizarVendaPdv {
     gap: 2px 4px;
   }
 
-  .pdv-resumo > *:not(.btn-finalizar):not(.btn-cancelar):not(.btn-venda-entrega) {
+  .pdv-resumo > *:not(.btn-finalizar):not(.btn-cancelar):not(.btn-venda-entrega):not(.btn-venda-por-valor) {
     grid-column: 1 / -1;
   }
 
@@ -2063,7 +2151,8 @@ body.modo-fiscal-ativo #btnFinalizarVendaPdv {
 
   .btn-finalizar,
   .btn-cancelar,
-  .btn-venda-entrega {
+  .btn-venda-entrega,
+  .btn-venda-por-valor {
     min-height: 30px;
     padding: 4px 6px;
     margin-top: 2px;
@@ -2086,7 +2175,8 @@ body.modo-fiscal-ativo #btnFinalizarVendaPdv {
 
   .btn-finalizar-titulo,
   .btn-cancelar-titulo,
-  .btn-venda-entrega-titulo {
+  .btn-venda-entrega-titulo,
+  .btn-venda-por-valor-titulo {
     font-size: 0.7rem;
   }
 
@@ -2214,7 +2304,7 @@ body.modo-fiscal-ativo #btnFinalizarVendaPdv {
     gap: 2px 4px;
   }
 
-  .pdv-resumo > *:not(.btn-finalizar):not(.btn-cancelar):not(.btn-venda-entrega) {
+  .pdv-resumo > *:not(.btn-finalizar):not(.btn-cancelar):not(.btn-venda-entrega):not(.btn-venda-por-valor) {
     grid-column: 1 / -1;
   }
 
@@ -2329,13 +2419,14 @@ body.modo-fiscal-ativo #btnFinalizarVendaPdv {
 
   .btn-finalizar,
   .btn-cancelar,
-  .btn-venda-entrega {
+  .btn-venda-entrega,
+  .btn-venda-por-valor {
     min-height: 34px;
     padding: 5px 10px;
     margin-top: 4px;
   }
 
-  .btn-finalizar {
+  .btn-venda-por-valor {
     margin-top: auto;
   }
 

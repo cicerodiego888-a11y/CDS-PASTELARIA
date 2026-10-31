@@ -105,6 +105,7 @@
             empresa_id: null,
             empresa: null,
             fiscal: null,
+            estoque: null,
             geracao: 0
         };
     }
@@ -115,8 +116,17 @@
             empresa_id: id,
             empresa: null,
             fiscal: null,
+            estoque: null,
             geracao: (sessao && sessao.geracao ? sessao.geracao : 0) + 1
         };
+    }
+
+    function urlGetEstoque(empresaId) {
+        return `/api/empresas/${Number(empresaId)}/configuracao-estoque`;
+    }
+
+    function urlPutEstoque(empresaId) {
+        return `/api/empresas/${Number(empresaId)}/configuracao-estoque`;
     }
 
     function empresaANaoCarregaB(sessao, empresaId) {
@@ -669,10 +679,19 @@
             } catch (_fe) {
                 fiscal = fiscalVazio(empresaId);
             }
+            let estoque = { modo: 'AUTOMATICO', origem: 'PADRAO_LEGADO' };
+            try {
+                estoque = await jsonFetch(urlGetEstoque(empresaId), {
+                    headers: authHeaders({ 'X-Empresa-Id': String(empresaId) })
+                });
+            } catch (_ee) {
+                estoque = { modo: 'AUTOMATICO', origem: 'PADRAO_LEGADO' };
+            }
             if (geracao !== _ui.sessao.geracao) return;
             if (!empresaANaoCarregaB(_ui.sessao, empresaId)) return;
             _ui.sessao.empresa = empresa;
             _ui.sessao.fiscal = fiscal;
+            _ui.sessao.estoque = estoque;
             logEmpresas('configuracao_fiscal_carregada', {
                 empresa_id: Number(empresaId),
                 status_fiscal: fiscal && fiscal.status
@@ -680,7 +699,7 @@
             pintarDetalhe();
             logEmpresas('edicao_renderizada', {
                 empresa_id: Number(empresaId),
-                abas: ['DADOS GERAIS', 'CONFIGURAÇÃO FISCAL', 'CERTIFICADO DIGITAL']
+                abas: ['DADOS GERAIS', 'CONFIGURAÇÃO FISCAL', 'CERTIFICADO DIGITAL', 'ESTOQUE']
             });
         } catch (err) {
             if (geracao !== _ui.sessao.geracao) return;
@@ -705,9 +724,11 @@
         });
     }
 
-    function htmlPainelEdicao(empresa, fiscal, avisoStatus) {
+    function htmlPainelEdicao(empresa, fiscal, avisoStatus, estoqueCfg) {
         const e = empresa || {};
         const f = fiscal || {};
+        const est = estoqueCfg || { modo: 'AUTOMATICO' };
+        const modoManual = String(est.modo || 'AUTOMATICO').toUpperCase() === 'MANUAL';
         const cscTxt = indicadorCscVisual(f);
         const cert = indicadorCertificadoVisual(f);
         const ambProd = Number(f.ambiente) === 1 ? 'selected' : '';
@@ -736,6 +757,7 @@
                         <button type="button" class="btn btn-outline-primary" data-gef-tab="gerais">DADOS GERAIS</button>
                         <button type="button" class="btn btn-outline-primary" data-gef-tab="fiscal">CONFIGURAÇÃO FISCAL</button>
                         <button type="button" class="btn btn-outline-primary" data-gef-tab="cert">CERTIFICADO DIGITAL</button>
+                        <button type="button" class="btn btn-outline-primary" data-gef-tab="estoque">ESTOQUE</button>
                     </div>
                     ${aviso}
                     <div data-gef-pane="gerais">
@@ -801,6 +823,19 @@
                         </div>
                         <p id="gef-cert-resultado" data-gef-cert-resultado class="small mt-2 mb-0" hidden></p>
                     </div>
+                    <div data-gef-pane="estoque" hidden>
+                        <h4 class="h6">CONTROLE DE ESTOQUE</h4>
+                        <p class="text-muted small">Configuração global da empresa. No modo manual, vendas e fichas técnicas não baixam estoque automaticamente; o ajuste ocorre pela contagem física fiscal e não fiscal.</p>
+                        <div class="mb-3" style="max-width:22rem">
+                            <label class="form-label" for="gef-modo-estoque">Modo de estoque</label>
+                            <select id="gef-modo-estoque" class="form-select">
+                                <option value="AUTOMATICO" ${!modoManual ? 'selected' : ''}>AUTOMÁTICO (baixa por venda/ficha)</option>
+                                <option value="MANUAL" ${modoManual ? 'selected' : ''}>MANUAL (contagem física)</option>
+                            </select>
+                        </div>
+                        <button type="button" class="btn btn-primary" id="gef-salvar-estoque">Salvar modo de estoque</button>
+                        <button type="button" class="btn btn-outline-secondary ms-2" id="gef-abrir-contagem">Abrir contagem física</button>
+                    </div>
                 </div>
             </div>`;
     }
@@ -810,7 +845,7 @@
         const f = _ui.sessao.fiscal || {};
         const box = document.getElementById('gef-detalhe');
         if (!box) return;
-        box.innerHTML = htmlPainelEdicao(e, f, _ui.avisoStatusFiscal);
+        box.innerHTML = htmlPainelEdicao(e, f, _ui.avisoStatusFiscal, _ui.sessao.estoque);
         aplicarAba(box, _ui.aba || 'gerais');
         box.querySelectorAll('[data-gef-tab]').forEach(function (t) {
             t.addEventListener('click', function () {
@@ -819,6 +854,14 @@
         });
         document.getElementById('gef-salvar-gerais').addEventListener('click', salvarGerais);
         document.getElementById('gef-salvar-fiscal').addEventListener('click', salvarFiscal);
+        const btnEstoque = document.getElementById('gef-salvar-estoque');
+        if (btnEstoque) btnEstoque.addEventListener('click', salvarEstoque);
+        const btnContagem = document.getElementById('gef-abrir-contagem');
+        if (btnContagem) {
+            btnContagem.addEventListener('click', function () {
+                if (typeof globalThis.loadPage === 'function') globalThis.loadPage('contagem-estoque');
+            });
+        }
         document.getElementById('gef-upload-cert').addEventListener('click', enviarCertificado);
         const btnTestar = document.getElementById('gef-testar-cert');
         if (btnTestar) btnTestar.addEventListener('click', testarCertificado);
@@ -888,6 +931,32 @@
             _ui.aba = 'gerais';
             await carregarLista();
             await abrirDetalhe(id);
+        } catch (err) {
+            feedback(err.message, 'danger');
+        } finally {
+            _ui.saving = false;
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    async function salvarEstoque() {
+        if (_ui.saving) return;
+        const id = _ui.sessao.empresa_id;
+        const sel = document.getElementById('gef-modo-estoque');
+        if (!sel) return;
+        _ui.saving = true;
+        const btn = document.getElementById('gef-salvar-estoque');
+        if (btn) btn.disabled = true;
+        try {
+            const dto = await jsonFetch(urlPutEstoque(id), {
+                method: 'PUT',
+                headers: authHeaders({ 'X-Empresa-Id': String(id) }),
+                body: JSON.stringify({ modo: sel.value })
+            });
+            _ui.sessao.estoque = dto;
+            feedback('Modo de estoque salvo.', 'success');
+            _ui.aba = 'estoque';
+            pintarDetalhe();
         } catch (err) {
             feedback(err.message, 'danger');
         } finally {

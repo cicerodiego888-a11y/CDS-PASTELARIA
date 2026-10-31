@@ -494,12 +494,47 @@ function loadPedidos() {
           <button type="button" class="btn btn-outline-secondary" id="btnPedMesas" title="Cadastrar e ativar/desativar mesas">
             <i class="fas fa-chair"></i> Mesas
           </button>
+          <button type="button" class="btn btn-outline-success" id="btnPedVendaValor" title="Iniciar venda pelo valor total e quantidade de pastéis">
+            <i class="fas fa-calculator"></i> Venda por valor
+          </button>
           <button type="button" class="btn btn-primary" id="btnPedNovo" title="F2">
             <i class="fas fa-plus"></i> Novo
           </button>
         </div>
       </div>
       <div id="pedAlert"></div>
+      <div class="modal fade" id="pedVendaValorModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title">Venda por valor + pastéis</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
+            </div>
+            <div class="modal-body">
+              <p class="text-muted small mb-3">
+                Informe o valor total original do pedido e a quantidade de pastéis.
+                A composição de refrigerantes e o desconto usam o motor atual.
+              </p>
+              <div class="mb-3">
+                <label class="form-label" for="pedVvValor">Valor total (R$)</label>
+                <input type="number" class="form-control" id="pedVvValor" min="0.01" step="0.01">
+              </div>
+              <div class="mb-3">
+                <label class="form-label" for="pedVvQtd">Quantidade de pastéis</label>
+                <input type="number" class="form-control" id="pedVvQtd" min="1" step="1" value="1">
+              </div>
+              <div class="mb-0">
+                <label class="form-label" for="pedVvPastelId">Produto pastel (opcional se houver só um)</label>
+                <input type="number" class="form-control" id="pedVvPastelId" min="1" step="1" placeholder="ID do cadastro">
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+              <button type="button" class="btn btn-success" id="pedVvConfirmar">Preparar e abrir PDV</button>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <ul class="nav nav-tabs mb-3" id="pedAbas" role="tablist">
         ${ABAS.map((a) => `
@@ -2195,6 +2230,62 @@ function loadPedidos() {
   });
 
   $('#btnPedNovo').on('click', () => abrirEditor(null));
+  $('#btnPedVendaValor').on('click', () => {
+    $('#pedVvValor').val('');
+    $('#pedVvQtd').val('1');
+    $('#pedVvPastelId').val('');
+    const el = document.getElementById('pedVendaValorModal');
+    if (window.bootstrap && el) {
+      window.bootstrap.Modal.getOrCreateInstance(el).show();
+    } else {
+      $('#pedVendaValorModal').modal('show');
+    }
+  });
+  $('#pedVvConfirmar').on('click', async () => {
+    const valor = Number($('#pedVvValor').val());
+    const qtd = Number($('#pedVvQtd').val());
+    const pastelIdRaw = ($('#pedVvPastelId').val() || '').trim();
+    if (!(valor > 0) || !Number.isSafeInteger(qtd) || qtd <= 0) {
+      alertar('Informe valor total positivo e quantidade inteira de pastéis.', 'warning');
+      return;
+    }
+    const chave = novaChaveIdempotencia();
+    const corpo = {
+      valor_total: valor,
+      quantidade_pasteis: qtd
+    };
+    if (pastelIdRaw) corpo.produto_pastel_id = Number(pastelIdRaw);
+    try {
+      const resp = await fetch(`${API_URL}/pedidos/venda-por-valor-pasteis`, {
+        method: 'POST',
+        headers: Object.assign(_pedHeaders(), { 'Idempotency-Key': chave }),
+        body: JSON.stringify(corpo)
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        throw new Error(data.mensagem || data.error || `HTTP ${resp.status}`);
+      }
+      const el = document.getElementById('pedVendaValorModal');
+      if (window.bootstrap && el) {
+        window.bootstrap.Modal.getOrCreateInstance(el).hide();
+      } else {
+        $('#pedVendaValorModal').modal('hide');
+      }
+      if (data.venda_concluida) {
+        alertar(`Pedido #${data.pedido_id} já possui venda concluída (#${data.venda_id}).`, 'info');
+        await carregarLista();
+        return;
+      }
+      sessionStorage.setItem('pdvPedidoHandoff', JSON.stringify(data));
+      alertar(
+        `Pedido #${data.pedido_id} composto (desconto R$ ${Number(data.desconto || 0).toFixed(2)}). Abrindo PDV…`,
+        'success'
+      );
+      window.location.assign('/pdv');
+    } catch (err) {
+      alertar(err.message || 'Falha ao iniciar venda por valor.', 'danger');
+    }
+  });
   $('#btnPedMesas').on('click', abrirMesas);
   $('#btnPedMesaAdd').on('click', cadastrarMesa);
   $('#pedMesaNovoNumero').on('keydown', (e) => {

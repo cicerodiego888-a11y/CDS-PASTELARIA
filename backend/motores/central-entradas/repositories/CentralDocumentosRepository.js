@@ -238,7 +238,7 @@ class CentralDocumentosRepository extends IRepository {
   /**
    * @private
    */
-  _aplicarFiltroEmpresa(where, params, filtros = {}) {
+  _aplicarFiltroEmpresa(where, params, filtros = {}, coluna = 'empresa_id') {
     const ids = this._idsEmpresaFiltro(filtros);
     if (ids === null) {
       return;
@@ -248,27 +248,43 @@ class CentralDocumentosRepository extends IRepository {
       return;
     }
     if (ids.length === 1) {
-      where.push('empresa_id = ?');
+      where.push(`${coluna} = ?`);
       params.push(ids[0]);
     } else {
-      where.push(`empresa_id IN (${ids.map(() => '?').join(', ')})`);
+      where.push(`${coluna} IN (${ids.map(() => '?').join(', ')})`);
       params.push(...ids);
     }
-    where.push('empresa_id IS NOT NULL');
+    where.push(`${coluna} IS NOT NULL`);
   }
 
   /**
    * @private
    * @returns {{ sql: string, params: *[] }}
    */
-  _fragmentoSqlEmpresa(filtros = {}) {
+  _fragmentoSqlEmpresa(filtros = {}, coluna = 'empresa_id') {
     const where = [];
     const params = [];
-    this._aplicarFiltroEmpresa(where, params, filtros);
+    this._aplicarFiltroEmpresa(where, params, filtros, coluna);
     return {
       sql: where.length ? ` AND ${where.join(' AND ')}` : '',
       params
     };
+  }
+
+  /**
+   * Consultas de alerta/pendência: sem escopo autorizado não há SELECT global.
+   * @private
+   */
+  _escopoEmpresaFechado(filtros) {
+    if (filtros && (
+      Array.isArray(filtros.empresaIds)
+      || Array.isArray(filtros.empresa_ids)
+      || (filtros.empresaId != null && filtros.empresaId !== '')
+      || (filtros.empresa_id != null && filtros.empresa_id !== '')
+    )) {
+      return filtros;
+    }
+    return { empresaIds: [] };
   }
 
   /**
@@ -702,8 +718,17 @@ class CentralDocumentosRepository extends IRepository {
    * @param {number} [limite]
    * @returns {Promise<Object[]>}
    */
-  async listarPorStatus(status, limite = 50) {
-    return this.listar({ status, limite, ordenarPor: 'created_at', ordenarDirecao: 'ASC' });
+  async listarPorStatus(status, limite = 50, filtros = {}) {
+    return this.listar({
+      status,
+      limite,
+      ordenarPor: 'created_at',
+      ordenarDirecao: 'ASC',
+      empresaId: filtros.empresaId,
+      empresa_id: filtros.empresa_id,
+      empresaIds: filtros.empresaIds,
+      empresa_ids: filtros.empresa_ids
+    });
   }
 
   /**
@@ -735,9 +760,12 @@ class CentralDocumentosRepository extends IRepository {
    *
    * @returns {Promise<Object[]>}
    */
-  async listarFornecedoresNovos() {
+  async listarFornecedoresNovos(filtros = {}) {
     const sql = this._obterSql();
     await sql.whenReady();
+    const escopo = this._escopoEmpresaFechado(filtros);
+    const frag = this._fragmentoSqlEmpresa(escopo);
+    const fragDoc = this._fragmentoSqlEmpresa(escopo, 'd.empresa_id');
 
     const rows = await sql.all(
       `SELECT d.*
@@ -746,12 +774,15 @@ class CentralDocumentosRepository extends IRepository {
          SELECT cnpj_fornecedor, COUNT(*) AS total
          FROM ${CentralDocumentosRepository.TABELA}
          WHERE cnpj_fornecedor IS NOT NULL AND cnpj_fornecedor != ''
+         ${frag.sql}
          GROUP BY cnpj_fornecedor
          HAVING total = 1
        ) novos ON novos.cnpj_fornecedor = d.cnpj_fornecedor
        WHERE d.created_at >= datetime('now', 'localtime', '-30 days')
+       ${fragDoc.sql}
        ORDER BY d.created_at DESC
-       LIMIT 20`
+       LIMIT 20`,
+      [...frag.params, ...fragDoc.params]
     );
 
     return rows.map((row) => this._mapearRow(row));
@@ -762,9 +793,12 @@ class CentralDocumentosRepository extends IRepository {
    * @param {number} [limite]
    * @returns {Promise<Object[]>}
    */
-  async listarValorAcimaMediaFornecedor(multiplicador = 2, limite = 20) {
+  async listarValorAcimaMediaFornecedor(multiplicador = 2, limite = 20, filtros = {}) {
     const sql = this._obterSql();
     await sql.whenReady();
+    const escopo = this._escopoEmpresaFechado(filtros);
+    const frag = this._fragmentoSqlEmpresa(escopo);
+    const fragDoc = this._fragmentoSqlEmpresa(escopo, 'd.empresa_id');
 
     const rows = await sql.all(
       `SELECT d.*
@@ -773,14 +807,23 @@ class CentralDocumentosRepository extends IRepository {
          SELECT cnpj_fornecedor, AVG(valor_total) AS media_valor
          FROM ${CentralDocumentosRepository.TABELA}
          WHERE cnpj_fornecedor IS NOT NULL AND valor_total > 0
+         ${frag.sql}
          GROUP BY cnpj_fornecedor
          HAVING COUNT(*) >= 2
        ) med ON med.cnpj_fornecedor = d.cnpj_fornecedor
        WHERE d.valor_total > (med.media_valor * ?)
          AND d.status NOT IN (?, ?)
+         ${fragDoc.sql}
        ORDER BY d.valor_total DESC
        LIMIT ?`,
-      [multiplicador, DocumentoFiscalStatus.GRAVADA, DocumentoFiscalStatus.DUPLICADA, limite]
+      [
+        ...frag.params,
+        multiplicador,
+        DocumentoFiscalStatus.GRAVADA,
+        DocumentoFiscalStatus.DUPLICADA,
+        ...fragDoc.params,
+        limite
+      ]
     );
 
     return rows.map((row) => this._mapearRow(row));
@@ -791,17 +834,19 @@ class CentralDocumentosRepository extends IRepository {
    * @param {number} [limite]
    * @returns {Promise<Object[]>}
    */
-  async listarRevisaoParada(dias = 3, limite = 50) {
+  async listarRevisaoParada(dias = 3, limite = 50, filtros = {}) {
     const sql = this._obterSql();
     await sql.whenReady();
+    const frag = this._fragmentoSqlEmpresa(this._escopoEmpresaFechado(filtros));
 
     const rows = await sql.all(
       `SELECT * FROM ${CentralDocumentosRepository.TABELA}
        WHERE status = ?
          AND datetime(COALESCE(processado_em, created_at)) <= datetime('now', 'localtime', ? || ' days')
+         ${frag.sql}
        ORDER BY created_at ASC
        LIMIT ?`,
-      [DocumentoFiscalStatus.AGUARDANDO_REVISAO, `-${Number(dias)}`, limite]
+      [DocumentoFiscalStatus.AGUARDANDO_REVISAO, `-${Number(dias)}`, ...frag.params, limite]
     );
 
     return rows.map((row) => this._mapearRow(row));
@@ -812,18 +857,20 @@ class CentralDocumentosRepository extends IRepository {
    * @param {number} [limite]
    * @returns {Promise<Object[]>}
    */
-  async listarSincronizadasNaoProcessadas(dias = 1, limite = 50) {
+  async listarSincronizadasNaoProcessadas(dias = 1, limite = 50, filtros = {}) {
     const sql = this._obterSql();
     await sql.whenReady();
+    const frag = this._fragmentoSqlEmpresa(this._escopoEmpresaFechado(filtros));
 
     const rows = await sql.all(
       `SELECT * FROM ${CentralDocumentosRepository.TABELA}
        WHERE status = ?
          AND processado_em IS NULL
          AND datetime(created_at) <= datetime('now', 'localtime', ? || ' days')
+         ${frag.sql}
        ORDER BY created_at ASC
        LIMIT ?`,
-      [DocumentoFiscalStatus.SINCRONIZADA, `-${Number(dias)}`, limite]
+      [DocumentoFiscalStatus.SINCRONIZADA, `-${Number(dias)}`, ...frag.params, limite]
     );
 
     return rows.map((row) => this._mapearRow(row));
@@ -833,16 +880,18 @@ class CentralDocumentosRepository extends IRepository {
    * @param {number} [limite]
    * @returns {Promise<Object[]>}
    */
-  async listarComprasAbertas(limite = 50) {
+  async listarComprasAbertas(limite = 50, filtros = {}) {
     const sql = this._obterSql();
     await sql.whenReady();
+    const frag = this._fragmentoSqlEmpresa(this._escopoEmpresaFechado(filtros));
 
     const rows = await sql.all(
       `SELECT * FROM ${CentralDocumentosRepository.TABELA}
        WHERE status = ? AND (compra_id IS NULL OR compra_id = '')
+         ${frag.sql}
        ORDER BY updated_at DESC
        LIMIT ?`,
-      [DocumentoFiscalStatus.EM_COMPRA, limite]
+      [DocumentoFiscalStatus.EM_COMPRA, ...frag.params, limite]
     );
 
     return rows.map((row) => this._mapearRow(row));
@@ -852,9 +901,10 @@ class CentralDocumentosRepository extends IRepository {
    * @param {number} [limite]
    * @returns {Promise<Object[]>}
    */
-  async listarXmlInvalido(limite = 50) {
+  async listarXmlInvalido(limite = 50, filtros = {}) {
     const sql = this._obterSql();
     await sql.whenReady();
+    const frag = this._fragmentoSqlEmpresa(this._escopoEmpresaFechado(filtros));
 
     const rows = await sql.all(
       `SELECT * FROM ${CentralDocumentosRepository.TABELA}
@@ -864,9 +914,10 @@ class CentralDocumentosRepository extends IRepository {
            OR LOWER(COALESCE(status_detalhe, '')) LIKE '%parse%'
            OR xml IS NULL OR xml = ''
          )
+         ${frag.sql}
        ORDER BY updated_at DESC
        LIMIT ?`,
-      [DocumentoFiscalStatus.ERRO, limite]
+      [DocumentoFiscalStatus.ERRO, ...frag.params, limite]
     );
 
     return rows.map((row) => this._mapearRow(row));

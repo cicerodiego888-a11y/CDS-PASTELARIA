@@ -14,6 +14,7 @@ const PedidoOperacional = require('../services/pedido/PedidoOperacionalService')
 const EntradaPedido = require('../services/pedido/EntradaPedidoService');
 const { empresaIdDoReqPedido } = require('../services/pedido/empresaIdDoReqPedido');
 const { prepararComposicaoPedidoPdv } = require('../services/vendas/PedidoPdvComposicaoService');
+const { iniciarVendaPorValorPasteis } = require('../services/vendas/VendaPorValorPasteisService');
 const PedidoFaturamentoOperacaoRepository = require('../services/faturamento/PedidoFaturamentoOperacaoRepository');
 const FaturamentoService = require('../services/faturamento/FaturamentoService');
 
@@ -78,6 +79,29 @@ router.post('/', async (req, res) => {
       chaveIdempotencia: req.get('Idempotency-Key')
     });
     res.status(201).json(out);
+  } catch (err) {
+    responderErro(res, err);
+  }
+});
+
+router.post('/venda-por-valor-pasteis', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const out = await iniciarVendaPorValorPasteis({
+      db,
+      empresaId: empresaIdDoReqPedido(req),
+      operadorId: req.user?.id || null,
+      chaveIdempotencia: req.get('Idempotency-Key') || body.chave_idempotencia || null,
+      valorTotal: body.valor_total != null ? body.valor_total : body.valorTotal,
+      quantidadePasteis: body.quantidade_pasteis != null
+        ? body.quantidade_pasteis
+        : body.quantidadePasteis,
+      produtoPastelId: body.produto_pastel_id != null
+        ? body.produto_pastel_id
+        : body.produtoPastelId,
+      clienteId: body.cliente_id != null ? body.cliente_id : body.clienteId
+    });
+    res.status(out.pedido_repetido || out.recuperacao ? 200 : 201).json(out);
   } catch (err) {
     responderErro(res, err);
   }

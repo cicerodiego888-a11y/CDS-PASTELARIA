@@ -47,6 +47,7 @@ function statusDeErroEmpresa(err) {
     code === 'EMPRESA_INATIVA'
     || code === 'EMPRESA_CENTRAL_INATIVA'
     || code === 'EMPRESA_CENTRAL_AUSENTE'
+    || code === 'EMPRESA_NAO_AUTORIZADA'
     || code === 'EMPRESA_CENTRAL_AMBIGUA'
     || code === 'DOCUMENTO_EMPRESA_AMBIGUA'
     || code === 'EMPRESA_OPERACIONAL_AUSENTE'
@@ -65,6 +66,33 @@ function statusDeErroEmpresa(err) {
 
 function normalizarCnpj(valor) {
   return String(valor || '').replace(/\D/g, '');
+}
+
+/**
+ * Identidade só de req.user. Empresa do header não autoriza sozinha.
+ * Sem req (resolução interna já delimitada), o vínculo não é reaberto aqui.
+ */
+async function exigirVinculoUsuarioDaRequisicao(req, empresaId, deps, db) {
+  if (!req) return;
+  const UsuarioEmpresaService = deps.UsuarioEmpresaService
+    || require('../empresas/UsuarioEmpresaService');
+  try {
+    await UsuarioEmpresaService.exigirEmpresaAutorizada(req.user, empresaId, {
+      db: db || req.db || deps.db
+    });
+  } catch (err) {
+    if (err && (err.code === 'EMPRESA_NAO_AUTORIZADA' || err.code === 'USUARIO_OBRIGATORIO')) {
+      throw erroCentralEmpresa(
+        'EMPRESA_NAO_AUTORIZADA',
+        err.code === 'USUARIO_OBRIGATORIO'
+          ? 'Usuário autenticado é obrigatório para consultar a empresa.'
+          : 'Usuário não está autorizado a usar esta empresa.',
+        403,
+        { empresa_id: empresaId }
+      );
+    }
+    throw err;
+  }
 }
 
 /**
@@ -121,6 +149,7 @@ async function resolverEmpresaParaCentral(params = {}, deps = {}) {
         { empresa_id: empresaId }
       );
     }
+    await exigirVinculoUsuarioDaRequisicao(params.req, empresaId, deps, db);
     return {
       empresaId,
       cnpj: normalizarCnpj(empresa.cnpj),
@@ -156,6 +185,7 @@ async function resolverEmpresaParaCentral(params = {}, deps = {}) {
         { cnpj, empresa_id: empresa && empresa.id }
       );
     }
+    await exigirVinculoUsuarioDaRequisicao(params.req, Number(empresa.id), deps, db);
     return {
       empresaId: Number(empresa.id),
       cnpj,
@@ -425,7 +455,7 @@ async function aplicarFiltroLeituraEmpresasCentral(params = {}, deps = {}) {
     || require('../empresas/UsuarioEmpresaService');
   let lista;
   try {
-    lista = await UsuarioEmpresaService.listarEmpresasPermitidas(req.user || req.usuario, {
+    lista = await UsuarioEmpresaService.listarEmpresasPermitidas(req.user, {
       db: req.db || deps.db
     });
   } catch (err) {
@@ -450,6 +480,48 @@ async function aplicarFiltroLeituraEmpresasCentral(params = {}, deps = {}) {
   return { visao: 'todas', empresaIds: ids };
 }
 
+/**
+ * Leitura da Central. Visão consolidada autorizada não exige X-Empresa-Id.
+ * Visão individual continua em resolverEmpresaParaCentral, com vínculo do usuário.
+ */
+async function resolverLeituraCentral(params = {}, deps = {}) {
+  const req = params.req || {};
+  const dest = params.dest;
+  if (!dest || typeof dest !== 'object') {
+    throw erroCentralEmpresa(
+      'EMPRESA_CENTRAL_AUSENTE',
+      'Destino de filtro empresarial ausente.',
+      500
+    );
+  }
+
+  const contrato = deps.contrato
+    || await ContratoOperacionalService.montarContratoOperacional(deps);
+  const modo = contrato.modo_operacional;
+
+  if (queryPedeEscopoTodas(req.query) && modo !== ModoOperacionalGlobal.EMPRESA_SIMPLES) {
+    const ctx = {
+      empresaId: null,
+      cnpj: null,
+      modo,
+      origem: 'LEITURA_CONSOLIDADA',
+      contrato
+    };
+    const visao = await aplicarFiltroLeituraEmpresasCentral({ req, ctx, dest }, deps);
+    return { ctx, visao };
+  }
+
+  const resolverEmpresa = typeof deps.resolverEmpresa === 'function'
+    ? deps.resolverEmpresa
+    : resolverEmpresaParaCentral;
+  const ctx = await resolverEmpresa({
+    req,
+    empresaId: params.empresaId != null ? params.empresaId : req.empresaId
+  }, deps);
+  const visao = await aplicarFiltroLeituraEmpresasCentral({ req, ctx, dest }, deps);
+  return { ctx, visao };
+}
+
 module.exports = {
   resolverEmpresaParaCentral,
   listarAlvosSincronizacaoCentral,
@@ -464,5 +536,6 @@ module.exports = {
   statusDeErroEmpresa,
   normalizarCnpj,
   aplicarFiltroLeituraEmpresasCentral,
-  queryPedeEscopoTodas
+  queryPedeEscopoTodas,
+  resolverLeituraCentral
 };

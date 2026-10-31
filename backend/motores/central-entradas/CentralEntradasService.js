@@ -75,8 +75,8 @@ class CentralEntradasService {
     return this._orchestrator.sincronizar(opcoes);
   }
 
-  sincronizarAoAbrir() {
-    return this._orchestrator.sincronizarAoAbrir();
+  sincronizarAoAbrir(opcoes = {}) {
+    return this._orchestrator.sincronizarAoAbrir(opcoes);
   }
 
   obterStatusOperacaoFiscalReal(empresaId) {
@@ -160,8 +160,8 @@ class CentralEntradasService {
     return this._orchestrator.vincularCompra(documentoId, compraId, opcoes);
   }
 
-  listarAlertas() {
-    return this._orchestrator.listarAlertas();
+  listarAlertas(opcoes = {}) {
+    return this._orchestrator.listarAlertas(opcoes);
   }
 
   obterPendencias(opcoes = {}) {

@@ -6,6 +6,7 @@
 
 const { DocumentoFiscalStatus } = require('../core/DocumentoFiscalStatus');
 const CentralAlertasService = require('./CentralAlertasService');
+const { escopoEmpresaConsulta } = require('./CentralAlertasService');
 
 class CentralOperacionalDashboardService {
   /**
@@ -32,7 +33,7 @@ class CentralOperacionalDashboardService {
    */
   async obterIndicadores(opcoes = {}) {
     const alertasResultado = opcoes.alertasResultado
-      ?? await this._alertasService.listarAlertas();
+      ?? await this._alertasService.listarAlertas(escopoEmpresaConsulta(opcoes));
 
     const filtrosPeriodo = {
       ano: opcoes.ano,

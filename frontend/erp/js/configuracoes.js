@@ -1399,6 +1399,25 @@ async function salvarConfiguracoesAvancadas() {
             }
         }
 
+        const radioPdvModelo = document.querySelector('input[name="pdvModeloEmpresa"]:checked');
+        const pdvModeloEmpresa = String(
+            (radioPdvModelo && radioPdvModelo.value)
+            || servidorAtual.pdv_modelo_empresa
+            || 'MULTIPLAS'
+        ).toUpperCase() === 'UNICA' ? 'UNICA' : 'MULTIPLAS';
+        const pdvEmpresaRaw = $('#cfgPdvEmpresaId').length
+            ? String($('#cfgPdvEmpresaId').val() || '').trim()
+            : String(servidorAtual.pdv_empresa_id || '').trim();
+        if (pdvModeloEmpresa === 'UNICA' && !pdvEmpresaRaw) {
+            showNotification(
+                'Modo PDV Empresa única exige selecionar a empresa do PDV (ex.: Matriz).',
+                'warning'
+            );
+            if (typeof ativarCategoriaCentroCfg === 'function') ativarCategoriaCentroCfg('modulosLicenciados');
+            document.getElementById('cfgPdvEmpresaId')?.focus();
+            return;
+        }
+
         if (modoOperacionalGlobal !== modoAnterior) {
             const textoSimples = modoOperacionalGlobal === 'EMPRESA_SIMPLES'
                 ? 'O modo Empresa Simples opera com um único CNPJ. Se houver várias empresas ativas, escolha a empresa operacional no campo da tela Empresa.\n\n'
@@ -1417,6 +1436,10 @@ async function salvarConfiguracoesAvancadas() {
             modo_operacional_global: modoOperacionalGlobal,
             confirmacao_modo_operacional: confirmacaoModoOperacional,
             empresa_operacional_id: empresaOperacionalRaw !== '' ? Number(empresaOperacionalRaw) : null,
+            pdv_modelo_empresa: pdvModeloEmpresa,
+            pdv_empresa_id: pdvModeloEmpresa === 'UNICA' && pdvEmpresaRaw !== ''
+                ? Number(pdvEmpresaRaw)
+                : null,
             tipoImplantacao,
             modo_confirmacao_fiscal: modoConfirmacaoFiscal,
             porta,

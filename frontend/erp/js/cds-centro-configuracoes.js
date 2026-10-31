@@ -193,6 +193,10 @@
 
     const modoOperacionalGlobal = String(config.modo_operacional_global || 'EMPRESA_SIMPLES').toUpperCase();
     const empresaOperacionalId = config.empresa_operacional_id != null ? Number(config.empresa_operacional_id) : '';
+    const pdvModeloEmpresa = String(config.pdv_modelo_empresa || 'MULTIPLAS').toUpperCase() === 'UNICA'
+      ? 'UNICA'
+      : 'MULTIPLAS';
+    const pdvEmpresaId = config.pdv_empresa_id != null ? Number(config.pdv_empresa_id) : '';
 
     return `
       <div class="cds-cfg-pane is-active" data-cfg-pane="empresa">
@@ -596,6 +600,31 @@
             </div>
           </div>
         `, 'módulos pdv histórico vendas pedidos expedição entregas nfe nfce')}
+        ${card('<i class="fas fa-store"></i> Modelo de empresa do PDV', `
+          <p class="cds-cfg-hint mb-3">Exclusivo do PDV. Não altera o modo operacional global da instalação.</p>
+          <div class="form-check mb-2" data-cfg-search="pdv múltiplas empresas">
+            <input class="form-check-input" type="radio" name="pdvModeloEmpresa" id="pdvModeloMultiplas" value="MULTIPLAS" ${pdvModeloEmpresa === 'MULTIPLAS' ? 'checked' : ''}>
+            <label class="form-check-label" for="pdvModeloMultiplas"><strong>Múltiplas empresas</strong></label>
+            <div class="small text-muted ms-4">Mantém a seleção e o vínculo atuais do PDV.</div>
+          </div>
+          <div class="form-check mb-3" data-cfg-search="pdv empresa única matriz">
+            <input class="form-check-input" type="radio" name="pdvModeloEmpresa" id="pdvModeloUnica" value="UNICA" ${pdvModeloEmpresa === 'UNICA' ? 'checked' : ''}>
+            <label class="form-check-label" for="pdvModeloUnica"><strong>Empresa única</strong></label>
+            <div class="small text-muted ms-4">Todas as vendas do PDV usam a empresa selecionada (ex.: Matriz).</div>
+          </div>
+          <div id="cfgPdvEmpresaWrap" class="row g-2 ${pdvModeloEmpresa === 'UNICA' ? '' : 'd-none'}">
+            <div class="col-md-8" data-cfg-search="pdv empresa id cnpj">
+              <label for="cfgPdvEmpresaId" class="cds-cfg-label">Empresa do PDV</label>
+              <select class="form-select form-select-sm" id="cfgPdvEmpresaId"
+                data-empresa-salva="${pdvEmpresaId ? escapeHtml(String(pdvEmpresaId)) : ''}">
+                ${pdvEmpresaId
+                  ? `<option value="${escapeHtml(String(pdvEmpresaId))}" selected>Empresa #${escapeHtml(String(pdvEmpresaId))}</option>`
+                  : '<option value="">Selecione a empresa do PDV</option>'}
+              </select>
+              <div class="form-text">Obrigatório no modo Empresa única. Estoque e CNPJ fiscal seguem esta empresa.</div>
+            </div>
+          </div>
+        `, 'pdv modelo empresa única múltiplas')}
       </div>
 
       <div class="cds-cfg-pane" data-cfg-pane="licenciamentoCds">
@@ -1075,6 +1104,45 @@
     }
   }
 
+  async function popularSelectPdvEmpresa() {
+    const sel = document.getElementById('cfgPdvEmpresaId');
+    if (!sel) return;
+    const salvo = String(sel.getAttribute('data-empresa-salva') || '').trim();
+    let lista = [];
+    try {
+      if (global.CdsEmpresaContexto && typeof global.CdsEmpresaContexto.listarDisponiveis === 'function') {
+        lista = await global.CdsEmpresaContexto.listarDisponiveis();
+      }
+    } catch (_e) {
+      lista = [];
+    }
+    if (!Array.isArray(lista)) lista = [];
+    sel.innerHTML = ['<option value="">Selecione a empresa do PDV</option>']
+      .concat(lista.map((e) => {
+        const id = Number(e && e.id);
+        if (!Number.isInteger(id) || id <= 0) return '';
+        return `<option value="${id}">${escapeHtml(rotuloEmpresaOperacionalCfg(e))}</option>`;
+      }))
+      .join('');
+    if (salvo && lista.some((e) => Number(e.id) === Number(salvo))) {
+      sel.value = String(Number(salvo));
+    } else if (lista.length === 1) {
+      sel.value = String(Number(lista[0].id));
+    } else {
+      sel.value = '';
+    }
+  }
+
+  function aplicarEstadoPdvModeloEmpresa() {
+    const selecionado = String(
+      document.querySelector('input[name="pdvModeloEmpresa"]:checked')?.value || 'MULTIPLAS'
+    ).toUpperCase();
+    const wrap = document.getElementById('cfgPdvEmpresaWrap');
+    if (wrap) {
+      wrap.classList.toggle('d-none', selecionado !== 'UNICA');
+    }
+  }
+
   function wireShell() {
     document.querySelectorAll('[data-cfg-nav]').forEach((btn) => {
       btn.addEventListener('click', () => ativarCategoria(btn.getAttribute('data-cfg-nav')));
@@ -1084,6 +1152,12 @@
       input.addEventListener('change', aplicarEstadoModoOperacionalGlobal);
     });
     aplicarEstadoModoOperacionalGlobal();
+
+    document.querySelectorAll('input[name="pdvModeloEmpresa"]').forEach((input) => {
+      input.addEventListener('change', aplicarEstadoPdvModeloEmpresa);
+    });
+    aplicarEstadoPdvModeloEmpresa();
+    popularSelectPdvEmpresa();
 
     const search = document.getElementById('cdsCfgSearch');
     if (search) {
@@ -1346,6 +1420,7 @@
 
     wireShell();
     void popularSelectEmpresaOperacional();
+    void popularSelectPdvEmpresa();
     atualizarPainelExecutivo();
     if (typeof global.setupBackupManualListener === 'function') {
       global.setupBackupManualListener();

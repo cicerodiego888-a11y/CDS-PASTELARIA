@@ -61,7 +61,19 @@ function carregarUltimoAcessoLogin() {
   window.location.replace(destino);
 })();
 
+function invalidarContextoEmpresaDaSessaoAnterior() {
+  try {
+    if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.limpar === 'function') {
+      CdsEmpresaContexto.limpar();
+      return;
+    }
+    localStorage.removeItem('cds_empresa_id');
+    localStorage.removeItem('cds_empresa');
+  } catch (_) { /* sessão anterior não pode autorizar o próximo usuário */ }
+}
+
 function concluirPosLogin(data) {
+  invalidarContextoEmpresaDaSessaoAnterior();
   localStorage.setItem('token', data.token);
   localStorage.setItem('user', JSON.stringify(data.user));
 
@@ -131,6 +143,7 @@ $('#loginForm').on('submit', function (e) {
     data: JSON.stringify({ username, password }),
     success: function (data) {
       salvarUltimoAcessoLogin(username, password);
+      invalidarContextoEmpresaDaSessaoAnterior();
       localStorage.setItem('token', data.token);
       localStorage.setItem('user', JSON.stringify(data.user));
       publicarLoginDuration(true);

@@ -75,6 +75,7 @@ const CDS_ERP_PAGE_SCRIPTS = Object.freeze({
         '/erp/js/configuracoes.js'
     ],
     empresas: [cdsErpAsset('/erp/js/gestao-empresas-fiscal.js')],
+    'contagem-estoque': [cdsErpAsset('/erp/js/contagem-estoque.js')],
     'importacao-inicial-produtos': [
         '/erp/js/importacao-inicial-estado.js',
         '/erp/js/importacao-inicial-produtos.js'
@@ -379,6 +380,10 @@ async function loadPage(page) {
             return typeof loadProdutos === 'function'
                 ? loadProdutos()
                 : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar produtos.</div>');
+        case 'contagem-estoque':
+            return typeof loadContagemEstoque === 'function'
+                ? loadContagemEstoque()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar contagem de estoque.</div>');
         case 'insumos':
             return typeof loadInsumos === 'function'
                 ? loadInsumos()
