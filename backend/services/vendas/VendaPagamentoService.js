@@ -31,6 +31,11 @@ const {
   exigirVendaDaEmpresa,
   responderErroEmpresaVenda
 } = require('./VendaEmpresaContextoService');
+const {
+  avaliarReferenciaRecomposicao,
+  ambienteTesteRecomposicaoReferencia,
+  gravarReferenciaRecomposicao
+} = require('./PagamentoSequencialComposicaoService');
 
 /**
  * RC8.2 — carrega MPFC e entrega política aos consumidores.
@@ -986,6 +991,66 @@ db.all(`
 });
 }
 
+function arredondarCentavosAcrescimo(valor) {
+  return Math.round((Number(valor) + Number.EPSILON) * 100) / 100;
+}
+
+function subtotalComercialDoItem(item) {
+  if (item && item.subtotal != null && item.subtotal !== '') {
+    return Number(item.subtotal);
+  }
+  return Number(item && item.preco_unitario || 0) * Number(item && item.quantidade || 0);
+}
+
+/**
+ * O acréscimo gravado é o que fecha a identidade comercial já aceita:
+ * total = subtotal dos itens - desconto + acréscimo + valor_outros.
+ * Valor enviado fora dessa identidade é recusado. O total comercial não é recalculado.
+ */
+function resolverAcrescimoPersistido({ itens, desconto, acrescimo, total, valorOutros }) {
+  const informadoBruto = acrescimo == null || acrescimo === '' ? 0 : Number(acrescimo);
+  if (!Number.isFinite(informadoBruto) || informadoBruto < 0) {
+    const err = new Error('Acréscimo inválido.');
+    err.statusCode = 400;
+    err.code = 'ACRESCIMO_INVALIDO';
+    throw err;
+  }
+  const informado = arredondarCentavosAcrescimo(informadoBruto);
+  const subtotal = arredondarCentavosAcrescimo(
+    (Array.isArray(itens) ? itens : []).reduce((soma, item) => soma + subtotalComercialDoItem(item), 0)
+  );
+  const desc = arredondarCentavosAcrescimo(Math.max(0, Number(desconto || 0)));
+  const outros = arredondarCentavosAcrescimo(Math.max(0, Number(valorOutros || 0)));
+  const totalArred = arredondarCentavosAcrescimo(total);
+  if (!(subtotal > 0)) {
+    if (informado > 0.009) {
+      const err = new Error('O acréscimo não confere com o total comercial da venda.');
+      err.statusCode = 400;
+      err.code = 'ACRESCIMO_DIVERGENTE';
+      throw err;
+    }
+    return 0;
+  }
+  const derivado = arredondarCentavosAcrescimo(totalArred - subtotal + desc - outros);
+  if (derivado < -0.009) {
+    if (informado > 0.009) {
+      const err = new Error('O acréscimo não confere com o total comercial da venda.');
+      err.statusCode = 400;
+      err.code = 'ACRESCIMO_DIVERGENTE';
+      throw err;
+    }
+    return 0;
+  }
+  const persistido = Math.max(0, derivado);
+  if (Math.abs(persistido - informado) > 0.009) {
+    const err = new Error('O acréscimo não confere com o total comercial da venda.');
+    err.statusCode = 400;
+    err.code = 'ACRESCIMO_DIVERGENTE';
+    throw err;
+  }
+  return persistido;
+}
+
 function vendaExigeAutorizacaoDescontoManual(body = {}) {
   if (Number(body.desconto || 0) > 0) return true;
   const itens = Array.isArray(body.itens) ? body.itens : [];
@@ -1160,6 +1225,41 @@ if (!itens || !Array.isArray(itens) || itens.length === 0) {
 if (Number.isNaN(totalNum) || totalNum <= 0) {
   res.status(400).json({ error: 'Total inválido.' });
   return;
+}
+
+let acrescimoPersistido;
+try {
+  acrescimoPersistido = resolverAcrescimoPersistido({
+    itens,
+    desconto,
+    acrescimo,
+    total: totalNum,
+    valorOutros
+  });
+} catch (errAcrescimo) {
+  return res.status(errAcrescimo.statusCode || 400).json({
+    error: errAcrescimo.message,
+    codigo: errAcrescimo.code || 'ACRESCIMO_INVALIDO'
+  });
+}
+
+let referenciaRecomposicao = null;
+if ((req.body && req.body.pagamento_sequencial === true) || ambienteTesteRecomposicaoReferencia()) {
+  try {
+    const pagamentosReferencia = pagamentosVenda.length
+      ? pagamentosVenda
+      : (forma_pagamento ? [{ forma_pagamento, valor: totalNum }] : []);
+    referenciaRecomposicao = avaliarReferenciaRecomposicao({
+      total: totalNum,
+      pagamentos: pagamentosReferencia,
+      itens
+    });
+  } catch (errComposicao) {
+    return res.status(errComposicao.statusCode || 400).json({
+      error: errComposicao.message,
+      codigo: errComposicao.code || 'COMPOSICAO_INVALIDA'
+    });
+  }
 }
 
 if (formaGeraParcelasFinanceiras(forma_pagamento) && !cliente_id) {
@@ -1490,6 +1590,175 @@ db.all(`
     }
   }
 
+  const fiscalReferencia = Number(referenciaRecomposicao && referenciaRecomposicao.valor_fiscal_referencia || 0);
+  const naoFiscalReferencia = Number(referenciaRecomposicao && referenciaRecomposicao.valor_nao_fiscal_referencia || 0);
+  const somenteDinheiroConfirmado = vendaFiscal === true
+    && referenciaRecomposicao
+    && referenciaRecomposicao.recomposicao_executada === true
+    && fiscalReferencia <= 0.009
+    && naoFiscalReferencia > 0.009
+    && Math.abs(naoFiscalReferencia - totalNum) <= 0.02;
+  if (somenteDinheiroConfirmado) {
+    resultadoParaFechamento = {
+      sucesso: true,
+      valorFiscalLiquido: 0,
+      valorFiscalEfetivo: 0,
+      valorNaoFiscalLiquido: totalNum,
+      valorNaoFiscal: totalNum,
+      itens: (itens || []).map((item) => ({
+        ...item,
+        quantidade_fiscal: 0,
+        valor_fiscal: 0,
+        quantidade_nao_fiscal: Number(item.quantidade || 0),
+        valor_nao_fiscal: Number(item.subtotal || 0)
+      }))
+    };
+  }
+
+  if (
+    vendaFiscal === true
+    && referenciaRecomposicao
+    && referenciaRecomposicao.recomposicao_executada === true
+    && fiscalReferencia > 0.009
+    && naoFiscalReferencia > 0.009
+  ) {
+    const { integrarPagamentoRecomposicao } = require('./PagamentoRecomposicaoDocumentoService');
+    const documento = await integrarPagamentoRecomposicao({
+      total: totalNum,
+      pagamentos: pagamentosVenda,
+      itens,
+      empresaId: empresaIdVenda
+    }, { db });
+    const somaCampo = (linhas, campo) => Math.round((linhas || []).reduce((total, linha) => (
+      total + Number(linha && linha[campo] || 0)
+    ), 0) * 100) / 100;
+    const autorizado = documento
+      && documento.bloqueado !== true
+      && Array.isArray(documento.itens_fiscais)
+      && documento.itens_fiscais.length > 0;
+    if (autorizado) {
+      const porId = new Map();
+      for (const item of itens || []) {
+        const id = Number(item.produto_id);
+        porId.set(id, {
+          ...item,
+          produto_id: id,
+          quantidade_fiscal: 0,
+          valor_fiscal: 0,
+          quantidade_nao_fiscal: 0,
+          valor_nao_fiscal: 0
+        });
+      }
+      for (const linha of documento.itens_fiscais) {
+        const id = Number(linha.produto_id);
+        const base = porId.get(id) || { produto_id: id, preco_unitario: linha.preco_unitario };
+        base.quantidade_fiscal = Number(linha.quantidade_fiscal || 0);
+        base.valor_fiscal = Number(linha.valor_fiscal || 0);
+        base.preco_unitario = base.preco_unitario || linha.preco_unitario;
+        base.produto_nome = base.produto_nome || linha.produto_nome;
+        base.produto_ncm = base.produto_ncm || linha.produto_ncm || linha.ncm;
+        porId.set(id, base);
+      }
+      for (const linha of documento.itens_nao_fiscais || []) {
+        const id = Number(linha.produto_id);
+        const base = porId.get(id) || { produto_id: id, preco_unitario: linha.preco_unitario };
+        base.quantidade_nao_fiscal = Number(linha.quantidade_nao_fiscal || 0);
+        base.valor_nao_fiscal = Number(linha.valor_nao_fiscal || 0);
+        porId.set(id, base);
+      }
+      const mesclados = [...porId.values()].map((item) => ({
+        ...item,
+        quantidade: Number(item.quantidade || 0) || (Number(item.quantidade_fiscal || 0) + Number(item.quantidade_nao_fiscal || 0)),
+        subtotal: item.subtotal != null
+          ? item.subtotal
+          : Math.round((Number(item.valor_fiscal || 0) + Number(item.valor_nao_fiscal || 0)) * 100) / 100
+      }));
+      const somaFiscal = somaCampo(mesclados, 'valor_fiscal');
+      const somaNao = somaCampo(mesclados, 'valor_nao_fiscal');
+      if (Math.abs(somaFiscal - Number(referenciaRecomposicao.valor_fiscal_referencia)) <= 0.02) {
+        resultadoParaFechamento = {
+          ...resultadoParaFechamento,
+          sucesso: true,
+          valorFiscalLiquido: somaFiscal,
+          valorFiscalEfetivo: somaFiscal,
+          valorNaoFiscalLiquido: somaNao,
+          valorNaoFiscal: somaNao,
+          itens: mesclados
+        };
+        req.__distribuicaoReferenciaAplicada = true;
+      } else {
+        req.__bloqueioDocumentoFiscal = {
+          codigo: 'TOTAL_FISCAL_DIVERGENTE_DA_REFERENCIA',
+          motivo: 'A distribuição autorizada não fecha a referência fiscal.'
+        };
+      }
+    }
+    if (!req.__distribuicaoReferenciaAplicada) {
+      req.__bloqueioDocumentoFiscal = req.__bloqueioDocumentoFiscal || {
+        codigo: documento && documento.codigo ? documento.codigo : 'DISTRIBUICAO_NAO_AUTORIZADA',
+        motivo: documento && documento.motivo
+          ? documento.motivo
+          : 'A distribuição fiscal não foi autorizada.'
+      };
+      resultadoParaFechamento = {
+        sucesso: true,
+        valorFiscalLiquido: 0,
+        valorFiscalEfetivo: 0,
+        valorNaoFiscalLiquido: totalNum,
+        valorNaoFiscal: totalNum,
+        itens: (itens || []).map((item) => ({
+          ...item,
+          quantidade_fiscal: 0,
+          valor_fiscal: 0,
+          quantidade_nao_fiscal: 0,
+          valor_nao_fiscal: 0
+        }))
+      };
+    }
+  }
+
+  if (vendaFiscal === true && !req.__distribuicaoReferenciaAplicada && !req.__bloqueioDocumentoFiscal) {
+    const { calcularReferenciasConfirmadas } = require('./PagamentoSequencialComposicaoService');
+    const classificado = calcularReferenciasConfirmadas(pagamentosVenda);
+    const fiscalClassificado = Number(classificado.valor_fiscal_referencia || 0);
+    const naoClassificado = Number(classificado.valor_nao_fiscal_referencia || 0);
+    if (fiscalClassificado > 0.009 && naoClassificado > 0.009) {
+      req.__bloqueioDocumentoFiscal = {
+        codigo: 'RECOMPOSICAO_NAO_AUTORIZADA',
+        motivo: 'A venda tem recebimento fiscal e não fiscal, mas não há distribuição autorizada. A NFC-e não foi montada.'
+      };
+      resultadoParaFechamento = {
+        sucesso: true,
+        valorFiscalLiquido: 0,
+        valorFiscalEfetivo: 0,
+        valorNaoFiscalLiquido: totalNum,
+        valorNaoFiscal: totalNum,
+        itens: (itens || []).map((item) => ({
+          ...item,
+          quantidade_fiscal: 0,
+          valor_fiscal: 0,
+          quantidade_nao_fiscal: 0,
+          valor_nao_fiscal: 0
+        }))
+      };
+    } else if (fiscalClassificado <= 0.009 && naoClassificado > 0.009 && Math.abs(naoClassificado - totalNum) <= 0.02) {
+      resultadoParaFechamento = {
+        sucesso: true,
+        valorFiscalLiquido: 0,
+        valorFiscalEfetivo: 0,
+        valorNaoFiscalLiquido: totalNum,
+        valorNaoFiscal: totalNum,
+        itens: (itens || []).map((item) => ({
+          ...item,
+          quantidade_fiscal: 0,
+          valor_fiscal: 0,
+          quantidade_nao_fiscal: Number(item.quantidade || 0),
+          valor_nao_fiscal: Number(item.subtotal || 0)
+        }))
+      };
+    }
+  }
+
   if (!resultadoParaFechamento.sucesso) {
     const produtoErro = resultadoParaFechamento.item
       ? produtoMap[resultadoParaFechamento.item.produto_id]
@@ -1609,6 +1878,12 @@ db.all(`
   }
 
   async function vincularTransacoesTef(transacaoDb, vendaId, resultadoFiscal) {
+    if (process.env.CDS_TEF_VINCULO_FALHA === '1') {
+      const err = new Error('Falha controlada na vinculação TEF.');
+      err.code = 'TEF_VINCULO_FALHA';
+      err.statusCode = 409;
+      throw err;
+    }
     const transacoesTefParaVincular = resultadoFiscal?.transacoes || [];
     if (tef && tef.transacao_id) {
       transacoesTefParaVincular.push(tef.transacao_id);
@@ -1619,14 +1894,49 @@ db.all(`
     });
 
     for (const transacaoId of new Set(transacoesTefParaVincular)) {
-      try {
-        await runSqlite(transacaoDb, `
-          UPDATE tef_transacoes SET venda_id = ? WHERE id = ?
-        `, [vendaId, transacaoId]);
-      } catch (tefErr) {
-        console.error('Erro ao vincular TEF à venda:', tefErr);
+      const resultado = await runSqlite(transacaoDb, `
+        UPDATE tef_transacoes
+        SET venda_id = ?, atualizado_em = datetime('now')
+        WHERE id = ? AND venda_id IS NULL AND empresa_id = ?
+      `, [vendaId, transacaoId, empresaIdVenda]);
+      if (!resultado || Number(resultado.changes) !== 1) {
+        const err = new Error('Transação TEF não pôde ser vinculada à venda.');
+        err.code = 'TEF_VINCULO_RECUSADO';
+        err.statusCode = 409;
+        throw err;
       }
     }
+  }
+
+  function confirmacaoManualExplicitaNoPedido(pagamento) {
+    const flag = req.body && req.body.confirmacao_fiscal_manual;
+    if (flag === true || flag === 'true' || flag === 1 || flag === '1') return true;
+    if (!pagamento) return false;
+    return pagamento.confirmacao_manual === 1
+      || pagamento.confirmacao_manual === true
+      || pagamento.confirmacao_manual === '1'
+      || pagamento.confirmacao_modalidade === 'manual';
+  }
+
+  function camposConfirmacaoPagamento(pagamento, tefId) {
+    const operadorId = req.user && (req.user.id != null ? req.user.id : req.user.usuario_id);
+    if (tefId) {
+      return {
+        modalidade: 'tef',
+        manual: 0,
+        operadorId: operadorId || null,
+        confirmadoEm: null
+      };
+    }
+    if (!confirmacaoManualExplicitaNoPedido(pagamento)) {
+      return { modalidade: null, manual: 0, operadorId: null, confirmadoEm: null };
+    }
+    return {
+      modalidade: 'manual',
+      manual: 1,
+      operadorId: operadorId || null,
+      confirmadoEm: agoraLocalBrasil()
+    };
   }
 
   async function inserirPagamentosDaVenda(transacaoDb, vendaId) {
@@ -1634,39 +1944,78 @@ db.all(`
       INSERT INTO venda_pagamentos (
         venda_id, forma_pagamento, valor, tef_transacao_id, tef_nsu,
         tef_autorizacao, tef_bandeira, tef_adquirente,
-        tef_comprovante_cliente, tef_comprovante_estabelecimento
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        tef_comprovante_cliente, tef_comprovante_estabelecimento,
+        confirmacao_modalidade, confirmacao_manual, operador_id, confirmado_em
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     if (pagamentosVenda.length > 0) {
       for (const pagamento of pagamentosVenda) {
+        const tefId = pagamento.tef_transacao_id || pagamento.tef?.transacao_id || null;
+        const confirmacao = camposConfirmacaoPagamento(pagamento, tefId);
+        let nsu = pagamento.nsu || pagamento.tef?.nsu || null;
+        let autorizacao = pagamento.autorizacao || pagamento.tef?.autorizacao || null;
+        let bandeira = pagamento.bandeira || pagamento.tef?.bandeira || null;
+        let adquirente = pagamento.adquirente || pagamento.tef?.adquirente || null;
+        if (tefId) {
+          const row = await getSqlite(
+            transacaoDb,
+            `SELECT nsu, autorizacao FROM tef_transacoes WHERE id = ?`,
+            [tefId]
+          );
+          if (!row) {
+            const err = new Error('Transação TEF não encontrada na gravação do pagamento.');
+            err.code = 'TEF_VINCULO_RECUSADO';
+            err.statusCode = 409;
+            throw err;
+          }
+          nsu = row.nsu || null;
+          autorizacao = row.autorizacao || null;
+        } else if (confirmacao.manual === 1) {
+          nsu = null;
+          autorizacao = null;
+          bandeira = null;
+          adquirente = null;
+        }
         await runSqlite(transacaoDb, sql, [
           vendaId,
           pagamento.forma_pagamento,
           Number(pagamento.valor || 0),
-          pagamento.tef_transacao_id || pagamento.tef?.transacao_id || null,
-          pagamento.nsu || pagamento.tef?.nsu || null,
-          pagamento.autorizacao || pagamento.tef?.autorizacao || null,
-          pagamento.bandeira || pagamento.tef?.bandeira || null,
-          pagamento.adquirente || pagamento.tef?.adquirente || null,
-          pagamento.tef?.comprovante_cliente || null,
-          pagamento.tef?.comprovante_estabelecimento || null
+          confirmacao.manual === 1 ? null : tefId,
+          nsu,
+          autorizacao,
+          bandeira,
+          adquirente,
+          confirmacao.manual === 1 ? null : (pagamento.tef?.comprovante_cliente || null),
+          confirmacao.manual === 1 ? null : (pagamento.tef?.comprovante_estabelecimento || null),
+          confirmacao.modalidade,
+          confirmacao.manual,
+          confirmacao.operadorId,
+          confirmacao.confirmadoEm
         ]);
       }
       return;
     }
 
+    const confirmacaoUnica = camposConfirmacaoPagamento(
+      { confirmacao_manual: req.body && req.body.confirmacao_fiscal_manual },
+      tef?.transacao_id || null
+    );
     await runSqlite(transacaoDb, sql, [
       vendaId,
       formaPagamentoFinal,
       Number(total || 0),
-      tef?.transacao_id || null,
-      tef?.nsu || null,
-      tef?.autorizacao || null,
-      tef?.bandeira || null,
-      tef?.adquirente || null,
-      tef?.comprovante_cliente || null,
-      tef?.comprovante_estabelecimento || null
+      confirmacaoUnica.manual === 1 ? null : (tef?.transacao_id || null),
+      confirmacaoUnica.manual === 1 ? null : (tef?.nsu || null),
+      confirmacaoUnica.manual === 1 ? null : (tef?.autorizacao || null),
+      confirmacaoUnica.manual === 1 ? null : (tef?.bandeira || null),
+      confirmacaoUnica.manual === 1 ? null : (tef?.adquirente || null),
+      confirmacaoUnica.manual === 1 ? null : (tef?.comprovante_cliente || null),
+      confirmacaoUnica.manual === 1 ? null : (tef?.comprovante_estabelecimento || null),
+      confirmacaoUnica.modalidade,
+      confirmacaoUnica.manual,
+      confirmacaoUnica.operadorId,
+      confirmacaoUnica.confirmadoEm
     ]);
   }
 
@@ -1767,7 +2116,9 @@ db.all(`
       acrescimo: Number(acrescimo || 0),
       totalOutros: valorOutros,
       subtotalBruto: Number(resultadoParaFechamento.totalVendaBruto || 0),
-      debugDescontoFiscal: process.env.CDS_DEBUG_DESCONTO_FISCAL === '1'
+      debugDescontoFiscal: process.env.CDS_DEBUG_DESCONTO_FISCAL === '1',
+      confirmacaoFiscalManual: req.body ? req.body.confirmacao_fiscal_manual : undefined,
+      empresaId: empresaIdVenda
     });
 
     if (!resultadoPagamento.sucesso) {
@@ -1806,11 +2157,11 @@ db.all(`
         codigo = await gerarCodigoVendaUnico(transacaoDb, codigoBase);
         const venda = await runSqlite(transacaoDb, `
           INSERT INTO vendas (
-            codigo, data_venda, cliente_id, total, valor_outros, desconto,
+            codigo, data_venda, cliente_id, total, valor_outros, desconto, acrescimo,
             forma_pagamento, status, caixa_sessao_id, caixa_id, terminal_id,
             operador_id, valor_fiscal, valor_nao_fiscal, status_pagamento,
             tef_transacao_id, mpfc_politica_snapshot, empresa_id
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `, [
           codigo,
           data_venda,
@@ -1818,6 +2169,7 @@ db.all(`
           totalNum,
           valorOutros,
           desconto || 0,
+          acrescimoPersistido,
           formaPagamentoFinal,
           req.caixaSessaoId || null,
           req.caixaId || null,
@@ -1837,6 +2189,7 @@ db.all(`
         await vincularTransacoesTef(transacaoDb, id, resultadoFiscal);
         await inserirItensDaVenda(transacaoDb, id);
         await inserirPagamentosDaVenda(transacaoDb, id);
+        await gravarReferenciaRecomposicao(transacaoDb, id, referenciaRecomposicao);
 
         const qtdParcelas = Math.max(1, parseInt(parcelas || 1, 10) || 1);
         const parcelasReceber = montarParcelasReceber(totalNum, valorOutros, qtdParcelas);
@@ -1986,7 +2339,9 @@ const executarVenda = async () => {
     acrescimo: Number(acrescimo || 0),
     totalOutros: valorOutros,
     subtotalBruto: Number(resultadoParaFechamento.totalVendaBruto || 0),
-    debugDescontoFiscal: process.env.CDS_DEBUG_DESCONTO_FISCAL === '1'
+    debugDescontoFiscal: process.env.CDS_DEBUG_DESCONTO_FISCAL === '1',
+    confirmacaoFiscalManual: req.body ? req.body.confirmacao_fiscal_manual : undefined,
+    empresaId: empresaIdVenda
   });
 
   if (!resultadoPagamento.sucesso) {
@@ -2004,7 +2359,22 @@ const executarVenda = async () => {
     statusPagamento: resultadoPagamento.statusPagamento,
     recebimentos: resultadoPagamento.recebimentos
   });
-  const { statusPagamento, recebimentos } = resultadoStatus;
+  let { statusPagamento, recebimentos } = resultadoStatus;
+  const { classificarTipoRecebimento } = require('./PagamentoSequencialComposicaoService');
+  recebimentos = (recebimentos || []).map((recebimento) => {
+    const tipo = classificarTipoRecebimento(recebimento);
+    if (!tipo) return recebimento;
+    if (tipo === 'nao_fiscal') {
+      return {
+        ...recebimento,
+        tipo_recebimento: 'nao_fiscal',
+        tef_transacao_id: null,
+        nsu: null,
+        autorizacao: null
+      };
+    }
+    return { ...recebimento, tipo_recebimento: 'fiscal' };
+  });
 
   let vendaId;
   try {
@@ -2025,11 +2395,11 @@ const executarVenda = async () => {
       codigo = await gerarCodigoVendaUnico(transacaoDb, codigoBase);
       const venda = await runSqlite(transacaoDb, `
         INSERT INTO vendas (
-          codigo, data_venda, cliente_id, total, valor_outros, desconto,
+          codigo, data_venda, cliente_id, total, valor_outros, desconto, acrescimo,
           forma_pagamento, status, valor_recebido, caixa_sessao_id, caixa_id,
           terminal_id, cpf_cnpj_nota, operador_id, valor_fiscal, valor_nao_fiscal,
           status_pagamento, tef_transacao_id, mpfc_politica_snapshot, empresa_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         codigo,
         data_venda,
@@ -2037,6 +2407,7 @@ const executarVenda = async () => {
         totalNum,
         valorOutros,
         desconto || 0,
+        acrescimoPersistido,
         formaPagamentoFinal,
         valor_recebido || null,
         req.caixaSessaoId || null,
@@ -2058,6 +2429,7 @@ const executarVenda = async () => {
       await vincularTransacoesTef(transacaoDb, id, resultadoFiscal);
       await inserirItensDaVenda(transacaoDb, id);
       await inserirPagamentosDaVenda(transacaoDb, id);
+      await gravarReferenciaRecomposicao(transacaoDb, id, referenciaRecomposicao);
 
       const statusFinanceiro = vendaFicaPendente ? 'pendente' : 'recebido';
       const baixadoEm = statusFinanceiro === 'recebido' ? data_venda : null;
@@ -2123,11 +2495,12 @@ const executarVenda = async () => {
     vendaId,
     codigo,
     message: 'Venda registrada com sucesso',
-    emitirFiscal: !!emitir_fiscal,
+    emitirFiscal: !!emitir_fiscal && !req.__bloqueioDocumentoFiscal,
     valorFiscal: totalFiscal,
     valorNaoFiscal: totalNaoFiscal,
     statusPagamento,
-    pagamentosTef: pagamentosVenda
+    pagamentosTef: pagamentosVenda,
+    documentoFiscalBloqueado: req.__bloqueioDocumentoFiscal || null
   });
 };
 

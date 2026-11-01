@@ -1,5 +1,6 @@
 const BaseAdapter = require('./BaseAdapter');
 const tefContrato = require('../tefContrato');
+const { respostaSimulada } = require('../simulacaoControlada');
 const sdkDetector = require('../sdkDetector');
 const fs = require('fs');
 const path = require('path');
@@ -62,6 +63,9 @@ class SitefAdapter extends BaseAdapter {
   }
 
   async autorizarPagamento(dados) {
+    const controlado = respostaSimulada(dados, { adquirente: 'SiTef', bandeira: 'Visa' });
+    if (controlado) return controlado;
+
     await this.inicializar();
 
     this.emitirEventoPinpad(require('../tefEvents').estadosPinpad.AGUARDE);

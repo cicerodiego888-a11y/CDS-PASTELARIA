@@ -148,7 +148,14 @@ async function responderVendaComFiscal(res, payload) {
     message: payload.message,
     status_pagamento: statusPagamento,
     valor_fiscal: valorFiscal,
-    valor_nao_fiscal: valorNaoFiscal
+    valor_nao_fiscal: valorNaoFiscal,
+    documento_fiscal: payload.documentoFiscalBloqueado
+      ? {
+          bloqueado: true,
+          codigo: payload.documentoFiscalBloqueado.codigo,
+          motivo: payload.documentoFiscalBloqueado.motivo
+        }
+      : null
   };
 
   if (!payload.emitirFiscal) {

@@ -62,6 +62,38 @@ function auditarQrCodeHomologacao({
   ].join('\n'));
 }
 
+function rejeitarCscQr(code, message) {
+  const err = new Error(message);
+  err.code = code;
+  return err;
+}
+
+function idTokenQrObrigatorio(idCSC) {
+  const texto = idCSC == null ? '' : String(idCSC);
+  if (!texto || texto !== texto.trim() || !/^[0-9]+$/.test(texto)) {
+    throw rejeitarCscQr(
+      texto ? 'CSC_ID_INVALIDO' : 'CSC_NAO_CONFIGURADO_PARA_AMBIENTE',
+      'ID CSC ausente ou inválido. O QR Code não foi gerado.'
+    );
+  }
+  const n = Number(texto);
+  if (!Number.isSafeInteger(n) || n <= 0) {
+    throw rejeitarCscQr('CSC_ID_INVALIDO', 'ID CSC ausente ou inválido. O QR Code não foi gerado.');
+  }
+  return String(n);
+}
+
+function tokenQrObrigatorio(CSC) {
+  const token = CSC == null ? '' : String(CSC);
+  if (!token.trim()) {
+    throw rejeitarCscQr(
+      'CSC_NAO_CONFIGURADO_PARA_AMBIENTE',
+      'CSC não configurado para o ambiente da NFC-e. O QR Code não foi gerado.'
+    );
+  }
+  return token.trim();
+}
+
 /**
  * Gera a URL do QR Code NFC-e (versão 2 — emissão online).
  * Algoritmo de hash: SHA-1(chNFe|2|tpAmb|cIdToken + CSC) em hex maiúsculo.
@@ -77,8 +109,8 @@ function gerarQRCodeNFCe({
 }) {
   const versaoQR = '2';
   const tpAmb = String(Number(ambiente || 2));
-  const idToken = String(Number(String(idCSC || '1').replace(/\D/g, '') || 1));
-  const token = String(CSC || '').trim();
+  const idToken = idTokenQrObrigatorio(idCSC);
+  const token = tokenQrObrigatorio(CSC);
   const urlBase = normalizarUrlBaseQr(consultaUrl);
 
   const dadosParaHash = `${chave}|${versaoQR}|${tpAmb}|${idToken}`;

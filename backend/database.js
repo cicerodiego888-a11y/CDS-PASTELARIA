@@ -422,6 +422,7 @@ function aplicarAlteracoesPosCriacao() {
     `ALTER TABLE vendas ADD COLUMN desconto_autorizado_em DATETIME`,
     `ALTER TABLE vendas ADD COLUMN valor_fiscal REAL DEFAULT 0`,
     `ALTER TABLE vendas ADD COLUMN valor_nao_fiscal REAL DEFAULT 0`,
+    `ALTER TABLE vendas ADD COLUMN acrescimo REAL DEFAULT 0`,
     `ALTER TABLE vendas ADD COLUMN valor_outros REAL NOT NULL DEFAULT 0`,
     // Sprint 1 — Vendas para Entrega (somente estrutura; sem regras)
     `ALTER TABLE vendas ADD COLUMN tipo_venda TEXT DEFAULT 'BALCAO'`,
@@ -455,6 +456,12 @@ function aplicarAlteracoesPosCriacao() {
   alteracoesFinanceiro.forEach(sql => aplicarAlteracaoSegura('financeiro', sql));
   alteracoesComprasItens.forEach(sql => aplicarAlteracaoSegura('compras_itens', sql));
   alteracoesVendas.forEach(sql => aplicarAlteracaoSegura('vendas', sql));
+  [
+    `ALTER TABLE venda_pagamentos ADD COLUMN confirmacao_modalidade TEXT`,
+    `ALTER TABLE venda_pagamentos ADD COLUMN confirmacao_manual INTEGER DEFAULT 0`,
+    `ALTER TABLE venda_pagamentos ADD COLUMN operador_id INTEGER`,
+    `ALTER TABLE venda_pagamentos ADD COLUMN confirmado_em DATETIME`
+  ].forEach(sql => aplicarAlteracaoSegura('venda_pagamentos', sql));
   alteracoesContasReceber.forEach(sql => aplicarAlteracaoSegura('contas_receber', sql));
   alteracoesCaixaMovimentacoes.forEach(sql => aplicarAlteracaoSegura('caixa_movimentacoes', sql));
 
@@ -478,7 +485,8 @@ function aplicarAlteracoesPosCriacao() {
     `ALTER TABLE tef_transacoes ADD COLUMN updated_at DATETIME`,
     `ALTER TABLE tef_transacoes ADD COLUMN reversao_executada INTEGER DEFAULT 0`,
     `ALTER TABLE tef_transacoes ADD COLUMN reversao_motivo TEXT`,
-    `ALTER TABLE tef_transacoes ADD COLUMN reversao_data DATETIME`
+    `ALTER TABLE tef_transacoes ADD COLUMN reversao_data DATETIME`,
+    `ALTER TABLE tef_transacoes ADD COLUMN empresa_id INTEGER`
   ];
   alteracoesTefTransacoes.forEach((sql) => aplicarAlteracaoSegura('tef_transacoes', sql));
   aplicarAlteracaoSegura(
@@ -649,6 +657,35 @@ function aplicarAlteracoesPosCriacao() {
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_central_eventos_miip_unico
      ON central_entradas_eventos(documento_id)
      WHERE tipo = 'MIIP_CONCLUIDO' AND documento_id IS NOT NULL`
+  );
+  garantirIndiceUnicoPagamentoTef();
+}
+
+function garantirIndiceUnicoPagamentoTef() {
+  db.all(
+    `SELECT tef_transacao_id
+     FROM venda_pagamentos
+     WHERE tef_transacao_id IS NOT NULL
+     GROUP BY tef_transacao_id
+     HAVING COUNT(*) > 1`,
+    (err, rows) => {
+      if (err) {
+        console.error('Não foi possível verificar duplicidades de tef_transacao_id:', err.message);
+        return;
+      }
+      if (rows && rows.length) {
+        console.error(
+          `Índice único de venda_pagamentos.tef_transacao_id não criado: ${rows.length} transação(ões) já repetida(s) no histórico.`
+        );
+        return;
+      }
+      aplicarAlteracaoSegura(
+        'venda_pagamentos',
+        `CREATE UNIQUE INDEX IF NOT EXISTS idx_venda_pagamentos_tef_transacao_unica
+         ON venda_pagamentos(tef_transacao_id)
+         WHERE tef_transacao_id IS NOT NULL`
+      );
+    }
   );
 }
 
@@ -923,6 +960,7 @@ function criarTabelas() {
       CREATE TABLE IF NOT EXISTS tef_transacoes (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         venda_id INTEGER,
+        empresa_id INTEGER,
         tipo TEXT NOT NULL,
         valor DECIMAL(10,2) NOT NULL,
         parcelas INTEGER DEFAULT 1,

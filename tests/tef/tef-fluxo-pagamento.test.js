@@ -35,6 +35,39 @@ test('TEF habilitado + modo MANUAL + cartão → TEF automático', () => {
   assert.strictEqual(r.usarConfirmacaoManual, false);
 });
 
+test('TEF desabilitado + modo TEF + cartão + fiscal zero → confirmação manual', () => {
+  const r = fluxo.resolverFluxoPagamentoFiscal({
+    modoConfirmacaoFiscal: 'TEF',
+    tefHabilitado: false,
+    formaPagamento: 'cartao_debito',
+    ehPagamentoMisto: false,
+    pagamentosMistos: [],
+    totalFiscal: 0
+  });
+  assert.strictEqual(r.deveUsarTefAutomatico, false);
+  assert.strictEqual(r.usarConfirmacaoManual, true);
+});
+
+test('TEF desabilitado + dinheiro → confirmação manual', () => {
+  const r = fluxo.resolverFluxoPagamentoFiscal({
+    modoConfirmacaoFiscal: 'TEF',
+    tefHabilitado: false,
+    formaPagamento: 'dinheiro',
+    ehPagamentoMisto: false,
+    pagamentosMistos: [],
+    totalFiscal: 0
+  });
+  assert.strictEqual(r.pagamentoExigeTef, false);
+  assert.strictEqual(r.usarConfirmacaoManual, true);
+});
+
+test('segundo clique da confirmação manual é recusado', () => {
+  const primeiro = fluxo.consumirCliqueConfirmacao({ consumido: false });
+  assert.strictEqual(primeiro.aceito, true);
+  const segundo = fluxo.consumirCliqueConfirmacao(primeiro.estado);
+  assert.strictEqual(segundo.aceito, false);
+});
+
 test('TEF desabilitado + modo MANUAL + cartão → confirmação manual', () => {
   const r = fluxo.resolverFluxoPagamentoFiscal({
     modoConfirmacaoFiscal: 'MANUAL',
@@ -154,6 +187,44 @@ test('TEF habilitado + modo MANUAL + PIX → TEF automático (PIX TEF)', () => {
   assert.strictEqual(r.pagamentoExigeTef, true);
   assert.strictEqual(r.deveUsarTefAutomatico, true);
   assert.strictEqual(r.usarConfirmacaoManual, false);
+});
+
+test('Lista sequencial com valor fiscal não cai no pagamento único', () => {
+  const parcelas = [
+    { forma_pagamento: 'cartao_debito', valor: 20 },
+    { forma_pagamento: 'cartao_credito', valor: 20 },
+    { forma_pagamento: 'dinheiro', valor: 10 }
+  ];
+  const r = fluxo.resolverFluxoPagamentoFiscal({
+    modoConfirmacaoFiscal: 'TEF',
+    tefHabilitado: true,
+    formaPagamento: 'misto',
+    ehPagamentoMisto: true,
+    pagamentosMistos: parcelas,
+    totalFiscal: 50
+  });
+  const ramo = fluxo.ramoFechamentoPagamento({ ...r, totalFiscal: 50, ehPagamentoMisto: true });
+  assert.strictEqual(r.preservarListaSequencial, true);
+  assert.strictEqual(r.deveUsarTefAutomatico, true);
+  assert.strictEqual(ramo, 'lista_sequencial');
+});
+
+test('TEF desligado preserva a lista sequencial no ramo manual', () => {
+  const r = fluxo.resolverFluxoPagamentoFiscal({
+    modoConfirmacaoFiscal: 'TEF',
+    tefHabilitado: false,
+    formaPagamento: 'misto',
+    ehPagamentoMisto: true,
+    pagamentosMistos: [
+      { forma_pagamento: 'cartao_debito', valor: 20 },
+      { forma_pagamento: 'cartao_credito', valor: 20 },
+      { forma_pagamento: 'dinheiro', valor: 10 }
+    ],
+    totalFiscal: 0
+  });
+  const ramo = fluxo.ramoFechamentoPagamento({ ...r, totalFiscal: 0, ehPagamentoMisto: true });
+  assert.strictEqual(r.usarConfirmacaoManual, true);
+  assert.strictEqual(ramo, 'lista_sequencial');
 });
 
 test('Pagamento misto dinheiro + PIX exige TEF quando habilitado', () => {

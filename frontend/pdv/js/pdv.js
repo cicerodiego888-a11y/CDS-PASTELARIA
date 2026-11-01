@@ -929,20 +929,20 @@ async function processarPagamentoTEF(tipo, valor, parcelas = 1, opcoes = {}) {
             'info'
         );
 
+        const valorReais = (typeof ValorMonetarioPdv !== 'undefined')
+            ? ValorMonetarioPdv.arredondar(valor)
+            : Math.round((Number(valor) + Number.EPSILON) * 100) / 100;
         const idempotencyKey = opcoes.idempotency_key
-            || `pdv-${tipoTef}-${Number(valor).toFixed(2)}-${Date.now()}`;
+            || `pdv-${tipoTef}-${valorReais.toFixed(2)}-${Date.now()}`;
 
-        console.log('CHAMANDO TEF:', { tipo, tipoTef, valor, parcelas, idempotencyKey });
+        console.log('CHAMANDO TEF:', { tipo, tipoTef, valor: valorReais, parcelas, idempotencyKey });
 
         const response = await fetch(`${API_URL}/tef/pagar`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${localStorage.getItem('token') || ''}`
-            },
+            headers: headersPedidoPdv(),
             body: JSON.stringify({
                 tipo: tipoTef,
-                valor: Number(valor),
+                valor: valorReais,
                 parcelas: Number(parcelas || 1),
                 venda_id: opcoes.venda_id || null,
                 idempotency_key: idempotencyKey
@@ -962,18 +962,34 @@ async function processarPagamentoTEF(tipo, valor, parcelas = 1, opcoes = {}) {
         }
 
         if (!response.ok) {
-            throw new Error(data.error || data.mensagem || 'Erro ao processar TEF.');
+            const falha = {
+                sucesso: false,
+                aprovado: false,
+                status: data.status || (data.codigo === 'TIMEOUT' || data.tipo_erro === 'timeout' ? 'timeout' : 'erro'),
+                codigo: data.codigo || data.code || 'ERRO',
+                tipo_erro: data.tipo_erro || null,
+                mensagem: data.mensagem || data.error || 'Erro ao processar TEF.',
+                transacao_id: data.transacao_id || null
+            };
+            showNotification(falha.mensagem, 'danger');
+            return falha;
         }
 
-        const aprovado = data.aprovado === true
-            || data.sucesso === true
-            || data.status === 'aprovado';
+        const aprovado = data.aprovado === true || data.status === 'aprovado';
 
         if (!aprovado) {
-            throw new Error(data.mensagem || 'Pagamento TEF negado.');
+            showNotification(data.mensagem || 'Pagamento TEF não aprovado.', 'warning');
+            return {
+                ...data,
+                sucesso: false,
+                aprovado: false
+            };
         }
 
-        if (ehPixTef) {
+        if (ehPixTef && opcoes.encerrarModalPix !== true) {
+            if (typeof window.fecharModalValorDiretoPdv === 'function') {
+                window.fecharModalValorDiretoPdv();
+            }
             await mostrarModalPixTefPDV(data, valor);
         }
 
@@ -1000,8 +1016,16 @@ async function processarPagamentoTEF(tipo, valor, parcelas = 1, opcoes = {}) {
 
     } catch (error) {
         console.error('Erro TEF:', error);
+        const timeout = error && error.message && String(error.message).toLowerCase().includes('timeout');
         showNotification(error.message || 'Erro ao processar TEF.', 'danger');
-        return null;
+        return {
+            sucesso: false,
+            aprovado: false,
+            status: timeout ? 'timeout' : 'erro',
+            codigo: timeout ? 'TIMEOUT' : 'ERRO',
+            tipo_erro: timeout ? 'timeout' : 'erro',
+            mensagem: error.message || 'Erro ao processar TEF.'
+        };
     } finally {
         window.__tefPagamentoEmAndamento = false;
     }
@@ -1209,15 +1233,21 @@ function abrirModalPagamentoNaoFiscal(valor, onConfirm, onCancel, formaPredefini
     }
 }
 
-function abrirModalConfirmacaoFiscalManual(valor, onConfirm, onCancel) {
+function abrirModalConfirmacaoFiscalManual(valor, onConfirm, onCancel, opcoes) {
     const valorNum = Number(valor || 0);
+    const valorConfirmacao = Number(
+        opcoes && opcoes.valorConfirmacao != null ? opcoes.valorConfirmacao : valorNum
+    );
 
-    if (valorNum <= 0) {
+    if (valorNum <= 0 && valorConfirmacao <= 0) {
         if (typeof onConfirm === 'function') {
             onConfirm();
         }
         return;
     }
+
+    const valorExibido = valorConfirmacao > 0 ? valorConfirmacao : valorNum;
+    const rotuloValor = valorNum > 0 ? 'Valor fiscal' : 'Valor recebido';
 
     const modalHtml = `
         <div class="modal fade" id="confirmacaoFiscalManualModal" tabindex="-1" aria-hidden="true">
@@ -1229,7 +1259,7 @@ function abrirModalConfirmacaoFiscalManual(valor, onConfirm, onCancel) {
                     </div>
                     <div class="modal-body">
                         <p class="mb-3">Confirme que o valor fiscal foi recebido.</p>
-                        <h4 class="text-center mb-0">Valor fiscal: ${formatCurrency(valorNum)}</h4>
+                        <h4 class="text-center mb-0">${rotuloValor}: ${formatCurrency(valorExibido)}</h4>
                     </div>
                     <div class="modal-footer">
                         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
@@ -1245,6 +1275,7 @@ function abrirModalConfirmacaoFiscalManual(valor, onConfirm, onCancel) {
     const modalEl = document.getElementById('confirmacaoFiscalManualModal');
     const modal = new bootstrap.Modal(modalEl);
     let confirmado = false;
+    let estadoClique = { consumido: false };
 
     modalEl.addEventListener('hidden.bs.modal', function handler() {
         modalEl.removeEventListener('hidden.bs.modal', handler);
@@ -1254,7 +1285,14 @@ function abrirModalConfirmacaoFiscalManual(valor, onConfirm, onCancel) {
     }, { once: true });
 
     $('#confirmar-recebimento-fiscal-manual').off('click').on('click', function() {
+        const clique = window.TefFluxoPagamento
+            && typeof TefFluxoPagamento.consumirCliqueConfirmacao === 'function'
+            ? TefFluxoPagamento.consumirCliqueConfirmacao(estadoClique)
+            : { aceito: !estadoClique.consumido, estado: { consumido: true } };
+        estadoClique = clique.estado;
+        if (!clique.aceito) return;
         confirmado = true;
+        this.disabled = true;
         modal.hide();
         if (typeof onConfirm === 'function') {
             onConfirm();
@@ -1309,12 +1347,13 @@ function pagamentoMistoExigeTef(pagamentos) {
     );
 }
 
-async function confirmarRecebimentoFiscalManual(valorFiscal) {
+async function confirmarRecebimentoFiscalManual(valorFiscal, opcoes) {
     await new Promise((resolve, reject) => {
         abrirModalConfirmacaoFiscalManual(
             valorFiscal,
             resolve,
-            () => reject(new Error('Confirmação de recebimento fiscal cancelada.'))
+            () => reject(new Error('Confirmação de recebimento fiscal cancelada.')),
+            opcoes
         );
     });
 }
@@ -1512,9 +1551,9 @@ function aplicarDescontoProporcionalDistribuicao(distribuicao, subtotal, descont
     };
 }
 
-async function processarVendaFiscalManual(dadosVenda, valorFiscal) {
+async function processarVendaFiscalManual(dadosVenda, valorFiscal, opcoes) {
     try {
-        await confirmarRecebimentoFiscalManual(valorFiscal);
+        await confirmarRecebimentoFiscalManual(valorFiscal, opcoes);
         pagamentoFiscalAtual = { manual: true, valor: valorFiscal };
         return { sucesso: true };
     } catch (error) {
@@ -1529,7 +1568,7 @@ async function processarVendaFiscalNaoFiscal(dadosVenda, totalFiscal) {
         const formaFiscal = obterFormaPagamentoFiscal();
         const retorno = await processarPagamentoTEF(formaFiscal, totalFiscal, 1);
 
-        if (!retorno || !(retorno.aprovado || retorno.sucesso || retorno.status === 'aprovado')) {
+        if (!retorno || !(retorno.aprovado === true || retorno.status === 'aprovado')) {
             throw new Error('Pagamento fiscal não aprovado.');
         }
 
@@ -1574,6 +1613,28 @@ function normalizarPagamentosSemTef(pagamentos) {
             forma_pagamento: normalizarFormaPagamentoTEF(pagamento.forma_pagamento),
             valor: Number(pagamento.valor)
         }));
+}
+
+function marcarParcelaConfirmacaoManual(pagamento) {
+    if (pagamento && pagamento.tef_transacao_id) {
+        return {
+            ...pagamento,
+            confirmacao_modalidade: 'tef',
+            confirmacao_manual: 0
+        };
+    }
+    const copia = { ...(pagamento || {}) };
+    delete copia.nsu;
+    delete copia.autorizacao;
+    delete copia.bandeira;
+    delete copia.adquirente;
+    delete copia.tef_transacao_id;
+    delete copia.tef;
+    return {
+        ...copia,
+        confirmacao_modalidade: 'manual',
+        confirmacao_manual: 1
+    };
 }
 
 async function concluirPagamentoNaoFiscalVenda(vendaId, pagamento, emitirFiscal = false) {
@@ -1742,7 +1803,7 @@ async function mostrarModalPixTefPDV(data, valor) {
                 </div>
             </div>`;
 
-        $('#modal-container').html(`
+        $('body').append(`
             <div class="modal fade" id="modalPixTefPDV" tabindex="-1" data-bs-backdrop="static">
                 <div class="modal-dialog modal-dialog-centered" style="max-width:420px;">
                     <div class="modal-content border-0 shadow" style="border-radius:12px;overflow:hidden;">
@@ -1782,10 +1843,12 @@ async function mostrarModalPixTefPDV(data, valor) {
 
         $('#btnFecharPixTefPDV').on('click', function() {
             modal.hide();
-            resolve();
         });
 
-        modalEl.addEventListener('hidden.bs.modal', () => resolve(), { once: true });
+        modalEl.addEventListener('hidden.bs.modal', () => {
+            modalEl.remove();
+            resolve();
+        }, { once: true });
         modal.show();
     });
 }
@@ -1811,6 +1874,19 @@ function montarObjetoTEF(retornoTef) {
 }
 
 async function processarPagamentosMistosTEF(pagamentos) {
+    if (typeof PagamentoSequencial !== 'undefined') {
+        return PagamentoSequencial.autorizarParcelasPendentes(pagamentos, {
+            tefHabilitado: await obterTefHabilitadoConfig(),
+            formaUsaTef: (forma) => formaPagamentoUsaTEF(normalizarFormaPagamentoTEF(forma)),
+            autorizarTef: (forma, valor, chave) => processarPagamentoTEF(
+                TefFluxoPagamento.normalizarTipoTef(forma),
+                valor,
+                1,
+                { idempotency_key: chave, encerrarModalPix: true }
+            )
+        });
+    }
+
     const pagamentosProcessados = [];
     const tefHabilitado = await obterTefHabilitadoConfig();
 
@@ -1835,7 +1911,7 @@ async function processarPagamentosMistosTEF(pagamentos) {
             parcelasTef
         );
 
-        if (!retornoTef || !(retornoTef.aprovado || retornoTef.sucesso || retornoTef.status === 'aprovado')) {
+        if (!retornoTef || !(retornoTef.aprovado === true || retornoTef.status === 'aprovado')) {
             throw new Error(`Pagamento TEF não aprovado para ${pagamento.forma_pagamento}.`);
         }
 
@@ -2404,6 +2480,7 @@ function bindEventosPDV() {
             abrirPagamentoMisto();
         } else {
             pagamentosMistos = [];
+            if (typeof PagamentoSequencial !== 'undefined') PagamentoSequencial.reset();
         }
         aoAlterarFormaPagamento();
     });
@@ -4924,6 +5001,19 @@ function prosseguirFinalizacaoConformeModoFiscal(formaPagamentoOverride) {
 }
 
 function mostrarModalDecisaoFiscal() {
+    const bloqueio = window.pdvDocumentoFiscalBloqueado;
+    if (bloqueio && bloqueio.bloqueado) {
+        if (bloqueio.codigo === 'REFERENCIA_FISCAL_ZERO') {
+            pdvEmitirFiscalNaVenda = false;
+            executarFinalizacaoVenda(false, null, formaPagamentoSelecionadaPDV);
+            return;
+        }
+        showNotification(
+            bloqueio.motivo || 'A NFC-e não foi autorizada pela recomposição.',
+            'warning'
+        );
+        return;
+    }
     prosseguirFinalizacaoConformeModoFiscal();
 }
 
@@ -4942,27 +5032,186 @@ function validarCpfCnpjNota(valor) {
     return doc.length === 11 || doc.length === 14;
 }
 
+function itensCarrinhoParaComposicao() {
+    return (Array.isArray(carrinho) ? carrinho : []).map((item) => ({
+        produto_id: item.produto_id || item.id,
+        nome: item.nome,
+        quantidade: item.quantidade,
+        preco_unitario: item.preco_unitario,
+        subtotal: item.subtotal,
+        categoria_nome: item.categoria_nome || item.categoria || null,
+        ncm: item.ncm || item.produto_ncm || null,
+        unidade: item.unidade || 'UN'
+    }));
+}
+
+function registrarBloqueioDocumentoFiscal(avaliacao) {
+    const documento = avaliacao && avaliacao.documento_fiscal;
+    window.pdvDocumentoFiscalBloqueado = documento && documento.bloqueado ? documento : null;
+    return window.pdvDocumentoFiscalBloqueado;
+}
+
+function htmlComposicaoFiscalPdv(dados) {
+    const documento = dados && dados.documento_fiscal;
+    if (documento && documento.bloqueado) {
+        return `<strong>Composição fiscal da venda</strong><p class="mb-0">Bloqueada. ${documento.codigo}: ${documento.motivo || 'A distribuição não foi autorizada.'}</p>`;
+    }
+    const apresentacao = dados && dados.composicao_fiscal;
+    const itens = (apresentacao && apresentacao.itens) || (documento && documento.itens_fiscais) || [];
+    const linhas = itens.map((item) => {
+        const quantidade = Number(item.quantidade != null ? item.quantidade : item.quantidade_fiscal || 0);
+        const valor = Number(item.valor_fiscal || item.subtotal || 0);
+        const volume = item.volume_ml != null ? ` · ${item.volume_ml} ml` : '';
+        return `<li>Produto ${item.produto_id}: ${quantidade} un${volume} · R$ ${valor.toFixed(2).replace('.', ',')}</li>`;
+    }).join('');
+    const fiscal = apresentacao ? apresentacao.valor_fiscal : (dados && dados.valor_fiscal_referencia);
+    const naoFiscal = apresentacao ? apresentacao.valor_nao_fiscal : (dados && dados.valor_nao_fiscal_referencia);
+    return `<strong>Composição fiscal da venda</strong>
+        <p class="mb-1">Esta é a composição fiscal. O carrinho comercial permanece.</p>
+        <ul class="mb-1">${linhas || '<li>Nenhum item fiscal autorizado.</li>'}</ul>
+        <div>Valor fiscal: R$ ${Number(fiscal || 0).toFixed(2).replace('.', ',')}</div>
+        <div>Dinheiro, fora da NFC-e: R$ ${Number(naoFiscal || 0).toFixed(2).replace('.', ',')}</div>
+        <div>Desconto de ajuste: R$ 0,00. A tolerância de 20% não vira desconto.</div>`;
+}
+
+function textoAguardoComposicaoFiscal() {
+    return '<strong>Composição fiscal da venda</strong><p class="mb-0">O dinheiro foi marcado como não fiscal. A composição aguarda a conclusão dos pagamentos digitais.</p>';
+}
+
+async function solicitarAvaliacaoComposicaoPagamento(totalVenda, pagamentos) {
+    const lista = Array.isArray(pagamentos) ? pagamentos : [];
+    const temDinheiro = lista.some((pagamento) => pagamento && pagamento.forma_pagamento === 'dinheiro');
+    if (!temDinheiro) {
+        window.pdvDocumentoFiscalBloqueado = null;
+        return { sucesso: true, recomposicao_executada: false };
+    }
+    const headers = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${localStorage.getItem('token') || ''}`
+    };
+    if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.headersJson === 'function') {
+        Object.assign(headers, CdsEmpresaContexto.headersJson());
+    }
+    const resposta = await fetch(`${API_URL}/vendas/composicao-sequencial`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+            total: totalVenda,
+            pagamentos: lista,
+            itens: itensCarrinhoParaComposicao()
+        })
+    });
+    const dados = await resposta.json().catch(() => ({}));
+    if (!resposta.ok || dados.sucesso !== true) {
+        return {
+            sucesso: false,
+            error: dados.error || 'A composição dos pagamentos não foi validada.',
+            codigo: dados.codigo
+        };
+    }
+    return dados;
+}
+
 function abrirPagamentoMisto() {
+    window.pdvDocumentoFiscalBloqueado = null;
     const totalVenda = obterTotalVendaPDV();
 
     function moeda(v) {
         return 'R$ ' + Number(v || 0).toFixed(2).replace('.', ',');
     }
 
-    const opcoes = {
-        dinheiro_pix: [
-            { id: 'pgDinheiro', label: 'Dinheiro', forma: 'dinheiro' },
-            { id: 'pgPix', label: 'Pix', forma: 'pix' }
-        ],
-        dinheiro_debito: [
-            { id: 'pgDinheiro', label: 'Dinheiro', forma: 'dinheiro' },
-            { id: 'pgDebito', label: 'Cartão de Débito', forma: 'cartao_debito' }
-        ],
-        dinheiro_credito: [
-            { id: 'pgDinheiro', label: 'Dinheiro', forma: 'dinheiro' },
-            { id: 'pgCredito', label: 'Cartão de Crédito', forma: 'cartao_credito' }
-        ]
-    };
+    function rotuloForma(forma) {
+        const mapa = {
+            dinheiro: 'Dinheiro',
+            cartao_debito: 'Cartão de Débito',
+            cartao_credito: 'Cartão de Crédito',
+            pix: 'PIX',
+            prazo: 'A Prazo'
+        };
+        return mapa[forma] || forma;
+    }
+
+    function rotuloEstado(parcela) {
+        if (parcela.status_autorizacao === 'aprovada') return 'Autorizada';
+        if (parcela.status_autorizacao === 'informada') return 'Informada';
+        return parcela.status_autorizacao || 'Pendente';
+    }
+
+    const interacao = InteracaoPagamentoMisto.criar({
+        totalVenda,
+        sequencial: PagamentoSequencial
+    });
+
+    function desenhar() {
+        const visao = interacao.visao();
+        const lista = visao.parcelas;
+        const temDinheiro = lista.some((parcela) => parcela.forma_pagamento === 'dinheiro');
+        const podeConfirmar = visao.podeFinalizar && (!temDinheiro || PagamentoSequencial.composicaoValida());
+
+        $('#totalInformadoSequencial').text(moeda(visao.informado));
+        $('#totalFaltaSequencial').text(moeda(visao.restante));
+        $('#painelEscolhaFormaMista').toggleClass('d-none', !visao.mostrarEscolhaForma);
+        $('#painelValorFormaMista').toggleClass('d-none', !visao.solicitarValor);
+        $('#rotuloValorFormaMista').text(
+            visao.formaEscolhida
+                ? `Informe o valor em ${rotuloForma(visao.formaEscolhida)}`
+                : 'Informe o valor'
+        );
+        $('#listaParcelasSequenciais').html(lista.map((parcela) => `
+            <div class="d-flex justify-content-between align-items-center border rounded p-2 mb-2">
+                <div>
+                    <strong>${rotuloForma(parcela.forma_pagamento)}</strong>
+                    <span class="ms-2">${moeda(parcela.valor)}</span>
+                    <span class="badge bg-secondary ms-2">${rotuloEstado(parcela)}</span>
+                </div>
+                ${PagamentoSequencial.parcelaJaAutorizada(parcela) ? '' : `
+                    <button type="button" class="btn btn-sm btn-outline-danger btn-cancelar-parcela" data-local-id="${parcela.local_id}">
+                        Cancelar
+                    </button>
+                `}
+            </div>
+        `).join('') || '<p class="text-muted mb-0">Nenhuma parcela adicionada.</p>');
+        $('#btnConfirmarPagamentoMisto').prop('disabled', !podeConfirmar);
+        $('#alertaPagamentoMisto').toggleClass('d-none', podeConfirmar || lista.length === 0);
+        const painel = $('#painelComposicaoFiscalPdv');
+        const aguardando = PagamentoSequencial.recomposicaoNecessaria()
+            && (PagamentoSequencial.autorizacaoDigitalPendente() || visao.restante > 0.009);
+        painel.toggleClass('d-none', !PagamentoSequencial.recomposicaoNecessaria() && visao.formaEscolhida !== 'dinheiro');
+        if (aguardando || visao.formaEscolhida === 'dinheiro' && !PagamentoSequencial.composicaoValida()) {
+            painel.html(textoAguardoComposicaoFiscal());
+        }
+    }
+
+    async function avaliarSeHouverDinheiro() {
+        const lista = PagamentoSequencial.exportar();
+        const temDinheiro = lista.some((parcela) => parcela.forma_pagamento === 'dinheiro');
+        if (
+            !temDinheiro
+            || PagamentoSequencial.autorizacaoDigitalPendente()
+            || Math.abs(PagamentoSequencial.soma() - totalVenda) > 0.009
+        ) {
+            PagamentoSequencial.invalidarComposicao();
+            desenhar();
+            return;
+        }
+        const dados = await solicitarAvaliacaoComposicaoPagamento(totalVenda, lista);
+        if (dados.sucesso !== true) {
+            PagamentoSequencial.invalidarComposicao();
+            showNotification(dados.error || 'A composição dos pagamentos não foi validada.', 'danger');
+            desenhar();
+            return;
+        }
+        const bloqueio = registrarBloqueioDocumentoFiscal(dados);
+        if (bloqueio && bloqueio.codigo !== 'REFERENCIA_FISCAL_ZERO') {
+            PagamentoSequencial.invalidarComposicao();
+            showNotification(bloqueio.motivo || 'A recomposição não autorizou o documento fiscal.', 'warning');
+            desenhar();
+            return;
+        }
+        PagamentoSequencial.registrarComposicao(dados);
+        $('#painelComposicaoFiscalPdv').removeClass('d-none').html(htmlComposicaoFiscalPdv(dados));
+        desenhar();
+    }
 
     $('#modal-container').html(`
         <div class="modal fade" id="pagamentoMistoModal" tabindex="-1">
@@ -4970,12 +5219,11 @@ function abrirPagamentoMisto() {
                 <div class="modal-content border-0 shadow-lg" style="border-radius: 16px; overflow: hidden;">
                     <div class="modal-header text-white" style="background:#0d6efd;">
                         <div>
-                            <h4 class="modal-title mb-0">Pagamento Misto</h4>
-                            <small>Escolha a combinação e informe os valores</small>
+                            <h4 class="modal-title mb-0">Pagamentos</h4>
+                            <small>Escolha uma forma. O valor dessa forma é pedido em seguida.</small>
                         </div>
                         <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
                     </div>
-
                     <div class="modal-body p-4" style="background:#f5f7fb;">
                         <div class="row g-3 mb-4">
                             <div class="col-md-4">
@@ -4987,42 +5235,47 @@ function abrirPagamentoMisto() {
                             <div class="col-md-4">
                                 <div class="p-3 bg-white rounded shadow-sm">
                                     <small class="text-muted">VALOR INFORMADO</small>
-                                    <h3 class="mb-0 text-success" id="totalInformado">${moeda(0)}</h3>
+                                    <h3 class="mb-0 text-success" id="totalInformadoSequencial">${moeda(0)}</h3>
                                 </div>
                             </div>
                             <div class="col-md-4">
                                 <div class="p-3 bg-white rounded shadow-sm">
                                     <small class="text-muted">VALOR RESTANTE</small>
-                                    <h3 class="mb-0 text-danger" id="totalFalta">${moeda(totalVenda)}</h3>
+                                    <h3 class="mb-0 text-danger" id="totalFaltaSequencial">${moeda(totalVenda)}</h3>
                                 </div>
                             </div>
                         </div>
-
-                        <div class="bg-white rounded shadow-sm p-3 mb-3">
-                            <label class="fw-bold mb-2">Tipo de pagamento misto</label>
-                            <select id="tipoPagamentoMisto" class="form-select form-select-lg">
-                                <option value="">-- Selecione a combinação --</option>
-                                <option value="dinheiro_pix">Dinheiro + Pix</option>
-                                <option value="dinheiro_debito">Dinheiro + Cartão de Débito</option>
-                                <option value="dinheiro_credito">Dinheiro + Cartão de Crédito</option>
-                            </select>
+                        <div id="painelEscolhaFormaMista" class="bg-white rounded shadow-sm p-3 mb-3">
+                            <label class="fw-bold mb-2">Escolha a forma de pagamento</label>
+                            <div class="d-flex flex-wrap gap-2">
+                                <button type="button" class="btn btn-outline-primary btn-escolher-forma-mista" data-forma="cartao_credito">Crédito</button>
+                                <button type="button" class="btn btn-outline-primary btn-escolher-forma-mista" data-forma="cartao_debito">Débito</button>
+                                <button type="button" class="btn btn-outline-primary btn-escolher-forma-mista" data-forma="dinheiro">Dinheiro</button>
+                                <button type="button" class="btn btn-outline-primary btn-escolher-forma-mista" data-forma="pix">PIX</button>
+                                <button type="button" class="btn btn-outline-primary btn-escolher-forma-mista" data-forma="prazo">A Prazo</button>
+                            </div>
                         </div>
-
-                        <div id="camposPagamentoMisto"></div>
-
-                        <div id="alertaPagamentoMisto" class="alert alert-warning d-none mt-3 mb-0">
-                            A soma dos pagamentos precisa ser igual ao total da venda.
+                        <div id="painelValorFormaMista" class="bg-white rounded shadow-sm p-3 mb-3 d-none">
+                            <label class="fw-bold mb-2" id="rotuloValorFormaMista">Informe o valor</label>
+                            <div class="row g-2">
+                                <div class="col-md-7">
+                                    <input type="number" step="0.01" min="0.01" id="valorParcelaSequencial" class="form-control" placeholder="0,00">
+                                </div>
+                                <div class="col-md-5 d-flex gap-2">
+                                    <button type="button" class="btn btn-outline-secondary" id="btnVoltarFormaMista">Voltar</button>
+                                    <button type="button" class="btn btn-primary flex-grow-1" id="btnConfirmarValorParcela">Confirmar valor</button>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="listaParcelasSequenciais" class="bg-white rounded shadow-sm p-3 mb-3"></div>
+                        <div id="painelComposicaoFiscalPdv" class="bg-white rounded shadow-sm p-3 mb-3 d-none"></div>
+                        <div id="alertaPagamentoMisto" class="alert alert-warning d-none mb-0">
+                            A soma precisa fechar o total e a composição em dinheiro precisa estar validada.
                         </div>
                     </div>
-
                     <div class="modal-footer bg-white p-3">
-                        <button type="button" class="btn btn-outline-secondary btn-lg" data-bs-dismiss="modal">
-                            Cancelar
-                        </button>
-
-                        <button class="btn btn-success btn-lg px-5" id="btnConfirmarPagamentoMisto" disabled>
-                            Confirmar Pagamento
-                        </button>
+                        <button type="button" class="btn btn-outline-secondary btn-lg" data-bs-dismiss="modal">Cancelar</button>
+                        <button class="btn btn-success btn-lg px-5" id="btnConfirmarPagamentoMisto" disabled>Confirmar Pagamento</button>
                     </div>
                 </div>
             </div>
@@ -5030,145 +5283,106 @@ function abrirPagamentoMisto() {
     `);
 
     const modal = new bootstrap.Modal(document.getElementById('pagamentoMistoModal'));
+    let fechamentoMistoConfirmado = false;
+    document.getElementById('pagamentoMistoModal').addEventListener('hidden.bs.modal', function () {
+        if (fechamentoMistoConfirmado) return;
+        PagamentoSequencial.invalidarComposicao();
+        window.pdvDocumentoFiscalBloqueado = null;
+    });
     modal.show();
+    desenhar();
 
-    function renderizarCampos(tipo) {
-        const campos = opcoes[tipo];
-
-        $('#camposPagamentoMisto').html(campos.map(campo => `
-            <div class="bg-white rounded shadow-sm p-3 mb-3">
-                <label class="fw-bold mb-2">${campo.label}</label>
-                <div class="input-group input-group-lg">
-                    <span class="input-group-text">R$</span>
-                    <input
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        id="${campo.id}"
-                        data-forma="${campo.forma}"
-                        class="form-control pagamento-misto-input"
-                        placeholder="0"
-                    >
-                </div>
-            </div>
-        `).join(''));
-
-        $('.pagamento-misto-input').on('input', atualizarTotais);
-
-        const $inputs = $('.pagamento-misto-input');
-        // Completa o 2º campo só no blur e só se estiver vazio —
-        // nunca sobrescreve enquanto o operador digita (Hotfix pagamento misto).
-        if ($inputs.length >= 2) {
-            $inputs.first().on('blur', function () {
-                const valPrimeiro = Number($(this).val() || 0);
-                const $segundo = $inputs.eq(1);
-                const valSegundo = Number($segundo.val() || 0);
-
-                if (valPrimeiro > 0 && valSegundo === 0) {
-                    const restante = Math.round((totalVenda - valPrimeiro) * 100) / 100;
-                    if (restante > 0) {
-                        $segundo.val(restante.toFixed(2));
-                        atualizarTotais();
-                    }
-                }
-            });
+    $('#painelEscolhaFormaMista').on('click', '.btn-escolher-forma-mista', function () {
+        const escolha = interacao.escolherForma($(this).data('forma'));
+        if (!escolha.ok) {
+            showNotification('A venda já está completa. Confirme o pagamento.', 'warning');
+            return;
         }
+        $('#valorParcelaSequencial').val('');
+        desenhar();
+        $('#valorParcelaSequencial').trigger('focus');
+    });
 
-        $('.pagamento-misto-input').first().trigger('focus');
-        atualizarTotais();
-    }
+    $('#btnVoltarFormaMista').on('click', function () {
+        interacao.cancelarValor();
+        $('#valorParcelaSequencial').val('');
+        desenhar();
+    });
 
-    function atualizarTotais() {
-        let informado = 0;
-
-        $('.pagamento-misto-input').each(function () {
-            informado += Number($(this).val() || 0);
+    $('#btnConfirmarValorParcela').on('click', async function () {
+        const botao = $(this);
+        if (botao.prop('disabled')) return;
+        botao.prop('disabled', true);
+        const valor = Number($('#valorParcelaSequencial').val() || 0);
+        const resultado = await interacao.confirmarValor(valor, {
+            formaUsaTef: (formaParcela) => PagamentoSequencial.formaExigeAutorizador(formaParcela),
+            autorizarTef: async (formaParcela, valorParcela, chave) => processarPagamentoTEF(
+                TefFluxoPagamento.normalizarTipoTef(formaParcela),
+                valorParcela,
+                1,
+                { idempotency_key: chave, encerrarModalPix: true }
+            )
         });
-
-        const falta = totalVenda - informado;
-        const correto = Math.abs(falta) <= 0.01;
-
-        $('#totalInformado').text(moeda(informado));
-        $('#totalFalta').text(moeda(falta));
-
-        $('#btnConfirmarPagamentoMisto').prop('disabled', !correto);
-
-        if (correto) {
-            $('#alertaPagamentoMisto').addClass('d-none');
-            $('#totalFalta').removeClass('text-danger').addClass('text-success');
-        } else {
-            $('#alertaPagamentoMisto').removeClass('d-none');
-            $('#totalFalta').removeClass('text-success').addClass('text-danger');
+        botao.prop('disabled', false);
+        if (!resultado.ok) {
+            const mensagens = {
+                AUTORIZACAO_EM_CURSO: 'Já existe uma autorização em andamento.',
+                AUTORIZADOR_AUSENTE: 'A forma eletrônica aguarda o autorizador.',
+                RECUSADO: 'A autorização foi recusada. A parcela não foi registrada.',
+                TEF_REJEITADO: 'A autorização foi recusada. As parcelas anteriores foram mantidas.',
+                TIMEOUT: 'A autorização expirou. As parcelas anteriores foram mantidas.',
+                ERRO: resultado.mensagem || 'Falha de comunicação. As parcelas anteriores foram mantidas.',
+                PENDENTE: 'A autorização ficou pendente e não entrou no saldo recebido.',
+                TEF_FALHA: resultado.mensagem || 'Falha de comunicação. As parcelas anteriores foram mantidas.',
+                VALOR_ACIMA_DO_RESTANTE: 'O valor supera o restante da venda.',
+                VALOR_INVALIDO: 'Informe um valor maior que zero.'
+            };
+            showNotification(mensagens[resultado.codigo] || 'Não foi possível adicionar a parcela.', 'warning');
+            desenhar();
+            return;
         }
-    }
-
-    $('#tipoPagamentoMisto').on('change', function () {
-        const tipo = $(this).val();
-        pagamentosMistos = [];
-
-        if (tipo && opcoes[tipo]) {
-            renderizarCampos(tipo);
-        } else {
-            $('#camposPagamentoMisto').empty();
-            $('#btnConfirmarPagamentoMisto').prop('disabled', true);
+        $('#valorParcelaSequencial').val('');
+        await avaliarSeHouverDinheiro();
+        if (interacao.visao().podeFinalizar && !$('#btnConfirmarPagamentoMisto').prop('disabled')) {
+            dispararFechamentoMisto();
         }
     });
 
-    $('#btnConfirmarPagamentoMisto').on('click', function () {
-        const tipoMisto = $('#tipoPagamentoMisto').val();
-
-        if (tipoMisto === 'dinheiro_pix') {
-            const $dinheiro = $('#pgDinheiro');
-            const $pix = $('#pgPix');
-            const valDinheiro = Number($dinheiro.val() || 0);
-            const valPixAtual = Number($pix.val() || 0);
-            const restante = Math.round((totalVenda - valDinheiro) * 100) / 100;
-
-            if (valDinheiro > 0 && valPixAtual === 0 && restante > 0) {
-                $pix.val(restante.toFixed(2));
-            }
+    $('#listaParcelasSequenciais').on('click', '.btn-cancelar-parcela', async function () {
+        const resultado = PagamentoSequencial.cancelar(Number($(this).data('local-id')));
+        if (!resultado.ok) {
+            showNotification('Parcela TEF já autorizada não pode ser removida por aqui.', 'warning');
+            return;
         }
+        await avaliarSeHouverDinheiro();
+    });
 
-        pagamentosMistos = [];
-
-        $('.pagamento-misto-input').each(function () {
-            const valor = Number($(this).val() || 0);
-            const forma = $(this).data('forma');
-
-            if (valor > 0) {
-                pagamentosMistos.push({
-                    forma_pagamento: forma,
-                    valor
-                });
-            }
-        });
-
+    function dispararFechamentoMisto() {
+        const lista = PagamentoSequencial.exportar();
+        const temDinheiro = lista.some((parcela) => parcela.forma_pagamento === 'dinheiro');
+        if (temDinheiro && !PagamentoSequencial.composicaoValida()) {
+            showNotification('A composição precisa ser validada novamente antes de confirmar.', 'warning');
+            return;
+        }
+        fechamentoMistoConfirmado = true;
+        pagamentosMistos = lista;
         formaPagamentoSelecionadaPDV = 'misto';
-
-        const pagamentoPix = pagamentosMistos.find(p => p.forma_pagamento === 'pix');
-        const valorPix = pagamentoPix ? Number(pagamentoPix.valor) : 0;
-
-        if (document.activeElement) {
-            document.activeElement.blur();
-        }
-
+        if (document.activeElement) document.activeElement.blur();
         modal.hide();
 
-        if (tipoMisto === 'dinheiro_pix' && valorPix > 0) {
+        const pagamentoPix = lista.find((parcela) => parcela.forma_pagamento === 'pix' && !parcela.tef_transacao_id);
+        if (pagamentoPix) {
             setTimeout(async () => {
                 const tefOn = await obterTefHabilitadoConfig();
                 if (tefOn) {
                     mostrarModalDecisaoFiscal();
                     return;
                 }
-
                 const ativo = await pixAutomaticoHabilitado();
                 if (ativo) {
-                    iniciarPixAutomaticoPDV(valorPix, {
+                    iniciarPixAutomaticoPDV(Number(pagamentoPix.valor), {
                         modoMisto: true,
-                        onPago: () => {
-                            setTimeout(() => mostrarModalDecisaoFiscal(), 300);
-                        }
+                        onPago: () => setTimeout(() => mostrarModalDecisaoFiscal(), 300)
                     });
                 } else {
                     mostrarModalDecisaoFiscal();
@@ -5177,11 +5391,12 @@ function abrirPagamentoMisto() {
             return;
         }
 
-        setTimeout(() => {
-            mostrarModalDecisaoFiscal();
-        }, 300);
-    });
+        setTimeout(() => mostrarModalDecisaoFiscal(), 300);
+    }
+
+    $('#btnConfirmarPagamentoMisto').on('click', dispararFechamentoMisto);
 }
+
 
 function mostrarModalCpfCnpjNota() {
     if (!pdvModoFiscalAtivo()) {
@@ -5343,6 +5558,15 @@ function mostrarModalAvisoDebitoCliente(aviso, totalEmAberto, parcelasVencidas, 
 }
 
 async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null, formaPagamentoDireta = null) {
+    if (window.pdvVendaPersistida && window.pdvVendaPersistida.id) {
+        showNotification(
+            `Venda ${window.pdvVendaPersistida.id} já foi registrada. Nenhuma segunda venda foi criada.`,
+            'info'
+        );
+        finalizarPosVenda();
+        return;
+    }
+
     if (vendaEmProcessamento) {
         showNotification('A venda já está sendo processada.', 'warning');
         return;
@@ -5413,13 +5637,20 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
         return;
     }
 
+    if (!window.pdvChaveFechamento) {
+        window.pdvChaveFechamento = `pdv-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    }
+
     const dados = {
+        chave_fechamento_pdv: window.pdvChaveFechamento,
         cliente_id: clienteId,
         cliente_nome: clienteSelecionado?.nome || vendaPrazoInfo?.cliente_nome || null,
         forma_pagamento: pagamentosMistos.length > 1 ? "misto" : formaPagamento,
         desconto,
         acrescimo,
         total,
+        pagamento_sequencial: typeof PagamentoSequencial !== 'undefined'
+            && PagamentoSequencial.snapshot().length >= 1,
         emitir_fiscal: false,
         cpf_cnpj_nota: null,
         pagamentos: pagamentosMistos.length > 0 ? pagamentosMistos : [
@@ -5547,6 +5778,12 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
     }
 
     const formaPagamentoNormalizada = normalizarFormaPagamentoTEF(formaPagamento);
+    let pagamentoExigeTef = ehPagamentoMisto
+        ? pagamentosMistos.some((pagamento) => formaPagamentoUsaTEF(
+            normalizarFormaPagamentoTEF(pagamento && pagamento.forma_pagamento)
+        ))
+        : formaPagamentoUsaTEF(formaPagamentoNormalizada);
+    let ramoPagamentoConcluido = false;
 
     console.log('DISTRIBUICAO FISCAL PDV:', {
         totalFiscal,
@@ -5577,9 +5814,14 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
 
         const {
             deveUsarTefAutomatico,
-            usarConfirmacaoManual,
-            pagamentoExigeTef
+            usarConfirmacaoManual
         } = fluxoResolvido;
+        pagamentoExigeTef = fluxoResolvido.pagamentoExigeTef;
+        const ramoFechamento = TefFluxoPagamento.ramoFechamentoPagamento({
+            ...fluxoResolvido,
+            totalFiscal,
+            ehPagamentoMisto
+        });
 
         console.log('FLUXO PAGAMENTO FISCAL:', {
             modoConfirmacaoFiscal,
@@ -5589,7 +5831,46 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
             usarConfirmacaoManual
         });
 
-        if (deveUsarTefAutomatico && totalFiscal > 0) {
+        if (ramoFechamento === 'lista_sequencial') {
+            let parcelasFechamento = normalizarPagamentosSemTef(pagamentosMistos);
+            if (tefHabilitado && pagamentoExigeTef) {
+                parcelasFechamento = await processarPagamentosMistosTEF(parcelasFechamento);
+            }
+            const confirmacao = TefFluxoPagamento.listaSequencialJaConfirmada(parcelasFechamento);
+            if (!confirmacao.dispensaModalExtra) {
+                vendaEmProcessamento = false;
+                const mensagens = {
+                    PARCELA_ELETRONICA_SEM_AUTORIZACAO: 'Há parcela eletrônica sem autorização. A venda não foi finalizada.',
+                    PARCELA_NAO_CONFIRMADA: 'Há parcela pendente, recusada ou com falha. A venda não foi finalizada.',
+                    PARCELA_INVALIDA: 'Há parcela inválida. A venda não foi finalizada.',
+                    LISTA_VAZIA: 'Não há parcelas confirmadas. A venda não foi finalizada.'
+                };
+                showNotification(
+                    `${confirmacao.codigo || 'PAGAMENTO_INCOMPLETO'}: ${mensagens[confirmacao.codigo] || 'O pagamento não está integralmente confirmado.'}`,
+                    'warning'
+                );
+                return;
+            }
+            dados.forma_pagamento = 'misto';
+            dados.pagamento_sequencial = true;
+            dados.pagamentos = parcelasFechamento.map((pagamento) => (
+                pagamento.tef_transacao_id
+                    ? {
+                        ...pagamento,
+                        confirmacao_modalidade: 'tef',
+                        confirmacao_manual: 0,
+                        tipo_recebimento: 'fiscal'
+                    }
+                    : {
+                        ...marcarParcelaConfirmacaoManual(pagamento),
+                        tipo_recebimento: 'nao_fiscal',
+                        confirmacao_manual: 1,
+                        confirmacao_modalidade: 'manual'
+                    }
+            ));
+            dados.confirmacao_fiscal_manual = dados.pagamentos.some((pagamento) => pagamento.confirmacao_manual === 1);
+            ramoPagamentoConcluido = true;
+        } else if (ramoFechamento === 'pagamento_unico_fiscal') {
             const resultadoProcessamento = await processarVendaFiscalNaoFiscal(dados, totalFiscal);
 
             if (!resultadoProcessamento.sucesso) {
@@ -5616,10 +5897,12 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
             if (deveEnviarPagamentosProcessadosPdv(totalFiscal, totalNaoFiscal)) {
                 dados.pagamentos_processados_pdv = true;
             }
-        } else if (deveUsarTefAutomatico && ehPagamentoMisto) {
+            ramoPagamentoConcluido = true;
+        } else if (ramoFechamento === 'tef_misto') {
             const pagamentosComTEF = await processarPagamentosMistosTEF(pagamentosMistos);
             dados.pagamentos = pagamentosComTEF;
-        } else if (deveUsarTefAutomatico) {
+            ramoPagamentoConcluido = true;
+        } else if (ramoFechamento === 'tef_simples') {
             if (totalNaoFiscal > 0) {
                 const formaNaoFiscal = resolverFormaPagamentoNaoFiscalConhecida({
                     pagamentosMistos,
@@ -5653,7 +5936,7 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
                     parcelasTef
                 );
 
-                if (!retornoTef || !(retornoTef.aprovado || retornoTef.sucesso || retornoTef.status === 'aprovado')) {
+                if (!retornoTef || !(retornoTef.aprovado === true || retornoTef.status === 'aprovado')) {
                     vendaEmProcessamento = false;
                     showNotification('Venda cancelada: pagamento TEF não aprovado.', 'warning');
                     return;
@@ -5681,8 +5964,11 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
                     dados.pagamentos_processados_pdv = true;
                 }
             }
-        } else if (usarConfirmacaoManual) {
-            const resultadoManual = await processarVendaFiscalManual(dados, totalFiscal);
+            ramoPagamentoConcluido = true;
+        } else if (ramoFechamento === 'manual') {
+            const resultadoManual = await processarVendaFiscalManual(dados, totalFiscal, {
+                valorConfirmacao: total
+            });
 
             if (!resultadoManual.sucesso) {
                 vendaEmProcessamento = false;
@@ -5693,34 +5979,46 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
             if (ehPagamentoMisto) {
                 dados.pagamentos = normalizarPagamentosSemTef(pagamentosMistos);
                 dados.forma_pagamento = 'misto';
-            } else if (totalNaoFiscal > 0) {
-                const formaFiscal = obterFormaPagamentoFiscal();
-                dados.pagamentos = [
-                    {
-                        forma_pagamento: formaFiscal,
-                        valor: totalFiscal,
-                        tipo_recebimento: 'fiscal'
-                    }
-                ];
-            } else {
+            } else if (!Array.isArray(dados.pagamentos) || dados.pagamentos.length === 0) {
                 dados.pagamentos = [
                     {
                         forma_pagamento: formaPagamentoNormalizada,
-                        valor: totalFiscal,
-                        tipo_recebimento: 'fiscal'
+                        valor: total,
+                        tipo_recebimento: totalFiscal > 0 ? 'fiscal' : 'nao_fiscal'
                     }
                 ];
             }
+            dados.pagamentos = dados.pagamentos.map(marcarParcelaConfirmacaoManual);
 
             if (deveEnviarPagamentosProcessadosPdv(totalFiscal, totalNaoFiscal)) {
                 dados.pagamentos_processados_pdv = true;
             }
             dados.confirmacao_fiscal_manual = true;
+            ramoPagamentoConcluido = true;
         }
     } catch (error) {
         vendaEmProcessamento = false;
         console.error('Erro no TEF misto:', error);
         showNotification(error.message || 'Venda cancelada: falha no TEF.', 'danger');
+        return;
+    }
+
+    const autorizacaoTefInformada = Boolean(
+        (dados.tef && dados.tef.transacao_id)
+        || (Array.isArray(dados.pagamentos) && dados.pagamentos.some((pagamento) => (
+            pagamento && (pagamento.tef_transacao_id || (pagamento.tef && pagamento.tef.transacao_id))
+        )))
+    );
+    const confirmacaoManualExplicita = dados.confirmacao_fiscal_manual === true
+        || dados.confirmacao_fiscal_manual === 'true'
+        || dados.confirmacao_fiscal_manual === 1
+        || dados.confirmacao_fiscal_manual === '1';
+    if (pagamentoExigeTef && !ramoPagamentoConcluido && !autorizacaoTefInformada && !confirmacaoManualExplicita) {
+        vendaEmProcessamento = false;
+        showNotification(
+            'Não foi possível confirmar a configuração ou a autorização do pagamento. A venda não foi enviada.',
+            'danger'
+        );
         return;
     }
 
@@ -5774,9 +6072,13 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
                     if (!vendaId) {
                         vendaEmProcessamento = false;
                         console.error('Resposta da venda sem ID:', response);
-                        showNotification('Venda finalizada, mas não foi possível localizar o ID da venda.', 'danger');
+                        showNotification('A venda não foi concluída: a resposta não trouxe o identificador.', 'danger');
                         return;
                     }
+                    window.pdvVendaPersistida = {
+                        id: Number(vendaId),
+                        chave: payload.chave_fechamento_pdv || window.pdvChaveFechamento || null
+                    };
                     if (pdvPedidoHandoff) {
                         pdvPedidoHandoff.venda_id = Number(vendaId);
                         sessionStorage.setItem('pdvPedidoHandoff', JSON.stringify(pdvPedidoHandoff));
@@ -5832,6 +6134,15 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
                     showNotification('Venda finalizada com sucesso.', 'success');
                 } catch (erroSucesso) {
                     console.error('Erro ao processar resposta da venda:', erroSucesso);
+                    if (window.pdvVendaPersistida && window.pdvVendaPersistida.id) {
+                        vendaEmProcessamento = false;
+                        showNotification(
+                            `Venda ${window.pdvVendaPersistida.id} já foi registrada. A tela foi liberada sem criar outra venda.`,
+                            'warning'
+                        );
+                        finalizarPosVenda();
+                        return;
+                    }
                     if (!handoffNaoFiscal) {
                         vendaEmProcessamento = false;
                     }
@@ -5875,6 +6186,24 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
 
                 const bodyErr = xhr.responseJSON || {};
                 const msgSel = bodyErr.mensagem || bodyErr.error || 'Erro ao finalizar a venda.';
+                if (/vinculada a outra venda|TEF_JA_VINCULADO/i.test(`${msgSel} ${bodyErr.code || ''}`)) {
+                    if (window.pdvVendaPersistida && window.pdvVendaPersistida.id) {
+                        showNotification(
+                            `A venda ${window.pdvVendaPersistida.id} já foi registrada.`,
+                            'warning'
+                        );
+                        finalizarPosVenda();
+                        return;
+                    }
+                    pagamentosMistos = [];
+                    if (typeof PagamentoSequencial !== 'undefined') PagamentoSequencial.reset();
+                    window.pdvChaveFechamento = null;
+                    showNotification(
+                        'Essa autorização TEF já entrou em outra venda. Informe débito, crédito e PIX novamente.',
+                        'warning'
+                    );
+                    return;
+                }
                 if (bodyErr.code && /EMPRESA|SELECAO|MATRIZ|CAIXA_INCOMPATIVEL|NENHUMA_EMPRESA|TIPO_SALDO/i.test(String(bodyErr.code))) {
                     const estadoBloqueio = {
                         bloqueio: true,
@@ -5904,10 +6233,13 @@ function finalizarPosVenda() {
         pdvPedidoHandoffFinalizado = false;
     }
     carrinho = [];
+    window.pdvVendaPersistida = null;
+    window.pdvChaveFechamento = null;
     formaPagamentoSelecionada = null;
     clienteSelecionado = null;
     vendaPrazoInfo = null;
     pagamentosMistos = [];
+    if (typeof PagamentoSequencial !== 'undefined') PagamentoSequencial.reset();
     supervisorAuthToken = null;
     pdvEmitirFiscalNaVenda = null;
     window.pdvTipoVenda = 'BALCAO';
@@ -6426,8 +6758,33 @@ function abrirTelaPagamento() {
     return abrirTelaPagamentoBalcao();
 }
 
-function abrirTelaPagamentoBalcao() {
+function abrirTelaPagamentoBalcao(opcoes = {}) {
+    window.pdvDocumentoFiscalBloqueado = null;
     const totalVenda = obterTotalVendaPDV();
+    if (!opcoes.preservarParcelas && typeof PagamentoSequencial !== 'undefined') {
+        PagamentoSequencial.reset();
+        pagamentosMistos = [];
+    }
+    const interacao = (typeof InteracaoPagamentoMisto !== 'undefined' && typeof PagamentoSequencial !== 'undefined')
+        ? InteracaoPagamentoMisto.criar({
+            totalVenda,
+            sequencial: PagamentoSequencial
+        })
+        : null;
+
+    function moedaDireta(valor) {
+        return 'R$ ' + Number(valor || 0).toFixed(2).replace('.', ',');
+    }
+
+    function rotuloFormaDireta(forma) {
+        const mapa = {
+            dinheiro: 'Dinheiro',
+            cartao_debito: 'Débito',
+            cartao_credito: 'Crédito',
+            pix: 'PIX'
+        };
+        return mapa[forma] || forma;
+    }
 
     $('#modal-container').html(`
         <div class="modal fade" id="modalPagamentoPDV" tabindex="-1">
@@ -6444,21 +6801,30 @@ function abrirTelaPagamentoBalcao() {
                                 <small class="opacity-75 mb-2">
                                     TOTAL DA VENDA
                                 </small>
-                                <h1 style="
+                                <h1 id="pdvDiretoTotal" style="
                                     font-size: 4rem;
                                     font-weight: 700;
                                 ">
                                     R$ ${totalVenda.toFixed(2).replace('.', ',')}
                                 </h1>
-                                <div class="mt-4 opacity-75 text-center">
-                                    Escolha a forma de pagamento
+                                <div class="mt-4 text-center">
+                                    <div class="opacity-75">Recebido</div>
+                                    <div id="pdvDiretoRecebido" class="fs-3 fw-bold">${moedaDireta(0)}</div>
+                                    <div class="opacity-75 mt-3">Saldo restante</div>
+                                    <div id="pdvDiretoRestante" class="fs-3 fw-bold">${moedaDireta(totalVenda)}</div>
+                                </div>
+                                <div id="pdvDiretoRefs" class="mt-4 text-center d-none">
+                                    <div class="opacity-75">Referência fiscal</div>
+                                    <div id="pdvDiretoRefFiscal" class="fw-bold"></div>
+                                    <div class="opacity-75 mt-2">Referência não fiscal</div>
+                                    <div id="pdvDiretoRefNaoFiscal" class="fw-bold"></div>
                                 </div>
                             </div>
                             <div class="col-md-8 p-5">
                                 <div class="row g-4">
                                     <div class="col-md-6">
-                                        <button class="btnPagamentoPDV btn btn-light w-100"
-                                            onclick="selecionarPagamentoPDV('dinheiro')">
+                                        <button class="btnPagamentoPDV btn btn-light w-100 btn-forma-direta"
+                                            data-forma="dinheiro">
                                             <div class="atalho">
                                                 1
                                             </div>
@@ -6468,8 +6834,8 @@ function abrirTelaPagamentoBalcao() {
                                         </button>
                                     </div>
                                     <div class="col-md-6">
-                                        <button class="btnPagamentoPDV btn btn-light w-100"
-                                            onclick="selecionarPagamentoPDV('pix')">
+                                        <button class="btnPagamentoPDV btn btn-light w-100 btn-forma-direta"
+                                            data-forma="pix">
                                             <div class="atalho">
                                                 2
                                             </div>
@@ -6479,8 +6845,8 @@ function abrirTelaPagamentoBalcao() {
                                         </button>
                                     </div>
                                     <div class="col-md-6">
-                                        <button class="btnPagamentoPDV btn btn-light w-100"
-                                            onclick="selecionarPagamentoPDV('cartao_debito')">
+                                        <button class="btnPagamentoPDV btn btn-light w-100 btn-forma-direta"
+                                            data-forma="cartao_debito">
                                             <div class="atalho">
                                                 3
                                             </div>
@@ -6490,8 +6856,8 @@ function abrirTelaPagamentoBalcao() {
                                         </button>
                                     </div>
                                     <div class="col-md-6">
-                                        <button class="btnPagamentoPDV btn btn-light w-100"
-                                            onclick="selecionarPagamentoPDV('cartao_credito')">
+                                        <button class="btnPagamentoPDV btn btn-light w-100 btn-forma-direta"
+                                            data-forma="cartao_credito">
                                             <div class="atalho">
                                                 4
                                             </div>
@@ -6534,6 +6900,11 @@ function abrirTelaPagamentoBalcao() {
                                         </button>
                                     </div>
                                 </div>
+                                <div id="listaParcelasDiretas" class="mt-3"></div>
+                                <div id="painelComposicaoFiscalDireta" class="bg-white rounded shadow-sm p-3 mt-3 d-none"></div>
+                                <button type="button" class="btn btn-success btn-lg w-100 mt-3" id="btnFecharPagamentoDireto" disabled>
+                                    Confirmar pagamento
+                                </button>
                             </div>
                         </div>
                     </div>
@@ -6547,6 +6918,272 @@ function abrirTelaPagamentoBalcao() {
     );
 
     modal.show();
+
+    function lerValorMonetarioBr(texto) {
+        return ValorMonetarioPdv.ler(texto);
+    }
+
+    function garantirModalValorDireto() {
+        if (document.getElementById('modalValorDireto')) return;
+        $('body').append(`
+            <div class="modal fade" id="modalValorDireto" tabindex="-1" aria-hidden="true">
+                <div class="modal-dialog modal-dialog-centered" style="max-width: 420px;">
+                    <div class="modal-content border-0 shadow-lg" style="border-radius: 20px;">
+                        <div class="modal-header border-0 pb-0">
+                            <h5 class="modal-title" id="rotuloValorDireto">Valor</h5>
+                            <button type="button" class="btn-close" id="btnFecharValorDireto" aria-label="Fechar"></button>
+                        </div>
+                        <div class="modal-body">
+                            <p class="text-muted mb-3" id="saldoValorDireto">Saldo restante: R$ 0,00</p>
+                            <label class="form-label fw-bold" for="valorParcelaDireta">Valor</label>
+                            <div class="input-group input-group-lg">
+                                <span class="input-group-text">R$</span>
+                                <input type="text" inputmode="numeric" id="valorParcelaDireta" class="form-control" autocomplete="off" placeholder="0,00">
+                            </div>
+                        </div>
+                        <div class="modal-footer border-0 pt-0">
+                            <button type="button" class="btn btn-outline-secondary" id="btnVoltarFormaDireta">Voltar</button>
+                            <button type="button" class="btn btn-primary" id="btnConfirmarValorDireto">Confirmar</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `);
+        const modalEl = document.getElementById('modalValorDireto');
+        const modalValor = new bootstrap.Modal(modalEl, { backdrop: true, keyboard: true, focus: true });
+        modalEl.addEventListener('shown.bs.modal', function () {
+            modalEl.style.zIndex = '1065';
+            const fundos = document.querySelectorAll('.modal-backdrop');
+            if (fundos.length) fundos[fundos.length - 1].style.zIndex = '1060';
+            const campo = document.getElementById('valorParcelaDireta');
+            if (campo) {
+                campo.focus();
+                campo.select();
+            }
+        });
+        modalEl.addEventListener('hidden.bs.modal', function () {
+            if (interacao && interacao.visao().solicitarValor) {
+                interacao.cancelarValor();
+                desenharPagamentoDireto();
+            }
+            setTimeout(function () {
+                if ($('#modalPagamentoPDV').hasClass('show') && $('.modal-backdrop').length === 0) {
+                    $('body').addClass('modal-open');
+                    $('<div class="modal-backdrop fade show"></div>').appendTo(document.body);
+                }
+            }, 0);
+        });
+        $('#valorParcelaDireta').on('keydown', function (e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                confirmarValorDireto();
+            }
+        });
+        $('#btnVoltarFormaDireta, #btnFecharValorDireto').on('click', function () {
+            modalValor.hide();
+        });
+        $('#btnConfirmarValorDireto').on('click', confirmarValorDireto);
+        modalEl._modalValorDireto = modalValor;
+    }
+
+    function fecharModalValorDireto() {
+        const el = document.getElementById('modalValorDireto');
+        if (el) {
+            el.classList.remove('show');
+            el.style.display = 'none';
+            el.setAttribute('aria-hidden', 'true');
+            if (el._modalValorDireto) {
+                try { el._modalValorDireto.hide(); } catch (erro) { /* já encerrado */ }
+            }
+        }
+        const pagamentoAberto = $('#modalPagamentoPDV').hasClass('show');
+        $('.modal-backdrop').remove();
+        if (pagamentoAberto) {
+            $('body').addClass('modal-open');
+            $('<div class="modal-backdrop fade show"></div>').appendTo(document.body);
+        } else {
+            $('body').removeClass('modal-open');
+        }
+    }
+    window.fecharModalValorDiretoPdv = fecharModalValorDireto;
+
+    function iniciarFechamentoDireto() {
+        if (!interacao || !interacao.visao().podeFinalizar) {
+            showNotification('Ainda há saldo restante.', 'warning');
+            return;
+        }
+        if (
+            window.pdvDocumentoFiscalBloqueado
+            && window.pdvDocumentoFiscalBloqueado.bloqueado
+            && window.pdvDocumentoFiscalBloqueado.codigo !== 'REFERENCIA_FISCAL_ZERO'
+        ) {
+            showNotification(
+                `${window.pdvDocumentoFiscalBloqueado.codigo}: ${window.pdvDocumentoFiscalBloqueado.motivo || 'A recomposição não autorizou o documento fiscal.'}`,
+                'warning'
+            );
+            return;
+        }
+        fecharModalValorDireto();
+        pagamentosMistos = PagamentoSequencial.exportar();
+        formaPagamentoSelecionadaPDV = 'misto';
+        if (document.activeElement) document.activeElement.blur();
+        modal.hide();
+        setTimeout(() => mostrarModalDecisaoFiscal(), 300);
+    }
+
+    function desenharPagamentoDireto(opcoes = {}) {
+        if (!interacao) return;
+        const visao = interacao.visao();
+        $('#pdvDiretoRecebido').text(moedaDireta(visao.informado));
+        $('#pdvDiretoRestante').text(moedaDireta(visao.restante));
+        $('#listaParcelasDiretas').html((visao.parcelas || []).map((parcela) => `
+            <div class="d-flex justify-content-between border rounded bg-white p-2 mb-2">
+                <strong>${rotuloFormaDireta(parcela.forma_pagamento)}</strong>
+                <span>${moedaDireta(parcela.valor)}</span>
+            </div>
+        `).join(''));
+        const bloqueioDocumento = window.pdvDocumentoFiscalBloqueado;
+        const documentoImpedeFechamento = Boolean(
+            bloqueioDocumento
+            && bloqueioDocumento.bloqueado
+            && bloqueioDocumento.codigo !== 'REFERENCIA_FISCAL_ZERO'
+        );
+        $('#btnFecharPagamentoDireto').prop('disabled', !visao.podeFinalizar || documentoImpedeFechamento);
+        const painelDireto = $('#painelComposicaoFiscalDireta');
+        const aguardaDireto = PagamentoSequencial.recomposicaoNecessaria()
+            && (PagamentoSequencial.autorizacaoDigitalPendente() || visao.restante > 0.009);
+        painelDireto.toggleClass('d-none', !PagamentoSequencial.recomposicaoNecessaria());
+        if (aguardaDireto) painelDireto.html(textoAguardoComposicaoFiscal());
+        const modalEl = document.getElementById('modalValorDireto');
+        if (visao.solicitarValor) {
+            garantirModalValorDireto();
+            $('#rotuloValorDireto').text(rotuloFormaDireta(visao.formaEscolhida));
+            $('#saldoValorDireto').text(`Saldo restante: ${moedaDireta(visao.restante)}`);
+            if (opcoes.limparValor) $('#valorParcelaDireta').val('');
+            const aberto = document.getElementById('modalValorDireto');
+            if (aberto && !aberto.classList.contains('show')) aberto._modalValorDireto.show();
+            return;
+        }
+        if (modalEl && modalEl.classList.contains('show') && modalEl._modalValorDireto) {
+            modalEl._modalValorDireto.hide();
+        }
+    }
+
+    async function confirmarValorDireto() {
+        if (!interacao) return;
+        const botao = $('#btnConfirmarValorDireto');
+        if (botao.prop('disabled')) return;
+        const textoDigitado = $('#valorParcelaDireta').val();
+        const valor = lerValorMonetarioBr(textoDigitado);
+        if (ValorMonetarioPdv.excedeRestante(valor, interacao.visao().restante)) {
+            showNotification('O valor supera o saldo restante.', 'warning');
+            botao.prop('disabled', false);
+            return;
+        }
+        const forma = interacao.visao().formaEscolhida;
+        const modo = InteracaoPagamentoMisto.modoConfirmacaoDireta(forma);
+        botao.prop('disabled', true);
+        const resultado = await interacao.confirmarValor(valor, {
+            formaUsaTef: (formaParcela) => modo === 'tef' && PagamentoSequencial.formaExigeAutorizador(formaParcela),
+            autorizarTef: async (formaParcela, valorParcela, chave) => processarPagamentoTEF(
+                TefFluxoPagamento.normalizarTipoTef(formaParcela),
+                valorParcela,
+                1,
+                { idempotency_key: chave, encerrarModalPix: true }
+            )
+        });
+        botao.prop('disabled', false);
+        if (!resultado.ok) {
+            const mensagens = {
+                AUTORIZADOR_AUSENTE: 'A forma eletrônica aguarda o autorizador.',
+                RECUSADO: 'A autorização foi recusada. A parcela não foi registrada.',
+                TEF_REJEITADO: 'A autorização foi recusada. A parcela não foi registrada.',
+                TIMEOUT: 'A autorização expirou. A parcela não foi registrada.',
+                ERRO: resultado.mensagem || 'Falha de comunicação. A parcela não foi registrada.',
+                PENDENTE: 'A autorização ficou pendente e não entrou no saldo recebido.',
+                TEF_FALHA: resultado.mensagem || 'Falha de comunicação. A parcela não foi registrada.',
+                VALOR_ACIMA_DO_RESTANTE: 'O valor supera o saldo restante.',
+                VALOR_INVALIDO: 'Informe um valor maior que zero.'
+            };
+            showNotification(mensagens[resultado.codigo] || 'Não foi possível registrar a parcela.', 'warning');
+            desenharPagamentoDireto();
+            return;
+        }
+        $('#valorParcelaDireta').val('');
+        fecharModalValorDireto();
+        desenharPagamentoDireto();
+        const lista = PagamentoSequencial.exportar();
+        if (
+            lista.some((parcela) => parcela.forma_pagamento === 'dinheiro')
+            && !PagamentoSequencial.autorizacaoDigitalPendente()
+            && Math.abs(PagamentoSequencial.soma() - totalVenda) <= 0.009
+        ) {
+            const avaliacao = await solicitarAvaliacaoComposicaoPagamento(totalVenda, lista).catch(() => null);
+            const bloqueio = registrarBloqueioDocumentoFiscal(avaliacao);
+            if (bloqueio && bloqueio.codigo !== 'REFERENCIA_FISCAL_ZERO') {
+                showNotification(
+                    `${bloqueio.codigo}: ${bloqueio.motivo || 'A recomposição não autorizou o documento fiscal.'}`,
+                    'warning'
+                );
+                desenharPagamentoDireto();
+                return;
+            }
+            if (avaliacao && avaliacao.recomposicao_executada) {
+                $('#pdvDiretoRefs').removeClass('d-none');
+                $('#pdvDiretoRefFiscal').text(moedaDireta(avaliacao.valor_fiscal_referencia));
+                $('#pdvDiretoRefNaoFiscal').text(moedaDireta(avaliacao.valor_nao_fiscal_referencia));
+                $('#painelComposicaoFiscalDireta').removeClass('d-none').html(htmlComposicaoFiscalPdv(avaliacao));
+            }
+            desenharPagamentoDireto();
+        }
+        if (interacao.visao().podeFinalizar) iniciarFechamentoDireto();
+    }
+
+    function escolherFormaDireta(forma) {
+        if (!interacao) {
+            selecionarPagamentoPDV(forma);
+            return;
+        }
+        const escolha = interacao.escolherForma(forma);
+        if (!escolha.ok) {
+            showNotification('O saldo da venda já foi recebido.', 'warning');
+            return;
+        }
+        desenharPagamentoDireto({ limparValor: true });
+    }
+
+    $('#modalPagamentoPDV').on('click', '.btn-forma-direta', function () {
+        escolherFormaDireta($(this).data('forma'));
+    });
+    document.getElementById('modalPagamentoPDV').addEventListener('hidden.bs.modal', function () {
+        if (!window.pdvVendaPersistida) {
+            PagamentoSequencial.invalidarComposicao();
+        }
+        const valorEl = document.getElementById('modalValorDireto');
+        if (!valorEl) return;
+        const instancia = bootstrap.Modal.getInstance(valorEl);
+        if (instancia) instancia.dispose();
+        valorEl.remove();
+    });
+    $('#btnFecharPagamentoDireto').on('click', function () {
+        if (!interacao || !interacao.visao().podeFinalizar) {
+            showNotification('Ainda há saldo restante.', 'warning');
+            return;
+        }
+        if (
+            window.pdvDocumentoFiscalBloqueado
+            && window.pdvDocumentoFiscalBloqueado.bloqueado
+            && window.pdvDocumentoFiscalBloqueado.codigo !== 'REFERENCIA_FISCAL_ZERO'
+        ) {
+            showNotification(
+                window.pdvDocumentoFiscalBloqueado.motivo || 'A recomposição não autorizou o documento fiscal.',
+                'warning'
+            );
+            return;
+        }
+        iniciarFechamentoDireto();
+    });
+    desenharPagamentoDireto();
 
     $(document).off('keydown.pagamentoPDV');
 
@@ -6566,22 +7203,22 @@ function abrirTelaPagamentoBalcao() {
         switch (e.key) {
             case '1':
                 e.preventDefault();
-                selecionarPagamentoPDV('dinheiro');
+                escolherFormaDireta('dinheiro');
                 break;
 
             case '2':
                 e.preventDefault();
-                selecionarPagamentoPDV('pix');
+                escolherFormaDireta('pix');
                 break;
 
             case '3':
                 e.preventDefault();
-                selecionarPagamentoPDV('cartao_debito');
+                escolherFormaDireta('cartao_debito');
                 break;
 
             case '4':
                 e.preventDefault();
-                selecionarPagamentoPDV('cartao_credito');
+                escolherFormaDireta('cartao_credito');
                 break;
 
             case '5':
@@ -6596,6 +7233,11 @@ function abrirTelaPagamentoBalcao() {
 
             case 'Escape':
                 e.preventDefault();
+                if ($('#modalValorDireto').hasClass('show')) {
+                    const valorEl = document.getElementById('modalValorDireto');
+                    if (valorEl && valorEl._modalValorDireto) valorEl._modalValorDireto.hide();
+                    return;
+                }
                 if (document.activeElement) {
                     document.activeElement.blur();
                 }
@@ -6606,9 +7248,18 @@ function abrirTelaPagamentoBalcao() {
 }
 
 function selecionarPagamentoPDV(forma) {
+    if (
+        forma === 'prazo'
+        && typeof PagamentoSequencial !== 'undefined'
+        && PagamentoSequencial.snapshot().length > 0
+    ) {
+        showNotification('Conclua as parcelas já informadas antes do prazo.', 'warning');
+        return;
+    }
     $(document).off('keydown.pagamentoPDV');
 
     pagamentosMistos = [];
+    if (typeof PagamentoSequencial !== 'undefined') PagamentoSequencial.reset();
     formaPagamentoSelecionadaPDV = forma;
 
     const modalEl = document.getElementById('modalPagamentoPDV');
@@ -6623,6 +7274,17 @@ function selecionarPagamentoPDV(forma) {
     }
 
     if (forma === 'dinheiro') {
+        const totalDireto = obterTotalVendaPDV();
+        solicitarAvaliacaoComposicaoPagamento(totalDireto, [{
+            forma_pagamento: 'dinheiro',
+            valor: totalDireto,
+            status_autorizacao: 'informada'
+        }]).then((avaliacao) => {
+            const bloqueio = registrarBloqueioDocumentoFiscal(avaliacao);
+            if (bloqueio && bloqueio.codigo !== 'REFERENCIA_FISCAL_ZERO') {
+                showNotification(bloqueio.motivo || 'A recomposição não autorizou o documento fiscal.', 'warning');
+            }
+        }).catch(() => {});
         mostrarModalTroco();
     } else if (forma === 'pix') {
         setTimeout(async () => {
@@ -6649,6 +7311,7 @@ function selecionarPagamentoPDV(forma) {
 }
 
 let intervaloConsultaPixPDV = null;
+let retomadaAposPixDireto = null;
 let pixAutomaticoAtivoCache = null;
 
 async function pixAutomaticoHabilitado() {
@@ -6825,6 +7488,7 @@ function consultarPixAteConfirmarPDV(txid, opcoes = {}) {
                 clearInterval(intervaloConsultaPixPDV);
                 intervaloConsultaPixPDV = null;
                 showNotification(`Pix ${status}. Gere uma nova cobrança.`, 'danger');
+                if (typeof opcoes.onCancel === 'function') opcoes.onCancel();
             }
 
         } catch (err) {
@@ -6859,6 +7523,11 @@ function cancelarAguardandoPixPDV() {
     }
 
     showNotification('Pagamento Pix cancelado no PDV.', 'warning');
+    if (typeof retomadaAposPixDireto === 'function') {
+        const retomar = retomadaAposPixDireto;
+        retomadaAposPixDireto = null;
+        retomar();
+    }
 }
 
 function mostrarModalClientePrazo() {

@@ -71,6 +71,29 @@ async function main() {
     );
   });
 
+  await test('ID CSC vazio não assume 1', async () => {
+    assert.throws(
+      () => gerarQRCodeNFCe({
+        chave,
+        ambiente: 2,
+        idCSC: '',
+        CSC: csc,
+        consultaUrl: urlHomolog
+      }),
+      (err) => err.code === 'CSC_NAO_CONFIGURADO_PARA_AMBIENTE'
+    );
+    assert.throws(
+      () => gerarQRCodeNFCe({
+        chave,
+        ambiente: 2,
+        idCSC: 'ABC',
+        CSC: csc,
+        consultaUrl: urlHomolog
+      }),
+      (err) => err.code === 'CSC_ID_INVALIDO'
+    );
+  });
+
   await test('gerarQRCodeNFCe falha sem consultaUrl (sem fallback)', async () => {
     assert.throws(
       () => gerarQRCodeNFCe({

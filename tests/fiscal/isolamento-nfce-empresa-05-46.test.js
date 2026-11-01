@@ -310,7 +310,7 @@ async function t13CscAusenteSemFallback() {
   await upsertConfiguracaoFiscalEmpresa(b.id, cfg('B'), db);
   await assert.rejects(
     () => resolverCredenciaisNfceDaEmpresa({ empresaId: a.id, db }),
-    (err) => err.code === 'CONFIGURACAO_FISCAL_EMPRESA_INCOMPLETA'
+    (err) => err.code === 'CSC_NAO_CONFIGURADO_PARA_AMBIENTE'
   );
   const credB = await resolverCredenciaisNfceDaEmpresa({ empresaId: b.id, db });
   assert.strictEqual(credB.csc, 'CSC-B-SECRETO');

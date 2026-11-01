@@ -147,6 +147,52 @@ describe('Seletor de empresas do ADMIN', () => {
     ctx.db.close();
   });
 
+  it('rotas do PDV aceitam ADMIN sem vínculo e continuam recusando operador sem vínculo', async () => {
+    const ctx = await montar();
+    const { criarMiddlewareContextoEmpresa } = require('../../backend/services/fiscalNaoFiscal/empresaContexto');
+    const { resolverEmpresaIdParaCaixa } = require('../../backend/services/caixa/CaixaEmpresaContextoService');
+    const mw = criarMiddlewareContextoEmpresa(ctx.db);
+    const contrato = { modo_operacional: 'MULTIEMPRESA', empresa_operacional: null };
+
+    const reqAdmin = {
+      user: ctx.diego,
+      headers: { 'x-empresa-id': String(ctx.empresaB.id) },
+      body: {},
+      query: {}
+    };
+    let seguiu = false;
+    const resAdmin = { statusCode: 0, body: null, status(code) { this.statusCode = code; return this; }, json(payload) { this.body = payload; return this; } };
+    await mw(reqAdmin, resAdmin, () => { seguiu = true; });
+    assert.equal(seguiu, true);
+    assert.equal(reqAdmin.empresaId, ctx.empresaB.id);
+
+    const caixaAdmin = await resolverEmpresaIdParaCaixa(reqAdmin, { db: ctx.db, contrato });
+    assert.equal(caixaAdmin.empresaId, ctx.empresaB.id);
+
+    await assert.rejects(
+      () => UsuarioEmpresaService.exigirEmpresaAutorizada(ctx.diego.id, ctx.empresaB.id, { db: ctx.db }),
+      (err) => err && err.code === 'EMPRESA_NAO_AUTORIZADA'
+    );
+
+    const reqOperador = {
+      user: ctx.semVinculo,
+      headers: { 'x-empresa-id': String(ctx.empresaA.id) },
+      body: {},
+      query: {}
+    };
+    let seguiuOperador = false;
+    const resOperador = { statusCode: 0, body: null, status(code) { this.statusCode = code; return this; }, json(payload) { this.body = payload; return this; } };
+    await mw(reqOperador, resOperador, () => { seguiuOperador = true; });
+    assert.equal(seguiuOperador, false);
+    assert.equal(resOperador.statusCode, 403);
+    assert.equal(resOperador.body.code, 'EMPRESA_NAO_AUTORIZADA');
+    await assert.rejects(
+      () => resolverEmpresaIdParaCaixa(reqOperador, { db: ctx.db, contrato }),
+      (err) => err && err.code === 'EMPRESA_NAO_AUTORIZADA'
+    );
+    ctx.db.close();
+  });
+
   it('a tela mostra “0 empresas ativas” quando a lista autorizada vem vazia', () => {
     const fonte = fs.readFileSync(
       path.join(__dirname, '../../frontend/erp/js/central-entradas.js'),

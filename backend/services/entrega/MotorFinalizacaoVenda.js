@@ -290,7 +290,8 @@ async function _finalizarPrestacaoInterno({ vendaId, body = {}, req = {}, contex
     formaPagamento: formaPagamentoFinal,
     pagamentos: pagamentosNormalizados,
     tefHabilitado,
-    modoConfirmacaoFiscal
+    modoConfirmacaoFiscal,
+    empresaId: empresaIdFin
   });
 
   if (!resultadoPagamento.sucesso) {
@@ -424,6 +425,37 @@ async function _finalizarPrestacaoInterno({ vendaId, body = {}, req = {}, contex
     // Pagamentos
     await run(`DELETE FROM venda_pagamentos WHERE venda_id = ?`, [vendaId]);
     for (const p of pagamentosNormalizados) {
+      const tefId = p.tef_transacao_id || p.tef?.transacao_id || null;
+      let nsu = p.nsu || p.tef?.nsu || null;
+      let autorizacao = p.autorizacao || p.tef?.autorizacao || null;
+      if (tefId) {
+        const rowTef = await get(
+          `SELECT nsu, autorizacao FROM tef_transacoes WHERE id = ?`,
+          [tefId]
+        );
+        if (!rowTef) {
+          await rollback();
+          const err = new Error('Transação TEF não encontrada na gravação do pagamento.');
+          err.status = 409;
+          err.codigo = 'TEF_VINCULO_RECUSADO';
+          throw err;
+        }
+        nsu = rowTef.nsu || null;
+        autorizacao = rowTef.autorizacao || null;
+        const claimTef = await run(
+          `UPDATE tef_transacoes
+           SET venda_id = ?, atualizado_em = datetime('now')
+           WHERE id = ? AND venda_id IS NULL AND empresa_id = ?`,
+          [vendaId, tefId, empresaIdFin]
+        );
+        if (!claimTef.changes) {
+          await rollback();
+          const err = new Error('Transação TEF não pôde ser vinculada à venda.');
+          err.status = 409;
+          err.codigo = 'TEF_VINCULO_RECUSADO';
+          throw err;
+        }
+      }
       await run(
         `
           INSERT INTO venda_pagamentos (
@@ -437,9 +469,9 @@ async function _finalizarPrestacaoInterno({ vendaId, body = {}, req = {}, contex
           vendaId,
           p.forma_pagamento,
           Number(p.valor || 0),
-          p.tef_transacao_id || p.tef?.transacao_id || null,
-          p.nsu || p.tef?.nsu || null,
-          p.autorizacao || p.tef?.autorizacao || null,
+          tefId,
+          nsu,
+          autorizacao,
           p.bandeira || p.tef?.bandeira || null,
           p.adquirente || p.tef?.adquirente || null,
           p.tef?.comprovante_cliente || null,

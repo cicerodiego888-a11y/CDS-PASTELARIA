@@ -31,7 +31,7 @@ async function resolverEmpresaIdParaMis(req, deps = {}) {
     if (uid) {
       const UsuarioEmpresaService = deps.UsuarioEmpresaService
         || require('../empresas/UsuarioEmpresaService');
-      await UsuarioEmpresaService.exigirEmpresaAutorizada(uid, resolved.empresaId, { db });
+      await UsuarioEmpresaService.exigirEmpresaAutorizada(uid, resolved.empresaId, { db, user: req.user });
     }
   }
 

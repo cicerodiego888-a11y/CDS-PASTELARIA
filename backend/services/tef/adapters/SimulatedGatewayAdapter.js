@@ -1,6 +1,7 @@
 const BaseAdapter = require('./BaseAdapter');
 const tefContrato = require('../tefContrato');
 const tefEvents = require('../tefEvents');
+const { respostaSimulada } = require('../simulacaoControlada');
 
 /**
  * Adapter base para gateways simulados (Stone, Cielo, Rede, Getnet).
@@ -15,6 +16,12 @@ class SimulatedGatewayAdapter extends BaseAdapter {
   }
 
   async autorizarPagamento(dados) {
+    const controlado = respostaSimulada(dados, {
+      adquirente: this.adquirente,
+      bandeira: this.bandeiraPadrao
+    });
+    if (controlado) return controlado;
+
     const tipoNorm = String(dados.tipo || '').toLowerCase().trim();
     const ehPix = tipoNorm === 'pix' || tipoNorm === 'pix_tef';
 

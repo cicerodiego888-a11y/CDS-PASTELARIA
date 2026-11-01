@@ -44,6 +44,28 @@ ${qtd} x R$ ${preco.toFixed(2).replace('.', ',')} = R$ ${subtotal.toFixed(2).rep
 `;
 }
 
+function headersCupomAutenticado() {
+    if (typeof CdsEmpresaContexto !== 'undefined'
+        && CdsEmpresaContexto
+        && typeof CdsEmpresaContexto.headersAuth === 'function') {
+        return CdsEmpresaContexto.headersAuth();
+    }
+    const token = localStorage.getItem('token');
+    return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+function mensagemRespostaCupom(texto) {
+    const bruto = String(texto || '').trim();
+    if (!bruto) return 'Não foi possível abrir o cupom fiscal.';
+    try {
+        const json = JSON.parse(bruto);
+        if (json && typeof json === 'object') {
+            return json.error || json.message || json.erro || bruto;
+        }
+    } catch (_e) { /* resposta em texto */ }
+    return bruto;
+}
+
 async function obterDeviceNameImpressoraCupom() {
     try {
         const token = localStorage.getItem('token');
@@ -128,19 +150,30 @@ function obterTotalCupomNaoFiscal(venda) {
     return Number(venda?.total || 0);
 }
 
+function textoFormasCupomPersistidas(venda, mapaForma, formaCabecalho) {
+    const fiscal = Number(venda && venda.valor_fiscal || 0);
+    const naoFiscal = Number(venda && venda.valor_nao_fiscal || 0);
+    const recebimentos = Array.isArray(venda && venda.venda_recebimentos) ? venda.venda_recebimentos : [];
+    const pagamentos = Array.isArray(venda && venda.venda_pagamentos) ? venda.venda_pagamentos : [];
+    const fonte = fiscal > 0 && naoFiscal > 0
+        ? recebimentos.filter((recebimento) => recebimento.tipo_recebimento === 'nao_fiscal')
+        : pagamentos;
+    if (!fonte.length) return `Forma pag.: ${formaCabecalho}`;
+    return fonte.map((pagamento) => {
+        const forma = mapaForma[pagamento.forma_pagamento] || pagamento.forma_pagamento || '-';
+        const nsu = pagamento.tef_nsu || pagamento.nsu;
+        const autorizacao = pagamento.tef_autorizacao || pagamento.autorizacao;
+        let linha = `Forma pag.: ${forma}  R$ ${Number(pagamento.valor || 0).toFixed(2).replace('.', ',')}`;
+        if (nsu) linha += `\nNSU: ${escapeHtmlCupom(nsu)}`;
+        if (autorizacao) linha += `\nAut.: ${escapeHtmlCupom(autorizacao)}`;
+        return linha;
+    }).join('\n');
+}
+
 function montarHtmlCupomNaoFiscal(vendaId, venda, total, desconto) {
     const dataHora = venda.data_venda || venda.created_at
         ? new Date(venda.data_venda || venda.created_at).toLocaleString('pt-BR')
         : new Date().toLocaleString('pt-BR');
-
-    const formaPagamentoTexto = {
-        dinheiro: 'Dinheiro',
-        cartao_credito: 'Cartão de Crédito',
-        cartao_debito: 'Cartão de Débito',
-        pix: 'PIX',
-        prazo: 'A Prazo',
-        misto: 'Misto'
-    }[venda.forma_pagamento] || venda.forma_pagamento || '-';
 
     const clienteNome = venda.cliente_nome || '';
     const linha = '------------------------------------------------';
@@ -167,7 +200,7 @@ ${itensHtml}
 ${linha}
 Total: R$ ${Number(total || 0).toFixed(2).replace('.', ',')}
 Desconto: R$ ${Number(desconto || 0).toFixed(2).replace('.', ',')}
-Forma pag.: ${formaPagamentoTexto}
+Acréscimo: R$ ${Number(venda.acrescimo || 0).toFixed(2).replace('.', ',')}
 ${clienteNome ? `Cliente: ${escapeHtmlCupom(clienteNome)}` : ''}
 ${linha}
 ESTE COMPROVANTE NÃO POSSUI VALOR FISCAL
@@ -246,10 +279,9 @@ async function imprimirDANFEFiscal(vendaId) {
     }
 
     try {
-        const token = localStorage.getItem('token');
         const resposta = await fetch(`${API_URL}/fiscal/danfe/venda/${vendaId}`, {
             method: 'GET',
-            headers: { Authorization: `Bearer ${token}` }
+            headers: headersCupomAutenticado()
         });
 
         const htmlDanfe = await resposta.text();
@@ -257,7 +289,7 @@ async function imprimirDANFEFiscal(vendaId) {
         if (!resposta.ok) {
             console.error('Erro ao buscar DANFE:', { status: resposta.status, resposta: htmlDanfe });
             if (typeof showNotification === 'function') {
-                showNotification(`Erro ao abrir cupom fiscal: ${htmlDanfe}`, 'danger');
+                showNotification(`Erro ao abrir cupom fiscal: ${mensagemRespostaCupom(htmlDanfe)}`, 'danger');
             }
             return;
         }
@@ -328,9 +360,23 @@ async function reimprimirCupomNaoFiscalHistorico(vendaId) {
     if (!vendaId) return;
 
     try {
-        const token = localStorage.getItem('token');
+        const contexto = typeof CdsEmpresaContexto !== 'undefined' ? CdsEmpresaContexto : null;
+        const empresaAtiva = contexto
+            && typeof contexto.temEmpresaSelecionada === 'function'
+            && contexto.temEmpresaSelecionada()
+            && typeof contexto.headersAuth === 'function';
+        if (!empresaAtiva) {
+            const mensagem = contexto && typeof contexto.mensagemEmpresaObrigatoria === 'function'
+                ? contexto.mensagemEmpresaObrigatoria()
+                : 'Selecione a empresa no seletor da barra lateral para continuar.';
+            if (typeof showNotification === 'function') {
+                showNotification(mensagem, 'warning');
+            }
+            return;
+        }
+
         const resp = await fetch(`${API_URL}/vendas/${vendaId}`, {
-            headers: { Authorization: `Bearer ${token}` }
+            headers: contexto.headersAuth()
         });
         const venda = await resp.json();
 

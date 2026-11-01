@@ -20,6 +20,11 @@ const VendaApplicationService = require('../services/vendas/VendaApplicationServ
 const VendaPagamentoService = require('../services/vendas/VendaPagamentoService');
 const VendaDevolucaoService = require('../services/vendas/VendaDevolucaoService');
 const VendaCancelamentoService = require('../services/vendas/VendaCancelamentoService');
+const { avaliarReferenciaRecomposicao } = require('../services/vendas/PagamentoSequencialComposicaoService');
+const {
+  integrarPagamentoRecomposicao,
+  apresentacaoComposicaoFiscal
+} = require('../services/vendas/PagamentoRecomposicaoDocumentoService');
 
 const { agoraLocalBrasil } = VendaFinanceiroService;
 const { criarVenda } = VendaApplicationService;
@@ -110,9 +115,17 @@ router.get('/', anexarEmpresaVenda, (req, res) => {
       v.valor_fiscal,
       v.valor_nao_fiscal,
       v.desconto,
+      v.acrescimo,
       v.forma_pagamento,
       v.status,
+      v.status_pagamento,
+      v.tef_transacao_id,
       v.pedido_id,
+      (
+        SELECT GROUP_CONCAT(vp.forma_pagamento || '|' || printf('%.2f', vp.valor), ';')
+        FROM venda_pagamentos vp
+        WHERE vp.venda_id = v.id
+      ) AS pagamentos_resumo,
       n.id AS nfce_id,
       n.numero AS nfce_numero,
       n.status AS nfce_status,
@@ -168,6 +181,43 @@ router.get('/pdv-modelo-empresa', (req, res) => {
       success: false,
       error: err.message || 'Falha ao ler modelo de empresa do PDV.',
       code: err.code || undefined
+    });
+  }
+});
+
+/** Sprint 23/28 — valida as parcelas e, no ambiente de teste, prepara o documento fiscal. Não emite NFC-e. */
+router.post('/composicao-sequencial', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const resultado = avaliarReferenciaRecomposicao({
+      total: body.total,
+      total_comercial: body.total_comercial,
+      pagamentos: body.pagamentos,
+      itens: body.itens
+    });
+    let documentoFiscal = null;
+    if (
+      resultado.recomposicao_executada === true
+      && Array.isArray(body.itens)
+      && body.itens.length > 0
+    ) {
+      documentoFiscal = await integrarPagamentoRecomposicao({
+        total: body.total,
+        pagamentos: body.pagamentos,
+        itens: body.itens,
+        empresaId: req.empresaId
+      }, { db });
+    }
+    return res.json({
+      ...resultado,
+      documento_fiscal: documentoFiscal,
+      composicao_fiscal: apresentacaoComposicaoFiscal(documentoFiscal, resultado)
+    });
+  } catch (err) {
+    return res.status(err.statusCode || 400).json({
+      sucesso: false,
+      error: err.message,
+      codigo: err.code || err.codigo || 'COMPOSICAO_INVALIDA'
     });
   }
 });
@@ -298,7 +348,39 @@ router.get('/:id', anexarEmpresaVenda, (req, res) => {
         res.status(500).json({ error: errItens.message });
         return;
       }
-      res.json({ ...venda, itens });
+      db.all(`
+        SELECT
+          id, venda_id, forma_pagamento, valor, tef_transacao_id,
+          tef_nsu, tef_autorizacao, tef_bandeira, tef_adquirente,
+          confirmacao_modalidade, confirmacao_manual, operador_id, confirmado_em, criado_em
+        FROM venda_pagamentos
+        WHERE venda_id = ?
+        ORDER BY id ASC
+      `, [id], (errPag, pagamentos) => {
+        if (errPag) {
+          res.status(500).json({ error: errPag.message });
+          return;
+        }
+        db.all(`
+          SELECT
+            id, venda_id, tipo_recebimento, forma_pagamento, valor,
+            tef_transacao_id, nsu, autorizacao, status
+          FROM venda_recebimentos
+          WHERE venda_id = ?
+          ORDER BY id ASC
+        `, [id], (errRec, recebimentos) => {
+          if (errRec) {
+            res.status(500).json({ error: errRec.message });
+            return;
+          }
+          res.json({
+            ...venda,
+            itens: itens || [],
+            venda_pagamentos: pagamentos || [],
+            venda_recebimentos: recebimentos || []
+          });
+        });
+      });
     });
   });
 });
@@ -343,7 +425,48 @@ router.post('/pre-calcular-distribuicao', validarCaixaAberto, preCalcularDistrib
 
 // CDS-PDV-EMPRESA-UNICA-02: fixa empresa PDV UNICA antes do caixa; depois núcleo.
 // Sprint 2.2: PDV exige caixa; demais origens reconhecidas sem validarCaixaAberto
-router.post('/', aplicarPdvModeloEmpresa, validarCaixaSeOrigemPdv, criarVenda);
+function criarVendaComIdempotenciaPdv(req, res) {
+  const chave = String(req.body && req.body.chave_fechamento_pdv || '').trim();
+  if (!/^[A-Za-z0-9._:-]{8,80}$/.test(chave)) return criarVenda(req, res);
+  db.run(`CREATE TABLE IF NOT EXISTS pdv_fechamento_idempotencia (
+    chave TEXT PRIMARY KEY,
+    venda_id INTEGER NOT NULL,
+    status_pagamento TEXT,
+    criado_em TEXT
+  )`, (errTabela) => {
+    if (errTabela) return criarVenda(req, res);
+    db.get(
+      'SELECT venda_id, status_pagamento FROM pdv_fechamento_idempotencia WHERE chave = ?',
+      [chave],
+      (err, row) => {
+        if (err) return criarVenda(req, res);
+        if (row && row.venda_id) {
+          return res.json({
+            id: Number(row.venda_id),
+            venda_id: Number(row.venda_id),
+            status_pagamento: row.status_pagamento || 'quitada',
+            venda_ja_persistida: true,
+            message: 'Venda já registrada. Nenhuma segunda venda foi criada.'
+          });
+        }
+        const enviar = res.json.bind(res);
+        res.json = function (corpo) {
+          const vendaId = corpo && (corpo.venda_id || corpo.id);
+          if (!(vendaId && res.statusCode < 400)) return enviar(corpo);
+          db.run(
+            `INSERT OR IGNORE INTO pdv_fechamento_idempotencia (chave, venda_id, status_pagamento, criado_em)
+             VALUES (?, ?, ?, datetime('now', 'localtime'))`,
+            [chave, Number(vendaId), corpo.status_pagamento || null],
+            () => enviar(corpo)
+          );
+        };
+        return criarVenda(req, res);
+      }
+    );
+  });
+}
+
+router.post('/', aplicarPdvModeloEmpresa, validarCaixaSeOrigemPdv, criarVendaComIdempotenciaPdv);
 
 router.get('/:id/pagamento-nao-fiscal', consultarPagamentoNaoFiscal);
 

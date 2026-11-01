@@ -77,13 +77,23 @@ function test08CscVisivelNoHtml() {
   const html = G.htmlPainelEdicao({ id: 3, razao_social: 'X', cnpj: '1' }, {
     ...G.fiscalVazio(3),
     csc_configurado: true,
-    id_csc_configurado: true
+    id_csc_configurado: true,
+    csc_homologacao_configurado: true,
+    id_csc_homologacao: '7',
+    csc_producao_configurado: false
   }, '');
+  assert.ok(html.includes('CSC CONFIGURADO'));
+  assert.ok(html.includes('color:#198754'));
+  assert.ok(!html.includes('SEGREDO'));
+  assert.ok(html.includes('Não configurado'));
   assert.ok(html.includes('ID CSC'));
   assert.ok(html.includes('CSC / TOKEN CSC'));
   assert.ok(html.includes('id="gef-id-csc"'));
   assert.ok(html.includes('id="gef-csc"'));
-  assert.ok(html.includes('CONFIGURADO'));
+  assert.ok(html.includes('Homologação: Configurado'));
+  assert.ok(html.includes('Produção: Não configurado'));
+  assert.strictEqual(html.split('id="gef-id-csc"').length, 2);
+  assert.strictEqual(html.split('id="gef-csc"').length, 2);
 }
 
 function test09CertificadoPfx() {

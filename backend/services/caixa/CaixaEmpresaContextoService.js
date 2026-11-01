@@ -97,7 +97,7 @@ async function resolverEmpresaIdParaCaixa(req, deps = {}) {
     if (uid) {
       const { exigirEmpresaAutorizada } = deps.UsuarioEmpresaService
         || require('../empresas/UsuarioEmpresaService');
-      await exigirEmpresaAutorizada(uid, empresaId, { db });
+      await exigirEmpresaAutorizada(uid, empresaId, { db, user: req.user });
     }
   }
 

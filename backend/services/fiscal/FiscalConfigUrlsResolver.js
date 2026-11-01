@@ -97,7 +97,7 @@ function enriquecerBlocoUrlsExibicao(bloco, { uf, ambiente } = {}) {
 function ehPlaceholderCsc(valor) {
   const t = String(valor == null ? '' : valor).trim();
   if (!t) return true;
-  if (t === PLACEHOLDER_CSC_UI) return true;
+  if (t === PLACEHOLDER_CSC_UI || t === 'CSC CONFIGURADO') return true;
   if (/^CONFIGURADO/i.test(t) && /substituir/i.test(t)) return true;
   return false;
 }
@@ -107,7 +107,11 @@ function ehPlaceholderCsc(valor) {
  */
 function sanitizarPatchCsc(patch) {
   const out = patch && typeof patch === 'object' ? { ...patch } : {};
-  ['token_csc', 'id_csc'].forEach((campo) => {
+  [
+    'token_csc', 'id_csc',
+    'token_csc_homologacao', 'id_csc_homologacao',
+    'token_csc_producao', 'id_csc_producao'
+  ].forEach((campo) => {
     if (!Object.prototype.hasOwnProperty.call(out, campo)) return;
     if (ehPlaceholderCsc(out[campo])) delete out[campo];
   });

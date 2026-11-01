@@ -92,8 +92,10 @@ function renderVendas(vendas) {
                                 <th>Data</th>
                                 <th>Cliente</th>
                                 <th>Total</th>
+                                <th>Acréscimo</th>
                                 <th>Forma</th>
-                                <th>Status</th>
+                                <th>Status da venda</th>
+                                <th>Status do pagamento</th>
                                 <th class="historico-venda-acoes-col">Ações</th>
                             </tr>
                         </thead>
@@ -105,11 +107,13 @@ function renderVendas(vendas) {
                                     <td>${formatDate(v.data_venda || v.created_at)}</td>
                                     <td>${escapeHtml(v.cliente_nome || 'Não informado')}</td>
                                     <td>${formatCurrency(v.total)}</td>
-                                    <td>${rotuloFormaPagamento(v.forma_pagamento)}</td>
+                                    <td>${formatCurrency(v.acrescimo || 0)}</td>
+                                    <td>${textoMeiosPagamentoLista(v)}</td>
                                     <td>${rotuloStatusVenda(v.status)}</td>
+                                    <td>${rotuloStatusPagamento(v.status_pagamento)}</td>
                                     <td class="historico-venda-acoes-col">${montarHtmlAcoesHistoricoVenda(v, { incluirDevolucao: false })}</td>
                                 </tr>
-                            `).join('') || '<tr><td colspan="8" class="text-center">Nenhuma venda encontrada.</td></tr>'}
+                            `).join('') || '<tr><td colspan="10" class="text-center">Nenhuma venda encontrada.</td></tr>'}
                         </tbody>
                     </table>
                 </div>
@@ -166,12 +170,13 @@ function showVendaModal(venda) {
                         <div class="row mb-3">
                             <div class="col-sm-4"><strong>Total:</strong> ${formatCurrency(totalExibido)}</div>
                             <div class="col-sm-4"><strong>Desconto:</strong> ${formatCurrency(venda.desconto)}</div>
-                            <div class="col-sm-4"><strong>Pagamento:</strong> ${rotuloFormaPagamento(venda.forma_pagamento)}</div>
+                            <div class="col-sm-4"><strong>Acréscimo:</strong> ${formatCurrency(venda.acrescimo || 0)}</div>
+                            <div class="col-sm-4"><strong>Forma no cabeçalho:</strong> ${rotuloFormaPagamento(venda.forma_pagamento)}</div>
                         </div>
                         <div class="row mb-3">
-                            <div class="col-sm-4"><strong>Status:</strong> ${rotuloStatusVenda(venda.status)}</div>
-                            <div class="col-sm-4"><strong>Documento:</strong> ${escapeHtml(venda.documento || '-')}</div>
-                            <div class="col-sm-4"><strong>Número de itens:</strong> ${itens.length}</div>
+                            <div class="col-sm-4"><strong>Status da venda:</strong> ${rotuloStatusVenda(venda.status)}</div>
+                            <div class="col-sm-4"><strong>Status do pagamento:</strong> ${rotuloStatusPagamento(venda.status_pagamento)}</div>
+                            <div class="col-sm-4"><strong>Documento:</strong> ${escapeHtml(venda.documento || '-')} · Itens: ${itens.length}</div>
                         </div>
                         ${venda.pedido_id ? `
                         <div class="alert alert-secondary py-2 mb-3">
@@ -189,6 +194,12 @@ function showVendaModal(venda) {
                             <i class="fas fa-file-invoice"></i>
                             Comprovante não fiscal disponível${Number(venda.valor_nao_fiscal || 0) > 0 ? ` — R$ ${Number(venda.valor_nao_fiscal).toFixed(2).replace('.', ',')}` : ''}
                         </div>` : ''}
+                        <h6 class="mt-2">Meios de pagamento</h6>
+                        <p class="text-muted small mb-2">Valores de cada meio. O total da venda permanece o total comercial gravado.</p>
+                        ${htmlTabelaPagamentos(venda)}
+                        <h6 class="mt-3">Recebimentos</h6>
+                        <p class="text-muted small mb-2">Distribuição fiscal e não fiscal já gravada. Estes valores não são somados de novo ao total.</p>
+                        ${htmlTabelaRecebimentos(venda)}
                         <div class="table-responsive">
                             <table class="table table-sm table-bordered">
                                 <thead>
@@ -229,6 +240,91 @@ function showVendaModal(venda) {
     $('#modal-container').html(modalHtml);
     const vendaModal = new bootstrap.Modal(document.getElementById('vendaModal'));
     vendaModal.show();
+}
+
+function rotuloStatusPagamento(status) {
+    const mapa = {
+        quitada: 'Quitado',
+        pendente: 'Pendente',
+        aguardando_nao_fiscal: 'Aguardando não fiscal',
+        fiscal_pago: 'Fiscal pago'
+    };
+    return mapa[status] || (status ? String(status) : '-');
+}
+
+function textoMeiosPagamentoLista(venda) {
+    const resumo = String(venda && venda.pagamentos_resumo || '').trim();
+    if (!resumo) return rotuloFormaPagamento(venda && venda.forma_pagamento);
+    return resumo.split(';').filter(Boolean).map((parte) => {
+        const [forma, valor] = parte.split('|');
+        return `${rotuloFormaPagamento(forma)} ${formatCurrency(valor)}`;
+    }).join(', ');
+}
+
+function htmlTabelaPagamentos(venda) {
+    const lista = Array.isArray(venda && venda.venda_pagamentos) ? venda.venda_pagamentos : [];
+    if (!lista.length) {
+        return `<p class="mb-2">${rotuloFormaPagamento(venda && venda.forma_pagamento)}</p>`;
+    }
+    const linhas = lista.map((pagamento) => `
+        <tr>
+            <td>${escapeHtml(rotuloFormaPagamento(pagamento.forma_pagamento))}</td>
+            <td>${formatCurrency(pagamento.valor)}</td>
+            <td>${escapeHtml(pagamento.tef_transacao_id || '-')}</td>
+            <td>${escapeHtml(pagamento.tef_nsu || '-')}</td>
+            <td>${escapeHtml(pagamento.tef_autorizacao || '-')}</td>
+        </tr>
+    `).join('');
+    return `
+        <div class="table-responsive mb-2">
+            <table class="table table-sm table-bordered">
+                <thead>
+                    <tr>
+                        <th>Forma</th>
+                        <th>Valor</th>
+                        <th>Transação TEF</th>
+                        <th>NSU</th>
+                        <th>Autorização</th>
+                    </tr>
+                </thead>
+                <tbody>${linhas}</tbody>
+            </table>
+        </div>
+    `;
+}
+
+function htmlTabelaRecebimentos(venda) {
+    const lista = Array.isArray(venda && venda.venda_recebimentos) ? venda.venda_recebimentos : [];
+    if (!lista.length) return '<p class="mb-2">Nenhum recebimento gravado.</p>';
+    const linhas = lista.map((recebimento) => `
+        <tr>
+            <td>${escapeHtml(recebimento.tipo_recebimento || '-')}</td>
+            <td>${escapeHtml(rotuloFormaPagamento(recebimento.forma_pagamento))}</td>
+            <td>${formatCurrency(recebimento.valor)}</td>
+            <td>${escapeHtml(recebimento.status || '-')}</td>
+            <td>${escapeHtml(recebimento.tef_transacao_id || '-')}</td>
+            <td>${escapeHtml(recebimento.nsu || '-')}</td>
+            <td>${escapeHtml(recebimento.autorizacao || '-')}</td>
+        </tr>
+    `).join('');
+    return `
+        <div class="table-responsive mb-3">
+            <table class="table table-sm table-bordered">
+                <thead>
+                    <tr>
+                        <th>Tipo</th>
+                        <th>Forma</th>
+                        <th>Valor</th>
+                        <th>Status</th>
+                        <th>Transação TEF</th>
+                        <th>NSU</th>
+                        <th>Autorização</th>
+                    </tr>
+                </thead>
+                <tbody>${linhas}</tbody>
+            </table>
+        </div>
+    `;
 }
 
 function rotuloFormaPagamento(value) {

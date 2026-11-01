@@ -724,7 +724,7 @@ function buscarVendaParaNFCe() {
                                 <p class="mb-1"><strong>Data:</strong> ${formatarDataHoraBrasil(data.venda.data_venda)}</p>
                             </div>
                             <div class="col-md-6 text-md-end">
-                                <p class="mb-1"><strong>Total:</strong> <span class="h5 text-success">${dinheiro(data.venda.total)}</span></p>
+                                <p class="mb-1"><strong>Total:</strong> <span class="h5 text-success">${formatCurrency(Number(data.venda.total || 0))}</span></p>
                                 <p class="mb-1"><strong>Forma:</strong> ${data.venda.forma_pagamento}</p>
                             </div>
                         </div>
@@ -746,8 +746,8 @@ function buscarVendaParaNFCe() {
                     <tr>
                         <td>${item.produto_nome}</td>
                         <td class="text-center">${item.quantidade}</td>
-                        <td class="text-end">${dinheiro(item.preco_unitario || item.preco)}</td>
-                        <td class="text-end">${dinheiro(item.subtotal)}</td>
+                        <td class="text-end">${formatCurrency(Number(item.preco_unitario || item.preco || 0))}</td>
+                        <td class="text-end">${formatCurrency(Number(item.subtotal || 0))}</td>
                     </tr>
                 `;
             });

@@ -109,7 +109,12 @@ async function garantirSchemaFiscalEmpresaAsync(db) {
     'certificado_cnpj',
     'certificado_titular',
     'certificado_validacao_codigo',
-    'certificado_validacao_mensagem'
+    'certificado_validacao_mensagem',
+    'id_csc_homologacao',
+    'token_csc_homologacao',
+    'id_csc_producao',
+    'token_csc_producao',
+    'csc_cnpj_vinculado'
   ]) {
     await garantirColuna(db, 'empresas_configuracao_fiscal', col, `${col} TEXT`);
   }
@@ -207,6 +212,173 @@ function complementarUrlsPorAmbiente(merged) {
   return merged;
 }
 
+const CAMPOS_CSC_NAO_APAGAR = Object.freeze([
+  'token_csc', 'id_csc',
+  'token_csc_homologacao', 'id_csc_homologacao',
+  'token_csc_producao', 'id_csc_producao',
+  'certificado_senha', 'certificado_path'
+]);
+
+function digitosCnpj(valor) {
+  return String(valor || '').replace(/\D/g, '');
+}
+
+function erroCsc(code, message) {
+  const err = new Error(message);
+  err.code = code;
+  err.status = code === 'CSC_ID_INVALIDO' ? 400 : 409;
+  err.statusCode = err.status;
+  return err;
+}
+
+function validarIdCsc(valor, { obrigatorio = false } = {}) {
+  if (valor == null || String(valor).trim() === '') {
+    if (obrigatorio) {
+      throw erroCsc('CSC_NAO_CONFIGURADO_PARA_AMBIENTE', 'ID CSC ausente para o ambiente da NFC-e.');
+    }
+    return '';
+  }
+  const texto = String(valor);
+  if (texto !== texto.trim() || !/^[0-9]+$/.test(texto)) {
+    throw erroCsc('CSC_ID_INVALIDO', 'ID CSC inválido. Informe um inteiro positivo, sem espaços.');
+  }
+  const n = Number(texto);
+  if (!Number.isSafeInteger(n) || n <= 0) {
+    throw erroCsc('CSC_ID_INVALIDO', 'ID CSC inválido. Informe um inteiro positivo, sem espaços.');
+  }
+  return String(n);
+}
+
+function idCscLegadoNumerico(valor) {
+  try {
+    return validarIdCsc(valor, { obrigatorio: false });
+  } catch (_err) {
+    return '';
+  }
+}
+
+function selecionarCscParaEmissao(row, empresa, ambiente) {
+  const amb = Number(ambiente);
+  if (amb !== 1 && amb !== 2) {
+    throw erroCsc('CSC_NAO_CONFIGURADO_PARA_AMBIENTE', 'Ambiente fiscal da NFC-e não identificado.');
+  }
+  const vinculado = digitosCnpj(row && row.csc_cnpj_vinculado);
+  const cnpj = digitosCnpj(empresa && empresa.cnpj);
+  if (!vinculado || !cnpj || vinculado !== cnpj) {
+    throw erroCsc(
+      'CSC_NAO_CONFIGURADO_PARA_AMBIENTE',
+      'CSC não associado ao CNPJ desta empresa. Cadastre o CSC do ambiente novamente.'
+    );
+  }
+  const idBruto = amb === 1 ? row.id_csc_producao : row.id_csc_homologacao;
+  const token = String((amb === 1 ? row.token_csc_producao : row.token_csc_homologacao) || '').trim();
+  const id = validarIdCsc(idBruto, { obrigatorio: true });
+  if (!token) {
+    throw erroCsc(
+      'CSC_NAO_CONFIGURADO_PARA_AMBIENTE',
+      amb === 1
+        ? 'CSC de produção não configurado para esta empresa.'
+        : 'CSC de homologação não configurado para esta empresa.'
+    );
+  }
+  return { idCSC: id, tokenCSC: token, ambiente: amb };
+}
+
+function cscDoAmbienteConfigurado(row, empresa, ambiente) {
+  try {
+    selecionarCscParaEmissao(row, empresa, ambiente);
+    return true;
+  } catch (_err) {
+    return false;
+  }
+}
+
+function escreverParAmbiente(destino, ambiente, id, token) {
+  if (Number(ambiente) === 1) {
+    destino.id_csc_producao = id;
+    destino.token_csc_producao = token;
+  } else {
+    destino.id_csc_homologacao = id;
+    destino.token_csc_homologacao = token;
+  }
+}
+
+function consolidarParSePatch(merged, patch, prefixo, rotulo) {
+  const idKey = `id_csc_${prefixo}`;
+  const tokenKey = `token_csc_${prefixo}`;
+  const mexeu = Object.prototype.hasOwnProperty.call(patch, idKey)
+    || Object.prototype.hasOwnProperty.call(patch, tokenKey);
+  if (!mexeu) return false;
+  const id = validarIdCsc(merged[idKey], { obrigatorio: true });
+  const token = String(merged[tokenKey] || '').trim();
+  if (!token) {
+    throw erroCsc('CSC_NAO_CONFIGURADO_PARA_AMBIENTE', `Informe o token CSC de ${rotulo}.`);
+  }
+  merged[idKey] = id;
+  merged[tokenKey] = token;
+  return true;
+}
+
+function consolidarCscParaSalvar(merged, patch, cnpj) {
+  let vinculou = false;
+  if (consolidarParSePatch(merged, patch, 'homologacao', 'homologação')) vinculou = true;
+  if (consolidarParSePatch(merged, patch, 'producao', 'produção')) vinculou = true;
+  const mexeuLegado = Object.prototype.hasOwnProperty.call(patch, 'token_csc')
+    || Object.prototype.hasOwnProperty.call(patch, 'id_csc');
+  const mexeuNovo = [
+    'id_csc_homologacao', 'token_csc_homologacao',
+    'id_csc_producao', 'token_csc_producao'
+  ].some((campo) => Object.prototype.hasOwnProperty.call(patch, campo));
+  if (mexeuLegado && !mexeuNovo) {
+    const id = idCscLegadoNumerico(merged.id_csc);
+    const token = String(merged.token_csc || '').trim();
+    if (id && token) {
+      const amb = Number(merged.ambiente) === 1 ? 1 : 2;
+      escreverParAmbiente(merged, amb, id, token);
+      vinculou = true;
+    }
+  }
+  if (vinculou) {
+    if (!cnpj || cnpj.length !== 14) {
+      throw erroCsc('CSC_NAO_CONFIGURADO_PARA_AMBIENTE', 'CNPJ da empresa ausente para vincular o CSC.');
+    }
+    merged.csc_cnpj_vinculado = cnpj;
+  }
+  return merged;
+}
+
+function consolidarCscUpsertDireto(dados, cnpj) {
+  const out = { ...dados };
+  const temHom = preencherTexto(out.token_csc_homologacao) || preencherTexto(out.id_csc_homologacao);
+  const temProd = preencherTexto(out.token_csc_producao) || preencherTexto(out.id_csc_producao);
+  if (temHom) {
+    out.id_csc_homologacao = validarIdCsc(out.id_csc_homologacao, { obrigatorio: true });
+    if (!preencherTexto(out.token_csc_homologacao)) {
+      throw erroCsc('CSC_NAO_CONFIGURADO_PARA_AMBIENTE', 'Informe o token CSC de homologação.');
+    }
+    out.token_csc_homologacao = String(out.token_csc_homologacao).trim();
+  }
+  if (temProd) {
+    out.id_csc_producao = validarIdCsc(out.id_csc_producao, { obrigatorio: true });
+    if (!preencherTexto(out.token_csc_producao)) {
+      throw erroCsc('CSC_NAO_CONFIGURADO_PARA_AMBIENTE', 'Informe o token CSC de produção.');
+    }
+    out.token_csc_producao = String(out.token_csc_producao).trim();
+  }
+  if (!temHom && !temProd) {
+    const id = idCscLegadoNumerico(out.id_csc);
+    const token = String(out.token_csc || '').trim();
+    if (id && token) {
+      const amb = Number(out.ambiente) === 1 ? 1 : 2;
+      escreverParAmbiente(out, amb, id, token);
+      if (cnpj && cnpj.length === 14) out.csc_cnpj_vinculado = cnpj;
+    }
+  } else if (cnpj && cnpj.length === 14) {
+    out.csc_cnpj_vinculado = cnpj;
+  }
+  return out;
+}
+
 function montarConfigEmpresa({ empresa, row, validarUrls }) {
   const ambiente = Number(row.ambiente);
   if (![1, 2].includes(ambiente)) {
@@ -223,6 +395,16 @@ function montarConfigEmpresa({ empresa, row, validarUrls }) {
     );
   }
   const ie = row.ie || empresa.inscricao_estadual || '';
+  let tokenCSC = '';
+  let idCSC = '';
+  let cscBloqueio = null;
+  try {
+    const cred = selecionarCscParaEmissao(row, empresa, ambiente);
+    tokenCSC = cred.tokenCSC;
+    idCSC = cred.idCSC;
+  } catch (err) {
+    cscBloqueio = err && err.code ? err.code : 'CSC_NAO_CONFIGURADO_PARA_AMBIENTE';
+  }
   return {
     fonte: 'EMPRESA',
     empresaId: Number(empresa.id),
@@ -231,8 +413,9 @@ function montarConfigEmpresa({ empresa, row, validarUrls }) {
     codigoUf: String(row.codigo_uf || '23'),
     serie: Number(row.serie || 1),
     numeroAtual: Number(row.numero_atual || 1),
-    tokenCSC: row.token_csc || '',
-    idCSC: row.id_csc || '',
+    tokenCSC,
+    idCSC,
+    cscBloqueio,
     certificadoPath: row.certificado_path || '',
     certificadoSenha: row.certificado_senha || '',
     certificadoValidacaoStatus: row.certificado_validacao_status || '',
@@ -270,8 +453,16 @@ async function upsertConfiguracaoFiscalEmpresa(empresaId, dados, db) {
   if (!id) throw erroConfig('EMPRESA_OBRIGATORIA', 'empresaId obrigatório.', { statusCode: 400 });
   await garantirSchemaFiscalEmpresaAsync(db);
   const existente = await dbGet(db, `SELECT empresa_id FROM empresas_configuracao_fiscal WHERE empresa_id = ?`, [id]);
+  let gravar = dados || {};
+  if (!gravar.__cscConsolidado) {
+    const empresaCsc = await dbGet(db, `SELECT cnpj FROM empresas WHERE id = ?`, [id]);
+    gravar = consolidarCscUpsertDireto(gravar, digitosCnpj(empresaCsc && empresaCsc.cnpj));
+  } else {
+    gravar = { ...gravar };
+    delete gravar.__cscConsolidado;
+  }
   const campos = CAMPOS_ESCRITA.slice();
-  const valores = campos.map((c) => (dados[c] != null ? dados[c] : null));
+  const valores = campos.map((c) => (gravar[c] != null ? gravar[c] : null));
   if (existente) {
     const setSql = campos.map((c) => `${c}=?`).join(', ');
     await runSql(
@@ -331,6 +522,8 @@ const STATUS_FISCAL_ADMIN = Object.freeze({
 
 const CAMPOS_ESCRITA = Object.freeze([
   'ambiente', 'uf', 'codigo_uf', 'serie', 'numero_atual', 'token_csc', 'id_csc',
+  'id_csc_homologacao', 'token_csc_homologacao', 'id_csc_producao', 'token_csc_producao',
+  'csc_cnpj_vinculado',
   'certificado_path', 'certificado_senha',
   'certificado_validacao_status', 'certificado_validacao_em', 'certificado_validade_ate',
   'certificado_cnpj', 'certificado_titular', 'certificado_validacao_codigo',
@@ -344,6 +537,10 @@ const CAMPOS_ESCRITA = Object.freeze([
 const ALIASES_ESCRITA = Object.freeze({
   tokenCsc: 'token_csc',
   idCsc: 'id_csc',
+  idCscHomologacao: 'id_csc_homologacao',
+  tokenCscHomologacao: 'token_csc_homologacao',
+  idCscProducao: 'id_csc_producao',
+  tokenCscProducao: 'token_csc_producao',
   certificadoPath: 'certificado_path',
   certificadoSenha: 'certificado_senha',
   codigoUf: 'codigo_uf',
@@ -413,10 +610,11 @@ function validarConfiguracaoFiscalEmpresa(empresaId, configuracao) {
   return { empresaId: id, dados, valida: true };
 }
 
-function avaliarCamposProntidao(row) {
+function avaliarCamposProntidao(row, empresa) {
   const ambienteOk = row && [1, 2].includes(Number(row.ambiente));
   const serieOk = row && Number(row.serie) >= 1;
-  const cscOk = row && preencherTexto(row.token_csc) && preencherTexto(row.id_csc);
+  const ambienteCsc = row && Number(row.ambiente) === 1 ? 1 : (row && Number(row.ambiente) === 2 ? 2 : null);
+  const cscOk = ambienteCsc ? cscDoAmbienteConfigurado(row, empresa, ambienteCsc) : false;
   const certificadoOk = row && preencherTexto(row.certificado_path) && preencherTexto(row.certificado_senha);
   const sefazOk = row && (
     preencherTexto(row.ws_autorizacao)
@@ -443,7 +641,7 @@ function avaliarStatusAdmin(empresa, row) {
   if (row.serie != null && row.serie !== '' && !(Number(row.serie) >= 1)) {
     return STATUS_FISCAL_ADMIN.INVALIDA;
   }
-  const campos = avaliarCamposProntidao(row);
+  const campos = avaliarCamposProntidao(row, empresa);
   const pronta = campos.ambiente && campos.serie && campos.csc && campos.certificado && campos.sefaz;
   return pronta ? STATUS_FISCAL_ADMIN.PRONTA : STATUS_FISCAL_ADMIN.INCOMPLETA;
 }
@@ -463,7 +661,7 @@ function derivarEstadoCertificado(row) {
 function dtoPublicoConfiguracao(empresa, row) {
   const path = require('path');
   const { ESTADOS_CERTIFICADO_A1 } = require('./certificadoEstados');
-  const campos = avaliarCamposProntidao(row);
+  const campos = avaliarCamposProntidao(row, empresa);
   const status = avaliarStatusAdmin(empresa, row);
   const nomeCert = row && preencherTexto(row.certificado_path)
     ? path.basename(String(row.certificado_path))
@@ -489,7 +687,27 @@ function dtoPublicoConfiguracao(empresa, row) {
     // TOKEN CSC é segredo — apenas flag (nunca token_csc puro no DTO público).
     id_csc: row && preencherTexto(row.id_csc) ? String(row.id_csc).trim() : null,
     id_csc_configurado: !!(row && preencherTexto(row.id_csc)),
-    csc_configurado: !!(row && preencherTexto(row.token_csc)),
+    csc_configurado: cscDoAmbienteConfigurado(
+      row,
+      empresa,
+      row && Number(row.ambiente) === 1 ? 1 : 2
+    ),
+    csc_homologacao_configurado: cscDoAmbienteConfigurado(row, empresa, 2),
+    csc_producao_configurado: cscDoAmbienteConfigurado(row, empresa, 1),
+    id_csc_homologacao: cscDoAmbienteConfigurado(row, empresa, 2)
+      ? validarIdCsc(row.id_csc_homologacao)
+      : null,
+    id_csc_producao: cscDoAmbienteConfigurado(row, empresa, 1)
+      ? validarIdCsc(row.id_csc_producao)
+      : null,
+    csc_vinculado_ao_cnpj: digitosCnpj(row && row.csc_cnpj_vinculado) !== ''
+      && digitosCnpj(row && row.csc_cnpj_vinculado) === digitosCnpj(empresa && empresa.cnpj),
+    csc_legado_pendente: !!(
+      row
+      && preencherTexto(row.token_csc)
+      && !cscDoAmbienteConfigurado(row, empresa, 1)
+      && !cscDoAmbienteConfigurado(row, empresa, 2)
+    ),
     certificado_configurado: certificadoConfigurado,
     certificado_validado: certificadoValidado,
     certificado_status: certificadoStatus,
@@ -614,6 +832,7 @@ async function salvarConfiguracaoFiscalEmpresa(empresaId, configuracao, deps = {
   validarConfiguracaoFiscalEmpresa(id, configuracao);
   const empresa = await obterEmpresaOuErro(id, db);
   const patch = sanitizarPatchCsc(normalizarPayloadEscrita(configuracao));
+  delete patch.csc_cnpj_vinculado;
   const existente = await dbGet(db, `SELECT * FROM empresas_configuracao_fiscal WHERE empresa_id = ?`, [id]);
 
   let txAberta = false;
@@ -627,7 +846,7 @@ async function salvarConfiguracaoFiscalEmpresa(empresaId, configuracao, deps = {
         const valor = patch[campo];
         // Nunca apagar CSC/certificado com string vazia acidental.
         if (
-          (campo === 'token_csc' || campo === 'id_csc' || campo === 'certificado_senha' || campo === 'certificado_path')
+          CAMPOS_CSC_NAO_APAGAR.includes(campo)
           && (valor == null || String(valor).trim() === '')
         ) {
           merged[campo] = base[campo] != null ? base[campo] : null;
@@ -707,6 +926,8 @@ async function salvarConfiguracaoFiscalEmpresa(empresaId, configuracao, deps = {
     if (merged.numero_atual == null) merged.numero_atual = 1;
     if (!merged.uf) merged.uf = 'CE';
     complementarUrlsPorAmbiente(merged);
+    consolidarCscParaSalvar(merged, patch, digitosCnpj(empresa.cnpj));
+    merged.__cscConsolidado = true;
     await upsertConfiguracaoFiscalEmpresa(id, merged, db);
     if (typeof deps.aposPersistir === 'function') {
       await deps.aposPersistir({ empresaId: id, merged });
@@ -720,6 +941,27 @@ async function salvarConfiguracaoFiscalEmpresa(empresaId, configuracao, deps = {
     throw e;
   }
   return obterConfiguracaoFiscalEmpresa(empresa.id, { db });
+}
+
+async function invalidarCscsDaEmpresa(empresaId, db) {
+  const id = normalizarEmpresaId(empresaId);
+  if (!id) return { empresa_id: null, cscs_invalidados: false };
+  await garantirSchemaFiscalEmpresaAsync(db);
+  await runSql(
+    db,
+    `UPDATE empresas_configuracao_fiscal
+        SET token_csc = NULL,
+            id_csc = NULL,
+            id_csc_homologacao = NULL,
+            token_csc_homologacao = NULL,
+            id_csc_producao = NULL,
+            token_csc_producao = NULL,
+            csc_cnpj_vinculado = NULL,
+            updated_at = CURRENT_TIMESTAMP
+      WHERE empresa_id = ?`,
+    [id]
+  );
+  return { empresa_id: id, cscs_invalidados: true };
 }
 
 async function removerConfiguracaoFiscalEmpresa(empresaId, deps = {}) {
@@ -749,5 +991,8 @@ module.exports = {
   exigirEmpresaAlvoAdministrativo,
   obterEmpresaOuErro,
   dtoPublicoConfiguracao,
-  derivarEstadoCertificado
+  derivarEstadoCertificado,
+  validarIdCsc,
+  selecionarCscParaEmissao,
+  invalidarCscsDaEmpresa
 };

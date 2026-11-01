@@ -223,7 +223,11 @@ async function atualizarEmpresa(id, dados = {}, opts = {}) {
     }
   }
 
+  const cnpjMudou = cnpj !== atual.cnpj;
+  let txAberta = false;
   try {
+    await dbRun(db, 'BEGIN IMMEDIATE');
+    txAberta = true;
     await dbRun(
       db,
       `UPDATE empresas
@@ -233,11 +237,25 @@ async function atualizarEmpresa(id, dados = {}, opts = {}) {
        WHERE id = ?`,
       [cnpj, razaoSocial, nomeFantasia, ie, im, atual.id]
     );
+    if (cnpjMudou) {
+      const { invalidarCscsDaEmpresa } = require('../fiscal/empresasConfiguracaoFiscal');
+      await invalidarCscsDaEmpresa(atual.id, db);
+    }
+    await dbRun(db, 'COMMIT');
+    txAberta = false;
   } catch (err) {
+    if (txAberta) {
+      try { await dbRun(db, 'ROLLBACK'); } catch (_rollback) { /* ignore */ }
+    }
     throw interpretarUniqueCnpj(err);
   }
 
-  return buscarEmpresaPorId(atual.id, { db });
+  const empresa = await buscarEmpresaPorId(atual.id, { db });
+  if (cnpjMudou) {
+    empresa.cscs_invalidados = true;
+    empresa.cscs_mensagem = 'O CNPJ foi alterado. Os CSCs anteriores foram invalidados. Cadastre novamente o CSC de homologação e o de produção.';
+  }
+  return empresa;
 }
 
 async function ativarEmpresa(id, opts = {}) {

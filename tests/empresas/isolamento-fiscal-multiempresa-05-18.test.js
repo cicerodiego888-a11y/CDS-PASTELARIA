@@ -67,7 +67,7 @@ async function test01IsolamentoCscECert() {
     serie: 1,
     numero_atual: 10,
     token_csc: 'CSC-A-SECRETO',
-    id_csc: 'ID-A',
+    id_csc: '1',
     certificado_path: `C:/certs/certificado-empresa-${ctx.a.id}.pfx`,
     certificado_senha: 'senha-a',
     ws_autorizacao: 'https://sefaz.local/a'
@@ -78,7 +78,7 @@ async function test01IsolamentoCscECert() {
     serie: 2,
     numero_atual: 20,
     token_csc: 'CSC-B-SECRETO',
-    id_csc: 'ID-B',
+    id_csc: '2',
     certificado_path: `C:/certs/certificado-empresa-${ctx.b.id}.pfx`,
     certificado_senha: 'senha-b',
     ws_autorizacao: 'https://sefaz.local/b'

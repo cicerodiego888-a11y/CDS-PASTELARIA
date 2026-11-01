@@ -156,11 +156,59 @@ function resolverTefPagamento(pagamento, dadosVenda = {}) {
  * RC7.10.4 — resolve pagamentos fiscais e troco.
  * Σ vPag = vNF + vTroco (nunca clipar overpay de dinheiro).
  */
+function formaDePagamentoNfce(pagamento) {
+  return String(pagamento && (pagamento.forma_pagamento || pagamento.tipo) || '')
+    .toLowerCase()
+    .trim();
+}
+
+function pagamentoDinheiroNfce(pagamento) {
+  const forma = formaDePagamentoNfce(pagamento);
+  return forma === 'dinheiro' || forma === 'especie' || forma === 'cash';
+}
+
+function pagamentoRecusadoNfce(pagamento) {
+  const status = String(pagamento && (pagamento.status_autorizacao || pagamento.status) || '').toLowerCase();
+  return ['pendente', 'rejeitada', 'rejeitado', 'falha', 'negado', 'negada', 'timeout', 'erro'].includes(status);
+}
+
+function pagamentoEletronicoNfce(pagamento) {
+  const forma = formaDePagamentoNfce(pagamento);
+  return ['pix', 'pix_tef', 'cartao_debito', 'cartao_credito', 'debito', 'credito', 'tef', 'cartao'].includes(forma);
+}
+
+function vendaExigeSeparacaoDePagamento(venda, pagamentos) {
+  const lista = pagamentos || [];
+  const dinheiroConfirmado = lista.some((pagamento) => (
+    pagamentoDinheiroNfce(pagamento) && !pagamentoRecusadoNfce(pagamento)
+  ));
+  const eletronicoConfirmado = lista.some((pagamento) => (
+    pagamentoEletronicoNfce(pagamento)
+    && !pagamentoRecusadoNfce(pagamento)
+    && pagamento.aprovado !== false
+  ));
+  if (dinheiroConfirmado && eletronicoConfirmado) return true;
+  const temTipoNaoFiscal = lista.some((pagamento) => pagamento && pagamento.tipo_recebimento === 'nao_fiscal');
+  const temTipoFiscal = lista.some((pagamento) => pagamento && pagamento.tipo_recebimento === 'fiscal');
+  if (temTipoNaoFiscal && temTipoFiscal) return true;
+  const valoresSeparados = Number(venda && venda.valor_nao_fiscal || 0) > 0.009
+    && Number(venda && venda.valor_fiscal || 0) > 0.009;
+  return (temTipoNaoFiscal || dinheiroConfirmado) && eletronicoConfirmado && (valoresSeparados || temTipoNaoFiscal);
+}
+
 function resolverPagamentosNfce(venda, totalFiscal) {
   const pagamentosBrutos = Array.isArray(venda?.pagamentos) ? venda.pagamentos : [];
-  let pagamentosFiscais = pagamentosBrutos.filter((p) => (
-    !p.tipo_recebimento || p.tipo_recebimento === 'fiscal'
-  ));
+  const separacao = vendaExigeSeparacaoDePagamento(venda, pagamentosBrutos);
+  let pagamentosFiscais = pagamentosBrutos.filter((pagamento) => {
+    if (!pagamento || pagamentoRecusadoNfce(pagamento)) return false;
+    if (pagamento.tipo_recebimento === 'nao_fiscal' || pagamento.tipo_recebimento === 'outros') return false;
+    if (separacao && pagamentoDinheiroNfce(pagamento) && pagamento.dinheiro_moeda_fechamento !== true) return false;
+    if (separacao && !pagamento.tipo_recebimento) return false;
+    return !pagamento.tipo_recebimento || pagamento.tipo_recebimento === 'fiscal';
+  });
+  if (separacao && pagamentosFiscais.length === 0) {
+    return { pagamentos: [], vTroco: 0, somaPagamentos: 0, separacaoExigida: true };
+  }
 
   if (pagamentosFiscais.length === 0 && venda?.forma_pagamento) {
     pagamentosFiscais = [{
@@ -189,7 +237,7 @@ function resolverPagamentosNfce(venda, totalFiscal) {
 
   if (somaPagamentos > vNF + 0.009) {
     vTroco = round2(somaPagamentos - vNF);
-  } else if (Math.abs(somaPagamentos - vNF) > 0.01 && pagamentosFiscais.length === 1) {
+  } else if (!separacao && Math.abs(somaPagamentos - vNF) > 0.01 && pagamentosFiscais.length === 1) {
     // Pagamento único aquém / ruído: normaliza para vNF (sem troco).
     pagamentosFiscais = [{
       ...pagamentosFiscais[0],
@@ -197,9 +245,16 @@ function resolverPagamentosNfce(venda, totalFiscal) {
     }];
   }
 
-  return { pagamentos: pagamentosFiscais, vTroco, somaPagamentos: round2(
+  const somaFinal = round2(
     pagamentosFiscais.reduce((t, p) => t + Number(p.valor || 0), 0)
-  ) };
+  );
+  return {
+    pagamentos: pagamentosFiscais,
+    vTroco,
+    somaPagamentos: somaFinal,
+    separacaoExigida: separacao,
+    divergente: separacao && Math.abs(somaFinal - vTroco - vNF) > 0.02
+  };
 }
 
 function montarPagamentos(pagamentos, dadosVenda = {}, vTroco = 0) {
@@ -647,7 +702,9 @@ function buildNfceXml({ config, venda, itens, numero }) {
     const tagCEST = cestLimpo.length === 7
       ? `<CEST>${cestLimpo}</CEST>`
       : '';
-    const unidade = normalizarUnidadeComercialFiscal(item.unidade || item.produto_unidade || 'UN');
+    const unidadeInformada = normalizarUnidadeComercialFiscal(item.unidade || item.produto_unidade || 'UN');
+    const fracionado = Number(item.produto_fracionado ?? item.vendido_por_peso ?? 0) === 1;
+    const unidade = !fracionado && unidadeInformada === 'ML' ? 'UN' : unidadeInformada;
     const xProd = Number(config.ambiente) === 2 && idx === 0
       ? descricaoHomologacao
       : item.produto_nome || 'PRODUTO';

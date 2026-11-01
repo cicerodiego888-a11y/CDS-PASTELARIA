@@ -1,4 +1,5 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { spawn } = require('child_process');
 const { resolverIconeJanela } = require('./electron-icon');
 const path = require('path');
 const fs = require('fs');
@@ -43,6 +44,99 @@ app.commandLine.appendSwitch('disable-software-rasterizer');
 app.commandLine.appendSwitch('disable-features', 'UseSkiaRenderer');
 
 let mainWindow;
+let impressaoCupomAtiva = false;
+
+function obterJobImpressaoCupom() {
+  const indice = process.argv.indexOf('--cds-impressao-cupom');
+  if (indice === -1) return null;
+  return {
+    arquivo: process.argv[indice + 1] || '',
+    deviceName: process.argv[indice + 2] || ''
+  };
+}
+
+function dispararImpressaoIsolada(html, deviceName) {
+  const dir = path.join(os.tmpdir(), 'cds-cupom');
+  fs.mkdirSync(dir, { recursive: true });
+  const arquivo = path.join(dir, `cupom-${Date.now()}-${process.pid}.html`);
+  fs.writeFileSync(arquivo, String(html || ''), 'utf8');
+
+  const args = [];
+  if (!app.isPackaged) {
+    args.push(app.getAppPath());
+  }
+  args.push('--', '--cds-impressao-cupom', arquivo, deviceName || '');
+
+  const child = spawn(process.execPath, args, {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+    cwd: app.getAppPath(),
+    env: process.env
+  });
+  child.unref();
+  child.on('error', (err) => {
+    console.error('[IMPRESSAO] Processo isolado não iniciou:', err && err.message ? err.message : err);
+  });
+  console.log('[IMPRESSAO] Cupom enviado ao processo isolado.');
+}
+
+function executarJobImpressaoCupom(job) {
+  let html = '';
+  try {
+    html = fs.readFileSync(job.arquivo, 'utf8');
+  } catch (err) {
+    console.error('[IMPRESSAO] Arquivo do cupom indisponível:', err && err.message ? err.message : err);
+    app.exit(0);
+    return;
+  }
+
+  const win = new BrowserWindow({
+    show: false,
+    width: 380,
+    height: 720,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true
+    }
+  });
+
+  let encerrou = false;
+  const encerrar = () => {
+    if (encerrou) return;
+    encerrou = true;
+    setTimeout(() => {
+      try { fs.unlinkSync(job.arquivo); } catch (_) { /* arquivo temporário */ }
+      app.exit(0);
+    }, 300);
+  };
+
+  win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  win.webContents.once('did-finish-load', () => {
+    setTimeout(() => {
+      if (win.isDestroyed()) {
+        encerrar();
+        return;
+      }
+      const printOptions = {
+        silent: true,
+        printBackground: true,
+        margins: { marginType: 'none' }
+      };
+      if (job.deviceName) {
+        printOptions.deviceName = job.deviceName;
+      }
+      try {
+        win.webContents.print(printOptions, () => encerrar());
+      } catch (err) {
+        console.error('[IMPRESSAO] Falha no processo isolado:', err && err.message ? err.message : err);
+        encerrar();
+      }
+    }, 400);
+  });
+  win.webContents.once('did-fail-load', () => encerrar());
+  setTimeout(encerrar, 120000);
+}
 
 // Registrar handlers IPC globalmente (antes de criar a janela)
 ipcMain.removeHandler('listar-impressoras');
@@ -402,6 +496,13 @@ function criarMainWindow(opcoes = {}) {
 
   global.mainWindow = mainWindow;
 
+  mainWindow.on('close', (event) => {
+    if (impressaoCupomAtiva && mainWindow && !mainWindow.isDestroyed()) {
+      event.preventDefault();
+      console.log('[IMPRESSAO] Fechamento do PDV ignorado enquanto a impressora aguarda conexão.');
+    }
+  });
+
   mainWindow.webContents.on('preload-error', (_event, preloadPath, error) => {
     console.error('[ELECTRON] Erro no preload:', preloadPath, error?.message || error);
   });
@@ -466,7 +567,6 @@ function criarMainWindow(opcoes = {}) {
       width: 380,
       height: 720,
       title: 'DANFE NFC-e',
-      parent: mainWindow,
       modal: false,
       show: false,
       alwaysOnTop: true,
@@ -519,72 +619,15 @@ function criarMainWindow(opcoes = {}) {
     </style>
   </head>`);
 
-    let impressaoConcluida = false;
-    let conteudoPronto = false;
     let autoFecharTimer = null;
 
-    function executarImpressao(callback) {
-      const printOptions = {
-        silent: true,
-        printBackground: true,
-        margins: {
-          marginType: 'none'
-        }
-      };
-
-      if (deviceName) {
-        printOptions.deviceName = deviceName;
-      }
-
-      cupomWindow.webContents.print(printOptions, (success, errorType) => {
-        if (success) {
-          console.log('[IMPRESSAO] DANFE NFC-e impresso.');
-        } else {
-          console.error('[IMPRESSAO] Falha:', errorType);
-        }
-
-        impressaoConcluida = true;
-        if (typeof callback === 'function') {
-          callback();
-        }
-      });
-    }
-
-    function fecharCupomComImpressao() {
-      if (cupomWindow.isDestroyed()) {
-        return;
-      }
-
-      if (autoFecharTimer) {
-        clearTimeout(autoFecharTimer);
-        autoFecharTimer = null;
-      }
-
-      if (impressaoConcluida) {
-        cupomWindow.destroy();
-        return;
-      }
-
-      if (!conteudoPronto) {
-        cupomWindow.destroy();
-        return;
-      }
-
-      executarImpressao(() => {
+    function agendarFechamentoCupom() {
+      setTimeout(() => {
         if (!cupomWindow.isDestroyed()) {
           cupomWindow.destroy();
         }
-      });
+      }, 200);
     }
-
-    cupomWindow.on('close', (e) => {
-      if (impressaoConcluida || cupomWindow.isDestroyed()) {
-        return;
-      }
-
-      e.preventDefault();
-      fecharCupomComImpressao();
-    });
 
     cupomWindow.loadURL(
       `data:text/html;charset=utf-8,${encodeURIComponent(htmlFinal)}`
@@ -620,14 +663,10 @@ function criarMainWindow(opcoes = {}) {
       });
     `);
 
-      conteudoPronto = true;
+      dispararImpressaoIsolada(htmlFinal, deviceName);
 
       if (silent) {
-        executarImpressao(() => {
-          if (!cupomWindow.isDestroyed()) {
-            cupomWindow.destroy();
-          }
-        });
+        agendarFechamentoCupom();
         return;
       }
 
@@ -643,45 +682,9 @@ function criarMainWindow(opcoes = {}) {
   });
 
   ipcMain.removeHandler('imprimir-danfe-silencioso');
-  ipcMain.handle('imprimir-danfe-silencioso', async (event, html, deviceName) => {
-    const printWindow = new BrowserWindow({
-      width: 420,
-      height: 720,
-      show: false, // Janela invisível
-      webPreferences: {
-        nodeIntegration: false,
-        contextIsolation: true
-      }
-    });
-
-    await printWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
-
-    // Aguardar renderização
-    await new Promise(resolve => setTimeout(resolve, 500));
-
-    const printOptions = {
-      silent: true,
-      printBackground: true
-    };
-
-    if (deviceName) {
-      printOptions.deviceName = deviceName;
-    }
-
-    return new Promise((resolve, reject) => {
-      printWindow.webContents.print(printOptions, (success, errorType) => {
-        // Fechar janela após impressão
-        if (!printWindow.isDestroyed()) {
-          printWindow.close();
-        }
-
-        if (success) {
-          resolve({ sucesso: true });
-        } else {
-          reject(new Error(`Falha na impressão: ${errorType}`));
-        }
-      });
-    });
+  ipcMain.handle('imprimir-danfe-silencioso', async (_event, html, deviceName) => {
+    dispararImpressaoIsolada(html, deviceName);
+    return { sucesso: true, isolado: true };
   });
 
   return mainWindow;
@@ -798,6 +801,12 @@ function createWindowRemote(remoteUrl, configServidor = {}) {
 
 
 app.whenReady().then(() => {
+  const jobImpressao = obterJobImpressaoCupom();
+  if (jobImpressao) {
+    executarJobImpressaoCupom(jobImpressao);
+    return;
+  }
+
   try {
     // CSP restritiva no renderer (antes de qualquer loadURL).
     const { aplicarCspElectron } = require('./electron-csp');
@@ -875,6 +884,13 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  if (obterJobImpressaoCupom()) {
+    app.quit();
+    return;
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    return;
+  }
   try {
     const cm = require('./backend/motores/equipamentos/connection/ConnectionManager');
     if (cm && typeof cm.closeAll === 'function') {

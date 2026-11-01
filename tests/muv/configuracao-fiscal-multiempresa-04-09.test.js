@@ -68,7 +68,7 @@ function configCompleta(tag) {
     ambiente: 2,
     serie: 1,
     token_csc: `CSC-SECRETO-${tag}`,
-    id_csc: `ID-${tag}`,
+    id_csc: '1',
     certificado_path: `C:/certs/certificado-empresa-${tag}.pfx`,
     certificado_senha: `senha-secreta-${tag}`,
     ws_autorizacao: `https://sefaz.local/${tag}/auth`

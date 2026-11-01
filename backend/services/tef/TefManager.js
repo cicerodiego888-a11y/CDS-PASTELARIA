@@ -71,6 +71,32 @@ class TefManager {
         const transacaoExistente = await this._verificarIdempotencia(dadosNormalizados.idempotency_key);
         if (transacaoExistente) {
           const completa = await this._buscarTransacaoCompleta(transacaoExistente.id);
+          const empresaPedido = Number(dadosNormalizados.empresa_id);
+          if (
+            completa
+            && completa.empresa_id != null
+            && empresaPedido
+            && Number(completa.empresa_id) !== empresaPedido
+          ) {
+            return {
+              sucesso: false,
+              aprovado: false,
+              codigo: 'TEF_EMPRESA_DIVERGENTE',
+              mensagem: 'Transação TEF pertence a outra empresa.',
+              transacao_id: transacaoExistente.id,
+              status: transacaoExistente.status
+            };
+          }
+          if (completa && completa.venda_id != null) {
+            return {
+              sucesso: false,
+              aprovado: false,
+              codigo: 'TEF_JA_VINCULADO',
+              mensagem: 'Esta autorização TEF já entrou em outra venda. Informe o pagamento novamente.',
+              transacao_id: transacaoExistente.id,
+              status: 'negado'
+            };
+          }
           const resposta = tefContrato.paraRespostaApi({
             sucesso: tefContrato.estaAprovado({ status: transacaoExistente.status }),
             status: transacaoExistente.status,
@@ -90,6 +116,15 @@ class TefManager {
         }
       }
 
+      if (!Number(dadosNormalizados.empresa_id)) {
+        return {
+          sucesso: false,
+          aprovado: false,
+          codigo: 'TEF_EMPRESA_AUSENTE',
+          mensagem: 'Transação TEF sem empresa autorizada.'
+        };
+      }
+
       const adapter = await obterAdapter();
 
       // Executar operação com circuit breaker e retry
@@ -106,6 +141,7 @@ class TefManager {
 
                 repository.criarTransacao({
                   venda_id: dadosNormalizados.venda_id || null,
+                  empresa_id: Number(dadosNormalizados.empresa_id),
                   tipo: dadosNormalizados.tipo,
                   valor: dadosNormalizados.valor,
                   parcelas: dadosNormalizados.parcelas || 1,
@@ -120,6 +156,17 @@ class TefManager {
                     if (err.message && err.message.includes('UNIQUE constraint')) {
                       const transacaoExistente = await this._buscarPorIdempotencyKey(dadosNormalizados.idempotency_key);
                       if (transacaoExistente) {
+                        const completa = await this._buscarTransacaoCompleta(transacaoExistente.id);
+                        if (completa && completa.venda_id != null) {
+                          return resolve({
+                            sucesso: false,
+                            aprovado: false,
+                            codigo: 'TEF_JA_VINCULADO',
+                            mensagem: 'Esta autorização TEF já entrou em outra venda. Informe o pagamento novamente.',
+                            transacao_id: transacaoExistente.id,
+                            status: 'negado'
+                          });
+                        }
                         return resolve({
                           sucesso: false,
                           codigo: 'TRANSACAO_DUPLICADA',

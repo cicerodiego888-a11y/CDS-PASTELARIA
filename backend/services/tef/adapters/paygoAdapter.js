@@ -1,5 +1,6 @@
 const BaseAdapter = require('./BaseAdapter');
 const tefContrato = require('../tefContrato');
+const { respostaSimulada } = require('../simulacaoControlada');
 const sdkDetector = require('../sdkDetector');
 const fs = require('fs');
 
@@ -48,6 +49,9 @@ class PaygoAdapter extends BaseAdapter {
   }
 
   async autorizarPagamento(dados) {
+    const controlado = respostaSimulada(dados, { adquirente: 'PayGo', bandeira: 'Visa' });
+    if (controlado) return controlado;
+
     await this.inicializar();
 
     this.emitirEventoPinpad(require('../tefEvents').estadosPinpad.AGUARDE);

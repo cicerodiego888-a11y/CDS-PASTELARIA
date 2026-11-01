@@ -26,6 +26,9 @@ function dtoSeguro(id, extras) {
       serie: 1,
       token_csc: 'SEGREDO-CSC',
       id_csc: 'ID-CSC',
+      id_csc_homologacao: '1',
+      token_csc_homologacao: 'SEGREDO-CSC',
+      csc_cnpj_vinculado: '11222333000181',
       certificado_path: `C:/interno/certificado-empresa-${id}.pfx`,
       certificado_senha: 'senha-secreta',
       ws_autorizacao: 'https://sefaz.local/auth'

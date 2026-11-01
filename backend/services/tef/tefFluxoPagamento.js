@@ -56,6 +56,22 @@ function pagamentoMistoExigeTef(pagamentos) {
   );
 }
 
+function formaAceitaConfirmacaoManual(forma, ehPagamentoMisto) {
+  if (ehPagamentoMisto) return true;
+  const normalizada = normalizarFormaPagamentoTEF(forma);
+  return normalizada === 'dinheiro'
+    || normalizada === 'debito'
+    || normalizada === 'credito'
+    || formaPagamentoUsaTEF(normalizada);
+}
+
+function consumirCliqueConfirmacao(estado) {
+  if (!estado || estado.consumido === true) {
+    return { aceito: false, estado: estado || { consumido: true } };
+  }
+  return { aceito: true, estado: { consumido: true } };
+}
+
 function resolverFluxoPagamentoFiscal({
   modoConfirmacaoFiscal,
   tefHabilitado,
@@ -71,16 +87,39 @@ function resolverFluxoPagamentoFiscal({
   const tefOn = parseTefHabilitado(tefHabilitado);
   const deveUsarTefAutomatico = tefOn && pagamentoExigeTef;
   const modoManual = String(modoConfirmacaoFiscal || 'TEF').toUpperCase() === 'MANUAL';
-  const usarConfirmacaoManual = modoManual
+  const manualPorModo = modoManual
     && Number(totalFiscal) > 0
     && !deveUsarTefAutomatico;
+  const manualPorTefDesligado = !tefOn
+    && formaAceitaConfirmacaoManual(formaNormalizada, ehPagamentoMisto);
+  const usarConfirmacaoManual = manualPorModo || manualPorTefDesligado;
+  const quantidadeParcelas = (pagamentosMistos || []).filter((pagamento) =>
+    Number(pagamento && pagamento.valor) > 0
+  ).length;
+  const preservarListaSequencial = Boolean(ehPagamentoMisto) && quantidadeParcelas >= 1;
 
   return {
     formaNormalizada,
     pagamentoExigeTef,
     deveUsarTefAutomatico,
-    usarConfirmacaoManual
+    usarConfirmacaoManual,
+    preservarListaSequencial
   };
+}
+
+function ramoFechamentoPagamento({
+  preservarListaSequencial,
+  deveUsarTefAutomatico,
+  totalFiscal,
+  ehPagamentoMisto,
+  usarConfirmacaoManual
+}) {
+  if (preservarListaSequencial) return 'lista_sequencial';
+  if (deveUsarTefAutomatico && Number(totalFiscal) > 0) return 'pagamento_unico_fiscal';
+  if (deveUsarTefAutomatico && ehPagamentoMisto) return 'tef_misto';
+  if (deveUsarTefAutomatico) return 'tef_simples';
+  if (usarConfirmacaoManual) return 'manual';
+  return 'sem_ramo';
 }
 
 function isConfirmacaoFiscalManualFlag(confirmacaoManualFlag, modoGlobalConfirmacaoFiscal) {
@@ -121,7 +160,10 @@ module.exports = {
   ehPagamentoPixTef,
   parseTefHabilitado,
   pagamentoMistoExigeTef,
+  formaAceitaConfirmacaoManual,
+  consumirCliqueConfirmacao,
   resolverFluxoPagamentoFiscal,
+  ramoFechamentoPagamento,
   isConfirmacaoFiscalManualFlag,
   devePularAutorizacaoTefBackend
 };

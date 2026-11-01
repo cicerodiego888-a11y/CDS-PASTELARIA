@@ -23,6 +23,107 @@ const FORMAS_PRAZO = new Set([
   'boleto_bancario'
 ]);
 const FORMAS_TEF = new Set(['cartao_debito', 'cartao_credito']);
+const ERRO_AUTORIZACAO_PAGAMENTO =
+  'Não foi possível confirmar a autorização do pagamento. A venda não foi registrada.';
+
+function confirmacaoFiscalManualExplicita(valor) {
+  return valor === true || valor === 'true' || valor === 1 || valor === '1';
+}
+
+function modoManualVigente(modoConfirmacaoFiscal) {
+  return String(modoConfirmacaoFiscal || 'TEF').toUpperCase() === 'MANUAL';
+}
+
+function confirmacaoManualAceita(modoConfirmacaoFiscal, confirmacaoFiscalManual, tefHabilitado) {
+  if (!confirmacaoFiscalManualExplicita(confirmacaoFiscalManual)) return false;
+  if (!tefFluxoPagamento.parseTefHabilitado(tefHabilitado)) return true;
+  return modoManualVigente(modoConfirmacaoFiscal);
+}
+
+function listarPagamentosQueExigemTef(pagamentos) {
+  return (Array.isArray(pagamentos) ? pagamentos : []).filter((pagamento) =>
+    tefFluxoPagamento.formaPagamentoUsaTEF(pagamento && pagamento.forma_pagamento)
+  );
+}
+
+function identificadorTefInformado(valor) {
+  return valor != null && String(valor).trim() !== '';
+}
+
+function valoresMonetariosCompativeis(aprovado, pagamento) {
+  return Math.abs(arredondarCentavos(aprovado) - arredondarCentavos(pagamento)) <= 0.009;
+}
+
+function buscarTransacaoTefPorId(id) {
+  const db = require('../database');
+  return new Promise((resolve, reject) => {
+    db.get(
+      `SELECT id, status, valor, tipo, nsu, autorizacao, venda_id, empresa_id
+       FROM tef_transacoes WHERE id = ?`,
+      [Number(id)],
+      (err, row) => {
+        if (err) reject(err);
+        else resolve(row || null);
+      }
+    );
+  });
+}
+
+async function comprovarTransacoesTefAprovadas(pagamentosTef, empresaIdVenda) {
+  const ids = pagamentosTef.map((pagamento) => Number(pagamento.tef_transacao_id));
+  if (ids.some((id) => !Number.isInteger(id) || id <= 0)) {
+    return { sucesso: false, erro: 'Transação TEF não encontrada ou não aprovada.' };
+  }
+  if (new Set(ids).size !== ids.length) {
+    return { sucesso: false, erro: 'A mesma transação TEF não pode quitar mais de um pagamento.' };
+  }
+  if (!Number(empresaIdVenda)) {
+    return { sucesso: false, erro: 'Venda sem empresa autorizada para vincular a transação TEF.' };
+  }
+
+  const transacoes = [];
+  for (const pagamento of pagamentosTef) {
+    let row;
+    try {
+      row = await buscarTransacaoTefPorId(pagamento.tef_transacao_id);
+    } catch (error) {
+      return { sucesso: false, erro: 'Não foi possível confirmar a transação TEF.' };
+    }
+    if (!row || !tefContrato.estaAprovado({ status: row.status })) {
+      return { sucesso: false, erro: 'Transação TEF não encontrada ou não aprovada.' };
+    }
+    if (row.empresa_id == null) {
+      return { sucesso: false, erro: 'Transação TEF sem vínculo empresarial não pode quitar a venda.' };
+    }
+    if (Number(row.empresa_id) !== Number(empresaIdVenda)) {
+      return { sucesso: false, erro: 'Transação TEF pertence a outra empresa.' };
+    }
+    if (!valoresMonetariosCompativeis(row.valor, pagamento.valor)) {
+      return { sucesso: false, erro: 'Valor da transação TEF não confere com o pagamento.' };
+    }
+    const tipoPagamento = tefFluxoPagamento.normalizarTipoTef(pagamento.forma_pagamento);
+    const tipoTransacao = tefFluxoPagamento.normalizarTipoTef(row.tipo);
+    if (tipoPagamento !== tipoTransacao) {
+      return { sucesso: false, erro: 'Forma de pagamento incompatível com a transação TEF.' };
+    }
+    if (identificadorTefInformado(pagamento.nsu) && String(pagamento.nsu) !== String(row.nsu || '')) {
+      return { sucesso: false, erro: 'NSU informado não confere com a transação TEF.' };
+    }
+    if (
+      identificadorTefInformado(pagamento.autorizacao)
+      && String(pagamento.autorizacao) !== String(row.autorizacao || '')
+    ) {
+      return { sucesso: false, erro: 'Autorização informada não confere com a transação TEF.' };
+    }
+    if (row.venda_id != null) {
+      return { sucesso: false, erro: 'Transação TEF já vinculada a outra venda.' };
+    }
+    pagamento.nsu = row.nsu || null;
+    pagamento.autorizacao = row.autorizacao || null;
+    transacoes.push(row.id);
+  }
+  return { sucesso: true, transacoes };
+}
 
 function arredondarCentavos(valor) {
   return Math.round((Number(valor || 0) + Number.EPSILON) * 100) / 100;
@@ -135,7 +236,9 @@ async function processarFluxoPagamentoVenda({
   desconto,
   acrescimo,
   subtotalBruto,
-  debugDescontoFiscal
+  debugDescontoFiscal,
+  confirmacaoFiscalManual,
+  empresaId
 }) {
   // Validações básicas — totalFiscal/totalNaoFiscal DEVEM ser líquidos (RC7.10.1 / FISCAL-4.0.2)
   totalFiscal = Number(totalFiscal || 0);
@@ -157,6 +260,14 @@ async function processarFluxoPagamentoVenda({
     formaPagamento,
     totalLiquidoEsperado
   );
+
+  const pagamentosTefEntrada = listarPagamentosQueExigemTef(pagamentosEntrada);
+  if (pagamentosTefEntrada.length > 0 && pagamentosTefEntrada.every((pagamento) => pagamento.tef_transacao_id)) {
+    const prova = await comprovarTransacoesTefAprovadas(pagamentosTefEntrada, empresaId);
+    if (!prova.sucesso) {
+      return { sucesso: false, erro: prova.erro };
+    }
+  }
   
   // RC8.2.2 — midpAtivo vem exclusivamente da política MPFC (núcleo).
   // Migração: omitido → false (não consulta configuracaoService).
@@ -247,13 +358,35 @@ async function processarFluxoPagamentoVenda({
     };
   }
   
+  if (Number(totalFiscal) <= 0) {
+    const pagamentosTef = listarPagamentosQueExigemTef(pagamentosEntrada);
+    const todosComId = pagamentosTef.length > 0 && pagamentosTef.every((pagamento) => pagamento.tef_transacao_id);
+    if (pagamentosTef.length > 0 && !todosComId) {
+      const aceita = confirmacaoManualAceita(
+        modoConfirmacaoFiscal,
+        confirmacaoFiscalManual,
+        tefHabilitado
+      );
+      const tefOn = tefFluxoPagamento.parseTefHabilitado(tefHabilitado);
+      if (!aceita && !tefOn) {
+        return {
+          sucesso: false,
+          erro: ERRO_AUTORIZACAO_PAGAMENTO,
+          distribuicao
+        };
+      }
+    }
+  }
+
   // Processar recebimento fiscal (TEF ou Confirmação Manual)
   const resultadoFiscal = await processarRecebimentoFiscal({
     recebimentosFiscal: distribuicao.recebimentosFiscal,
     totalFiscal,
     tefHabilitado,
     modoConfirmacaoFiscal,
-    formaPagamento
+    formaPagamento,
+    confirmacaoFiscalManual,
+    empresaId
   });
   
   if (!resultadoFiscal.sucesso) {
@@ -325,32 +458,69 @@ async function processarRecebimentoFiscal({
   totalFiscal,
   tefHabilitado,
   modoConfirmacaoFiscal,
-  formaPagamento
+  formaPagamento,
+  confirmacaoFiscalManual,
+  empresaId
 }) {
   // Se não há fiscal, não processa nada
   if (totalFiscal <= 0 || !recebimentosFiscal || recebimentosFiscal.length === 0) {
     return { sucesso: true, tipo: 'sem_fiscal' };
   }
-  
-  // Determinar se deve usar TEF ou confirmação manual
+
+  const recebimentosTef = listarPagamentosQueExigemTef(recebimentosFiscal);
+  if (recebimentosTef.length === 0) {
+    return await processarConfirmacaoManualFiscal(recebimentosFiscal);
+  }
+
+  const comId = recebimentosTef.filter((recebimento) =>
+    identificadorTefInformado(recebimento.tef_transacao_id)
+  );
+  const semId = recebimentosTef.filter((recebimento) =>
+    !identificadorTefInformado(recebimento.tef_transacao_id)
+  );
+  const manualAceita = confirmacaoManualAceita(
+    modoConfirmacaoFiscal,
+    confirmacaoFiscalManual,
+    tefHabilitado
+  );
+
+  if (semId.length === 0) {
+    return {
+      sucesso: true,
+      tipo: 'tef',
+      transacoes: [...new Set(comId.map((recebimento) => recebimento.tef_transacao_id))],
+      recebimentos: recebimentosFiscal
+    };
+  }
+
+  if (comId.length > 0 && manualAceita) {
+    const prova = await comprovarTransacoesTefAprovadas(comId, empresaId);
+    if (!prova.sucesso) return prova;
+    return await processarConfirmacaoManualFiscal(recebimentosFiscal);
+  }
+
+  if (manualAceita) {
+    return await processarConfirmacaoManualFiscal(recebimentosFiscal);
+  }
+
   const deveUsarTef = await deveUsarTEFParaFiscal({
     tefHabilitado,
     modoConfirmacaoFiscal,
     formaPagamento,
     totalFiscal
   });
-  
+
   if (deveUsarTef) {
-    return await processarTEFFiscal(recebimentosFiscal);
-  } else {
-    return await processarConfirmacaoManualFiscal(recebimentosFiscal);
+    return await processarTEFFiscal(recebimentosFiscal, empresaId);
   }
+
+  return { sucesso: false, erro: ERRO_AUTORIZACAO_PAGAMENTO };
 }
 
 /**
  * Processa TEF para recebimentos fiscais
  */
-async function processarTEFFiscal(recebimentosFiscal) {
+async function processarTEFFiscal(recebimentosFiscal, empresaId) {
   const tefConfig = await tefConfigService.obterConfiguracao();
   const tefOn = tefFluxoPagamento.parseTefHabilitado(tefConfig.tefHabilitado);
   
@@ -371,9 +541,10 @@ async function processarTEFFiscal(recebimentosFiscal) {
   const transacoesAutorizadas = [];
   
   for (const recebimento of recebimentosTEF) {
-    // Se já tem transação TEF, apenas valida
     if (recebimento.tef_transacao_id) {
-      transacoesAutorizadas.push(recebimento.tef_transacao_id);
+      const prova = await comprovarTransacoesTefAprovadas([recebimento], empresaId);
+      if (!prova.sucesso) return prova;
+      transacoesAutorizadas.push(prova.transacoes[0]);
       continue;
     }
     
@@ -381,6 +552,7 @@ async function processarTEFFiscal(recebimentosFiscal) {
       const tipoTef = tefFluxoPagamento.normalizarTipoTef(recebimento.forma_pagamento);
       const retornoTEF = await tefManager.autorizar({
         venda_id: null,
+        empresa_id: empresaId,
         tipo: tipoTef,
         valor: recebimento.valor,
         parcelas: 1

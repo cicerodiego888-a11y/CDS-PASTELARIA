@@ -15,7 +15,8 @@ const {
 const { exigirCertificadoAptoParaUsoFiscal } = require('./CertificadoUsoFiscalGate');
 const { carregarCertificadoPfx } = require('./certificateService');
 const {
-  buildNfceXml
+  buildNfceXml,
+  resolverPagamentosNfce
 } = require('./xmlBuilder');
 const { gerarQRCodeNFCe } = require('./qrcode');
 const { assinarNFe } = require('./signer');
@@ -27,9 +28,59 @@ const { validarXmlFiscal } = require('./validarXmlFiscal');
 const { gerarDanfeHtml } = require('./danfe');
 const { getFiscalSubDir } = require('./paths');
 
+function totalConferenciaEmissao(venda, itens) {
+  const bruto = Math.round((itens || []).reduce((total, item) => (
+    total + Number(item && item.valor_fiscal || 0)
+  ), 0) * 100) / 100;
+  const desconto = Math.round(Number(venda && venda.desconto || 0) * 100) / 100;
+  if (desconto > 0.009) return Math.round((bruto - desconto) * 100) / 100;
+  return bruto;
+}
+
 function itemEntraNaNfce(item) {
   return Number(item.quantidade_fiscal || 0) > 0
     && Number(item.valor_fiscal || 0) > 0;
+}
+
+function selecionarItensFiscaisParaNfce(venda, itens) {
+  const {
+    calcularReferenciasConfirmadas
+  } = require('../vendas/PagamentoSequencialComposicaoService');
+  const lista = Array.isArray(itens) ? itens : [];
+  const referencias = calcularReferenciasConfirmadas(venda && venda.pagamentos);
+  const fiscal = Number(referencias.valor_fiscal_referencia || 0);
+  const naoFiscal = Number(referencias.valor_nao_fiscal_referencia || 0);
+  const somaFiscal = Math.round(lista.reduce((total, item) => (
+    total + Number(item && item.valor_fiscal || 0)
+  ), 0) * 100) / 100;
+  const separacao = fiscal > 0.009 && naoFiscal > 0.009;
+  if (separacao && Math.abs(somaFiscal - fiscal) > 0.02) {
+    return {
+      bloqueado: true,
+      codigo: 'DISTRIBUICAO_NAO_AUTORIZADA',
+      motivo: 'A referência fiscal não corresponde aos itens persistidos. A NFC-e não foi montada com o carrinho comercial.',
+      itens: [],
+      referencia: referencias,
+      somaFiscal
+    };
+  }
+  if (separacao && somaFiscal <= 0.009) {
+    return {
+      bloqueado: true,
+      codigo: 'DISTRIBUICAO_NAO_AUTORIZADA',
+      motivo: 'Não há distribuição fiscal autorizada para a referência da venda.',
+      itens: [],
+      referencia: referencias,
+      somaFiscal
+    };
+  }
+  return {
+    bloqueado: false,
+    codigo: null,
+    itens: lista,
+    referencia: referencias,
+    somaFiscal
+  };
 }
 
 console.log('EMISSOR REAL:', __filename);
@@ -66,6 +117,7 @@ function carregarVenda(vendaId, conn = db) {
           p.cest as produto_cest,
           p.codigo_barras as produto_codigo_barras,
           p.unidade,
+          p.preco_venda,
           p.produto_fracionado,
           p.vendido_por_peso
         FROM vendas_itens vi
@@ -241,7 +293,58 @@ async function emitirPorVendaId(vendaId, opcoes = {}) {
     };
   }
 
-  const itensFiscal = itens.filter(itemEntraNaNfce);
+  let selecaoFiscal = selecionarItensFiscaisParaNfce(venda, itens);
+  let itensDocumento = selecaoFiscal.itens;
+  if (selecaoFiscal.bloqueado) {
+    try {
+      const { itensFiscaisInteirosParaReferencia } = require('../vendas/PagamentoRecomposicaoDocumentoService');
+      const reconciliados = await itensFiscaisInteirosParaReferencia({
+        itens,
+        pagamentos: venda.pagamentos,
+        total: venda.total,
+        empresaId,
+        db: conn
+      });
+      if (reconciliados && Array.isArray(reconciliados.itens) && reconciliados.itens.length > 0) {
+        venda.desconto = Number(reconciliados.desconto || 0);
+        venda.valor_fiscal = Number(reconciliados.valor_fiscal_liquido || 0);
+        const semDinheiro = (venda.pagamentos || []).filter((pagamento) => {
+          const forma = String(pagamento && (pagamento.forma_pagamento || pagamento.tipo) || '').toLowerCase();
+          return forma !== 'dinheiro' && forma !== 'especie' && forma !== 'cash';
+        });
+        if (Number(reconciliados.dinheiro_aplicado || 0) > 0) {
+          semDinheiro.push({
+            forma_pagamento: 'dinheiro',
+            valor: Number(reconciliados.dinheiro_aplicado),
+            tipo_recebimento: 'fiscal',
+            dinheiro_moeda_fechamento: true,
+            status: 'aprovado'
+          });
+        }
+        venda.pagamentos = semDinheiro;
+        selecaoFiscal = {
+          bloqueado: false,
+          codigo: null,
+          itens: reconciliados.itens,
+          referencia: selecaoFiscal.referencia,
+          somaFiscal: Number(reconciliados.valor_produtos || 0)
+        };
+        itensDocumento = reconciliados.itens;
+      }
+    } catch (erroReconciliacao) {
+      console.error('Falha ao reconciliar itens fiscais inteiros:', erroReconciliacao);
+    }
+  }
+  if (selecaoFiscal.bloqueado) {
+    return {
+      success: false,
+      status: 'recomposicao_bloqueada',
+      code: selecaoFiscal.codigo,
+      message: selecaoFiscal.motivo
+    };
+  }
+
+  const itensFiscal = itensDocumento.filter(itemEntraNaNfce);
   const itensDanfe = itens;
 
   if (itensFiscal.length === 0) {
@@ -295,10 +398,35 @@ async function emitirPorVendaId(vendaId, opcoes = {}) {
   const credenciais = await resolverCredenciaisNfceDaEmpresa({
     empresaId,
     db: conn,
-    validarUrls: true,
+    validarUrls: opcoes.naoTransmitir === true ? false : true,
     getFiscalConfigFn: opcoes.getFiscalConfig
   });
   const config = credenciais.config;
+
+  if (opcoes.naoTransmitir === true) {
+    const conferencia = resolverPagamentosNfce(
+      venda,
+      totalConferenciaEmissao(venda, itensFiscal)
+    );
+    if (conferencia.divergente || (conferencia.separacaoExigida && conferencia.pagamentos.length === 0)) {
+      return {
+        success: false,
+        status: 'recomposicao_bloqueada',
+        code: 'PAGAMENTO_FISCAL_DIVERGENTE',
+        message: 'Os pagamentos fiscais não fecham o total autorizado. A NFC-e não foi montada.'
+      };
+    }
+    const xmlPreparado = buildNfceXml({ config, venda, itens: itensFiscal, numero: 1 });
+    return {
+      success: true,
+      status: 'xml_preparado',
+      transmitido: false,
+      xml: xmlPreparado.xmlSemAssinatura,
+      valores: xmlPreparado.valores,
+      itens: itensFiscal,
+      vendaId
+    };
+  }
 
   // P0.2 — gate criptográfico antes de assinatura / cliente SEFAZ.
   // Não usa PRONTA nem path+senha como prova de validade.
@@ -400,6 +528,19 @@ async function emitirPorVendaId(vendaId, opcoes = {}) {
     }
   } catch (eqErr) {
     console.warn('[RC5] validação equipamentos fiscal:', eqErr.message);
+  }
+
+  const conferenciaPagamento = resolverPagamentosNfce(
+    { ...venda, pagamentos: venda.pagamentos },
+    totalConferenciaEmissao(venda, itensFiscal)
+  );
+  if (conferenciaPagamento.divergente || (conferenciaPagamento.separacaoExigida && conferenciaPagamento.pagamentos.length === 0)) {
+    return {
+      success: false,
+      status: 'recomposicao_bloqueada',
+      code: 'PAGAMENTO_FISCAL_DIVERGENTE',
+      message: 'Os pagamentos fiscais não fecham o total autorizado. A NFC-e não foi montada.'
+    };
   }
 
   const xmlBase = buildNfceXml({ config, venda, itens: itensFiscal, numero });
@@ -795,6 +936,7 @@ function entregarUrlsAoTransporte(config, extras, enviar) {
 
 module.exports = {
   emitirPorVendaId,
+  selecionarItensFiscaisParaNfce,
   obterDanfeHtmlAtualizado,
   entregarUrlsAoTransporte,
   resolverUrlsEmissao

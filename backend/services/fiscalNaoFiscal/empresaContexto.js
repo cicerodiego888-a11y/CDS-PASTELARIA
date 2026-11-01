@@ -142,7 +142,7 @@ function criarMiddlewareContextoEmpresa(db, opts = {}) {
         );
       }
       const { exigirEmpresaAutorizada } = require('../empresas/UsuarioEmpresaService');
-      await exigirEmpresaAutorizada(uid, empresaId, { db: dbConn });
+      await exigirEmpresaAutorizada(uid, empresaId, { db: dbConn, user: req.user });
       req.empresaId = empresaId;
       req.empresa = { id: empresaId };
       return next();

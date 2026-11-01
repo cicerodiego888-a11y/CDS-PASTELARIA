@@ -33,7 +33,10 @@
 
     const CAMPOS_FISCAIS_ENVIO = Object.freeze([
         'ambiente', 'serie', 'numero_atual', 'uf', 'codigo_uf',
-        'token_csc', 'id_csc', 'ws_autorizacao', 'ws_retorno', 'ws_status',
+        'token_csc', 'id_csc',
+        'id_csc_homologacao', 'token_csc_homologacao',
+        'id_csc_producao', 'token_csc_producao',
+        'ws_autorizacao', 'ws_retorno', 'ws_status',
         'csc_qrcode_url', 'consulta_chave_url',
         'ws_autorizacao_homologacao', 'ws_retorno_homologacao', 'ws_status_homologacao',
         'csc_qrcode_url_homologacao', 'consulta_chave_url_homologacao',
@@ -45,16 +48,19 @@
     ]);
 
     const CAMPOS_SEGREDO = Object.freeze([
-        'token_csc', 'tokenCsc', 'csc', 'certificado_senha', 'certificadoSenha',
+        'token_csc', 'tokenCsc', 'csc',
+        'token_csc_homologacao', 'token_csc_producao',
+        'certificado_senha', 'certificadoSenha',
         'senha', 'certificado_path', 'certificadoPath', 'path'
     ]);
 
     const PLACEHOLDER_CSC = 'CONFIGURADO — informe para substituir';
+    const AVISO_CSC_CONFIGURADO = 'CSC CONFIGURADO';
 
     function ehPlaceholderCsc(valor) {
         const t = String(valor == null ? '' : valor).trim();
         if (!t) return true;
-        if (t === PLACEHOLDER_CSC) return true;
+        if (t === PLACEHOLDER_CSC || t === AVISO_CSC_CONFIGURADO) return true;
         if (/^CONFIGURADO/i.test(t) && /substituir/i.test(t)) return true;
         return false;
     }
@@ -153,7 +159,7 @@
             const v = src[k];
             if (v == null) return;
             if (typeof v === 'string' && v.trim() === '') return;
-            if ((k === 'token_csc' || k === 'id_csc') && ehPlaceholderCsc(v)) return;
+            if (/^(token_csc|id_csc)(_homologacao|_producao)?$/.test(k) && ehPlaceholderCsc(v)) return;
             out[k] = typeof v === 'string' ? v.trim() : v;
         });
         return out;
@@ -341,6 +347,10 @@
             && h.indexOf('data-gef-tab="fiscal"') === -1;
     }
 
+    function textoEstadoCsc(configurado) {
+        return configurado ? 'Configurado' : 'Não configurado';
+    }
+
     function indicadorCscVisual(fiscal) {
         return fiscal && fiscal.csc_configurado ? 'CSC configurado' : 'CSC não configurado';
     }
@@ -445,8 +455,12 @@
             empresa_id: empresaId != null ? Number(empresaId) : null,
             status: 'INCOMPLETA',
             csc_configurado: false,
+            csc_homologacao_configurado: false,
+            csc_producao_configurado: false,
             id_csc_configurado: false,
             id_csc: null,
+            id_csc_homologacao: null,
+            id_csc_producao: null,
             certificado_configurado: false,
             certificado_nome: null,
             sefaz_configurado: false,
@@ -729,7 +743,6 @@
         const f = fiscal || {};
         const est = estoqueCfg || { modo: 'AUTOMATICO' };
         const modoManual = String(est.modo || 'AUTOMATICO').toUpperCase() === 'MANUAL';
-        const cscTxt = indicadorCscVisual(f);
         const cert = indicadorCertificadoVisual(f);
         const ambProd = Number(f.ambiente) === 1 ? 'selected' : '';
         const ambHom = Number(f.ambiente) === 2 ? 'selected' : '';
@@ -791,17 +804,23 @@
                             <div class="col-md-3"><label class="form-label">Próximo número</label><input id="gef-numero" class="form-control" value="${f.numero_atual != null ? escapeHtml(String(f.numero_atual)) : ''}"></div>
                         </div>
                         <h5 class="h6 mt-3">CÓDIGO DE SEGURANÇA DO CONTRIBUINTE</h5>
-                        <p class="small" data-gef-csc-status>${escapeHtml(cscTxt)}</p>
-                        <div class="row g-2">
+                        ${f.csc_legado_pendente ? `<div class="alert alert-warning" data-gef-csc-invalido="legado">O CSC anterior não está associado ao CNPJ e ao ambiente. Informe novamente o CSC do ambiente selecionado. O valor antigo não será usado na emissão.</div>` : ''}
+                        <p class="small" data-gef-csc-status>Homologação: ${textoEstadoCsc(f.csc_homologacao_configurado)} · Produção: ${textoEstadoCsc(f.csc_producao_configurado)}</p>
+                        <p class="small text-muted">O ID e o token abaixo são do ambiente selecionado. Deixar em branco não apaga o CSC já gravado.</p>
+                        <div class="row g-2" id="gef-csc-bloco"
+                            data-id-h="${escapeHtml(f.id_csc_homologacao || '')}"
+                            data-id-p="${escapeHtml(f.id_csc_producao || '')}"
+                            data-ok-h="${f.csc_homologacao_configurado ? '1' : '0'}"
+                            data-ok-p="${f.csc_producao_configurado ? '1' : '0'}">
                             <div class="col-md-6"><label class="form-label" data-gef-label-id-csc>ID CSC</label>
                                 <input id="gef-id-csc" class="form-control" type="text" autocomplete="off"
-                                    value="${escapeHtml(f.id_csc || '')}"
-                                    placeholder="${(!f.id_csc && f.id_csc_configurado) ? PLACEHOLDER_CSC : ''}"></div>
+                                    value="${escapeHtml((Number(f.ambiente) === 1 ? f.id_csc_producao : f.id_csc_homologacao) || '')}"></div>
                             <div class="col-md-6"><label class="form-label" data-gef-label-csc>CSC / TOKEN CSC</label>
-                                <input id="gef-csc" class="form-control" type="password" autocomplete="new-password"
-                                    value=""
-                                    placeholder="${f.csc_configurado ? PLACEHOLDER_CSC : ''}"
-                                    data-gef-csc-mask="1"></div>
+                                <input id="gef-csc" class="form-control" type="text" autocomplete="off"
+                                    value="${(Number(f.ambiente) === 1 ? f.csc_producao_configurado : f.csc_homologacao_configurado) ? AVISO_CSC_CONFIGURADO : ''}"
+                                    style="${(Number(f.ambiente) === 1 ? f.csc_producao_configurado : f.csc_homologacao_configurado) ? 'color:#198754;font-weight:600;' : ''}"
+                                    data-gef-csc-mask="1"
+                                    data-gef-csc-aviso="${(Number(f.ambiente) === 1 ? f.csc_producao_configurado : f.csc_homologacao_configurado) ? '1' : '0'}"></div>
                         </div>
                         ${htmlBlocosUrlsFiscais(f)}
                         <button type="button" class="btn btn-primary mt-3" id="gef-salvar-fiscal">SALVAR CONFIGURAÇÃO FISCAL</button>
@@ -840,6 +859,22 @@
             </div>`;
     }
 
+    function aplicarCscDoAmbienteSelecionado() {
+        const bloco = document.getElementById('gef-csc-bloco');
+        const ambiente = document.getElementById('gef-ambiente');
+        const idCsc = document.getElementById('gef-id-csc');
+        const token = document.getElementById('gef-csc');
+        if (!bloco || !ambiente || !idCsc || !token) return;
+        const producao = ambiente.value === '1';
+        const id = producao ? bloco.getAttribute('data-id-p') : bloco.getAttribute('data-id-h');
+        const configurado = (producao ? bloco.getAttribute('data-ok-p') : bloco.getAttribute('data-ok-h')) === '1';
+        idCsc.value = id || '';
+        token.value = configurado ? AVISO_CSC_CONFIGURADO : '';
+        token.style.color = configurado ? '#198754' : '';
+        token.style.fontWeight = configurado ? '600' : '';
+        token.setAttribute('data-gef-csc-aviso', configurado ? '1' : '0');
+    }
+
     function pintarDetalhe() {
         const e = _ui.sessao.empresa || {};
         const f = _ui.sessao.fiscal || {};
@@ -854,6 +889,25 @@
         });
         document.getElementById('gef-salvar-gerais').addEventListener('click', salvarGerais);
         document.getElementById('gef-salvar-fiscal').addEventListener('click', salvarFiscal);
+        const selAmbiente = document.getElementById('gef-ambiente');
+        if (selAmbiente) selAmbiente.addEventListener('change', aplicarCscDoAmbienteSelecionado);
+        const campoCsc = document.getElementById('gef-csc');
+        if (campoCsc) {
+            campoCsc.addEventListener('focus', function () {
+                if (campoCsc.getAttribute('data-gef-csc-aviso') === '1' && campoCsc.value === AVISO_CSC_CONFIGURADO) {
+                    campoCsc.value = '';
+                    campoCsc.style.color = '';
+                    campoCsc.style.fontWeight = '';
+                }
+            });
+            campoCsc.addEventListener('blur', function () {
+                if (campoCsc.getAttribute('data-gef-csc-aviso') === '1' && !String(campoCsc.value || '').trim()) {
+                    campoCsc.value = AVISO_CSC_CONFIGURADO;
+                    campoCsc.style.color = '#198754';
+                    campoCsc.style.fontWeight = '600';
+                }
+            });
+        }
         const btnEstoque = document.getElementById('gef-salvar-estoque');
         if (btnEstoque) btnEstoque.addEventListener('click', salvarEstoque);
         const btnContagem = document.getElementById('gef-abrir-contagem');
@@ -916,7 +970,7 @@
         const btn = document.getElementById('gef-salvar-gerais');
         if (btn) btn.disabled = true;
         try {
-            await jsonFetch(`/empresas/${id}`, {
+            const salvo = await jsonFetch(`/empresas/${id}`, {
                 method: 'PUT',
                 headers: authHeaders({ 'X-Empresa-Id': String(id) }),
                 body: JSON.stringify({
@@ -927,7 +981,12 @@
                     inscricao_municipal: document.getElementById('gef-im').value
                 })
             });
-            feedback('Configuração salva com sucesso.', 'success');
+            feedback(
+                salvo && salvo.cscs_invalidados
+                    ? (salvo.cscs_mensagem || 'O CNPJ foi alterado. Os CSCs anteriores foram invalidados. Cadastre novamente o CSC de homologação e o de produção.')
+                    : 'Configuração salva com sucesso.',
+                salvo && salvo.cscs_invalidados ? 'warning' : 'success'
+            );
             _ui.aba = 'gerais';
             await carregarLista();
             await abrirDetalhe(id);
@@ -976,13 +1035,23 @@
                 const el = document.getElementById(idEl);
                 return el ? el.value : '';
             }
-            const bruto = montarPayloadFiscal({
-                ambiente: valorCampo('gef-ambiente'),
+            const ambienteSelecionado = valorCampo('gef-ambiente');
+            const idCsc = valorCampo('gef-id-csc');
+            const tokenCsc = valorCampo('gef-csc');
+            const camposCsc = {};
+            if (ambienteSelecionado === '1') {
+                camposCsc.id_csc_producao = idCsc;
+                camposCsc.token_csc_producao = tokenCsc;
+            } else if (ambienteSelecionado === '2') {
+                camposCsc.id_csc_homologacao = idCsc;
+                camposCsc.token_csc_homologacao = tokenCsc;
+            }
+            const bruto = montarPayloadFiscal(Object.assign({
+                ambiente: ambienteSelecionado,
                 uf: valorCampo('gef-uf'),
                 serie: valorCampo('gef-serie'),
-                numero_atual: valorCampo('gef-numero'),
-                id_csc: valorCampo('gef-id-csc'),
-                token_csc: valorCampo('gef-csc'),
+                numero_atual: valorCampo('gef-numero')
+            }, camposCsc, {
                 csc_qrcode_url_homologacao: valorCampo('gef-h-qr'),
                 consulta_chave_url_homologacao: valorCampo('gef-h-chave'),
                 ws_autorizacao_homologacao: valorCampo('gef-h-aut'),
@@ -993,7 +1062,7 @@
                 ws_autorizacao_producao: valorCampo('gef-p-aut'),
                 ws_retorno_producao: valorCampo('gef-p-ret'),
                 ws_status_producao: valorCampo('gef-p-st')
-            }, id);
+            }), id);
             const envio = payloadNaoSubstituiUrl(id, bruto);
             await jsonFetch(urlPutFiscal(envio.urlEmpresaId), {
                 method: 'PUT',

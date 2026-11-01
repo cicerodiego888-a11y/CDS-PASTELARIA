@@ -19,6 +19,7 @@ const CODIGO_CONFIG_INCOMPLETA = 'CONFIGURACAO_FISCAL_EMPRESA_INCOMPLETA';
 
 const CHAVES_SECRETAS = Object.freeze([
   'csc', 'tokenCSC', 'token_csc', 'CSC',
+  'token_csc_homologacao', 'token_csc_producao',
   'certificadoSenha', 'certificado_senha', 'senha',
   'privateKey', 'privateKeyPem', 'chavePrivada'
 ]);
@@ -136,10 +137,10 @@ async function resolverCredenciaisNfceDaEmpresa({ empresaId, db, validarUrls = t
   const config = await exigirContextoFiscalDaEmpresa({ empresaId, db, validarUrls, getFiscalConfigFn });
   if (!preencherTexto(config.tokenCSC) || !preencherTexto(config.idCSC)) {
     throw erroFiscalEmpresa(
-      CODIGO_CONFIG_INCOMPLETA,
-      'CSC da empresa não configurado.',
+      config.cscBloqueio || 'CSC_NAO_CONFIGURADO_PARA_AMBIENTE',
+      'CSC não configurado para o ambiente da emissão.',
       409,
-      { empresa_id: Number(config.empresaId) }
+      { empresa_id: Number(config.empresaId), ambiente: config.ambiente }
     );
   }
   return {

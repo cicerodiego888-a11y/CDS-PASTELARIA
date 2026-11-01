@@ -10,6 +10,8 @@ const tefDiagnosticoService = require('../services/tef/tefDiagnosticoService');
 const tefEvents = require('../services/tef/tefEvents');
 const tefContrato = require('../services/tef/tefContrato');
 const { verificarToken } = require('../middleware/auth');
+const { exigirEmpresaAutorizada } = require('../services/empresas/UsuarioEmpresaService');
+const { resolverEmpresaAutorizadaTef } = require('../services/tef/tefEmpresaContexto');
 const tefConfigService = require('../services/tef/tefConfigService');
 const tefFluxoPagamento = require('../services/tef/tefFluxoPagamento');
 const configService = require('../services/configuracaoService');
@@ -33,7 +35,19 @@ router.get('/fluxo-pdv', verificarToken, async (req, res) => {
   }
 });
 
-router.post('/pagar', async (req, res) => {
+function consultarEmpresasDoCaixaAberto(usuarioId) {
+  return new Promise((resolve, reject) => {
+    db.all(
+      `SELECT DISTINCT empresa_id
+       FROM caixa_sessoes
+       WHERE operador_id = ? AND status = 'aberto' AND empresa_id IS NOT NULL`,
+      [usuarioId],
+      (err, rows) => (err ? reject(err) : resolve(rows || []))
+    );
+  });
+}
+
+router.post('/pagar', verificarToken, async (req, res) => {
   try {
     const {
       venda_id,
@@ -42,6 +56,18 @@ router.post('/pagar', async (req, res) => {
       parcelas,
       idempotency_key
     } = req.body;
+    const resolvido = await resolverEmpresaAutorizadaTef(req, {
+      exigirEmpresaAutorizada: (usuario, empresaId) => exigirEmpresaAutorizada(usuario, empresaId, { db }),
+      consultarEmpresasDoCaixaAberto
+    });
+    if (!resolvido.empresaId) {
+      const codigo = resolvido.codigo || 'TEF_EMPRESA_AUSENTE';
+      return res.status(codigo === 'EMPRESA_NAO_AUTORIZADA' ? 403 : 400).json({
+        error: resolvido.mensagem || 'Empresa autorizada não identificada para a transação TEF.',
+        code: codigo
+      });
+    }
+    const empresaId = resolvido.empresaId;
 
     if (!tipo) {
       return res.status(400).json({ error: 'Tipo de pagamento TEF não informado.' });
@@ -53,6 +79,7 @@ router.post('/pagar', async (req, res) => {
 
     const resultado = await tefService.iniciarPagamento({
       venda_id: venda_id || null,
+      empresa_id: empresaId,
       tipo,
       valor: Number(valor),
       parcelas: Number(parcelas || 1),
