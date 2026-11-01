@@ -5853,21 +5853,7 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
             }
             dados.forma_pagamento = 'misto';
             dados.pagamento_sequencial = true;
-            dados.pagamentos = parcelasFechamento.map((pagamento) => (
-                pagamento.tef_transacao_id
-                    ? {
-                        ...pagamento,
-                        confirmacao_modalidade: 'tef',
-                        confirmacao_manual: 0,
-                        tipo_recebimento: 'fiscal'
-                    }
-                    : {
-                        ...marcarParcelaConfirmacaoManual(pagamento),
-                        tipo_recebimento: 'nao_fiscal',
-                        confirmacao_manual: 1,
-                        confirmacao_modalidade: 'manual'
-                    }
-            ));
+            dados.pagamentos = TefFluxoPagamento.montarParcelasListaSequencial(parcelasFechamento);
             dados.confirmacao_fiscal_manual = dados.pagamentos.some((pagamento) => pagamento.confirmacao_manual === 1);
             ramoPagamentoConcluido = true;
         } else if (ramoFechamento === 'pagamento_unico_fiscal') {

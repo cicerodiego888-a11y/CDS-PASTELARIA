@@ -118,6 +118,13 @@ app.get('/login', (req, res) => {
     res.sendFile(path.join(frontendRoot, 'shared/login.html'));
 });
 
+app.get(['/mobile-pedido', '/mobile-pedido/'], (req, res) => {
+    res.sendFile(path.join(frontendRoot, 'mobile-pedido/index.html'));
+});
+app.get(['/mobile-pdv', '/mobile-pdv/'], (req, res) => {
+    res.sendFile(path.join(frontendRoot, 'mobile-pdv/index.html'));
+});
+
 app.get(['/erp', '/erp/'], verificarToken, (req, res) => {
     res.sendFile(path.join(frontendRoot, 'erp/index.html'));
 });

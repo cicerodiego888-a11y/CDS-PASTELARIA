@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0f2744">
+    <title>Pedido — CDS Sistemas</title>
+    <link rel="icon" type="image/x-icon" href="/branding/favicon.ico">
+    <link rel="stylesheet" href="/mobile-pedido/mobile-pedido.css">
+</head>
+<body>
+    <div id="mp-app" class="mp">
+        <header class="mp-topo">
+            <img src="/branding/logo-oficial.png" alt="CDS Sistemas" class="mp-logo" width="40" height="40">
+            <div class="mp-topo-texto">
+                <strong>CDS Sistemas</strong>
+                <span id="mp-empresa">Empresa não selecionada</span>
+            </div>
+            <button type="button" class="mp-btn mp-btn-claro" id="mp-trocar-empresa">Empresa</button>
+        </header>
+
+        <div id="mp-alerta" class="mp-alerta" hidden></div>
+
+        <nav class="mp-etapas" id="mp-etapas" aria-label="Etapas do pedido">
+            <button type="button" data-etapa="cliente" class="is-ativa">1 Cliente</button>
+            <button type="button" data-etapa="produtos">2 Produtos</button>
+            <button type="button" data-etapa="carrinho">3 Carrinho</button>
+            <button type="button" data-etapa="conferencia">4 Conferência</button>
+        </nav>
+
+        <main>
+            <section id="mp-painel-cliente" data-painel="cliente">
+                <h1>Cliente</h1>
+                <p class="mp-ajuda">Opcional. O pedido pode seguir sem cliente.</p>
+                <label class="mp-label" for="mp-cliente-busca">Nome, CPF ou telefone</label>
+                <input id="mp-cliente-busca" class="mp-campo" type="search" autocomplete="off" enterkeyhint="search">
+                <p id="mp-cliente-status" class="mp-status" hidden></p>
+                <div id="mp-cliente-lista" class="mp-lista"></div>
+                <p id="mp-cliente-escolhido" class="mp-escolhido">Nenhum cliente selecionado</p>
+                <div class="mp-acoes">
+                    <button type="button" class="mp-btn" id="mp-sem-cliente">Continuar sem cliente</button>
+                    <button type="button" class="mp-btn mp-btn-primario" id="mp-cliente-seguir">Continuar</button>
+                </div>
+            </section>
+
+            <section id="mp-painel-produtos" data-painel="produtos" hidden>
+                <h1>Produtos</h1>
+                <label class="mp-label" for="mp-produto-busca">Código ou descrição</label>
+                <input id="mp-produto-busca" class="mp-campo" type="search" autocomplete="off" enterkeyhint="search">
+                <p id="mp-produto-status" class="mp-status" hidden></p>
+                <div id="mp-produto-lista" class="mp-lista"></div>
+                <div id="mp-produto-escolha" class="mp-card" hidden>
+                    <h2 id="mp-produto-nome"></h2>
+                    <p id="mp-produto-preco" class="mp-preco"></p>
+                    <label class="mp-label" for="mp-produto-qtd">Quantidade</label>
+                    <div class="mp-qtd">
+                        <button type="button" id="mp-qtd-menos" aria-label="Diminuir quantidade">−</button>
+                        <input id="mp-produto-qtd" class="mp-campo" type="number" min="1" step="1" value="1" inputmode="numeric">
+                        <button type="button" id="mp-qtd-mais" aria-label="Aumentar quantidade">+</button>
+                    </div>
+                    <div id="mp-personalizacao" hidden>
+                        <h3>Ingredientes</h3>
+                        <div id="mp-opcionais"></div>
+                        <p id="mp-personalizacao-total" class="mp-preco"></p>
+                    </div>
+                    <button type="button" class="mp-btn mp-btn-primario" id="mp-adicionar">Adicionar ao carrinho</button>
+                </div>
+                <div class="mp-acoes">
+                    <button type="button" class="mp-btn" id="mp-voltar-cliente">Voltar</button>
+                    <button type="button" class="mp-btn mp-btn-primario" id="mp-ir-carrinho">Ver carrinho</button>
+                </div>
+            </section>
+
+            <section id="mp-painel-carrinho" data-painel="carrinho" hidden>
+                <h1>Carrinho</h1>
+                <div id="mp-carrinho-lista"></div>
+                <p class="mp-total">Total parcial <strong id="mp-total-parcial">R$ 0,00</strong></p>
+                <div class="mp-acoes">
+                    <button type="button" class="mp-btn" id="mp-voltar-produtos">Produtos</button>
+                    <button type="button" class="mp-btn mp-btn-primario" id="mp-ir-conferencia">Conferir</button>
+                </div>
+            </section>
+
+            <section id="mp-painel-conferencia" data-painel="conferencia" hidden>
+                <h1>Conferência</h1>
+                <div id="mp-resumo" class="mp-card"></div>
+                <label class="mp-label" for="mp-desconto">Desconto do pedido (R$)</label>
+                <input id="mp-desconto" class="mp-campo" type="number" min="0" step="0.01" value="0" inputmode="decimal">
+                <label class="mp-label" for="mp-observacao">Observação do pedido</label>
+                <textarea id="mp-observacao" class="mp-campo" rows="3" maxlength="500"></textarea>
+                <p class="mp-total">Total <strong id="mp-total-final">R$ 0,00</strong></p>
+                <div class="mp-acoes">
+                    <button type="button" class="mp-btn" id="mp-voltar-carrinho">Voltar</button>
+                    <button type="button" class="mp-btn mp-btn-primario" id="mp-gravar">Gravar pedido</button>
+                </div>
+            </section>
+
+            <section id="mp-painel-confirmado" data-painel="confirmado" hidden>
+                <h1>Pedido gravado</h1>
+                <p class="mp-ajuda">Este registro é um pedido. Ainda não é uma venda e não gera documento fiscal.</p>
+                <div id="mp-confirmacao" class="mp-card"></div>
+                <button type="button" class="mp-btn mp-btn-primario" id="mp-enviar-pdv">Enviar para o PDV</button>
+                <button type="button" class="mp-btn" id="mp-novo">Novo pedido</button>
+            </section>
+
+            <section id="mp-painel-empresas" data-painel="empresas" hidden>
+                <h1>Empresa</h1>
+                <p class="mp-ajuda">O pedido usa a empresa deste contexto.</p>
+                <div id="mp-empresa-lista" class="mp-lista"></div>
+            </section>
+        </main>
+    </div>
+    <script src="/shared/js/cds-empresa-contexto.js"></script>
+    <script src="/erp/js/pedidos.js"></script>
+    <script src="/mobile-pedido/mobile-pedido.js"></script>
+</body>
+</html>

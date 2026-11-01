@@ -411,6 +411,9 @@ function _pedResolverPrecoSugerido(produto = {}, precoComercial, origemPrecoCome
 window.montarHtmlImpressaoPedido = montarHtmlImpressaoPedido;
 window.montarHtmlImpressaoPedidoTermico = montarHtmlImpressaoPedidoTermico;
 window.imprimirPedidoPorId = imprimirPedidoPorId;
+window.cdsPedidoResolverPrecoSugerido = _pedResolverPrecoSugerido;
+window.cdsPedidoCalcularTotaisPersonalizacao = _pedCalcularTotaisPersonalizacao;
+window.cdsPedidoPersonalizacaoEquivalente = _pedPersonalizacaoEquivalente;
 
 function loadPedidos() {
   let headers = _pedHeaders();

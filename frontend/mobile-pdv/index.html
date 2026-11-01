@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0f2744">
+    <title>PDV — CDS Sistemas</title>
+    <link rel="icon" type="image/x-icon" href="/branding/favicon.ico">
+    <link rel="stylesheet" href="/mobile-pedido/mobile-pedido.css">
+    <link rel="stylesheet" href="/mobile-pdv/mobile-pdv.css">
+</head>
+<body>
+    <div id="mv-app" class="mp">
+        <header class="mp-topo">
+            <img src="/branding/logo-oficial.png" alt="CDS Sistemas" class="mp-logo" width="40" height="40">
+            <div class="mp-topo-texto">
+                <strong>CDS Sistemas</strong>
+                <span id="mv-empresa">Empresa não selecionada</span>
+            </div>
+        </header>
+        <div id="mv-alerta" class="mp-alerta" hidden></div>
+        <main>
+            <section id="mv-painel-venda">
+                <h1>Fechamento</h1>
+                <p id="mv-operador" class="mp-ajuda"></p>
+                <p id="mv-pedido" class="mp-ajuda"></p>
+                <div id="mv-itens" class="mp-card"></div>
+                <div id="mv-busca-livre">
+                    <label class="mp-label" for="mv-produto-busca">Produto para venda avulsa</label>
+                    <input id="mv-produto-busca" class="mp-campo" type="search" autocomplete="off" enterkeyhint="search">
+                    <div id="mv-produto-lista" class="mp-lista"></div>
+                </div>
+                <p class="mp-total">Total <strong id="mv-total">R$ 0,00</strong></p>
+                <h2>Pagamentos</h2>
+                <p id="mv-informado" class="mp-ajuda"></p>
+                <p id="mv-restante" class="mp-ajuda"></p>
+                <div id="mv-formas" class="mp-acoes">
+                    <button type="button" class="mp-btn" data-forma="pix">PIX</button>
+                    <button type="button" class="mp-btn" data-forma="cartao_debito">Débito</button>
+                    <button type="button" class="mp-btn" data-forma="cartao_credito">Crédito</button>
+                    <button type="button" class="mp-btn" data-forma="dinheiro">Dinheiro</button>
+                </div>
+                <label class="mp-label" for="mv-valor">Valor da parcela</label>
+                <input id="mv-valor" class="mp-campo" type="number" min="0.01" step="0.01" inputmode="decimal">
+                <button type="button" class="mp-btn mp-btn-primario" id="mv-confirmar-parcela">Confirmar parcela</button>
+                <div id="mv-parcelas" class="mp-lista"></div>
+                <div id="mv-composicao" class="mp-card" hidden></div>
+                <p class="mp-ajuda">PIX, débito e crédito só entram depois da confirmação do autorizador. Neste celular, essa confirmação fica na estação com o pinpad.</p>
+                <button type="button" class="mp-btn mp-btn-primario" id="mv-finalizar">Finalizar venda</button>
+            </section>
+            <section id="mv-painel-resultado" hidden>
+                <h1>Venda registrada</h1>
+                <p class="mp-ajuda">O registro veio do PDV oficial. Esta tela não emite NFC-e por conta própria.</p>
+                <div id="mv-resultado" class="mp-card"></div>
+                <a class="mp-btn" href="/mobile-pedido">Novo pedido</a>
+            </section>
+        </main>
+    </div>
+    <script src="/shared/js/cds-empresa-contexto.js"></script>
+    <script src="/shared/js/tefFluxoPagamento.js"></script>
+    <script src="/pdv/js/pagamentoSequencial.js"></script>
+    <script src="/pdv/js/interacaoPagamentoMisto.js"></script>
+    <script src="/pdv/js/pdv-fechamento-oficial.js"></script>
+    <script src="/mobile-pdv/mobile-pdv.js"></script>
+</body>
+</html>

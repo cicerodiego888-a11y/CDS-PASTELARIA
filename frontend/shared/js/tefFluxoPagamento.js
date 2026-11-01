@@ -157,6 +157,32 @@
     return { dispensaModalExtra: true, codigo: null };
   }
 
+  function montarParcelasListaSequencial(parcelas) {
+    return (parcelas || []).map((pagamento) => {
+      if (pagamento && pagamento.tef_transacao_id) {
+        return {
+          ...pagamento,
+          confirmacao_modalidade: 'tef',
+          confirmacao_manual: 0,
+          tipo_recebimento: 'fiscal'
+        };
+      }
+      const copia = { ...(pagamento || {}) };
+      delete copia.nsu;
+      delete copia.autorizacao;
+      delete copia.bandeira;
+      delete copia.adquirente;
+      delete copia.tef_transacao_id;
+      delete copia.tef;
+      return {
+        ...copia,
+        tipo_recebimento: 'nao_fiscal',
+        confirmacao_manual: 1,
+        confirmacao_modalidade: 'manual'
+      };
+    });
+  }
+
   function ramoFechamentoPagamento({
     preservarListaSequencial,
     deveUsarTefAutomatico,
@@ -184,6 +210,7 @@
     consumirCliqueConfirmacao,
     parcelaSequencialJaConfirmada,
     listaSequencialJaConfirmada,
+    montarParcelasListaSequencial,
     resolverFluxoPagamentoFiscal,
     ramoFechamentoPagamento
   };
