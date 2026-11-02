@@ -24,7 +24,7 @@
         const trimmed = raw.trim();
         if (!trimmed.startsWith('/') || trimmed.startsWith('//')) return null;
         const path = trimmed.split('?')[0].split('#')[0];
-        const permitidos = ['/pdv-universal', '/pdv', '/erp', '/mobile-pedido', '/mobile-pdv'];
+        const permitidos = ['/pdv-universal', '/pdv', '/erp', '/mobile', '/mobile-pedido', '/mobile-pdv'];
         const ok = permitidos.some(function (p) {
             return path === p || path === p + '/' || path.indexOf(p + '/') === 0;
         });

@@ -17,6 +17,11 @@
                 <strong>CDS Sistemas</strong>
                 <span id="mv-empresa">Empresa não selecionada</span>
             </div>
+            <nav class="mp-modulos" aria-label="Módulos do CDS">
+                <a href="/mobile/">Início</a>
+                <a href="/mobile-pedido/">Pedido</a>
+                <a href="/mobile-pdv/" aria-current="page">PDV</a>
+            </nav>
         </header>
         <div id="mv-alerta" class="mp-alerta" hidden></div>
         <main>
@@ -26,6 +31,7 @@
                 <p id="mv-pedido" class="mp-ajuda"></p>
                 <div id="mv-itens" class="mp-card"></div>
                 <div id="mv-busca-livre">
+                    <button type="button" class="mp-btn" id="mv-venda-valor">Venda pelo Valor</button>
                     <label class="mp-label" for="mv-produto-busca">Produto para venda avulsa</label>
                     <input id="mv-produto-busca" class="mp-campo" type="search" autocomplete="off" enterkeyhint="search">
                     <div id="mv-produto-lista" class="mp-lista"></div>
@@ -40,23 +46,50 @@
                     <button type="button" class="mp-btn" data-forma="cartao_credito">Crédito</button>
                     <button type="button" class="mp-btn" data-forma="dinheiro">Dinheiro</button>
                 </div>
-                <label class="mp-label" for="mv-valor">Valor da parcela</label>
-                <input id="mv-valor" class="mp-campo" type="number" min="0.01" step="0.01" inputmode="decimal">
-                <button type="button" class="mp-btn mp-btn-primario" id="mv-confirmar-parcela">Confirmar parcela</button>
+                <p id="mv-estado-transacao" class="mp-ajuda"></p>
+                <dialog id="mv-dialogo-valor">
+                    <h2 id="mv-dialogo-titulo">Valor da parcela</h2>
+                    <label class="mp-label" for="mv-valor">Valor</label>
+                    <input id="mv-valor" class="mp-campo" type="number" min="0.01" step="0.01" inputmode="decimal">
+                    <div class="mp-acoes">
+                        <button type="button" class="mp-btn" id="mv-dialogo-cancelar">Cancelar</button>
+                        <button type="button" class="mp-btn mp-btn-primario" id="mv-confirmar-parcela">Confirmar</button>
+                    </div>
+                </dialog>
+                <dialog id="mv-dialogo-venda-valor">
+                    <h2>Venda pelo Valor</h2>
+                    <p class="mp-ajuda">O mesmo contrato do PDV. Informe o total e a quantidade de pastéis.</p>
+                    <label class="mp-label" for="mv-vv-valor">Valor total</label>
+                    <input id="mv-vv-valor" class="mp-campo" inputmode="decimal" autocomplete="off">
+                    <label class="mp-label" for="mv-vv-qtd">Quantidade de pastéis</label>
+                    <input id="mv-vv-qtd" class="mp-campo" type="number" min="1" step="1" value="1" inputmode="numeric">
+                    <div class="mp-acoes">
+                        <button type="button" class="mp-btn" id="mv-vv-cancelar">Cancelar</button>
+                        <button type="button" class="mp-btn mp-btn-primario" id="mv-vv-continuar">Continuar</button>
+                    </div>
+                </dialog>
                 <div id="mv-parcelas" class="mp-lista"></div>
                 <div id="mv-composicao" class="mp-card" hidden></div>
-                <p class="mp-ajuda">PIX, débito e crédito só entram depois da confirmação do autorizador. Neste celular, essa confirmação fica na estação com o pinpad.</p>
+                <p class="mp-ajuda">PIX, débito e crédito só entram depois da confirmação gravada pela estação. Este celular não comanda o pinpad nem a maquininha. Uma resposta de Smart POS simulada não substitui essa confirmação e não é recebimento real.</p>
+                <label class="mp-label" for="mv-correlacao">Identificador da cobrança na estação</label>
+                <input id="mv-correlacao" class="mp-campo" type="text" autocomplete="off">
+                <button type="button" class="mp-btn" id="mv-consultar-estacao">Consultar estação</button>
                 <button type="button" class="mp-btn mp-btn-primario" id="mv-finalizar">Finalizar venda</button>
             </section>
             <section id="mv-painel-resultado" hidden>
                 <h1>Venda registrada</h1>
-                <p class="mp-ajuda">O registro veio do PDV oficial. Esta tela não emite NFC-e por conta própria.</p>
+                <p class="mp-ajuda">O registro veio do PDV oficial. A emissão usa o contrato do emissor e permanece bloqueada nesta etapa.</p>
                 <div id="mv-resultado" class="mp-card"></div>
+                <button type="button" class="mp-btn" id="mv-emitir" disabled>Solicitar emissão</button>
                 <a class="mp-btn" href="/mobile-pedido">Novo pedido</a>
             </section>
         </main>
     </div>
     <script src="/shared/js/cds-empresa-contexto.js"></script>
+    <script src="/shared/js/cds-mobile-operacao.js"></script>
+    <script src="/shared/js/motor-preco-atacado.js"></script>
+    <script src="/pdv/js/pdv-preco-comercial.js"></script>
+    <script src="/pdv/js/pdv-venda-por-valor.js"></script>
     <script src="/shared/js/tefFluxoPagamento.js"></script>
     <script src="/pdv/js/pagamentoSequencial.js"></script>
     <script src="/pdv/js/interacaoPagamentoMisto.js"></script>

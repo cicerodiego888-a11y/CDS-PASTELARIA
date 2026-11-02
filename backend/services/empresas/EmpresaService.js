@@ -341,6 +341,103 @@ async function selecionarEmpresaContexto(fonte, opts = {}) {
   return dtoContextoEmpresa(empresa);
 }
 
+/**
+ * Empresa padrão da loja para o fluxo mobile.
+ * PDV em modo UNICA usa pdv_empresa_id. Nos demais modos usa a matriz
+ * oficial (CNPJ ordem 0001, com desempate por empresa_operacional_id).
+ * Não escolhe outra empresa quando a padrão está ausente, inativa ou
+ * fora da autorização do operador.
+ */
+async function resolverEmpresaPadraoDaLoja(opts = {}) {
+  const PdvModelo = require('../pdv/PdvModeloEmpresaService');
+  const {
+    escolherMatrizPadrao,
+    classificarTipoEmpresa
+  } = require('./ContextoEmpresaOperacionalService');
+  const UsuarioEmpresaService = require('./UsuarioEmpresaService');
+  const cfg = opts.cfg || PdvModelo.lerConfigPdvModelo(opts);
+
+  async function autorizar(empresa, origem) {
+    try {
+      await UsuarioEmpresaService.exigirEmpresaAutorizada(
+        opts.user || opts.usuario || opts.usuarioId,
+        empresa.id,
+        opts
+      );
+    } catch (err) {
+      if (err && err.code === 'EMPRESA_NAO_AUTORIZADA') {
+        throw erroCadastro(
+          'EMPRESA_PADRAO_NAO_AUTORIZADA',
+          'A empresa padrão da loja não está autorizada para este operador.',
+          403,
+          { empresa_id: empresa.id }
+        );
+      }
+      throw err;
+    }
+    return { empresa: dtoContextoEmpresa(empresa), origem };
+  }
+
+  if (cfg.pdv_modelo_empresa === 'UNICA') {
+    let empresa;
+    try {
+      empresa = await buscarEmpresaPorId(cfg.pdv_empresa_id, opts);
+    } catch (err) {
+      if (err && err.code === 'EMPRESA_NAO_ENCONTRADA') {
+        throw erroCadastro(
+          'EMPRESA_PADRAO_AUSENTE',
+          'A empresa padrão configurada para o PDV não está cadastrada.',
+          409
+        );
+      }
+      throw err;
+    }
+    if (Number(empresa.ativo) !== 1) {
+      throw erroCadastro(
+        'EMPRESA_PADRAO_INATIVA',
+        'A empresa padrão da loja está inativa.',
+        400,
+        { empresa_id: empresa.id }
+      );
+    }
+    return autorizar(empresa, 'CONFIG_PDV_EMPRESA_UNICA');
+  }
+
+  const todas = await listarEmpresas({}, opts);
+  const matrizes = todas.filter((empresa) => classificarTipoEmpresa(empresa.cnpj) === 'MATRIZ');
+  if (matrizes.length === 1 && Number(matrizes[0].ativo) !== 1) {
+    throw erroCadastro(
+      'EMPRESA_PADRAO_INATIVA',
+      'A matriz padrão da loja está inativa.',
+      400,
+      { empresa_id: matrizes[0].id }
+    );
+  }
+
+  let empresaOperacionalId = opts.empresaOperacionalId != null ? opts.empresaOperacionalId : null;
+  if (opts.empresaOperacionalId == null) {
+    try {
+      const { PoliticaEmpresaSimples } = require('../../core/modo-operacional');
+      empresaOperacionalId = PoliticaEmpresaSimples.obterEmpresaOperacionalIdConfig(opts);
+    } catch (_erro) {
+      empresaOperacionalId = null;
+    }
+  }
+  const padrao = escolherMatrizPadrao(todas, { empresaOperacionalId });
+  if (!padrao.empresa) {
+    const ambiguo = padrao.codigo === 'MATRIZ_AMBIGUA';
+    throw erroCadastro(
+      ambiguo ? 'MATRIZ_AMBIGUA' : 'EMPRESA_PADRAO_AUSENTE',
+      ambiguo
+        ? 'Há mais de uma matriz ativa e a configuração não indica qual é a padrão.'
+        : 'A loja não tem empresa padrão ativa.',
+      409,
+      ambiguo ? { candidatas: padrao.candidatas || [] } : {}
+    );
+  }
+  return autorizar(padrao.empresa, padrao.origem);
+}
+
 async function obterContextoEmpresa(fonte, opts = {}) {
   const { resolverEmpresaId, resolverEmpresaIdDaRequisicao } = require('../fiscalNaoFiscal/empresaContexto');
   const id = resolverEmpresaId(fonte)
@@ -366,6 +463,7 @@ module.exports = {
   ativarEmpresa,
   inativarEmpresa,
   selecionarEmpresaContexto,
+  resolverEmpresaPadraoDaLoja,
   obterContextoEmpresa,
   dtoContextoEmpresa,
   mapearEmpresa

@@ -623,5 +623,6 @@ module.exports = {
   integrarPagamentoRecomposicao,
   apresentacaoComposicaoFiscal,
   itensFiscaisInteirosParaReferencia,
+  centavosMoedaReal,
   CATEGORIA_PASTEL
 };

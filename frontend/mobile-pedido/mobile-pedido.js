@@ -106,6 +106,10 @@
     };
   }
 
+  function etapaDepoisDeAdicionar() {
+    return 'produtos';
+  }
+
   function irPara(estado, etapa) {
     if (ETAPAS.indexOf(etapa) === -1 && etapa !== 'confirmado' && etapa !== 'empresas') {
       throw new Error('Etapa desconhecida.');
@@ -564,7 +568,11 @@
     }
     const conferencia = conferenciaHandoff(preparacao);
     if (!conferencia.ok) return conferencia;
-    storage.setItem('pdvPedidoHandoff', JSON.stringify(preparacao));
+    const usuario = opcoes && opcoes.usuario;
+    const operadorId = Number(usuario && (usuario.id || usuario.usuario_id));
+    const envelope = Object.assign({}, preparacao);
+    if (operadorId > 0) envelope.sessao_operador_id = operadorId;
+    storage.setItem('pdvPedidoHandoff', JSON.stringify(envelope));
     return { ok: true, handoff: preparacao, destino: '/mobile-pdv' };
   }
 
@@ -590,6 +598,7 @@
     MENSAGENS,
     criarEstado,
     irPara,
+    etapaDepoisDeAdicionar,
     selecionarCliente,
     adicionarItem,
     alterarQuantidade,
@@ -652,11 +661,25 @@
     return empresa.nome_fantasia || empresa.razao_social || ('Empresa #' + empresa.id);
   }
 
+  function usuarioSessao() {
+    try {
+      return JSON.parse(root.localStorage.getItem('user') || 'null');
+    } catch (_erro) {
+      return null;
+    }
+  }
+
   function pintarEmpresa() {
     const el = $('mp-empresa');
     if (!el) return;
     const nome = nomeEmpresaAtual();
     el.textContent = nome || 'Empresa não selecionada';
+    const operador = $('mp-operador');
+    if (operador) {
+      const usuario = usuarioSessao();
+      const nomeOperador = usuario && (usuario.nome || usuario.username);
+      operador.textContent = nomeOperador ? ('Operador: ' + nomeOperador) : '';
+    }
   }
 
   function pintarEtapas(estado) {
@@ -753,7 +776,15 @@
     }
     pintarCarrinho(estado);
     pintarConferencia(estado);
+    const verCarrinho = $('mp-ir-carrinho');
+    if (verCarrinho) {
+      const totais = calcularTotais(estado);
+      verCarrinho.textContent = totais.itens
+        ? ('Ver carrinho (' + totais.itens + ') · ' + dinheiro(totais.total))
+        : 'Ver carrinho';
+    }
     pintarConfirmacao(estado);
+    if (root.CdsMobileOperacao) root.CdsMobileOperacao.salvarPedido(estado);
     const gravarBtn = $('mp-gravar');
     if (gravarBtn) {
       gravarBtn.disabled = estado.enviando;
@@ -782,6 +813,21 @@
     if (!documentoAtual() || !$('mp-app')) return;
     if (!exigirSessao()) return;
     const estado = criarEstado();
+    const guardado = root.CdsMobileOperacao ? root.CdsMobileOperacao.lerPedido() : null;
+    if (guardado && guardado.ok && guardado.registro && guardado.registro.estado) {
+      const salvo = guardado.registro.estado;
+      if (ETAPAS.indexOf(salvo.etapa) >= 0 || salvo.etapa === 'confirmado') estado.etapa = salvo.etapa;
+      estado.cliente = salvo.cliente || null;
+      estado.itens = Array.isArray(salvo.itens) ? salvo.itens : [];
+      estado.sequencia = Number(salvo.sequencia) || 0;
+      estado.desconto = Number(salvo.desconto) || 0;
+      estado.observacao = salvo.observacao || '';
+      estado.chave = salvo.chave || null;
+      estado.assinaturaChave = salvo.assinaturaChave || null;
+      estado.confirmacao = salvo.confirmacao || null;
+    } else if (guardado && guardado.codigo === 'OPERADOR_DIVERGENTE') {
+      mostrarAlerta('Há um pedido em andamento de outro operador. Ele foi mantido e não foi aberto.');
+    }
     pintar(estado);
 
     async function prepararEmpresa() {
@@ -801,14 +847,11 @@
         mostrarAlerta('Você não possui empresa disponível.');
         return;
       }
-      if (!contexto.temEmpresaSelecionada()) {
-        if (lista.length === 1) {
-          await contexto.selecionar(lista[0].id);
-        } else {
-          abrirEmpresas(lista);
-          return;
-        }
+      if (typeof contexto.adotarEmpresaPadrao !== 'function') {
+        mostrarAlerta('A resolução da empresa padrão não está disponível.');
+        return;
       }
+      await contexto.adotarEmpresaPadrao();
       mostrarAlerta('');
       pintar(estado);
     }
@@ -1000,12 +1043,15 @@
       atualizarPreviaPersonalizacao();
     });
 
+    let adicionandoProduto = false;
     $('mp-adicionar').addEventListener('click', () => {
+      if (adicionandoProduto) return;
       const pendente = estado.produtoPendente;
       if (!pendente) {
         mostrarAlerta('Selecione um produto.');
         return;
       }
+      adicionandoProduto = true;
       try {
         const selecao = pendente.ficha
           ? Array.from($('mp-opcionais').querySelectorAll('input:checked')).map((input) => Number(input.value))
@@ -1025,11 +1071,14 @@
         });
         estado.produtoPendente = null;
         $('mp-produto-escolha').hidden = true;
-        mostrarAlerta('');
-        irPara(estado, 'carrinho');
+        $('mp-produto-qtd').value = '1';
+        mostrarAlerta('Item incluído. Você continua em Produtos.');
+        estado.etapa = etapaDepoisDeAdicionar();
         pintar(estado);
       } catch (erro) {
         mostrarAlerta(erro.message || 'Não foi possível adicionar o item.');
+      } finally {
+        adicionandoProduto = false;
       }
     });
 
@@ -1099,7 +1148,8 @@
         const resultado = await encaminharPedidoAoPdv(estado.confirmacao.id, {
           fetch: root.fetch.bind(root),
           storage: root.sessionStorage,
-          contexto: root.CdsEmpresaContexto
+          contexto: root.CdsEmpresaContexto,
+          usuario: usuarioSessao()
         });
         if (!resultado.ok) {
           mostrarAlerta(resultado.mensagem || 'O pedido não foi encaminhado ao PDV.');

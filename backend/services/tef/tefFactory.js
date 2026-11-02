@@ -6,6 +6,7 @@ const StoneAdapter = require('./adapters/stoneAdapter');
 const CieloAdapter = require('./adapters/cieloAdapter');
 const RedeAdapter = require('./adapters/redeAdapter');
 const GetnetAdapter = require('./adapters/getnetAdapter');
+const SmartPosSimuladorAdapter = require('./adapters/SmartPosSimuladorAdapter');
 const tefConfigRepository = require('../../repositories/tefConfigRepository');
 
 function ambienteUsaMiddlewareReal(ambiente) {
@@ -13,15 +14,25 @@ function ambienteUsaMiddlewareReal(ambiente) {
   return a === 'homologacao' || a === 'producao' || a === 'produção';
 }
 
-async function obterAdapter() {
-  const registro = await tefConfigRepository.buscarConfiguracaoPrincipal();
+function ambienteTesteSmartPos() {
+  return process.env.CDS_TEST_ISOLATION === '1'
+    && process.env.CDS_BLOQUEAR_BANCO_OFICIAL === '1';
+}
 
+function criarAdapter(registro) {
   if (!registro) {
     throw new Error('TEF não configurado');
   }
 
   const provedor = String(registro.provedor || '').toLowerCase();
   const usarReal = ambienteUsaMiddlewareReal(registro.ambiente);
+
+  if (provedor === 'smart_pos_simulador') {
+    if (!ambienteTesteSmartPos()) {
+      throw new Error('Provedor TEF não suportado: smart_pos_simulador');
+    }
+    return new SmartPosSimuladorAdapter(registro);
+  }
 
   if (provedor === 'sitef') {
     if (usarReal && SitefRealAdapter.podeUsarModoReal()) {
@@ -52,7 +63,14 @@ async function obterAdapter() {
   return new Gateway(registro);
 }
 
+async function obterAdapter() {
+  const registro = await tefConfigRepository.buscarConfiguracaoPrincipal();
+  return criarAdapter(registro);
+}
+
 module.exports = {
   obterAdapter,
-  ambienteUsaMiddlewareReal
+  criarAdapter,
+  ambienteUsaMiddlewareReal,
+  ambienteTesteSmartPos
 };

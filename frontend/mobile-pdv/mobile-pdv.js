@@ -45,6 +45,37 @@
     }
   }
 
+  function usuarioSessao() {
+    try {
+      return JSON.parse(root.localStorage.getItem('user') || 'null');
+    } catch (_erro) {
+      return null;
+    }
+  }
+
+  function handoffCompativelComSessao(handoff, usuario, empresaId) {
+    if (!handoff || handoff.invalido) {
+      return { ok: false, codigo: 'HANDOFF_INVALIDO', mensagem: 'Os dados do pedido não puderam ser lidos.' };
+    }
+    const operadorHandoff = Number(handoff.sessao_operador_id);
+    const operadorAtual = Number(usuario && (usuario.id || usuario.usuario_id));
+    if (operadorHandoff > 0 && operadorAtual > 0 && operadorHandoff !== operadorAtual) {
+      return {
+        ok: false,
+        codigo: 'OPERADOR_DIVERGENTE',
+        mensagem: 'Este pedido foi preparado por outro operador. A operação não foi aberta.'
+      };
+    }
+    if (empresaId && handoff.empresa_id != null && String(handoff.empresa_id) !== String(empresaId)) {
+      return {
+        ok: false,
+        codigo: 'EMPRESA_DIVERGENTE',
+        mensagem: 'Este pedido pertence a outra empresa. A operação não foi aberta.'
+      };
+    }
+    return { ok: true };
+  }
+
   function nomeOperador() {
     try {
       const user = JSON.parse(root.localStorage.getItem('user') || 'null');
@@ -56,6 +87,11 @@
 
   function estacaoComPinpad() {
     return Boolean(root.electronAPI);
+  }
+
+  function textoSmartPosSimulado(retorno) {
+    if (!retorno || (retorno.simulado !== true && retorno.modo !== 'simulacao')) return '';
+    return 'Simulação de Smart POS. Este resultado não é um recebimento real.';
   }
 
   async function autorizarEletronico(forma, valor, chave, fetchFn) {
@@ -92,11 +128,159 @@
     return data;
   }
 
+  function prepararVendaPorValor(valorRaw, quantidadeRaw) {
+    const oficial = root.PdvVendaPorValor;
+    if (!oficial || typeof oficial.validarEntrada !== 'function') {
+      return { ok: false, mensagem: 'A venda por valor do PDV não está disponível.' };
+    }
+    const validacao = oficial.validarEntrada(valorRaw, quantidadeRaw);
+    if (!validacao.ok) return { ok: false, mensagem: validacao.message };
+    return {
+      ok: true,
+      endpoint: oficial.ENDPOINT,
+      corpo: {
+        valor_total: validacao.valor,
+        quantidade_pasteis: validacao.quantidade
+      }
+    };
+  }
+
   function precoAvulso(produto) {
     if (produto.preco_promocional != null && produto.preco_promocional !== '') {
       return Number(produto.preco_promocional);
     }
     return Number(produto.preco_venda || 0);
+  }
+
+  async function identificarProduto(codigo, fetchFn) {
+    const resp = await fetchFn(apiUrl() + '/produtos/identificar', {
+      method: 'POST',
+      headers: headers(),
+      body: JSON.stringify({ codigo: String(codigo || '').trim(), contexto: { origem: 'pdv' } })
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      return { ok: false, mensagem: data.error || data.mensagem || 'A identificação do produto falhou.' };
+    }
+    return { ok: true, encontrado: data.encontrado === true, produtoId: data.produtoId || null };
+  }
+
+  async function cotarProduto(produtoId, quantidade, fetchFn) {
+    const pedido = fetchFn || root.fetch.bind(root);
+    const h = headers();
+    const produtoResp = await pedido(apiUrl() + '/produtos/' + produtoId, { headers: h });
+    const produto = await produtoResp.json().catch(() => ({}));
+    if (!produtoResp.ok) {
+      return { ok: false, mensagem: produto.error || produto.mensagem || 'O produto não foi carregado.' };
+    }
+    const promoResp = await pedido(apiUrl() + '/produtos/' + produtoId + '/promocao-ativa', { headers: h });
+    const promocao = await promoResp.json().catch(() => null);
+    const faixaResp = await pedido(apiUrl() + '/produtos/' + produtoId + '/atacado', { headers: h });
+    const faixas = await faixaResp.json().catch(() => []);
+    if (!root.PdvPrecoComercial || typeof root.PdvPrecoComercial.montarLinha !== 'function') {
+      return { ok: false, mensagem: 'O motor de preço do PDV não está disponível nesta tela.' };
+    }
+    return {
+      ok: true,
+      linha: root.PdvPrecoComercial.montarLinha({
+        produto,
+        quantidade,
+        precoInformado: produto.preco_venda,
+        promocao: promocao && promocao.id ? promocao : null,
+        faixas: Array.isArray(faixas) ? faixas : []
+      })
+    };
+  }
+
+  async function acompanharCobranca(chave, fetchFn) {
+    const correlacao = String(chave || '').trim();
+    if (!correlacao) {
+      return { aprovado: false, status: 'erro', codigo: 'CORRELACAO_AUSENTE', mensagem: 'Informe o identificador da cobrança.' };
+    }
+    const resp = await fetchFn(apiUrl() + '/tef/acompanhamento?idempotency_key=' + encodeURIComponent(correlacao), {
+      headers: headers()
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      return {
+        aprovado: false,
+        status: data.status || 'erro',
+        codigo: data.code || 'ERRO',
+        mensagem: data.error || 'Falha ao consultar a estação.',
+        autenticacao: resp.status === 401
+      };
+    }
+    if (data.aprovado !== true || !data.transacao_id) {
+      return {
+        aprovado: false,
+        status: data.status || 'pendente',
+        codigo: 'AGUARDANDO_ESTACAO',
+        transacao_id: data.transacao_id || null,
+        mensagem: 'A cobrança ainda não foi confirmada na estação. A parcela não entrou.'
+      };
+    }
+    return {
+      aprovado: true,
+      status: 'aprovado',
+      transacao_id: data.transacao_id,
+      valor: Number(data.valor),
+      tipo: data.tipo || null
+    };
+  }
+
+  function formaDaTransacao(tipo) {
+    const nome = String(tipo || '').toLowerCase();
+    if (nome === 'pix' || nome === 'pix_tef') return 'pix';
+    if (nome === 'debito' || nome === 'cartao_debito') return 'cartao_debito';
+    if (nome === 'credito' || nome === 'cartao_credito') return 'cartao_credito';
+    return '';
+  }
+
+  async function vincularCobrancaConfirmada(entrada) {
+    const retorno = entrada.retorno;
+    if (!retorno || retorno.aprovado !== true || !retorno.transacao_id) {
+      return { ok: false, codigo: 'SEM_CONFIRMACAO', mensagem: 'Pagamento sem confirmação da estação não é registrado.' };
+    }
+    const sequencial = root.PagamentoSequencial;
+    const repetida = sequencial.exportar().some((parcela) => String(parcela.tef_transacao_id) === String(retorno.transacao_id));
+    if (repetida) {
+      return { ok: false, codigo: 'TRANSACAO_JA_VINCULADA', mensagem: 'Essa cobrança já está na venda.' };
+    }
+    const forma = formaDaTransacao(retorno.tipo) || entrada.forma;
+    const valor = Number.isFinite(Number(retorno.valor)) ? Number(retorno.valor) : Number(entrada.valor);
+    return sequencial.adicionar({
+      forma,
+      valor,
+      totalVenda: entrada.totalVenda,
+      autorizarTef: async () => ({
+        aprovado: true,
+        status: 'aprovado',
+        transacao_id: retorno.transacao_id
+      })
+    });
+  }
+
+  async function solicitarEmissao(entrada) {
+    if (!entrada || !entrada.vendaId) {
+      return { ok: false, codigo: 'VENDA_AUSENTE', mensagem: 'A venda ainda não foi registrada.' };
+    }
+    if (entrada.distribuicaoAutorizada !== true) {
+      return { ok: false, codigo: 'DISTRIBUICAO_NAO_AUTORIZADA', mensagem: 'A emissão fica bloqueada sem a distribuição autorizada.' };
+    }
+    if (entrada.transmitir !== true) {
+      return {
+        ok: false,
+        codigo: 'EMISSAO_NAO_LIBERADA',
+        mensagem: 'A transmissão à SEFAZ não está liberada nesta etapa.'
+      };
+    }
+    const resp = await entrada.fetch(apiUrl() + '/fiscal/emitir/venda/' + entrada.vendaId, {
+      method: 'POST',
+      headers: entrada.headers || headers(),
+      body: '{}'
+    });
+    const data = await resp.json().catch(() => ({}));
+    return { ok: resp.ok, status: resp.status, data };
   }
 
   async function fechar(entrada) {
@@ -217,10 +401,18 @@
 
   const api = {
     lerHandoff,
+    handoffCompativelComSessao,
+    prepararVendaPorValor,
     autorizarEletronico,
     precoAvulso,
+    identificarProduto,
+    cotarProduto,
+    acompanharCobranca,
+    vincularCobrancaConfirmada,
+    solicitarEmissao,
     fechar,
-    estacaoComPinpad
+    estacaoComPinpad,
+    textoSmartPosSimulado
   };
   root.MobilePdv = api;
 
@@ -243,10 +435,35 @@
       root.location.replace('/login?next=/mobile-pdv');
       return;
     }
-    if (root.PagamentoSequencial) root.PagamentoSequencial.reset();
+    let operacaoSalva = null;
+    if (root.CdsMobileOperacao) {
+      const leitura = root.CdsMobileOperacao.lerPdv();
+      if (leitura && leitura.ok) operacaoSalva = leitura.registro;
+      else if (leitura && leitura.codigo === 'OPERADOR_DIVERGENTE') {
+        alerta('Há um pagamento em andamento de outro operador. Ele foi mantido e não foi aberto.');
+      }
+    }
+    if (root.PagamentoSequencial) {
+      if (operacaoSalva && operacaoSalva.pagamento && typeof root.PagamentoSequencial.reidratar === 'function') {
+        root.PagamentoSequencial.reidratar(operacaoSalva.pagamento);
+      } else {
+        root.PagamentoSequencial.reset();
+      }
+    }
     const handoff = lerHandoff(root.sessionStorage);
     if (handoff) $('mv-busca-livre').hidden = true;
     const contexto = root.CdsEmpresaContexto;
+    if (contexto && typeof contexto.adotarEmpresaPadrao === 'function') {
+      try {
+        await contexto.adotarEmpresaPadrao();
+      } catch (erro) {
+        if (erro && erro.status === 401 && root.location) {
+          root.location.replace('/login?next=/mobile-pdv');
+          return;
+        }
+        alerta((erro && erro.message) || 'A empresa padrão da loja não pôde ser usada.');
+      }
+    }
     const empresaId = contexto && contexto.lerEmpresaId ? contexto.lerEmpresaId() : null;
     const empresa = contexto && contexto.lerEmpresa ? contexto.lerEmpresa() : null;
     $('mv-empresa').textContent = empresa
@@ -261,31 +478,45 @@
     if (handoff && handoff.invalido) {
       alerta('Os dados do pedido não puderam ser lidos.');
     } else if (handoff) {
-      const conferencia = root.PdvFechamentoOficial.conferirSnapshot(handoff);
-      if (!conferencia.ok) {
-        alerta(conferencia.mensagem);
+      const sessaoOk = handoffCompativelComSessao(handoff, usuarioSessao(), empresaId);
+      if (!sessaoOk.ok) {
+        alerta(sessaoOk.mensagem);
       } else {
-        let modelo = null;
-        try {
-          const respModelo = await root.fetch(apiUrl() + '/vendas/pdv-modelo-empresa', { headers: headers() });
-          modelo = await respModelo.json().catch(() => null);
-        } catch (_erro) {
-          modelo = null;
-        }
-        const empresaOk = root.PdvFechamentoOficial.empresaCompativel(handoff, empresaId, modelo);
-        if (!empresaOk.ok) {
-          alerta(empresaOk.mensagem);
+        const conferencia = root.PdvFechamentoOficial.conferirSnapshot(handoff);
+        if (!conferencia.ok) {
+          alerta(conferencia.mensagem);
         } else {
-          handoffValido = handoff;
-          itens = handoff.itens.slice();
-          desconto = Number(handoff.desconto || 0);
-          total = Number(handoff.total);
-          $('mv-pedido').textContent = 'Pedido #' + handoff.pedido_id;
-          $('mv-busca-livre').hidden = true;
+          let modelo = null;
+          try {
+            const respModelo = await root.fetch(apiUrl() + '/vendas/pdv-modelo-empresa', { headers: headers() });
+            if (respModelo.status === 401) {
+              root.location.replace('/login?next=/mobile-pdv');
+              return;
+            }
+            modelo = await respModelo.json().catch(() => null);
+          } catch (_erro) {
+            modelo = null;
+          }
+          const empresaOk = root.PdvFechamentoOficial.empresaCompativel(handoff, empresaId, modelo);
+          if (!empresaOk.ok) {
+            alerta(empresaOk.mensagem);
+          } else {
+            handoffValido = handoff;
+            itens = handoff.itens.slice();
+            desconto = Number(handoff.desconto || 0);
+            total = Number(handoff.total);
+            $('mv-pedido').textContent = 'Pedido #' + handoff.pedido_id;
+            $('mv-busca-livre').hidden = true;
+          }
         }
       }
     } else {
       $('mv-pedido').textContent = 'Venda avulsa, sem pedido.';
+      if (operacaoSalva && Array.isArray(operacaoSalva.itens) && operacaoSalva.itens.length) {
+        itens = operacaoSalva.itens.slice();
+        desconto = Number(operacaoSalva.desconto || 0);
+        total = Number(operacaoSalva.total || 0);
+      }
     }
 
     const interacao = root.InteracaoPagamentoMisto.criar({
@@ -294,8 +525,29 @@
     });
     let forma = '';
     let enviando = false;
-    let vendaPersistida = null;
-    let chave = null;
+    let vendaPersistida = operacaoSalva && operacaoSalva.vendaPersistida ? operacaoSalva.vendaPersistida : null;
+    let chave = operacaoSalva && operacaoSalva.chave ? operacaoSalva.chave : null;
+
+    async function alterarQuantidade(indice, delta) {
+      if (handoffValido) return;
+      const item = itens[indice];
+      if (!item) return;
+      const quantidade = Math.round((Number(item.quantidade) + delta) * 100) / 100;
+      if (quantidade <= 0) {
+        itens.splice(indice, 1);
+      } else {
+        const cotacao = await cotarProduto(item.produto_id, quantidade, root.fetch.bind(root));
+        if (!cotacao.ok) {
+          alerta(cotacao.mensagem || 'A quantidade não foi atualizada.');
+          return;
+        }
+        itens[indice] = cotacao.linha;
+      }
+      total = Math.round(itens.reduce((soma, atual) => soma + Number(atual.subtotal || 0), 0) * 100) / 100;
+      root.PagamentoSequencial.invalidarComposicao();
+      alerta('');
+      pintar();
+    }
 
     function pintar() {
       const visao = handoffValido || itens.length
@@ -305,16 +557,36 @@
       $('mv-informado').textContent = 'Registrado: ' + dinheiro(root.PagamentoSequencial.soma());
       $('mv-restante').textContent = 'Restante: ' + dinheiro(Math.max(0, total - root.PagamentoSequencial.soma()));
       $('mv-itens').innerHTML = itens.length
-        ? '<ul>' + itens.map((item) => (
+        ? '<ul>' + itens.map((item, indice) => (
           '<li>' + escapar(item.quantidade) + ' × ' + escapar(item.nome || item.produto_nome || item.produto_id)
-          + ' — ' + dinheiro(item.subtotal) + '</li>'
+          + ' — ' + dinheiro(item.subtotal)
+          + (handoffValido ? '' : ' <button type="button" data-qtd="' + indice + '" data-delta="-1">−</button><button type="button" data-qtd="' + indice + '" data-delta="1">+</button>')
+          + '</li>'
         )).join('') + '</ul>'
         : '<p>Nenhum item.</p>';
+      $('mv-itens').querySelectorAll('button[data-qtd]').forEach((botao) => {
+        botao.addEventListener('click', () => {
+          alterarQuantidade(Number(botao.getAttribute('data-qtd')), Number(botao.getAttribute('data-delta')));
+        });
+      });
       $('mv-parcelas').innerHTML = (visao.parcelas || []).map((parcela) => (
         '<p><strong>' + escapar(parcela.forma_pagamento) + '</strong> '
         + dinheiro(parcela.valor) + ' · ' + escapar(parcela.status_autorizacao || 'pendente') + '</p>'
       )).join('') || '<p>Nenhuma parcela.</p>';
       $('mv-finalizar').disabled = enviando;
+      if (root.CdsMobileOperacao && root.PagamentoSequencial) {
+        root.CdsMobileOperacao.salvarPdv({
+          itens: itens.slice(),
+          desconto,
+          total,
+          chave,
+          vendaPersistida,
+          pagamento: {
+            parcelas: root.PagamentoSequencial.snapshot(),
+            composicao: root.PagamentoSequencial.composicaoAtual()
+          }
+        });
+      }
     }
 
     async function avaliarComposicao() {
@@ -376,12 +648,41 @@
         });
         entradaInteracao = escolha;
         const resultado = escolha.escolherForma(forma);
-        if (!resultado.ok) alerta('A venda já está completa.');
-        else alerta('');
+        if (!resultado.ok) {
+          alerta('A venda já está completa.');
+          return;
+        }
+        const titulos = {
+          pix: 'PIX',
+          cartao_debito: 'Débito',
+          cartao_credito: 'Crédito',
+          dinheiro: 'Dinheiro'
+        };
+        const titulo = $('mv-dialogo-titulo');
+        if (titulo) titulo.textContent = titulos[forma] || forma;
+        $('mv-valor').value = '';
+        const estadoTx = $('mv-estado-transacao');
+        if (estadoTx) estadoTx.textContent = '';
+        const dialogo = $('mv-dialogo-valor');
+        if (dialogo && typeof dialogo.showModal === 'function') dialogo.showModal();
+        else alerta('Informe o valor da parcela.');
       });
     });
 
     let entradaInteracao = interacao;
+
+    if ($('mv-dialogo-cancelar')) {
+      $('mv-dialogo-cancelar').addEventListener('click', () => {
+        const dialogo = $('mv-dialogo-valor');
+        if (dialogo && typeof dialogo.close === 'function') dialogo.close();
+      });
+    }
+    if ($('mv-vv-cancelar')) {
+      $('mv-vv-cancelar').addEventListener('click', () => {
+        const dialogo = $('mv-dialogo-venda-valor');
+        if (dialogo && typeof dialogo.close === 'function') dialogo.close();
+      });
+    }
 
     $('mv-confirmar-parcela').addEventListener('click', async () => {
       const botao = $('mv-confirmar-parcela');
@@ -396,16 +697,32 @@
           sequencial: root.PagamentoSequencial
         });
         if (forma) entradaInteracao.escolherForma(forma);
-        const resultado = await entradaInteracao.confirmarValor(Number($('mv-valor').value || 0), {
+        const valorInformado = Number($('mv-valor').value || 0);
+        const eletronica = root.PagamentoSequencial.formaExigeAutorizador(forma);
+        if (eletronica && !estacaoComPinpad()) {
+          const chaveCobranca = 'pdv-mob-' + Date.now().toString(36) + '-' + forma + '-' + valorInformado.toFixed(2);
+          $('mv-correlacao').value = chaveCobranca;
+          $('mv-estado-transacao').textContent = 'Aguardando a estação. Nada foi recebido.';
+          alerta('A cobrança de ' + forma + ' precisa ser executada na estação com a chave exibida. Consulte quando ela confirmar.');
+          const dialogo = $('mv-dialogo-valor');
+          if (dialogo && typeof dialogo.close === 'function') dialogo.close();
+          pintar();
+          return;
+        }
+        const resultado = await entradaInteracao.confirmarValor(valorInformado, {
           formaUsaTef: (nome) => root.PagamentoSequencial.formaExigeAutorizador(nome),
           autorizarTef: (nome, valor, chaveParcela) => autorizarEletronico(nome, valor, chaveParcela, root.fetch.bind(root))
         });
         if (!resultado.ok) {
+          $('mv-estado-transacao').textContent = resultado.mensagem || 'A parcela não foi confirmada.';
           alerta(resultado.mensagem || 'A parcela não foi confirmada.');
         } else {
           alerta('');
           $('mv-valor').value = '';
           forma = '';
+          $('mv-estado-transacao').textContent = 'Parcela registrada. Escolha a próxima forma.';
+          const dialogo = $('mv-dialogo-valor');
+          if (dialogo && typeof dialogo.close === 'function') dialogo.close();
           await avaliarComposicao();
         }
         pintar();
@@ -425,27 +742,115 @@
           alerta((data && (data.mensagem || data.error)) || 'A pesquisa de produtos falhou.');
           return;
         }
-        $('mv-produto-lista').innerHTML = data.map((produto) => (
-          '<button type="button" data-id="' + produto.id + '" data-nome="' + escapar(produto.nome_comercial || produto.nome) + '" data-preco="' + precoAvulso(produto) + '">'
-          + '<strong>' + escapar(produto.nome_comercial || produto.nome) + '</strong><small>' + dinheiro(precoAvulso(produto)) + '</small></button>'
+        let identificado = { ok: false };
+        try {
+          identificado = await identificarProduto(termo, root.fetch.bind(root));
+        } catch (erro) {
+          alerta(erro && erro.message ? erro.message : 'A identificação do produto falhou.');
+        }
+        const lista = Array.isArray(data) ? data.slice() : [];
+        if (identificado.ok && identificado.encontrado && identificado.produtoId
+          && !lista.some((produto) => Number(produto.id) === Number(identificado.produtoId))) {
+          lista.unshift({ id: identificado.produtoId, nome: 'Produto ' + identificado.produtoId });
+        }
+        $('mv-produto-lista').innerHTML = lista.map((produto) => (
+          '<button type="button" data-id="' + produto.id + '">'
+          + '<strong>' + escapar(produto.nome_comercial || produto.nome) + '</strong></button>'
         )).join('');
         $('mv-produto-lista').querySelectorAll('button').forEach((botao) => {
-          botao.addEventListener('click', () => {
-            const preco = Number(botao.getAttribute('data-preco'));
-            itens.push({
-              produto_id: Number(botao.getAttribute('data-id')),
-              nome: botao.getAttribute('data-nome'),
-              quantidade: 1,
-              preco_unitario: preco,
-              subtotal: preco,
-              tipo_venda: 'UNIDADE'
-            });
+          botao.addEventListener('click', async () => {
+            const cotacao = await cotarProduto(Number(botao.getAttribute('data-id')), 1, root.fetch.bind(root));
+            if (!cotacao.ok) {
+              alerta(cotacao.mensagem || 'O preço do produto não foi calculado.');
+              return;
+            }
+            itens.push(cotacao.linha);
             total = Math.round(itens.reduce((soma, item) => soma + Number(item.subtotal || 0), 0) * 100) / 100;
+            alerta('');
             pintar();
           });
         });
       }, 250);
     });
+
+    $('mv-consultar-estacao').addEventListener('click', async () => {
+      const retorno = await acompanharCobranca($('mv-correlacao').value, root.fetch.bind(root));
+      if (retorno.autenticacao) {
+        root.location.replace('/login?next=/mobile-pdv');
+        return;
+      }
+      if (retorno.aprovado !== true) {
+        alerta(retorno.mensagem || 'A cobrança não foi confirmada.');
+        return;
+      }
+      const vinculo = await vincularCobrancaConfirmada({
+        retorno,
+        forma: forma || 'pix',
+        valor: Number($('mv-valor').value || 0),
+        totalVenda: total
+      });
+      if (!vinculo.ok) {
+        alerta(vinculo.mensagem || 'A parcela não foi confirmada.');
+        return;
+      }
+      alerta('');
+      $('mv-valor').value = '';
+      forma = '';
+      $('mv-estado-transacao').textContent = 'Parcela aprovada. Escolha a próxima forma.';
+      await avaliarComposicao();
+      pintar();
+    });
+
+    if ($('mv-venda-valor')) {
+      $('mv-venda-valor').addEventListener('click', () => {
+        if (itens.length || handoffValido) {
+          alerta('A venda por valor começa com a venda vazia.');
+          return;
+        }
+        const dialogo = $('mv-dialogo-venda-valor');
+        if (dialogo && typeof dialogo.showModal === 'function') dialogo.showModal();
+      });
+    }
+    if ($('mv-vv-continuar')) {
+      $('mv-vv-continuar').addEventListener('click', async () => {
+        const preparado = prepararVendaPorValor($('mv-vv-valor').value, $('mv-vv-qtd').value);
+        if (!preparado.ok) {
+          alerta(preparado.mensagem);
+          return;
+        }
+        const resp = await root.fetch(apiUrl() + preparado.endpoint, {
+          method: 'POST',
+          headers: Object.assign({ 'Content-Type': 'application/json', 'Idempotency-Key': 'pdv-vv-' + Date.now().toString(36) }, headers()),
+          body: JSON.stringify(preparado.corpo)
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          alerta(data.mensagem || data.message || 'A venda por valor não foi calculada.');
+          return;
+        }
+        if (root.sessionStorage && Array.isArray(data.itens) && data.itens.length) {
+          const usuario = usuarioSessao();
+          const operadorId = Number(usuario && (usuario.id || usuario.usuario_id));
+          const envelope = Object.assign({}, data);
+          if (operadorId > 0) envelope.sessao_operador_id = operadorId;
+          root.sessionStorage.setItem('pdvPedidoHandoff', JSON.stringify(envelope));
+        }
+        const dialogo = $('mv-dialogo-venda-valor');
+        if (dialogo && typeof dialogo.close === 'function') dialogo.close();
+        root.location.reload();
+      });
+    }
+
+    if ($('mv-emitir')) {
+      $('mv-emitir').addEventListener('click', async () => {
+        const pedido = await solicitarEmissao({
+          vendaId: vendaPersistida && vendaPersistida.id,
+          distribuicaoAutorizada: false,
+          transmitir: false
+        });
+        alerta(pedido.mensagem || 'A emissão não foi solicitada.');
+      });
+    }
 
     $('mv-finalizar').addEventListener('click', async () => {
       if (enviando) return;
@@ -474,6 +879,7 @@
       }
       vendaPersistida = { id: resultado.vendaId };
       if (root.sessionStorage) root.sessionStorage.removeItem('pdvPedidoHandoff');
+      if (root.CdsMobileOperacao) root.CdsMobileOperacao.limparPdv();
       $('mv-painel-venda').hidden = true;
       $('mv-painel-resultado').hidden = false;
       const fiscal = resultado.fiscal;

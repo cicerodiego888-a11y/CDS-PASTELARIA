@@ -34,10 +34,53 @@ body {
 .mp-topo {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
   padding: 12px 16px;
   background: var(--mp-marca);
   color: #fff;
+}
+
+.mp-modulos {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.mp-modulos a {
+  color: #fff;
+  text-decoration: none;
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  border-radius: 8px;
+}
+
+.mp-modulos a[aria-current="page"] {
+  background: #fff;
+  color: var(--mp-marca);
+}
+
+.mi-entrada {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+}
+
+.mi-modulo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 88px;
+  font-size: 1.25rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.mi-estado {
+  margin: 0;
 }
 
 .mp-logo {
@@ -117,6 +160,12 @@ h3 { font-size: 1rem; margin: 12px 0 6px; }
   background: #fff;
   color: var(--mp-tinta);
   padding: 12px;
+}
+
+.mp-btn.mi-modulo {
+  min-height: 88px;
+  font-size: 1.25rem;
+  font-weight: 700;
 }
 
 .mp-btn-primario {

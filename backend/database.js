@@ -486,7 +486,8 @@ function aplicarAlteracoesPosCriacao() {
     `ALTER TABLE tef_transacoes ADD COLUMN reversao_executada INTEGER DEFAULT 0`,
     `ALTER TABLE tef_transacoes ADD COLUMN reversao_motivo TEXT`,
     `ALTER TABLE tef_transacoes ADD COLUMN reversao_data DATETIME`,
-    `ALTER TABLE tef_transacoes ADD COLUMN empresa_id INTEGER`
+    `ALTER TABLE tef_transacoes ADD COLUMN empresa_id INTEGER`,
+    `ALTER TABLE tef_transacoes ADD COLUMN operador_id INTEGER`
   ];
   alteracoesTefTransacoes.forEach((sql) => aplicarAlteracaoSegura('tef_transacoes', sql));
   aplicarAlteracaoSegura(
@@ -961,6 +962,7 @@ function criarTabelas() {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         venda_id INTEGER,
         empresa_id INTEGER,
+        operador_id INTEGER,
         tipo TEXT NOT NULL,
         valor DECIMAL(10,2) NOT NULL,
         parcelas INTEGER DEFAULT 1,

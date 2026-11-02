@@ -161,7 +161,10 @@ function paraPersistencia(retorno) {
 /** Mapeia contrato → resposta HTTP (compatível PDV e vendas) */
 function paraRespostaApi(retorno, transacaoId = null) {
   const id = transacaoId || retorno.transacaoId || retorno.transacao_id;
-  return {
+  const simulado = retorno.simulado === true
+    || retorno.payloadRetorno?.simulado === true
+    || retorno.payload_retorno?.simulado === true;
+  const corpo = {
     sucesso: retorno.sucesso === true,
     status: retorno.status,
     aprovado: estaAprovado(retorno),
@@ -190,12 +193,77 @@ function paraRespostaApi(retorno, transacaoId = null) {
       || retorno.payload_retorno?.exibir_qr_tela
       || false
   };
+  if (simulado) corpo.simulado = true;
+  if (retorno.tipo_erro) corpo.tipo_erro = retorno.tipo_erro;
+  return corpo;
+}
+
+/**
+ * Leitura de uma cobrança já gravada. Não inicia pagamento e não chama adaptador.
+ * Sem registro, o estado permanece pendente e não pode ser tratado como recebido.
+ */
+function classificarAcompanhamento(row) {
+  if (!row || row.id == null) {
+    return {
+      encontrado: false,
+      aprovado: false,
+      status: STATUS.PENDENTE,
+      transacao_id: null,
+      nsu: null,
+      autorizacao: null,
+      executou_cobranca: false
+    };
+  }
+  const bruto = String(row.status || '').toLowerCase();
+  let status;
+  if (bruto === 'timeout') status = 'timeout';
+  else if (bruto === 'falha' || bruto === 'falha_comunicacao') status = STATUS.ERRO;
+  else status = normalizarStatus(bruto);
+  if (row.venda_id != null) {
+    return {
+      encontrado: true,
+      aprovado: false,
+      status: 'vinculada',
+      transacao_id: null,
+      codigo: 'TRANSACAO_JA_VINCULADA',
+      executou_cobranca: false
+    };
+  }
+  const aprovado = status === STATUS.APROVADO;
+  return {
+    encontrado: true,
+    aprovado,
+    status,
+    transacao_id: aprovado ? row.id : null,
+    valor: aprovado ? Number(row.valor) : null,
+    tipo: aprovado ? (row.tipo || null) : null,
+    executou_cobranca: false
+  };
+}
+
+function respostaAcompanhamentoPublica(resultado) {
+  const aprovado = !!(resultado && resultado.aprovado === true && resultado.transacao_id != null);
+  const corpo = {
+    encontrado: !!(resultado && resultado.encontrado),
+    aprovado,
+    status: resultado && resultado.status ? resultado.status : STATUS.PENDENTE,
+    executou_cobranca: false
+  };
+  if (resultado && resultado.codigo) corpo.code = resultado.codigo;
+  if (aprovado) {
+    corpo.transacao_id = resultado.transacao_id;
+    corpo.valor = Number(resultado.valor);
+    corpo.tipo = resultado.tipo || null;
+  }
+  return corpo;
 }
 
 module.exports = {
   STATUS,
   normalizarStatus,
   estaAprovado,
+  classificarAcompanhamento,
+  respostaAcompanhamentoPublica,
   criarRespostaAutorizacao,
   criarRespostaCancelamento,
   criarRespostaConsulta,

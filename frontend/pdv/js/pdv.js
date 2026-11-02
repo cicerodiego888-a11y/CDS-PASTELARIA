@@ -3257,6 +3257,16 @@ function obterPrecoAtacado(produtoId, quantidadeTotal, precoBase, produto) {
         const precoAtacado = Number(escolhida.preco_atacado || 0);
         if (precoAtacado <= 0) return { preco: precoBase, descontoAtacado: 0, isAtacado: false };
 
+        if (typeof PdvPrecoComercial !== 'undefined'
+            && typeof PdvPrecoComercial.aplicarFaixaEscolhida === 'function') {
+            return PdvPrecoComercial.aplicarFaixaEscolhida({
+                produto,
+                quantidade: quantidadeTotal,
+                precoBase,
+                precoAtacado
+            });
+        }
+
         if (!motorPrecoAtacadoDisponivel()) {
             return { preco: precoBase, descontoAtacado: 0, isAtacado: false };
         }

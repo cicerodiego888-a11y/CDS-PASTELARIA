@@ -131,6 +131,19 @@
     });
   }
 
+  async function adotarEmpresaPadrao() {
+    const body = await fetchJson(apiUrl() + '/empresas/contexto/padrao', {
+      headers: headersJson()
+    });
+    if (!body || !body.empresa || !body.empresa.id) {
+      const err = new Error('A empresa padrão da loja não foi identificada.');
+      err.code = 'EMPRESA_PADRAO_AUSENTE';
+      throw err;
+    }
+    persistir(body.empresa);
+    return body;
+  }
+
   async function selecionar(empresaId) {
     const body = await fetchJson(apiUrl() + '/empresas/contexto', {
       method: 'POST',
@@ -274,7 +287,8 @@
     anexarHeaderXhr: anexarHeaderXhr,
     listarDisponiveis: listarDisponiveis,
     empresaPadrao: empresaPadrao,
+    adotarEmpresaPadrao: adotarEmpresaPadrao,
     selecionar: selecionar,
     inicializar: inicializar
   };
-})(typeof window !== 'undefined' ? window : this);
+})(typeof window !== 'undefined' ? window : globalThis);

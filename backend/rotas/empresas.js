@@ -23,6 +23,10 @@ const STATUS_POR_CODIGO = {
   EMPRESA_JA_INATIVA: 409,
   EMPRESA_OBRIGATORIA: 400,
   EMPRESA_NAO_AUTORIZADA: 403,
+  EMPRESA_PADRAO_AUSENTE: 409,
+  EMPRESA_PADRAO_INATIVA: 400,
+  EMPRESA_PADRAO_NAO_AUTORIZADA: 403,
+  MATRIZ_AMBIGUA: 409,
   VINCULO_EMPRESA_DUPLICADO: 409,
   VINCULO_NAO_ENCONTRADO: 404,
   VINCULO_JA_INATIVO: 409,
@@ -69,6 +73,23 @@ router.get('/contexto/disponiveis', async (req, res) => {
       tipo_empresa: classificarTipoEmpresa(e.cnpj),
       matriz_padrao: padraoId != null && Number(e.id) === padraoId
     })));
+  } catch (err) {
+    return responderErro(res, err);
+  }
+});
+
+router.get('/contexto/padrao', async (req, res) => {
+  try {
+    const out = await EmpresaService.resolverEmpresaPadraoDaLoja({
+      db,
+      user: req.user
+    });
+    return res.json({
+      empresaId: out.empresa.id,
+      empresa: out.empresa,
+      origem: out.origem,
+      selecionada: true
+    });
   } catch (err) {
     return responderErro(res, err);
   }

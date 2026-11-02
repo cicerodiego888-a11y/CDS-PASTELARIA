@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0f2744">
+    <title>CDS Sistemas</title>
+    <link rel="icon" type="image/x-icon" href="/branding/favicon.ico">
+    <link rel="stylesheet" href="/mobile-pedido/mobile-pedido.css">
+</head>
+<body>
+    <div id="mi-app" class="mp">
+        <header class="mp-topo">
+            <img src="/branding/logo-oficial.png" alt="CDS Sistemas" class="mp-logo" width="40" height="40">
+            <div class="mp-topo-texto">
+                <strong>CDS Sistemas</strong>
+                <span id="mi-empresa">Empresa não selecionada</span>
+                <span id="mi-operador"></span>
+            </div>
+        </header>
+        <div id="mi-alerta" class="mp-alerta" hidden></div>
+        <main>
+            <h1>Operação</h1>
+            <p id="mi-sessao" class="mp-ajuda">Sessão</p>
+            <p id="mi-licenca" class="mp-ajuda"></p>
+            <p id="mi-pedido-estado" class="mp-ajuda mi-estado"></p>
+            <p id="mi-pdv-estado" class="mp-ajuda mi-estado"></p>
+            <button type="button" class="mp-btn" id="mi-sair">Sair</button>
+            <nav class="mi-entrada" id="mi-modulos" hidden aria-label="Módulos do CDS">
+                <a class="mp-btn mp-btn-primario mi-modulo" href="/mobile-pedido/">PEDIDO</a>
+                <a class="mp-btn mp-btn-primario mi-modulo" href="/mobile-pdv/">PDV</a>
+            </nav>
+        </main>
+    </div>
+    <script src="/shared/js/cds-empresa-contexto.js"></script>
+    <script src="/shared/js/cds-mobile-operacao.js"></script>
+    <script src="/mobile/mobile-inicio.js"></script>
+</body>
+</html>

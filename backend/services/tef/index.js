@@ -36,9 +36,14 @@ async function reimprimirPagamento(transacaoId, tipo = 'cliente') {
   return tefManager.reimprimir(Number(transacaoId), tipo);
 }
 
+async function acompanharCobranca(chave, empresaId, operadorId) {
+  return tefManager.acompanharPorCorrelacao(chave, empresaId, operadorId);
+}
+
 module.exports = {
   iniciarPagamento,
   cancelarPagamento,
   consultarPagamento,
-  reimprimirPagamento
+  reimprimirPagamento,
+  acompanharCobranca
 };

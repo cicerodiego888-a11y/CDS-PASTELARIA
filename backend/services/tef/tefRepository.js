@@ -18,6 +18,7 @@ function criarTransacao(dados, callback) {
     INSERT INTO tef_transacoes (
       venda_id,
       empresa_id,
+      operador_id,
       tipo,
       valor,
       parcelas,
@@ -34,10 +35,11 @@ function criarTransacao(dados, callback) {
       payload_retorno,
       criado_em,
       atualizado_em
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
   `, [
     dados.venda_id || null,
     dados.empresa_id || null,
+    dados.operador_id || null,
     dados.tipo,
     dados.valor,
     dados.parcelas || 1,

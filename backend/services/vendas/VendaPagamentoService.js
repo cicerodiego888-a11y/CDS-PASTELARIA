@@ -1898,7 +1898,13 @@ db.all(`
         UPDATE tef_transacoes
         SET venda_id = ?, atualizado_em = datetime('now')
         WHERE id = ? AND venda_id IS NULL AND empresa_id = ?
-      `, [vendaId, transacaoId, empresaIdVenda]);
+          AND (operador_id IS NULL OR operador_id = ?)
+      `, [
+        vendaId,
+        transacaoId,
+        empresaIdVenda,
+        Number(req.user && (req.user.id || req.user.usuario_id)) || null
+      ]);
       if (!resultado || Number(resultado.changes) !== 1) {
         const err = new Error('Transação TEF não pôde ser vinculada à venda.');
         err.code = 'TEF_VINCULO_RECUSADO';
@@ -2118,7 +2124,8 @@ db.all(`
       subtotalBruto: Number(resultadoParaFechamento.totalVendaBruto || 0),
       debugDescontoFiscal: process.env.CDS_DEBUG_DESCONTO_FISCAL === '1',
       confirmacaoFiscalManual: req.body ? req.body.confirmacao_fiscal_manual : undefined,
-      empresaId: empresaIdVenda
+      empresaId: empresaIdVenda,
+      operadorId: Number(req.user && (req.user.id || req.user.usuario_id)) || null
     });
 
     if (!resultadoPagamento.sucesso) {
@@ -2341,7 +2348,8 @@ const executarVenda = async () => {
     subtotalBruto: Number(resultadoParaFechamento.totalVendaBruto || 0),
     debugDescontoFiscal: process.env.CDS_DEBUG_DESCONTO_FISCAL === '1',
     confirmacaoFiscalManual: req.body ? req.body.confirmacao_fiscal_manual : undefined,
-    empresaId: empresaIdVenda
+    empresaId: empresaIdVenda,
+    operadorId: Number(req.user && (req.user.id || req.user.usuario_id)) || null
   });
 
   if (!resultadoPagamento.sucesso) {

@@ -118,6 +118,9 @@ app.get('/login', (req, res) => {
     res.sendFile(path.join(frontendRoot, 'shared/login.html'));
 });
 
+app.get(['/mobile', '/mobile/'], (req, res) => {
+    res.sendFile(path.join(frontendRoot, 'mobile/index.html'));
+});
 app.get(['/mobile-pedido', '/mobile-pedido/'], (req, res) => {
     res.sendFile(path.join(frontendRoot, 'mobile-pedido/index.html'));
 });

@@ -47,6 +47,39 @@ function consultarEmpresasDoCaixaAberto(usuarioId) {
   });
 }
 
+/** Leitura da cobrança executada na estação. Não inicia pagamento. */
+router.get('/acompanhamento', verificarToken, async (req, res) => {
+  try {
+    const chave = String(req.query.idempotency_key || '').trim();
+    if (!chave) {
+      return res.status(400).json({
+        error: 'Identificador de correlação ausente.',
+        code: 'CORRELACAO_AUSENTE'
+      });
+    }
+    const resolvido = await resolverEmpresaAutorizadaTef(req, {
+      exigirEmpresaAutorizada: (usuario, empresaId) => exigirEmpresaAutorizada(usuario, empresaId, { db }),
+      consultarEmpresasDoCaixaAberto
+    });
+    if (!resolvido.empresaId) {
+      const codigo = resolvido.codigo || 'TEF_EMPRESA_AUSENTE';
+      return res.status(codigo === 'EMPRESA_NAO_AUTORIZADA' ? 403 : 400).json({
+        error: resolvido.mensagem || 'Empresa autorizada não identificada para a consulta TEF.',
+        code: codigo
+      });
+    }
+    const operadorId = Number(req.user && (req.user.id || req.user.usuario_id));
+    if (!operadorId) {
+      return res.status(401).json({ error: 'Sessão sem operador.', code: 'SESSAO_INVALIDA' });
+    }
+    const resultado = await tefService.acompanharCobranca(chave, resolvido.empresaId, operadorId);
+    res.json(tefContrato.respostaAcompanhamentoPublica(resultado));
+  } catch (error) {
+    console.error('Erro ao acompanhar cobrança TEF:', error);
+    res.status(500).json({ error: 'Falha ao consultar a cobrança.', code: 'ERRO' });
+  }
+});
+
 router.post('/pagar', verificarToken, async (req, res) => {
   try {
     const {
@@ -77,9 +110,14 @@ router.post('/pagar', verificarToken, async (req, res) => {
       return res.status(400).json({ error: 'Valor TEF inválido.' });
     }
 
+    const operadorId = Number(req.user && (req.user.id || req.user.usuario_id));
+    if (!operadorId) {
+      return res.status(401).json({ error: 'Sessão sem operador.', code: 'SESSAO_INVALIDA' });
+    }
     const resultado = await tefService.iniciarPagamento({
       venda_id: venda_id || null,
       empresa_id: empresaId,
+      operador_id: operadorId,
       tipo,
       valor: Number(valor),
       parcelas: Number(parcelas || 1),

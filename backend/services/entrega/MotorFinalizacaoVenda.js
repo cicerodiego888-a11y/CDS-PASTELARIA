@@ -291,7 +291,8 @@ async function _finalizarPrestacaoInterno({ vendaId, body = {}, req = {}, contex
     pagamentos: pagamentosNormalizados,
     tefHabilitado,
     modoConfirmacaoFiscal,
-    empresaId: empresaIdFin
+    empresaId: empresaIdFin,
+    operadorId: Number(req.user && (req.user.id || req.user.usuario_id)) || null
   });
 
   if (!resultadoPagamento.sucesso) {

@@ -99,6 +99,16 @@
         sessaoPagamento = null;
     }
 
+    function reidratar(estado) {
+        const lista = estado && Array.isArray(estado.parcelas) ? estado.parcelas : [];
+        parcelas = lista.map((parcela) => ({ ...parcela }));
+        sequencia = parcelas.reduce((maior, parcela) => Math.max(maior, Number(parcela.local_id) || 0), 0);
+        sessaoPagamento = estado && estado.sessaoPagamento ? String(estado.sessaoPagamento) : null;
+        composicao = estado && estado.composicao ? estado.composicao : null;
+        emCurso = false;
+        return snapshot();
+    }
+
     function exportar() {
         return snapshot()
             .filter((parcela) => contaComoRecebido(parcela))
@@ -313,6 +323,7 @@
         alterar,
         exportar,
         reset,
+        reidratar,
         snapshot,
         soma,
         assinatura,

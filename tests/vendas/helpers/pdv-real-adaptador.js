@@ -102,6 +102,8 @@ function criarPdvReal(cfg) {
     const TIPO_VENDA_PESO = 'PESO';
     const TIPO_VENDA_UNIDADE = 'UNIDADE';
     var carrinho = [];
+    var pdvPedidoHandoff = null;
+    var pdvCarregandoHandoff = false;
     function showNotification(msg, tipo) { notificacoes.push({ msg, tipo }); }
     function pdvNotificarEstoqueInsuficiente() { return true; }
     function atualizarCarrinho() {}
