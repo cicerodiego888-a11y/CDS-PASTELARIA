@@ -1,9 +1,10 @@
 /**
  * Crédito de estoque na conclusão de compra — via Porta Pública F×NF.
  *
- * Fase 1 / Implementação 02.3:
- *   compra concluída → creditarSaldo → produtos
- * Storage ainda em `produtos` (sem estoque_empresa).
+ * Sprint CDS-ESTOQUE-INTEGRIDADE-ENTRADAS-01:
+ *   crédito com movimentação exige empresaId válido (estoque_empresa).
+ *   Sem fallback silencioso para saldo global de `produtos`.
+ * Dual-write em `produtos` permanece quando há empresa (não eliminado nesta Sprint).
  *
  * Não altera classificação F/NF, MUC, MIIP nem Central.
  * Cancelamento/devolução: ver debitoEstoqueCompraViaPorta (02.4).
@@ -17,7 +18,7 @@ const estoqueSaldosPublico = require('../fiscalNaoFiscal/estoqueSaldosPublico');
 const { TipoSaldo } = require('../fiscalNaoFiscal/constants');
 const { resolverEmpresaId } = require('../fiscalNaoFiscal/empresaContexto');
 
-/** Compat explícita: ERP/compra ainda sem empresa no JWT. */
+/** Compat explícita (somente no-op / fluxos formalmente autorizados — não para crédito com qty). */
 const MOTIVO_COMPAT_CREDITO_COMPRA = 'COMPAT_CREDITO_COMPRA_PRE_MULTIEMPRESA';
 
 /**
@@ -29,8 +30,8 @@ function empresaIdDoReqCompra(req) {
 }
 
 /**
- * Monta opts da porta: empresaId explícito ou COMPAT de crédito de compra.
- * Nunca inventa empresa 1 / CNPJ de configurações.
+ * Monta opts da porta: empresaId explícito obrigatório para crédito com movimentação.
+ * Nunca inventa empresa 1 / CNPJ de configurações / Matriz.
  */
 function montarOptsPortaCreditoCompra(db, opcoes = {}) {
   const empresaId = resolverEmpresaId(opcoes.empresaId);
@@ -45,14 +46,16 @@ function montarOptsPortaCreditoCompra(db, opcoes = {}) {
     return { ...base, empresaId, legado: false, motivoCompat: null };
   }
 
-  if (opcoes.exigirEmpresa === true) {
+  // CDS-ESTOQUE-INTEGRIDADE-ENTRADAS-01: sem empresa → bloqueio (sem COMPAT silencioso).
+  if (opcoes.exigirEmpresa !== false) {
     const err = new Error(
-      'empresaId é obrigatório para operações de saldo/reserva. Informe empresa_id/empresaId no contexto.'
+      'empresaId é obrigatório para crédito de estoque da compra. Informe empresa_id/empresaId no contexto.'
     );
     err.code = 'EMPRESA_OBRIGATORIA';
     throw err;
   }
 
+  // Somente se o chamador optar explicitamente por não exigir empresa (no-op / legado autorizado).
   return {
     ...base,
     modoLegadoSemEmpresa: true,
@@ -94,24 +97,32 @@ function creditarEstoqueItemCompra(db, dados, callback) {
     return callback(new Error('produtoId inválido para crédito de compra'));
   }
 
-  let optsPorta;
-  try {
-    optsPorta = montarOptsPortaCreditoCompra(db, dados);
-  } catch (e) {
-    return callback(e);
-  }
+  const vaiMovimentar = qtdFiscal > 0 || qtdNaoFiscal > 0;
 
-  if (!(qtdFiscal > 0) && !(qtdNaoFiscal > 0)) {
+  // Sem quantidade: não há crédito — não força empresa (uso/consumo, bonificação sem estoque, etc.).
+  if (!vaiMovimentar) {
+    const empresaIdInfo = resolverEmpresaId(dados.empresaId);
     return callback(null, {
       produto_id: produtoId,
       creditado: false,
       saldo_fiscal: null,
       saldo_nao_fiscal: null,
       estoque_atual: null,
-      empresa_id: optsPorta.empresaId != null ? optsPorta.empresaId : null,
-      legado: optsPorta.legado === true,
-      motivo_compat: optsPorta.legado ? (optsPorta.motivoCompat || MOTIVO_COMPAT_CREDITO_COMPRA) : null
+      empresa_id: empresaIdInfo != null ? empresaIdInfo : null,
+      legado: false,
+      motivo_compat: null
     });
+  }
+
+  // Com movimentação: empresa obrigatória — sem fallback para estoque global.
+  let optsPorta;
+  try {
+    optsPorta = montarOptsPortaCreditoCompra(db, {
+      ...dados,
+      exigirEmpresa: true
+    });
+  } catch (e) {
+    return callback(e);
   }
 
   (async () => {
@@ -136,8 +147,8 @@ function creditarEstoqueItemCompra(db, dados, callback) {
           : (depois.saldo_fiscal + depois.saldo_nao_fiscal)
       ),
       empresa_id: depois.empresa_id != null ? depois.empresa_id : null,
-      legado: optsPorta.legado === true,
-      motivo_compat: optsPorta.legado ? (optsPorta.motivoCompat || MOTIVO_COMPAT_CREDITO_COMPRA) : null
+      legado: false,
+      motivo_compat: null
     };
   })().then(
     (result) => callback(null, result),

@@ -112,7 +112,7 @@ function renderVendas(vendas) {
                                     <td>${formatDate(v.data_venda || v.created_at)}</td>
                                     <td>${escapeHtml(v.cliente_nome || 'Não informado')}</td>
                                     <td>${formatCurrency(v.total)}</td>
-                                    <td>${rotuloFormaPagamento(v.forma_pagamento)}</td>
+                                    <td>${rotuloPagamentoDaVenda(v)}</td>
                                     <td>${rotuloStatusVenda(v.status)}</td>
                                     <td class="historico-venda-acoes-col">${montarHtmlAcoesHistoricoVenda(v)}</td>
                                 </tr>
@@ -200,7 +200,7 @@ function showVendaModal(venda) {
                         <div class="row mb-3">
                             <div class="col-sm-4"><strong>Total:</strong> ${formatCurrency(totalExibido)}</div>
                             <div class="col-sm-4"><strong>Desconto:</strong> ${formatCurrency(venda.desconto)}</div>
-                            <div class="col-sm-4"><strong>Pagamento:</strong> ${rotuloFormaPagamento(venda.forma_pagamento)}</div>
+                            <div class="col-sm-4"><strong>Pagamento:</strong> ${rotuloPagamentoDaVenda(venda)}</div>
                         </div>
                         <div class="row mb-3">
                             <div class="col-sm-4"><strong>Status:</strong> ${rotuloStatusVenda(venda.status)}</div>
@@ -271,16 +271,28 @@ function showVendaModal(venda) {
     vendaModal.show();
 }
 
+function rotuloPagamentoDaVenda(venda) {
+    if (window.ClassificacaoModalidadePagamento) {
+        return ClassificacaoModalidadePagamento.formaExibidaDaVenda(venda);
+    }
+    return rotuloFormaPagamento(venda && venda.forma_pagamento);
+}
+
 function rotuloFormaPagamento(value) {
+    if (window.ClassificacaoModalidadePagamento) {
+        return ClassificacaoModalidadePagamento.rotuloFormaClassificada(value);
+    }
     const mapa = {
         dinheiro: 'Dinheiro',
         pix: 'PIX',
-        cartao_credito: 'Cartão crédito',
-        cartao_debito: 'Cartão débito',
+        cartao_credito: 'Crédito',
+        cartao_debito: 'Débito',
+        debito: 'Débito',
+        credito: 'Crédito',
         boleto: 'Boleto',
         transferencia: 'Transferência',
         cheque: 'Cheque',
-        credito: 'Crédito',
+        misto: 'Misto',
         prazo: 'A prazo'
     };
     return mapa[value] || (value ? String(value) : '-');
@@ -314,6 +326,21 @@ function montarPayloadCancelamentoVenda(motivo) {
         payload.terminal_id = window.terminalId;
     }
     return payload;
+}
+
+function headersCancelamentoVenda() {
+    if (typeof CdsEmpresaContexto !== 'undefined' && typeof CdsEmpresaContexto.headersJson === 'function') {
+        return CdsEmpresaContexto.headersJson();
+    }
+    const headers = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${localStorage.getItem('token')}`
+    };
+    const empresaId = Number(localStorage.getItem('cds_empresa_id'));
+    if (Number.isInteger(empresaId) && empresaId > 0) {
+        headers['X-Empresa-Id'] = String(empresaId);
+    }
+    return headers;
 }
 
 function extrairMensagemErroResposta(dados, status) {
@@ -400,10 +427,7 @@ function cancelarVendaNaoFiscal(vendaId) {
                     `${API_URL}/vendas/cancelar/${vendaId}`,
                     {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${localStorage.getItem('token')}`
-                    },
+                    headers: headersCancelamentoVenda(),
                     body: JSON.stringify(montarPayloadCancelamentoVenda(motivo))
                     }
                 );

@@ -9,8 +9,7 @@ const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
 
 const {
-  creditarEstoqueItemCompra,
-  MOTIVO_COMPAT_CREDITO_COMPRA
+  creditarEstoqueItemCompra
 } = require('../../backend/services/compras/creditoEstoqueCompraViaPorta');
 
 const SRC_PORTA = path.resolve(
@@ -150,17 +149,17 @@ async function test04EmpresaPropagada() {
   await closeDb(db);
 }
 
-async function test05CompatEmpresaAusente() {
+async function test05SemEmpresaBloqueiaCredito() {
   const { db, produtoId } = await setup();
-  const r = await creditoAsync(db, {
-    produtoId,
-    quantidadeFiscal: 4,
-    quantidadeNaoFiscal: 0
-  });
-  assert.strictEqual(r.legado, true);
-  assert.strictEqual(r.motivo_compat, MOTIVO_COMPAT_CREDITO_COMPRA);
-  assert.strictEqual(r.saldo_fiscal, 4);
-
+  // CDS-ESTOQUE-INTEGRIDADE-ENTRADAS-01: crédito com qty sem empresa → bloqueio (sem COMPAT).
+  await assertRejects(
+    creditoAsync(db, {
+      produtoId,
+      quantidadeFiscal: 4,
+      quantidadeNaoFiscal: 0
+    }),
+    'EMPRESA_OBRIGATORIA'
+  );
   await assertRejects(
     creditoAsync(db, {
       produtoId,
@@ -169,6 +168,9 @@ async function test05CompatEmpresaAusente() {
     }),
     'EMPRESA_OBRIGATORIA'
   );
+  const row = await get(db, 'SELECT saldo_fiscal, estoque_atual FROM produtos WHERE id = ?', [produtoId]);
+  assert.strictEqual(row.saldo_fiscal, 0);
+  assert.strictEqual(row.estoque_atual, 0);
   await closeDb(db);
 }
 
@@ -284,7 +286,7 @@ async function main() {
     ['02 compra nao fiscal', test02NaoFiscal],
     ['03 produto global', test03ProdutoGlobal],
     ['04 empresaId', test04EmpresaPropagada],
-    ['05 COMPAT / empresa ausente', test05CompatEmpresaAusente],
+    ['05 sem empresa bloqueia crédito', test05SemEmpresaBloqueiaCredito],
     ['06 EA = SF+SNF', test06EstoqueAtual],
     ['07 transação', test07Transacao],
     ['08 rollback', test08Rollback],

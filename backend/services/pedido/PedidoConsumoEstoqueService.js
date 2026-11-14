@@ -31,9 +31,12 @@ const SQL_SCHEMA = [
     pedido_id INTEGER NOT NULL UNIQUE,
     empresa_id INTEGER NOT NULL,
     operacao_id TEXT NOT NULL UNIQUE,
+    sem_baixa_fisica INTEGER NOT NULL DEFAULT 0,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (pedido_id) REFERENCES pedidos(id) ON DELETE CASCADE
   )`,
+  // CDS-ESTOQUE-MODO-MANUAL-RESERVAS-02: distingue finalização sem consumo físico.
+  `ALTER TABLE pedido_estoque_consumos ADD COLUMN sem_baixa_fisica INTEGER NOT NULL DEFAULT 0`,
   `CREATE TABLE IF NOT EXISTS pedido_estoque_consumo_finalizacoes (
     pedido_id INTEGER PRIMARY KEY,
     consumo_id INTEGER NOT NULL UNIQUE,
@@ -174,7 +177,14 @@ function erro(codigo, mensagem, statusCode = 409) {
 
 async function garantirSchema(db) {
   if (!db) throw erro('DB_OBRIGATORIO', 'Conexão SQLite obrigatória.', 500);
-  for (const sql of SQL_SCHEMA) await dbRun(db, sql);
+  for (const sql of SQL_SCHEMA) {
+    try {
+      await dbRun(db, sql);
+    } catch (err) {
+      // ALTER ADD COLUMN em tabela já migrada → ignora duplicate column.
+      if (!/duplicate column/i.test(String(err && err.message || ''))) throw err;
+    }
+  }
 }
 
 function normalizarChaveIdempotencia(chave) {
@@ -228,13 +238,23 @@ async function jaConsumido(pedidoId, opts = {}) {
   const id = Number(pedidoId);
   if (!Number.isInteger(id) || id <= 0 || !opts.db) return false;
   try {
+    // CDS-ESTOQUE-MODO-MANUAL-RESERVAS-02: marcador sem_baixa_fisica ≠ consumo físico.
     return Boolean(await dbGet(
       opts.db,
-      'SELECT id FROM pedido_estoque_consumos WHERE pedido_id = ?',
+      `SELECT id FROM pedido_estoque_consumos
+        WHERE pedido_id = ?
+          AND COALESCE(sem_baixa_fisica, 0) = 0`,
       [id]
     ));
   } catch (err) {
     if (/no such table/i.test(String(err.message || ''))) return false;
+    if (/no such column/i.test(String(err.message || ''))) {
+      return Boolean(await dbGet(
+        opts.db,
+        'SELECT id FROM pedido_estoque_consumos WHERE pedido_id = ?',
+        [id]
+      ));
+    }
     throw err;
   }
 }
@@ -417,8 +437,17 @@ async function reservarConsumo({
     throw erro('PEDIDO_CANCELADO', 'Pedido cancelado não pode reservar estoque.', 409);
   }
 
+  // CDS-ESTOQUE-MODO-MANUAL-RESERVAS-02: modo da empresa do pedido (sem fallback de empresa padrão).
+  const { empresaPermiteBaixaAutomaticaEstoque } = require('../empresas/EmpresaModoEstoqueService');
+  const permiteBaixaAutomatica = await empresaPermiteBaixaAutomaticaEstoque(db, empresa);
+  const modoEstoque = permiteBaixaAutomatica ? 'AUTOMATICO' : 'MANUAL';
+
   const requisitos = await montarRequisitos(itens, db);
-  const desejado = agregarRequisitosPorEstoque(requisitos);
+  // MANUAL: não reserva insumos de ficha técnica; preserva PRODUTO_SIMPLES (regras comerciais).
+  const requisitosParaReserva = permiteBaixaAutomatica
+    ? requisitos
+    : requisitos.filter((r) => r.origem_requisito !== 'FICHA_TECNICA');
+  const desejado = agregarRequisitosPorEstoque(requisitosParaReserva);
   const consumo = await carregarConsumoPedido(id, db);
   let quantidadeAReservar = desejado;
 
@@ -464,13 +493,16 @@ async function reservarConsumo({
       empresaId: empresa
     }, depsMotorNaTransacao(db));
   } else {
+    // Sem requisitos reserváveis (ex.: MANUAL só com ficha) → libera eventuais reservas residuais.
     await MotorComercial.liberarReservasDoPedido(id, depsMotorNaTransacao(db));
   }
 
   return {
     pedido_id: id,
     empresa_id: empresa,
+    modo_estoque: modoEstoque,
     requisitos,
+    requisitos_reservados: requisitosParaReserva,
     reservas: [...quantidadeAReservar.values()]
   };
 }
@@ -1062,16 +1094,18 @@ async function registrarConsumo({
 
   const { empresaPermiteBaixaAutomaticaEstoque } = require('../empresas/EmpresaModoEstoqueService');
   if (!(await empresaPermiteBaixaAutomaticaEstoque(db, empresa))) {
+    // MANUAL: libera reservas residuais (legado pré-correção); sem débito físico de insumos.
     await MotorComercial.liberarReservasDoPedido(id, depsMotorNaTransacao(db));
     const operacaoIdManual = crypto.randomUUID();
     const cabManual = await dbRun(
       db,
-      `INSERT INTO pedido_estoque_consumos (pedido_id, empresa_id, operacao_id)
-       VALUES (?, ?, ?)`,
+      `INSERT INTO pedido_estoque_consumos
+        (pedido_id, empresa_id, operacao_id, sem_baixa_fisica)
+       VALUES (?, ?, ?, 1)`,
       [id, empresa, operacaoIdManual]
     );
     const consumoIdManual = Number(cabManual.lastID);
-    await consumirReservasPedidoNaVenda(id, venda, { db, empresaId: empresa, usuarioId });
+    // Idempotência do fechamento — NÃO equivale a consumo físico (sem_baixa_fisica=1).
     await dbRun(
       db,
       `INSERT INTO pedido_estoque_consumo_finalizacoes
@@ -1084,6 +1118,7 @@ async function registrarConsumo({
       empresa_id: empresa,
       venda_id: venda,
       modo_estoque: 'MANUAL',
+      sem_baixa_fisica: true,
       ja_consumido: false,
       consumido: false,
       itens: []

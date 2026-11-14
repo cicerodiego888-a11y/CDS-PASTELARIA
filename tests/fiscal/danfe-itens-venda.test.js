@@ -136,8 +136,8 @@ async function main() {
       nota: { tpAmb: 1 }
     });
 
-    assert.ok(html.includes('Dinheiro: R$ 10,00'), 'deve somar o valor comercial pago');
-    assert.ok(!html.includes('Dinheiro: R$ 2,00'), 'não deve mostrar só a fatia fiscal');
+    assert.ok(!html.includes('Dinheiro'), 'o cupom não lista a forma de pagamento');
+    assert.ok(html.includes('R$ 10,00'), 'mantém o total da venda');
   });
 
   await test('DANFE prioriza recebimentos F+NF mesmo com venda_pagamentos incompleto', async () => {
@@ -167,8 +167,8 @@ async function main() {
       nota: { tpAmb: 1 }
     });
 
-    assert.ok(html.includes('Cartão Crédito: R$ 2,00'), 'mostra cartão fiscal');
-    assert.ok(html.includes('PIX: R$ 2,00'), 'mostra pix não fiscal');
+    assert.ok(!html.includes('Cartão'), 'o cupom não lista cartão');
+    assert.ok(!html.includes('PIX'), 'o cupom não lista pix');
     assert.ok(html.includes('Total: R$ 4.00'), 'total comercial');
   });
 
@@ -197,8 +197,8 @@ async function main() {
       nota: { tpAmb: 1 }
     });
 
-    assert.ok(html.includes('Dinheiro: R$ 10,00'), 'usa valor comercial pago pelo cliente');
-    assert.ok(!html.includes('Dinheiro: R$ 2,00'), 'ignora fatia fiscal isolada');
+    assert.ok(!html.includes('Dinheiro'), 'o cupom não lista a forma de pagamento');
+    assert.ok(html.includes('R$ 10,00'), 'mantém o total da venda');
   });
 
   console.log(`\nResultado: ${passou} passou, ${falhou} falhou\n`);

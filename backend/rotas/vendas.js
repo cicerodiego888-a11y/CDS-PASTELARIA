@@ -56,6 +56,11 @@ const {
 } = require('../services/vendas/VendaEmpresaContextoService');
 
 const anexarEmpresaVenda = middlewareResolverEmpresaVenda({ db, exigirAutorizacaoUsuario: false });
+const anexarEmpresaReversaoVenda = middlewareResolverEmpresaVenda({
+  db,
+  exigirAutorizacaoUsuario: false,
+  adotarEmpresaDaVenda: true
+});
 const {
   middlewareAplicarPdvModeloEmpresa,
   obterPdvModeloEmpresaPublico,
@@ -352,7 +357,8 @@ router.get('/:id', anexarEmpresaVenda, (req, res) => {
         SELECT
           id, venda_id, forma_pagamento, valor, tef_transacao_id,
           tef_nsu, tef_autorizacao, tef_bandeira, tef_adquirente,
-          confirmacao_modalidade, confirmacao_manual, operador_id, confirmado_em, criado_em
+          confirmacao_modalidade, confirmacao_manual, operador_id, confirmado_em,
+          valor_entregue, troco, criado_em
         FROM venda_pagamentos
         WHERE venda_id = ?
         ORDER BY id ASC
@@ -472,7 +478,7 @@ router.get('/:id/pagamento-nao-fiscal', consultarPagamentoNaoFiscal);
 
 router.post('/:id/pagamento-nao-fiscal', validarCaixaAberto, registrarPagamentoNaoFiscal);
 
-router.post('/:id/devolver', anexarEmpresaVenda, validarCaixaAbertoDevolucaoVenda, exigirSenhaAdmin, (req, res) => {
+router.post('/:id/devolver', anexarEmpresaReversaoVenda, validarCaixaAbertoDevolucaoVenda, exigirSenhaAdmin, (req, res) => {
   const vendaId = Number(req.params.id);
   const motivo = String(req.body?.motivo || '').trim();
   const itens = Array.isArray(req.body?.itens) ? req.body.itens : [];
@@ -480,13 +486,13 @@ router.post('/:id/devolver', anexarEmpresaVenda, validarCaixaAbertoDevolucaoVend
   devolverParcial(vendaId, motivo, itens, req, res);
 });
 
-router.put('/:id/cancelar', anexarEmpresaVenda, validarCaixaAbertoCancelamentoVenda, (req, res) => {
+router.put('/:id/cancelar', anexarEmpresaReversaoVenda, validarCaixaAbertoCancelamentoVenda, (req, res) => {
   const { id } = req.params;
   const motivo = req.body.motivo || req.body.justificativa || '';
   cancelarVendaPut(id, motivo, req, res);
 });
 
-router.post('/cancelar/:id', anexarEmpresaVenda, validarCaixaAbertoCancelamentoVenda, (req, res) => {
+router.post('/cancelar/:id', anexarEmpresaReversaoVenda, validarCaixaAbertoCancelamentoVenda, (req, res) => {
   const vendaId = req.params.id;
   const { motivo } = req.body;
   cancelarVendaPost(vendaId, motivo, req, res);

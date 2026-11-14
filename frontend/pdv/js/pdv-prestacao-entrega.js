@@ -433,9 +433,11 @@
     }
 
     const documento = $('input[name="prestDoc"]:checked').val() || 'NAO_FISCAL';
-    const forma = pagamentosLinhas.length > 1
-      ? 'misto'
-      : pagamentosLinhas[0].forma_pagamento;
+    const formaClassificada = window.ClassificacaoModalidadePagamento
+      && ClassificacaoModalidadePagamento.classificarFormaPagamento(pagamentosLinhas);
+    const forma = formaClassificada && formaClassificada !== 'pendente'
+      ? formaClassificada
+      : (pagamentosLinhas.length > 1 ? 'misto' : pagamentosLinhas[0].forma_pagamento);
     const pagamentoRecebido = pagamentosLinhas.length > 1
       ? pagamentosLinhas.map((p) => `${labelForma(p.forma_pagamento)} ${fmtMoney(p.valor)}`).join(' + ')
       : `${labelForma(forma)} ${fmtMoney(total)}`;

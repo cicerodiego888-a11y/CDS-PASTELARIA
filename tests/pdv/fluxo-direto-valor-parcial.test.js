@@ -114,11 +114,10 @@ describe('fluxo direto de valor parcial', () => {
       autorizarTef: async () => ({ aprovado: true, status: 'aprovado', transacao_id: 8, nsu: 'NSU-8', autorizacao: 'AUT-8' })
     });
     tela.escolherForma('dinheiro');
-    const acima = await tela.confirmarValor(40, { formaUsaTef: () => false });
-    assert.equal(acima.codigo, 'VALOR_ACIMA_DO_RESTANTE');
-    assert.equal(PagamentoSequencial.snapshot().length, 1);
     const dinheiro = await tela.confirmarValor(10, { formaUsaTef: () => false });
     assert.equal(dinheiro.restante, 20);
+    assert.equal(dinheiro.parcela.valor, 10);
+    assert.equal(dinheiro.parcela.troco, 0);
     assert.equal(dinheiro.podeFinalizar, false);
     const referencia = avaliarReferenciaRecomposicao({
       total: 30,

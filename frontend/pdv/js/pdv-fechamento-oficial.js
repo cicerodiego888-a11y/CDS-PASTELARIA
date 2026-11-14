@@ -7,6 +7,22 @@
   if (typeof module === 'object' && module.exports) module.exports = api;
   if (root) root.PdvFechamentoOficial = api;
 }(typeof window !== 'undefined' ? window : globalThis, function () {
+  function formaClassificadaDoFechamento(pagamentos) {
+    let classificar = null;
+    if (typeof require === 'function') {
+      try {
+        classificar = require('../../shared/js/classificacaoModalidadePagamento').classificarFormaPagamento;
+      } catch (erro) {
+        classificar = null;
+      }
+    }
+    if (!classificar && typeof globalThis !== 'undefined' && globalThis.ClassificacaoModalidadePagamento) {
+      classificar = globalThis.ClassificacaoModalidadePagamento.classificarFormaPagamento;
+    }
+    const forma = classificar ? classificar(pagamentos) : null;
+    return forma && forma !== 'pendente' ? forma : 'misto';
+  }
+
   function centavos(valor) {
     const numero = Number(valor);
     if (!Number.isFinite(numero)) return null;
@@ -175,7 +191,7 @@
     const corpo = {
       chave_fechamento_pdv: novaChave(entrada.chave),
       cliente_id: entrada.clienteId || null,
-      forma_pagamento: 'misto',
+      forma_pagamento: formaClassificadaDoFechamento(pagamentos),
       desconto: arredondar(entrada.desconto || 0),
       acrescimo: 0,
       total,

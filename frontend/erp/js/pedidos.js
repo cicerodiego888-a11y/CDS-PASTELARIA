@@ -73,6 +73,9 @@ function _pedHeaders() {
   };
 }
 
+let cdsAberturaMesaEmCurso = false;
+let cdsConsultaPedidoSeq = 0;
+
 function _pedEmpresaSelecionada() {
   return typeof CdsEmpresaContexto !== 'undefined'
     && typeof CdsEmpresaContexto.lerEmpresaId === 'function'
@@ -447,9 +450,22 @@ function loadPedidos() {
   const ABAS = [
     { id: 'pedidos', label: 'Pedidos', status: 'PEDIDO,ABERTO,EM_SEPARACAO' },
     { id: 'concluidos', label: 'Concluídos', status: 'FATURADO' },
-    { id: 'cancelados', label: 'Cancelados', status: 'CANCELADO' }
+    { id: 'cancelados', label: 'Cancelados', status: 'CANCELADO' },
+    { id: 'todos', label: 'Todos', status: null }
   ];
 
+  function contextoInicialPedidosMesa() {
+    const api = typeof window !== 'undefined' ? window.CdsMesasLancamento : null;
+    if (!api || !window.sessionStorage || typeof api.lerLancamento !== 'function') return null;
+    const empresaId = _pedEmpresaSelecionada()
+      && window.CdsEmpresaContexto.lerEmpresaId
+      ? window.CdsEmpresaContexto.lerEmpresaId()
+      : null;
+    const contexto = api.lerLancamento(window.sessionStorage, empresaId);
+    return contexto && contexto.visualizar_pedidos ? contexto : null;
+  }
+
+  let filtroMesaPedidos = contextoInicialPedidosMesa();
   let abaAtual = 'pedidos';
 
   function badgeStatus(st) {
@@ -481,6 +497,7 @@ function loadPedidos() {
   let sugClienteIdx = -1;
   let sugProdutoIdx = -1;
   let linhaGradeFoco = -1;
+  let mesaFechamentoId = null;
 
   $('#page-content').html(`
     ${(typeof CdsPageShell !== 'undefined' && CdsPageShell.renderHeader)
@@ -497,47 +514,15 @@ function loadPedidos() {
           <button type="button" class="btn btn-outline-secondary" id="btnPedMesas" title="Cadastrar e ativar/desativar mesas">
             <i class="fas fa-chair"></i> Mesas
           </button>
-          <button type="button" class="btn btn-outline-success" id="btnPedVendaValor" title="Iniciar venda pelo valor total e quantidade de pastéis">
-            <i class="fas fa-calculator"></i> Venda por valor
-          </button>
           <button type="button" class="btn btn-primary" id="btnPedNovo" title="F2">
             <i class="fas fa-plus"></i> Novo
           </button>
         </div>
       </div>
       <div id="pedAlert"></div>
-      <div class="modal fade" id="pedVendaValorModal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog">
-          <div class="modal-content">
-            <div class="modal-header">
-              <h5 class="modal-title">Venda por valor + pastéis</h5>
-              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
-            </div>
-            <div class="modal-body">
-              <p class="text-muted small mb-3">
-                Informe o valor total original do pedido e a quantidade de pastéis.
-                A composição de refrigerantes e o desconto usam o motor atual.
-              </p>
-              <div class="mb-3">
-                <label class="form-label" for="pedVvValor">Valor total (R$)</label>
-                <input type="number" class="form-control" id="pedVvValor" min="0.01" step="0.01">
-              </div>
-              <div class="mb-3">
-                <label class="form-label" for="pedVvQtd">Quantidade de pastéis</label>
-                <input type="number" class="form-control" id="pedVvQtd" min="1" step="1" value="1">
-              </div>
-              <div class="mb-0">
-                <label class="form-label" for="pedVvPastelId">Produto pastel (opcional se houver só um)</label>
-                <input type="number" class="form-control" id="pedVvPastelId" min="1" step="1" placeholder="ID do cadastro">
-              </div>
-            </div>
-            <div class="modal-footer">
-              <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
-              <button type="button" class="btn btn-success" id="pedVvConfirmar">Preparar e abrir PDV</button>
-            </div>
-          </div>
-        </div>
-      </div>
+      <div id="pedMesaLancamentoHost"></div>
+      <div id="pedFiltroMesaContexto" class="alert alert-info py-2 mb-3" hidden></div>
+      <div id="pedConferenciaHost"></div>
 
       <ul class="nav nav-tabs mb-3" id="pedAbas" role="tablist">
         ${ABAS.map((a) => `
@@ -572,6 +557,22 @@ function loadPedidos() {
         </div>
       </div>
 
+      <div id="pedConsolidadaHost"></div>
+      <div class="modal fade" id="pedConsolidadaModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title">Gerar venda consolidada da mesa</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
+            </div>
+            <div class="modal-body" id="pedConsolidadaCorpo"></div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+              <button type="button" class="btn btn-success" id="pedConsolidadaConfirmar">Confirmar e abrir no PDV</button>
+            </div>
+          </div>
+        </div>
+      </div>
       <div class="card shadow-sm">
         <div class="table-responsive">
           <table class="table table-hover mb-0 align-middle">
@@ -720,6 +721,9 @@ function loadPedidos() {
               <i class="fas fa-print"></i> Imprimir
             </button>
             <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Fechar</button>
+            <button type="button" class="btn btn-outline-primary" id="btnPedFinalizar" hidden>
+              Finalizar lançamento
+            </button>
             <button type="button" class="btn btn-primary" id="btnPedSalvar" title="Ctrl+S">
               <i class="fas fa-save"></i> Salvar
             </button>
@@ -1065,6 +1069,162 @@ function loadPedidos() {
     });
   }
 
+  let consolidadaAtual = null;
+
+  function chaveIdempotenciaConsolidada(mesaId, atendimentoId, pedidoIds) {
+    const contexto = window.CdsEmpresaContexto;
+    const empresaId = contexto && typeof contexto.lerEmpresaId === 'function'
+      ? Number(contexto.lerEmpresaId())
+      : 0;
+    const api = window.CdsVendaConsolidada;
+    if (!api || typeof api.chaveIdempotencia !== 'function') {
+      throw new Error('O módulo de idempotência da venda consolidada não está disponível.');
+    }
+    if (!Number.isInteger(empresaId) || empresaId <= 0) {
+      throw new Error('Selecione uma empresa antes de reservar a venda consolidada.');
+    }
+    return api.chaveIdempotencia({
+      storage: sessionStorage,
+      empresaId,
+      mesaId,
+      atendimentoId,
+      pedidoIds,
+      criarChave: () => (window.crypto && typeof window.crypto.randomUUID === 'function'
+        ? window.crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`)
+    });
+  }
+
+  function pintarConsolidada(itens) {
+    const api = window.CdsVendaConsolidada;
+    const grupos = api ? api.grupos(itens) : [];
+    if (!grupos.length) {
+      $('#pedConsolidadaHost').empty();
+      return;
+    }
+    $('#pedConsolidadaHost').html(grupos.map((grupo) => `
+      <div class="alert alert-light border d-flex justify-content-between align-items-center flex-wrap gap-2">
+        <span>Mesa ${escapeHtml(grupo.mesa_numero == null ? grupo.mesa_id : grupo.mesa_numero)} · ${grupo.pedidos.length} pedidos elegíveis · ${fmtMoney(grupo.total)}</span>
+        <button type="button" class="btn btn-sm btn-success ped-venda-consolidada" data-mesa="${grupo.mesa_id}">Gerar venda consolidada da mesa</button>
+      </div>
+    `).join(''));
+    $('.ped-venda-consolidada').off('click').on('click', function () {
+      const mesaId = Number($(this).data('mesa'));
+      const grupo = grupos.find((item) => item.mesa_id === mesaId);
+      if (grupo) abrirConsolidada(grupo);
+    });
+  }
+
+  async function abrirConsolidada(grupo) {
+    consolidadaAtual = {
+      mesaId: grupo.mesa_id,
+      pedidos: grupo.pedidos.map((pedido) => ({ ...pedido, incluir: true, itens: [] })),
+      enviando: false
+    };
+    $('#pedConsolidadaCorpo').html('<p class="text-muted mb-0">Carregando os pedidos gravados…</p>');
+    const el = document.getElementById('pedConsolidadaModal');
+    if (window.bootstrap && el) window.bootstrap.Modal.getOrCreateInstance(el).show();
+    try {
+      for (const pedido of consolidadaAtual.pedidos) {
+        const resp = await fetch(`${API_URL}/pedidos/${pedido.id}`, { headers: _pedHeaders() });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.mensagem || data.error || 'Não foi possível ler o pedido.');
+        pedido.itens = (data.pedido && data.pedido.itens) || data.itens || [];
+        pedido.observacao = (data.pedido && data.pedido.observacao) || pedido.observacao || '';
+        pedido.total = data.pedido && data.pedido.total != null ? data.pedido.total : pedido.total;
+      }
+      desenharConsolidada();
+    } catch (err) {
+      $('#pedConsolidadaCorpo').html(`<div class="alert alert-danger mb-0">${escapeHtml(err.message)}</div>`);
+    }
+  }
+
+  function desenharConsolidada() {
+    const pedidos = consolidadaAtual.pedidos.filter((pedido) => pedido.incluir);
+    const total = pedidos.reduce((soma, pedido) => soma + Number(pedido.total || 0), 0);
+    $('#pedConsolidadaCorpo').html(`
+      ${consolidadaAtual.pedidos.map((pedido) => `
+        <section class="border rounded p-2 mb-2">
+          <label class="d-flex justify-content-between gap-2">
+            <span><input type="checkbox" class="form-check-input me-2 ped-consolidada-item" data-id="${pedido.id}" ${pedido.incluir ? 'checked' : ''}>${escapeHtml(pedido.codigo || ('Pedido ' + pedido.id))}</span>
+            <strong>${fmtMoney(pedido.total)}</strong>
+          </label>
+          <div class="small text-muted">Observação ${escapeHtml(pedido.observacao || '—')}</div>
+          <ul class="mb-0">${(pedido.itens || []).map((item) => `<li>${escapeHtml(item.produto_nome || item.produto_id)} · quantidade ${escapeHtml(item.quantidade)} · ${fmtMoney(item.subtotal)}</li>`).join('')}</ul>
+        </section>
+      `).join('')}
+      <p class="mb-0"><strong>Total consolidado ${fmtMoney(total)}</strong></p>
+    `);
+    $('#pedConsolidadaConfirmar').prop('disabled', pedidos.length < 2);
+    $('.ped-consolidada-item').on('change', function () {
+      const id = Number($(this).data('id'));
+      const pedido = consolidadaAtual.pedidos.find((item) => Number(item.id) === id);
+      if (pedido) pedido.incluir = this.checked;
+      desenharConsolidada();
+    });
+  }
+
+  async function confirmarConsolidada() {
+    if (
+      !consolidadaAtual
+      || consolidadaAtual.enviando
+      || $('#pedConsolidadaConfirmar').prop('disabled')
+    ) return;
+    const api = window.CdsVendaConsolidada;
+    const decisao = api.confirmarSelecao(
+      consolidadaAtual.pedidos,
+      consolidadaAtual.pedidos.filter((pedido) => !pedido.incluir).map((pedido) => pedido.id)
+    );
+    if (!decisao.ok || decisao.criarVenda) return;
+    consolidadaAtual.enviando = true;
+    $('#pedConsolidadaConfirmar').prop('disabled', true);
+    $('.ped-consolidada-item').prop('disabled', true);
+    try {
+      const atendimentoId = consolidadaAtual.pedidos[0].mesa_atendimento_id;
+      const chave = chaveIdempotenciaConsolidada(
+        consolidadaAtual.mesaId,
+        atendimentoId,
+        decisao.pedidoIds
+      );
+      const resp = await fetch(`${API_URL}/pedidos/venda-consolidada-mesa`, {
+        method: 'POST',
+        headers: Object.assign(_pedHeaders(), { 'Idempotency-Key': chave }),
+        body: JSON.stringify({ mesa_id: consolidadaAtual.mesaId, pedido_ids: decisao.pedidoIds })
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        const erro = new Error(
+          (data && (data.mensagem || data.error)) || `A mesa não pôde ser preparada (HTTP ${resp.status}).`
+        );
+        erro.codigo = data && (data.codigo || data.code);
+        throw erro;
+      }
+      if (!data || !Number.isInteger(Number(data.consolidacao_id)) || Number(data.consolidacao_id) <= 0) {
+        throw new Error('O servidor não confirmou a reserva da consolidação; o PDV não será aberto.');
+      }
+      sessionStorage.setItem('pdvPedidoHandoff', JSON.stringify({
+        consolidacao_id: data.consolidacao_id,
+        venda_id: data.venda_id || null,
+        idempotency_key: chave,
+        mesa_id: data.mesa_id || consolidadaAtual.mesaId,
+        total: data.total,
+        desconto: data.desconto || 0,
+        itens: data.itens,
+        cliente_id: data.cliente_id || null
+      }));
+      window.location.assign('/pdv');
+    } catch (err) {
+      const codigo = err.codigo ? ` [${err.codigo}]` : '';
+      alertar(`${err.message || 'Falha ao reservar a venda consolidada.'}${codigo}`, 'danger');
+      consolidadaAtual.enviando = false;
+      $('.ped-consolidada-item').prop('disabled', false);
+      $('#pedConsolidadaConfirmar').prop(
+        'disabled',
+        consolidadaAtual.pedidos.filter((pedido) => pedido.incluir).length < 2
+      );
+    }
+  }
+
   async function carregarLista() {
     const qs = new URLSearchParams();
     const cliente = $('#pedFiltroCliente').val();
@@ -1075,6 +1235,15 @@ function loadPedidos() {
     if (cliente) qs.set('cliente', cliente);
     if (inicio) qs.set('dataInicio', inicio);
     if (fim) qs.set('dataFim', fim);
+    if (filtroMesaPedidos) {
+      qs.set('mesa_id', filtroMesaPedidos.mesa_id);
+      qs.set('mesa_atendimento_id', filtroMesaPedidos.atendimento_id);
+      $('#pedFiltroMesaContexto')
+        .prop('hidden', false)
+      .text(`Exibindo somente pedidos abertos vigentes da mesa ${
+        filtroMesaPedidos.numero || filtroMesaPedidos.mesa_id
+      }.`);
+    }
 
     if (!_pedEmpresaSelecionada()) {
       $('#pedListaBody').html('<tr><td colspan="8" class="text-center text-warning py-4">Selecione a empresa para consultar os pedidos.</td></tr>');
@@ -1086,9 +1255,24 @@ function loadPedidos() {
       const resp = await fetch(`${API_URL}/pedidos?${qs}`, { headers });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data.mensagem || data.error || ('HTTP ' + resp.status));
-      const itens = data.itens || [];
+      let itens = data.itens || [];
+      if (filtroMesaPedidos) {
+        const api = window.CdsMesasLancamento;
+        if (!api || typeof api.filtrarPedidosAbertosDaMesa !== 'function') {
+          throw new Error('Não foi possível aplicar o filtro dos pedidos abertos desta mesa.');
+        }
+        itens = api.filtrarPedidosAbertosDaMesa(itens, filtroMesaPedidos);
+        if (typeof api.consumirVisualizacaoPedidos === 'function') {
+          api.consumirVisualizacaoPedidos(window.sessionStorage);
+        }
+      }
       if (!itens.length) {
-        $('#pedListaBody').html('<tr><td colspan="8" class="text-center text-muted py-4">Nenhum registro encontrado.</td></tr>');
+        $('#pedConsolidadaHost').empty();
+        $('#pedListaBody').html(`<tr><td colspan="8" class="text-center text-muted py-4">${
+          filtroMesaPedidos
+            ? 'Nenhum pedido aberto vigente encontrado para esta mesa.'
+            : 'Nenhum registro encontrado.'
+        }</td></tr>`);
         return;
       }
       $('#pedListaBody').html(itens.map((p) => {
@@ -1169,6 +1353,7 @@ function loadPedidos() {
           Number($(this).data('venda-id'))
         );
       });
+      pintarConsolidada(itens);
     } catch (err) {
       $('#pedListaBody').html(`<tr><td colspan="8" class="text-danger text-center py-4">${escapeHtml(err.message)}</td></tr>`);
     }
@@ -1328,6 +1513,7 @@ function loadPedidos() {
       }
       $('#pedMesaAviso').addClass('text-danger').text('Falha ao carregar mesas: ' + err.message);
     }
+    atualizarAcaoMesa();
   }
 
   async function renderMesas() {
@@ -1465,23 +1651,144 @@ function loadPedidos() {
     $('#pedClienteSugestoes, #pedProdutoSugestoes').hide().empty();
     $('#pedPersonalizacaoModal input, #btnPedConfirmarPersonalizacao')
       .prop('disabled', pedidoEdicaoBloqueada);
-    $('#btnPedSalvar')
+    $('#btnPedSalvar, #btnPedFinalizar')
       .prop('hidden', pedidoEdicaoBloqueada)
       .prop('disabled', pedidoEdicaoBloqueada);
+    atualizarAcaoMesa();
+  }
+
+  function atualizarAcaoMesa() {
+    const temMesa = !!$('#pedMesaId').val();
+    $('#btnPedFinalizar').prop('hidden', pedidoEdicaoBloqueada || !temMesa);
   }
 
   function focarAoAbrirModal() {
     const el = document.getElementById('modalPedidoEditor');
+    if (!el) return;
     const handler = () => {
       if (!pedidoEdicaoBloqueada) {
-        setTimeout(() => $('#pedProdutoBusca').trigger('focus'), 50);
+        setTimeout(() => {
+          if (document.getElementById('modalPedidoEditor') !== el || !el.classList.contains('show')) return;
+          const ativo = document.activeElement;
+          const dialogo = el.querySelector('.modal-dialog');
+          if (ativo !== document.body && ativo !== el && ativo !== dialogo) return;
+          const campoProduto = document.getElementById('pedProdutoBusca');
+          if (campoProduto && !campoProduto.disabled) campoProduto.focus();
+        }, 50);
       }
       el.removeEventListener('shown.bs.modal', handler);
     };
     el.addEventListener('shown.bs.modal', handler);
   }
 
-  async function abrirEditor(id) {
+  function pintarFaixaMesa(decisao) {
+    const api = window.CdsMesasLancamento;
+    const host = document.getElementById('pedMesaLancamentoHost');
+    if (!host) return;
+    host.innerHTML = api && decisao ? api.htmlFaixa(decisao) : '';
+    mesaFechamentoId = decisao && decisao.bloqueado && decisao.situacao === 'FECHAMENTO'
+      ? decisao.mesa_id
+      : null;
+  }
+
+  async function consultarPedidoDaMesa(ctx) {
+    const api = window.CdsMesasConferencia;
+    const seq = ++cdsConsultaPedidoSeq;
+    if (conferencia) {
+      conferencia.dispensar();
+      pintarConferencia();
+    }
+    try {
+      const consulta = await requisitarMesas(`/${ctx.mesa_id}/atendimento`);
+      if (seq !== cdsConsultaPedidoSeq) return;
+      const resp = await fetch(`${API_URL}/pedidos/${ctx.pedido_id}`, { headers: _pedHeaders() });
+      const data = await resp.json().catch(() => null);
+      if (seq !== cdsConsultaPedidoSeq) return;
+      if (!resp.ok || !data || !data.pedido) {
+        const err = new Error((data && (data.mensagem || data.error)) || 'O pedido não foi encontrado.');
+        err.codigo = (data && data.codigo) || 'PEDIDO_NAO_ENCONTRADO';
+        throw err;
+      }
+      const lista = await requisitarMesas(`/${ctx.mesa_id}/atendimento/pedidos`);
+      if (seq !== cdsConsultaPedidoSeq) return;
+      const item = (lista.pedidos || []).find((row) => Number(row.id) === Number(data.pedido.id));
+      const pedido = { ...data.pedido, preparacao: item && item.preparacao };
+      pedido.mesa_atendimento_id = item ? item.mesa_atendimento_id : null;
+      const decisao = api.decidirConsultaPedido(consulta, pedido, { geracao: seq, geracaoAtual: cdsConsultaPedidoSeq });
+      if (!decisao.abrir) {
+        pintarFaixaMesa({
+          bloqueado: true,
+          numero: consulta.numero,
+          situacao: consulta.situacao,
+          titulo: window.CdsMesasLancamento.tituloMesa(consulta.numero),
+          mensagem: decisao.mensagem || 'O pedido não pôde ser aberto.'
+        });
+        return;
+      }
+      conferencia.finalizar(pedido, { numero: consulta.numero });
+      pintarConferencia();
+      window.CdsMesasLancamento.consumirConsultaPedido(window.sessionStorage);
+    } catch (err) {
+      if (seq !== cdsConsultaPedidoSeq) return;
+      if (!err.codigo) err.rede = true;
+      if (conferencia) {
+        conferencia.dispensar();
+        pintarConferencia();
+      }
+      pintarFaixaMesa({
+        bloqueado: true,
+        numero: ctx.mesa_id,
+        situacao: '',
+        titulo: 'Mesa do Controle de Mesas',
+        mensagem: err.rede ? 'Não foi possível consultar o pedido. Os dados anteriores não foram mantidos.' : (err.message || 'Não foi possível consultar o pedido.')
+      });
+    }
+  }
+
+  async function aplicarLancamentoDaMesa() {
+    const api = window.CdsMesasLancamento;
+    if (!api || !window.sessionStorage) return;
+    const empresaId = _pedEmpresaSelecionada() && window.CdsEmpresaContexto.lerEmpresaId
+      ? window.CdsEmpresaContexto.lerEmpresaId()
+      : null;
+    const ctx = api.lerLancamento(window.sessionStorage, empresaId);
+    if (!ctx) return;
+    if (ctx.pedido_id && window.CdsMesasConferencia) {
+      await consultarPedidoDaMesa(ctx);
+      return;
+    }
+    const intencao = api.temIntencaoModal(window.sessionStorage, empresaId);
+    if (intencao) {
+      if (cdsAberturaMesaEmCurso) return;
+      cdsAberturaMesaEmCurso = true;
+    }
+    try {
+      const data = await requisitarMesas(`/${ctx.mesa_id}/atendimento`);
+      const decisao = api.decidirAberturaModal(data, {
+        modalAberto: modalAberto(),
+        intencao
+      });
+      pintarFaixaMesa(decisao);
+      if (decisao.abrirModal) {
+        await abrirEditor(null, decisao);
+        api.consumirIntencaoModal(window.sessionStorage);
+      }
+    } catch (err) {
+      pintarFaixaMesa({
+        bloqueado: true,
+        numero: ctx.mesa_id,
+        situacao: '',
+        titulo: 'Mesa do Controle de Mesas',
+        mensagem: err && err.rede
+          ? 'Não foi possível confirmar o atendimento da mesa.'
+          : (err.message || 'Não foi possível confirmar o atendimento da mesa.')
+      });
+    } finally {
+      if (intencao) cdsAberturaMesaEmCurso = false;
+    }
+  }
+
+  async function abrirEditor(id, decisao) {
     $('#btn-restaurar-modalPedidoEditor').remove();
     if (!_pedEmpresaSelecionada()) {
       alertar('Selecione a empresa antes de abrir um pedido.', 'warning');
@@ -1489,11 +1796,35 @@ function loadPedidos() {
     }
     headers = _pedHeaders();
     limparEditor();
-    focarAoAbrirModal();
     if (!id) {
+      if (modalAberto()) return;
       $('#btnPedImprimir').prop('disabled', true);
-      new bootstrap.Modal(document.getElementById('modalPedidoEditor')).show();
-      preencherSelectMesa(null, null);
+      if (decisao && decisao.titulo) $('#pedEditorTitulo').text(decisao.titulo);
+      if (decisao && decisao.mesa_id) {
+        const $sel = $('#pedMesaId');
+        if (!$sel.find(`option[value="${decisao.mesa_id}"]`).length) {
+          $sel.append(`<option value="${decisao.mesa_id}">Mesa ${escapeHtml(decisao.numero)}</option>`);
+        }
+        $sel.val(String(decisao.mesa_id));
+        atualizarAcaoMesa();
+      }
+      if (decisao && Number(decisao.cliente_id) > 0) {
+        const clienteId = Number(decisao.cliente_id);
+        const clienteNome = decisao.cliente_nome || '';
+        clienteSelecionado = { id: clienteId, nome: clienteNome };
+        $('#pedClienteId').val(clienteId);
+        $('#pedClienteBusca').val(clienteNome);
+        $('#pedClienteSelecionadoLabel').text(clienteNome || `Cliente nº ${clienteId}`);
+      }
+      const editor = document.getElementById('modalPedidoEditor');
+      if (editor) {
+        focarAoAbrirModal();
+        bootstrap.Modal.getOrCreateInstance(editor).show();
+      }
+      await preencherSelectMesa(
+        decisao && decisao.mesa_id ? decisao.mesa_id : null,
+        decisao ? decisao.numero : null
+      );
       return;
     }
     try {
@@ -1537,6 +1868,8 @@ function loadPedidos() {
       }));
       renderItens();
       await preencherSelectMesa(p.mesa_id, p.mesa_numero);
+      await bloquearSeJaEnviado(p);
+      focarAoAbrirModal();
       new bootstrap.Modal(document.getElementById('modalPedidoEditor')).show();
     } catch (err) {
       alertar(err.message, 'danger');
@@ -1658,7 +1991,68 @@ function loadPedidos() {
     return data;
   }
 
-  async function salvarPedido() {
+  const conferencia = window.CdsMesasConferencia
+    ? window.CdsMesasConferencia.criarConferencia({
+      novaChave: novaChaveIdempotencia,
+      fetchJson: (method, path, chave) => enviarPreparacao(method, path, chave),
+      listarPedidos: (mesaId) => requisitarMesas(`/${mesaId}/atendimento/pedidos`)
+    })
+    : null;
+
+  function pintarConferencia() {
+    const host = document.getElementById('pedConferenciaHost');
+    if (!host || !conferencia) return;
+    host.innerHTML = conferencia.html();
+  }
+
+  async function enviarPreparacao(method, path, chave) {
+    try {
+      const resp = await fetch(`${API_URL}${path}`, {
+        method,
+        headers: { ..._pedHeaders(), 'Idempotency-Key': chave },
+        body: '{}'
+      });
+      const data = await resp.json().catch(() => null);
+      if (!resp.ok) {
+        const err = new Error((data && (data.mensagem || data.error)) || 'Falha na operação');
+        err.codigo = data && data.codigo;
+        throw err;
+      }
+      if (!data || typeof data !== 'object') {
+        const err = new Error('Resposta inválida do servidor.');
+        err.codigo = 'RESPOSTA_INVALIDA';
+        throw err;
+      }
+      return data;
+    } catch (err) {
+      if (!err.codigo) err.rede = true;
+      throw err;
+    }
+  }
+
+  async function bloquearSeJaEnviado(pedido) {
+    if (!pedido || pedido.mesa_id == null || pedido.mesa_atendimento_id == null) return;
+    try {
+      const data = await requisitarMesas(`/${pedido.mesa_id}/atendimento/pedidos`);
+      const item = (data.pedidos || []).find((row) => Number(row.id) === Number(pedido.id));
+      const estadoPrep = item && item.preparacao && item.preparacao.estado;
+      if (estadoPrep && estadoPrep !== 'NAO_ENVIADO') {
+        pedidoEdicaoBloqueada = true;
+        $('#pedEditorBloqueioAviso')
+          .text('Este pedido já foi enviado para preparação. Os itens encaminhados não são alterados por esta tela.')
+          .removeClass('d-none');
+        $('#btnPedSalvar, #btnPedFinalizar').prop('hidden', true).prop('disabled', true);
+        $('#pedMesaId, #pedClienteBusca, #pedClienteId, #pedDesconto, #pedObservacao, #pedProdutoBusca, #pedProdutoId, #pedProdutoNome, #pedProdutoCodigo, #pedItemQtd, #pedItemPreco, #pedItemDesc, #btnPedAddItem')
+          .prop('disabled', true);
+      }
+    } catch (_err) {
+      $('#pedMesaAviso')
+        .addClass('text-danger')
+        .text('Não foi possível consultar a preparação. O envio fica indisponível até a consulta.');
+    }
+  }
+
+  async function salvarPedido(acao) {
     if (pedidoEdicaoBloqueada) {
       alertar($('#pedEditorBloqueioAviso').text() || 'A edição deste pedido está bloqueada.', 'warning');
       return;
@@ -1669,6 +2063,10 @@ function loadPedidos() {
     }
     if (!itensEditor.length) {
       alertar('Adicione ao menos um item.', 'warning');
+      return;
+    }
+    if (mesaFechamentoId && Number($('#pedMesaId').val()) === Number(mesaFechamentoId)) {
+      alertar('O atendimento está em fechamento e não recebe pedido novo.', 'warning');
       return;
     }
     headers = _pedHeaders();
@@ -1710,24 +2108,40 @@ function loadPedidos() {
       const url = pedidoEditandoId ? `${API_URL}/pedidos/${pedidoEditandoId}` : `${API_URL}/pedidos`;
       const method = pedidoEditandoId ? 'PUT' : 'POST';
       const data = await fetchPedidoComSupervisor(url, method, payload);
-      bootstrap.Modal.getInstance(document.getElementById('modalPedidoEditor'))?.hide();
-      alertar(`Pedido ${data.pedido?.codigo || ''} salvo.`, 'success');
-      pedidoEditandoId = data.pedido?.id || pedidoEditandoId;
-      pedidoEditandoStatus = data.pedido?.status || pedidoEditandoStatus;
-      $('#btnPedImprimir').prop('disabled', !pedidoEditandoId);
+      const pedido = data && data.pedido;
+      if (!pedido || !pedido.id) {
+        alertar('O pedido não foi confirmado pelo servidor.', 'danger');
+        return;
+      }
+      pedidoEditandoId = pedido.id;
+      pedidoEditandoStatus = pedido.status || pedidoEditandoStatus;
+      $('#btnPedImprimir').prop('disabled', false);
       abaAtual = 'pedidos';
       sincronizarAbas();
       await carregarLista();
       if (method === 'POST') {
         chaveCriacaoPendente = null;
         assinaturaCriacaoPendente = null;
-        if (!data.idempotente && data.pedido?.id) {
-          await iniciarVendaPdv(
-            Number(data.pedido.id),
-            true,
-            'Pedido salvo com sucesso. Deseja gerar a venda deste pedido no PDV?'
-          );
-        }
+      }
+      const salao = window.CdsMesasConferencia && window.CdsMesasConferencia.fluxoDoPedido(pedido) === 'salao';
+      if (salao && acao === 'finalizar' && conferencia) {
+        conferencia.finalizar(pedido, { numero: pedido.mesa_numero });
+        pintarConferencia();
+        bootstrap.Modal.getInstance(document.getElementById('modalPedidoEditor'))?.hide();
+        return;
+      }
+      if (salao) {
+        alertar(`Pedido ${pedido.codigo || ''} salvo. A preparação ainda não foi acionada.`, 'success');
+        return;
+      }
+      bootstrap.Modal.getInstance(document.getElementById('modalPedidoEditor'))?.hide();
+      alertar(`Pedido ${pedido.codigo || ''} salvo.`, 'success');
+      if (method === 'POST' && !data.idempotente) {
+        await iniciarVendaPdv(
+          Number(pedido.id),
+          true,
+          'Pedido salvo com sucesso. Deseja gerar a venda deste pedido no PDV?'
+        );
       }
     } catch (err) {
       alertar(err.message, 'danger');
@@ -2232,63 +2646,42 @@ function loadPedidos() {
     carregarLista();
   });
 
-  $('#btnPedNovo').on('click', () => abrirEditor(null));
-  $('#btnPedVendaValor').on('click', () => {
-    $('#pedVvValor').val('');
-    $('#pedVvQtd').val('1');
-    $('#pedVvPastelId').val('');
-    const el = document.getElementById('pedVendaValorModal');
-    if (window.bootstrap && el) {
-      window.bootstrap.Modal.getOrCreateInstance(el).show();
-    } else {
-      $('#pedVendaValorModal').modal('show');
-    }
+  $('#pedidosRoot').on('click', '#btnPedVoltarMesas', () => {
+    if (conferencia) conferencia.parar();
+    if (typeof loadPage === 'function') loadPage('mesas');
   });
-  $('#pedVvConfirmar').on('click', async () => {
-    const valor = Number($('#pedVvValor').val());
-    const qtd = Number($('#pedVvQtd').val());
-    const pastelIdRaw = ($('#pedVvPastelId').val() || '').trim();
-    if (!(valor > 0) || !Number.isSafeInteger(qtd) || qtd <= 0) {
-      alertar('Informe valor total positivo e quantidade inteira de pastéis.', 'warning');
-      return;
-    }
-    const chave = novaChaveIdempotencia();
-    const corpo = {
-      valor_total: valor,
-      quantidade_pasteis: qtd
-    };
-    if (pastelIdRaw) corpo.produto_pastel_id = Number(pastelIdRaw);
-    try {
-      const resp = await fetch(`${API_URL}/pedidos/venda-por-valor-pasteis`, {
-        method: 'POST',
-        headers: Object.assign(_pedHeaders(), { 'Idempotency-Key': chave }),
-        body: JSON.stringify(corpo)
+  $('#pedConferenciaHost').on('click', '[data-acao="enviar"]', async () => {
+    if (!conferencia) return;
+    const geracao = conferencia.estado.geracao;
+    const resultado = await conferencia.enviar();
+    if (resultado && resultado.obsoleta) return;
+    if (geracao !== conferencia.estado.geracao) return;
+    pintarConferencia();
+  });
+  $('#pedConferenciaHost').on('click', '[data-acao="corrigir"]', async () => {
+    if (!conferencia) return;
+    const resultado = conferencia.corrigir();
+    pintarConferencia();
+    if (resultado && resultado.ok) await abrirEditor(resultado.pedidoId);
+  });
+  $('#pedConferenciaHost').on('click', '[data-acao="outro"]', async () => {
+    if (!conferencia) return;
+    const pedido = conferencia.estado.pedido;
+    const numero = conferencia.estado.numero;
+    conferencia.dispensar();
+    pintarConferencia();
+    if (pedido && pedido.mesa_id) {
+      await abrirEditor(null, {
+        mesa_id: pedido.mesa_id,
+        numero,
+        titulo: window.CdsMesasLancamento ? window.CdsMesasLancamento.tituloMesa(numero) : 'Novo pedido',
+        bloqueado: false
       });
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok) {
-        throw new Error(data.mensagem || data.error || `HTTP ${resp.status}`);
-      }
-      const el = document.getElementById('pedVendaValorModal');
-      if (window.bootstrap && el) {
-        window.bootstrap.Modal.getOrCreateInstance(el).hide();
-      } else {
-        $('#pedVendaValorModal').modal('hide');
-      }
-      if (data.venda_concluida) {
-        alertar(`Pedido #${data.pedido_id} já possui venda concluída (#${data.venda_id}).`, 'info');
-        await carregarLista();
-        return;
-      }
-      sessionStorage.setItem('pdvPedidoHandoff', JSON.stringify(data));
-      alertar(
-        `Pedido #${data.pedido_id} composto (desconto R$ ${Number(data.desconto || 0).toFixed(2)}). Abrindo PDV…`,
-        'success'
-      );
-      window.location.assign('/pdv');
-    } catch (err) {
-      alertar(err.message || 'Falha ao iniciar venda por valor.', 'danger');
     }
   });
+  $('#pedMesaId').on('change', atualizarAcaoMesa);
+  $('#btnPedNovo').on('click', () => abrirEditor(null));
+  $('#pedConsolidadaConfirmar').on('click', confirmarConsolidada);
   $('#btnPedMesas').on('click', abrirMesas);
   $('#btnPedMesaAdd').on('click', cadastrarMesa);
   $('#pedMesaNovoNumero').on('keydown', (e) => {
@@ -2311,7 +2704,8 @@ function loadPedidos() {
     salvarEdicaoMesa(Number($tr.data('id')), $tr.find('.ped-mesa-edit-num').val());
   });
   $('#btnPedPesquisar').on('click', carregarLista);
-  $('#btnPedSalvar').on('click', salvarPedido);
+  $('#btnPedSalvar').on('click', () => salvarPedido('salvar'));
+  $('#btnPedFinalizar').on('click', () => salvarPedido('finalizar'));
   $('#btnPedImprimir').on('click', () => imprimirPedido(pedidoEditandoId));
   $('#btnPedAddItem').on('click', adicionarItem);
   $('#btnPedConfirmarPersonalizacao').on('click', confirmarPersonalizacaoPendente);
@@ -2341,6 +2735,7 @@ function loadPedidos() {
   });
 
   carregarLista();
+  aplicarLancamentoDaMesa();
 }
 
 window.loadPedidos = loadPedidos;

@@ -1,7 +1,7 @@
 /**
  * Contagem física absoluta F×NF — CDS-ESTOQUE-MANUAL-01.
- * Operador informa saldos físicos fiscal e não fiscal separadamente.
- * Deltas são aplicados via porta pública / ajuste existente.
+ * CDS-ESTOQUE-CONTAGEM-CONCORRENCIA-03: observação carrega saldo de referência;
+ * confirmação em BEGIN IMMEDIATE rejeita snapshot desatualizado (CONTAGEM_DESATUALIZADA).
  *
  * @module services/estoque/EstoqueContagemFisicaService
  */
@@ -15,8 +15,43 @@ const {
   garantirSchemaEstoqueContagemFisicaAsync
 } = require('./estoqueContagemFisicaSchema');
 const { registrarAjusteEstoque } = require('../ajusteEstoqueService');
+const {
+  converterQuantidadeContagem
+} = require('./EstoqueContagemConversaoService');
 
 const MOTIVO_CONTAGEM = 'CONTAGEM_FISICA';
+const EPS_SALDO = 1e-9;
+
+/**
+ * F12 ON = modo fiscal: não contar/ajustar saldo não fiscal.
+ * Fonte alinhada a modo_dashboard_fiscal / pdv_modo_fiscal_ativo ('1' = ON).
+ */
+function resolverOmitirNaoFiscal(params = {}, item = {}) {
+  if (item.omitir_nao_fiscal === true || item.omitir_nao_fiscal === 1 || item.omitir_nao_fiscal === '1') {
+    return true;
+  }
+  if (item.contar_nao_fiscal === false || item.contar_nao_fiscal === 0 || item.contar_nao_fiscal === '0') {
+    return true;
+  }
+  const modo = params.modo_fiscal != null
+    ? params.modo_fiscal
+    : (params.modoFiscal != null
+      ? params.modoFiscal
+      : (item.modo_fiscal != null ? item.modo_fiscal : item.modoFiscal));
+  if (modo == null || modo === '') return false;
+  const s = String(modo).trim().toLowerCase();
+  return s === '1' || s === 'true' || s === 'on' || s === 'sim';
+}
+
+function quantidadeInformadaOpcional(valor, campo, { obrigatorio }) {
+  if (valor === undefined || valor === null || valor === '') {
+    if (obrigatorio) {
+      throw erroContagem('QUANTIDADE_CONTAGEM_OBRIGATORIA', `${campo} é obrigatória.`);
+    }
+    return null;
+  }
+  return quantidadeNaoNegativa(valor, campo);
+}
 
 function erroContagem(code, message, status = 400, extra = {}) {
   const err = new Error(message);
@@ -24,6 +59,50 @@ function erroContagem(code, message, status = 400, extra = {}) {
   err.status = status;
   Object.assign(err, extra);
   return err;
+}
+
+function saldosIguais(a, b) {
+  return Math.abs(roundStockQuantity(a) - roundStockQuantity(b)) <= EPS_SALDO;
+}
+
+/**
+ * Snapshot opcional da observação (preview / abertura).
+ * Quando informado, a confirmação exige que o saldo atual ainda coincida.
+ */
+function extrairSaldoEsperadoItem(item = {}) {
+  const temFiscal = item.saldo_fiscal_esperado != null
+    || item.saldoFiscalEsperado != null
+    || item.saldo_fiscal_anterior != null
+    || item.saldoFiscalAnterior != null;
+  const temNaoFiscal = item.saldo_nao_fiscal_esperado != null
+    || item.saldoNaoFiscalEsperado != null
+    || item.saldo_nao_fiscal_anterior != null
+    || item.saldoNaoFiscalAnterior != null;
+  if (!temFiscal && !temNaoFiscal) return null;
+  if (!temFiscal || !temNaoFiscal) {
+    throw erroContagem(
+      'SALDO_ESPERADO_INCOMPLETO',
+      'Informe saldo_fiscal_esperado e saldo_nao_fiscal_esperado juntos (referência da observação).'
+    );
+  }
+  const fiscalRaw = item.saldo_fiscal_esperado != null
+    ? item.saldo_fiscal_esperado
+    : (item.saldoFiscalEsperado != null
+      ? item.saldoFiscalEsperado
+      : (item.saldo_fiscal_anterior != null
+        ? item.saldo_fiscal_anterior
+        : item.saldoFiscalAnterior));
+  const naoFiscalRaw = item.saldo_nao_fiscal_esperado != null
+    ? item.saldo_nao_fiscal_esperado
+    : (item.saldoNaoFiscalEsperado != null
+      ? item.saldoNaoFiscalEsperado
+      : (item.saldo_nao_fiscal_anterior != null
+        ? item.saldo_nao_fiscal_anterior
+        : item.saldoNaoFiscalAnterior));
+  return {
+    saldo_fiscal: quantidadeNaoNegativa(fiscalRaw, 'saldo_fiscal_esperado'),
+    saldo_nao_fiscal: quantidadeNaoNegativa(naoFiscalRaw, 'saldo_nao_fiscal_esperado')
+  };
 }
 
 function dbGet(db, sql, params = []) {
@@ -119,6 +198,7 @@ async function registrarContagemFisica(params = {}) {
     ? String(chaveRaw).trim().slice(0, 120)
     : null;
 
+  // Atalho fora da TX: revalidado dentro de BEGIN IMMEDIATE.
   if (chaveIdempotencia) {
     const existente = await dbGet(
       db,
@@ -136,6 +216,7 @@ async function registrarContagemFisica(params = {}) {
     throw erroContagem('ITENS_CONTAGEM_OBRIGATORIOS', 'Informe ao menos um produto na contagem.');
   }
 
+  const omitirNaoFiscalGlobal = resolverOmitirNaoFiscal(params);
   const vistos = new Set();
   const itensNorm = [];
   for (const item of itensBrutos) {
@@ -154,21 +235,51 @@ async function registrarContagemFisica(params = {}) {
     if (!produto) {
       throw erroContagem('PRODUTO_NAO_ENCONTRADO', `Produto ${produtoId} não encontrado.`, 404);
     }
+
+    const omitirNf = omitirNaoFiscalGlobal || resolverOmitirNaoFiscal(params, item);
+    const qFInformada = quantidadeInformadaOpcional(
+      item.quantidade_fiscal_informada != null
+        ? item.quantidade_fiscal_informada
+        : (item.quantidade_fiscal_contada != null
+          ? item.quantidade_fiscal_contada
+          : item.quantidadeFiscalContada),
+      'quantidade_fiscal_informada',
+      { obrigatorio: true }
+    );
+    const qNfInformada = omitirNf
+      ? null
+      : quantidadeInformadaOpcional(
+        item.quantidade_nao_fiscal_informada != null
+          ? item.quantidade_nao_fiscal_informada
+          : (item.quantidade_nao_fiscal_contada != null
+            ? item.quantidade_nao_fiscal_contada
+            : item.quantidadeNaoFiscalContada),
+        'quantidade_nao_fiscal_informada',
+        { obrigatorio: true }
+      );
+
+    const convOpts = {
+      apresentacaoId: item.apresentacao_id != null ? item.apresentacao_id : item.apresentacaoId,
+      unidadeOrigem: item.unidade_informada || item.unidade_comercial || item.unidadeComercial
+    };
+    const convF = await converterQuantidadeContagem(db, produtoId, qFInformada, convOpts);
+    const convNf = omitirNf
+      ? null
+      : await converterQuantidadeContagem(db, produtoId, qNfInformada, convOpts);
+
     itensNorm.push({
       produto_id: produtoId,
       produto_nome: produto.nome || null,
-      quantidade_fiscal_contada: quantidadeNaoNegativa(
-        item.quantidade_fiscal_contada != null
-          ? item.quantidade_fiscal_contada
-          : item.quantidadeFiscalContada,
-        'quantidade_fiscal_contada'
-      ),
-      quantidade_nao_fiscal_contada: quantidadeNaoNegativa(
-        item.quantidade_nao_fiscal_contada != null
-          ? item.quantidade_nao_fiscal_contada
-          : item.quantidadeNaoFiscalContada,
-        'quantidade_nao_fiscal_contada'
-      )
+      omitir_nao_fiscal: omitirNf,
+      quantidade_fiscal_informada: convF.quantidade_informada,
+      quantidade_nao_fiscal_informada: convNf ? convNf.quantidade_informada : null,
+      unidade_informada: convF.unidade_informada,
+      unidade_base: convF.unidade_base,
+      fator_total: convF.fator_total,
+      // Persistidos / comparados na unidade-base.
+      quantidade_fiscal_contada: convF.quantidade_convertida,
+      quantidade_nao_fiscal_contada: convNf ? convNf.quantidade_convertida : null,
+      saldo_esperado: extrairSaldoEsperadoItem(item)
     });
   }
 
@@ -188,100 +299,147 @@ async function registrarContagemFisica(params = {}) {
     motivoCompat: null
   };
 
-  await estoqueSaldosPublico.executarEmTransacao(async () => {
-    const cab = await dbRun(
-      db,
-      `INSERT INTO estoque_contagens_fisicas
-        (empresa_id, usuario_id, usuario_nome, observacao, chave_idempotencia)
-       VALUES (?, ?, ?, ?, ?)`,
-      [empresaId, usuarioId, usuarioNome, observacao, chaveIdempotencia]
-    );
-    const contagemId = Number(cab.lastID);
-
-    for (const item of itensNorm) {
-      const antes = await estoqueSaldosPublico.consultarSaldo(item.produto_id, optsPorta);
-      const saldoFiscalAnterior = roundStockQuantity(Number(antes.saldo_fiscal || 0));
-      const saldoNaoFiscalAnterior = roundStockQuantity(Number(antes.saldo_nao_fiscal || 0));
-      const diferencaFiscal = roundStockQuantity(
-        item.quantidade_fiscal_contada - saldoFiscalAnterior
-      );
-      const diferencaNaoFiscal = roundStockQuantity(
-        item.quantidade_nao_fiscal_contada - saldoNaoFiscalAnterior
-      );
-
-      let ajusteId = null;
-      if (Math.abs(diferencaFiscal) > 1e-9 || Math.abs(diferencaNaoFiscal) > 1e-9) {
-        const depois = await aplicarAsync(
+  let contagemIdFinal;
+  try {
+    contagemIdFinal = await estoqueSaldosPublico.executarEmTransacao(async () => {
+      // Idempotência sob lock de escrita (evita duplicar ajuste com a mesma chave).
+      if (chaveIdempotencia) {
+        const existenteTx = await dbGet(
           db,
-          item.produto_id,
-          diferencaFiscal,
-          diferencaNaoFiscal,
-          optsPorta
+          `SELECT id FROM estoque_contagens_fisicas
+            WHERE empresa_id = ? AND chave_idempotencia = ?`,
+          [empresaId, chaveIdempotencia]
         );
-        const estoqueTotalAntes = roundStockQuantity(saldoFiscalAnterior + saldoNaoFiscalAnterior);
-        const estoqueTotalDepois = roundStockQuantity(
-          Number(depois.estoque_atual != null
-            ? depois.estoque_atual
-            : (Number(depois.saldo_fiscal || 0) + Number(depois.saldo_nao_fiscal || 0)))
-        );
-        ajusteId = await registrarAjusteAsync(db, {
-          produto_id: item.produto_id,
-          usuario_id: usuarioId,
-          usuario_nome: usuarioNome,
-          motivo: observacao || MOTIVO_CONTAGEM,
-          ajuste_fiscal: diferencaFiscal,
-          ajuste_nao_fiscal: diferencaNaoFiscal,
-          saldo_fiscal_antes: saldoFiscalAnterior,
-          saldo_fiscal_depois: Number(depois.saldo_fiscal),
-          saldo_nao_fiscal_antes: saldoNaoFiscalAnterior,
-          saldo_nao_fiscal_depois: Number(depois.saldo_nao_fiscal),
-          estoque_total_antes: estoqueTotalAntes,
-          estoque_total_depois: estoqueTotalDepois
-        });
+        if (existenteTx) {
+          return { idempotente: true, id: Number(existenteTx.id) };
+        }
       }
 
-      await dbRun(
+      const cab = await dbRun(
         db,
-        `INSERT INTO estoque_contagens_fisicas_itens (
-          contagem_id, empresa_id, produto_id,
-          saldo_fiscal_anterior, saldo_nao_fiscal_anterior,
-          quantidade_fiscal_contada, quantidade_nao_fiscal_contada,
-          diferenca_fiscal, diferenca_nao_fiscal, ajuste_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          contagemId,
-          empresaId,
-          item.produto_id,
-          saldoFiscalAnterior,
-          saldoNaoFiscalAnterior,
-          item.quantidade_fiscal_contada,
-          item.quantidade_nao_fiscal_contada,
-          diferencaFiscal,
-          diferencaNaoFiscal,
-          ajusteId
-        ]
+        `INSERT INTO estoque_contagens_fisicas
+          (empresa_id, usuario_id, usuario_nome, observacao, chave_idempotencia)
+         VALUES (?, ?, ?, ?, ?)`,
+        [empresaId, usuarioId, usuarioNome, observacao, chaveIdempotencia]
       );
+      const contagemId = Number(cab.lastID);
+
+      for (const item of itensNorm) {
+        const antes = await estoqueSaldosPublico.consultarSaldo(item.produto_id, optsPorta);
+        const saldoFiscalAnterior = roundStockQuantity(Number(antes.saldo_fiscal || 0));
+        const saldoNaoFiscalAnterior = roundStockQuantity(Number(antes.saldo_nao_fiscal || 0));
+
+        // Observação desatualizada: saldo mudou desde o início da contagem.
+        if (item.saldo_esperado) {
+          if (
+            !saldosIguais(item.saldo_esperado.saldo_fiscal, saldoFiscalAnterior)
+            || !saldosIguais(item.saldo_esperado.saldo_nao_fiscal, saldoNaoFiscalAnterior)
+          ) {
+            throw erroContagem(
+              'CONTAGEM_DESATUALIZADA',
+              'A observação da contagem está desatualizada: o saldo foi alterado desde o início. '
+              + 'Atualize a pré-visualização e realize uma nova contagem.',
+              409,
+              {
+                empresa_id: empresaId,
+                produto_id: item.produto_id,
+                saldo_fiscal_esperado: item.saldo_esperado.saldo_fiscal,
+                saldo_nao_fiscal_esperado: item.saldo_esperado.saldo_nao_fiscal,
+                saldo_fiscal_atual: saldoFiscalAnterior,
+                saldo_nao_fiscal_atual: saldoNaoFiscalAnterior
+              }
+            );
+          }
+        }
+
+        const diferencaFiscal = roundStockQuantity(
+          item.quantidade_fiscal_contada - saldoFiscalAnterior
+        );
+        // F12 ON: não interpreta ausência como zero — preserva NF sem ajuste.
+        const quantidadeNfPersistida = item.omitir_nao_fiscal
+          ? saldoNaoFiscalAnterior
+          : item.quantidade_nao_fiscal_contada;
+        const diferencaNaoFiscal = item.omitir_nao_fiscal
+          ? 0
+          : roundStockQuantity(quantidadeNfPersistida - saldoNaoFiscalAnterior);
+
+        let ajusteId = null;
+        if (Math.abs(diferencaFiscal) > EPS_SALDO || Math.abs(diferencaNaoFiscal) > EPS_SALDO) {
+          const depois = await aplicarAsync(
+            db,
+            item.produto_id,
+            diferencaFiscal,
+            diferencaNaoFiscal,
+            optsPorta
+          );
+          const estoqueTotalAntes = roundStockQuantity(saldoFiscalAnterior + saldoNaoFiscalAnterior);
+          const estoqueTotalDepois = roundStockQuantity(
+            Number(depois.estoque_atual != null
+              ? depois.estoque_atual
+              : (Number(depois.saldo_fiscal || 0) + Number(depois.saldo_nao_fiscal || 0)))
+          );
+          ajusteId = await registrarAjusteAsync(db, {
+            produto_id: item.produto_id,
+            usuario_id: usuarioId,
+            usuario_nome: usuarioNome,
+            motivo: observacao || MOTIVO_CONTAGEM,
+            ajuste_fiscal: diferencaFiscal,
+            ajuste_nao_fiscal: diferencaNaoFiscal,
+            saldo_fiscal_antes: saldoFiscalAnterior,
+            saldo_fiscal_depois: Number(depois.saldo_fiscal),
+            saldo_nao_fiscal_antes: saldoNaoFiscalAnterior,
+            saldo_nao_fiscal_depois: Number(depois.saldo_nao_fiscal),
+            estoque_total_antes: estoqueTotalAntes,
+            estoque_total_depois: estoqueTotalDepois
+          });
+        }
+
+        await dbRun(
+          db,
+          `INSERT INTO estoque_contagens_fisicas_itens (
+            contagem_id, empresa_id, produto_id,
+            saldo_fiscal_anterior, saldo_nao_fiscal_anterior,
+            quantidade_fiscal_contada, quantidade_nao_fiscal_contada,
+            diferenca_fiscal, diferenca_nao_fiscal, ajuste_id
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            contagemId,
+            empresaId,
+            item.produto_id,
+            saldoFiscalAnterior,
+            saldoNaoFiscalAnterior,
+            item.quantidade_fiscal_contada,
+            quantidadeNfPersistida,
+            diferencaFiscal,
+            diferencaNaoFiscal,
+            ajusteId
+          ]
+        );
+      }
+
+      return { idempotente: false, id: contagemId };
+    }, { db });
+  } catch (err) {
+    // Corrida na UNIQUE de idempotência: outra requisição confirmou a mesma chave.
+    if (
+      chaveIdempotencia
+      && err
+      && /UNIQUE/i.test(String(err.message || ''))
+    ) {
+      const existente = await dbGet(
+        db,
+        `SELECT id FROM estoque_contagens_fisicas
+          WHERE empresa_id = ? AND chave_idempotencia = ?`,
+        [empresaId, chaveIdempotencia]
+      );
+      if (existente) {
+        return obterContagemPorId(db, existente.id, empresaId);
+      }
     }
+    throw err;
+  }
 
-    return contagemId;
-  }, { db });
-
-  const cabFinal = chaveIdempotencia
-    ? await dbGet(
-      db,
-      `SELECT id FROM estoque_contagens_fisicas
-        WHERE empresa_id = ? AND chave_idempotencia = ?`,
-      [empresaId, chaveIdempotencia]
-    )
-    : await dbGet(
-      db,
-      `SELECT id FROM estoque_contagens_fisicas
-        WHERE empresa_id = ?
-        ORDER BY id DESC LIMIT 1`,
-      [empresaId]
-    );
-
-  return obterContagemPorId(db, cabFinal.id, empresaId);
+  return obterContagemPorId(db, contagemIdFinal.id, empresaId);
 }
 
 async function obterContagemPorId(db, contagemId, empresaId) {
@@ -333,18 +491,38 @@ async function previsualizarContagem(params = {}) {
   if (!Number.isInteger(produtoId) || produtoId <= 0) {
     throw erroContagem('PRODUTO_INVALIDO', 'produto_id inválido.');
   }
-  const qF = quantidadeNaoNegativa(
-    params.quantidade_fiscal_contada != null
-      ? params.quantidade_fiscal_contada
-      : params.quantidadeFiscalContada,
-    'quantidade_fiscal_contada'
+
+  const omitirNf = resolverOmitirNaoFiscal(params);
+  const qFInformada = quantidadeInformadaOpcional(
+    params.quantidade_fiscal_informada != null
+      ? params.quantidade_fiscal_informada
+      : (params.quantidade_fiscal_contada != null
+        ? params.quantidade_fiscal_contada
+        : params.quantidadeFiscalContada),
+    'quantidade_fiscal_informada',
+    { obrigatorio: true }
   );
-  const qNf = quantidadeNaoNegativa(
-    params.quantidade_nao_fiscal_contada != null
-      ? params.quantidade_nao_fiscal_contada
-      : params.quantidadeNaoFiscalContada,
-    'quantidade_nao_fiscal_contada'
-  );
+  const qNfInformada = omitirNf
+    ? null
+    : quantidadeInformadaOpcional(
+      params.quantidade_nao_fiscal_informada != null
+        ? params.quantidade_nao_fiscal_informada
+        : (params.quantidade_nao_fiscal_contada != null
+          ? params.quantidade_nao_fiscal_contada
+          : params.quantidadeNaoFiscalContada),
+      'quantidade_nao_fiscal_informada',
+      { obrigatorio: true }
+    );
+
+  const convOpts = {
+    apresentacaoId: params.apresentacao_id != null ? params.apresentacao_id : params.apresentacaoId,
+    unidadeOrigem: params.unidade_informada || params.unidade_comercial || params.unidadeComercial
+  };
+  const convF = await converterQuantidadeContagem(db, produtoId, qFInformada, convOpts);
+  const convNf = omitirNf
+    ? null
+    : await converterQuantidadeContagem(db, produtoId, qNfInformada, convOpts);
+
   const antes = await estoqueSaldosPublico.consultarSaldo(produtoId, {
     db,
     empresaId,
@@ -352,15 +530,33 @@ async function previsualizarContagem(params = {}) {
   });
   const saldoFiscalAnterior = roundStockQuantity(Number(antes.saldo_fiscal || 0));
   const saldoNaoFiscalAnterior = roundStockQuantity(Number(antes.saldo_nao_fiscal || 0));
+  const qF = convF.quantidade_convertida;
+  const qNf = omitirNf ? null : convNf.quantidade_convertida;
+
   return {
     empresa_id: empresaId,
     produto_id: produtoId,
+    modo_fiscal: omitirNf ? '1' : '0',
+    omitir_nao_fiscal: omitirNf,
+    // Referência da observação — reenviar na confirmação como saldo_*_esperado.
     saldo_fiscal_anterior: saldoFiscalAnterior,
     saldo_nao_fiscal_anterior: saldoNaoFiscalAnterior,
+    saldo_fiscal_esperado: saldoFiscalAnterior,
+    saldo_nao_fiscal_esperado: saldoNaoFiscalAnterior,
+    // Comercial (operador) + convertida (unidade-base — fonte de verdade do ajuste).
+    quantidade_fiscal_informada: convF.quantidade_informada,
+    quantidade_nao_fiscal_informada: omitirNf ? null : convNf.quantidade_informada,
+    unidade_informada: convF.unidade_informada,
+    unidade_base: convF.unidade_base,
+    fator_total: convF.fator_total,
+    mensagem_conversao_fiscal: convF.mensagem_conversao,
+    mensagem_conversao_nao_fiscal: omitirNf ? null : convNf.mensagem_conversao,
     quantidade_fiscal_contada: qF,
     quantidade_nao_fiscal_contada: qNf,
     diferenca_fiscal: roundStockQuantity(qF - saldoFiscalAnterior),
-    diferenca_nao_fiscal: roundStockQuantity(qNf - saldoNaoFiscalAnterior)
+    diferenca_nao_fiscal: omitirNf
+      ? null
+      : roundStockQuantity(qNf - saldoNaoFiscalAnterior)
   };
 }
 
@@ -368,5 +564,6 @@ module.exports = {
   MOTIVO_CONTAGEM,
   registrarContagemFisica,
   obterContagemPorId,
-  previsualizarContagem
+  previsualizarContagem,
+  resolverOmitirNaoFiscal
 };

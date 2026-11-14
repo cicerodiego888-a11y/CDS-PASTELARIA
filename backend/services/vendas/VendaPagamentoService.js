@@ -32,10 +32,21 @@ const {
   responderErroEmpresaVenda
 } = require('./VendaEmpresaContextoService');
 const {
+  validarReferenciasPersistenciaVenda
+} = require('./VendaReferenciaIntegridade');
+const {
+  classificarFormaPagamento
+} = require('./ClassificacaoModalidadePagamento');
+const {
   avaliarReferenciaRecomposicao,
   ambienteTesteRecomposicaoReferencia,
   gravarReferenciaRecomposicao
 } = require('./PagamentoSequencialComposicaoService');
+const {
+  devePreservarItensComposicaoPedido,
+  decisaoEmissaoComposicaoPreservada
+} = require('./FechamentoComposicaoPedidoContrato');
+const { registroFinanceiroParcela } = require('./registroTrocoDinheiro');
 
 /**
  * RC8.2 — carrega MPFC e entrega política aos consumidores.
@@ -106,6 +117,14 @@ const { emitirFiscalSeSolicitado, responderVendaComFiscal } = VendaFiscalService
  */
 function erroPersistenciaVenda(err, etapa, ctx = {}) {
   const msg = String((err && err.message) || err || 'Erro ao gravar venda');
+  if (err && err.codigo && !/FOREIGN KEY/i.test(msg)) {
+    return {
+      error: msg,
+      codigo: err.codigo,
+      etapa,
+      referencia: err.referencia || null
+    };
+  }
   if (/FOREIGN KEY/i.test(msg)) {
     const detalhe = Object.entries(ctx || {})
       .filter(([, v]) => v !== undefined && v !== null && v !== '')
@@ -940,6 +959,13 @@ db.all(`
   const { politica: politicaMpfc } = carregarPoliticaFiscalComercialPassiva();
   const midpAtivo = Boolean(politicaMpfc.preservarDinheiro);
   const pagamentosPre = Array.isArray(req.body?.pagamentos) ? req.body.pagamentos : [];
+  const preservarPre = devePreservarItensComposicaoPedido({
+    pedidoId: req.body && (req.body.pedido_id || req.body.pedidoId),
+    itens,
+    desconto,
+    acrescimo,
+    total: req.body && req.body.total
+  });
   const resultadoMotor = distribuirItensVendaComValorFiscalEfetivo(
     entradasMotor,
     vendaFiscal,
@@ -948,7 +974,8 @@ db.all(`
       midpAtivo,
       desconto: Number(desconto || 0),
       acrescimo: Number(acrescimo || 0),
-      politicaFiscalComercial: politicaMpfc
+      politicaFiscalComercial: politicaMpfc,
+      preservarItensComposicaoPedido: preservarPre
     }
   );
 
@@ -1162,11 +1189,8 @@ if (cpfCnpjNotaLimpo && ![11, 14].includes(cpfCnpjNotaLimpo.length)) {
 
 const pagamentosVenda = Array.isArray(pagamentos) ? pagamentos : [];
 
-let formaPagamentoFinal = forma_pagamento;
-
-if (pagamentosVenda.length > 1) {
-  formaPagamentoFinal = "misto";
-}
+const formaClassificada = classificarFormaPagamento(pagamentosVenda);
+let formaPagamentoFinal = formaClassificada || forma_pagamento;
 
 // Hotfix: body.valor_fiscal / valor_nao_fiscal são ignorados — fonte de verdade = Motor.
 void _valorFiscalBody;
@@ -1468,6 +1492,13 @@ db.all(`
     );
   }
 
+  const preservarComposicaoPedido = devePreservarItensComposicaoPedido({
+    pedidoId: pedidoIdVenda,
+    itens,
+    desconto,
+    acrescimo,
+    total: totalNum
+  });
   const resultadoMotor = distribuirItensVendaComValorFiscalEfetivo(
     entradasMotor,
     vendaFiscal,
@@ -1476,7 +1507,8 @@ db.all(`
       midpAtivo,
       desconto: Number(desconto || 0),
       acrescimo: Number(acrescimo || 0),
-      politicaFiscalComercial: politicaMpfc
+      politicaFiscalComercial: politicaMpfc,
+      preservarItensComposicaoPedido: preservarComposicaoPedido
     }
   );
 
@@ -1723,6 +1755,20 @@ db.all(`
     const fiscalClassificado = Number(classificado.valor_fiscal_referencia || 0);
     const naoClassificado = Number(classificado.valor_nao_fiscal_referencia || 0);
     if (fiscalClassificado > 0.009 && naoClassificado > 0.009) {
+      if (preservarComposicaoPedido && resultadoParaFechamento && resultadoParaFechamento.sucesso) {
+        const decisao = decisaoEmissaoComposicaoPreservada(pagamentosVenda);
+        resultadoParaFechamento = {
+          ...resultadoParaFechamento,
+          valorFiscalLiquido: decisao.valorFiscal,
+          valorFiscalEfetivo: decisao.valorFiscal,
+          valorNaoFiscalLiquido: decisao.valorNaoFiscal,
+          valorNaoFiscal: decisao.valorNaoFiscal
+        };
+        req.__bloqueioDocumentoFiscal = {
+          codigo: decisao.codigo,
+          motivo: decisao.motivo
+        };
+      } else {
       req.__bloqueioDocumentoFiscal = {
         codigo: 'RECOMPOSICAO_NAO_AUTORIZADA',
         motivo: 'A venda tem recebimento fiscal e não fiscal, mas não há distribuição autorizada. A NFC-e não foi montada.'
@@ -1741,6 +1787,7 @@ db.all(`
           valor_nao_fiscal: 0
         }))
       };
+      }
     } else if (fiscalClassificado <= 0.009 && naoClassificado > 0.009 && Math.abs(naoClassificado - totalNum) <= 0.02) {
       resultadoParaFechamento = {
         sucesso: true,
@@ -1951,8 +1998,9 @@ db.all(`
         venda_id, forma_pagamento, valor, tef_transacao_id, tef_nsu,
         tef_autorizacao, tef_bandeira, tef_adquirente,
         tef_comprovante_cliente, tef_comprovante_estabelecimento,
-        confirmacao_modalidade, confirmacao_manual, operador_id, confirmado_em
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        confirmacao_modalidade, confirmacao_manual, operador_id, confirmado_em,
+        valor_entregue, troco
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     if (pagamentosVenda.length > 0) {
@@ -1983,10 +2031,11 @@ db.all(`
           bandeira = null;
           adquirente = null;
         }
+        const registro = registroFinanceiroParcela(pagamento);
         await runSqlite(transacaoDb, sql, [
           vendaId,
           pagamento.forma_pagamento,
-          Number(pagamento.valor || 0),
+          registro.valor,
           confirmacao.manual === 1 ? null : tefId,
           nsu,
           autorizacao,
@@ -1997,7 +2046,9 @@ db.all(`
           confirmacao.modalidade,
           confirmacao.manual,
           confirmacao.operadorId,
-          confirmacao.confirmadoEm
+          confirmacao.confirmadoEm,
+          registro.valor_entregue,
+          registro.troco
         ]);
       }
       return;
@@ -2007,10 +2058,11 @@ db.all(`
       { confirmacao_manual: req.body && req.body.confirmacao_fiscal_manual },
       tef?.transacao_id || null
     );
+    const registroUnico = registroFinanceiroParcela({ valor: Number(total || 0) });
     await runSqlite(transacaoDb, sql, [
       vendaId,
       formaPagamentoFinal,
-      Number(total || 0),
+      registroUnico.valor,
       confirmacaoUnica.manual === 1 ? null : (tef?.transacao_id || null),
       confirmacaoUnica.manual === 1 ? null : (tef?.nsu || null),
       confirmacaoUnica.manual === 1 ? null : (tef?.autorizacao || null),
@@ -2021,7 +2073,9 @@ db.all(`
       confirmacaoUnica.modalidade,
       confirmacaoUnica.manual,
       confirmacaoUnica.operadorId,
-      confirmacaoUnica.confirmadoEm
+      confirmacaoUnica.confirmadoEm,
+      registroUnico.valor_entregue,
+      registroUnico.troco
     ]);
   }
 
@@ -2162,6 +2216,15 @@ db.all(`
         }
 
         codigo = await gerarCodigoVendaUnico(transacaoDb, codigoBase);
+        const refsVenda = await validarReferenciasPersistenciaVenda(transacaoDb, {
+          caixaId: req.caixaId,
+          caixaSessaoId: req.caixaSessaoId,
+          terminalId: req.terminalId,
+          operadorId: req.operadorId,
+          usuario: req.user,
+          empresaId: empresaIdVenda,
+          clienteId: cliente_id
+        });
         const venda = await runSqlite(transacaoDb, `
           INSERT INTO vendas (
             codigo, data_venda, cliente_id, total, valor_outros, desconto, acrescimo,
@@ -2178,10 +2241,10 @@ db.all(`
           desconto || 0,
           acrescimoPersistido,
           formaPagamentoFinal,
-          req.caixaSessaoId || null,
-          req.caixaId || null,
-          req.terminalId || null,
-          req.operadorId || null,
+          refsVenda.caixaSessaoId,
+          refsVenda.caixaId,
+          refsVenda.terminalId,
+          refsVenda.operadorId,
           totalFiscal,
           totalNaoFiscal,
           statusPagamento,
@@ -2401,6 +2464,15 @@ const executarVenda = async () => {
       }
 
       codigo = await gerarCodigoVendaUnico(transacaoDb, codigoBase);
+      const refsVenda = await validarReferenciasPersistenciaVenda(transacaoDb, {
+        caixaId: req.caixaId,
+        caixaSessaoId: req.caixaSessaoId,
+        terminalId: req.terminalId,
+        operadorId: req.operadorId,
+        usuario: req.user,
+        empresaId: empresaIdVenda,
+        clienteId: cliente_id
+      });
       const venda = await runSqlite(transacaoDb, `
         INSERT INTO vendas (
           codigo, data_venda, cliente_id, total, valor_outros, desconto, acrescimo,
@@ -2418,11 +2490,11 @@ const executarVenda = async () => {
         acrescimoPersistido,
         formaPagamentoFinal,
         valor_recebido || null,
-        req.caixaSessaoId || null,
-        req.caixaId,
-        req.terminalId || null,
+        refsVenda.caixaSessaoId,
+        refsVenda.caixaId,
+        refsVenda.terminalId,
         emitir_fiscal ? cpfCnpjNotaLimpo || null : null,
-        req.operadorId,
+        refsVenda.operadorId,
         totalFiscal,
         totalNaoFiscal,
         statusPagamento,

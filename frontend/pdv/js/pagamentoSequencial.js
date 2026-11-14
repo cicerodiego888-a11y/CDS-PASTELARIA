@@ -127,6 +127,12 @@
                     confirmacao_modalidade: eletronica ? 'tef' : 'manual'
                 };
                 if (eletronica) linha.aprovado = parcela.status_autorizacao === 'aprovada';
+                if (formaEhDinheiroLocal(parcela.forma_pagamento)) {
+                    linha.valor_entregue = parcela.valor_entregue != null
+                        ? parcela.valor_entregue
+                        : parcela.valor;
+                    linha.troco = parcela.troco != null ? parcela.troco : 0;
+                }
                 return linha;
             });
     }
@@ -178,7 +184,21 @@
 
         if (!forma) return { ok: false, codigo: 'FORMA_AUSENTE', parcelas: snapshot() };
         if (!(valor > 0)) return { ok: false, codigo: 'VALOR_INVALIDO', parcelas: snapshot() };
-        if (valor - arredondar(totalVenda - soma()) > 0.009) {
+        const restante = arredondar(totalVenda - soma());
+        let valorAplicado = valor;
+        let valorEntregue = valor;
+        let troco = 0;
+        if (formaEhDinheiroLocal(forma)) {
+            const entregueC = Math.round((valor + Number.EPSILON) * 100);
+            const restanteC = Math.round((restante + Number.EPSILON) * 100);
+            if (restanteC <= 0 || entregueC <= 0) {
+                return { ok: false, codigo: 'VALOR_ACIMA_DO_RESTANTE', parcelas: snapshot() };
+            }
+            const aplicadoC = Math.min(entregueC, restanteC);
+            valorAplicado = aplicadoC / 100;
+            valorEntregue = entregueC / 100;
+            troco = (entregueC - aplicadoC) / 100;
+        } else if (valor - restante > 0.009) {
             return { ok: false, codigo: 'VALOR_ACIMA_DO_RESTANTE', parcelas: snapshot() };
         }
         if (eletronica && typeof entrada.autorizarTef !== 'function') {
@@ -191,10 +211,12 @@
         const parcela = {
             local_id: ++sequencia,
             forma_pagamento: forma,
-            valor,
+            valor: valorAplicado,
+            valor_entregue: formaEhDinheiroLocal(forma) ? valorEntregue : valorAplicado,
+            troco: formaEhDinheiroLocal(forma) ? troco : 0,
             status_autorizacao: usaTef ? 'pendente' : 'informada',
             idempotency_key: usaTef
-                ? `pdv-${garantirSessaoPagamento()}-${sequencia}-${forma}-${valor.toFixed(2)}`
+                ? `pdv-${garantirSessaoPagamento()}-${sequencia}-${forma}-${valorAplicado.toFixed(2)}`
                 : null
         };
 

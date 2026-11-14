@@ -1,7 +1,8 @@
 function obterCaixaTurnoId(sessao) {
   if (!sessao) return null;
-  if (sessao.caixa_turno_id) return sessao.caixa_turno_id;
-  return sessao.caixa_id || null;
+  const turno = Number(sessao.caixa_turno_id);
+  if (Number.isInteger(turno) && turno > 0) return turno;
+  return null;
 }
 
 function empresaIdOperacionalCaixa(empresaId) {

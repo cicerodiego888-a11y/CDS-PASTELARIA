@@ -153,7 +153,7 @@ describe('PRINT-RC1.0 — produtos, totais, QR, rodapé', () => {
     assert.match(html, /R\$ 20,00/);
   });
 
-  it('formas de pagamento organizadas', async () => {
+  it('não imprime as formas de pagamento', async () => {
     const html = await gerar({
       venda: {
         total: 20,
@@ -164,8 +164,8 @@ describe('PRINT-RC1.0 — produtos, totais, QR, rodapé', () => {
         ]
       }
     });
-    assert.match(html, /PIX/);
-    assert.match(html, /Dinheiro/);
+    assert.doesNotMatch(html, /PIX|Dinheiro|Cartão/);
+    assert.match(html, /R\$ 20,00/);
   });
 
   it('QR centralizado quando URL presente', async () => {

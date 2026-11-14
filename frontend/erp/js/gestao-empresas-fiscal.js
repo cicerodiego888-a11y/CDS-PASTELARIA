@@ -853,7 +853,7 @@
                             </select>
                         </div>
                         <button type="button" class="btn btn-primary" id="gef-salvar-estoque">Salvar modo de estoque</button>
-                        <button type="button" class="btn btn-outline-secondary ms-2" id="gef-abrir-contagem">Abrir contagem física</button>
+                        <p class="small text-muted mt-2 mb-0">A operação diária de contagem física fica no menu <strong>Estoque → Contagem Física</strong>.</p>
                     </div>
                 </div>
             </div>`;
@@ -910,12 +910,6 @@
         }
         const btnEstoque = document.getElementById('gef-salvar-estoque');
         if (btnEstoque) btnEstoque.addEventListener('click', salvarEstoque);
-        const btnContagem = document.getElementById('gef-abrir-contagem');
-        if (btnContagem) {
-            btnContagem.addEventListener('click', function () {
-                if (typeof globalThis.loadPage === 'function') globalThis.loadPage('contagem-estoque');
-            });
-        }
         document.getElementById('gef-upload-cert').addEventListener('click', enviarCertificado);
         const btnTestar = document.getElementById('gef-testar-cert');
         if (btnTestar) btnTestar.addEventListener('click', testarCertificado);

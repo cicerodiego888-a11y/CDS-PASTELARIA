@@ -142,7 +142,7 @@ describe('CDS-PDV-VALOR-PASTEIS-02', { concurrency: false }, () => {
     const erp = fs.readFileSync(erpPedidosPath, 'utf8');
     assert.match(svc, /iniciarVendaPorValorPasteis/);
     assert.match(rota, /venda-por-valor-pasteis/);
-    assert.match(erp, /venda-por-valor-pasteis/);
+    assert.doesNotMatch(erp, /btnPedVendaValor|Venda por valor/);
     // Motor de composição não redesenhado nesta sprint
     assert.ok(!jsSrc.includes('PedidoPdvComposicaoService'));
     assert.ok(!jsSrc.includes('VendaApplicationService'));

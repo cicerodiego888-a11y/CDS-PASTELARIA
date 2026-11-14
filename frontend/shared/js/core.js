@@ -21,16 +21,14 @@ function limparModaisTravados() {
     document.querySelectorAll('[aria-hidden="true"]').forEach(el => {
         el.removeAttribute('aria-hidden');
     });
-    document.querySelectorAll('.loading, .overlay, .toast-container, .spinner-overlay').forEach(el => {
+    document.querySelectorAll('.loading, .overlay, .spinner-overlay').forEach(el => {
         el.style.display = 'none';
         el.style.pointerEvents = 'none';
     });
-    document.body.style.display = 'none';
-    document.body.offsetHeight;
-    document.body.style.display = '';
 }
 
 $(document).on('hidden.bs.modal', function () {
+    if (document.querySelector('.modal.show')) return;
     limparModaisTravados();
 });
 
@@ -50,15 +48,7 @@ $(document).on('click', function () {
 });
 
 setInterval(() => {
-    if (window.electronAPI && cliquesDetectados > 0) {
-        const tempoDesdeUltimoClique = Date.now() - ultimoClique;
-        if (tempoDesdeUltimoClique > 100 && tempoDesdeUltimoClique < 2000) {
-            if (window.electronAPI.forcarReflow) {
-                window.electronAPI.forcarReflow();
-            }
-        }
-        cliquesDetectados = 0;
-    }
+    cliquesDetectados = 0;
 }, 3000);
 
 const MODO_FISCAL_PADRAO = '1'; // sistema sempre inicia com modo fiscal aberto
@@ -106,6 +96,7 @@ const CATALOGO_PESQUISA_PAGINAS = Object.freeze([
     { page: 'vendas', titulo: 'Histórico de Vendas', keywords: 'vendas histórico comercial' },
     { page: 'entregas', titulo: 'Entregas', keywords: 'entrega delivery', recurso: 'vendasEntrega' },
     { page: 'pedidos', titulo: 'Pedidos', keywords: 'pedido orçamento', recurso: 'pedidos' },
+    { page: 'mesas', titulo: 'Controle de Mesas', keywords: 'mesas salão atendimento ocupação', recurso: 'pedidos' },
     { page: 'faturamento', titulo: 'Expedição', keywords: 'expedição expedir pedido liberação entrega comercial', recurso: 'expedicao' },
     { page: 'central-faturamento', titulo: 'Central de Faturamento', keywords: 'faturamento fiscal nf-e emitir checklist', fiscal: true, recurso: 'nfe' },
     { page: 'caixa', titulo: 'Fechamento de Caixa', keywords: 'caixa fechamento' },
@@ -132,7 +123,7 @@ const CATALOGO_PESQUISA_PAGINAS = Object.freeze([
     { page: 'usuarios', titulo: 'Usuários', keywords: 'usuário permissão' },
     { page: 'licenca', titulo: 'Assinatura CDS', keywords: 'licença assinatura' },
     { page: 'auditoria', titulo: 'Auditoria', keywords: 'auditoria log' },
-    { page: 'configuracoes-avancadas', titulo: 'Centro de Configurações', keywords: 'avançadas certificado csc sefaz' },
+    { page: 'configuracoes-avancadas', titulo: 'Centro de Configurações', keywords: 'avançadas certificado csc sefaz empresas por canal de venda' },
     { page: 'mib-analytics', titulo: 'MIB Analytics', keywords: 'mib busca aprendizado fuzzy sinônimos analytics' },
     { page: 'enterprise-search', titulo: 'Enterprise Search', keywords: 'enterprise search mib providers sdk telemetria' },
     { page: 'knowledge-center', titulo: 'Knowledge Center', keywords: 'knowledge graph recomendações similaridade duplicados clusters mib' },
@@ -318,7 +309,7 @@ function paginaPermitidaPorImplantacao(page) {
     if (p === 'caixas' && !implantacaoPermiteMultiCaixa()) return false;
     if (p === 'entregas') return possuiRecurso('vendasEntrega');
     if (p === 'faturamento') return expedicaoHabilitada();
-    if (p === 'pedidos') return possuiRecurso('pedidos');
+    if (p === 'pedidos' || p === 'mesas') return possuiRecurso('pedidos');
     return true;
 }
 

@@ -258,6 +258,21 @@ async function prepararOperacao(pedidoId, empresaId, payload = {}) {
   return resultado;
 }
 
+async function pedidoEmConsolidacao(db, pedidoId) {
+  try {
+    return await get(db, `
+      SELECT c.id, c.status
+      FROM venda_consolidacao_pedidos vp
+      JOIN venda_consolidacoes c ON c.id = vp.consolidacao_id
+      WHERE vp.pedido_id = ?
+        AND c.status IN ('RESERVADA', 'EM_CRIACAO', 'VENDA_CRIADA', 'VINCULADA')
+    `, [pedidoId]);
+  } catch (err) {
+    if (/no such table/i.test(String(err && err.message))) return null;
+    throw err;
+  }
+}
+
 async function prepararOperacaoPdv(pedidoId, empresaId, payload) {
   const db = require('../../database');
   const transacaoDb = await db.openExclusiveConnection();
@@ -304,6 +319,14 @@ async function prepararOperacaoPdv(pedidoId, empresaId, payload) {
           venda_id: pedido.venda_id
         });
       }
+    const reservado = await pedidoEmConsolidacao(transacaoDb, pedidoId);
+    if (reservado) {
+      throw erroConflito('O pedido participa de uma venda consolidada da mesa.', {
+        codigo: 'PEDIDO_EM_CONSOLIDACAO',
+        pedido_id: pedidoId,
+        consolidacao_id: reservado.id
+      });
+    }
       const vendaVinculada = await get(
         transacaoDb,
         'SELECT id FROM vendas WHERE pedido_id = ? AND empresa_id = ? LIMIT 1',

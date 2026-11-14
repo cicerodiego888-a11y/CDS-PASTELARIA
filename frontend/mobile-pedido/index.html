@@ -21,11 +21,17 @@
             <nav class="mp-modulos" aria-label="Módulos do CDS">
                 <a href="/mobile/">Início</a>
                 <a href="/mobile-pedido/" aria-current="page">Pedido</a>
+                <a href="/mobile-mesas/">Mesas</a>
                 <a href="/mobile-pdv/">PDV</a>
             </nav>
         </header>
 
         <div id="mp-alerta" class="mp-alerta" hidden></div>
+
+        <div id="mp-mesa-faixa" class="mp-mesa-faixa" hidden>
+            <strong id="mp-mesa-rotulo"></strong>
+            <a id="mp-mesa-voltar" href="/mobile-mesas/">Voltar às mesas</a>
+        </div>
 
         <nav class="mp-etapas" id="mp-etapas" aria-label="Etapas do pedido">
             <button type="button" data-etapa="cliente" class="is-ativa">1 Cliente</button>
@@ -106,6 +112,10 @@
                 <p class="mp-ajuda">Este registro é um pedido. Ainda não é uma venda e não gera documento fiscal.</p>
                 <div id="mp-confirmacao" class="mp-card"></div>
                 <button type="button" class="mp-btn mp-btn-primario" id="mp-enviar-pdv">Enviar para o PDV</button>
+                <div id="mp-mesa-acoes" class="mp-mesa-acoes" hidden>
+                    <a id="mp-mesa-conferir" class="mp-btn mp-btn-primario mp-link-btn" href="/mobile-mesas/">Conferir e enviar para preparação</a>
+                    <a id="mp-mesa-voltar-fim" class="mp-btn mp-link-btn" href="/mobile-mesas/">Voltar às mesas</a>
+                </div>
                 <button type="button" class="mp-btn" id="mp-novo">Novo pedido</button>
             </section>
 

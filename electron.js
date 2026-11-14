@@ -547,10 +547,16 @@ function criarMainWindow(opcoes = {}) {
   ipcMain.on('forcar-reflow', () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.executeJavaScript(`
-        document.body.style.display = 'none';
-        document.body.offsetHeight;
-        document.body.style.display = '';
-        console.log('Reflow forçado pelo Electron');
+        const ativo = document.activeElement;
+        const inicio = ativo && typeof ativo.selectionStart === 'number' ? ativo.selectionStart : null;
+        const fim = ativo && typeof ativo.selectionEnd === 'number' ? ativo.selectionEnd : null;
+        void document.body.offsetHeight;
+        if (ativo && document.contains(ativo) && typeof ativo.focus === 'function') {
+          ativo.focus();
+          if (inicio != null && typeof ativo.setSelectionRange === 'function') {
+            try { ativo.setSelectionRange(inicio, fim); } catch (e) {}
+          }
+        }
       `);
     }
   });

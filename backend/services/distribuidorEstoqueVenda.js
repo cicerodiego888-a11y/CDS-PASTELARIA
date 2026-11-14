@@ -748,6 +748,9 @@ function distribuirItensVendaComValorFiscalEfetivo(entradas = [], vendaFiscal = 
   const pagamentos = Array.isArray(opcoes.pagamentos) ? opcoes.pagamentos : [];
   const desconto = Number(opcoes.desconto || 0);
   const acrescimo = Number(opcoes.acrescimo || 0);
+  // Composição de pedido já traz o desconto técnico no cabeçalho.
+  // Os itens permanecem no preço comercial. Venda sem esse contrato segue o rateio.
+  const preservarItensComposicaoPedido = opcoes.preservarItensComposicaoPedido === true;
   // RC8.2 — política oficial do MPFC (obrigatória para novos fluxos; opcional em testes legados)
   const politicaFiscalComercial = opcoes.politicaFiscalComercial || null;
   const midpAtivo = politicaFiscalComercial
@@ -805,8 +808,8 @@ function distribuirItensVendaComValorFiscalEfetivo(entradas = [], vendaFiscal = 
   const liquidoMax = calcularValorFiscalLiquido({
     valorFiscalBruto: valorFiscalMaximoBruto,
     valorNaoFiscalBruto: valorNaoFiscalMaximoBruto,
-    desconto,
-    acrescimo
+    desconto: preservarItensComposicaoPedido ? 0 : desconto,
+    acrescimo: preservarItensComposicaoPedido ? 0 : acrescimo
   });
 
   const fatorComercial = liquidoMax.ajustado ? Number(liquidoMax.fator) : 1;
@@ -843,7 +846,7 @@ function distribuirItensVendaComValorFiscalEfetivo(entradas = [], vendaFiscal = 
     politicaFiscalComercial
   });
 
-  let itens = efetivo.preservacaoAplicada
+  let itens = !preservarItensComposicaoPedido && efetivo.preservacaoAplicada
     ? ajustarItensParaValorFiscalEfetivo(itensLiquidosMax, efetivo.valorFiscalEfetivo)
     : itensLiquidosMax.map((i) => ({ ...i }));
 
@@ -855,9 +858,31 @@ function distribuirItensVendaComValorFiscalEfetivo(entradas = [], vendaFiscal = 
   });
   itens = integridade.itens;
 
-  const totalFiscal = round2(itens.reduce((s, i) => s + Number(i.valor_fiscal || 0), 0));
-  const totalNaoFiscal = round2(itens.reduce((s, i) => s + Number(i.valor_nao_fiscal || 0), 0));
-  const totalVenda = round2(totalFiscal + totalNaoFiscal);
+  const totalFiscalItens = round2(itens.reduce((s, i) => s + Number(i.valor_fiscal || 0), 0));
+  const totalNaoFiscalItens = round2(itens.reduce((s, i) => s + Number(i.valor_nao_fiscal || 0), 0));
+  let totalFiscal = totalFiscalItens;
+  let totalNaoFiscal = totalNaoFiscalItens;
+  let totalVenda = round2(totalFiscalItens + totalNaoFiscalItens);
+  if (preservarItensComposicaoPedido) {
+    const liquidoCabecalho = round2(totalVendaBruto - desconto + acrescimo);
+    if (totalNaoFiscalItens <= 0.009) {
+      totalFiscal = liquidoCabecalho;
+      totalNaoFiscal = 0;
+    } else if (totalFiscalItens <= 0.009) {
+      totalFiscal = 0;
+      totalNaoFiscal = liquidoCabecalho;
+    } else {
+      const rateioCabecalho = calcularValorFiscalLiquido({
+        valorFiscalBruto: totalFiscalItens,
+        valorNaoFiscalBruto: totalNaoFiscalItens,
+        desconto,
+        acrescimo
+      });
+      totalFiscal = rateioCabecalho.valorFiscalLiquido;
+      totalNaoFiscal = rateioCabecalho.valorNaoFiscalLiquido;
+    }
+    totalVenda = liquidoCabecalho;
+  }
   const valorFiscalMaximo = valorFiscalMaximoLiquido;
   const liquido = {
     ...liquidoMax,
@@ -866,16 +891,20 @@ function distribuirItensVendaComValorFiscalEfetivo(entradas = [], vendaFiscal = 
     totalLiquido: totalVenda
   };
   // Espelho bruto da partilha final (antes do desconto comercial), p/ auditoria RC7.10.1
-  const totalFiscalBruto = liquidoMax.ajustado
-    ? (fatorComercial > 0.0000001
-      ? round2(totalFiscal / fatorComercial)
-      : valorFiscalMaximoBruto)
-    : totalFiscal;
-  const totalNaoFiscalBruto = liquidoMax.ajustado
-    ? (fatorComercial > 0.0000001
-      ? round2(totalNaoFiscal / fatorComercial)
-      : valorNaoFiscalMaximoBruto)
-    : totalNaoFiscal;
+  const totalFiscalBruto = preservarItensComposicaoPedido
+    ? totalFiscalItens
+    : (liquidoMax.ajustado
+      ? (fatorComercial > 0.0000001
+        ? round2(totalFiscal / fatorComercial)
+        : valorFiscalMaximoBruto)
+      : totalFiscal);
+  const totalNaoFiscalBruto = preservarItensComposicaoPedido
+    ? totalNaoFiscalItens
+    : (liquidoMax.ajustado
+      ? (fatorComercial > 0.0000001
+        ? round2(totalNaoFiscal / fatorComercial)
+        : valorNaoFiscalMaximoBruto)
+      : totalNaoFiscal);
 
   // Limpa campos auxiliares internos antes de retornar (mantém espelho útil mínimo).
   const itensLimpos = itens.map((i) => {
@@ -909,7 +938,8 @@ function distribuirItensVendaComValorFiscalEfetivo(entradas = [], vendaFiscal = 
     valorNaoFiscalBruto: totalNaoFiscalBruto,
     totalVenda,
     totalVendaBruto,
-    preservacaoAplicada: efetivo.preservacaoAplicada,
+    preservacaoAplicada: preservarItensComposicaoPedido ? false : efetivo.preservacaoAplicada,
+    preservouItensComposicaoPedido: preservarItensComposicaoPedido,
     liquidoComercial: liquido,
     integridadeQuantidades: {
       aplicada: Boolean(integridade.ajusteIntegridadeAplicado),

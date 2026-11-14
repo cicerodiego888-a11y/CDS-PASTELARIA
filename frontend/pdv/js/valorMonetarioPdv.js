@@ -40,5 +40,53 @@
     return informado;
   }
 
-  return { ler, formatar, excedeRestante, limitarAoRestante, arredondar };
+  function centavos(valor) {
+    const numero = Number(valor);
+    if (!Number.isFinite(numero)) return null;
+    return Math.round((numero + Number.EPSILON) * 100);
+  }
+
+  function separarDinheiro(entregue, restante) {
+    const entregueC = centavos(entregue);
+    const restanteC = centavos(restante);
+    if (entregueC == null || entregueC <= 0) {
+      return { ok: false, codigo: 'VALOR_INVALIDO' };
+    }
+    if (restanteC == null || restanteC < 0) {
+      return { ok: false, codigo: 'VALOR_INVALIDO' };
+    }
+    if (restanteC === 0) {
+      return { ok: false, codigo: 'VALOR_ACIMA_DO_RESTANTE' };
+    }
+    const aplicadoC = Math.min(entregueC, restanteC);
+    return {
+      ok: true,
+      entregue: entregueC / 100,
+      restante: restanteC / 100,
+      aplicado: aplicadoC / 100,
+      troco: (entregueC - aplicadoC) / 100
+    };
+  }
+
+  function decidirConfirmacaoDinheiro(estado, entregue) {
+    if (estado && estado.emRegistro) {
+      return { acao: 'ignorada', codigo: 'CONFIRMACAO_DUPLICADA' };
+    }
+    const conta = separarDinheiro(entregue, estado ? estado.restante : null);
+    if (!conta.ok) return { acao: 'recusada', codigo: conta.codigo };
+    if (!estado || estado.confirmacaoAberta !== true) {
+      return { acao: 'aguardar_confirmacao', conta };
+    }
+    return { acao: 'registrar', conta };
+  }
+
+  return {
+    ler,
+    formatar,
+    excedeRestante,
+    limitarAoRestante,
+    arredondar,
+    separarDinheiro,
+    decidirConfirmacaoDinheiro
+  };
 }));

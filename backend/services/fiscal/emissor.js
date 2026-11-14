@@ -296,6 +296,10 @@ async function emitirPorVendaId(vendaId, opcoes = {}) {
   let selecaoFiscal = selecionarItensFiscaisParaNfce(venda, itens);
   let itensDocumento = selecaoFiscal.itens;
   if (selecaoFiscal.bloqueado) {
+    const {
+      reescritaDeComposicaoNoEmissorAutorizada
+    } = require('../vendas/FechamentoComposicaoPedidoContrato');
+    if (reescritaDeComposicaoNoEmissorAutorizada()) {
     try {
       const { itensFiscaisInteirosParaReferencia } = require('../vendas/PagamentoRecomposicaoDocumentoService');
       const reconciliados = await itensFiscaisInteirosParaReferencia({
@@ -333,6 +337,7 @@ async function emitirPorVendaId(vendaId, opcoes = {}) {
       }
     } catch (erroReconciliacao) {
       console.error('Falha ao reconciliar itens fiscais inteiros:', erroReconciliacao);
+    }
     }
   }
   if (selecaoFiscal.bloqueado) {
@@ -827,8 +832,8 @@ async function emitirPorVendaId(vendaId, opcoes = {}) {
 }
 
 /**
- * Regenera o DANFE com pagamentos atuais (F+NF),
- * para a impressão não ficar presa ao HTML gerado só com a fatia fiscal.
+ * Regenera o DANFE na impressão.
+ * O cupom mostra o total e não lista as formas de pagamento.
  */
 async function obterDanfeHtmlAtualizado(vendaId, opcoes = {}) {
   const id = Number(vendaId);

@@ -291,9 +291,6 @@ async function gerarDanfeHtml({
     : '';
 
   const itensImpressao = Array.isArray(itensDanfe) ? itensDanfe : [];
-  const pagamentosComerciais = resolverPagamentosExibicaoDanfe(venda);
-  const textoPagamentos = montarPagamentosDanfe(pagamentosComerciais);
-  const pagamentosHtml = montarPagamentosHtml(pagamentosComerciais);
 
   const valorTotalVenda = Number(venda.total ?? 0) > 0
     ? Number(venda.total)
@@ -366,9 +363,6 @@ async function gerarDanfeHtml({
   }
 
   const totalLegado = `Total: R$ ${valorTotalVenda.toFixed(2)}`;
-  const pagamentosLegado = textoPagamentos
-    ? `<div class="sr-only">${escapeHtml(textoPagamentos)}</div>`
-    : '';
 
   return `<!DOCTYPE html>
 <html>
@@ -459,7 +453,7 @@ async function gerarDanfeHtml({
     </div>
     <div class="sr-only">${escapeHtml(totalLegado)}</div>
   </div>
-  <div class="pays">${pagamentosHtml}${trocoHtml}${pagamentosLegado}</div>
+  ${trocoHtml ? `<div class="pays">${trocoHtml}</div>` : ''}
   <hr class="sep" />
   ${tributosHtml}
   ${tributosHtml ? '<hr class="sep" />' : ''}

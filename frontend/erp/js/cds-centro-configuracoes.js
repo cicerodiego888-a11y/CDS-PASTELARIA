@@ -8,6 +8,7 @@
 
   const CATEGORIAS = Object.freeze([
     { id: 'empresa', icon: 'fa-building', label: 'Empresa', keywords: 'implantação tipo erp cfop csosn origem cest padrão fiscal empresa empresas cnpj configuração fiscal certificado digital' },
+    { id: 'empresasCanalVenda', icon: 'fa-store', label: 'Empresas por Canal de Venda', keywords: 'canal de venda pdv empresa única matriz pedido expedição marketplace compra fácil' },
     { id: 'modulosLicenciados', icon: 'fa-puzzle-piece', label: 'Módulos Licenciados', keywords: 'pdv pedidos expedição faturamento entregas nfe nfce compra fácil marketplace crm invisibilidade' },
     { id: 'motores', icon: 'fa-brain', label: 'Motores Inteligentes', keywords: 'midp miip mib motor busca distribuição pagamentos ativar' },
     { id: 'equipamentos', icon: 'fa-cash-register', label: 'Equipamentos', keywords: 'tef pinpad equipamento' },
@@ -567,6 +568,93 @@
         `, 'migração banco antigo csv xml futuro')}
       </div>
 
+      <div class="cds-cfg-pane" data-cfg-pane="empresasCanalVenda">
+        <h2 class="cds-cfg-pane__title">Empresas por Canal de Venda</h2>
+        <p class="cds-cfg-pane__sub">Selecione a empresa de cada canal. O cadastro do CNPJ continua em Empresas. A resolução da venda não muda.</p>
+        ${card('<i class="fas fa-city"></i> Empresas', `
+          <p class="cds-cfg-hint mb-2">Cadastre ou abra um CNPJ já existente. O vínculo do canal usa essa empresa.</p>
+          <button type="button" class="btn btn-outline-primary btn-sm" id="btnAbrirEmpresasCanalVenda">Cadastrar ou selecionar empresa</button>
+        `, 'cadastrar empresa cnpj canal')}
+        ${card('<i class="fas fa-store"></i> Canal PDV', `
+          <p class="cds-cfg-hint mb-3">Exclusivo do PDV. Não altera o modo operacional global da instalação.</p>
+          <div class="form-check mb-2" data-cfg-search="pdv múltiplas empresas">
+            <input class="form-check-input" type="radio" name="pdvModeloEmpresa" id="pdvModeloMultiplas" value="MULTIPLAS" ${pdvModeloEmpresa === 'MULTIPLAS' ? 'checked' : ''}>
+            <label class="form-check-label" for="pdvModeloMultiplas"><strong>Múltiplas empresas</strong></label>
+            <div class="small text-muted ms-4">O PDV mantém a empresa escolhida na operação.</div>
+          </div>
+          <div class="form-check mb-3" data-cfg-search="pdv empresa única matriz">
+            <input class="form-check-input" type="radio" name="pdvModeloEmpresa" id="pdvModeloUnica" value="UNICA" ${pdvModeloEmpresa === 'UNICA' ? 'checked' : ''}>
+            <label class="form-check-label" for="pdvModeloUnica"><strong>Empresa única</strong></label>
+            <div class="small text-muted ms-4">Todas as vendas do PDV usam a empresa selecionada.</div>
+          </div>
+          <div id="cfgPdvEmpresaWrap" class="row g-2 ${pdvModeloEmpresa === 'UNICA' ? '' : 'd-none'}">
+            <div class="col-md-8" data-cfg-search="pdv empresa id cnpj canal">
+              <label for="cfgPdvEmpresaId" class="cds-cfg-label">Empresa do canal PDV</label>
+              <select class="form-select form-select-sm" id="cfgPdvEmpresaId"
+                data-empresa-salva="${pdvEmpresaId ? escapeHtml(String(pdvEmpresaId)) : ''}">
+                ${pdvEmpresaId
+                  ? `<option value="${escapeHtml(String(pdvEmpresaId))}" selected>Empresa #${escapeHtml(String(pdvEmpresaId))}</option>`
+                  : '<option value="">Selecione a empresa do PDV</option>'}
+              </select>
+              <div class="form-text">Obrigatório no modo Empresa única. Estoque e CNPJ fiscal seguem esta empresa.</div>
+            </div>
+          </div>
+        `, 'canal pdv empresa única múltiplas')}
+        ${card('<i class="fas fa-plus"></i> Novo canal', `
+          <p class="cds-cfg-hint mb-3">O código fica estável. O CNPJ vem do cadastro da empresa, sem uma segunda ficha.</p>
+          <div class="row g-2">
+            <div class="col-md-4">
+              <label class="cds-cfg-label" for="canalVendaNome">Nome</label>
+              <input type="text" class="form-control form-control-sm" id="canalVendaNome" placeholder="Ex.: iFood">
+            </div>
+            <div class="col-md-3">
+              <label class="cds-cfg-label" for="canalVendaCodigo">Código</label>
+              <input type="text" class="form-control form-control-sm" id="canalVendaCodigo" placeholder="Ex.: IFOOD">
+            </div>
+            <div class="col-md-3">
+              <label class="cds-cfg-label" for="canalVendaTipo">Tipo / origem</label>
+              <input type="text" class="form-control form-control-sm" id="canalVendaTipo" placeholder="Ex.: Marketplace">
+            </div>
+            <div class="col-md-2 d-flex align-items-end">
+              <div class="form-check mb-1">
+                <input class="form-check-input" type="checkbox" id="canalVendaAtivo" checked>
+                <label class="form-check-label" for="canalVendaAtivo">Ativo</label>
+              </div>
+            </div>
+            <div class="col-md-8">
+              <label class="cds-cfg-label" for="canalVendaEmpresa">Empresa responsável</label>
+              <select class="form-select form-select-sm" id="canalVendaEmpresa">
+                <option value="">Selecione a empresa</option>
+              </select>
+            </div>
+            <div class="col-md-4">
+              <label class="cds-cfg-label" for="canalVendaDescricao">Descrição</label>
+              <input type="text" class="form-control form-control-sm" id="canalVendaDescricao">
+            </div>
+          </div>
+          <button type="button" class="btn btn-primary btn-sm mt-3" id="btnSalvarCanalVenda">Salvar canal</button>
+        `, 'cadastrar canal ifood whatsapp delivery')}
+        ${card('<i class="fas fa-link"></i> Vínculos', `
+          <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+              <thead>
+                <tr>
+                  <th>Canal</th>
+                  <th>Código</th>
+                  <th>Empresa</th>
+                  <th>CNPJ</th>
+                  <th>Status</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="listaCanaisVenda">
+                <tr><td colspan="6" class="text-muted">Nenhum canal carregado.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        `, 'vínculo canal empresa cnpj')}
+      </div>
+
       <div class="cds-cfg-pane" data-cfg-pane="modulosLicenciados">
         <h2 class="cds-cfg-pane__title">Módulos Licenciados</h2>
         <p class="cds-cfg-pane__sub">Princípio da invisibilidade: módulo desligado desaparece de menus, APIs e widgets.</p>
@@ -600,31 +688,6 @@
             </div>
           </div>
         `, 'módulos pdv histórico vendas pedidos expedição entregas nfe nfce')}
-        ${card('<i class="fas fa-store"></i> Modelo de empresa do PDV', `
-          <p class="cds-cfg-hint mb-3">Exclusivo do PDV. Não altera o modo operacional global da instalação.</p>
-          <div class="form-check mb-2" data-cfg-search="pdv múltiplas empresas">
-            <input class="form-check-input" type="radio" name="pdvModeloEmpresa" id="pdvModeloMultiplas" value="MULTIPLAS" ${pdvModeloEmpresa === 'MULTIPLAS' ? 'checked' : ''}>
-            <label class="form-check-label" for="pdvModeloMultiplas"><strong>Múltiplas empresas</strong></label>
-            <div class="small text-muted ms-4">Mantém a seleção e o vínculo atuais do PDV.</div>
-          </div>
-          <div class="form-check mb-3" data-cfg-search="pdv empresa única matriz">
-            <input class="form-check-input" type="radio" name="pdvModeloEmpresa" id="pdvModeloUnica" value="UNICA" ${pdvModeloEmpresa === 'UNICA' ? 'checked' : ''}>
-            <label class="form-check-label" for="pdvModeloUnica"><strong>Empresa única</strong></label>
-            <div class="small text-muted ms-4">Todas as vendas do PDV usam a empresa selecionada (ex.: Matriz).</div>
-          </div>
-          <div id="cfgPdvEmpresaWrap" class="row g-2 ${pdvModeloEmpresa === 'UNICA' ? '' : 'd-none'}">
-            <div class="col-md-8" data-cfg-search="pdv empresa id cnpj">
-              <label for="cfgPdvEmpresaId" class="cds-cfg-label">Empresa do PDV</label>
-              <select class="form-select form-select-sm" id="cfgPdvEmpresaId"
-                data-empresa-salva="${pdvEmpresaId ? escapeHtml(String(pdvEmpresaId)) : ''}">
-                ${pdvEmpresaId
-                  ? `<option value="${escapeHtml(String(pdvEmpresaId))}" selected>Empresa #${escapeHtml(String(pdvEmpresaId))}</option>`
-                  : '<option value="">Selecione a empresa do PDV</option>'}
-              </select>
-              <div class="form-text">Obrigatório no modo Empresa única. Estoque e CNPJ fiscal seguem esta empresa.</div>
-            </div>
-          </div>
-        `, 'pdv modelo empresa única múltiplas')}
       </div>
 
       <div class="cds-cfg-pane" data-cfg-pane="licenciamentoCds">
@@ -803,6 +866,141 @@
     setTimeout(() => tentar(0), 200);
   }
 
+  function headersCfg() {
+    const headers = { 'Content-Type': 'application/json' };
+    const token = global.localStorage && global.localStorage.getItem('token');
+    if (token) headers.Authorization = `Bearer ${token}`;
+    return headers;
+  }
+
+  async function preencherEmpresasDoCanal() {
+    const sel = document.getElementById('canalVendaEmpresa');
+    if (!sel) return;
+    let lista = [];
+    try {
+      if (global.CdsEmpresaContexto && typeof global.CdsEmpresaContexto.listarDisponiveis === 'function') {
+        lista = await global.CdsEmpresaContexto.listarDisponiveis();
+      }
+    } catch (_e) {
+      lista = [];
+    }
+    if (!Array.isArray(lista)) lista = [];
+    sel.innerHTML = ['<option value="">Selecione a empresa</option>']
+      .concat(lista.map((empresa) => {
+        const id = Number(empresa && empresa.id);
+        if (!Number.isInteger(id) || id <= 0) return '';
+        return `<option value="${id}">${escapeHtml(rotuloEmpresaOperacionalCfg(empresa))}</option>`;
+      }))
+      .join('');
+  }
+
+  async function carregarCanaisVenda() {
+    const corpo = document.getElementById('listaCanaisVenda');
+    if (!corpo) return;
+    await preencherEmpresasDoCanal();
+    try {
+      const resposta = await fetch(`${global.API_URL}/configuracoes-avancadas/canais-venda`, {
+        headers: headersCfg()
+      });
+      const dados = await resposta.json();
+      if (!resposta.ok) throw new Error(dados.error || 'Não foi possível listar os canais.');
+      const canais = Array.isArray(dados.canais) ? dados.canais : [];
+      if (!canais.length) {
+        corpo.innerHTML = '<tr><td colspan="6" class="text-muted">Nenhum canal cadastrado.</td></tr>';
+        return;
+      }
+      corpo.innerHTML = canais.map((canal) => {
+        const empresa = canal.nome_fantasia || canal.razao_social || (canal.empresa_id ? `Empresa #${canal.empresa_id}` : '—');
+        const opcoes = Array.from(document.getElementById('canalVendaEmpresa')?.options || [])
+          .map((opcao) => `<option value="${escapeHtml(opcao.value)}" ${String(opcao.value) === String(canal.empresa_id || '') ? 'selected' : ''}>${escapeHtml(opcao.text)}</option>`)
+          .join('');
+        const empresaCelula = canal.codigo === 'PDV'
+          ? escapeHtml(empresa)
+          : `<select class="form-select form-select-sm" data-canal-empresa="${canal.id}">${opcoes}</select>`;
+        const acao = canal.codigo === 'PDV'
+          ? '<span class="text-muted">Usa o bloco Canal PDV</span>'
+          : `<button type="button" class="btn btn-outline-secondary btn-sm" data-canal-desativar="${canal.id}" ${Number(canal.ativo) === 1 ? '' : 'disabled'}>Desativar</button>`;
+        return `<tr>
+          <td>${escapeHtml(canal.nome)}</td>
+          <td>${escapeHtml(canal.codigo)}</td>
+          <td>${empresaCelula}</td>
+          <td>${escapeHtml(canal.cnpj || '—')}</td>
+          <td>${Number(canal.ativo) === 1 ? 'Ativo' : 'Inativo'}</td>
+          <td>${acao}</td>
+        </tr>`;
+      }).join('');
+      corpo.querySelectorAll('[data-canal-desativar]').forEach((botao) => {
+        botao.addEventListener('click', () => desativarCanalVenda(botao.getAttribute('data-canal-desativar')));
+      });
+      corpo.querySelectorAll('[data-canal-empresa]').forEach((campo) => {
+        campo.addEventListener('change', () => alterarEmpresaDoCanal(
+          campo.getAttribute('data-canal-empresa'),
+          campo.value
+        ));
+      });
+    } catch (error) {
+      corpo.innerHTML = `<tr><td colspan="6" class="text-danger">${escapeHtml(error.message)}</td></tr>`;
+    }
+  }
+
+  async function salvarCanalVenda() {
+    const corpo = {
+      nome: document.getElementById('canalVendaNome')?.value || '',
+      codigo: document.getElementById('canalVendaCodigo')?.value || '',
+      tipo_origem: document.getElementById('canalVendaTipo')?.value || '',
+      descricao: document.getElementById('canalVendaDescricao')?.value || '',
+      empresa_id: document.getElementById('canalVendaEmpresa')?.value || '',
+      ativo: document.getElementById('canalVendaAtivo')?.checked !== false
+    };
+    try {
+      const resposta = await fetch(`${global.API_URL}/configuracoes-avancadas/canais-venda`, {
+        method: 'POST',
+        headers: headersCfg(),
+        body: JSON.stringify(corpo)
+      });
+      const dados = await resposta.json();
+      if (!resposta.ok) throw new Error(dados.error || 'Não foi possível salvar o canal.');
+      if (typeof global.showNotification === 'function') global.showNotification('Canal de venda salvo.', 'success');
+      ['canalVendaNome', 'canalVendaCodigo', 'canalVendaTipo', 'canalVendaDescricao'].forEach((id) => {
+        const campo = document.getElementById(id);
+        if (campo) campo.value = '';
+      });
+      await carregarCanaisVenda();
+    } catch (error) {
+      if (typeof global.showNotification === 'function') global.showNotification(error.message, 'warning');
+    }
+  }
+
+  async function alterarEmpresaDoCanal(id, empresaId) {
+    try {
+      const resposta = await fetch(`${global.API_URL}/configuracoes-avancadas/canais-venda/${id}`, {
+        method: 'PUT',
+        headers: headersCfg(),
+        body: JSON.stringify({ empresa_id: empresaId })
+      });
+      const dados = await resposta.json();
+      if (!resposta.ok) throw new Error(dados.error || 'Não foi possível alterar a empresa do canal.');
+      await carregarCanaisVenda();
+    } catch (error) {
+      if (typeof global.showNotification === 'function') global.showNotification(error.message, 'warning');
+    }
+  }
+
+  async function desativarCanalVenda(id) {
+    try {
+      const resposta = await fetch(`${global.API_URL}/configuracoes-avancadas/canais-venda/${id}`, {
+        method: 'PUT',
+        headers: headersCfg(),
+        body: JSON.stringify({ ativo: false })
+      });
+      const dados = await resposta.json();
+      if (!resposta.ok) throw new Error(dados.error || 'Não foi possível desativar o canal.');
+      await carregarCanaisVenda();
+    } catch (error) {
+      if (typeof global.showNotification === 'function') global.showNotification(error.message, 'warning');
+    }
+  }
+
   function ativarCategoria(id) {
     if (id === 'plataformaFiscal' || id === 'plataforma') {
       id = 'empresa';
@@ -818,6 +1016,7 @@
     try {
       sessionStorage.setItem('cds_cfg_tab', cat.id);
     } catch { /* ignore */ }
+    if (cat.id === 'empresasCanalVenda') carregarCanaisVenda();
   }
 
   function pesquisarConfiguracao(termo) {
@@ -1333,6 +1532,11 @@
     document.getElementById('btnAbrirGestaoEmpresas')?.addEventListener('click', () => {
       if (typeof global.loadPage === 'function') global.loadPage('empresas');
     });
+    document.getElementById('btnAbrirEmpresasCanalVenda')?.addEventListener('click', () => {
+      if (typeof global.loadPage === 'function') global.loadPage('empresas');
+    });
+    document.getElementById('btnSalvarCanalVenda')?.addEventListener('click', salvarCanalVenda);
+    carregarCanaisVenda();
     document.getElementById('btnConfiguracaoTEF')?.addEventListener('click', abrirTefLazy);
     document.getElementById('btnConfiguracaoTEFIntegracoes')?.addEventListener('click', abrirTefLazy);
     document.getElementById('btnConfiguracaoRede')?.addEventListener('click', () => {

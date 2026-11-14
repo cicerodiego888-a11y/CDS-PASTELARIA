@@ -28,6 +28,13 @@ describe('Sprint 3.6 — teclado e foco', () => {
     assert.match(ui, /\$\('#pedItemQtd'\)\.trigger\('focus'/);
     assert.match(ui, /shown\.bs\.modal/);
   });
+
+  it('não rouba o foco se o usuário já começou a interagir com o modal', () => {
+    assert.match(ui, /document\.getElementById\('modalPedidoEditor'\) !== el \|\| !el\.classList\.contains\('show'\)/);
+    assert.match(ui, /const ativo = document\.activeElement/);
+    assert.match(ui, /ativo !== document\.body && ativo !== el && ativo !== dialogo/);
+    assert.match(ui, /campoProduto && !campoProduto\.disabled/);
+  });
 });
 
 describe('Sprint 3.6 — grade, totais e atalhos', () => {

@@ -1,0 +1,121 @@
+.mesas-painel {
+  min-height: calc(100vh - 1rem);
+  background: #f4f6f8;
+}
+
+.mesas-cabecalho {
+  background: #0b1f3a;
+  color: #fff;
+  padding: 1rem 1.25rem;
+  border-radius: 0 0 12px 12px;
+}
+
+.mesas-cabecalho h1 {
+  font-size: 1.35rem;
+  margin: 0;
+}
+
+.mesas-empresa {
+  opacity: 0.9;
+  margin-top: 0.25rem;
+}
+
+.mesas-contadores {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.mesas-contador {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  padding: 0.2rem 0.7rem;
+  font-size: 0.85rem;
+}
+
+.mesas-grade {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  gap: 12px;
+  padding: 1rem 0.25rem 2rem;
+  overflow-x: hidden;
+}
+
+.mesas-card {
+  border: 0;
+  border-radius: 12px;
+  min-height: 132px;
+  padding: 0.85rem;
+  text-align: left;
+  color: #1c2430;
+  box-shadow: 0 1px 3px rgba(11, 31, 58, 0.12);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.mesas-card--livre { background: #d9f2e3; }
+.mesas-card--ocupada { background: #f8d0d0; }
+.mesas-card--fechamento { background: #ffe3c2; }
+.mesas-card--inativa { opacity: 0.72; }
+
+.mesas-card__numero {
+  font-size: 1.6rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.mesas-card__estado,
+.mesas-prep {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.mesas-card--livre .mesas-card__estado { background: #1f7a45; color: #fff; }
+.mesas-card--ocupada .mesas-card__estado { background: #a32020; color: #fff; }
+.mesas-card--fechamento .mesas-card__estado { background: #b86e00; color: #fff; }
+
+.mesas-prep--estado { background: #0b1f3a; color: #fff; }
+.mesas-prep--neutra { background: #e6e8eb; color: #243040; }
+.mesas-prep--normal,
+.mesas-prep--concluido { background: #1f7a45; color: #fff; }
+.mesas-prep--atrasado { background: #b86e00; color: #fff; }
+.mesas-prep--critico { background: #a32020; color: #fff; }
+
+.mesas-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(11, 31, 58, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1080;
+  padding: 1rem;
+}
+
+.mesas-modal[hidden] { display: none; }
+
+.mesas-modal__caixa {
+  width: min(640px, 100%);
+  max-height: min(86vh, 820px);
+  overflow: auto;
+  background: #fff;
+  border-radius: 14px;
+  padding: 1.1rem 1.2rem 1.2rem;
+  box-shadow: 0 12px 40px rgba(11, 31, 58, 0.25);
+}
+
+.mesas-pedido {
+  border: 1px solid #e3e7ee;
+  border-radius: 10px;
+  padding: 0.7rem 0.8rem;
+  margin-bottom: 0.5rem;
+}
+
+.mesas-aviso {
+  margin-top: 0.75rem;
+}

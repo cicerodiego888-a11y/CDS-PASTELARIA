@@ -149,14 +149,14 @@ test('aplica o menor excedente acima do residual como desconto global explícito
       { pedidoId: 99, empresaId: 1 },
       { db }
     );
-    assert.equal(composicao.valorPastelCentavos, 1798);
+    assert.equal(composicao.valorPastelCentavos, 4398);
     assert.equal(composicao.valorResidualCentavos, 4400);
-    assert.equal(composicao.valorCompostoBrutoCentavos, 6376);
-    assert.equal(composicao.descontoCentavos, 178);
+    assert.equal(composicao.valorCompostoBrutoCentavos, 8976);
+    assert.equal(composicao.descontoCentavos, 2778);
     assert.equal(composicao.valorFinalCentavos, 6198);
     assert.deepEqual(
       composicao.itens.map((item) => [item.produto_id, item.quantidade, item.preco_unitario]),
-      [[747, 2, 8.99], [748, 2, 12.99], [749, 1, 19.8]]
+      [[747, 2, 21.99], [748, 2, 12.99], [749, 1, 19.8]]
     );
     const repetida = await prepararComposicaoPedidoPdv(
       { pedidoId: 99, empresaId: 1 },
@@ -243,12 +243,13 @@ test('usa o preço vigente do cadastro de pastel em cada preparação', async ()
       { db }
     );
 
-    assert.equal(original.itens.find((item) => item.produto_id === 747).preco_unitario, 8.99);
-    assert.equal(atualizado.itens.find((item) => item.produto_id === 747).preco_unitario, 9.5);
-    assert.equal(atualizado.valorPastelCentavos, 1900);
+    assert.equal(original.itens.find((item) => item.produto_id === 747).preco_unitario, 21.99);
+    assert.equal(atualizado.itens.find((item) => item.produto_id === 747).preco_unitario, 21.99);
+    assert.equal(original.valorResidualCentavos, 4400);
+    assert.equal(atualizado.valorPastelCentavos, 4398);
     assert.equal(atualizado.valorResidualCentavos, 4298);
     assert.equal(atualizado.valorFinalCentavos, 6198);
-    assert.notEqual(atualizado.fingerprint, original.fingerprint);
+    assert.equal(atualizado.fingerprint, original.fingerprint);
   } finally {
     await fecharDb(db);
   }
@@ -614,7 +615,7 @@ test('mantém regra de composição residual quando há pastel elegível', async
       { db }
     );
     assert.equal(composicao.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
-    assert.equal(composicao.valorPastelCentavos, 1798);
+    assert.equal(composicao.valorPastelCentavos, 4398);
     assert.equal(composicao.valorResidualCentavos, 4400);
     assert.ok(composicao.itens.some((item) => item.produto_id === 747));
     assert.ok(composicao.itens.some((item) => item.produto_id === 748 || item.produto_id === 749));

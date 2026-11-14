@@ -147,7 +147,8 @@ async function resolverEmpresaDaCompraDesdeDocumentoCentral(req, opts, deps) {
     origem: 'DOCUMENTO_CENTRAL',
     contrato: opts.contrato || ctx.contrato,
     documento,
-    exigirEmpresaEstoque: (opts.modo || ctx.modo) === ModoOperacionalGlobal.MULTIEMPRESA
+    // CDS-ESTOQUE-INTEGRIDADE-ENTRADAS-01: crédito empresarial sempre exige empresa resolvida.
+    exigirEmpresaEstoque: true
   };
 }
 
@@ -201,7 +202,8 @@ async function resolverEmpresaDaCompra(req, opts = {}, deps = {}) {
       origem: httpId != null ? 'CONTEXTO_HTTP' : 'BODY_EXPLICITO',
       contrato,
       documento: null,
-      exigirEmpresaEstoque: modo === ModoOperacionalGlobal.MULTIEMPRESA
+      // CDS-ESTOQUE-INTEGRIDADE-ENTRADAS-01: N empresas — crédito sem fallback global.
+      exigirEmpresaEstoque: true
     };
   }
 
@@ -221,7 +223,7 @@ async function resolverEmpresaDaCompra(req, opts = {}, deps = {}) {
       origem: 'CONTRATO_EMPRESA_SIMPLES',
       contrato,
       documento: null,
-      exigirEmpresaEstoque: false
+      exigirEmpresaEstoque: true
     };
   }
 

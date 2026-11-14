@@ -301,6 +301,7 @@ async function fiscalizarAtendimento(atendimentoId, entrada = {}, opcoes = {}) {
 module.exports = {
   criarVenda,
   criarVendaComContexto,
+  concluirVendaNoNucleoOficial,
   materializarAtendimento,
   fiscalizarAtendimento,
   executarAtendimentoMultiempresa,

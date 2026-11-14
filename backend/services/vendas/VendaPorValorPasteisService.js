@@ -2,7 +2,9 @@
  * CDS-VENDA-VALOR-PASTEIS-01 — adaptador de entrada.
  * Recebe valor total + quantidade de pastéis, cria Pedido via EntradaPedido
  * e reutiliza prepararComposicaoPedidoPdv + handoff PDV existentes.
- * Não altera o motor de composição nem o de vendas.
+ * O pedido guarda o valor comercial informado. O payload fiscal reparte
+ * esse total pelo cadastro do pastel e pelos componentes, e o desconto
+ * técnico fica só no excedente da busca. O motor compartilhado não muda.
  *
  * @module services/vendas/VendaPorValorPasteisService
  */
@@ -129,8 +131,8 @@ async function resolverProdutoPastel(db, produtoPastelIdInformado) {
 }
 
 /**
- * Item com massa monetária = valor total (útil em fixtures de composição).
- * A composição ignora o preço de linha do pastel e recota pelo cadastro.
+ * Linha comercial do pedido: o valor informado inteiro fica no pastel
+ * para a soma dos itens fechar o total. Não é o preço fiscal emitido.
  */
 function montarItemPedidoPastel(produtoId, quantidade, totalCentavos) {
   const subtotal = totalCentavos / 100;
@@ -184,8 +186,8 @@ function dbGet(db, sql, params = []) {
 /**
  * Persistência no formato aceito por ComposicaoInterna.carregarPedido:
  *   total === soma(itens.subtotal) − desconto  (frete = 0)
- * A massa monetária fica na linha do pastel (igual aos fixtures/tests do motor);
- * a composição recota o pastel pelo cadastro e usa o residual.
+ * A massa monetária fica na linha do pastel para essa invariante.
+ * A distribuição fiscal, feita depois, usa o cadastro e o residual.
  */
 async function persistirMassaMonetariaPedidoAlvo(db, params = {}) {
   const pedidoId = Number(params.pedidoId);
@@ -299,6 +301,123 @@ async function atualizarTotalPedidoAlvo(db, pedidoId, empresaId, totalReais) {
 }
 
 /**
+ * Separa o valor comercial, já gravado no pedido, da composição fiscal.
+ * O pastel fiscal sai pelo cadastro (total − residual). O desconto técnico
+ * é só o quanto os componentes passaram do residual. O líquido continua
+ * o valor informado: cadastro + componentes − excedente.
+ * Não altera a busca nem a composição de um pedido cuja linha do pastel
+ * não seja a massa inteira.
+ */
+function distribuirValorFiscalVendaPorValor(composicao, produtoPastelId) {
+  const totalCentavos = Number(composicao && composicao.valorFinalCentavos);
+  const residualCentavos = Number(composicao && composicao.valorResidualCentavos);
+  const pastelComercialCentavos = Number(composicao && composicao.valorPastelCentavos);
+  const brutoComercialCentavos = Number(composicao && composicao.valorCompostoBrutoCentavos);
+  const produtoId = Number(produtoPastelId);
+
+  if (!Number.isSafeInteger(totalCentavos) || totalCentavos <= 0
+    || !Number.isSafeInteger(residualCentavos) || residualCentavos < 0
+    || !Number.isSafeInteger(pastelComercialCentavos)
+    || pastelComercialCentavos !== totalCentavos
+    || !Number.isSafeInteger(brutoComercialCentavos)
+    || brutoComercialCentavos < pastelComercialCentavos
+    || !Number.isSafeInteger(produtoId) || produtoId <= 0) {
+    throw erro(
+      'DISTRIBUICAO_FISCAL_INVALIDA',
+      'A venda por valor não recebeu uma composição cuja linha do pastel seja o valor comercial informado.',
+      500,
+      {
+        total_centavos: totalCentavos,
+        residual_centavos: residualCentavos,
+        pastel_comercial_centavos: pastelComercialCentavos,
+        bruto_comercial_centavos: brutoComercialCentavos,
+        produto_pastel_id: produtoId
+      }
+    );
+  }
+
+  const catalogoCentavos = totalCentavos - residualCentavos;
+  const componentesCentavos = brutoComercialCentavos - pastelComercialCentavos;
+  const excedenteCentavos = componentesCentavos - residualCentavos;
+  const brutoFiscalCentavos = catalogoCentavos + componentesCentavos;
+  if (!Number.isSafeInteger(catalogoCentavos) || catalogoCentavos <= 0
+    || !Number.isSafeInteger(componentesCentavos) || componentesCentavos < 0
+    || !Number.isSafeInteger(excedenteCentavos) || excedenteCentavos < 0
+    || brutoFiscalCentavos - excedenteCentavos !== totalCentavos) {
+    throw erro(
+      'DISTRIBUICAO_FISCAL_INVALIDA',
+      'Cadastro, componentes e excedente não fecham o valor comercial informado.',
+      500,
+      {
+        catalogo_centavos: catalogoCentavos,
+        componentes_centavos: componentesCentavos,
+        excedente_centavos: excedenteCentavos,
+        total_centavos: totalCentavos
+      }
+    );
+  }
+
+  const itens = (Array.isArray(composicao.itens) ? composicao.itens : []).map((item) => ({ ...item }));
+  const linhasPastel = itens.filter((item) => Number(item.produto_id) === produtoId);
+  if (linhasPastel.length !== 1) {
+    throw erro(
+      'DISTRIBUICAO_FISCAL_INVALIDA',
+      'A distribuição fiscal espera uma linha do pastel na composição.',
+      500,
+      { produto_pastel_id: produtoId, linhas: linhasPastel.length }
+    );
+  }
+
+  const linha = linhasPastel[0];
+  const quantidade = Number(linha.quantidade);
+  const precoUnitario = catalogoCentavos / quantidade / 100;
+  if (!Number.isSafeInteger(quantidade) || quantidade <= 0
+    || Math.round(precoUnitario * quantidade * 100) !== catalogoCentavos) {
+    throw erro(
+      'PRECO_LINHA_NAO_REPRESENTAVEL',
+      'O valor fiscal do pastel não reproduz o cadastro na quantidade informada.',
+      500,
+      {
+        produto_pastel_id: produtoId,
+        quantidade,
+        catalogo_centavos: catalogoCentavos
+      }
+    );
+  }
+
+  linha.preco_unitario = precoUnitario;
+  linha.subtotal = catalogoCentavos / 100;
+  linha.desconto_percentual = 0;
+  linha.desconto_valor = 0;
+  linha.desconto_atacado = 0;
+  linha.desconto_manual = 0;
+  linha.preco_origem = Number(precoUnitario.toFixed(6));
+
+  const somaItensCentavos = itens.reduce(
+    (soma, item) => soma + Math.round(Number(item.subtotal) * 100),
+    0
+  );
+  if (somaItensCentavos !== brutoFiscalCentavos) {
+    throw erro(
+      'DISTRIBUICAO_FISCAL_INVALIDA',
+      'A soma fiscal dos itens não fecha cadastro mais componentes.',
+      500,
+      { soma_itens_centavos: somaItensCentavos, bruto_fiscal_centavos: brutoFiscalCentavos }
+    );
+  }
+
+  return {
+    ...composicao,
+    valorPastelCentavos: catalogoCentavos,
+    valorCompostoBrutoCentavos: brutoFiscalCentavos,
+    descontoCentavos: excedenteCentavos,
+    desconto: excedenteCentavos / 100,
+    valorFinalCentavos: totalCentavos,
+    itens
+  };
+}
+
+/**
  * @param {object} params
  * @param {object} params.db
  * @param {number} params.empresaId
@@ -372,7 +491,8 @@ async function iniciarVendaPorValorPasteis(params = {}, deps = {}) {
   // 1) EntradaPedido com preço de cadastro (compatível com personalização).
   // 2) Em seguida alinha total+item na massa monetária do valor informado —
   //    mesma invariante do fluxo original / fixtures: soma(itens) === total.
-  // 3) Motor de composição recota pastel e monta residual (inalterado).
+  // 3) Motor de composição recota o pastel e monta o residual (inalterado).
+  // 4) A distribuição fiscal devolve o pastel ao cadastro e limita o desconto ao excedente.
   const itemEntrada = montarItemPedidoPastelDaCotacao(produtoPastel.id, quantidade, cotacao);
   const valorTotalReais = totalCentavos / 100;
   const chaveIdempotencia = params.chaveIdempotencia || params.chave_idempotencia || null;
@@ -505,6 +625,7 @@ module.exports = {
   montarItemPedidoPastel,
   montarItemPedidoPastelDaCotacao,
   persistirMassaMonetariaPedidoAlvo,
+  distribuirValorFiscalVendaPorValor,
   atualizarTotalPedidoAlvo,
   OBS_ORIGEM,
   CATEGORIA_PASTEIS

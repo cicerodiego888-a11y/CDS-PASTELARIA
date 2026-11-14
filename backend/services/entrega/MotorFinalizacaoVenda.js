@@ -208,14 +208,10 @@ async function _finalizarPrestacaoInterno({ vendaId, body = {}, req = {}, contex
   const totalFiscal = Number(venda.valor_fiscal || 0);
   const totalNaoFiscal = Number(venda.valor_nao_fiscal || 0);
 
+  const { classificarFormaPagamento } = require('../vendas/ClassificacaoModalidadePagamento');
   const pagamentosVenda = Array.isArray(body.pagamentos) ? body.pagamentos : [];
-  let formaPagamentoFinal = String(body.forma_pagamento || '').toLowerCase().trim();
-  if (pagamentosVenda.length > 1) {
-    formaPagamentoFinal = 'misto';
-  }
-  if (!formaPagamentoFinal && pagamentosVenda.length === 1) {
-    formaPagamentoFinal = String(pagamentosVenda[0].forma_pagamento || '').toLowerCase();
-  }
+  let formaPagamentoFinal = classificarFormaPagamento(pagamentosVenda)
+    || String(body.forma_pagamento || '').toLowerCase().trim();
   if (!formaPagamentoFinal) {
     formaPagamentoFinal = String(venda.pagamento_previsto || 'dinheiro').toLowerCase();
   }

@@ -289,6 +289,48 @@ function produtoComercialAtivoNoPedido(produto) {
 }
 
 /**
+ * Preço comercial já gravado na linha do pedido.
+ * A cotação de cadastro continua só como base do residual da busca;
+ * ela não substitui o preço principal na composição fiscal.
+ */
+function precoComercialPersistido(itensPedido, produtoId, quantidade) {
+  const linhas = itensPedido.filter((item) => Number(item.produto_id) === produtoId);
+  if (!linhas.length) {
+    throw erro(
+      'PRECO_PASTEL_INVALIDO',
+      'O pastel elegível não possui linha comercial no Pedido.',
+      { produto_id: produtoId }
+    );
+  }
+  const subtotalCentavos = linhas.reduce((soma, linha) => {
+    const centavos = Math.round(Number(linha.subtotal) * 100);
+    if (!Number.isSafeInteger(centavos) || centavos <= 0) {
+      throw erro(
+        'PRECO_PASTEL_INVALIDO',
+        'A linha do pastel não possui subtotal comercial válido.',
+        { produto_id: produtoId, subtotal: linha.subtotal }
+      );
+    }
+    return somarCentavos(soma, centavos);
+  }, 0);
+  const precos = linhas.map((linha) => Number(linha.preco_unitario));
+  const precoInformado = precos.every((preco) => preco === precos[0]) ? precos[0] : null;
+  if (precoInformado != null && Number.isFinite(precoInformado) && precoInformado > 0
+    && Math.round(precoInformado * quantidade * 100) === subtotalCentavos) {
+    return { precoUnitario: precoInformado, subtotalCentavos };
+  }
+  const precoUnitario = subtotalCentavos / quantidade / 100;
+  if (Math.round(precoUnitario * quantidade * 100) !== subtotalCentavos) {
+    throw erro(
+      'PRECO_LINHA_NAO_REPRESENTAVEL',
+      'O subtotal comercial do pastel não reproduz um preço unitário em centavos.',
+      { produto_id: produtoId, quantidade, subtotal_centavos: subtotalCentavos }
+    );
+  }
+  return { precoUnitario, subtotalCentavos };
+}
+
+/**
  * Pedidos sem pastéis elegíveis: envia as linhas comerciais originais ao PDV
  * (refrigerantes e demais produtos independentes), sem composição residual nem
  * inclusão artificial de pastel. A composição pastel→refrigerante permanece
@@ -467,6 +509,7 @@ async function prepararComposicaoPedidoPdv(params = {}, opts = {}) {
   }
 
   const itensPastel = [];
+  let valorPastelCatalogoCentavos = 0;
   for (const [produtoId, quantidade] of [...quantidadePastelPorProduto.entries()]
     .sort(([idA], [idB]) => idA - idB)) {
     const produto = produtoPorId.get(produtoId);
@@ -500,24 +543,41 @@ async function prepararComposicaoPedidoPdv(params = {}, opts = {}) {
         { produto_id: produtoId, quantidade }
       );
     }
+    valorPastelCatalogoCentavos = somarCentavos(
+      valorPastelCatalogoCentavos,
+      cotacao.subtotalCentavos
+    );
+    const comercial = precoComercialPersistido(itens, produtoId, quantidade);
     itensPastel.push(mapearItemVenda(
       produtoId,
       quantidade,
-      cotacao.precoUnitarioInterno,
-      cotacao.subtotalCentavos,
-      metadadosDaCotacao(produto, quantidade, cotacao)
+      comercial.precoUnitario,
+      comercial.subtotalCentavos,
+      {
+        desconto_percentual: 0,
+        desconto_valor: 0,
+        desconto_atacado: 0,
+        desconto_manual: 0,
+        tipo_preco: 'varejo',
+        promocao_id: null,
+        preco_origem: Number(Number(comercial.precoUnitario).toFixed(6))
+      }
     ));
   }
   const valorPastelCentavos = itensPastel.reduce(
     (total, item) => somarCentavos(total, item.subtotal),
     0
   );
-  const residualCentavos = totalCentavos - valorPastelCentavos;
+  const residualCentavos = totalCentavos - valorPastelCatalogoCentavos;
   if (residualCentavos < 0) {
     throw erro(
       'RESIDUAL_PASTEL_NEGATIVO',
       'O valor-base dos pastéis excede o total do Pedido; nenhuma composição foi gerada.',
-      { total_pedido_centavos: totalCentavos, total_pastel_centavos: valorPastelCentavos }
+      {
+        total_pedido_centavos: totalCentavos,
+        total_pastel_comercial_centavos: valorPastelCentavos,
+        total_pastel_catalogo_centavos: valorPastelCatalogoCentavos
+      }
     );
   }
 
@@ -548,7 +608,6 @@ async function prepararComposicaoPedidoPdv(params = {}, opts = {}) {
     otimalidadeComprovada: true,
     estadosVisitados: 0
   };
-  let descontoCentavos = 0;
   if (residualCentavos > 0) {
     busca = ComposicaoInterna.buscarComposicao(
       modelos,
@@ -598,7 +657,6 @@ async function prepararComposicaoPedidoPdv(params = {}, opts = {}) {
         );
       }
       busca = buscaAcima;
-      descontoCentavos = busca.totalCentavos - residualCentavos;
     }
   }
 
@@ -630,8 +688,11 @@ async function prepararComposicaoPedidoPdv(params = {}, opts = {}) {
     (total, item) => somarCentavos(total, item.subtotal),
     0
   );
+  const descontoCentavos = totalCompostoCentavos - totalCentavos;
   const totalLiquidoCentavos = totalCompostoCentavos - descontoCentavos;
-  if (!Number.isSafeInteger(totalLiquidoCentavos) || totalLiquidoCentavos !== totalCentavos) {
+  if (!Number.isSafeInteger(descontoCentavos) || descontoCentavos < 0
+    || !Number.isSafeInteger(totalLiquidoCentavos)
+    || totalLiquidoCentavos !== totalCentavos) {
     throw erro(
       'TOTAL_COMPOSICAO_DIVERGENTE',
       'O total bruto da composição, após o desconto global explícito, não corresponde ao total do Pedido; a geração foi bloqueada.',
@@ -668,7 +729,7 @@ async function prepararComposicaoPedidoPdv(params = {}, opts = {}) {
     }))
   });
 
-  return {
+  const resultado = {
     sucesso: true,
     modo: 'COMPOSICAO_PASTEL_REFRIGERANTE',
     pedidoId,
@@ -690,6 +751,12 @@ async function prepararComposicaoPedidoPdv(params = {}, opts = {}) {
     dataReferenciaCotacao: agora.toISOString(),
     efeitosOperacionais: false
   };
+  // Só a Venda por Valor troca a massa comercial pelo cadastro fiscal.
+  // Pedido sem essa origem mantém o preço comercial da linha.
+  if (String(pedido.observacao || '') !== 'VENDA_POR_VALOR_PASTEIS') return resultado;
+  const produtoPastelId = itensPastel.length === 1 ? itensPastel[0].produto_id : null;
+  const { distribuirValorFiscalVendaPorValor } = require('./VendaPorValorPasteisService');
+  return distribuirValorFiscalVendaPorValor(resultado, produtoPastelId);
 }
 
 /**

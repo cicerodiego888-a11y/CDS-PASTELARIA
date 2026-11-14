@@ -197,8 +197,27 @@ function resolverEmpresaDaVenda(venda) {
 }
 
 /**
+ * Empresa já gravada na venda. Não inventa empresa 1 nem usa o contexto da requisição.
+ * @returns {Promise<number|null>}
+ */
+function lerEmpresaIdVinculadaAVenda(vendaId, db) {
+  const id = Number(vendaId);
+  if (!db || typeof db.get !== 'function' || !Number.isInteger(id) || id <= 0) {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve, reject) => {
+    db.get('SELECT empresa_id FROM vendas WHERE id = ?', [id], (err, row) => {
+      if (err) return reject(err);
+      const empresaId = resolverEmpresaId(row && row.empresa_id);
+      resolve(empresaId);
+    });
+  });
+}
+
+/**
  * Cancelamento/devolução: empresa da venda + autorização do contexto atual.
  * Cruzado → VENDA_NAO_ENCONTRADA. Legado NULL → EMPRESA_OWNERSHIP_REQUIRED.
+ * Sem contexto na requisição, o middleware com adotarEmpresaDaVenda usa vendas.empresa_id.
  */
 function exigirOperacaoReversaoDaVenda(venda, empresaIdContexto) {
   if (!venda) {
@@ -214,24 +233,51 @@ function exigirOperacaoReversaoDaVenda(venda, empresaIdContexto) {
   return empresaDaVenda;
 }
 
+function responderErroMiddlewareEmpresa(res, err) {
+  const status = statusDeErroEmpresaVenda(err);
+  return res.status(status).json({
+    sucesso: false,
+    mensagem: err.message || 'Erro ao resolver empresa da venda.',
+    error: err.message || 'Erro ao resolver empresa da venda.',
+    code: err.code || CODIGO_EMPRESA_CONTEXT_REQUIRED,
+    empresa_id: err.empresa_id != null ? err.empresa_id : undefined
+  });
+}
+
 function middlewareResolverEmpresaVenda(deps = {}) {
   return async function anexarEmpresaVenda(req, res, next) {
+    const depsResolver = {
+      ...deps,
+      db: deps.db || req.db || require('../../database'),
+      exigirAutorizacaoUsuario: deps.exigirAutorizacaoUsuario
+    };
     try {
-      const resolved = await resolverEmpresaIdParaVenda(req, {
-        ...deps,
-        db: deps.db || req.db || require('../../database'),
-        exigirAutorizacaoUsuario: deps.exigirAutorizacaoUsuario
-      });
+      const resolved = await resolverEmpresaIdParaVenda(req, depsResolver);
       req.empresaId = resolved.empresaId;
       req.vendaEmpresaContexto = resolved;
       return next();
     } catch (err) {
-      const status = statusDeErroEmpresaVenda(err);
-      return res.status(status).json({
-        error: err.message || 'Erro ao resolver empresa da venda.',
-        code: err.code || CODIGO_EMPRESA_CONTEXT_REQUIRED,
-        empresa_id: err.empresa_id != null ? err.empresa_id : undefined
-      });
+      if (deps.adotarEmpresaDaVenda && err && err.code === CODIGO_EMPRESA_CONTEXT_REQUIRED) {
+        try {
+          const empresaVinculada = await lerEmpresaIdVinculadaAVenda(
+            req.params && req.params.id,
+            depsResolver.db
+          );
+          if (empresaVinculada != null) {
+            req.empresaId = empresaVinculada;
+            const resolved = await resolverEmpresaIdParaVenda(req, {
+              ...depsResolver,
+              exigirAutorizacaoUsuario: true
+            });
+            req.empresaId = resolved.empresaId;
+            req.vendaEmpresaContexto = Object.assign({}, resolved, { origem: 'VENDA_VINCULADA' });
+          }
+          return next();
+        } catch (adotarErr) {
+          return responderErroMiddlewareEmpresa(res, adotarErr);
+        }
+      }
+      return responderErroMiddlewareEmpresa(res, err);
     }
   };
 }
@@ -254,6 +300,7 @@ module.exports = {
   exigirCaixaCompativelComVenda,
   exigirVendaDaEmpresa,
   exigirOperacaoReversaoDaVenda,
+  lerEmpresaIdVinculadaAVenda,
   middlewareResolverEmpresaVenda,
   statusDeErroEmpresaVenda,
   responderErroEmpresaVenda,

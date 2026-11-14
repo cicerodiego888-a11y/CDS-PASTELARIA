@@ -39,6 +39,44 @@ router.get('/contrato-operacional', async (req, res) => {
   }
 });
 
+router.get('/canais-venda', exigirSuperAdmin, async (req, res) => {
+  try {
+    const db = require('../database');
+    const configServiceLocal = require('../services/configuracaoService');
+    const { listarCanais } = require('../services/vendas/CanalVendaEmpresaService');
+    const canais = await listarCanais(db, { cfg: configServiceLocal.readConfig() });
+    res.json({ canais });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message, code: err.code || undefined });
+  }
+});
+
+router.post('/canais-venda', exigirSuperAdmin, async (req, res) => {
+  try {
+    const db = require('../database');
+    const { cadastrarCanal } = require('../services/vendas/CanalVendaEmpresaService');
+    const canal = await cadastrarCanal(db, req.body || {}, { usuario: req.user });
+    res.status(201).json({ canal });
+  } catch (err) {
+    const status = err.code === 'SQLITE_CONSTRAINT' ? 409 : (err.statusCode || 500);
+    res.status(status).json({
+      error: err.code === 'SQLITE_CONSTRAINT' ? 'Já existe um canal com este código.' : err.message,
+      code: err.code || undefined
+    });
+  }
+});
+
+router.put('/canais-venda/:id', exigirSuperAdmin, async (req, res) => {
+  try {
+    const db = require('../database');
+    const { atualizarVinculo } = require('../services/vendas/CanalVendaEmpresaService');
+    const canal = await atualizarVinculo(db, Number(req.params.id), req.body || {}, { usuario: req.user });
+    res.json({ canal });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({ error: err.message, code: err.code || undefined });
+  }
+});
+
 router.get('/pdv-modelo-empresa', (req, res) => {
   try {
     const { obterPdvModeloEmpresaPublico } = require('../services/pdv/PdvModeloEmpresaService');

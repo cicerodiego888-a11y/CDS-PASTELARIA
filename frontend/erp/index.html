@@ -25,6 +25,7 @@
     <link rel="stylesheet" href="/css/produtos-cadastro.css">
     <link rel="stylesheet" href="/css/cds-smart-select.css">
     <link rel="stylesheet" href="/shared/design-system/cds-ui-foundation.css">
+    <link rel="stylesheet" href="/css/mesas-painel.css">
 </head>
 <body>
     <div class="container-fluid">
@@ -91,6 +92,11 @@
                                         <i class="fas fa-clipboard-list" aria-hidden="true"></i><span>Pedidos</span>
                                     </a>
                                 </li>
+                                <li class="nav-item" data-recurso="pedidos">
+                                    <a class="nav-link text-white" href="#" data-page="mesas" title="Controle de Mesas">
+                                        <i class="fas fa-border-all" aria-hidden="true"></i><span>Controle de Mesas</span>
+                                    </a>
+                                </li>
                                 <li class="nav-item" data-recurso="expedicao">
                                     <a class="nav-link text-white" href="#" data-page="faturamento" title="Expedição">
                                         <i class="fas fa-dolly" aria-hidden="true"></i><span>Expedição</span>
@@ -136,6 +142,18 @@
                                 <li class="nav-item" data-recurso="fiscal">
                                     <a class="nav-link text-white" href="#" data-page="central-entradas" title="Central de Entradas">
                                         <i class="fas fa-inbox" aria-hidden="true"></i><span>Central de Entradas</span>
+                                    </a>
+                                </li>
+                            </ul>
+                        </li>
+
+                        <!-- ESTOQUE -->
+                        <li class="nav-group" data-nav-group="estoque">
+                            <div class="nav-group-label"><i class="fas fa-clipboard-check" aria-hidden="true"></i><span>Estoque</span></div>
+                            <ul class="nav flex-column nav-group-items">
+                                <li class="nav-item">
+                                    <a class="nav-link text-white" href="#" data-page="contagem-estoque" title="Contagem Física">
+                                        <i class="fas fa-clipboard-list" aria-hidden="true"></i><span>Contagem Física</span>
                                     </a>
                                 </li>
                             </ul>
@@ -375,6 +393,7 @@
     <script src="/shared/js/cds-nomenclatura.js"></script>
     <script src="/shared/js/modoFiscalHelpers.js"></script>
     <script src="/shared/js/cds-formas-pagamento.js"></script>
+    <script src="/shared/js/classificacaoModalidadePagamento.js"></script>
     <script src="/shared/services/AdaptiveLabelRegistry.js"></script>
     <script src="/shared/services/AdaptiveLabelContext.js"></script>
     <script src="/shared/services/AdaptiveLabelService.js"></script>

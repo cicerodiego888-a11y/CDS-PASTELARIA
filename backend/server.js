@@ -124,6 +124,9 @@ app.get(['/mobile', '/mobile/'], (req, res) => {
 app.get(['/mobile-pedido', '/mobile-pedido/'], (req, res) => {
     res.sendFile(path.join(frontendRoot, 'mobile-pedido/index.html'));
 });
+app.get(['/mobile-mesas', '/mobile-mesas/'], (req, res) => {
+    res.sendFile(path.join(frontendRoot, 'mobile-mesas/index.html'));
+});
 app.get(['/mobile-pdv', '/mobile-pdv/'], (req, res) => {
     res.sendFile(path.join(frontendRoot, 'mobile-pdv/index.html'));
 });

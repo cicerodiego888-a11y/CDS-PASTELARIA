@@ -29,6 +29,7 @@
                 <h1>Fechamento</h1>
                 <p id="mv-operador" class="mp-ajuda"></p>
                 <p id="mv-pedido" class="mp-ajuda"></p>
+                <a id="mv-voltar-mesa" class="mp-btn" href="/mobile-mesas/" hidden>Voltar à mesa</a>
                 <div id="mv-itens" class="mp-card"></div>
                 <div id="mv-busca-livre">
                     <button type="button" class="mp-btn" id="mv-venda-valor">Venda pelo Valor</button>
@@ -80,6 +81,7 @@
                 <h1>Venda registrada</h1>
                 <p class="mp-ajuda">O registro veio do PDV oficial. A emissão usa o contrato do emissor e permanece bloqueada nesta etapa.</p>
                 <div id="mv-resultado" class="mp-card"></div>
+                <a id="mv-voltar-mesa-fim" class="mp-btn mp-btn-primario" href="/mobile-mesas/" hidden>Voltar à mesa</a>
                 <button type="button" class="mp-btn" id="mv-emitir" disabled>Solicitar emissão</button>
                 <a class="mp-btn" href="/mobile-pedido">Novo pedido</a>
             </section>
@@ -91,6 +93,7 @@
     <script src="/pdv/js/pdv-preco-comercial.js"></script>
     <script src="/pdv/js/pdv-venda-por-valor.js"></script>
     <script src="/shared/js/tefFluxoPagamento.js"></script>
+    <script src="/shared/js/classificacaoModalidadePagamento.js"></script>
     <script src="/pdv/js/pagamentoSequencial.js"></script>
     <script src="/pdv/js/interacaoPagamentoMisto.js"></script>
     <script src="/pdv/js/pdv-fechamento-oficial.js"></script>

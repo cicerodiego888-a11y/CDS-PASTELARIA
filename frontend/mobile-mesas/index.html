@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0f2744">
+    <title>Mesas — CDS Sistemas</title>
+    <link rel="icon" type="image/x-icon" href="/branding/favicon.ico">
+    <link rel="stylesheet" href="/mobile-pedido/mobile-pedido.css">
+    <link rel="stylesheet" href="/mobile-mesas/mobile-mesas.css">
+</head>
+<body>
+    <div id="mm-app" class="mp mm">
+        <header class="mp-topo">
+            <img src="/branding/logo-oficial.png" alt="CDS Sistemas" class="mp-logo" width="40" height="40">
+            <div class="mp-topo-texto">
+                <strong>CDS Sistemas</strong>
+                <span id="mm-empresa">Empresa não selecionada</span>
+                <span id="mm-operador"></span>
+            </div>
+            <nav class="mp-modulos" aria-label="Módulos do CDS">
+                <a href="/mobile/">Início</a>
+                <a href="/mobile-pedido/">Pedido</a>
+                <a href="/mobile-mesas/" aria-current="page">Mesas</a>
+                <a href="/mobile-pdv/">PDV</a>
+            </nav>
+        </header>
+        <div id="mm-alerta" class="mp-alerta" role="alert" hidden></div>
+        <div id="mm-rede" class="mm-rede" role="status" hidden>Sem conexão com o servidor. Os últimos dados continuam na tela e a consulta será repetida sozinha.</div>
+        <main id="mm-conteudo" aria-live="polite">
+            <p class="mp-ajuda">Carregando mesas…</p>
+        </main>
+    </div>
+    <script src="/shared/js/cds-empresa-contexto.js"></script>
+    <script src="/mobile-pedido/mobile-pedido.js"></script>
+    <script src="/erp/js/mesas-lancamento.js"></script>
+    <script src="/erp/js/mesas-conferencia.js"></script>
+    <script src="/erp/js/mesas-painel.js"></script>
+    <script src="/mobile-mesas/mobile-mesas.js"></script>
+</body>
+</html>

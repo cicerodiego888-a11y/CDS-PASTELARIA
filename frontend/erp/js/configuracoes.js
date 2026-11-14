@@ -1413,7 +1413,7 @@ async function salvarConfiguracoesAvancadas() {
                 'Modo PDV Empresa única exige selecionar a empresa do PDV (ex.: Matriz).',
                 'warning'
             );
-            if (typeof ativarCategoriaCentroCfg === 'function') ativarCategoriaCentroCfg('modulosLicenciados');
+            if (typeof ativarCategoriaCentroCfg === 'function') ativarCategoriaCentroCfg('empresasCanalVenda');
             document.getElementById('cfgPdvEmpresaId')?.focus();
             return;
         }

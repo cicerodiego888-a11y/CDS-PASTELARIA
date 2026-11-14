@@ -53,6 +53,17 @@
     }
   }
 
+  function destinoRetornoMesa(storage, empresaId, pedidoId) {
+    if (!storage) return null;
+    let registro;
+    try { registro = JSON.parse(storage.getItem('cdsMesaRetorno') || 'null'); } catch (_erro) { return null; }
+    const mesa = Number(registro && registro.mesa_id);
+    if (!Number.isInteger(mesa) || mesa <= 0) return null;
+    if (empresaId && registro.empresa != null && String(registro.empresa) !== String(empresaId)) return null;
+    if (pedidoId && Number(registro.pedido_id) !== Number(pedidoId)) return null;
+    return '/mobile-mesas/?mesa=' + mesa;
+  }
+
   function handoffCompativelComSessao(handoff, usuario, empresaId) {
     if (!handoff || handoff.invalido) {
       return { ok: false, codigo: 'HANDOFF_INVALIDO', mensagem: 'Os dados do pedido não puderam ser lidos.' };
@@ -401,6 +412,7 @@
 
   const api = {
     lerHandoff,
+    destinoRetornoMesa,
     handoffCompativelComSessao,
     prepararVendaPorValor,
     autorizarEletronico,
@@ -517,6 +529,12 @@
         desconto = Number(operacaoSalva.desconto || 0);
         total = Number(operacaoSalva.total || 0);
       }
+    }
+
+    const retornoMesa = destinoRetornoMesa(root.sessionStorage, empresaId, handoffValido && handoffValido.pedido_id);
+    if (retornoMesa && $('mv-voltar-mesa')) {
+      $('mv-voltar-mesa').href = retornoMesa;
+      $('mv-voltar-mesa').hidden = false;
     }
 
     const interacao = root.InteracaoPagamentoMisto.criar({
@@ -882,6 +900,10 @@
       if (root.CdsMobileOperacao) root.CdsMobileOperacao.limparPdv();
       $('mv-painel-venda').hidden = true;
       $('mv-painel-resultado').hidden = false;
+      if (retornoMesa && $('mv-voltar-mesa-fim')) {
+        $('mv-voltar-mesa-fim').href = retornoMesa;
+        $('mv-voltar-mesa-fim').hidden = false;
+      }
       const fiscal = resultado.fiscal;
       $('mv-resultado').innerHTML = '<p><strong>Venda</strong><br>#' + resultado.vendaId + '</p>'
         + '<p><strong>Pedido</strong><br>' + (handoffValido ? ('#' + handoffValido.pedido_id) : 'Sem pedido') + '</p>'

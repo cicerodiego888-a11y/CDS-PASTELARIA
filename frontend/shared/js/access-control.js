@@ -21,6 +21,7 @@ const PERMISSOES_PAGINAS = {
     entregas: 'vendas',
     faturamento: 'vendas',
     pedidos: 'vendas',
+    mesas: 'vendas',
     'nfe-central': 'fiscal',
     'nfe-avulsa': 'fiscal',
     'nfe-monitor': 'fiscal',
@@ -44,8 +45,8 @@ const PERMISSOES_PAGINAS = {
     relatorios: 'relatorios',
     auditoria: 'auditoria',
     'configuracoes-avancadas': 'configuracoes',
-    estoque: 'produtos',
-    'contagem-estoque': 'produtos'
+    estoque: 'produtos'
+    // contagem-estoque: gate dedicado via podeAjustarEstoque (não usa chave produtos)
 };
 
 /** Permissões que habilitam acesso à retaguarda (ERP). */
@@ -244,6 +245,11 @@ function usuarioTemPermissao(page) {
 
     if (page === 'usuarios') {
         return podeGerenciarUsuariosSistema();
+    }
+
+    // Contagem física / ajuste de estoque — mesmo gate do backend (exigirPerfilAjusteEstoque).
+    if (page === 'contagem-estoque') {
+        return podeAjustarEstoque();
     }
 
     if (page === 'configuracoes-avancadas' || page === 'importacao-inicial-produtos' || page === 'configuracao-rede' || page === 'nome-terminal-pdv' || page === 'observabilidade' || page === 'mib-analytics' || page === 'enterprise-search' || page === 'knowledge-center' || page === 'cip-insights' || page === 'cds-copiloto') {

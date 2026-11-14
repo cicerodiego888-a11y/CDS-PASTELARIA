@@ -2,6 +2,7 @@
  * Rotas administrativas de estoque (Fase 2 / Implementação 03.18).
  * Leitura isolada de estoque_empresa. Sem fallback para produtos.
  * CDS-ESTOQUE-MANUAL-01 — contagem física F×NF.
+ * CDS-ESTOQUE-CONTAGEM-SNAPSHOT-FLUXO-03.1 — confirmação oficial exige snapshot.
  */
 'use strict';
 
@@ -10,6 +11,16 @@ const dbDefault = require('../database');
 const { criarMiddlewareContextoEmpresa } = require('../services/fiscalNaoFiscal/empresaContexto');
 const EstoqueEmpresaService = require('../services/estoque/EstoqueEmpresaService');
 const EstoqueContagemFisicaService = require('../services/estoque/EstoqueContagemFisicaService');
+const {
+  exigirSnapshotItensOficiais
+} = require('../services/estoque/contagemFisicaSnapshotOficial');
+const {
+  listarPendenciasEntradaEstoque
+} = require('../services/estoque/CentralEntradasPendenciasEstoqueService');
+const EstoqueContagemPeriodicidadeService = require('../services/estoque/EstoqueContagemPeriodicidadeService');
+const {
+  buscarProdutosParaContagem
+} = require('../services/estoque/EstoqueContagemProdutoBuscaService');
 const { exigirPerfilAjusteEstoque } = require('../middleware/auth');
 
 async function handleGetProdutoEstoqueEmpresa(req, res, dbConn) {
@@ -72,8 +83,18 @@ function criarRotasEstoque(dbConn) {
         db: dbConn,
         empresaId: req.empresaId,
         produtoId: body.produto_id != null ? body.produto_id : body.produtoId,
+        quantidade_fiscal_informada: body.quantidade_fiscal_informada != null
+          ? body.quantidade_fiscal_informada
+          : body.quantidade_fiscal_contada,
+        quantidade_nao_fiscal_informada: body.quantidade_nao_fiscal_informada != null
+          ? body.quantidade_nao_fiscal_informada
+          : body.quantidade_nao_fiscal_contada,
         quantidade_fiscal_contada: body.quantidade_fiscal_contada,
-        quantidade_nao_fiscal_contada: body.quantidade_nao_fiscal_contada
+        quantidade_nao_fiscal_contada: body.quantidade_nao_fiscal_contada,
+        apresentacao_id: body.apresentacao_id,
+        unidade_informada: body.unidade_informada || body.unidade_comercial,
+        modo_fiscal: body.modo_fiscal != null ? body.modo_fiscal : req.query.modo_fiscal,
+        omitir_nao_fiscal: body.omitir_nao_fiscal
       });
       return res.json(preview);
     } catch (err) {
@@ -92,21 +113,147 @@ function criarRotasEstoque(dbConn) {
         || body.chave_idempotencia
         || body.chaveIdempotencia
         || null;
+      // Fronteira oficial: sem snapshot → SNAPSHOT_OBRIGATORIO (não cai no legado silencioso).
+      const itensComSnapshot = exigirSnapshotItensOficiais(body.itens || []);
       const resultado = await EstoqueContagemFisicaService.registrarContagemFisica({
         db: dbConn,
         empresaId: req.empresaId,
-        itens: body.itens || [],
+        itens: itensComSnapshot,
         observacao: body.observacao,
         usuarioId: req.user && req.user.id,
         usuarioNome: (req.user && (req.user.username || req.user.nome)) || null,
-        chaveIdempotencia: chave
+        chaveIdempotencia: chave,
+        modo_fiscal: body.modo_fiscal != null ? body.modo_fiscal : req.query.modo_fiscal,
+        omitir_nao_fiscal: body.omitir_nao_fiscal
       });
       return res.status(201).json(resultado);
     } catch (err) {
       const status = Number(err && err.status) || 400;
       return res.status(status).json({
         error: err && err.message ? err.message : 'Erro ao registrar contagem física.',
-        code: err && err.code ? err.code : 'CONTAGEM_FISICA_FALHOU'
+        code: err && err.code ? err.code : 'CONTAGEM_FISICA_FALHOU',
+        produto_id: err && err.produto_id != null ? err.produto_id : undefined,
+        saldo_fiscal_esperado: err && err.saldo_fiscal_esperado,
+        saldo_nao_fiscal_esperado: err && err.saldo_nao_fiscal_esperado,
+        saldo_fiscal_atual: err && err.saldo_fiscal_atual,
+        saldo_nao_fiscal_atual: err && err.saldo_nao_fiscal_atual
+      });
+    }
+  });
+
+  // CDS-ESTOQUE-CONTAGEM-UX-PERMISSOES-05.1 — busca read-only de produtos (antes de :id).
+  router.get('/contagem-fisica/produtos-busca', exigirContexto, exigirPerfilAjusteEstoque(), async (req, res) => {
+    try {
+      const q = req.query && (req.query.q != null ? req.query.q : req.query.termo);
+      const limite = req.query && req.query.limite != null ? req.query.limite : undefined;
+      const resultado = await buscarProdutosParaContagem(dbConn, q, { limite });
+      return res.json(resultado);
+    } catch (err) {
+      const status = Number(err && err.status) || 400;
+      return res.status(status).json({
+        ok: false,
+        error: err && err.message ? err.message : 'Erro ao pesquisar produtos.',
+        code: err && err.code ? err.code : 'BUSCA_PRODUTOS_FALHOU'
+      });
+    }
+  });
+
+  // CDS-ESTOQUE-CONTAGEM-PERIODICIDADE-05 — configuração e status informativos (antes de :id).
+  router.get('/contagem-fisica/periodicidade', exigirContexto, exigirPerfilAjusteEstoque(), async (req, res) => {
+    try {
+      const cfg = await EstoqueContagemPeriodicidadeService.obterPeriodicidade(dbConn, req.empresaId);
+      return res.json(cfg);
+    } catch (err) {
+      const status = Number(err && err.status) || 400;
+      return res.status(status).json({
+        error: err && err.message ? err.message : 'Erro ao consultar periodicidade.',
+        code: err && err.code ? err.code : 'PERIODICIDADE_CONSULTA_FALHOU',
+        consulta_disponivel: false
+      });
+    }
+  });
+
+  router.put('/contagem-fisica/periodicidade', exigirContexto, exigirPerfilAjusteEstoque(), async (req, res) => {
+    try {
+      const body = req.body || {};
+      const cfg = await EstoqueContagemPeriodicidadeService.salvarPeriodicidade(
+        dbConn,
+        req.empresaId,
+        {
+          periodicidade: body.periodicidade,
+          ativo: body.ativo
+        },
+        { usuarioId: req.user && req.user.id }
+      );
+      return res.json(cfg);
+    } catch (err) {
+      const status = Number(err && err.status) || 400;
+      return res.status(status).json({
+        error: err && err.message ? err.message : 'Erro ao salvar periodicidade.',
+        code: err && err.code ? err.code : 'PERIODICIDADE_SALVAR_FALHOU'
+      });
+    }
+  });
+
+  router.get('/contagem-fisica/status-periodicidade', exigirContexto, exigirPerfilAjusteEstoque(), async (req, res) => {
+    try {
+      const status = await EstoqueContagemPeriodicidadeService.obterStatusPeriodicidade(
+        dbConn,
+        req.empresaId
+      );
+      return res.json(status);
+    } catch (err) {
+      const statusCode = Number(err && err.status) || 400;
+      return res.status(statusCode).json({
+        ok: false,
+        consulta_disponivel: false,
+        error: err && err.message ? err.message : 'Não foi possível consultar o status da periodicidade.',
+        code: err && err.code ? err.code : 'CONSULTA_PERIODICIDADE_FALHOU',
+        empresa_id: req.empresaId
+        // Não inventar EM_DIA em falha.
+      });
+    }
+  });
+
+  router.get('/contagem-fisica/historico', exigirContexto, exigirPerfilAjusteEstoque(), async (req, res) => {
+    try {
+      const limite = req.query && req.query.limite != null ? req.query.limite : undefined;
+      const hist = await EstoqueContagemPeriodicidadeService.listarHistoricoContagens(
+        dbConn,
+        req.empresaId,
+        { limite }
+      );
+      return res.json(hist);
+    } catch (err) {
+      const status = Number(err && err.status) || 400;
+      return res.status(status).json({
+        ok: false,
+        error: err && err.message ? err.message : 'Erro ao listar histórico de contagens.',
+        code: err && err.code ? err.code : 'CONSULTA_HISTORICO_FALHOU'
+      });
+    }
+  });
+
+  // CDS-ESTOQUE-CONTAGEM-PENDENCIAS-04 — somente leitura (antes de :id).
+  router.get('/contagem-fisica/pendencias-entrada', exigirContexto, exigirPerfilAjusteEstoque(), async (req, res) => {
+    try {
+      const limite = req.query && req.query.limite != null ? req.query.limite : undefined;
+      const resultado = await listarPendenciasEntradaEstoque({
+        db: dbConn,
+        empresaId: req.empresaId,
+        limite
+      });
+      return res.json(resultado);
+    } catch (err) {
+      const status = Number(err && err.status) || 400;
+      return res.status(status).json({
+        ok: false,
+        consulta_disponivel: false,
+        error: err && err.message
+          ? err.message
+          : 'Não foi possível verificar as entradas pendentes.',
+        code: err && err.code ? err.code : 'CONSULTA_PENDENCIAS_FALHOU',
+        empresa_id: req.empresaId
       });
     }
   });

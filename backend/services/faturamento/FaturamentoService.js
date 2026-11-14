@@ -486,7 +486,8 @@ async function finalizarVendaPdvPedido(pedidoId, reqHttp = {}) {
     && pedido.status === PedidoStatus.FATURADO
     && Number(pedido.venda_id) === Number(operacao.venda_id)
   ) {
-    return { pedido, venda_id: Number(operacao.venda_id), idempotente: true };
+    const mesa = await registrarMesaAposVendaConfirmada(pedido, empresaId, reqHttp);
+    return { pedido, venda_id: Number(operacao.venda_id), idempotente: true, mesa };
   }
   if (!Number.isInteger(Number(operacao.venda_id)) || Number(operacao.venda_id) <= 0) {
     throw erroVendaPedidoConflitante(
@@ -553,7 +554,21 @@ async function finalizarVendaPdvPedido(pedidoId, reqHttp = {}) {
       tipoOperacao: 'PDV_COMPOSICAO'
     }
   );
-  return { pedido: pedidoAtualizado, venda_id: Number(operacao.venda_id), idempotente: false };
+  const mesa = await registrarMesaAposVendaConfirmada(pedidoAtualizado, empresaId, reqHttp);
+  return { pedido: pedidoAtualizado, venda_id: Number(operacao.venda_id), idempotente: false, mesa };
+}
+
+async function registrarMesaAposVendaConfirmada(pedido, empresaId, reqHttp) {
+  const Atendimento = require('../pedido/MesaAtendimentoService');
+  const operadorId = reqHttp.operadorId || reqHttp.user?.id || reqHttp.user?.usuario_id || null;
+  try {
+    return await Atendimento.encerrarAtendimentoQuitado(empresaId, pedido && pedido.id, { operadorId });
+  } catch (err) {
+    return {
+      encerrado: false,
+      codigo: (err && (err.codigo || err.code)) || 'ATENDIMENTO_MESA_NAO_ATUALIZADO'
+    };
+  }
 }
 
 async function faturarPedido(pedidoId, body = {}, reqHttp = {}) {

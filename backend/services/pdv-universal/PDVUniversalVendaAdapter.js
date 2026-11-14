@@ -4,6 +4,8 @@
  */
 'use strict';
 
+const { classificarFormaPagamento } = require('../vendas/ClassificacaoModalidadePagamento');
+
 function erroCheckout(code, message, statusCode = 400, extra = {}) {
   const err = new Error(message);
   err.code = code;
@@ -100,7 +102,7 @@ function montarPayloadVendaOficial({ itens, pagamentos, emitir_fiscal, origem, d
   return {
     origem: origem || 'PDV',
     tipo_venda: 'BALCAO',
-    forma_pagamento: pags.length > 1 ? 'misto' : pags[0].forma_pagamento,
+    forma_pagamento: classificarFormaPagamento(pags) || pags[0].forma_pagamento,
     pagamentos: pags,
     total,
     desconto: desc,

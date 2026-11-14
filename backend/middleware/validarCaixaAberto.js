@@ -1,6 +1,7 @@
 const db = require('../database');
 const { isMultiCaixaAtivo, obterTerminalIdDaRequisicao, parsePositiveInteger } = require('../utils/multiCaixa');
 const { obterCaixaTurnoId, montarSqlSessaoAberta } = require('../utils/caixaSessaoHelpers');
+const { idDeclaradoDoUsuario } = require('../services/vendas/VendaReferenciaIntegridade');
 const { origemExigeCaixa } = require('../services/vendas/VendaOrigin');
 const {
   exigirSessaoDaEmpresa,
@@ -147,7 +148,7 @@ function validarCaixaAberto(req, res, next) {
         req.caixaId = turnoId;
         req.caixaConfigId = sessao.caixa_id || null;
         req.terminalId = terminalId || sessao.terminal_id || null;
-        req.operadorId = req.user?.id || sessao.operador_id || null;
+        req.operadorId = idDeclaradoDoUsuario(req.user);
         req.caixaSessao = sessao;
 
         next();
@@ -196,7 +197,7 @@ function validarCaixaAbertoCancelamentoVenda(req, res, next) {
           } else if (terminalId || empresaId || !isMultiCaixaAtivo()) {
             ({ sql, params } = montarConsultaSessaoAberta({ terminalId, empresaId }));
           } else {
-            req.operadorId = req.user?.id || venda.operador_id || null;
+            req.operadorId = idDeclaradoDoUsuario(req.user);
             return next();
           }
         } catch (sqlErr) {
@@ -219,12 +220,12 @@ function validarCaixaAbertoCancelamentoVenda(req, res, next) {
             req.caixaId = obterCaixaTurnoId(sessao);
             req.caixaConfigId = sessao.caixa_id || null;
             req.terminalId = terminalId || sessao.terminal_id || null;
-            req.operadorId = req.user?.id || sessao.operador_id || null;
+            req.operadorId = idDeclaradoDoUsuario(req.user);
             req.caixaSessao = sessao;
             return next();
           }
 
-          req.operadorId = req.user?.id || venda.operador_id || null;
+          req.operadorId = idDeclaradoDoUsuario(req.user);
           req.terminalId = terminalId || venda.terminal_id || null;
           return next();
         });

@@ -438,6 +438,26 @@ async function listarPedidos(filtros = {}) {
   } else {
     where.push('1 = 0');
   }
+  const filtroMesaInformado = filtros.mesaId != null || filtros.mesaAtendimentoId != null;
+  if (filtroMesaInformado) {
+    const mesaId = Number(filtros.mesaId);
+    const atendimentoId = Number(filtros.mesaAtendimentoId);
+    if (
+      !Number.isInteger(mesaId) || mesaId <= 0
+      || !Number.isInteger(atendimentoId) || atendimentoId <= 0
+      || !temMesa
+      || !colunasPedidos.has('mesa_atendimento_id')
+    ) {
+      const err = new Error('Filtro de mesa e atendimento inválido para consultar pedidos.');
+      err.statusCode = 400;
+      err.codigo = 'FILTRO_MESA_INVALIDO';
+      throw err;
+    }
+    where.push('p.mesa_id = ?');
+    params.push(mesaId);
+    where.push('p.mesa_atendimento_id = ?');
+    params.push(atendimentoId);
+  }
 
   const statusLista = [];
   if (Array.isArray(filtros.statusIn) && filtros.statusIn.length) {
@@ -480,6 +500,7 @@ async function listarPedidos(filtros = {}) {
   }
 
   const limite = Math.min(Math.max(Number(filtros.limite) || 200, 1), 500);
+  const limiteSql = filtroMesaInformado ? '' : 'LIMIT ?';
 
   return all(`
     SELECT
@@ -505,6 +526,7 @@ async function listarPedidos(filtros = {}) {
       p.operador_id,
       p.empresa_id,
       ${temMesa ? 'p.mesa_id' : 'NULL'} AS mesa_id,
+      ${temMesa && colunasPedidos.has('mesa_atendimento_id') ? 'p.mesa_atendimento_id' : 'NULL'} AS mesa_atendimento_id,
       ${temMesa ? 'm.numero' : 'NULL'} AS mesa_numero,
       ${temOrigem ? 'p.origem_canal' : 'NULL'} AS origem_canal,
       COALESCE(u.username, u.nome) AS usuario_nome
@@ -515,8 +537,8 @@ async function listarPedidos(filtros = {}) {
     ${operacaoPdvJoin}
     WHERE ${where.join(' AND ')}
     ORDER BY p.id DESC
-    LIMIT ?
-  `, [...params, limite], db);
+    ${limiteSql}
+  `, filtroMesaInformado ? params : [...params, limite], db);
 }
 
 async function obterPorId(pedidoId, opts = {}) {
@@ -1038,6 +1060,27 @@ async function atualizarDadosFiscais(pedidoId, dados = {}) {
   ]);
 }
 
+async function vincularAtendimentoDaMesa(pedidoId, empresaId, atendimentoId, opts = {}) {
+  const db = conn(opts.db);
+  const colunas = await obterColunasTabela('pedidos', db);
+  if (!colunas.has('mesa_atendimento_id')) {
+    throw new Error('Schema de pedidos sem mesa_atendimento_id: migração de mesas pendente.');
+  }
+  const atualizado = await run(
+    `UPDATE pedidos
+     SET mesa_atendimento_id = ?
+     WHERE id = ? AND empresa_id = ? AND mesa_atendimento_id IS NULL`,
+    [Number(atendimentoId), Number(pedidoId), Number(empresaId)],
+    db
+  );
+  if (atualizado.changes !== 1) {
+    const err = new Error('Não foi possível vincular o pedido ao atendimento da mesa.');
+    err.statusCode = 409;
+    err.codigo = 'ATENDIMENTO_VINCULO_CONCORRENTE';
+    throw err;
+  }
+}
+
 module.exports = {
   listarAguardandoFaturamento,
   listarPedidos,
@@ -1045,6 +1088,7 @@ module.exports = {
   obterEstadoEdicao,
   criarErroPedidoImutavel,
   criarPedido,
+  vincularAtendimentoDaMesa,
   substituirPedido,
   atualizarStatus,
   excluirOrcamento,

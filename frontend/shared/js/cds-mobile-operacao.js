@@ -68,8 +68,13 @@
     return { ok: true };
   }
 
+  function chavePedido(mesaId) {
+    const id = Number(mesaId);
+    return Number.isInteger(id) && id > 0 ? CHAVE_PEDIDO + ':mesa:' + id : CHAVE_PEDIDO;
+  }
+
   function salvarPedido(estado) {
-    return gravar(CHAVE_PEDIDO, {
+    return gravar(chavePedido(estado.mesaId), {
       estado: {
         etapa: estado.etapa,
         cliente: estado.cliente || null,
@@ -84,8 +89,8 @@
     });
   }
 
-  function lerPedido() {
-    return compativel(lerBruto(CHAVE_PEDIDO));
+  function lerPedido(mesaId) {
+    return compativel(lerBruto(chavePedido(mesaId)));
   }
 
   function salvarPdv(dados) {

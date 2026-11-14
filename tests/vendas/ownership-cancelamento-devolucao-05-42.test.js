@@ -21,6 +21,7 @@ const {
 const {
   resolverEmpresaDaVenda,
   exigirOperacaoReversaoDaVenda,
+  middlewareResolverEmpresaVenda,
   CODIGO_EMPRESA_OWNERSHIP_REQUIRED
 } = require('../../backend/services/vendas/VendaEmpresaContextoService');
 const {
@@ -329,9 +330,61 @@ function test08WritersNaoUsamReqComoOwnership() {
   assert.ok(financeiro.includes('resolverEmpresaDaOrigemFinanceira({ venda })'));
   assert.ok(!financeiro.includes('opcoes.empresaId || opcoes.empresa_id || null'));
 
-  assert.ok(rotas.includes("router.put('/:id/cancelar', anexarEmpresaVenda"));
-  assert.ok(rotas.includes("router.post('/cancelar/:id', anexarEmpresaVenda"));
-  assert.ok(rotas.includes("router.post('/:id/devolver', anexarEmpresaVenda"));
+  assert.ok(rotas.includes("router.put('/:id/cancelar', anexarEmpresaReversaoVenda"));
+  assert.ok(rotas.includes("router.post('/cancelar/:id', anexarEmpresaReversaoVenda"));
+  assert.ok(rotas.includes("router.post('/:id/devolver', anexarEmpresaReversaoVenda"));
+  assert.ok(rotas.includes('adotarEmpresaDaVenda: true'));
+}
+
+function respostaFake() {
+  return {
+    statusCode: null,
+    body: null,
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    json(body) {
+      this.body = body;
+      return this;
+    }
+  };
+}
+
+async function test10CancelamentoAdotaEmpresaDaVenda() {
+  const { db, a, b } = await criarDb();
+  const vendaIns = await run(
+    db,
+    `INSERT INTO vendas (codigo, total, status, empresa_id) VALUES ('VA', 10, 'concluida', ?)`,
+    [a.id]
+  );
+  const mw = middlewareResolverEmpresaVenda({
+    db,
+    exigirAutorizacaoUsuario: false,
+    adotarEmpresaDaVenda: true,
+    contrato: { modo_operacional: 'MULTIEMPRESA', empresa_operacional: null }
+  });
+
+  const req = { params: { id: String(vendaIns.lastID) }, headers: {} };
+  const res = respostaFake();
+  let seguiu = false;
+  await mw(req, res, () => { seguiu = true; });
+  assert.strictEqual(res.statusCode, null);
+  assert.strictEqual(seguiu, true);
+  assert.strictEqual(req.empresaId, Number(a.id));
+  assert.strictEqual(req.vendaEmpresaContexto.origem, 'VENDA_VINCULADA');
+
+  const reqCruzado = {
+    params: { id: String(vendaIns.lastID) },
+    headers: { 'x-empresa-id': String(b.id) }
+  };
+  const resCruzado = respostaFake();
+  let seguiuCruzado = false;
+  await mw(reqCruzado, resCruzado, () => { seguiuCruzado = true; });
+  assert.strictEqual(seguiuCruzado, true);
+  assert.strictEqual(reqCruzado.empresaId, Number(b.id));
+  assert.notStrictEqual(reqCruzado.vendaEmpresaContexto.origem, 'VENDA_VINCULADA');
+  db.close();
 }
 
 function test09NaoInventaFallback() {
@@ -352,7 +405,8 @@ const TESTS = [
   ['06 venda legada devolver', test06VendaLegadaDevolver],
   ['07 venda é fonte de verdade', test07VendaEhFonteDeVerdade],
   ['08 writers não usam req como ownership', test08WritersNaoUsamReqComoOwnership],
-  ['09 sem fallback inventado', test09NaoInventaFallback]
+  ['09 sem fallback inventado', test09NaoInventaFallback],
+  ['10 cancelamento adota empresa da venda', test10CancelamentoAdotaEmpresaDaVenda]
 ];
 
 (async () => {

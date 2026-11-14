@@ -185,6 +185,31 @@ h3 { font-size: 1rem; margin: 12px 0 6px; }
 
 .mp-btn:disabled { opacity: 0.55; }
 
+.mp-link-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  text-decoration: none;
+  margin-top: 8px;
+}
+
+.mp-mesa-faixa {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 10px 16px 0;
+  padding: 12px;
+  border-radius: 12px;
+  background: #e8f3ee;
+  border: 1px solid var(--mp-acao);
+}
+
+.mp-mesa-faixa[hidden], .mp-mesa-acoes[hidden] { display: none; }
+.mp-mesa-faixa a { color: var(--mp-marca); font-weight: 600; min-height: 44px; display: inline-flex; align-items: center; }
+
 .mp-acoes {
   display: grid;
   grid-template-columns: 1fr 1fr;

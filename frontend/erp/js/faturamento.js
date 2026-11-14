@@ -1091,9 +1091,13 @@ async function loadFaturamento() {
           : { motivo };
         let resp;
         try {
+          const headersCancelamento = (typeof CdsEmpresaContexto !== 'undefined'
+            && typeof CdsEmpresaContexto.headersJson === 'function')
+            ? CdsEmpresaContexto.headersJson()
+            : headers;
           resp = await fetch(`${API_URL}/vendas/cancelar/${vendaId}`, {
             method: 'POST',
-            headers,
+            headers: headersCancelamento,
             body: JSON.stringify(payload)
           });
         } catch (erroTransporte) {
@@ -1301,9 +1305,10 @@ async function loadFaturamento() {
         valor: valorOutros
       });
       pagPayload.pagamentos = pagamentoProduto;
-      pagPayload.forma_pagamento = pagamentoProduto.length > 1
-        ? 'misto'
-        : pagamentoProduto[0]?.forma_pagamento || 'dinheiro';
+      pagPayload.forma_pagamento = (window.ClassificacaoModalidadePagamento
+        && ClassificacaoModalidadePagamento.classificarFormaPagamento(pagamentoProduto))
+        || pagamentoProduto[0]?.forma_pagamento
+        || 'dinheiro';
       pagPayload.valor_recebido = total;
     } else {
       pagPayload.pagamentos = [{

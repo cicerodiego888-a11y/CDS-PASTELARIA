@@ -21,6 +21,9 @@ const repo = require('./PedidoRepository');
 const PedidoConsumoEstoqueService = require('./PedidoConsumoEstoqueService');
 const PedidoPersonalizacaoService = require('./PedidoPersonalizacaoService');
 const MesaService = require('./MesaService');
+const MesaAtendimentoService = require('./MesaAtendimentoService');
+const PedidoPreparacaoService = require('./PedidoPreparacaoService');
+const { garantirSchemaMesas } = require('../../utils/mesasSchema');
 const VendaFinanceiroService = require('../vendas/VendaFinanceiroService');
 const MotorComercial = require('../../motores/comercial');
 const { empresaIdDoReqPedido } = require('./empresaIdDoReqPedido');
@@ -405,6 +408,8 @@ async function criar(body = {}, operadorId = null, opcoes = {}) {
   const bodyParaHash = { ...body };
   delete bodyParaHash.supervisor_token;
   delete bodyParaHash.supervisorToken;
+  delete bodyParaHash.mesa_atendimento_id;
+  delete bodyParaHash.mesaAtendimentoId;
   const requisicaoHash = PedidoConsumoEstoqueService.hashRequisicao({
     empresaId,
     origemCanal,
@@ -412,6 +417,7 @@ async function criar(body = {}, operadorId = null, opcoes = {}) {
   });
 
   await PedidoConsumoEstoqueService.garantirSchema(db);
+  await garantirSchemaMesas(db);
   await new Promise((resolve, reject) => {
     db.run('BEGIN IMMEDIATE', (err) => (err ? reject(err) : resolve()));
   });
@@ -429,7 +435,7 @@ async function criar(body = {}, operadorId = null, opcoes = {}) {
       pedidoId = existenteId;
       repetido = true;
     } else {
-      mesaId = await MesaService.validarMesaDoPedido(empresaId, cab.mesaId);
+      mesaId = await MesaService.validarMesaDoPedido(empresaId, cab.mesaId, { db });
       pedidoId = await repo.criarPedido({
         codigo,
         dataPedido,
@@ -460,6 +466,17 @@ async function criar(body = {}, operadorId = null, opcoes = {}) {
           itens: pedido.itens || [],
           supervisorToken: cab.supervisorToken,
           jaEmTransacao: true
+        });
+      }
+
+      if (mesaId != null) {
+        const atendimentoId = await MesaAtendimentoService.resolverParaNovoPedido(empresaId, mesaId, { db });
+        await repo.vincularAtendimentoDaMesa(pedidoId, empresaId, atendimentoId, { db });
+        await PedidoPreparacaoService.registrarNaoEnviado({
+          db,
+          empresaId,
+          pedidoId,
+          atendimentoId
         });
       }
 

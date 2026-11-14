@@ -47,6 +47,11 @@ function assertInicializou(r, contexto) {
   );
   assert.ok(r.saida.includes('SONDA_PRONTO'), `${contexto}: prontidão não sinalizada`);
   assert.ok(!/no such table: configuracoes/.test(r.saida), `${contexto}: acesso a configuracoes antes da criação`);
+  assert.doesNotMatch(
+    r.saida,
+    /Erro ao adicionar coluna \w+: SQLITE_ERROR: duplicate column name:/i,
+    `${contexto}: migração de coluna duplicada em venda_pagamentos`
+  );
 }
 
 function abrir(arquivo) {
@@ -127,6 +132,10 @@ async function verificarEstruturaMinima(arquivo, contexto) {
   for (const t of ['configuracoes', 'usuarios', 'empresas', 'central_entradas_config', 'caixas', 'equipamentos_drivers', 'pedidos', 'nfe_notas']) {
     assert.ok(nomes.includes(t), `${contexto}: tabela ${t} ausente`);
   }
+  const colunasPagamentos = await comBanco(arquivo, (db) => all(db, 'PRAGMA table_info(venda_pagamentos)'));
+  const nomesColunasPagamentos = colunasPagamentos.map((coluna) => coluna.name);
+  assert.ok(nomesColunasPagamentos.includes('valor_entregue'), `${contexto}: venda_pagamentos.valor_entregue ausente`);
+  assert.ok(nomesColunasPagamentos.includes('troco'), `${contexto}: venda_pagamentos.troco ausente`);
   const dados = await dump(arquivo);
   const chaves = dados.configuracoes.map((c) => c.chave);
   for (const c of ['nome_empresa', 'fiscal_ambiente', 'equipamentos_ativo', 'produto_identidade_enabled', 'migracao_modo_fiscal_padrao_ativo']) {
@@ -175,6 +184,53 @@ async function main() {
     const r = inicializar(dbDir);
     assertInicializou(r, 'vazio');
     await verificarEstruturaMinima(arquivo, 'vazio');
+  });
+
+  await test('pagamentos legado: adiciona colunas de troco e preserva registros', async () => {
+    const dbDir = dirTemp('pagamentos-troco');
+    limpar.push(dbDir);
+    const arquivo = path.join(dbDir, 'mercadao.db');
+    await comBanco(arquivo, (db) => exec(db, `
+      CREATE TABLE venda_pagamentos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        venda_id INTEGER NOT NULL,
+        forma_pagamento TEXT NOT NULL,
+        valor DECIMAL(10,2) NOT NULL,
+        tef_transacao_id INTEGER,
+        tef_nsu TEXT,
+        tef_autorizacao TEXT,
+        tef_bandeira TEXT,
+        tef_adquirente TEXT,
+        tef_comprovante_cliente TEXT,
+        tef_comprovante_estabelecimento TEXT,
+        criado_em DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+      INSERT INTO venda_pagamentos (venda_id, forma_pagamento, valor)
+        VALUES (1, 'pix', 40.00);
+    `));
+
+    const inicializacao = inicializar(dbDir);
+    assertInicializou(inicializacao, 'pagamentos-troco');
+    await verificarEstruturaMinima(arquivo, 'pagamentos-troco');
+    await comBanco(arquivo, async (db) => {
+      const legado = await all(db, `
+        SELECT valor, valor_entregue, troco FROM venda_pagamentos WHERE venda_id = 1
+      `);
+      assert.deepStrictEqual(legado.map((linha) => [Number(linha.valor), linha.valor_entregue, linha.troco]), [[40, null, null]]);
+      await exec(db, `
+        INSERT INTO venda_pagamentos (venda_id, forma_pagamento, valor, valor_entregue, troco)
+        VALUES (1, 'dinheiro', 8.99, 9.00, 0.01)
+      `);
+      const pagamentos = await all(db, `
+        SELECT valor, valor_entregue, troco FROM venda_pagamentos WHERE venda_id = 1 ORDER BY id
+      `);
+      assert.deepStrictEqual(
+        pagamentos.map((linha) => [Number(linha.valor), Number(linha.valor_entregue || 0), Number(linha.troco || 0)]),
+        [[40, 0, 0], [8.99, 9, 0.01]]
+      );
+      const soma = pagamentos.reduce((total, linha) => total + Math.round(Number(linha.valor) * 100), 0);
+      assert.equal(soma, 4899);
+    });
   });
 
   await test('banco parcialmente inicializado (sem configuracoes): completa sem perder dados', async () => {

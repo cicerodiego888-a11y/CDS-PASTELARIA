@@ -201,7 +201,8 @@ function exigirPerfilAjusteEstoque() {
         return next();
       }
       return res.status(403).json({
-        error: 'Acesso restrito: apenas SUPER_ADMIN ou ADMIN podem ajustar estoque.'
+        error: 'Acesso restrito: apenas SUPER_ADMIN ou ADMIN podem ajustar estoque.',
+        code: 'AJUSTE_ESTOQUE_NAO_AUTORIZADO'
       });
     });
   };

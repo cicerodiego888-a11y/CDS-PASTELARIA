@@ -397,8 +397,64 @@ function headersPedidoPdv() {
     };
 }
 
+function handoffConsolidado(handoff) {
+    return Boolean(handoff && Number(handoff.consolidacao_id) > 0);
+}
+
+async function retomarVinculoVendaConsolidada(handoff) {
+    try {
+        const response = await fetch(
+            `${API_URL}/pedidos/venda-consolidada-mesa/${Number(handoff.consolidacao_id)}/vincular`,
+            {
+                method: 'POST',
+                headers: headersPedidoPdv(),
+                body: JSON.stringify({ venda_id: Number(handoff.venda_id) })
+            }
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || Number(data.venda_id) !== Number(handoff.venda_id)) {
+            throw new Error(
+                data.mensagem
+                || data.error
+                || 'A venda existe, mas o vínculo com os pedidos ainda não foi recuperado.'
+            );
+        }
+        if (data.mesa && data.mesa.encerrado) {
+            sessionStorage.removeItem('pdvPedidoHandoff');
+        }
+        showNotification(
+            data.mesa && data.mesa.encerrado
+                ? 'Vínculo recuperado e atendimento encerrado.'
+                : 'Vínculo da venda recuperado; o atendimento permanece ocupado até a quitação integral.',
+            data.mesa && data.mesa.encerrado ? 'success' : 'info'
+        );
+    } catch (error) {
+        showNotification(error.message || 'Não foi possível recuperar o vínculo da venda consolidada.', 'danger');
+    }
+}
+
 async function finalizarPedidoPdv(vendaId) {
     if (!pdvPedidoHandoff) return;
+    if (handoffConsolidado(pdvPedidoHandoff)) {
+        const response = await fetch(
+            `${API_URL}/pedidos/venda-consolidada-mesa/${Number(pdvPedidoHandoff.consolidacao_id)}/vincular`,
+            {
+                method: 'POST',
+                headers: headersPedidoPdv(),
+                body: JSON.stringify({ venda_id: Number(vendaId) })
+            }
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || Number(data.venda_id) !== Number(vendaId)) {
+            throw new Error(
+                data.mensagem
+                || data.error
+                || `A venda ${vendaId} foi persistida, mas os pedidos da mesa não foram vinculados.`
+            );
+        }
+        pdvPedidoHandoffFinalizado = true;
+        return;
+    }
     const pedidoId = Number(pdvPedidoHandoff.pedido_id);
     const response = await fetch(
         `${API_URL}/pedidos/${pedidoId}/finalizar-venda-pdv`,
@@ -429,12 +485,15 @@ function aplicarHandoffPedidoPdv() {
         showNotification('Dados de preparação do Pedido inválidos; nenhum item foi carregado.', 'danger');
         return;
     }
+    const consolidado = handoffConsolidado(handoff);
     if (
         !handoff
-        || !Number.isInteger(Number(handoff.pedido_id))
-        || !Number.isInteger(Number(handoff.operacao_id))
         || !Array.isArray(handoff.itens)
         || handoff.itens.length === 0
+        || (!consolidado && (
+          !Number.isInteger(Number(handoff.pedido_id))
+          || !Number.isInteger(Number(handoff.operacao_id))
+        ))
     ) {
         showNotification('Preparação do Pedido incompleta; nenhum item foi carregado.', 'danger');
         return;
@@ -463,6 +522,10 @@ function aplicarHandoffPedidoPdv() {
         return;
     }
     if (handoff.venda_id) {
+        if (handoffConsolidado(handoff)) {
+            void retomarVinculoVendaConsolidada(handoff);
+            return;
+        }
         showNotification(
             `A venda ${handoff.venda_id} já foi registrada para este Pedido. Retome o pagamento pelo fluxo da venda; não será criada outra.`,
             'warning'
@@ -518,7 +581,9 @@ function aplicarHandoffPedidoPdv() {
         atualizarCarrinho();
         $('#descontoPdv, #acrescimoPdv').prop('disabled', true);
         showNotification(
-            `Composição do Pedido ${handoff.pedido_id} carregada. Finalize o pagamento normalmente no PDV.`,
+            consolidado
+                ? 'Pedidos da mesa carregados em uma única venda. Finalize o pagamento normalmente no PDV.'
+                : `Composição do Pedido ${handoff.pedido_id} carregada. Finalize o pagamento normalmente no PDV.`,
             'info'
         );
     } catch (err) {
@@ -1471,7 +1536,8 @@ async function precalcularDistribuicaoFiscalVenda(
     vendaFiscal = false,
     pagamentos = [],
     desconto = 0,
-    acrescimo = 0
+    acrescimo = 0,
+    extras = {}
 ) {
     const pagamentosPayload = Array.isArray(pagamentos) ? pagamentos : [];
     try {
@@ -1491,7 +1557,9 @@ async function precalcularDistribuicaoFiscalVenda(
                 emitir_fiscal: vendaFiscal,
                 pagamentos: pagamentosPayload,
                 desconto: Number(desconto || 0),
-                acrescimo: Number(acrescimo || 0)
+                acrescimo: Number(acrescimo || 0),
+                pedido_id: extras.pedidoId || undefined,
+                total: extras.total
             }))
         });
 
@@ -1599,6 +1667,14 @@ function formaPagamentoUsaTEF(forma) {
 
 function formaPagamentoGravacaoFiscalPDV(forma) {
     return TefFluxoPagamento.formaPagamentoGravacaoFiscal(forma);
+}
+
+function formaClassificadaDasParcelas(parcelas, alternativa) {
+    const api = window.ClassificacaoModalidadePagamento;
+    if (!api || typeof api.classificarFormaPagamento !== 'function') return alternativa;
+    const forma = api.classificarFormaPagamento(parcelas);
+    if (!forma) return alternativa;
+    return forma;
 }
 
 function deveEnviarPagamentosProcessadosPdv(totalFiscal, totalNaoFiscal) {
@@ -5376,7 +5452,10 @@ function abrirPagamentoMisto() {
         }
         fechamentoMistoConfirmado = true;
         pagamentosMistos = lista;
-        formaPagamentoSelecionadaPDV = 'misto';
+        formaPagamentoSelecionadaPDV = formaClassificadaDasParcelas(
+            lista,
+            lista[0] && lista[0].forma_pagamento
+        );
         if (document.activeElement) document.activeElement.blur();
         modal.hide();
 
@@ -5648,14 +5727,19 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
     }
 
     if (!window.pdvChaveFechamento) {
-        window.pdvChaveFechamento = `pdv-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+        const consolidacaoId = Number(pdvPedidoHandoff && pdvPedidoHandoff.consolidacao_id || 0);
+        window.pdvChaveFechamento = consolidacaoId > 0
+            ? `mesa-consolidacao-${consolidacaoId}`
+            : `pdv-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     }
 
     const dados = {
         chave_fechamento_pdv: window.pdvChaveFechamento,
         cliente_id: clienteId,
         cliente_nome: clienteSelecionado?.nome || vendaPrazoInfo?.cliente_nome || null,
-        forma_pagamento: pagamentosMistos.length > 1 ? "misto" : formaPagamento,
+        forma_pagamento: pagamentosMistos.length > 0
+            ? formaClassificadaDasParcelas(pagamentosMistos, formaPagamento)
+            : formaPagamento,
         desconto,
         acrescimo,
         total,
@@ -5716,13 +5800,30 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
             return;
         }
         dados.origem = 'PDV';
-        dados.pedido_id = Number(pdvPedidoHandoff.pedido_id);
-        dados.pedido_faturamento_operacao_id = Number(pdvPedidoHandoff.operacao_id);
         dados.cliente_id = pdvPedidoHandoff.cliente_id || clienteId;
+        if (handoffConsolidado(pdvPedidoHandoff)) {
+            dados.consolidacao_id = Number(pdvPedidoHandoff.consolidacao_id);
+        } else {
+            dados.pedido_id = Number(pdvPedidoHandoff.pedido_id);
+            dados.pedido_faturamento_operacao_id = Number(pdvPedidoHandoff.operacao_id);
+        }
     }
 
     if (formaPagamento === 'dinheiro') {
         dados.valor_recebido = parseFloat($('#valorRecebidoPDV').val()) || 0;
+    }
+    if (pagamentosMistos.length > 0) {
+        const entregueCentavos = pagamentosMistos.reduce((soma, pagamento) => {
+            const base = pagamento.valor_entregue != null ? pagamento.valor_entregue : pagamento.valor;
+            return soma + Math.round(Number(base || 0) * 100);
+        }, 0);
+        const aplicadoCentavos = pagamentosMistos.reduce(
+            (soma, pagamento) => soma + Math.round(Number(pagamento.valor || 0) * 100),
+            0
+        );
+        if (entregueCentavos > aplicadoCentavos) {
+            dados.valor_recebido = entregueCentavos / 100;
+        }
     }
 
     if (formaPagamento === 'prazo') {
@@ -5737,7 +5838,11 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
         emitirFiscal,
         dados.pagamentos,
         desconto,
-        acrescimo
+        acrescimo,
+        {
+            pedidoId: pdvPedidoHandoff && pdvPedidoHandoff.pedido_id,
+            total
+        }
     );
 
     if (!distribuicao.sucesso) {
@@ -5861,9 +5966,9 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
                 );
                 return;
             }
-            dados.forma_pagamento = 'misto';
             dados.pagamento_sequencial = true;
             dados.pagamentos = TefFluxoPagamento.montarParcelasListaSequencial(parcelasFechamento);
+            dados.forma_pagamento = formaClassificadaDasParcelas(dados.pagamentos, dados.forma_pagamento);
             dados.confirmacao_fiscal_manual = dados.pagamentos.some((pagamento) => pagamento.confirmacao_manual === 1);
             ramoPagamentoConcluido = true;
         } else if (ramoFechamento === 'pagamento_unico_fiscal') {
@@ -5974,7 +6079,7 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
 
             if (ehPagamentoMisto) {
                 dados.pagamentos = normalizarPagamentosSemTef(pagamentosMistos);
-                dados.forma_pagamento = 'misto';
+                dados.forma_pagamento = formaClassificadaDasParcelas(dados.pagamentos, formaPagamentoNormalizada);
             } else if (!Array.isArray(dados.pagamentos) || dados.pagamentos.length === 0) {
                 dados.pagamentos = [
                     {
@@ -6919,6 +7024,68 @@ function abrirTelaPagamentoBalcao(opcoes = {}) {
         return ValorMonetarioPdv.ler(texto);
     }
 
+    let trocoEmRegistro = false;
+
+    function formaDiretaEhDinheiro(forma) {
+        const nome = String(forma || '').toLowerCase().trim();
+        return nome === 'dinheiro' || nome === 'especie' || nome === 'cash';
+    }
+
+    function htmlResumoTroco(conta, destacar) {
+        const classeTroco = destacar && conta.troco > 0
+            ? 'fw-bold fs-4 px-2 py-1 rounded'
+            : 'fw-bold';
+        const estiloTroco = destacar && conta.troco > 0
+            ? 'background:#fff3bf;color:#7a4e00;'
+            : '';
+        return `
+            <div class="d-flex justify-content-between mb-2"><span>DINHEIRO ENTREGUE</span><strong>${moedaDireta(conta.entregue)}</strong></div>
+            <div class="d-flex justify-content-between mb-2"><span>SALDO RESTANTE</span><strong>${moedaDireta(conta.restante)}</strong></div>
+            <div class="d-flex justify-content-between mb-2"><span>VALOR APLICADO</span><strong>${moedaDireta(conta.aplicado)}</strong></div>
+            <div class="d-flex justify-content-between"><span>TROCO</span><strong class="${classeTroco}" style="${estiloTroco}">${moedaDireta(conta.troco)}</strong></div>
+        `;
+    }
+
+    function mostrarEtapaValorDireto() {
+        $('#etapaValorDireto').removeClass('d-none');
+        $('#acoesValorDireto').removeClass('d-none');
+        $('#etapaConfirmacaoTroco').addClass('d-none').empty();
+        $('#acoesTrocoDireto').addClass('d-none');
+        $('#btnConfirmarTrocoDireto').prop('disabled', false);
+    }
+
+    function atualizarPreviewTrocoDireto() {
+        if (!interacao || !formaDiretaEhDinheiro(interacao.visao().formaEscolhida)) {
+            $('#previewTrocoDireto').addClass('d-none').empty();
+            return;
+        }
+        const conta = ValorMonetarioPdv.separarDinheiro(
+            lerValorMonetarioBr($('#valorParcelaDireta').val()),
+            interacao.visao().restante
+        );
+        if (!conta.ok) {
+            $('#previewTrocoDireto').addClass('d-none').empty();
+            return;
+        }
+        $('#previewTrocoDireto').removeClass('d-none').html(htmlResumoTroco(conta, false));
+    }
+
+    function mostrarConfirmacaoTroco(conta) {
+        $('#etapaValorDireto').addClass('d-none');
+        $('#acoesValorDireto').addClass('d-none');
+        $('#etapaConfirmacaoTroco').removeClass('d-none').html(htmlResumoTroco(conta, true));
+        $('#acoesTrocoDireto').removeClass('d-none');
+        $('#btnConfirmarTrocoDireto').prop('disabled', false).trigger('focus');
+    }
+
+    function voltarConfirmacaoTrocoDireto() {
+        if (trocoEmRegistro) return;
+        mostrarEtapaValorDireto();
+        atualizarPreviewTrocoDireto();
+        const campo = document.getElementById('valorParcelaDireta');
+        if (campo) campo.focus();
+    }
+
     function garantirModalValorDireto() {
         if (document.getElementById('modalValorDireto')) return;
         $('body').append(`
@@ -6930,34 +7097,81 @@ function abrirTelaPagamentoBalcao(opcoes = {}) {
                             <button type="button" class="btn-close" id="btnFecharValorDireto" aria-label="Fechar"></button>
                         </div>
                         <div class="modal-body">
-                            <p class="text-muted mb-3" id="saldoValorDireto">Saldo restante: R$ 0,00</p>
-                            <label class="form-label fw-bold" for="valorParcelaDireta">Valor</label>
-                            <div class="input-group input-group-lg">
-                                <span class="input-group-text">R$</span>
-                                <input type="text" inputmode="numeric" id="valorParcelaDireta" class="form-control" autocomplete="off" placeholder="0,00">
+                            <div id="etapaValorDireto">
+                                <p class="text-muted mb-3" id="saldoValorDireto">Saldo restante: R$ 0,00</p>
+                                <label class="form-label fw-bold" for="valorParcelaDireta">Valor</label>
+                                <div class="input-group input-group-lg">
+                                    <span class="input-group-text">R$</span>
+                                    <input type="text" inputmode="numeric" id="valorParcelaDireta" class="form-control" autocomplete="off" placeholder="0,00" autofocus>
+                                </div>
+                                <div id="previewTrocoDireto" class="d-none mt-3"></div>
                             </div>
+                            <div id="etapaConfirmacaoTroco" class="d-none"></div>
                         </div>
                         <div class="modal-footer border-0 pt-0">
-                            <button type="button" class="btn btn-outline-secondary" id="btnVoltarFormaDireta">Voltar</button>
-                            <button type="button" class="btn btn-primary" id="btnConfirmarValorDireto">Confirmar</button>
+                            <div id="acoesValorDireto" class="d-flex gap-2 w-100">
+                                <button type="button" class="btn btn-outline-secondary flex-fill" id="btnVoltarFormaDireta">Voltar</button>
+                                <button type="button" class="btn btn-primary flex-fill" id="btnConfirmarValorDireto">Confirmar</button>
+                            </div>
+                            <div id="acoesTrocoDireto" class="d-none d-flex gap-2 w-100">
+                                <button type="button" class="btn btn-outline-secondary flex-fill" id="btnVoltarTrocoDireto">Voltar</button>
+                                <button type="button" class="btn btn-success flex-fill" id="btnConfirmarTrocoDireto">Confirmar pagamento</button>
+                            </div>
                         </div>
                     </div>
                 </div>
             </div>
         `);
         const modalEl = document.getElementById('modalValorDireto');
-        const modalValor = new bootstrap.Modal(modalEl, { backdrop: true, keyboard: true, focus: true });
+        const modalValor = new bootstrap.Modal(modalEl, { backdrop: true, keyboard: true, focus: false });
+        function soltarArmadilhaFocoPagamento() {
+            const pagamento = document.getElementById('modalPagamentoPDV');
+            const instancia = pagamento && bootstrap.Modal.getInstance(pagamento);
+            if (instancia && instancia._focustrap && typeof instancia._focustrap.deactivate === 'function') {
+                instancia._focustrap.deactivate();
+            }
+        }
+        function focarCampoValorDireto() {
+            if (!modalEl.classList.contains('show')) return;
+            soltarArmadilhaFocoPagamento();
+            const etapaValor = document.getElementById('etapaValorDireto');
+            const campo = document.getElementById('valorParcelaDireta');
+            if (etapaValor && !etapaValor.classList.contains('d-none') && campo) {
+                campo.focus();
+                if (typeof campo.select === 'function') campo.select();
+                return;
+            }
+            const confirmarTroco = document.getElementById('btnConfirmarTrocoDireto');
+            const acoesTroco = document.getElementById('acoesTrocoDireto');
+            if (confirmarTroco && acoesTroco && !acoesTroco.classList.contains('d-none')) {
+                confirmarTroco.focus();
+            }
+        }
+        modalEl._guardaFocoValor = function (evento) {
+            if (!modalEl.classList.contains('show')) return;
+            if (modalEl.contains(evento.target)) return;
+            focarCampoValorDireto();
+        };
+        document.addEventListener('focusin', modalEl._guardaFocoValor, true);
         modalEl.addEventListener('shown.bs.modal', function () {
             modalEl.style.zIndex = '1065';
             const fundos = document.querySelectorAll('.modal-backdrop');
             if (fundos.length) fundos[fundos.length - 1].style.zIndex = '1060';
-            const campo = document.getElementById('valorParcelaDireta');
-            if (campo) {
-                campo.focus();
-                campo.select();
-            }
+            focarCampoValorDireto();
+            setTimeout(focarCampoValorDireto, 0);
+            setTimeout(focarCampoValorDireto, 200);
         });
         modalEl.addEventListener('hidden.bs.modal', function () {
+            const pagamento = document.getElementById('modalPagamentoPDV');
+            const pagamentoModal = pagamento && bootstrap.Modal.getInstance(pagamento);
+            if (
+                pagamento
+                && pagamento.classList.contains('show')
+                && pagamentoModal
+                && pagamentoModal._focustrap
+            ) {
+                pagamentoModal._focustrap.activate();
+            }
             if (interacao && interacao.visao().solicitarValor) {
                 interacao.cancelarValor();
                 desenharPagamentoDireto();
@@ -6969,16 +7183,22 @@ function abrirTelaPagamentoBalcao(opcoes = {}) {
                 }
             }, 0);
         });
+        $('#valorParcelaDireta').on('input', atualizarPreviewTrocoDireto);
         $('#valorParcelaDireta').on('keydown', function (e) {
             if (e.key === 'Enter') {
                 e.preventDefault();
-                confirmarValorDireto();
+                if (!$('#etapaConfirmacaoTroco').hasClass('d-none')) confirmarTrocoDireto();
+                else confirmarValorDireto();
             }
         });
         $('#btnVoltarFormaDireta, #btnFecharValorDireto').on('click', function () {
             modalValor.hide();
         });
+        $('#btnVoltarTrocoDireto').on('click', function () {
+            voltarConfirmacaoTrocoDireto();
+        });
         $('#btnConfirmarValorDireto').on('click', confirmarValorDireto);
+        $('#btnConfirmarTrocoDireto').on('click', confirmarTrocoDireto);
         modalEl._modalValorDireto = modalValor;
     }
 
@@ -7021,7 +7241,10 @@ function abrirTelaPagamentoBalcao(opcoes = {}) {
         }
         fecharModalValorDireto();
         pagamentosMistos = PagamentoSequencial.exportar();
-        formaPagamentoSelecionadaPDV = 'misto';
+        formaPagamentoSelecionadaPDV = formaClassificadaDasParcelas(
+            pagamentosMistos,
+            pagamentosMistos[0] && pagamentosMistos[0].forma_pagamento
+        );
         if (document.activeElement) document.activeElement.blur();
         modal.hide();
         setTimeout(() => mostrarModalDecisaoFiscal(), 300);
@@ -7035,7 +7258,7 @@ function abrirTelaPagamentoBalcao(opcoes = {}) {
         $('#listaParcelasDiretas').html((visao.parcelas || []).map((parcela) => `
             <div class="d-flex justify-content-between border rounded bg-white p-2 mb-2">
                 <strong>${rotuloFormaDireta(parcela.forma_pagamento)}</strong>
-                <span>${moedaDireta(parcela.valor)}</span>
+                <span>${moedaDireta(parcela.valor)}${Number(parcela.troco) > 0 ? ` <small class="text-muted">troco ${moedaDireta(parcela.troco)}</small>` : ''}</span>
             </div>
         `).join(''));
         const bloqueioDocumento = window.pdvDocumentoFiscalBloqueado;
@@ -7055,13 +7278,37 @@ function abrirTelaPagamentoBalcao(opcoes = {}) {
             garantirModalValorDireto();
             $('#rotuloValorDireto').text(rotuloFormaDireta(visao.formaEscolhida));
             $('#saldoValorDireto').text(`Saldo restante: ${moedaDireta(visao.restante)}`);
+            $('#btnConfirmarValorDireto').text(formaDiretaEhDinheiro(visao.formaEscolhida) ? 'Continuar' : 'Confirmar');
+            mostrarEtapaValorDireto();
             if (opcoes.limparValor) $('#valorParcelaDireta').val('');
+            atualizarPreviewTrocoDireto();
             const aberto = document.getElementById('modalValorDireto');
-            if (aberto && !aberto.classList.contains('show')) aberto._modalValorDireto.show();
+            if (aberto && !aberto.classList.contains('show')) {
+                const pagamento = document.getElementById('modalPagamentoPDV');
+                const pagamentoModal = pagamento && bootstrap.Modal.getInstance(pagamento);
+                if (pagamentoModal && pagamentoModal._focustrap) {
+                    pagamentoModal._focustrap.deactivate();
+                }
+                aberto._modalValorDireto.show();
+            }
             return;
         }
         if (modalEl && modalEl.classList.contains('show') && modalEl._modalValorDireto) {
             modalEl._modalValorDireto.hide();
+        }
+    }
+
+    async function confirmarTrocoDireto() {
+        if (trocoEmRegistro) return;
+        const botao = $('#btnConfirmarTrocoDireto');
+        if (botao.prop('disabled')) return;
+        trocoEmRegistro = true;
+        botao.prop('disabled', true);
+        try {
+            await registrarParcelaDireta($('#valorParcelaDireta').val());
+        } finally {
+            trocoEmRegistro = false;
+            botao.prop('disabled', false);
         }
     }
 
@@ -7071,11 +7318,36 @@ function abrirTelaPagamentoBalcao(opcoes = {}) {
         if (botao.prop('disabled')) return;
         const textoDigitado = $('#valorParcelaDireta').val();
         const valor = lerValorMonetarioBr(textoDigitado);
+        const forma = interacao.visao().formaEscolhida;
+        if (formaDiretaEhDinheiro(forma)) {
+            const decisao = ValorMonetarioPdv.decidirConfirmacaoDinheiro(
+                { restante: interacao.visao().restante, confirmacaoAberta: false, emRegistro: false },
+                valor
+            );
+            if (decisao.acao !== 'aguardar_confirmacao') {
+                const mensagens = {
+                    VALOR_INVALIDO: 'Informe um valor maior que zero.',
+                    VALOR_ACIMA_DO_RESTANTE: 'O saldo da venda já foi recebido.'
+                };
+                showNotification(mensagens[decisao.codigo] || 'Informe um valor válido.', 'warning');
+                return;
+            }
+            mostrarConfirmacaoTroco(decisao.conta);
+            return;
+        }
         if (ValorMonetarioPdv.excedeRestante(valor, interacao.visao().restante)) {
             showNotification('O valor supera o saldo restante.', 'warning');
             botao.prop('disabled', false);
             return;
         }
+        await registrarParcelaDireta(textoDigitado);
+    }
+
+    async function registrarParcelaDireta(textoDigitado) {
+        if (!interacao) return;
+        const botao = $('#btnConfirmarValorDireto');
+        if (botao.prop('disabled')) return;
+        const valor = lerValorMonetarioBr(textoDigitado);
         const forma = interacao.visao().formaEscolhida;
         const modo = InteracaoPagamentoMisto.modoConfirmacaoDireta(forma);
         botao.prop('disabled', true);
@@ -7157,6 +7429,9 @@ function abrirTelaPagamentoBalcao(opcoes = {}) {
         }
         const valorEl = document.getElementById('modalValorDireto');
         if (!valorEl) return;
+        if (valorEl._guardaFocoValor) {
+            document.removeEventListener('focusin', valorEl._guardaFocoValor, true);
+        }
         const instancia = bootstrap.Modal.getInstance(valorEl);
         if (instancia) instancia.dispose();
         valorEl.remove();
@@ -7184,62 +7459,55 @@ function abrirTelaPagamentoBalcao(opcoes = {}) {
     $(document).off('keydown.pagamentoPDV');
 
     $(document).on('keydown.pagamentoPDV', function(e) {
-        const modalAberto = $('#modalPagamentoPDV').hasClass('show');
+        const decisao = InteracaoPagamentoMisto.decidirAtalhoPagamentoPdv(e.key, {
+            modalPagamentoAberto: $('#modalPagamentoPDV').hasClass('show'),
+            modalValorAberto: $('#modalValorDireto').hasClass('show'),
+            campoFocado: $('input:focus, textarea:focus, select:focus').length > 0
+        });
 
-        if (!modalAberto) {
+        if (decisao.acao === 'digitar' && $('#modalValorDireto').hasClass('show')) {
+            const campo = document.getElementById('valorParcelaDireta');
+            const etapaValor = document.getElementById('etapaValorDireto');
+            if (
+                campo
+                && etapaValor
+                && !etapaValor.classList.contains('d-none')
+                && document.activeElement !== campo
+                && e.key.length === 1
+                && !e.ctrlKey
+                && !e.altKey
+                && !e.metaKey
+            ) {
+                campo.focus();
+                const inicio = typeof campo.selectionStart === 'number' ? campo.selectionStart : campo.value.length;
+                const fim = typeof campo.selectionEnd === 'number' ? campo.selectionEnd : campo.value.length;
+                if (typeof campo.setRangeText === 'function') {
+                    campo.setRangeText(e.key, inicio, fim, 'end');
+                    campo.dispatchEvent(new Event('input', { bubbles: true }));
+                    e.preventDefault();
+                }
+            }
             return;
         }
 
-        if (
-            $('input:focus, textarea:focus, select:focus').length > 0
-        ) {
+        if (decisao.acao === 'ignorar' || decisao.acao === 'confirmar_valor') {
             return;
         }
 
-        switch (e.key) {
-            case '1':
-                e.preventDefault();
-                escolherFormaDireta('dinheiro');
-                break;
-
-            case '2':
-                e.preventDefault();
-                escolherFormaDireta('pix');
-                break;
-
-            case '3':
-                e.preventDefault();
-                escolherFormaDireta('cartao_debito');
-                break;
-
-            case '4':
-                e.preventDefault();
-                escolherFormaDireta('cartao_credito');
-                break;
-
-            case '5':
-                e.preventDefault();
-                abrirPagamentoMisto();
-                break;
-
-            case '6':
-                e.preventDefault();
-                selecionarPagamentoPDV('prazo');
-                break;
-
-            case 'Escape':
-                e.preventDefault();
-                if ($('#modalValorDireto').hasClass('show')) {
-                    const valorEl = document.getElementById('modalValorDireto');
-                    if (valorEl && valorEl._modalValorDireto) valorEl._modalValorDireto.hide();
-                    return;
-                }
-                if (document.activeElement) {
-                    document.activeElement.blur();
-                }
-                $('#modalPagamentoPDV').modal('hide');
-                break;
+        e.preventDefault();
+        if (decisao.acao === 'cancelar_valor') {
+            const valorEl = document.getElementById('modalValorDireto');
+            if (valorEl && valorEl._modalValorDireto) valorEl._modalValorDireto.hide();
+            return;
         }
+        if (decisao.acao === 'fechar_pagamento') {
+            if (document.activeElement) document.activeElement.blur();
+            $('#modalPagamentoPDV').modal('hide');
+            return;
+        }
+        if (decisao.forma === 'misto') abrirPagamentoMisto();
+        else if (decisao.forma === 'prazo') selecionarPagamentoPDV('prazo');
+        else escolherFormaDireta(decisao.forma);
     });
 }
 
@@ -8233,9 +8501,12 @@ $(document).on('hide.bs.modal', '.modal', function () {
     }
 });
 
-// Limpeza extra quando o modal terminar de fechar
+// Limpeza extra quando o modal terminar de fechar.
+// Não tira o foco de um modal que ainda está aberto.
 $(document).on('hidden.bs.modal', '.modal', function () {
-    if (document.activeElement) {
+    if (document.querySelector('.modal.show')) return;
+
+    if (document.activeElement && this.contains(document.activeElement)) {
         document.activeElement.blur();
     }
 

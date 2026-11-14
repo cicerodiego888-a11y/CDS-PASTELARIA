@@ -17,6 +17,9 @@ const { prepararComposicaoPedidoPdv } = require('../services/vendas/PedidoPdvCom
 const { iniciarVendaPorValorPasteis } = require('../services/vendas/VendaPorValorPasteisService');
 const PedidoFaturamentoOperacaoRepository = require('../services/faturamento/PedidoFaturamentoOperacaoRepository');
 const FaturamentoService = require('../services/faturamento/FaturamentoService');
+const PedidoPreparacaoService = require('../services/pedido/PedidoPreparacaoService');
+const MesaAtendimentoService = require('../services/pedido/MesaAtendimentoService');
+const VendaConsolidadaMesa = require('../services/vendas/VendaConsolidadaMesaService');
 
 router.use(exigirRecurso('pedidos'));
 router.use(criarMiddlewareContextoEmpresa(db));
@@ -42,6 +45,28 @@ function responderErro(res, err) {
 
 router.get('/', async (req, res) => {
   try {
+    const empresaId = empresaIdDoReqPedido(req);
+    const mesaId = req.query.mesa_id == null || req.query.mesa_id === ''
+      ? null
+      : Number(req.query.mesa_id);
+    const mesaAtendimentoId = req.query.mesa_atendimento_id == null || req.query.mesa_atendimento_id === ''
+      ? null
+      : Number(req.query.mesa_atendimento_id);
+    if (mesaId != null || mesaAtendimentoId != null) {
+      if (
+        !Number.isInteger(mesaId) || mesaId <= 0
+        || !Number.isInteger(mesaAtendimentoId) || mesaAtendimentoId <= 0
+      ) {
+        const err = new Error('Informe uma mesa e um atendimento válidos para filtrar os pedidos.');
+        err.statusCode = 400;
+        err.codigo = 'FILTRO_MESA_INVALIDO';
+        throw err;
+      }
+      const atendimento = await MesaAtendimentoService.consultarAtivo(empresaId, mesaId, { db });
+      if (!atendimento.atendimento || Number(atendimento.atendimento.id) !== mesaAtendimentoId) {
+        return res.json({ success: true, itens: [] });
+      }
+    }
     const out = await PedidoOperacional.listar({
       status: req.query.status,
       cliente: req.query.cliente,
@@ -50,7 +75,9 @@ router.get('/', async (req, res) => {
       dataFim: req.query.dataFim || req.query.fim,
       busca: req.query.busca || req.query.q,
       limite: req.query.limite,
-      empresaId: empresaIdDoReqPedido(req)
+      empresaId,
+      mesaId,
+      mesaAtendimentoId
     });
     res.json(out);
   } catch (err) {
@@ -102,6 +129,40 @@ router.post('/venda-por-valor-pasteis', async (req, res) => {
       clienteId: body.cliente_id != null ? body.cliente_id : body.clienteId
     });
     res.status(out.pedido_repetido || out.recuperacao ? 200 : 201).json(out);
+  } catch (err) {
+    responderErro(res, err);
+  }
+});
+
+router.post('/venda-consolidada-mesa', async (req, res) => {
+  try {
+    const out = await VendaConsolidadaMesa.preparar({
+      empresaId: empresaIdDoReqPedido(req),
+      mesaId: (req.body || {}).mesa_id,
+      pedidoIds: (req.body || {}).pedido_ids,
+      operadorId: req.user && (req.user.id || req.user.usuario_id),
+      idempotencyKey: req.get('Idempotency-Key') || (req.body || {}).idempotency_key
+    }, { db });
+    res.json({ success: true, ...out });
+  } catch (err) {
+    responderErro(res, err);
+  }
+});
+
+router.post('/venda-consolidada-mesa/:consolidacaoId/vincular', async (req, res) => {
+  try {
+    const out = await VendaConsolidadaMesa.vincular({
+      empresaId: empresaIdDoReqPedido(req),
+      consolidacaoId: Number(req.params.consolidacaoId),
+      vendaId: Number((req.body || {}).venda_id),
+      operadorId: req.user && (req.user.id || req.user.usuario_id)
+    }, { db });
+    res.json({
+      success: true,
+      venda_id: out.venda_id,
+      idempotente: out.idempotente === true,
+      mesa: out.mesa || null
+    });
   } catch (err) {
     responderErro(res, err);
   }
@@ -178,7 +239,8 @@ router.post('/:id/finalizar-venda-pdv', async (req, res) => {
       success: true,
       pedido: out.pedido,
       venda_id: out.venda_id,
-      idempotente: out.idempotente === true
+      idempotente: out.idempotente === true,
+      mesa: out.mesa || null
     });
   } catch (err) {
     responderErro(res, err);
@@ -248,6 +310,46 @@ router.post('/:id/converter', async (req, res) => {
       { empresaId: empresaIdDoReqPedido(req) }
     );
     res.json(out);
+  } catch (err) {
+    responderErro(res, err);
+  }
+});
+
+function operadorDaSessao(req) {
+  const id = Number(req.user && (req.user.id || req.user.usuario_id));
+  if (!Number.isInteger(id) || id <= 0) {
+    const err = new Error('Sessão sem operador.');
+    err.statusCode = 401;
+    err.codigo = 'SESSAO_INVALIDA';
+    throw err;
+  }
+  return id;
+}
+
+function chaveIdempotencia(req) {
+  const header = req.get('Idempotency-Key');
+  const corpo = req.body && (req.body.idempotency_key || req.body.chave_idempotencia);
+  if (header == null && (corpo == null || String(corpo).trim() === '')) return null;
+  return String(header || corpo).trim();
+}
+
+router.post('/:id/preparacao/enviar', async (req, res) => {
+  try {
+    res.json(await PedidoPreparacaoService.enviar(empresaIdDoReqPedido(req), req.params.id, {
+      operadorId: operadorDaSessao(req),
+      idempotencyKey: chaveIdempotencia(req)
+    }));
+  } catch (err) {
+    responderErro(res, err);
+  }
+});
+
+router.post('/:id/preparacao/concluir', async (req, res) => {
+  try {
+    res.json(await PedidoPreparacaoService.concluir(empresaIdDoReqPedido(req), req.params.id, {
+      operadorId: operadorDaSessao(req),
+      idempotencyKey: chaveIdempotencia(req)
+    }));
   } catch (err) {
     responderErro(res, err);
   }

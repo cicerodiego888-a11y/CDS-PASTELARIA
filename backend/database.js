@@ -1570,8 +1570,13 @@ function criarTabelas() {
       function addColuna(nome, tipo) {
         if (!nomes.includes(nome)) {
           db.run(`ALTER TABLE venda_pagamentos ADD COLUMN ${nome} ${tipo}`, (e) => {
-            if (e) console.error(`Erro ao adicionar coluna ${nome}:`, e.message);
-            else console.log(`Coluna ${nome} adicionada em venda_pagamentos`);
+            if (e) {
+              const mensagem = e.message || '';
+              if (/duplicate column name|already exists/i.test(mensagem)) return;
+              console.error(`Erro ao adicionar coluna ${nome}:`, mensagem);
+            } else {
+              console.log(`Coluna ${nome} adicionada em venda_pagamentos`);
+            }
           });
         }
       }
@@ -1583,6 +1588,8 @@ function criarTabelas() {
       addColuna('tef_adquirente', 'TEXT');
       addColuna('tef_comprovante_cliente', 'TEXT');
       addColuna('tef_comprovante_estabelecimento', 'TEXT');
+      addColuna('valor_entregue', 'DECIMAL(10,2)');
+      addColuna('troco', 'DECIMAL(10,2)');
     });
 
     // Tabela de categorias
@@ -1793,6 +1800,19 @@ function criarTabelas() {
       });
     } catch (requireErr) {
       console.error('Erro ao carregar schema estoque_contagens_fisicas:', requireErr.message);
+    }
+    // CDS-ESTOQUE-CONTAGEM-PERIODICIDADE-05 — config informativa por empresa
+    try {
+      const {
+        garantirSchemaEstoqueContagemPeriodicidade
+      } = require('./services/estoque/estoqueContagemPeriodicidadeSchema');
+      garantirSchemaEstoqueContagemPeriodicidade(db, (schemaErr) => {
+        if (schemaErr) {
+          console.error('Erro ao garantir schema empresas_configuracao_contagem_fisica:', schemaErr.message);
+        }
+      });
+    } catch (requireErr) {
+      console.error('Erro ao carregar schema empresas_configuracao_contagem_fisica:', requireErr.message);
     }
 
     // Sprint 03.03 — tipo operacional + ficha técnica (catálogo compartilhado)
@@ -2186,6 +2206,8 @@ function criarTabelas() {
         tef_adquirente TEXT,
         tef_comprovante_cliente TEXT,
         tef_comprovante_estabelecimento TEXT,
+        valor_entregue DECIMAL(10,2),
+        troco DECIMAL(10,2),
         criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (venda_id) REFERENCES vendas(id)
       )
@@ -2926,7 +2948,7 @@ function inicializarBanco() {
         })
         .then((infoMesas) => {
           if (infoMesas && !infoMesas.skipped) {
-            console.log(`[MESAS] schema garantido | mesa_id adicionada: ${infoMesas.colunaAdicionada}`);
+            console.log(`[MESAS] schema garantido | mesa_id adicionada: ${infoMesas.colunaAdicionada} | mesa_atendimento_id adicionada: ${infoMesas.colunaAtendimentoAdicionada}`);
           }
           return garantirSchemaOrigemPedidos(db);
         })

@@ -11,7 +11,10 @@
     EMPRESA_CONTEXT_REQUIRED: 'Selecione a empresa antes de gravar o pedido.',
     PEDIDO_TOTAL_INCONSISTENTE: 'O total informado não confere com os itens. O pedido não foi gravado.',
     UNIDADE_ESTOQUE_INVALIDA: 'Um produto está sem unidade comercial e de estoque. O pedido não foi gravado.',
-    MODULO_NAO_LICENCIADO: 'O módulo Pedidos não está habilitado para esta empresa.'
+    MODULO_NAO_LICENCIADO: 'O módulo Pedidos não está habilitado para esta empresa.',
+    MESA_SEM_ATENDIMENTO: 'Esta mesa não tem atendimento aberto para receber pedido. Volte às mesas e confira a situação.',
+    ATENDIMENTO_NAO_ABERTO: 'Esta mesa não tem atendimento aberto para receber pedido. Volte às mesas e confira a situação.',
+    ATENDIMENTO_EM_FECHAMENTO: 'A mesa está em fechamento e não recebe pedido novo.'
   };
 
   function arredondar(valor) {
@@ -50,6 +53,9 @@
       chave: null,
       assinaturaChave: null,
       confirmacao: null,
+      mesaId: null,
+      mesaNumero: null,
+      mesaBloqueada: false,
       produtoPendente: null,
       editandoEditorId: null
     };
@@ -266,7 +272,7 @@
     const totais = calcularTotais(estado);
     return {
       cliente_id: estado.cliente && estado.cliente.id ? Number(estado.cliente.id) : null,
-      mesa_id: null,
+      mesa_id: estado.mesaId ? Number(estado.mesaId) : null,
       representante_nome: null,
       observacao: estado.observacao ? String(estado.observacao) : null,
       frete: totais.frete,
@@ -324,6 +330,9 @@
     }
     if (!estado.itens.length) {
       return { ok: false, mantemCarrinho: true, mensagem: 'Adicione ao menos um item.' };
+    }
+    if (estado.mesaBloqueada) {
+      return { ok: false, mantemCarrinho: true, mensagem: MENSAGENS.MESA_SEM_ATENDIMENTO };
     }
     const totais = calcularTotais(estado);
     if (!(totais.subtotal > 0) || !(totais.total >= 0)) {
@@ -784,6 +793,7 @@
         : 'Ver carrinho';
     }
     pintarConfirmacao(estado);
+    pintarMesa(estado);
     if (root.CdsMobileOperacao) root.CdsMobileOperacao.salvarPedido(estado);
     const gravarBtn = $('mp-gravar');
     if (gravarBtn) {
@@ -809,11 +819,81 @@
     }
   }
 
+  function mesaDaUrl() {
+    try {
+      const bruto = new root.URLSearchParams(root.location.search).get('mesa');
+      const id = Number(bruto);
+      return Number.isInteger(id) && id > 0 ? id : null;
+    } catch (_erro) {
+      return null;
+    }
+  }
+
+  // O servidor decide se a mesa recebe pedido; esta consulta só evita montar um carrinho inútil.
+  async function consultarMesa(mesaId, fetchFn, headers) {
+    let resp;
+    try {
+      resp = await fetchFn(apiUrl() + '/mesas/' + mesaId + '/atendimento', { headers });
+    } catch (_erro) {
+      return { ok: false, rede: true, mensagem: 'Sem conexão para confirmar a mesa. O pedido não será gravado até a confirmação.' };
+    }
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      const erro = mensagemErroApi(data, resp.status);
+      return Object.assign({ ok: false }, erro);
+    }
+    if (data.situacao === 'FECHAMENTO') {
+      return { ok: false, codigo: 'ATENDIMENTO_EM_FECHAMENTO', mensagem: MENSAGENS.ATENDIMENTO_EM_FECHAMENTO, numero: data.numero };
+    }
+    if (data.situacao !== 'OCUPADA' || !data.atendimento) {
+      return { ok: false, codigo: 'MESA_SEM_ATENDIMENTO', mensagem: MENSAGENS.MESA_SEM_ATENDIMENTO, numero: data.numero };
+    }
+    return { ok: true, numero: data.numero };
+  }
+  api.consultarMesa = consultarMesa;
+
+  async function validarMesaDoPedido(estado) {
+    if (!estado.mesaId) return;
+    const resultado = await consultarMesa(estado.mesaId, root.fetch.bind(root), headersLeitura());
+    tratarAutenticacao(resultado);
+    if (resultado.numero != null) estado.mesaNumero = resultado.numero;
+    estado.mesaBloqueada = !resultado.ok;
+    mostrarAlerta(resultado.ok ? '' : resultado.mensagem);
+  }
+
+  function pintarMesa(estado) {
+    const faixa = $('mp-mesa-faixa');
+    const confirmado = estado.etapa === 'confirmado';
+    if (faixa) {
+      faixa.hidden = !estado.mesaId;
+      const rotulo = $('mp-mesa-rotulo');
+      if (rotulo) {
+        rotulo.textContent = estado.mesaId
+          ? ('Pedido da mesa ' + (estado.mesaNumero != null ? estado.mesaNumero : estado.mesaId))
+          : '';
+      }
+    }
+    const pdv = $('mp-enviar-pdv');
+    if (pdv) pdv.hidden = !!estado.mesaId;
+    const acoes = $('mp-mesa-acoes');
+    if (acoes) acoes.hidden = !(estado.mesaId && confirmado);
+    const conferir = $('mp-mesa-conferir');
+    if (conferir && estado.confirmacao && estado.mesaId) {
+      conferir.href = '/mobile-mesas/?mesa=' + encodeURIComponent(estado.mesaId)
+        + '&pedido=' + encodeURIComponent(estado.confirmacao.id);
+    }
+    const voltar = $('mp-mesa-voltar');
+    if (voltar && estado.mesaId) voltar.href = '/mobile-mesas/?mesa=' + encodeURIComponent(estado.mesaId);
+    const voltarFim = $('mp-mesa-voltar-fim');
+    if (voltarFim && estado.mesaId) voltarFim.href = '/mobile-mesas/?mesa=' + encodeURIComponent(estado.mesaId);
+  }
+
   async function iniciar() {
     if (!documentoAtual() || !$('mp-app')) return;
     if (!exigirSessao()) return;
     const estado = criarEstado();
-    const guardado = root.CdsMobileOperacao ? root.CdsMobileOperacao.lerPedido() : null;
+    estado.mesaId = mesaDaUrl();
+    const guardado = root.CdsMobileOperacao ? root.CdsMobileOperacao.lerPedido(estado.mesaId) : null;
     if (guardado && guardado.ok && guardado.registro && guardado.registro.estado) {
       const salvo = guardado.registro.estado;
       if (ETAPAS.indexOf(salvo.etapa) >= 0 || salvo.etapa === 'confirmado') estado.etapa = salvo.etapa;
@@ -853,6 +933,7 @@
       }
       await contexto.adotarEmpresaPadrao();
       mostrarAlerta('');
+      await validarMesaDoPedido(estado);
       pintar(estado);
     }
 

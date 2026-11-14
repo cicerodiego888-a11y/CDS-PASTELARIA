@@ -250,24 +250,30 @@ async function test06ReqPrevaleceSobreBodyQuery() {
   await closeDb(db);
 }
 
-async function test07SemEmpresaMantemCompat() {
+async function test07SemEmpresaBloqueiaCredito() {
   const { db, produtoId } = await setup();
   const req = { empresaId: null, body: { empresaId: 99 }, query: { empresaId: 99 } };
-  const r = await entrarComoCompra(db, req, { produtoId, quantidadeFiscal: 7 });
-  assert.strictEqual(r.legado, true);
-  assert.ok(r.empresa_id == null);
+  await assert.rejects(
+    () => entrarComoCompra(db, req, { produtoId, quantidadeFiscal: 7 }),
+    (err) => err && err.code === 'EMPRESA_OBRIGATORIA'
+  );
   const prod = await get(db, 'SELECT saldo_fiscal FROM produtos WHERE id = ?', [produtoId]);
-  assert.strictEqual(prod.saldo_fiscal, 107);
+  assert.strictEqual(prod.saldo_fiscal, 100);
   await closeDb(db);
 }
 
 async function test08SemEmpresaNaoCriaEstoqueEmpresa() {
   const { db, produtoId } = await setup();
-  await entrarComoCompra(db, { empresaId: null, body: { empresaId: 1 } }, {
-    produtoId, quantidadeFiscal: 7
-  });
+  await assert.rejects(
+    () => entrarComoCompra(db, { empresaId: null, body: { empresaId: 1 } }, {
+      produtoId, quantidadeFiscal: 7
+    }),
+    (err) => err && err.code === 'EMPRESA_OBRIGATORIA'
+  );
   const n = await get(db, 'SELECT COUNT(*) AS c FROM estoque_empresa');
   assert.strictEqual(n.c, 0);
+  const prod = await get(db, 'SELECT saldo_fiscal FROM produtos WHERE id = ?', [produtoId]);
+  assert.strictEqual(prod.saldo_fiscal, 100);
   await closeDb(db);
 }
 
@@ -314,7 +320,9 @@ async function test10RegressaoFuncional() {
   assert.strictEqual(depois.saldo_nao_fiscal, 0);
 
   const rotas = fs.readFileSync(path.join(ROOT, 'backend/rotas/compras.js'), 'utf8');
-  assert.ok(rotas.includes('empresaIdDoReqCompra(req)'));
+  // CDS-ESTOQUE-INTEGRIDADE-ENTRADAS-01: empresa via opcoes.empresaId / helper (não fallback operacional).
+  assert.ok(rotas.includes('empresaIdDoReqCompra'));
+  assert.ok(rotas.includes('exigirEmpresa: true'));
   assert.ok(!rotas.includes('empresaIdDoReqOperacional'));
   assert.strictEqual((rotas.match(/creditarEstoqueItemCompra\s*\(/g) || []).length, 1);
   assert.strictEqual((rotas.match(/debitarEstoqueItemCompra\s*\(/g) || []).length, 2);
@@ -384,7 +392,7 @@ async function main() {
     ['04 reversao/cancelamento empresa correta', test04ReversaoEmpresaCorreta],
     ['05 req.empresaId chega ate a porta', test05ReqChegaNaPorta],
     ['06 req.empresaId prevalece sobre body/query', test06ReqPrevaleceSobreBodyQuery],
-    ['07 sem empresa mantem COMPAT', test07SemEmpresaMantemCompat],
+    ['07 sem empresa bloqueia crédito', test07SemEmpresaBloqueiaCredito],
     ['08 sem empresa nao cria estoque_empresa', test08SemEmpresaNaoCriaEstoqueEmpresa],
     ['09 rollback externo restaura ambos', test09RollbackExterno],
     ['10 fluxo de compra continua funcionando', test10RegressaoFuncional],

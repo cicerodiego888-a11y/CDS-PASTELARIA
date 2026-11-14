@@ -1,0 +1,141 @@
+/* Casca mobile de MESAS. Complementa mobile-pedido.css e não define regra de negócio. */
+html, body { overflow-x: hidden; }
+
+.mm {
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+  padding-bottom: calc(24px + env(safe-area-inset-bottom));
+  overflow-wrap: anywhere;
+}
+
+.mm .mp-topo { padding-top: calc(12px + env(safe-area-inset-top)); }
+.mm .mp-modulos { flex-wrap: wrap; width: 100%; margin-left: 0; }
+.mm .mp-modulos a { flex: 1 1 auto; justify-content: center; min-height: 44px; }
+
+.mm-rede {
+  margin: 10px 16px 0;
+  padding: 12px;
+  border-radius: 12px;
+  background: #fff4d6;
+  color: #6b4b00;
+  border: 1px solid #e3c36b;
+}
+
+.mm-rede[hidden], .mm-aviso[hidden] { display: none; }
+
+.mm-aviso {
+  margin: 0 0 12px;
+  padding: 12px;
+  border-radius: 12px;
+  background: #fff4d6;
+  color: #6b4b00;
+}
+
+.mm-sucesso {
+  margin: 0 0 12px;
+  padding: 12px;
+  border-radius: 12px;
+  background: #e1f3ea;
+  color: #0b5a3d;
+}
+
+.mm-titulo { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+
+.mm-contadores {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+
+.mm-filtro {
+  font: inherit;
+  min-height: 56px;
+  border: 2px solid var(--mp-borda);
+  border-radius: 12px;
+  background: #fff;
+  color: var(--mp-tinta);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  line-height: 1.2;
+}
+
+.mm-filtro strong { font-size: 1.3rem; }
+.mm-filtro.is-ativo { border-color: var(--mp-marca); background: #e8eef6; }
+
+.mm-grade { display: flex; flex-direction: column; gap: 10px; }
+
+.mm-card {
+  font: inherit;
+  width: 100%;
+  min-height: 84px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  text-align: left;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 2px solid var(--mp-borda);
+  border-left-width: 10px;
+  background: var(--mp-cartao);
+  color: var(--mp-tinta);
+}
+
+.mm-card--livre { border-color: #2e9e6b; }
+.mm-card--ocupada { border-color: #d9822b; }
+.mm-card--fechamento { border-color: #6a4fc2; }
+.mm-card--inativa { opacity: 0.55; }
+
+.mm-card__numero { font-size: 2.2rem; font-weight: 800; min-width: 3ch; }
+.mm-card__texto { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.mm-card__texto small { color: var(--mp-mudo); }
+
+.mm-selo {
+  display: inline-block;
+  align-self: flex-start;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #fff;
+}
+
+.mm-selo--livre { background: #2e9e6b; }
+.mm-selo--ocupada { background: #b8681a; }
+.mm-selo--fechamento { background: #6a4fc2; }
+
+.mm-voltar { width: auto; min-height: 44px; padding: 8px 14px; }
+
+.mm-bloco { background: var(--mp-cartao); border: 1px solid var(--mp-borda); border-radius: 12px; padding: 12px; margin-top: 10px; }
+.mm-bloco p { margin: 4px 0; }
+.mm-bloco ul { margin: 4px 0; padding-left: 18px; }
+
+.mm-pedido { background: var(--mp-cartao); border: 1px solid var(--mp-borda); border-radius: 12px; padding: 12px; margin-top: 10px; }
+.mm-pedido > div { margin: 2px 0; }
+
+.mm-prep { display: inline-block; padding: 1px 8px; border-radius: 8px; background: #eef1f5; font-size: 0.9rem; }
+.mm-prep--normal { background: #e1f3ea; }
+.mm-prep--atrasado { background: #fff1cc; }
+.mm-prep--critico { background: #fde0e0; }
+
+.mm-acoes { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
+.mm .mp-btn { min-height: 52px; }
+.mm .mp-link-btn { margin-top: 0; }
+.mm select.mp-campo { appearance: auto; }
+
+.mm-sugestoes { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.mm-sugestoes button { font: inherit; min-height: 48px; text-align: left; border: 1px solid var(--mp-borda); border-radius: 10px; background: #fff; padding: 8px 12px; }
+
+.mm-vazio { color: var(--mp-mudo); }
+
+@media (max-width: 360px) {
+  .mm-card__numero { font-size: 1.8rem; }
+  .mm-contadores { gap: 6px; }
+}
+
+.mm-modal { position: fixed; inset: 0; z-index: 50; display: flex; align-items: flex-end; justify-content: center; background: rgba(15, 39, 68, 0.55); padding: 12px; padding-bottom: max(12px, env(safe-area-inset-bottom)); overflow-y: auto; }
+.mm-modal__caixa { width: 100%; max-width: 520px; max-height: 90vh; overflow-y: auto; background: #fff; border-radius: 16px; padding: 16px; }
+.mm-modal__caixa h2 { margin: 0 0 8px; font-size: 1.15rem; }

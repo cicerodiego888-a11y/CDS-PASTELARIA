@@ -778,7 +778,7 @@ function processarItensCompra(compraId, itens, fornecedor, opcoes, done) {
         ], (insertErr) => {
           if (insertErr) return done(insertErr);
 
-          // Implementação 02.3: crédito F/NF pela porta pública (sem UPDATE de saldo aqui).
+          // CDS-ESTOQUE-INTEGRIDADE-ENTRADAS-01: crédito F/NF exige empresa (sem fallback global).
           creditarEstoqueItemCompra(db, {
             produtoId,
             quantidadeFiscal: qtdFiscal,
@@ -787,8 +787,7 @@ function processarItensCompra(compraId, itens, fornecedor, opcoes, done) {
               ? Number(opcoes.empresaId)
               : empresaIdDoReqCompra({ empresaId: opcoes?.empresaId }),
             usuarioId: opcoes?.usuarioId ?? opcoes?.usuario_id,
-            exigirEmpresa: opcoes?.exigirEmpresa === true,
-            motivoCompat: opcoes?.motivoCompat
+            exigirEmpresa: true
           }, (creditoErr) => {
             if (creditoErr) return done(creditoErr);
 
@@ -1624,8 +1623,8 @@ router.post('/', (req, res) => {
 
   const continuarGravacao = (empresaResolvida) => {
     const empresaCompraId = Number(empresaResolvida.empresaId);
-    const exigirEmpresaEstoque = empresaResolvida.exigirEmpresaEstoque === true
-      || empresaResolvida.modo === ModoOperacionalGlobal.MULTIEMPRESA;
+    // CDS-ESTOQUE-INTEGRIDADE-ENTRADAS-01: toda compra com itens que creditam estoque exige empresa.
+    const exigirEmpresaEstoque = true;
     req.empresaId = empresaCompraId;
 
     db.serialize(() => {

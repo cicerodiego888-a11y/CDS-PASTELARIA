@@ -57,7 +57,8 @@ const CDS_ERP_PAGE_SCRIPTS = Object.freeze({
     entregas: ['/pdv/js/entregas.js'],
     faturamento: ['/erp/js/faturamento.js'],
     'central-faturamento': ['/erp/js/central-faturamento.js'],
-    pedidos: ['/erp/js/pedidos.js'],
+    pedidos: ['/erp/js/mesas-lancamento.js', '/erp/js/mesas-conferencia.js', '/erp/js/mesas-venda-consolidada.js', '/erp/js/pedidos.js'],
+    mesas: ['/erp/js/mesas-lancamento.js', '/erp/js/mesas-conferencia.js', '/erp/js/mesas-painel.js'],
     financeiro: [
         '/erp/js/financeiro-dashboard.js',
         '/erp/js/financeiro-receber.js',
@@ -297,6 +298,10 @@ window.minimizarModal = function minimizarModal(modalId, rotuloRestaurar) {
 async function loadPage(page) {
     currentPage = page;
     window.CDS_ERP_ACTIVE_PAGE = page;
+    if (window.CdsPainelMesas && typeof window.CdsPainelMesas.parar === 'function') {
+        window.CdsPainelMesas.parar();
+        window.CdsPainelMesas = null;
+    }
 
     if (!paginaPermitidaPorImplantacao(page)) {
         const msg = typeof mensagemModuloNaoContratado === 'function'
@@ -432,6 +437,10 @@ async function loadPage(page) {
             return typeof loadPedidos === 'function'
                 ? loadPedidos()
                 : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar pedidos.</div>');
+        case 'mesas':
+            return typeof loadControleMesas === 'function'
+                ? loadControleMesas()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar o Controle de Mesas.</div>');
         case 'financeiro':
             return carregarPaginaHtml('financeiro.html', function () {
                 if (typeof initFinanceiro === 'function') initFinanceiro();
