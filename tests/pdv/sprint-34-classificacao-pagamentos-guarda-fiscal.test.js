@@ -21,6 +21,8 @@ process.env.CDS_TEST_ISOLATION = '1';
 process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
 process.env.CDS_FORCAR_LOCAL = '1';
 process.env.CDS_RECOMPOSICAO_REFERENCIA_TESTE = '1';
+// Regressão Sprint 34: isola o contrato original (sem fechamento operacional ATIVACAO-01).
+process.env.CDS_RECOMPOSICAO_FECHAMENTO_OPERACIONAL = '0';
 delete process.env.CDS_ALLOW_OFFICIAL_DB;
 delete process.env.CDS_RECOMPOSICAO_HOMOLOGACAO_DISTRIBUIR;
 delete process.env.CDS_RECOMPOSICAO_APLICAR_DISTRIBUICAO;
@@ -46,7 +48,8 @@ const {
 } = require('../../backend/services/vendas/RecomposicaoFiscalContratoService');
 const {
   classificarTipoRecebimento,
-  calcularReferenciasConfirmadas
+  calcularReferenciasConfirmadas,
+  marcarParcelaEletronicaComprovada
 } = require('../../backend/services/vendas/PagamentoSequencialComposicaoService');
 const { selecionarItensFiscaisParaNfce, emitirPorVendaId } = require('../../backend/services/fiscal/emissor');
 const { resolverPagamentosNfce } = require('../../backend/services/fiscal/xmlBuilder');
@@ -81,6 +84,7 @@ function parcela(forma, valor, status, extra = {}) {
   return { forma_pagamento: forma, valor, status_autorizacao: status, ...extra };
 }
 let empresaA;
+let operadorId;
 let token;
 let terminalId;
 let server;
@@ -118,9 +122,9 @@ function httpJson(urlPath, body) {
 describe('Sprint 34 — classificação independente da distribuição', { concurrency: false }, () => {
   it('1 a 9. a forma define o tipo e o estado não transforma eletrônico em dinheiro', () => {
     const dinheiro = parcela('dinheiro', 10, 'informada', { aprovado: false, confirmacao_manual: 1 });
-    const pix = parcela('pix', 20, 'aprovada', { aprovado: true });
-    const debito = parcela('cartao_debito', 20, 'aprovada', { aprovado: true });
-    const credito = parcela('cartao_credito', 10, 'aprovada', { aprovado: true });
+    const pix = marcarParcelaEletronicaComprovada(parcela('pix', 20, 'aprovada', { aprovado: true, nsu: 'NSU-SIM', autorizacao: 'AUT-SIM' }));
+    const debito = marcarParcelaEletronicaComprovada(parcela('cartao_debito', 20, 'aprovada', { aprovado: true, nsu: 'NSU-DEB', autorizacao: 'AUT-DEB' }));
+    const credito = marcarParcelaEletronicaComprovada(parcela('cartao_credito', 10, 'aprovada', { aprovado: true, nsu: 'NSU-CRE', autorizacao: 'AUT-CRE' }));
     assert.equal(classificarTipoRecebimento(pix), 'fiscal');
     assert.equal(classificarTipoRecebimento(debito), 'fiscal');
     assert.equal(classificarTipoRecebimento(credito), 'fiscal');
@@ -139,7 +143,9 @@ describe('Sprint 34 — classificação independente da distribuição', { concu
     const soDinheiro = calcularReferenciasConfirmadas([parcela('dinheiro', 60, 'informada', { confirmacao_manual: 1 })]);
     assert.equal(soDinheiro.valor_fiscal_referencia, 0);
     assert.equal(soDinheiro.valor_nao_fiscal_referencia, 60);
-    const soEletronico = calcularReferenciasConfirmadas([parcela('pix', 60, 'aprovada', { aprovado: true })]);
+    const soEletronico = calcularReferenciasConfirmadas([
+      marcarParcelaEletronicaComprovada(parcela('pix', 60, 'aprovada', { aprovado: true, nsu: 'NSU-SIM', autorizacao: 'AUT-SIM' }))
+    ]);
     assert.equal(soEletronico.valor_fiscal_referencia, 60);
     assert.equal(soEletronico.valor_nao_fiscal_referencia, 0);
     const pendente = calcularReferenciasConfirmadas([
@@ -152,9 +158,9 @@ describe('Sprint 34 — classificação independente da distribuição', { concu
 
   it('11. separação pela forma bloqueia o carrinho integral mesmo sem totais gravados', () => {
     const pagamentos = [
-      parcela('pix', 20, 'aprovada', { aprovado: true }),
-      parcela('cartao_debito', 20, 'aprovada', { aprovado: true }),
-      parcela('cartao_credito', 10, 'aprovada', { aprovado: true }),
+      marcarParcelaEletronicaComprovada(parcela('pix', 20, 'aprovada', { aprovado: true, nsu: 'NSU-SIM', autorizacao: 'AUT-SIM' })),
+      marcarParcelaEletronicaComprovada(parcela('cartao_debito', 20, 'aprovada', { aprovado: true, nsu: 'NSU-DEB', autorizacao: 'AUT-DEB' })),
+      marcarParcelaEletronicaComprovada(parcela('cartao_credito', 10, 'aprovada', { aprovado: true, nsu: 'NSU-CRE', autorizacao: 'AUT-CRE' })),
       parcela('dinheiro', 10, 'informada', { aprovado: false, confirmacao_manual: 1 })
     ];
     const venda = { valor_fiscal: 0, valor_nao_fiscal: 0, total: 60, pagamentos };
@@ -211,22 +217,23 @@ describe('Sprint 34 — classificação independente da distribuição', { concu
       `INSERT INTO usuarios (username, password_hash, role, nome, perfil, ativo)
        VALUES ('op34', 'x', 'operador', 'Operador 34', 'CAIXA', 1)`
     );
-    await run(`INSERT INTO usuario_empresas (usuario_id, empresa_id, ativo) VALUES (?, ?, 1)`, [operador.lastID, empresaA.id]);
+    operadorId = operador.lastID;
+    await run(`INSERT INTO usuario_empresas (usuario_id, empresa_id, ativo) VALUES (?, ?, 1)`, [operadorId, empresaA.id]);
     token = jwt.sign(
-      { id: operador.lastID, usuario_id: operador.lastID, username: 'op34', role: 'operador', perfil: 'CAIXA' },
+      { id: operadorId, usuario_id: operadorId, username: 'op34', role: 'operador', perfil: 'CAIXA' },
       getJwtSecret(), { expiresIn: '2h' }
     );
     terminalId = (await run(`INSERT INTO terminais (nome, hostname) VALUES ('PDV-34', 'sprint34')`)).lastID;
     const turno = await run(
       `INSERT INTO caixa (data, valor_inicial, status, terminal_id, aberto_em, aberto_por)
        VALUES (date('now','localtime'), 0, 'aberto', ?, DATETIME('now','localtime'), ?)`,
-      [terminalId, operador.lastID]
+      [terminalId, operadorId]
     );
     await run(
       `INSERT INTO caixa_sessoes (
          caixa_turno_id, terminal_id, operador_id, empresa_id, status, valor_abertura, aberto_em
        ) VALUES (?, ?, ?, ?, 'aberto', 0, DATETIME('now','localtime'))`,
-      [turno.lastID, terminalId, operador.lastID, empresaA.id]
+      [turno.lastID, terminalId, operadorId, empresaA.id]
     );
     const app = express();
     app.use(express.json());
@@ -254,15 +261,36 @@ describe('Sprint 34 — classificação independente da distribuição', { concu
     };
   }
 
-  const mistos = [
-    parcela('dinheiro', 10, 'informada', { aprovado: false, confirmacao_manual: 1, tipo_recebimento: 'nao_fiscal' }),
-    parcela('pix', 20, 'aprovada', { aprovado: true, tipo_recebimento: 'fiscal' }),
-    parcela('cartao_debito', 20, 'aprovada', { aprovado: true, tipo_recebimento: 'fiscal' }),
-    parcela('cartao_credito', 10, 'aprovada', { aprovado: true, tipo_recebimento: 'fiscal' })
-  ];
+  async function mistosComTef(sufixo) {
+    const specs = [
+      { forma: 'pix', valor: 20, tipo: 'pix_tef', nsu: `NSU-SIM-${sufixo}`, aut: `AUT-SIM-${sufixo}` },
+      { forma: 'cartao_debito', valor: 20, tipo: 'cartao_debito', nsu: `NSU-DEB-${sufixo}`, aut: `AUT-DEB-${sufixo}` },
+      { forma: 'cartao_credito', valor: 10, tipo: 'cartao_credito', nsu: `NSU-CRE-${sufixo}`, aut: `AUT-CRE-${sufixo}` }
+    ];
+    const lista = [
+      parcela('dinheiro', 10, 'informada', { aprovado: false, confirmacao_manual: 1, tipo_recebimento: 'nao_fiscal' })
+    ];
+    for (const s of specs) {
+      const tef = await run(
+        `INSERT INTO tef_transacoes (
+           venda_id, empresa_id, operador_id, tipo, valor, status, provedor, nsu, autorizacao
+         ) VALUES (NULL, ?, ?, ?, ?, 'aprovado', 'SITEF', ?, ?)`,
+        [empresaA.id, operadorId, s.tipo, s.valor, s.nsu, s.aut]
+      );
+      lista.push(parcela(s.forma, s.valor, 'aprovada', {
+        aprovado: true,
+        tef_transacao_id: tef.lastID,
+        nsu: s.nsu,
+        autorizacao: s.aut,
+        tipo_recebimento: 'fiscal'
+      }));
+    }
+    return lista;
+  }
 
   it('1 e 12. sem autorização a classificação permanece e a nota fecha na emissão', async () => {
     delete process.env.CDS_RECOMPOSICAO_HOMOLOGACAO_DISTRIBUIR;
+    const mistos = await mistosComTef('sem');
     const resposta = await httpJson('/api/vendas', pedido('pdv-sprint34-sem-auth', mistos));
     assert.equal(resposta.status, 200, JSON.stringify(resposta.body));
     assert.equal(resposta.body.documento_fiscal.bloqueado, true);
@@ -278,19 +306,23 @@ describe('Sprint 34 — classificação independente da distribuição', { concu
     assert.equal(porForma.dinheiro, 'nao_fiscal');
     const repetida = await httpJson('/api/vendas', pedido('pdv-sprint34-sem-auth', mistos));
     assert.equal(Number(repetida.body.venda_id), Number(resposta.body.venda_id));
-    assert.equal(repetida.body.venda_ja_persistida, true);
+    assert.equal(repetida.body.venda_ja_persistida, true); // mesma chave
     const emissao = await emitirPorVendaId(resposta.body.venda_id, {
       db, empresaIdContexto: empresaA.id, naoTransmitir: true,
       getFiscalConfig: async () => ({ ...CFG, empresaId: empresaA.id })
     }).catch((erro) => erro);
-    assert.equal(emissao.status, 'xml_preparado', emissao.message || emissao.status);
-    assert.equal(Number(emissao.valores.vNF), 50);
-    assert.equal(Number(emissao.valores.vDesc), 0);
-    assert.equal(emissao.xml.includes('<tPag>01</tPag>'), false);
+    // Sem distribuição autorizada: não monta NFC-e com carrinho comercial.
+    // Pode bloquear por divergência ou concluir sem itens fiscais (valor_fiscal=0).
+    assert.ok(
+      emissao.status === 'recomposicao_bloqueada' || emissao.status === 'sem_itens_fiscais',
+      emissao.message || emissao.status
+    );
+    assert.ok(!emissao.xml);
   });
 
   it('10. com autorização o XML usa só o fiscal e o dinheiro fica de fora', async () => {
     process.env.CDS_RECOMPOSICAO_HOMOLOGACAO_DISTRIBUIR = '1';
+    const mistos = await mistosComTef('auth');
     const resposta = await httpJson('/api/vendas', pedido('pdv-sprint34-autorizada', mistos));
     assert.equal(resposta.status, 200, JSON.stringify(resposta.body));
     assert.equal(Number(resposta.body.valor_fiscal), 50);

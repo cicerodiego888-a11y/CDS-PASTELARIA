@@ -194,10 +194,17 @@ router.get('/pdv-modelo-empresa', (req, res) => {
 router.post('/composicao-sequencial', async (req, res) => {
   try {
     const body = req.body || {};
+    const { comprovarPagamentosParaReferenciaFiscal } = require('../services/OrquestradorPagamento');
+    const comprovacao = await comprovarPagamentosParaReferenciaFiscal(body.pagamentos || [], {
+      empresaId: req.empresaId,
+      operadorId: req.user && (req.user.id || req.user.usuario_id),
+      db
+    });
+    const pagamentosComprovados = comprovacao.pagamentos;
     const resultado = avaliarReferenciaRecomposicao({
       total: body.total,
       total_comercial: body.total_comercial,
-      pagamentos: body.pagamentos,
+      pagamentos: pagamentosComprovados,
       itens: body.itens
     });
     let documentoFiscal = null;
@@ -208,10 +215,10 @@ router.post('/composicao-sequencial', async (req, res) => {
     ) {
       documentoFiscal = await integrarPagamentoRecomposicao({
         total: body.total,
-        pagamentos: body.pagamentos,
+        pagamentos: pagamentosComprovados,
         itens: body.itens,
         empresaId: req.empresaId
-      }, { db });
+      }, { db, pagamentosJaComprovados: true });
     }
     return res.json({
       ...resultado,
@@ -434,49 +441,123 @@ router.post('/pre-calcular-distribuicao', validarCaixaAberto, preCalcularDistrib
 function criarVendaComIdempotenciaPdv(req, res) {
   const chave = String(req.body && req.body.chave_fechamento_pdv || '').trim();
   if (!/^[A-Za-z0-9._:-]{8,80}$/.test(chave)) return criarVenda(req, res);
-  db.run(`CREATE TABLE IF NOT EXISTS pdv_fechamento_idempotencia (
-    chave TEXT PRIMARY KEY,
-    venda_id INTEGER NOT NULL,
-    status_pagamento TEXT,
-    criado_em TEXT
-  )`, (errTabela) => {
-    if (errTabela) return criarVenda(req, res);
-    db.get(
-      'SELECT venda_id, status_pagamento FROM pdv_fechamento_idempotencia WHERE chave = ?',
-      [chave],
-      (err, row) => {
-        if (err) return criarVenda(req, res);
-        if (row && row.venda_id) {
-          return res.json({
-            id: Number(row.venda_id),
-            venda_id: Number(row.venda_id),
-            status_pagamento: row.status_pagamento || 'quitada',
-            venda_ja_persistida: true,
-            message: 'Venda já registrada. Nenhuma segunda venda foi criada.'
-          });
-        }
-        const enviar = res.json.bind(res);
-        res.json = function (corpo) {
-          const vendaId = corpo && (corpo.venda_id || corpo.id);
-          if (!(vendaId && res.statusCode < 400)) return enviar(corpo);
-          db.run(
-            `INSERT OR IGNORE INTO pdv_fechamento_idempotencia (chave, venda_id, status_pagamento, criado_em)
-             VALUES (?, ?, ?, datetime('now', 'localtime'))`,
-            [chave, Number(vendaId), corpo.status_pagamento || null],
-            () => enviar(corpo)
-          );
-        };
-        return criarVenda(req, res);
+
+  const {
+    STATUS,
+    garantirSchemaIdempotenciaPdv,
+    reconciliarReservaOrfa
+  } = require('../services/vendas/PdvFechamentoIdempotenciaService');
+
+  function anexarHookRespostaECriar() {
+    req.__chaveFechamentoPdv = chave;
+    const enviar = res.json.bind(res);
+    res.json = function (corpo) {
+      const vendaId = corpo && (corpo.venda_id || corpo.id);
+      if (!(vendaId && res.statusCode < 400)) {
+        // Falha HTTP controlada: libera só se ainda não houver venda vinculada.
+        db.run(
+          `DELETE FROM pdv_fechamento_idempotencia WHERE chave = ? AND venda_id = 0`,
+          [chave],
+          () => enviar(corpo)
+        );
+        return;
       }
-    );
-  });
+      // Rede de segurança: vínculo preferencialmente já ocorre na transação da venda.
+      db.run(
+        `UPDATE pdv_fechamento_idempotencia
+         SET venda_id = ?, status_pagamento = ?
+         WHERE chave = ? AND (venda_id = 0 OR venda_id = ?)`,
+        [Number(vendaId), corpo.status_pagamento || STATUS.CONCLUIDO, chave, Number(vendaId)],
+        () => enviar(corpo)
+      );
+    };
+    return criarVenda(req, res);
+  }
+
+  function responderVendaExistente(vendaId, statusPagamento, extra = {}) {
+    return res.json({
+      id: Number(vendaId),
+      venda_id: Number(vendaId),
+      status_pagamento: statusPagamento || 'quitada',
+      venda_ja_persistida: true,
+      message: 'Venda já registrada. Nenhuma segunda venda foi criada.',
+      ...extra
+    });
+  }
+
+  garantirSchemaIdempotenciaPdv(db)
+    .then(() => new Promise((resolve, reject) => {
+      db.run(
+        `INSERT OR IGNORE INTO pdv_fechamento_idempotencia (chave, venda_id, status_pagamento, criado_em)
+         VALUES (?, 0, ?, datetime('now', 'localtime'))`,
+        [chave, STATUS.EM_ANDAMENTO],
+        function onClaim(errClaim) {
+          if (errClaim) reject(errClaim);
+          else resolve(Number(this && this.changes) === 1);
+        }
+      );
+    }))
+    .then(async (reivindicou) => {
+      const row = await new Promise((resolve, reject) => {
+        db.get(
+          'SELECT venda_id, status_pagamento, criado_em FROM pdv_fechamento_idempotencia WHERE chave = ?',
+          [chave],
+          (err, found) => (err ? reject(err) : resolve(found || null))
+        );
+      });
+      const vendaExistente = row && Number(row.venda_id) > 0 ? Number(row.venda_id) : 0;
+      if (vendaExistente > 0) {
+        return responderVendaExistente(vendaExistente, row.status_pagamento);
+      }
+      if (reivindicou) {
+        return anexarHookRespostaECriar();
+      }
+
+      // IDEMPOTENCIA-01: reserva órfã (venda_id=0) — reconciliar antes de 409 eterno.
+      const reconciliacao = await reconciliarReservaOrfa(db, chave, process.env);
+      if (reconciliacao.acao === 'retornar_venda') {
+        return responderVendaExistente(
+          reconciliacao.vendaId,
+          reconciliacao.status_pagamento,
+          { recuperacao_idempotencia: !!reconciliacao.recuperado }
+        );
+      }
+      if (reconciliacao.acao === 'criar_venda') {
+        return anexarHookRespostaECriar();
+      }
+      if (reconciliacao.acao === 'bloquear') {
+        return res.status(409).json({
+          error: 'Fechamento em estado inconsistente. Não é seguro criar nova venda automaticamente.',
+          code: reconciliacao.code || 'FECHAMENTO_INCONSISTENTE',
+          motivo: reconciliacao.motivo || null,
+          chave_fechamento_pdv: chave,
+          venda_id: reconciliacao.vendaId || null
+        });
+      }
+      return res.status(409).json({
+        error: 'Fechamento desta chave já está em andamento.',
+        code: reconciliacao.code || 'FECHAMENTO_EM_ANDAMENTO',
+        chave_fechamento_pdv: chave
+      });
+    })
+    .catch((err) => {
+      console.error('[pdv-idempotencia]', err);
+      return criarVenda(req, res);
+    });
 }
 
 router.post('/', aplicarPdvModeloEmpresa, validarCaixaSeOrigemPdv, criarVendaComIdempotenciaPdv);
 
-router.get('/:id/pagamento-nao-fiscal', consultarPagamentoNaoFiscal);
+// Complemento ao header X-Empresa-Id do PDV: sem contexto, adota vendas.empresa_id
+// (mesmo padrão de cancelamento/devolução). Não substitui a propagação no frontend.
+router.get('/:id/pagamento-nao-fiscal', anexarEmpresaReversaoVenda, consultarPagamentoNaoFiscal);
 
-router.post('/:id/pagamento-nao-fiscal', validarCaixaAberto, registrarPagamentoNaoFiscal);
+router.post(
+  '/:id/pagamento-nao-fiscal',
+  anexarEmpresaReversaoVenda,
+  validarCaixaAberto,
+  registrarPagamentoNaoFiscal
+);
 
 router.post('/:id/devolver', anexarEmpresaReversaoVenda, validarCaixaAbertoDevolucaoVenda, exigirSenhaAdmin, (req, res) => {
   const vendaId = Number(req.params.id);

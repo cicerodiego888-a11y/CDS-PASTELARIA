@@ -103,6 +103,11 @@
     return { rotulo: 'Conferir pedido', editar: true, enviar: true };
   }
 
+  function podeGerarVendaPdv(pedido) {
+    const status = String(pedido && pedido.status || '').toUpperCase();
+    return ['PEDIDO', 'ABERTO', 'EM_SEPARACAO'].includes(status);
+  }
+
   function rotuloEstadoPreparacao(estado) {
     if (estado === 'EM_PREPARACAO') return 'Em preparação';
     if (estado === 'CONCLUIDO') return 'Concluído';
@@ -337,6 +342,50 @@
       return { ok: true, redirecionado: true };
     }
 
+    async function gerarVendaPdv(pedidoId) {
+      const id = Number(pedidoId);
+      const mesa = mesaAtual();
+      const pedido = (estado.pedidos || []).find((item) => Number(item.id) === id);
+      if (!mesa || !['OCUPADA', 'FECHAMENTO'].includes(mesa.situacao)) return { ok: false };
+      if (!pedido || !podeGerarVendaPdv(pedido)) return { ok: false, codigo: 'PEDIDO_INELIGIVEL_PDV' };
+      if (operacao) return { ok: false, ignorada: true };
+      const confirmar = typeof deps.confirmar === 'function' ? deps.confirmar : () => true;
+      if (!confirmar(`Pedido #${id}: deseja gerar a venda deste pedido no PDV?`)) {
+        return { ok: false, cancelado: true };
+      }
+      operacao = true;
+      estado.sucesso = '';
+      estado.aviso = '';
+      try {
+        const preparacao = await fetchJson('POST', `/pedidos/${id}/preparar-venda-pdv`, {});
+        if (preparacao && preparacao.venda_concluida) {
+          estado.sucesso = `Este Pedido já possui a venda ${preparacao.venda_id || ''} concluída.`;
+          if (deps.aoMudar && estado.ativo) deps.aoMudar();
+          return { ok: true, venda_concluida: true };
+        }
+        const vendaId = Number(preparacao && preparacao.venda_id);
+        if (Number.isInteger(vendaId) && vendaId > 0) {
+          const resultado = await fetchJson('POST', `/pedidos/${id}/finalizar-venda-pdv`, {});
+          const vendaFinal = Number(resultado && resultado.venda_id) || vendaId;
+          estado.sucesso = `Venda #${vendaFinal} vinculada ao Pedido #${id}${resultado && resultado.idempotente ? ' (operação já concluída).' : '.'}`;
+          estado.aviso = '';
+          await atualizar();
+          return { ok: true, vinculada: true, venda_id: vendaFinal };
+        }
+        if (typeof deps.aoIrParaPdv === 'function') {
+          deps.aoIrParaPdv(preparacao);
+        }
+        return { ok: true, redirecionado: true, preparacao };
+      } catch (err) {
+        estado.sucesso = '';
+        estado.aviso = `O Pedido foi preservado, mas a venda não pôde ser gerada: ${mensagemDe(err)}`;
+        if (deps.aoMudar && estado.ativo) deps.aoMudar();
+        return { ok: false, codigo: err && err.codigo };
+      } finally {
+        operacao = false;
+      }
+    }
+
     async function transferir() {
       const mesa = mesaAtual();
       const destino = estado.itens.find((item) => String(item.id) === String(estado.destinoId));
@@ -437,6 +486,7 @@
       lancarPedido,
       verTodosPedidos,
       abrirPedidoExistente,
+      gerarVendaPdv,
       atualizarPedidos,
       transferir,
       definirDestino,
@@ -589,6 +639,9 @@
         : (estado === 'CONCLUIDO' ? 'mesas-prep--concluido' : 'mesas-prep--neutra');
       const total = pedido.total != null ? `<div>Total do pedido ${escapar(pedido.total)}</div>` : '';
       const acao = acaoDoPedido(pedido);
+      const botaoPdv = podeGerarVendaPdv(pedido)
+        ? `<button type="button" class="btn btn-outline-success btn-sm mt-2" data-acao="venda-pdv" data-pedido-id="${escapar(pedido.id)}" title="Preparar e abrir a venda deste pedido no PDV">Gerar venda no PDV</button>`
+        : '';
       return `
         <article class="mesas-pedido">
           <strong>${escapar(pedido.codigo || ('Pedido ' + pedido.id))}</strong>
@@ -597,7 +650,10 @@
           <div>Envio ${escapar(prep.enviado_em || '—')}</div>
           <div>Tempo ${escapar(tempo)}</div>
           ${total}
-          <button type="button" class="btn btn-outline-primary btn-sm mt-2" data-acao="pedido" data-pedido-id="${escapar(pedido.id)}">${escapar(acao.rotulo)}</button>
+          <div class="d-flex flex-wrap gap-2 mt-2">
+            <button type="button" class="btn btn-outline-primary btn-sm" data-acao="pedido" data-pedido-id="${escapar(pedido.id)}">${escapar(acao.rotulo)}</button>
+            ${botaoPdv}
+          </div>
         </article>`;
     }).join('');
   }
@@ -644,12 +700,27 @@
       agendar: (fn, ms) => global.setTimeout(fn, ms),
       cancelar: (id) => global.clearTimeout(id),
       aoMudar: () => desenhar(global, control, global.document && global.document.getElementById('page-content'), buscarClientes, cancelarBuscaCliente),
+      confirmar: (mensagem) => (typeof global.confirm === 'function' ? global.confirm(mensagem) : true),
       aoIrParaPedidos(ctx) {
         const api = global.CdsMesasLancamento;
         try {
           if (api && global.sessionStorage) api.gravarLancamento(global.sessionStorage, ctx);
         } catch (_err) { /* a tela de Pedidos ainda assim será aberta */ }
         if (typeof global.loadPage === 'function') global.loadPage('pedidos');
+      },
+      aoIrParaPdv(preparacao) {
+        if (typeof global.abrirPdvOficial === 'function') {
+          Promise.resolve(global.abrirPdvOficial({ handoff: preparacao })).catch(() => {});
+          return;
+        }
+        try {
+          if (global.sessionStorage) {
+            global.sessionStorage.setItem('pdvPedidoHandoff', JSON.stringify(preparacao));
+          }
+        } catch (_err) { /* o PDV ainda assim será aberto */ }
+        if (global.location && typeof global.location.assign === 'function') {
+          global.location.assign('/pdv');
+        }
       }
     });
     const originalIniciar = control.iniciar;
@@ -672,6 +743,21 @@
     const foco = global.document && global.document.activeElement;
     const editandoCliente = foco && foco.id === 'mesasCliente';
     const editandoDestino = foco && foco.id === 'mesasDestino';
+    // Polling a cada 5s não pode destruir o DOM enquanto o operador digita
+    // ou com modal Bootstrap aberto (perde caret/foco em qualquer campo).
+    const digitandoNoPainel = !!(
+      foco
+      && host.contains(foco)
+      && typeof foco.matches === 'function'
+      && foco.matches('input, textarea, select, [contenteditable="true"]')
+    );
+    const modalAberto = !!(
+      global.document.querySelector('.modal.show')
+      || global.document.querySelector('.modal.showing')
+    );
+    if ((digitandoNoPainel && !editandoCliente && !editandoDestino) || (modalAberto && !editandoCliente && !editandoDestino)) {
+      return;
+    }
     const selecaoCliente = editandoCliente && Number.isInteger(foco.selectionStart)
       && Number.isInteger(foco.selectionEnd)
       ? {
@@ -707,6 +793,9 @@
     });
     raiz.querySelectorAll('[data-acao="pedido"]').forEach((botao) => {
       botao.addEventListener('click', () => control.abrirPedidoExistente(botao.getAttribute('data-pedido-id')));
+    });
+    raiz.querySelectorAll('[data-acao="venda-pdv"]').forEach((botao) => {
+      botao.addEventListener('click', () => control.gerarVendaPdv(botao.getAttribute('data-pedido-id')));
     });
     const transferir = raiz.querySelector('[data-acao="transferir"]');
     if (transferir) transferir.addEventListener('click', () => control.transferir());
@@ -758,6 +847,7 @@
     contadores,
     filtrarEmpresa,
     mesasLivres,
+    podeGerarVendaPdv,
     criarControlador,
     htmlPainel,
     montarNoNavegador

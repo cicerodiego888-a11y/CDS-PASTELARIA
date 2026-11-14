@@ -54,10 +54,14 @@ function valoresMonetariosCompativeis(aprovado, pagamento) {
   return Math.abs(arredondarCentavos(aprovado) - arredondarCentavos(pagamento)) <= 0.009;
 }
 
-function buscarTransacaoTefPorId(id) {
-  const db = require('../database');
+function obterDbTef(dbConn) {
+  return dbConn || require('../database');
+}
+
+function buscarTransacaoTefPorId(id, dbConn) {
+  const dbLocal = obterDbTef(dbConn);
   return new Promise((resolve, reject) => {
-    db.get(
+    dbLocal.get(
       `SELECT id, status, valor, tipo, nsu, autorizacao, venda_id, empresa_id, operador_id, idempotency_key, provedor
        FROM tef_transacoes WHERE id = ?`,
       [Number(id)],
@@ -69,7 +73,82 @@ function buscarTransacaoTefPorId(id) {
   });
 }
 
-async function comprovarTransacoesTefAprovadas(pagamentosTef, empresaIdVenda, operadorId) {
+/**
+ * Localiza transação por NSU+autorização+empresa. Só é inequívoca com exatamente 1 linha.
+ */
+function buscarTransacoesTefPorNsuAutorizacao(nsu, autorizacao, empresaId, dbConn) {
+  const dbLocal = obterDbTef(dbConn);
+  return new Promise((resolve, reject) => {
+    dbLocal.all(
+      `SELECT id, status, valor, tipo, nsu, autorizacao, venda_id, empresa_id, operador_id, idempotency_key, provedor
+       FROM tef_transacoes
+       WHERE nsu = ? AND autorizacao = ? AND empresa_id = ?`,
+      [String(nsu), String(autorizacao), Number(empresaId)],
+      (err, rows) => {
+        if (err) reject(err);
+        else resolve(Array.isArray(rows) ? rows : []);
+      }
+    );
+  });
+}
+
+function statusTefTerminalInvalido(status) {
+  const s = String(status || '').toLowerCase();
+  return [
+    'cancelado', 'cancelada', 'cancelled', 'canceled',
+    'estornado', 'estornada', 'estorno',
+    'negado', 'negada', 'pendente', 'rejeitado', 'rejeitada', 'falha', 'erro'
+  ].includes(s);
+}
+
+/**
+ * Resolve o id persistido da transação. NSU+AUT só valem se houver exatamente um registro.
+ */
+async function resolverIdTransacaoTefPersistida(pagamento, empresaIdVenda, dbConn) {
+  const tefIdInformado = pagamento && (pagamento.tef_transacao_id != null
+    ? pagamento.tef_transacao_id
+    : (pagamento.tef && pagamento.tef.transacao_id));
+  if (identificadorTefInformado(tefIdInformado)) {
+    const id = Number(tefIdInformado);
+    if (!Number.isInteger(id) || id <= 0) {
+      return { sucesso: false, erro: 'Identificador TEF inválido.' };
+    }
+    return { sucesso: true, tef_transacao_id: id };
+  }
+  const nsu = String((pagamento && (pagamento.nsu || pagamento.tef_nsu)) || '').trim();
+  const aut = String((pagamento && pagamento.autorizacao) || '').trim();
+  if (!nsu || !aut) {
+    return { sucesso: false, erro: 'Pagamento eletrônico sem evidência persistida.' };
+  }
+  if (!Number(empresaIdVenda)) {
+    return { sucesso: false, erro: 'Empresa obrigatória para localizar a transação TEF.' };
+  }
+  let rows;
+  try {
+    rows = await buscarTransacoesTefPorNsuAutorizacao(nsu, aut, empresaIdVenda, dbConn);
+  } catch (_erro) {
+    return { sucesso: false, erro: 'Não foi possível consultar a transação TEF.' };
+  }
+  if (!rows.length) {
+    return { sucesso: false, erro: 'NSU/autorização não correspondem a transação persistida.' };
+  }
+  if (rows.length > 1) {
+    return { sucesso: false, erro: 'NSU/autorização ambíguos; informe tef_transacao_id.' };
+  }
+  return { sucesso: true, tef_transacao_id: Number(rows[0].id) };
+}
+
+/**
+ * @param {object[]} pagamentosTef
+ * @param {number} empresaIdVenda
+ * @param {number|null} operadorId
+ * @param {{ vendaIdPermitida?: number|null, db?: object }} [opcoes]
+ */
+async function comprovarTransacoesTefAprovadas(pagamentosTef, empresaIdVenda, operadorId, opcoes = {}) {
+  const vendaIdPermitida = opcoes && opcoes.vendaIdPermitida != null
+    ? Number(opcoes.vendaIdPermitida)
+    : null;
+  const dbConn = opcoes && opcoes.db ? opcoes.db : null;
   const ids = pagamentosTef.map((pagamento) => Number(pagamento.tef_transacao_id));
   if (ids.some((id) => !Number.isInteger(id) || id <= 0)) {
     return { sucesso: false, erro: 'Transação TEF não encontrada ou não aprovada.' };
@@ -82,14 +161,15 @@ async function comprovarTransacoesTefAprovadas(pagamentosTef, empresaIdVenda, op
   }
 
   const transacoes = [];
+  const linhas = [];
   for (const pagamento of pagamentosTef) {
     let row;
     try {
-      row = await buscarTransacaoTefPorId(pagamento.tef_transacao_id);
+      row = await buscarTransacaoTefPorId(pagamento.tef_transacao_id, dbConn);
     } catch (error) {
       return { sucesso: false, erro: 'Não foi possível confirmar a transação TEF.' };
     }
-    if (!row || !tefContrato.estaAprovado({ status: row.status })) {
+    if (!row || statusTefTerminalInvalido(row.status) || !tefContrato.estaAprovado({ status: row.status })) {
       return { sucesso: false, erro: 'Transação TEF não encontrada ou não aprovada.' };
     }
     if (row.provedor === 'smart_pos_simulador') {
@@ -132,13 +212,97 @@ async function comprovarTransacoesTefAprovadas(pagamentosTef, empresaIdVenda, op
       return { sucesso: false, erro: 'Autorização informada não confere com a transação TEF.' };
     }
     if (row.venda_id != null) {
-      return { sucesso: false, erro: 'Transação TEF já vinculada a outra venda.' };
+      const vinculada = Number(row.venda_id);
+      if (!(vendaIdPermitida > 0 && vinculada === vendaIdPermitida)) {
+        return { sucesso: false, erro: 'Transação TEF já vinculada a outra venda.' };
+      }
     }
     pagamento.nsu = row.nsu || null;
     pagamento.autorizacao = row.autorizacao || null;
     transacoes.push(row.id);
+    linhas.push(row);
   }
-  return { sucesso: true, transacoes };
+  return { sucesso: true, transacoes, linhas };
+}
+
+/**
+ * CDS-PDV-RECOMPOSICAO-FISCAL-CONFIRMACAO-AUTORITATIVA-01
+ * Carimba apenas parcelas eletrônicas comprovadas contra tef_transacoes.
+ * Dinheiro e demais formas não-TEF passam sem carimbo eletrônico.
+ */
+async function comprovarPagamentosParaReferenciaFiscal(pagamentos, opcoes = {}) {
+  const empresaId = Number(opcoes.empresaId || opcoes.empresa_id || 0);
+  const operadorId = opcoes.operadorId != null ? Number(opcoes.operadorId) : null;
+  const vendaIdPermitida = opcoes.vendaIdPermitida != null ? Number(opcoes.vendaIdPermitida) : null;
+  const dbConn = opcoes.db || null;
+  const lista = Array.isArray(pagamentos) ? pagamentos : [];
+  const saida = [];
+  const rejeicoes = [];
+
+  for (const pagamento of lista) {
+    if (!tefFluxoPagamento.formaPagamentoUsaTEF(pagamento && pagamento.forma_pagamento)) {
+      saida.push({ ...pagamento, confirmacao_eletronica_comprovada: false });
+      continue;
+    }
+    const resolucao = await resolverIdTransacaoTefPersistida(pagamento, empresaId, dbConn);
+    if (!resolucao.sucesso) {
+      rejeicoes.push({
+        forma_pagamento: pagamento && pagamento.forma_pagamento,
+        valor: pagamento && pagamento.valor,
+        motivo: resolucao.erro
+      });
+      saida.push({
+        ...pagamento,
+        confirmacao_eletronica_comprovada: false,
+        _motivo_comprovacao: resolucao.erro
+      });
+      continue;
+    }
+    const candidato = {
+      ...pagamento,
+      tef_transacao_id: resolucao.tef_transacao_id
+    };
+    const prova = await comprovarTransacoesTefAprovadas(
+      [candidato],
+      empresaId,
+      operadorId,
+      { vendaIdPermitida, db: dbConn }
+    );
+    if (!prova.sucesso) {
+      rejeicoes.push({
+        forma_pagamento: pagamento && pagamento.forma_pagamento,
+        valor: pagamento && pagamento.valor,
+        tef_transacao_id: resolucao.tef_transacao_id,
+        motivo: prova.erro
+      });
+      saida.push({
+        ...pagamento,
+        tef_transacao_id: resolucao.tef_transacao_id,
+        confirmacao_eletronica_comprovada: false,
+        _motivo_comprovacao: prova.erro
+      });
+      continue;
+    }
+    const row = (prova.linhas && prova.linhas[0]) || await buscarTransacaoTefPorId(resolucao.tef_transacao_id, dbConn);
+    saida.push({
+      ...pagamento,
+      tef_transacao_id: Number(row.id),
+      nsu: row.nsu || null,
+      autorizacao: row.autorizacao || null,
+      valor: arredondarCentavos(row.valor),
+      status: 'aprovado',
+      status_autorizacao: 'aprovado',
+      confirmacao_eletronica_comprovada: true,
+      _tef_comprovacao: {
+        tef_transacao_id: Number(row.id),
+        empresa_id: row.empresa_id,
+        valor: arredondarCentavos(row.valor),
+        tipo: row.tipo
+      }
+    });
+  }
+
+  return { sucesso: true, pagamentos: saida, rejeicoes };
 }
 
 function arredondarCentavos(valor) {
@@ -815,7 +979,14 @@ function normalizarPagamentosEntrada(pagamentos, formaPagamentoPadrao, totalLiqu
     valor: Number(p.valor || 0),
     tef_transacao_id: p.tef_transacao_id || null,
     nsu: p.nsu || null,
-    autorizacao: p.autorizacao || null
+    autorizacao: p.autorizacao || null,
+    // CONFIRMACAO-AUTORITATIVA-01: preserva carimbo backend (não vem do frontend).
+    confirmacao_eletronica_comprovada: p.confirmacao_eletronica_comprovada === true,
+    status: p.status || null,
+    status_autorizacao: p.status_autorizacao || null,
+    confirmacao_manual: p.confirmacao_manual,
+    confirmacao_modalidade: p.confirmacao_modalidade,
+    tipo_recebimento: p.tipo_recebimento || null
   }));
 }
 
@@ -887,6 +1058,8 @@ async function processarPagamentoNaoFiscal({
 module.exports = {
   processarFluxoPagamentoVenda,
   comprovarTransacoesTefAprovadas,
+  comprovarPagamentosParaReferenciaFiscal,
+  resolverIdTransacaoTefPersistida,
   processarPagamentoNaoFiscal,
   determinarStatusPagamento,
   montarRecebimentosParaGravar,

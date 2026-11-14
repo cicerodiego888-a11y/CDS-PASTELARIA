@@ -1202,7 +1202,7 @@ function loadPedidos() {
       if (!data || !Number.isInteger(Number(data.consolidacao_id)) || Number(data.consolidacao_id) <= 0) {
         throw new Error('O servidor não confirmou a reserva da consolidação; o PDV não será aberto.');
       }
-      sessionStorage.setItem('pdvPedidoHandoff', JSON.stringify({
+      const handoffConsolidado = {
         consolidacao_id: data.consolidacao_id,
         venda_id: data.venda_id || null,
         idempotency_key: chave,
@@ -1211,8 +1211,16 @@ function loadPedidos() {
         desconto: data.desconto || 0,
         itens: data.itens,
         cliente_id: data.cliente_id || null
-      }));
-      window.location.assign('/pdv');
+      };
+      if (typeof window.abrirPdvOficial === 'function') {
+        const resultado = await window.abrirPdvOficial({ handoff: handoffConsolidado });
+        if (resultado && resultado.ok === false) {
+          throw new Error(resultado.mensagem || 'Não foi possível abrir o PDV.');
+        }
+      } else {
+        sessionStorage.setItem('pdvPedidoHandoff', JSON.stringify(handoffConsolidado));
+        window.location.assign('/pdv');
+      }
     } catch (err) {
       const codigo = err.codigo ? ` [${err.codigo}]` : '';
       alertar(`${err.message || 'Falha ao reservar a venda consolidada.'}${codigo}`, 'danger');
@@ -1223,6 +1231,58 @@ function loadPedidos() {
         consolidadaAtual.pedidos.filter((pedido) => pedido.incluir).length < 2
       );
     }
+  }
+
+  let ultimoTickListaPedidos = 0;
+  let timerRecargaListaPedidos = null;
+
+  function tickListaPedidosAtual() {
+    if (typeof window.lerTickListaPedidos === 'function') {
+      return window.lerTickListaPedidos();
+    }
+    try {
+      const raw = window.localStorage && window.localStorage.getItem('cds_pedidos_lista_tick');
+      if (!raw) return null;
+      const o = JSON.parse(raw);
+      return o && Number(o.ts) > 0 ? o : null;
+    } catch (_e) {
+      return null;
+    }
+  }
+
+  /** Recarrega a lista quando o PDV (outra janela) finaliza o pedido. */
+  function agendarRecarregarListaAposPdv(forcar) {
+    if (!$('#pedidosRoot').length) return;
+    const tick = tickListaPedidosAtual();
+    const ts = tick ? Number(tick.ts) : 0;
+    if (!forcar) {
+      if (!ts || ts <= ultimoTickListaPedidos) return;
+    }
+    if (ts > ultimoTickListaPedidos) ultimoTickListaPedidos = ts;
+    if (timerRecargaListaPedidos) clearTimeout(timerRecargaListaPedidos);
+    timerRecargaListaPedidos = setTimeout(() => {
+      timerRecargaListaPedidos = null;
+      if ($('#pedidosRoot').length) carregarLista();
+    }, 120);
+  }
+
+  function ligarSincronizacaoListaPdv() {
+    $(window)
+      .off('storage.pedListaPdv')
+      .on('storage.pedListaPdv', (ev) => {
+        const key = ev.originalEvent && ev.originalEvent.key;
+        const chave = (window.PdvAcessoOficial && window.PdvAcessoOficial.CHAVE_LISTA_PEDIDOS_TICK)
+          || 'cds_pedidos_lista_tick';
+        if (key === chave) agendarRecarregarListaAposPdv(false);
+      });
+    $(window)
+      .off('focus.pedListaPdv')
+      .on('focus.pedListaPdv', () => agendarRecarregarListaAposPdv(false));
+    $(document)
+      .off('visibilitychange.pedListaPdv')
+      .on('visibilitychange.pedListaPdv', () => {
+        if (!document.hidden) agendarRecarregarListaAposPdv(false);
+      });
   }
 
   async function carregarLista() {
@@ -1462,6 +1522,13 @@ function loadPedidos() {
         await carregarLista();
         return;
       }
+      if (typeof window.abrirPdvOficial === 'function') {
+        const resultado = await window.abrirPdvOficial({ handoff: preparacao });
+        if (resultado && resultado.ok === false) {
+          throw new Error(resultado.mensagem || 'Não foi possível abrir o PDV.');
+        }
+        return;
+      }
       sessionStorage.setItem('pdvPedidoHandoff', JSON.stringify(preparacao));
       window.location.assign('/pdv');
     } catch (erro) {
@@ -1479,16 +1546,52 @@ function loadPedidos() {
     $('#pedMesasAlert').html(`<div class="alert alert-${tipo || 'info'} py-2 mb-2">${escapeHtml(msg)}</div>`);
   }
 
-  async function requisitarMesas(url, method, corpo) {
+  async function requisitarMesas(url, method, corpo, opcoes = {}) {
     headers = _pedHeaders();
+    const headersReq = { ...headers };
+    if (opcoes.idempotencyKey) headersReq['Idempotency-Key'] = opcoes.idempotencyKey;
     const resp = await fetch(`${API_URL}/mesas${url || ''}`, {
       method: method || 'GET',
-      headers,
+      headers: headersReq,
       body: corpo ? JSON.stringify(corpo) : undefined
     });
     const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) throw new Error(data.mensagem || data.error || ('HTTP ' + resp.status));
+    if (!resp.ok) {
+      const err = new Error(data.mensagem || data.error || ('HTTP ' + resp.status));
+      err.codigo = data.codigo || null;
+      throw err;
+    }
     return data;
+  }
+
+  /** Mesa livre/encerrada: abre atendimento antes do POST do pedido. FECHAMENTO continua bloqueado. */
+  async function garantirAtendimentoAbertoParaNovoPedido(mesaId) {
+    const id = Number(mesaId);
+    if (!Number.isInteger(id) || id <= 0) return null;
+    const consulta = await requisitarMesas(`/${id}/atendimento`);
+    const situacao = String(consulta.situacao || '').toUpperCase();
+    if (situacao === 'OCUPADA' && consulta.atendimento && consulta.atendimento.id) {
+      return consulta;
+    }
+    if (situacao === 'FECHAMENTO') {
+      const err = new Error('O atendimento está em fechamento e não recebe pedido novo.');
+      err.codigo = 'ATENDIMENTO_EM_FECHAMENTO';
+      throw err;
+    }
+    const aberto = await requisitarMesas(
+      `/${id}/atendimento`,
+      'POST',
+      {
+        cliente_id: $('#pedClienteId').val() ? Number($('#pedClienteId').val()) : null
+      },
+      { idempotencyKey: novaChaveIdempotencia() }
+    );
+    return {
+      mesa_id: id,
+      numero: consulta.numero,
+      situacao: 'OCUPADA',
+      atendimento: aberto && aberto.atendimento
+    };
   }
 
   async function preencherSelectMesa(mesaIdPedido, mesaNumeroPedido) {
@@ -2105,6 +2208,9 @@ function loadPedidos() {
       payload.status = 'PEDIDO';
     }
     try {
+      if (!pedidoEditandoId && payload.mesa_id) {
+        await garantirAtendimentoAbertoParaNovoPedido(payload.mesa_id);
+      }
       const url = pedidoEditandoId ? `${API_URL}/pedidos/${pedidoEditandoId}` : `${API_URL}/pedidos`;
       const method = pedidoEditandoId ? 'PUT' : 'POST';
       const data = await fetchPedidoComSupervisor(url, method, payload);
@@ -2734,6 +2840,7 @@ function loadPedidos() {
     }
   });
 
+  ligarSincronizacaoListaPdv();
   carregarLista();
   aplicarLancamentoDaMesa();
 }

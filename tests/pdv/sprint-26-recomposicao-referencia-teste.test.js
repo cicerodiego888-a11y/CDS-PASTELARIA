@@ -21,6 +21,8 @@ process.env.CDS_TEST_ISOLATION = '1';
 process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
 process.env.CDS_FORCAR_LOCAL = '1';
 process.env.CDS_RECOMPOSICAO_REFERENCIA_TESTE = '1';
+// Regressão Sprint 26: isola a porta de teste original (sem fechamento operacional ATIVACAO-01).
+process.env.CDS_RECOMPOSICAO_FECHAMENTO_OPERACIONAL = '0';
 delete process.env.CDS_ALLOW_OFFICIAL_DB;
 delete process.env.CDS_TEF_VINCULO_FALHA;
 delete process.env.CDS_RECOMPOSICAO_HOMOLOGACAO_DISTRIBUIR;
@@ -50,8 +52,10 @@ const {
   RECOMPOSICAO_HABILITADA_EM_PRODUCAO
 } = require('../../backend/services/vendas/RecomposicaoFiscalContratoService');
 const {
-  avaliarReferenciaRecomposicao
+  avaliarReferenciaRecomposicao,
+  marcarParcelaEletronicaComprovada
 } = require('../../backend/services/vendas/PagamentoSequencialComposicaoService');
+const { formaPagamentoUsaTEF } = require('../../backend/services/tef/tefFluxoPagamento');
 const PagamentoSequencial = require('../../frontend/pdv/js/pagamentoSequencial');
 
 const autorizacoesReais = [];
@@ -68,6 +72,7 @@ tefManager.autorizar = async function bloqueada() {
 let empresaA;
 let produtoId;
 let tokenOperador;
+let operadorId;
 let terminalId;
 let server;
 
@@ -123,7 +128,28 @@ function httpJson(urlPath, body) {
     req.end();
   });
 }
+function enriquecerPagamentoReferencia(pagamento, indice) {
+  const forma = String(pagamento.forma_pagamento || '').toLowerCase();
+  const dinheiro = forma === 'dinheiro' || forma === 'especie' || forma === 'cash';
+  if (dinheiro) {
+    return {
+      ...pagamento,
+      status_autorizacao: pagamento.status_autorizacao || 'informada',
+      confirmacao_manual: pagamento.confirmacao_manual != null ? pagamento.confirmacao_manual : 1,
+      tipo_recebimento: 'nao_fiscal'
+    };
+  }
+  return {
+    ...pagamento,
+    status_autorizacao: pagamento.status_autorizacao || 'aprovada',
+    nsu: pagamento.nsu || `NSU-26-${indice}`,
+    autorizacao: pagamento.autorizacao || `AUT-26-${indice}`,
+    tipo_recebimento: pagamento.tipo_recebimento || 'fiscal'
+  };
+}
+
 function corpo(pagamentos, total, extra = {}) {
+  const lista = (pagamentos || []).map((pagamento, indice) => enriquecerPagamentoReferencia(pagamento, indice));
   return {
     origem: 'PDV',
     terminal_id: terminalId,
@@ -131,7 +157,7 @@ function corpo(pagamentos, total, extra = {}) {
     emitir_fiscal: false,
     pagamento_sequencial: extra.sequencial !== false,
     confirmacao_fiscal_manual: true,
-    forma_pagamento: extra.forma || (pagamentos.length > 1 ? 'misto' : pagamentos[0].forma_pagamento),
+    forma_pagamento: extra.forma || (lista.length > 1 ? 'misto' : lista[0].forma_pagamento),
     desconto: 0,
     acrescimo: 0,
     total,
@@ -143,11 +169,49 @@ function corpo(pagamentos, total, extra = {}) {
       subtotal: total,
       tipo_venda: 'UNIDADE'
     }],
-    pagamentos
+    pagamentos: lista
   };
 }
+async function garantirTefParaPagamentos(lista) {
+  const saida = [];
+  for (const pagamento of lista || []) {
+    if (!formaPagamentoUsaTEF(pagamento.forma_pagamento)) {
+      saida.push(pagamento);
+      continue;
+    }
+    const status = String(pagamento.status_autorizacao || pagamento.status || '').toLowerCase();
+    if (status !== 'aprovada' && status !== 'aprovado') {
+      saida.push(pagamento);
+      continue;
+    }
+    const tipo = String(pagamento.forma_pagamento).includes('credito')
+      ? 'cartao_credito'
+      : (String(pagamento.forma_pagamento).includes('debito') ? 'cartao_debito' : 'pix_tef');
+    const nsu = pagamento.nsu || `NSU-26-${Date.now()}-${saida.length}`;
+    const aut = pagamento.autorizacao || `AUT-26-${Date.now()}-${saida.length}`;
+    const row = await run(
+      `INSERT INTO tef_transacoes (
+         venda_id, empresa_id, operador_id, tipo, valor, status, provedor, nsu, autorizacao
+       ) VALUES (NULL, ?, ?, ?, ?, 'aprovado', 'SITEF', ?, ?)`,
+      [empresaA.id, operadorId, tipo, Number(pagamento.valor), nsu, aut]
+    );
+    saida.push({
+      ...pagamento,
+      tef_transacao_id: row.lastID,
+      nsu,
+      autorizacao: aut
+    });
+  }
+  return saida;
+}
+
 async function vender(pagamentos, total, extra) {
-  const resposta = await httpJson('/api/vendas', corpo(pagamentos, total, extra));
+  const enriquecidos = (pagamentos || []).map((pagamento, indice) => enriquecerPagamentoReferencia(pagamento, indice));
+  const comTef = await garantirTefParaPagamentos(enriquecidos);
+  const corpoReq = corpo(comTef, total, { ...(extra || {}), _jaEnriquecido: true });
+  // corpo() re-enriquece; passar já com tef ids via override
+  corpoReq.pagamentos = comTef;
+  const resposta = await httpJson('/api/vendas', corpoReq);
   assert.equal(resposta.status, 200, JSON.stringify(resposta.body));
   const vendaId = resposta.body.id || resposta.body.venda_id;
   const venda = await get(
@@ -191,12 +255,13 @@ describe('Sprint 26 — recomposição de referência em teste', { concurrency: 
       `INSERT INTO usuarios (username, password_hash, role, nome, perfil, ativo)
        VALUES ('op26', 'x', 'operador', 'Operador 26', 'CAIXA', 1)`
     );
+    operadorId = operador.lastID;
     await run(
       `INSERT INTO usuario_empresas (usuario_id, empresa_id, ativo) VALUES (?, ?, 1)`,
-      [operador.lastID, empresaA.id]
+      [operadorId, empresaA.id]
     );
     tokenOperador = jwt.sign(
-      { id: operador.lastID, usuario_id: operador.lastID, username: 'op26', role: 'operador', perfil: 'CAIXA' },
+      { id: operadorId, usuario_id: operadorId, username: 'op26', role: 'operador', perfil: 'CAIXA' },
       getJwtSecret(),
       { expiresIn: '2h' }
     );
@@ -334,7 +399,13 @@ describe('Sprint 26 — recomposição de referência em teste', { concurrency: 
     const resultado = avaliarReferenciaRecomposicao({
       total: 40,
       pagamentos: [
-        { forma_pagamento: 'cartao_debito', valor: 20, status_autorizacao: 'aprovada' },
+        marcarParcelaEletronicaComprovada({
+          forma_pagamento: 'cartao_debito',
+          valor: 20,
+          status_autorizacao: 'aprovada',
+          nsu: 'NSU-OK',
+          autorizacao: 'AUT-OK'
+        }),
         { forma_pagamento: 'cartao_credito', valor: 10, status_autorizacao: 'rejeitada' },
         { forma_pagamento: 'pix', valor: 10, status_autorizacao: 'pendente' }
       ]

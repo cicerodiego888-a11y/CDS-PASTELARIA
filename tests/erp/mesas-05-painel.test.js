@@ -480,4 +480,37 @@ describe('navegação e permissões', () => {
     assert.equal(idas[0].visualizarPedidos, true);
     assert.equal(idas[0].pedidoId, undefined);
   });
+
+  it('oferece gerar venda no PDV e envia o handoff do pedido', async () => {
+    const handoffs = [];
+    const { control } = montar(async (method, path) => {
+      if (path === '/mesas/situacao') return { itens: itensEmpresa() };
+      if (path === '/mesas/2/atendimento') {
+        return { situacao: 'OCUPADA', numero: 2, atendimento: itensEmpresa()[1].atendimento };
+      }
+      if (path === '/mesas/2/atendimento/pedidos') return pedidosMesa();
+      if (method === 'POST' && path === '/pedidos/40/preparar-venda-pdv') {
+        return {
+          success: true,
+          pedido_id: 40,
+          venda_id: null,
+          venda_concluida: false,
+          itens: [{ produto_id: 1, quantidade: 1 }]
+        };
+      }
+      throw new Error('rota inesperada ' + method + ' ' + path);
+    }, {
+      confirmar: () => true,
+      aoIrParaPdv(preparacao) { handoffs.push(preparacao); }
+    });
+    await control.iniciar();
+    await control.selecionar(2);
+    assert.match(control.html(), /data-acao="venda-pdv"/);
+    assert.match(control.html(), /Gerar venda no PDV/);
+    const resultado = await control.gerarVendaPdv(40);
+    assert.equal(resultado.ok, true);
+    assert.equal(resultado.redirecionado, true);
+    assert.equal(handoffs.length, 1);
+    assert.equal(handoffs[0].pedido_id, 40);
+  });
 });

@@ -13,8 +13,50 @@
 
 const tefFluxo = require('../tef/tefFluxoPagamento');
 
-/** Flag de produto: recomposição oficial permanece desligada até sprint futura. */
+/**
+ * Flag histórica: recomposição “em produção” ampla (inclui reescrita no emissor).
+ * Permanece false — a NFC-e não reconstrói composição (Sprints 31/34 + ATIVACAO-01).
+ */
 const RECOMPOSICAO_HABILITADA_EM_PRODUCAO = false;
+
+/**
+ * CDS-PDV-ATIVACAO-RECOMPOSICAO-FISCAL-MISTA-01
+ * Intenção de recomposição no fechamento. HARDENING-01 exige contexto PDV
+ * (caixa + origem + chave). Não autoriza reescrita no emissor.
+ * Opt-out isolado em regressões: CDS_RECOMPOSICAO_FECHAMENTO_OPERACIONAL=0.
+ */
+const RECOMPOSICAO_FECHAMENTO_OPERACIONAL_ATIVA = true;
+
+const ENV_FECHAMENTO_OPERACIONAL = 'CDS_RECOMPOSICAO_FECHAMENTO_OPERACIONAL';
+
+/**
+ * Contexto confiável do fechamento PDV (middleware de caixa + contrato de chave).
+ * Não confia só em declaração solta do frontend.
+ */
+function contextoFechamentoPdvAutorizado(contexto = {}) {
+  const caixaSessaoId = Number(contexto.caixaSessaoId || contexto.caixa_sessao_id || 0);
+  const caixaId = Number(contexto.caixaId || contexto.caixa_id || 0);
+  const caixaOk = caixaSessaoId > 0 || caixaId > 0;
+  const canal = String(contexto.canalVendaHttp || contexto.canal_venda_http || '').toUpperCase();
+  const origem = String(contexto.origem || '').toUpperCase();
+  const origemPdv = canal === 'PDV' || origem === 'PDV';
+  const chave = String(contexto.chave_fechamento_pdv || '').trim();
+  const chaveOk = /^[A-Za-z0-9._:-]{8,80}$/.test(chave);
+  return caixaOk && origemPdv && chaveOk;
+}
+
+/**
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {object|null} [contexto] — caixa/origem/chave do fechamento
+ */
+function recomposicaoFechamentoOperacionalAtiva(env = process.env, contexto = null) {
+  const override = String(env[ENV_FECHAMENTO_OPERACIONAL] || '');
+  if (override === '0') return false;
+  if (RECOMPOSICAO_FECHAMENTO_OPERACIONAL_ATIVA !== true && override !== '1') return false;
+  // override=1 habilita a intenção; ainda exige contexto PDV autorizado.
+  if (!contextoFechamentoPdvAutorizado(contexto || {})) return false;
+  return true;
+}
 
 const TOLERANCIA_CENTAVOS = 0.01;
 
@@ -376,6 +418,10 @@ function pagamentoExigeProcessamentoTef(forma) {
 
 module.exports = {
   RECOMPOSICAO_HABILITADA_EM_PRODUCAO,
+  RECOMPOSICAO_FECHAMENTO_OPERACIONAL_ATIVA,
+  ENV_FECHAMENTO_OPERACIONAL,
+  contextoFechamentoPdvAutorizado,
+  recomposicaoFechamentoOperacionalAtiva,
   prepararContratoRecomposicaoFiscal,
   pagamentoExigeProcessamentoTef,
   formaEhDinheiro,

@@ -3,6 +3,7 @@
  * Leitura isolada de estoque_empresa. Sem fallback para produtos.
  * CDS-ESTOQUE-MANUAL-01 — contagem física F×NF.
  * CDS-ESTOQUE-CONTAGEM-SNAPSHOT-FLUXO-03.1 — confirmação oficial exige snapshot.
+ * CDS-ESTOQUE-CONTAGEM-REDESIGN-PREVIEW-05.3 — saldo atual somente leitura.
  */
 'use strict';
 
@@ -94,7 +95,9 @@ function criarRotasEstoque(dbConn) {
         apresentacao_id: body.apresentacao_id,
         unidade_informada: body.unidade_informada || body.unidade_comercial,
         modo_fiscal: body.modo_fiscal != null ? body.modo_fiscal : req.query.modo_fiscal,
-        omitir_nao_fiscal: body.omitir_nao_fiscal
+        omitir_nao_fiscal: body.omitir_nao_fiscal,
+        operacao: body.operacao,
+        tipo_ajuste: body.tipo_ajuste != null ? body.tipo_ajuste : body.tipoAjuste
       });
       return res.json(preview);
     } catch (err) {
@@ -137,6 +140,28 @@ function criarRotasEstoque(dbConn) {
         saldo_nao_fiscal_esperado: err && err.saldo_nao_fiscal_esperado,
         saldo_fiscal_atual: err && err.saldo_fiscal_atual,
         saldo_nao_fiscal_atual: err && err.saldo_nao_fiscal_atual
+      });
+    }
+  });
+
+  // CDS-ESTOQUE-CONTAGEM-REDESIGN-PREVIEW-05.3 — saldo atual, sem escrita (antes de :id).
+  router.get('/contagem-fisica/saldo-atual', exigirContexto, exigirPerfilAjusteEstoque(), async (req, res) => {
+    try {
+      const q = req.query || {};
+      const saldo = await EstoqueContagemFisicaService.consultarSaldoAtualContagem({
+        db: dbConn,
+        empresaId: req.empresaId,
+        produtoId: q.produto_id != null ? q.produto_id : q.produtoId
+      });
+      return res.json(saldo);
+    } catch (err) {
+      const status = Number(err && err.status) || 400;
+      return res.status(status).json({
+        ok: false,
+        somente_leitura: true,
+        movimentou_estoque: false,
+        error: err && err.message ? err.message : 'Erro ao consultar o saldo atual.',
+        code: err && err.code ? err.code : 'SALDO_ATUAL_FALHOU'
       });
     }
   });
@@ -218,10 +243,14 @@ function criarRotasEstoque(dbConn) {
   router.get('/contagem-fisica/historico', exigirContexto, exigirPerfilAjusteEstoque(), async (req, res) => {
     try {
       const limite = req.query && req.query.limite != null ? req.query.limite : undefined;
-      const hist = await EstoqueContagemPeriodicidadeService.listarHistoricoContagens(
+      const hist = await EstoqueContagemFisicaService.enriquecerHistoricoComTipoAjuste(
         dbConn,
         req.empresaId,
-        { limite }
+        await EstoqueContagemPeriodicidadeService.listarHistoricoContagens(
+          dbConn,
+          req.empresaId,
+          { limite }
+        )
       );
       return res.json(hist);
     } catch (err) {

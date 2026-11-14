@@ -39,7 +39,7 @@ const {
 } = require('./ClassificacaoModalidadePagamento');
 const {
   avaliarReferenciaRecomposicao,
-  ambienteTesteRecomposicaoReferencia,
+  ambienteRecomposicaoReferenciaAtivo,
   gravarReferenciaRecomposicao
 } = require('./PagamentoSequencialComposicaoService');
 const {
@@ -760,9 +760,12 @@ function resolverStatusPagamentoVenda(
     recebimentos.length > 0
     && Math.abs(totalConfirmado - valor) <= 0.01;
 
-  // Venda mista (fiscal + não fiscal): 2ª etapa obrigatória
+  // Venda mista (fiscal + não fiscal): 2ª etapa obrigatória.
+  // CDS-PDV-PAGAMENTO-MISTO-HARDENING-02 — NF confirmado (após classificação final)
+  // encerra como quitada; não herdar statusAtual stale (ex.: aguardando do Orquestrador
+  // antes do remapeamento dinheiro→nao_fiscal).
   if (valorFiscal > 0 && valor > 0) {
-    return naoFiscalConfirmado ? statusAtual : 'aguardando_nao_fiscal';
+    return naoFiscalConfirmado ? 'quitada' : 'aguardando_nao_fiscal';
   }
 
   // Venda somente não fiscal: pagamento único na criação — nunca aguarda 2ª etapa
@@ -775,6 +778,29 @@ function resolverStatusPagamentoVenda(
 
   // Venda somente fiscal
   return statusAtual;
+}
+
+/**
+ * Classificação comercial final dos recebimentos (dinheiro→NF, digitais→fiscal).
+ * Deve ocorrer ANTES de aplicarRegraStatusPagamentoVenda para o status refletir
+ * os tipos efetivos que serão persistidos.
+ */
+function aplicarClassificacaoTipoRecebimento(recebimentos) {
+  const { classificarTipoRecebimento } = require('./PagamentoSequencialComposicaoService');
+  return (Array.isArray(recebimentos) ? recebimentos : []).map((recebimento) => {
+    const tipo = classificarTipoRecebimento(recebimento);
+    if (!tipo) return recebimento;
+    if (tipo === 'nao_fiscal') {
+      return {
+        ...recebimento,
+        tipo_recebimento: 'nao_fiscal',
+        tef_transacao_id: null,
+        nsu: null,
+        autorizacao: null
+      };
+    }
+    return { ...recebimento, tipo_recebimento: 'fiscal' };
+  });
 }
 
 function aplicarRegraStatusPagamentoVenda({
@@ -810,6 +836,15 @@ function aplicarRegraStatusPagamentoVenda({
     statusPagamento: statusFinal,
     recebimentos: recebimentosFinal
   };
+}
+
+/** Classifica tipos e só então resolve status/strip — fonte única do fechamento. */
+function aplicarClassificacaoERegraStatusPagamentoVenda(entrada) {
+  const classificados = aplicarClassificacaoTipoRecebimento(entrada && entrada.recebimentos);
+  return aplicarRegraStatusPagamentoVenda({
+    ...entrada,
+    recebimentos: classificados
+  });
 }
 
 function normalizarPagamentosNaoFiscal(body) {
@@ -1187,7 +1222,7 @@ if (cpfCnpjNotaLimpo && ![11, 14].includes(cpfCnpjNotaLimpo.length)) {
   });
 }
 
-const pagamentosVenda = Array.isArray(pagamentos) ? pagamentos : [];
+let pagamentosVenda = Array.isArray(pagamentos) ? pagamentos : [];
 
 const formaClassificada = classificarFormaPagamento(pagamentosVenda);
 let formaPagamentoFinal = formaClassificada || forma_pagamento;
@@ -1267,17 +1302,60 @@ try {
   });
 }
 
+const contextoFechamentoPdv = {
+  origem: req.body && req.body.origem,
+  canalVendaHttp: req.canalVendaHttp,
+  caixaSessaoId: req.caixaSessaoId,
+  caixaId: req.caixaId,
+  chave_fechamento_pdv: req.body && req.body.chave_fechamento_pdv,
+  pagamento_sequencial: req.body && req.body.pagamento_sequencial === true
+};
+req.__contextoFechamentoPdv = contextoFechamentoPdv;
+const recomposicaoOperacionalNoFechamento = ambienteRecomposicaoReferenciaAtivo(
+  process.env,
+  contextoFechamentoPdv
+);
 let referenciaRecomposicao = null;
-if ((req.body && req.body.pagamento_sequencial === true) || ambienteTesteRecomposicaoReferencia()) {
-  try {
-    const pagamentosReferencia = pagamentosVenda.length
+if (
+  (req.body && req.body.pagamento_sequencial === true)
+  || recomposicaoOperacionalNoFechamento
+) {
+  // CONFIRMACAO-AUTORITATIVA-01: comprova TEF persistido ANTES de calcular a referência.
+  if (!req.__pagamentosComprovadosReferenciaOk) {
+    const pagamentosReferenciaBrutos = pagamentosVenda.length
       ? pagamentosVenda
       : (forma_pagamento ? [{ forma_pagamento, valor: totalNum }] : []);
+    const operadorIdRef = Number(req.user && (req.user.id || req.user.usuario_id)) || null;
+    const {
+      comprovarPagamentosParaReferenciaFiscal
+    } = require('../OrquestradorPagamento');
+    return comprovarPagamentosParaReferenciaFiscal(pagamentosReferenciaBrutos, {
+      empresaId: empresaIdVenda,
+      operadorId: operadorIdRef,
+      db
+    }).then((comprovacao) => {
+      req.__pagamentosComprovadosReferenciaOk = true;
+      req.__pagamentosComprovadosReferencia = comprovacao.pagamentos;
+      req.__rejeicoesComprovacaoEletronica = comprovacao.rejeicoes || [];
+      return criarVenda(req, res);
+    }).catch((errComprovacao) => res.status(errComprovacao.statusCode || 400).json({
+      error: errComprovacao.message || 'Falha ao comprovar pagamentos eletrônicos.',
+      codigo: errComprovacao.code || 'COMPROVACAO_ELETRONICA_FALHOU'
+    }));
+  }
+  try {
+    const pagamentosReferencia = Array.isArray(req.__pagamentosComprovadosReferencia)
+      ? req.__pagamentosComprovadosReferencia
+      : pagamentosVenda;
     referenciaRecomposicao = avaliarReferenciaRecomposicao({
       total: totalNum,
       pagamentos: pagamentosReferencia,
       itens
-    });
+    }, { contexto: contextoFechamentoPdv });
+    // Parcelas carimbadas passam a ser a lista autoritativa do fechamento.
+    if (Array.isArray(req.__pagamentosComprovadosReferencia)) {
+      pagamentosVenda = req.__pagamentosComprovadosReferencia;
+    }
   } catch (errComposicao) {
     return res.status(errComposicao.statusCode || 400).json({
       error: errComposicao.message,
@@ -1532,12 +1610,21 @@ db.all(`
       });
       const authDist = obterAutorizacaoDistribuicaoOficialInterna(
         process.env,
-        req.__cdsRecomposicaoDistribuicaoOficial || null
+        req.__cdsRecomposicaoDistribuicaoOficial || null,
+        contextoFechamentoPdv
       );
       const modoBloqueia = __cdsRecomposicaoPipeline.modoInfo
         && __cdsRecomposicaoPipeline.modoInfo.modo_efetivo === 'APLICACAO_BLOQUEADA';
+      // HARDENING-01: com fechamento operacional ativo, só o caminho integrarPagamentoRecomposicao aplica.
+      const operacaoOperacional = recomposicaoOperacionalNoFechamento === true
+        || (authDist && authDist.fonte === 'fechamento_operacional');
       let aplicacaoOficial = null;
-      if (authDist.ativa && !modoBloqueia && validacao.composicao_validada_em_homologacao === true) {
+      if (
+        authDist.ativa
+        && !modoBloqueia
+        && !operacaoOperacional
+        && validacao.composicao_validada_em_homologacao === true
+      ) {
         const saldosPorProduto = {};
         for (const entrada of entradasMotor) {
           const pid = Number(entrada.item && entrada.item.produto_id);
@@ -1655,12 +1742,34 @@ db.all(`
     && naoFiscalReferencia > 0.009
   ) {
     const { integrarPagamentoRecomposicao } = require('./PagamentoRecomposicaoDocumentoService');
+    const saldosPorProdutoRecomposicao = {};
+    for (const entrada of entradasMotor) {
+      const pid = Number(entrada.item && entrada.item.produto_id);
+      if (!Number.isInteger(pid) || pid <= 0) continue;
+      const produtoEntrada = produtoMap[pid] || produtoMap[entrada.item.produto_id] || {};
+      saldosPorProdutoRecomposicao[pid] = {
+        saldoFiscal: entrada.saldoFiscal,
+        saldoNaoFiscal: entrada.saldoNaoFiscal,
+        controla_estoque: produtoEntrada.controla_estoque
+      };
+    }
     const documento = await integrarPagamentoRecomposicao({
       total: totalNum,
-      pagamentos: pagamentosVenda,
+      desconto: Number(desconto || 0),
+      acrescimo: Number(acrescimo || 0),
+      pagamentos: Array.isArray(req.__pagamentosComprovadosReferencia)
+        ? req.__pagamentosComprovadosReferencia
+        : pagamentosVenda,
       itens,
-      empresaId: empresaIdVenda
-    }, { db });
+      empresaId: empresaIdVenda,
+      saldosPorProduto: saldosPorProdutoRecomposicao,
+      contexto: contextoFechamentoPdv
+    }, {
+      db,
+      contexto: contextoFechamentoPdv,
+      pagamentosJaComprovados: true,
+      saldosPorProduto: saldosPorProdutoRecomposicao
+    });
     const somaCampo = (linhas, campo) => Math.round((linhas || []).reduce((total, linha) => (
       total + Number(linha && linha[campo] || 0)
     ), 0) * 100) / 100;
@@ -1707,17 +1816,38 @@ db.all(`
       }));
       const somaFiscal = somaCampo(mesclados, 'valor_fiscal');
       const somaNao = somaCampo(mesclados, 'valor_nao_fiscal');
-      if (Math.abs(somaFiscal - Number(referenciaRecomposicao.valor_fiscal_referencia)) <= 0.02) {
+      // COMPLEMENTO-20: referência final pode incluir dinheiro transferido ao fiscal.
+      const refDoc = documento && documento.referencia ? documento.referencia : referenciaRecomposicao;
+      const fiscalAlvo = Number(
+        refDoc && refDoc.valor_fiscal_referencia != null
+          ? refDoc.valor_fiscal_referencia
+          : referenciaRecomposicao.valor_fiscal_referencia
+      );
+      const naoAlvo = Number(
+        refDoc && refDoc.valor_nao_fiscal_referencia != null
+          ? refDoc.valor_nao_fiscal_referencia
+          : referenciaRecomposicao.valor_nao_fiscal_referencia
+      );
+      if (Math.abs(somaFiscal - fiscalAlvo) <= 0.02) {
+        if (refDoc && refDoc !== referenciaRecomposicao) {
+          referenciaRecomposicao = refDoc;
+        }
         resultadoParaFechamento = {
           ...resultadoParaFechamento,
           sucesso: true,
           valorFiscalLiquido: somaFiscal,
           valorFiscalEfetivo: somaFiscal,
-          valorNaoFiscalLiquido: somaNao,
-          valorNaoFiscal: somaNao,
+          valorNaoFiscalLiquido: Math.abs(somaNao - naoAlvo) <= 0.05 ? somaNao : naoAlvo,
+          valorNaoFiscal: Math.abs(somaNao - naoAlvo) <= 0.05 ? somaNao : naoAlvo,
           itens: mesclados
         };
         req.__distribuicaoReferenciaAplicada = true;
+        req.__complementoDinheiroRecomposicao = Number(
+          documento.complemento_dinheiro_utilizado || refDoc.complemento_dinheiro_utilizado || 0
+        );
+        req.__descontoAjusteRecomposicao = Number(
+          documento.desconto_ajuste || refDoc.desconto_ajuste || 0
+        );
       } else {
         req.__bloqueioDocumentoFiscal = {
           codigo: 'TOTAL_FISCAL_DIVERGENTE_DA_REFERENCIA',
@@ -1726,32 +1856,34 @@ db.all(`
       }
     }
     if (!req.__distribuicaoReferenciaAplicada) {
-      req.__bloqueioDocumentoFiscal = req.__bloqueioDocumentoFiscal || {
+      // CDS-PDV-CORRECAO-FALLBACK-DESTRUTIVO-CLASSIFICACAO-MISTA-01
+      // Proibido converter referência mista confirmada em 0/100. Falhar antes de persistir.
+      const bloqueio = req.__bloqueioDocumentoFiscal || {
         codigo: documento && documento.codigo ? documento.codigo : 'DISTRIBUICAO_NAO_AUTORIZADA',
         motivo: documento && documento.motivo
           ? documento.motivo
           : 'A distribuição fiscal não foi autorizada.'
       };
-      resultadoParaFechamento = {
-        sucesso: true,
-        valorFiscalLiquido: 0,
-        valorFiscalEfetivo: 0,
-        valorNaoFiscalLiquido: totalNum,
-        valorNaoFiscal: totalNum,
-        itens: (itens || []).map((item) => ({
-          ...item,
-          quantidade_fiscal: 0,
-          valor_fiscal: 0,
-          quantidade_nao_fiscal: 0,
-          valor_nao_fiscal: 0
-        }))
-      };
+      req.__bloqueioDocumentoFiscal = bloqueio;
+      return res.status(409).json({
+        error: bloqueio.motivo
+          || 'A distribuição fiscal/gerencial não foi autorizada. O fechamento foi interrompido.',
+        codigo: bloqueio.codigo || 'DISTRIBUICAO_NAO_AUTORIZADA',
+        code: bloqueio.codigo || 'DISTRIBUICAO_NAO_AUTORIZADA',
+        valor_fiscal_referencia: fiscalReferencia,
+        valor_nao_fiscal_referencia: naoFiscalReferencia,
+        recomposicao_fiscal_gerencial_nao_autorizada: true
+      });
     }
   }
 
   if (vendaFiscal === true && !req.__distribuicaoReferenciaAplicada && !req.__bloqueioDocumentoFiscal) {
     const { calcularReferenciasConfirmadas } = require('./PagamentoSequencialComposicaoService');
-    const classificado = calcularReferenciasConfirmadas(pagamentosVenda);
+    const classificado = calcularReferenciasConfirmadas(
+      Array.isArray(req.__pagamentosComprovadosReferencia)
+        ? req.__pagamentosComprovadosReferencia
+        : pagamentosVenda
+    );
     const fiscalClassificado = Number(classificado.valor_fiscal_referencia || 0);
     const naoClassificado = Number(classificado.valor_nao_fiscal_referencia || 0);
     if (fiscalClassificado > 0.009 && naoClassificado > 0.009) {
@@ -1769,24 +1901,20 @@ db.all(`
           motivo: decisao.motivo
         };
       } else {
+      // CDS-PDV-CORRECAO-FALLBACK-DESTRUTIVO-CLASSIFICACAO-MISTA-01
+      // Contexto/recomposicao sem distribuição: interromper; nunca gravar 0/100.
       req.__bloqueioDocumentoFiscal = {
         codigo: 'RECOMPOSICAO_NAO_AUTORIZADA',
         motivo: 'A venda tem recebimento fiscal e não fiscal, mas não há distribuição autorizada. A NFC-e não foi montada.'
       };
-      resultadoParaFechamento = {
-        sucesso: true,
-        valorFiscalLiquido: 0,
-        valorFiscalEfetivo: 0,
-        valorNaoFiscalLiquido: totalNum,
-        valorNaoFiscal: totalNum,
-        itens: (itens || []).map((item) => ({
-          ...item,
-          quantidade_fiscal: 0,
-          valor_fiscal: 0,
-          quantidade_nao_fiscal: 0,
-          valor_nao_fiscal: 0
-        }))
-      };
+      return res.status(409).json({
+        error: 'A recomposição fiscal/gerencial não foi autorizada. O fechamento foi interrompido sem gravar a venda.',
+        codigo: 'RECOMPOSICAO_NAO_AUTORIZADA',
+        code: 'RECOMPOSICAO_NAO_AUTORIZADA',
+        valor_fiscal_referencia: fiscalClassificado,
+        valor_nao_fiscal_referencia: naoClassificado,
+        recomposicao_fiscal_gerencial_nao_autorizada: true
+      });
       }
     } else if (fiscalClassificado <= 0.009 && naoClassificado > 0.009 && Math.abs(naoClassificado - totalNum) <= 0.02) {
       resultadoParaFechamento = {
@@ -2166,7 +2294,7 @@ db.all(`
       totalFiscal,
       totalNaoFiscal,
       formaPagamento: formaPagamentoFinal,
-      pagamentos: req.body.pagamentos || [],
+      pagamentos: pagamentosVenda,
       tefHabilitado,
       modoConfirmacaoFiscal,
       valorFiscalMaximo: resultadoParaFechamento.valorFiscalMaximo,
@@ -2190,7 +2318,7 @@ db.all(`
     }
 
     const { resultadoFiscal } = resultadoPagamento;
-    const resultadoStatus = aplicarRegraStatusPagamentoVenda({
+    const resultadoStatus = aplicarClassificacaoERegraStatusPagamentoVenda({
       valorFiscal: totalFiscal,
       valorNaoFiscal: totalNaoFiscal,
       valorOutros,
@@ -2225,13 +2353,16 @@ db.all(`
           empresaId: empresaIdVenda,
           clienteId: cliente_id
         });
+        const chaveFechamentoPdv = String(
+          (req.__chaveFechamentoPdv || (req.body && req.body.chave_fechamento_pdv) || '')
+        ).trim() || null;
         const venda = await runSqlite(transacaoDb, `
           INSERT INTO vendas (
             codigo, data_venda, cliente_id, total, valor_outros, desconto, acrescimo,
             forma_pagamento, status, caixa_sessao_id, caixa_id, terminal_id,
             operador_id, valor_fiscal, valor_nao_fiscal, status_pagamento,
-            tef_transacao_id, mpfc_politica_snapshot, empresa_id
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            tef_transacao_id, mpfc_politica_snapshot, empresa_id, chave_fechamento_pdv
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `, [
           codigo,
           data_venda,
@@ -2250,7 +2381,8 @@ db.all(`
           statusPagamento,
           resultadoFiscal?.transacoes?.[0] || null,
           snapshotJson,
-          empresaIdVenda
+          empresaIdVenda,
+          chaveFechamentoPdv
         ]);
         const id = venda.lastID;
 
@@ -2260,6 +2392,17 @@ db.all(`
         await inserirItensDaVenda(transacaoDb, id);
         await inserirPagamentosDaVenda(transacaoDb, id);
         await gravarReferenciaRecomposicao(transacaoDb, id, referenciaRecomposicao);
+        if (chaveFechamentoPdv) {
+          const {
+            marcarReservaConcluidaNaTransacao
+          } = require('./PdvFechamentoIdempotenciaService');
+          await marcarReservaConcluidaNaTransacao(
+            transacaoDb,
+            chaveFechamentoPdv,
+            id,
+            statusPagamento
+          );
+        }
 
         const qtdParcelas = Math.max(1, parseInt(parcelas || 1, 10) || 1);
         const parcelasReceber = montarParcelasReceber(totalNum, valorOutros, qtdParcelas);
@@ -2399,7 +2542,7 @@ const executarVenda = async () => {
     totalFiscal,
     totalNaoFiscal,
     formaPagamento: formaPagamentoFinal,
-    pagamentos: req.body.pagamentos || [],
+    pagamentos: pagamentosVenda,
     tefHabilitado,
     modoConfirmacaoFiscal,
     valorFiscalMaximo: resultadoParaFechamento.valorFiscalMaximo,
@@ -2423,7 +2566,9 @@ const executarVenda = async () => {
   }
 
   const { distribuicao, resultadoFiscal } = resultadoPagamento;
-  const resultadoStatus = aplicarRegraStatusPagamentoVenda({
+  // HARDENING-02: classificar tipos finais ANTES da regra de status (evita status
+  // aguardando com dinheiro já remapeado/persistido como NF e saldo GET = 0).
+  const resultadoStatus = aplicarClassificacaoERegraStatusPagamentoVenda({
     valorFiscal: totalFiscal,
     valorNaoFiscal: totalNaoFiscal,
     valorOutros,
@@ -2431,21 +2576,6 @@ const executarVenda = async () => {
     recebimentos: resultadoPagamento.recebimentos
   });
   let { statusPagamento, recebimentos } = resultadoStatus;
-  const { classificarTipoRecebimento } = require('./PagamentoSequencialComposicaoService');
-  recebimentos = (recebimentos || []).map((recebimento) => {
-    const tipo = classificarTipoRecebimento(recebimento);
-    if (!tipo) return recebimento;
-    if (tipo === 'nao_fiscal') {
-      return {
-        ...recebimento,
-        tipo_recebimento: 'nao_fiscal',
-        tef_transacao_id: null,
-        nsu: null,
-        autorizacao: null
-      };
-    }
-    return { ...recebimento, tipo_recebimento: 'fiscal' };
-  });
 
   let vendaId;
   try {
@@ -2473,13 +2603,17 @@ const executarVenda = async () => {
         empresaId: empresaIdVenda,
         clienteId: cliente_id
       });
+      const chaveFechamentoPdv = String(
+        (req.__chaveFechamentoPdv || (req.body && req.body.chave_fechamento_pdv) || '')
+      ).trim() || null;
       const venda = await runSqlite(transacaoDb, `
         INSERT INTO vendas (
           codigo, data_venda, cliente_id, total, valor_outros, desconto, acrescimo,
           forma_pagamento, status, valor_recebido, caixa_sessao_id, caixa_id,
           terminal_id, cpf_cnpj_nota, operador_id, valor_fiscal, valor_nao_fiscal,
-          status_pagamento, tef_transacao_id, mpfc_politica_snapshot, empresa_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          status_pagamento, tef_transacao_id, mpfc_politica_snapshot, empresa_id,
+          chave_fechamento_pdv
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         codigo,
         data_venda,
@@ -2500,7 +2634,8 @@ const executarVenda = async () => {
         statusPagamento,
         resultadoFiscal?.transacoes?.[0] || null,
         snapshotJson,
-        empresaIdVenda
+        empresaIdVenda,
+        chaveFechamentoPdv
       ]);
       const id = venda.lastID;
 
@@ -2510,6 +2645,17 @@ const executarVenda = async () => {
       await inserirItensDaVenda(transacaoDb, id);
       await inserirPagamentosDaVenda(transacaoDb, id);
       await gravarReferenciaRecomposicao(transacaoDb, id, referenciaRecomposicao);
+      if (chaveFechamentoPdv) {
+        const {
+          marcarReservaConcluidaNaTransacao
+        } = require('./PdvFechamentoIdempotenciaService');
+        await marcarReservaConcluidaNaTransacao(
+          transacaoDb,
+          chaveFechamentoPdv,
+          id,
+          statusPagamento
+        );
+      }
 
       const statusFinanceiro = vendaFicaPendente ? 'pendente' : 'recebido';
       const baixadoEm = statusFinanceiro === 'recebido' ? data_venda : null;
@@ -3069,6 +3215,8 @@ module.exports = {
   filtrarRecebimentosNaoFiscal,
   resolverStatusPagamentoVenda,
   aplicarRegraStatusPagamentoVenda,
+  aplicarClassificacaoTipoRecebimento,
+  aplicarClassificacaoERegraStatusPagamentoVenda,
   normalizarPagamentosNaoFiscal,
   carregarPoliticaFiscalComercialPassiva,
   validarPagamentosNaoFiscal,

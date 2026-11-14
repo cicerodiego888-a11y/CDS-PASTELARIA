@@ -1,13 +1,24 @@
 /**
  * Sprint — venda mista com pagamento integral (anti-regressão #25).
- * Executar: node --test tests/vendas/venda-mista-pagamento-integral.test.js
+ * Executar: node --test --test-concurrency=1 tests/vendas/venda-mista-pagamento-integral.test.js
+ *
+ * HARDENING-02: isolamento DB_DIR + confirmacaoFiscalManual explícita no helper
+ * (contrato MANUAL do Orquestrador, sem TEF/hardware real).
  */
 'use strict';
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+
+const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-venda-mista-integral-'));
+process.env.DB_DIR = dbDir;
+process.env.CDS_TEST_ISOLATION = '1';
+process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
+process.env.CDS_FORCAR_LOCAL = '1';
+delete process.env.CDS_ALLOW_OFFICIAL_DB;
 
 const Orquestrador = require('../../backend/services/OrquestradorPagamento');
 const {
@@ -36,7 +47,18 @@ function sumForma(recebimentos, forma) {
   );
 }
 
-async function orquestrar({ fiscal, naoFiscal, pagamentos, forma }) {
+/**
+ * Simula fechamento em modo MANUAL já confirmado pelo operador/PDV.
+ * Não desliga a validação: passa confirmacaoFiscalManual explícita,
+ * o mesmo contrato que o PDV envia após confirmação sem TEF real.
+ */
+async function orquestrar({
+  fiscal,
+  naoFiscal,
+  pagamentos,
+  forma,
+  confirmacaoFiscalManual = true
+}) {
   return Orquestrador.processarFluxoPagamentoVenda({
     totalFiscal: fiscal,
     totalNaoFiscal: naoFiscal,
@@ -44,6 +66,7 @@ async function orquestrar({ fiscal, naoFiscal, pagamentos, forma }) {
     pagamentos,
     tefHabilitado: false,
     modoConfirmacaoFiscal: 'MANUAL',
+    confirmacaoFiscalManual,
     midpAtivo: false
   });
 }

@@ -38,6 +38,10 @@ function devePreservarItensComposicaoPedido({ pedidoId, itens, desconto, acresci
   return liquido > 0 && Math.abs(liquido - alvo) <= 0.02;
 }
 
+/**
+ * ATIVACAO-01: permanece amarrada somente a RECOMPOSICAO_HABILITADA_EM_PRODUCAO.
+ * O fechamento operacional NÃO autoriza reescrita no emissor.
+ */
 function reescritaDeComposicaoNoEmissorAutorizada() {
   return RECOMPOSICAO_HABILITADA_EM_PRODUCAO === true;
 }

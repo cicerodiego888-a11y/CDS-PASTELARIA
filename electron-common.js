@@ -52,6 +52,31 @@ try {
 
 let mainWindow;
 let appModuloAtual = 'erp';
+let backendBaseUrl = null;
+const { criarControladorAbrirPdv } = require('./electron-abrir-pdv');
+const controladorAbrirPdv = criarControladorAbrirPdv({
+  BrowserWindow,
+  dialog,
+  appRoot: __dirname,
+  preloadPath: path.join(__dirname, 'preload.js'),
+  resolverIconeJanela,
+  getMainWindow: () => mainWindow,
+  getAppModulo: () => appModuloAtual,
+  getBackendBaseUrl: () => backendBaseUrl,
+  carregarJanelaComRobustez,
+  injetarHostnameEstacao,
+  registrarMainWindow: (win) => {
+    mainWindow = win;
+    global.mainWindow = win;
+    win.on('closed', () => {
+      if (mainWindow === win) {
+        mainWindow = null;
+        global.mainWindow = null;
+      }
+    });
+  }
+});
+controladorAbrirPdv.registrar(ipcMain);
 
 // Registrar handlers IPC globalmente (antes de criar a janela)
 ipcMain.removeHandler('listar-impressoras');
@@ -318,9 +343,11 @@ function iniciarBackendLocal(tituloJanela) {
 
 function registrarHandlersIpc() {
   ipcMain.removeAllListeners('forcar-reflow');
-  ipcMain.on('forcar-reflow', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.executeJavaScript(`
+  ipcMain.on('forcar-reflow', (event) => {
+    // Aplicar no webContents que pediu (ERP ou PDV), não sempre na mainWindow.
+    const wc = event && event.sender;
+    if (!wc || wc.isDestroyed()) return;
+    wc.executeJavaScript(`
         const ativo = document.activeElement;
         const inicio = ativo && typeof ativo.selectionStart === 'number' ? ativo.selectionStart : null;
         const fim = ativo && typeof ativo.selectionEnd === 'number' ? ativo.selectionEnd : null;
@@ -332,7 +359,6 @@ function registrarHandlersIpc() {
           }
         }
       `);
-    }
   });
 
   ipcMain.removeAllListeners('abrir-comprovante');
@@ -527,6 +553,10 @@ function criarMainWindow(tituloJanela, opcoes = {}) {
   });
 
   global.mainWindow = mainWindow;
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+    global.mainWindow = null;
+  });
   registrarHandlersIpc();
   registrarHandlersDiagnostico();
 
@@ -623,8 +653,9 @@ function abrirJanelaApp(url, tituloErro, mensagemErro, tituloJanela, opcoes = {}
 
 function createWindow(serverPort, tituloJanela) {
   definirSessaoClienteRemoto(null);
+  backendBaseUrl = `http://127.0.0.1:${serverPort}`;
   return abrirJanelaApp(
-    montarUrlLogin(`http://127.0.0.1:${serverPort}`),
+    montarUrlLogin(backendBaseUrl),
     'Erro ao iniciar servidor',
     (error) => `O backend do sistema não respondeu.\n\n${error.message}\n\nDB_DIR: ${process.env.DB_DIR}`,
     tituloJanela
@@ -636,9 +667,10 @@ function createWindowRemote(remoteUrl, tituloJanela, configServidor = {}) {
     ipServidor: configServidor.ipServidor,
     porta: configServidor.porta
   });
+  backendBaseUrl = String(remoteUrl || '').replace(/\/$/, '');
 
   return abrirJanelaApp(
-    montarUrlLogin(remoteUrl),
+    montarUrlLogin(backendBaseUrl),
     'Erro ao carregar servidor remoto',
     (error) => `Não foi possível conectar ao servidor remoto.\n\n${error.message}`,
     tituloJanela,
@@ -655,6 +687,16 @@ function iniciarAplicacaoElectron(options = {}) {
   const { modulo = 'erp', tituloJanela = 'CDS Sistemas' } = options;
   appModuloAtual = modulo;
   process.env.CDS_APP_MODULO = modulo;
+
+  // HARDENING-01: no módulo PDV, pin da porta operacional (sem flags de teste/homolog).
+  if (String(modulo).toLowerCase() === 'pdv') {
+    process.env.CDS_RECOMPOSICAO_FECHAMENTO_OPERACIONAL = '1';
+    delete process.env.CDS_RECOMPOSICAO_REFERENCIA_TESTE;
+    delete process.env.CDS_RECOMPOSICAO_HOMOLOGACAO_DISTRIBUIR;
+    delete process.env.CDS_RECOMPOSICAO_APLICAR_DISTRIBUICAO;
+    delete process.env.CDS_RECOMPOSICAO_HOMOLOGACAO;
+    delete process.env.CDS_RECOMPOSICAO_DIAGNOSTICO;
+  }
 
   app.disableHardwareAcceleration();
   app.commandLine.appendSwitch('disable-gpu');
@@ -747,6 +789,11 @@ function iniciarAplicacaoElectron(options = {}) {
   });
 
   app.on('window-all-closed', () => {
+    const pdvAberta = controladorAbrirPdv.getPdvWindow()
+      && !controladorAbrirPdv.getPdvWindow().isDestroyed();
+    if ((mainWindow && !mainWindow.isDestroyed()) || pdvAberta) {
+      return;
+    }
     try {
       const cm = require('./backend/motores/equipamentos/connection/ConnectionManager');
       if (cm && typeof cm.closeAll === 'function') {
@@ -766,4 +813,7 @@ function iniciarAplicacaoElectron(options = {}) {
   });
 }
 
-module.exports = { iniciarAplicacaoElectron };
+module.exports = {
+  iniciarAplicacaoElectron,
+  obterControladorAbrirPdv: () => controladorAbrirPdv
+};

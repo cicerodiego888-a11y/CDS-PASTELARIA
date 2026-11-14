@@ -23,6 +23,7 @@ const EmpresaService = require('../../backend/services/empresas/EmpresaService')
 const { garantirSchemaEmpresasAsync } = require('../../backend/services/empresas/empresasSchema');
 const { garantirSchemaEstoqueEmpresaAsync } = require('../../backend/services/estoque/estoqueEmpresaSchema');
 const EstoqueEmpresaService = require('../../backend/services/estoque/EstoqueEmpresaService');
+const CanalVendaEmpresaService = require('../../backend/services/vendas/CanalVendaEmpresaService');
 
 function src(rel) { return fs.readFileSync(path.join(ROOT, rel), 'utf8'); }
 function run(db, sql, params = []) {
@@ -119,6 +120,158 @@ describe('Entrada central + Pedido Operacional (serviço real, banco isolado)', 
       estoqueAtual: await q('SELECT COALESCE(SUM(estoque_atual),0) AS n FROM estoque_empresa WHERE produto_id = ?', [produtoId])
     };
   }
+
+  async function cadastrarCanal(db, codigo, empresaId) {
+    return CanalVendaEmpresaService.cadastrarCanal(db, {
+      nome: `Canal ${codigo}`,
+      codigo,
+      tipo_origem: 'MARKETPLACE',
+      empresa_id: empresaId
+    }, { usuario: { id: 901 } });
+  }
+
+  async function criarProdutoIsolado(db, empresas) {
+    const produto = await run(db, `
+      INSERT INTO produtos (nome, preco_venda, unidade, saldo_fiscal, estoque_atual)
+      VALUES (?, 10, 'UN', 100, 100)
+    `, [`Pastel canal ${Date.now()}-${Math.random()}`]);
+    for (const empresa of empresas) {
+      await EstoqueEmpresaService.criarRegistro({
+        produtoId: produto.lastID,
+        empresaId: empresa.id,
+        saldo_fiscal: 100,
+        saldo_nao_fiscal: 0,
+        estoque_atual: 100,
+        reservado_fiscal: 0
+      }, { db });
+    }
+    return produto.lastID;
+  }
+
+  it('resolve canal confiável, persiste o código estável e rejeita divergência sem criar pedido', async () => {
+    const original = configService.recursoHabilitado;
+    configService.recursoHabilitado = () => true;
+    try {
+      const { db, a, b } = await preparar();
+      const produtoId = await criarProdutoIsolado(db, [a, b]);
+      const canalA = await cadastrarCanal(db, 'LOJA_A', a.id);
+      const canalB = await cadastrarCanal(db, 'LOJA_B', b.id);
+      const usuario = { id: 902, empresas: [a.id, b.id] };
+      const itens = [{ produto_id: produtoId, quantidade: 1, preco_unitario: 10, desconto_percentual: 0, subtotal: 10 }];
+      const out = await Entrada.receber({
+        canal: Entrada.CanalOrigem.EQUIPE,
+        canalVendaCodigo: canalA.codigo,
+        usuario,
+        body: { itens, total: 10, origem_canal: 'CLIENTE_NAO_CONFIAVEL' },
+        empresaId: a.id,
+        db,
+        chaveIdempotencia: 'entrada-canal-loja-a'
+      });
+
+      assert.equal(out.pedido.origem_canal, 'LOJA_A');
+      assert.equal(Number(out.pedido.empresa_id), a.id);
+      const antesDivergencia = await contagens(db, produtoId);
+      await assert.rejects(Entrada.receber({
+        canal: Entrada.CanalOrigem.EQUIPE,
+        canalVendaCodigo: canalB.codigo,
+        usuario,
+        body: { itens, total: 10 },
+        empresaId: a.id,
+        db,
+        chaveIdempotencia: 'entrada-canal-divergente'
+      }), (err) => err.codigo === 'CANAL_EMPRESA_DIVERGENTE' && err.statusCode === 409);
+      assert.deepEqual(await contagens(db, produtoId), antesDivergencia);
+    } finally {
+      configService.recursoHabilitado = original;
+    }
+  });
+
+  it('recusa canal inativo, vínculo inválido e usuário sem autorização antes de criar pedido', async () => {
+    const original = configService.recursoHabilitado;
+    configService.recursoHabilitado = () => true;
+    try {
+      const { db, produtoId, a, b } = await preparar();
+      const inativo = await cadastrarCanal(db, 'CANAL_INATIVO', a.id);
+      const semEmpresa = await cadastrarCanal(db, 'CANAL_SEM_EMPRESA', a.id);
+      const empresaInexistente = await cadastrarCanal(db, 'CANAL_EMPRESA_INEXISTENTE', a.id);
+      const semPermissao = await cadastrarCanal(db, 'CANAL_SEM_PERMISSAO', b.id);
+      await run(db, 'UPDATE canais_venda SET ativo = 0 WHERE id = ?', [inativo.id]);
+      await run(db, 'UPDATE canais_venda SET empresa_id = NULL WHERE id = ?', [semEmpresa.id]);
+      await run(db, 'UPDATE canais_venda SET empresa_id = 999999 WHERE id = ?', [empresaInexistente.id]);
+      const antes = await contagens(db, produtoId);
+      const itens = [{ produto_id: produtoId, quantidade: 1, preco_unitario: 10, desconto_percentual: 0, subtotal: 10 }];
+      const entrada = (codigo, usuario, empresaId) => Entrada.receber({
+        canal: Entrada.CanalOrigem.EQUIPE,
+        canalVendaCodigo: codigo,
+        usuario,
+        body: { itens, total: 10 },
+        empresaId,
+        db
+      });
+
+      await assert.rejects(entrada(inativo.codigo, { id: 903, empresas: [a.id] }, a.id),
+        (err) => err.code === 'CANAL_INATIVO' && err.statusCode === 409);
+      await assert.rejects(entrada(semEmpresa.codigo, { id: 903, empresas: [a.id] }, a.id),
+        (err) => err.code === 'CANAL_SEM_EMPRESA' && err.statusCode === 409);
+      await assert.rejects(entrada(empresaInexistente.codigo, { id: 903, empresas: [a.id] }, a.id),
+        (err) => err.code === 'EMPRESA_INATIVA' && err.statusCode === 409);
+      await assert.rejects(entrada(semPermissao.codigo, { id: 903, empresas: [a.id] }, b.id),
+        (err) => err.code === 'CANAL_USUARIO_SEM_AUTORIZACAO' && err.statusCode === 403);
+      await assert.rejects(entrada('CANAL_NAO_CADASTRADO', { id: 903, empresas: [a.id] }, a.id),
+        (err) => err.code === 'CANAL_INEXISTENTE' && err.statusCode === 404);
+      assert.deepEqual(await contagens(db, produtoId), antes);
+    } finally {
+      configService.recursoHabilitado = original;
+    }
+  });
+
+  it('mantém empresa selecionada no PDV MULTIPLAS e valida a empresa configurada no PDV UNICA', async () => {
+    const originalRecurso = configService.recursoHabilitado;
+    const originalReadConfig = configService.readConfig;
+    configService.recursoHabilitado = () => true;
+    try {
+      const { db, a } = await preparar();
+      const produtoId = await criarProdutoIsolado(db, [a]);
+      const itens = [{ produto_id: produtoId, quantidade: 1, preco_unitario: 10, desconto_percentual: 0, subtotal: 10 }];
+      const usuario = { id: 904, empresas: [a.id] };
+      configService.readConfig = () => ({
+        ...originalReadConfig(),
+        pdv_modelo_empresa: 'MULTIPLAS',
+        pdv_empresa_id: null
+      });
+      const multipla = await Entrada.receber({
+        canal: Entrada.CanalOrigem.EQUIPE,
+        canalVendaCodigo: 'PDV',
+        usuario,
+        body: { itens, total: 10 },
+        empresaId: a.id,
+        db,
+        chaveIdempotencia: 'entrada-pdv-multiplas'
+      });
+      assert.equal(multipla.pedido.origem_canal, 'PDV');
+      assert.equal(Number(multipla.pedido.empresa_id), a.id);
+
+      configService.readConfig = () => ({
+        ...originalReadConfig(),
+        pdv_modelo_empresa: 'UNICA',
+        pdv_empresa_id: a.id
+      });
+      const unica = await Entrada.receber({
+        canal: Entrada.CanalOrigem.EQUIPE,
+        canalVendaCodigo: 'PDV',
+        usuario,
+        body: { itens, total: 10 },
+        empresaId: a.id,
+        db,
+        chaveIdempotencia: 'entrada-pdv-unica'
+      });
+      assert.equal(unica.pedido.origem_canal, 'PDV');
+      assert.equal(Number(unica.pedido.empresa_id), a.id);
+    } finally {
+      configService.recursoHabilitado = originalRecurso;
+      configService.readConfig = originalReadConfig;
+    }
+  });
 
   it('cria um pedido pelo caminho central e consome o estoque da empresa correta', async () => {
     const original = configService.recursoHabilitado;
@@ -319,6 +472,7 @@ describe('Rotas e compatibilidade (código-fonte)', () => {
     const rota = src('backend/rotas/pedidos.js');
     assert.match(rota, /EntradaPedido\.receber\(/);
     assert.match(rota, /CanalOrigem\.EQUIPE/);
+    assert.match(rota, /canalVendaCodigo:\s*req\.canalVendaCodigo/);
     assert.doesNotMatch(rota, /req\.body[^;\n]*(origem|canal)/i, 'canal não pode vir do corpo');
     const server = src('backend/server.js');
     assert.doesNotMatch(server, /entrada-?pedido|api\/entrada|api\/publico\/pedidos|cardapio/i);

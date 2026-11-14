@@ -98,12 +98,85 @@ function ratearAjusteComercialFxNF(entrada = {}) {
 }
 
 /**
+ * Desconto/acréscimo comercial absorvido preferencialmente no não fiscal.
+ * Preserva o valor fiscal bruto da composição (referência eletrônico + complemento),
+ * desde que o NF comporte o desconto; o excedente só então toca o fiscal.
+ */
+function ratearAjusteComercialPreferindoNaoFiscal(entrada = {}) {
+  const valorFiscalBruto = round2(entrada.valorFiscalBruto || 0);
+  const valorNaoFiscalBruto = round2(entrada.valorNaoFiscalBruto || 0);
+  const subtotalBruto = round2(valorFiscalBruto + valorNaoFiscalBruto);
+  const desconto = Math.max(0, round2(entrada.desconto || 0));
+  const acrescimo = Math.max(0, round2(entrada.acrescimo || 0));
+  const totalLiquido = Math.max(0, round2(subtotalBruto - desconto + acrescimo));
+
+  if (
+    subtotalBruto <= 0
+    || (desconto <= 0 && acrescimo <= 0)
+    || Math.abs(totalLiquido - subtotalBruto) < 0.005
+  ) {
+    return ratearAjusteComercialFxNF(entrada);
+  }
+
+  // Desconto: NF primeiro; sobra no fiscal.
+  let descontoNaoFiscalRateado = round2(Math.min(desconto, Math.max(0, valorNaoFiscalBruto)));
+  let descontoFiscalRateado = round2(Math.min(
+    Math.max(0, desconto - descontoNaoFiscalRateado),
+    Math.max(0, valorFiscalBruto)
+  ));
+  // Acréscimo: fiscal primeiro; sobra no NF.
+  let acrescimoFiscalRateado = round2(Math.min(acrescimo, Math.max(0, valorFiscalBruto + acrescimo)));
+  let acrescimoNaoFiscalRateado = round2(Math.max(0, acrescimo - acrescimoFiscalRateado));
+
+  let valorFiscalLiquido = round2(valorFiscalBruto - descontoFiscalRateado + acrescimoFiscalRateado);
+  let valorNaoFiscalLiquido = round2(valorNaoFiscalBruto - descontoNaoFiscalRateado + acrescimoNaoFiscalRateado);
+  if (valorFiscalLiquido < 0) valorFiscalLiquido = 0;
+  if (valorNaoFiscalLiquido < 0) valorNaoFiscalLiquido = 0;
+
+  // Reconcilia centavos para fechar o líquido comercial.
+  const soma = round2(valorFiscalLiquido + valorNaoFiscalLiquido);
+  const diff = round2(totalLiquido - soma);
+  if (diff !== 0) {
+    if (valorNaoFiscalLiquido > 0 || diff > 0) {
+      valorNaoFiscalLiquido = round2(Math.max(0, valorNaoFiscalLiquido + diff));
+    } else {
+      valorFiscalLiquido = round2(Math.max(0, valorFiscalLiquido + diff));
+    }
+  }
+
+  descontoFiscalRateado = round2(Math.max(0, valorFiscalBruto + acrescimoFiscalRateado - valorFiscalLiquido));
+  descontoNaoFiscalRateado = round2(Math.max(0, valorNaoFiscalBruto + acrescimoNaoFiscalRateado - valorNaoFiscalLiquido));
+  acrescimoFiscalRateado = round2(Math.max(0, valorFiscalLiquido - (valorFiscalBruto - descontoFiscalRateado)));
+  acrescimoNaoFiscalRateado = round2(Math.max(0, valorNaoFiscalLiquido - (valorNaoFiscalBruto - descontoNaoFiscalRateado)));
+
+  return {
+    valorFiscalBruto,
+    valorNaoFiscalBruto,
+    valorFiscalLiquido,
+    valorNaoFiscalLiquido,
+    descontoFiscalRateado,
+    descontoNaoFiscalRateado,
+    acrescimoFiscalRateado,
+    acrescimoNaoFiscalRateado,
+    desconto,
+    acrescimo,
+    subtotalBruto,
+    totalLiquido,
+    fator: subtotalBruto > 0 ? totalLiquido / subtotalBruto : 1,
+    ajustado: true,
+    preferencia_nao_fiscal: true
+  };
+}
+
+/**
  * Função oficial — única fonte do valor fiscal líquido.
  *
  * valorFiscalLiquido = valorFiscalBruto - descontoFiscalRateado + acrescimoFiscalRateado
  */
 function calcularValorFiscalLiquido(entrada = {}) {
-  const rateio = ratearAjusteComercialFxNF(entrada);
+  const rateio = entrada && entrada.preferirNaoFiscal === true
+    ? ratearAjusteComercialPreferindoNaoFiscal(entrada)
+    : ratearAjusteComercialFxNF(entrada);
 
   const valorFiscalLiquido = round2(
     rateio.valorFiscalBruto - rateio.descontoFiscalRateado + rateio.acrescimoFiscalRateado
@@ -130,6 +203,64 @@ function aplicarValorFiscalLiquidoNosItens(itens = [], rateio = {}) {
   const lista = Array.isArray(itens) ? itens : [];
   if (!rateio || rateio.ajustado === false || Number(rateio.fator) === 1) {
     return lista.map((i) => ({ ...i }));
+  }
+
+  // Preferência NF: mantém fiscais no bruto e reconcilia só o gerencial (e F se sobrar).
+  if (rateio.preferencia_nao_fiscal === true) {
+    const out = lista.map((item) => ({
+      ...item,
+      valor_fiscal: round2(Number(item.valor_fiscal || 0)),
+      valor_nao_fiscal: round2(Number(item.valor_nao_fiscal || 0))
+    }));
+    const alvoF = round2(Number(rateio.valorFiscalLiquido || 0));
+    const alvoNF = round2(Number(rateio.valorNaoFiscalLiquido || 0));
+    let somaF = round2(out.reduce((s, i) => s + Number(i.valor_fiscal || 0), 0));
+    let somaNF = round2(out.reduce((s, i) => s + Number(i.valor_nao_fiscal || 0), 0));
+    let diffF = round2(alvoF - somaF);
+    let diffNF = round2(alvoNF - somaNF);
+
+    if (diffNF !== 0) {
+      // Reduz/aumenta NF a partir das maiores linhas gerenciais.
+      const ordem = out
+        .map((linha, indice) => ({ indice, valor: Number(linha.valor_nao_fiscal || 0) }))
+        .filter((e) => e.valor > 0.009 || diffNF > 0)
+        .sort((a, b) => b.valor - a.valor);
+      for (const e of ordem) {
+        if (Math.abs(diffNF) <= 0.009) break;
+        if (diffNF < 0) {
+          const tirar = round2(Math.min(out[e.indice].valor_nao_fiscal, -diffNF));
+          out[e.indice].valor_nao_fiscal = round2(out[e.indice].valor_nao_fiscal - tirar);
+          diffNF = round2(diffNF + tirar);
+        } else {
+          out[e.indice].valor_nao_fiscal = round2(out[e.indice].valor_nao_fiscal + diffNF);
+          diffNF = 0;
+        }
+      }
+      if (Math.abs(diffNF) > 0.009 && out.length) {
+        out[out.length - 1].valor_nao_fiscal = round2(
+          Number(out[out.length - 1].valor_nao_fiscal || 0) + diffNF
+        );
+      }
+    }
+
+    if (diffF !== 0) {
+      const ordemF = out
+        .map((linha, indice) => ({ indice, valor: Number(linha.valor_fiscal || 0) }))
+        .filter((e) => e.valor > 0.009 || diffF > 0)
+        .sort((a, b) => b.valor - a.valor);
+      for (const e of ordemF) {
+        if (Math.abs(diffF) <= 0.009) break;
+        if (diffF < 0) {
+          const tirar = round2(Math.min(out[e.indice].valor_fiscal, -diffF));
+          out[e.indice].valor_fiscal = round2(out[e.indice].valor_fiscal - tirar);
+          diffF = round2(diffF + tirar);
+        } else {
+          out[e.indice].valor_fiscal = round2(out[e.indice].valor_fiscal + diffF);
+          diffF = 0;
+        }
+      }
+    }
+    return out;
   }
 
   const fator = Number(rateio.fator);
@@ -179,6 +310,7 @@ function calcularValorFiscalMaximoLiquido(valorFiscalMaximoBruto, rateio = {}) {
 module.exports = {
   round2,
   ratearAjusteComercialFxNF,
+  ratearAjusteComercialPreferindoNaoFiscal,
   calcularValorFiscalLiquido,
   aplicarValorFiscalLiquidoNosItens,
   calcularValorFiscalMaximoLiquido

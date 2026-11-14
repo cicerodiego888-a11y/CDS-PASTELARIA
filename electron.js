@@ -44,6 +44,31 @@ app.commandLine.appendSwitch('disable-software-rasterizer');
 app.commandLine.appendSwitch('disable-features', 'UseSkiaRenderer');
 
 let mainWindow;
+let backendBaseUrl = null;
+const { criarControladorAbrirPdv } = require('./electron-abrir-pdv');
+const controladorAbrirPdv = criarControladorAbrirPdv({
+  BrowserWindow,
+  dialog,
+  appRoot: __dirname,
+  preloadPath: path.join(__dirname, 'preload.js'),
+  resolverIconeJanela,
+  getMainWindow: () => mainWindow,
+  getAppModulo: () => obterModuloApp(),
+  getBackendBaseUrl: () => backendBaseUrl,
+  carregarJanelaComRobustez,
+  injetarHostnameEstacao,
+  registrarMainWindow: (win) => {
+    mainWindow = win;
+    global.mainWindow = win;
+    win.on('closed', () => {
+      if (mainWindow === win) {
+        mainWindow = null;
+        global.mainWindow = null;
+      }
+    });
+  }
+});
+controladorAbrirPdv.registrar(ipcMain);
 let impressaoCupomAtiva = false;
 
 function obterJobImpressaoCupom() {
@@ -496,6 +521,11 @@ function criarMainWindow(opcoes = {}) {
 
   global.mainWindow = mainWindow;
 
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+    global.mainWindow = null;
+  });
+
   mainWindow.on('close', (event) => {
     if (impressaoCupomAtiva && mainWindow && !mainWindow.isDestroyed()) {
       event.preventDefault();
@@ -544,9 +574,11 @@ function criarMainWindow(opcoes = {}) {
   });
 
   ipcMain.removeAllListeners('forcar-reflow');
-  ipcMain.on('forcar-reflow', () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.executeJavaScript(`
+  ipcMain.on('forcar-reflow', (event) => {
+    // Aplicar no webContents que pediu (ERP ou PDV), não sempre na mainWindow.
+    const wc = event && event.sender;
+    if (!wc || wc.isDestroyed()) return;
+    wc.executeJavaScript(`
         const ativo = document.activeElement;
         const inicio = ativo && typeof ativo.selectionStart === 'number' ? ativo.selectionStart : null;
         const fim = ativo && typeof ativo.selectionEnd === 'number' ? ativo.selectionEnd : null;
@@ -558,7 +590,6 @@ function criarMainWindow(opcoes = {}) {
           }
         }
       `);
-    }
   });
 
   ipcMain.removeAllListeners('abrir-comprovante');
@@ -779,8 +810,9 @@ function abrirJanelaApp(url, tituloErro, mensagemErro, opcoes = {}) {
 
 function createWindow(serverPort) {
   definirSessaoClienteRemoto(null);
+  backendBaseUrl = `http://127.0.0.1:${serverPort}`;
   return abrirJanelaApp(
-    montarUrlLogin(`http://127.0.0.1:${serverPort}`),
+    montarUrlLogin(backendBaseUrl),
     'Erro ao iniciar servidor',
     (error) => `O backend do sistema não respondeu.\n\n${error.message}\n\nDB_DIR: ${process.env.DB_DIR}`
   );
@@ -791,9 +823,10 @@ function createWindowRemote(remoteUrl, configServidor = {}) {
     ipServidor: configServidor.ipServidor,
     porta: configServidor.porta
   });
+  backendBaseUrl = String(remoteUrl || '').replace(/\/$/, '');
 
   return abrirJanelaApp(
-    montarUrlLogin(remoteUrl),
+    montarUrlLogin(backendBaseUrl),
     'Erro ao carregar servidor remoto',
     (error) => `Não foi possível conectar ao servidor remoto.\n\n${error.message}`,
     {
@@ -894,7 +927,9 @@ app.on('window-all-closed', () => {
     app.quit();
     return;
   }
-  if (mainWindow && !mainWindow.isDestroyed()) {
+  const pdvAberta = controladorAbrirPdv.getPdvWindow()
+    && !controladorAbrirPdv.getPdvWindow().isDestroyed();
+  if ((mainWindow && !mainWindow.isDestroyed()) || pdvAberta) {
     return;
   }
   try {

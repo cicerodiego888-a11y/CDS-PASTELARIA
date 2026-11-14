@@ -13,30 +13,38 @@ const API_URL = (() => {
 let currentPage = window.CDS_DEFAULT_PAGE || 'dashboard';
 let chart = null;
 
+/** Modal Bootstrap em abertura/fechamento ou já visível — não interferir no foco. */
+function haModalBootstrapEmUso() {
+    return !!(
+        document.querySelector('.modal.show')
+        || document.querySelector('.modal.showing')
+        || document.querySelector('.modal[aria-modal="true"]')
+    );
+}
+
+/**
+ * Remove só resíduos órfãos (backdrop/body).
+ * Não mexe em aria-hidden global nem em overlays ativos — isso roubava foco
+ * em praticamente todas as telas e modais.
+ */
 function limparModaisTravados() {
-    document.querySelectorAll('.modal-backdrop').forEach(el => el.remove());
+    if (haModalBootstrapEmUso()) return;
+
+    document.querySelectorAll('.modal-backdrop').forEach((el) => el.remove());
     document.body.classList.remove('modal-open');
-    document.body.style.overflow = '';
-    document.body.style.paddingRight = '';
-    document.querySelectorAll('[aria-hidden="true"]').forEach(el => {
-        el.removeAttribute('aria-hidden');
-    });
-    document.querySelectorAll('.loading, .overlay, .spinner-overlay').forEach(el => {
-        el.style.display = 'none';
-        el.style.pointerEvents = 'none';
-    });
+    document.body.style.removeProperty('overflow');
+    document.body.style.removeProperty('padding-right');
 }
 
 $(document).on('hidden.bs.modal', function () {
-    if (document.querySelector('.modal.show')) return;
+    if (haModalBootstrapEmUso()) return;
     limparModaisTravados();
 });
 
 setInterval(() => {
     const backdrop = document.querySelector('.modal-backdrop');
-    if (backdrop && !document.querySelector('.modal.show')) {
-        limparModaisTravados();
-    }
+    if (!backdrop || haModalBootstrapEmUso()) return;
+    limparModaisTravados();
 }, 2000);
 
 let ultimoClique = Date.now();
@@ -70,6 +78,42 @@ function ligarNavegacaoSidebar() {
         loadPage(page);
         $('.nav-link').removeClass('active');
         $(this).addClass('active');
+    });
+
+    // CDS-ERP-PDV-JANELA-INDEPENDENTE-01 — Electron abre/foca janela própria; web navega.
+    $(document).off('click.cdsAbrirPdv', '[data-cds-abrir-pdv]').on('click.cdsAbrirPdv', '[data-cds-abrir-pdv]', function (e) {
+        if (typeof window.abrirPdvOficial === 'function') {
+            e.preventDefault();
+            Promise.resolve(window.abrirPdvOficial()).then((resultado) => {
+                if (resultado && resultado.ok === false && typeof showNotification === 'function') {
+                    showNotification(resultado.mensagem || 'Não foi possível abrir o PDV.', 'warning');
+                }
+            });
+            return;
+        }
+        if (window.electronAPI && typeof window.electronAPI.abrirPdv === 'function') {
+            e.preventDefault();
+            window.electronAPI.abrirPdv().catch(() => {});
+        }
+        // Sem Electron: deixa o href="/pdv" seguir normalmente.
+    });
+
+    $(document).off('click.cdsAbrirErp', '[data-cds-abrir-erp]').on('click.cdsAbrirErp', '[data-cds-abrir-erp]', function (e) {
+        const page = $(this).attr('data-erp-page') || null;
+        if (typeof window.abrirErpOficial === 'function') {
+            e.preventDefault();
+            Promise.resolve(window.abrirErpOficial(page ? { page } : {})).then((resultado) => {
+                if (resultado && resultado.ok === false && typeof showNotification === 'function') {
+                    showNotification(resultado.mensagem || 'Não foi possível abrir o ERP.', 'warning');
+                }
+            });
+            return;
+        }
+        if (window.electronAPI && typeof window.electronAPI.abrirErp === 'function') {
+            e.preventDefault();
+            window.electronAPI.abrirErp(page ? { page } : {}).catch(() => {});
+        }
+        // Sem Electron: deixa o href="/erp" seguir normalmente.
     });
 }
 
@@ -732,12 +776,13 @@ async function carregarLogoSidebar() {
             : logoPath;
 
         brandContent.innerHTML = `
-            <img
-                src="${logoUrl}"
-                alt="Logo da empresa"
-                class="img-fluid"
-                style="max-height: 110px; object-fit: contain;"
-            >
+            <span class="brand-mark">
+                <img
+                    src="${logoUrl}"
+                    alt="Logo da empresa"
+                    class="img-fluid brand-sidebar-logo"
+                >
+            </span>
         `;
     } catch (error) {
         console.error('Erro ao carregar logo da sidebar:', error);

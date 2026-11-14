@@ -30,6 +30,8 @@ const {
   garantirSchemaVendaFichaConsumoAsync
 } = require('../../backend/services/produtos/vendaFichaConsumoSchema');
 const { garantirSchemaEstoqueEmpresaAsync } = require('../../backend/services/estoque/estoqueEmpresaSchema');
+const CanalVendaEmpresaService = require('../../backend/services/vendas/CanalVendaEmpresaService');
+const EntradaPedidoService = require('../../backend/services/pedido/EntradaPedidoService');
 
 function whenReady() {
   return new Promise((resolve, reject) => {
@@ -390,6 +392,62 @@ describe('Sprint 3.2 — faturamento integrado de Pedido consumido', { concurren
       [pedido.id]
     )).total), 1);
     assert.deepEqual(await saldo(produtoId), depois);
+  });
+
+  it('preserva código do canal e empresa entre pedido e venda faturada', async () => {
+    const produtoId = await criarProduto({ nome: 'S32 canal de venda', saldo: 10 });
+    const canal = await CanalVendaEmpresaService.cadastrarCanal(db, {
+      nome: 'Marketplace S32',
+      codigo: 'MKT_S32',
+      tipo_origem: 'MARKETPLACE',
+      empresa_id: empresa.id
+    }, { usuario: { id: 905 } });
+    const itens = [montarItem(produtoId, 2)];
+    const pedidoCriado = await EntradaPedidoService.receber({
+      canal: EntradaPedidoService.CanalOrigem.EQUIPE,
+      canalVendaCodigo: canal.codigo,
+      usuario: { id: 905, role: 'SUPER_ADMIN' },
+      body: { total: 10, itens },
+      empresaId: empresa.id,
+      operadorId: 905,
+      chaveIdempotencia: 's32-pedido-canal-faturamento',
+      db
+    });
+    const pedido = pedidoCriado.pedido;
+    assert.equal(pedido.origem_canal, 'MKT_S32');
+    assert.equal(Number(pedido.empresa_id), empresa.id);
+
+    const usuarioInserido = await run(
+      'INSERT INTO usuarios (username, password_hash, role) VALUES (?, ?, ?)',
+      [`s32-canal-${crypto.randomUUID()}`, 'hash-de-teste', 'operador']
+    );
+    const operadorId = usuarioInserido.lastID;
+    await PedidoOperacionalService.enviarParaFaturamento(
+      pedido.id,
+      {},
+      operadorId,
+      { db, empresaId: empresa.id }
+    );
+    await FaturamentoService.faturarPedido(
+      pedido.id,
+      { forma_pagamento: 'dinheiro' },
+      { ...requestContext(), operadorId, user: { id: operadorId } }
+    );
+
+    const venda = await vendaDoPedido(pedido.id);
+    assert.ok(venda);
+    assert.equal(Number(venda.empresa_id), empresa.id);
+    const origemPersistida = await get(`
+      SELECT p.origem_canal, p.empresa_id AS pedido_empresa_id,
+             v.empresa_id AS venda_empresa_id, v.pedido_id
+      FROM pedidos p
+      JOIN vendas v ON v.pedido_id = p.id
+      WHERE p.id = ?
+    `, [pedido.id]);
+    assert.equal(origemPersistida.origem_canal, 'MKT_S32');
+    assert.equal(Number(origemPersistida.pedido_empresa_id), empresa.id);
+    assert.equal(Number(origemPersistida.venda_empresa_id), empresa.id);
+    assert.equal(Number(origemPersistida.pedido_id), pedido.id);
   });
 
   it('cancelamento da venda usa o ledger do Pedido e restaura saldo uma única vez', async () => {

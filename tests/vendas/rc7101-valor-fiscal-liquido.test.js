@@ -61,6 +61,19 @@ describe('RC7.10.1 — calcularValorFiscalLiquido (fonte oficial)', () => {
     assert.equal(out.totalLiquido, 90);
   });
 
+  it('preferirNaoFiscal: desconto 4,79 preserva fiscal 19,80 e reduz NF', () => {
+    const out = calcularValorFiscalLiquido({
+      valorFiscalBruto: 19.8,
+      valorNaoFiscalBruto: 21.98,
+      desconto: 4.79,
+      preferirNaoFiscal: true
+    });
+    assert.equal(out.valorFiscalLiquido, 19.8);
+    assert.equal(out.valorNaoFiscalLiquido, 17.19);
+    assert.equal(out.totalLiquido, 36.99);
+    assert.equal(out.preferencia_nao_fiscal, true);
+  });
+
   it('venda com acréscimo proporcional', () => {
     const out = calcularValorFiscalLiquido({
       valorFiscalBruto: 80,

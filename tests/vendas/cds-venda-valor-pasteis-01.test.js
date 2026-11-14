@@ -143,7 +143,7 @@ test('aceita valor total e quantidade e resolve o pastel cadastrado', async () =
   }
 });
 
-test('composição exata reutiliza o motor atual (igual ao fluxo tradicional equivalente)', async () => {
+test('pedido comercial e venda por valor compartilham o núcleo residual no residual exato', async () => {
   const db = await prepararCatalogo();
   try {
     await inserirPedidoNoFormatoAdaptador(db, { pedidoId: 10, valorTotal: 30.97, quantidade: 2 });
@@ -160,14 +160,13 @@ test('composição exata reutiliza o motor atual (igual ao fluxo tradicional equ
     assert.equal(tradicional.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
     assert.equal(porValor.valorFinalCentavos, 3097);
     assert.equal(tradicional.valorFinalCentavos, 3097);
-    assert.equal(porValor.valorResidualCentavos, tradicional.valorResidualCentavos);
-    assert.equal(porValor.valorPastelCentavos, 1798);
+    assert.equal(porValor.valorResidualCentavos, 1299);
+    assert.equal(tradicional.valorResidualCentavos, 1299);
     assert.equal(tradicional.valorPastelCentavos, 1798);
-    assert.equal(porValor.descontoCentavos, 0);
     assert.equal(tradicional.descontoCentavos, 0);
     assert.deepEqual(
-      porValor.itens.filter((i) => i.produto_id !== 747).map((i) => [i.produto_id, i.quantidade, i.subtotal]),
-      tradicional.itens.filter((i) => i.produto_id !== 747).map((i) => [i.produto_id, i.quantidade, i.subtotal])
+      tradicional.itens.map((i) => [i.produto_id, i.quantidade, i.subtotal]),
+      [[747, 2, 17.98], [748, 1, 12.99]]
     );
     const comercial = await all(
       db,
@@ -185,7 +184,7 @@ test('composição exata reutiliza o motor atual (igual ao fluxo tradicional equ
   }
 });
 
-test('composição aproximada e desconto automático permanecem iguais ao tradicional', async () => {
+test('pedido comercial e venda por valor unificam residual e desconto de ajuste', async () => {
   const db = await prepararCatalogo();
   try {
     await inserirPedidoNoFormatoAdaptador(db, { pedidoId: 20, valorTotal: 61.98, quantidade: 2 });
@@ -199,15 +198,18 @@ test('composição aproximada e desconto automático permanecem iguais ao tradic
     const tradicional = await prepararComposicaoPedidoPdv({ pedidoId: 21, empresaId: 1 }, { db });
 
     assert.equal(porValor.valorFinalCentavos, 6198);
-    assert.equal(tradicional.valorFinalCentavos, 6198);
-    assert.equal(porValor.valorResidualCentavos, tradicional.valorResidualCentavos);
-    assert.equal(porValor.valorPastelCentavos, 1798);
-    assert.equal(tradicional.valorPastelCentavos, 4398);
     assert.equal(porValor.descontoCentavos, 178);
-    assert.equal(tradicional.descontoCentavos, 2778);
+    assert.equal(porValor.valorPastelCentavos, 1798);
+    assert.equal(tradicional.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
+    assert.equal(tradicional.valorFinalCentavos, 6198);
+    assert.equal(tradicional.valorResidualCentavos, 4400);
+    assert.equal(tradicional.valorPastelCentavos, 1798);
+    assert.equal(tradicional.descontoCentavos, porValor.descontoCentavos);
     assert.deepEqual(
-      porValor.itens.filter((i) => i.produto_id !== 747).map((i) => [i.produto_id, i.quantidade, i.subtotal]),
-      tradicional.itens.filter((i) => i.produto_id !== 747).map((i) => [i.produto_id, i.quantidade, i.subtotal])
+      tradicional.itens.filter((i) => i.produto_id !== 747)
+        .map((i) => [i.produto_id, i.quantidade, i.preco_unitario]),
+      porValor.itens.filter((i) => i.produto_id !== 747)
+        .map((i) => [i.produto_id, i.quantidade, i.preco_unitario])
     );
     const linha = await all(
       db,
@@ -685,7 +687,7 @@ test('CDS-COMPOSICAO-VALOR-DISTRIBUICAO-01: reabertura não duplica linha nem de
   }
 });
 
-test('CDS-COMPOSICAO-VALOR-DISTRIBUICAO-01: composição normal permanece em R$ 27,78', async () => {
+test('CDS-COMPOSICAO-VALOR-DISTRIBUICAO-01: pedido comercial com pastel unifica residual; distribuição VV segue exclusiva', async () => {
   const db = await prepararCatalogo();
   try {
     await run(db, `INSERT INTO pedidos (
@@ -694,9 +696,12 @@ test('CDS-COMPOSICAO-VALOR-DISTRIBUICAO-01: composição normal permanece em R$ 
     await run(db, `INSERT INTO pedidos_itens (pedido_id, produto_id, quantidade, preco_unitario, subtotal)
       VALUES (96, 747, 2, 21.99, 43.98), (96, 748, 1, 18.00, 18.00)`);
     const normal = await prepararComposicaoPedidoPdv({ pedidoId: 96, empresaId: 1 }, { db });
-    assert.equal(normal.descontoCentavos, 2778);
-    assert.equal(normal.valorPastelCentavos, 4398);
+    assert.equal(normal.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
+    assert.equal(normal.valorPastelCentavos, 1798);
+    assert.equal(normal.valorResidualCentavos, 4400);
     assert.equal(normal.valorFinalCentavos, 6198);
+    assert.ok(normal.descontoCentavos >= 0);
+    // Distribuição fiscal VV exige massa comercial no pastel (= total); pedido comercial não a usa.
     assert.throws(
       () => distribuirValorFiscalVendaPorValor(normal, 747),
       (err) => err && err.codigo === 'DISTRIBUICAO_FISCAL_INVALIDA'

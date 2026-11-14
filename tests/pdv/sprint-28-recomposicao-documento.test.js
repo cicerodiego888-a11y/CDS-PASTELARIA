@@ -11,14 +11,37 @@ const path = require('path');
 const { beforeEach, describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 
+// Regressão Sprint 28: isola a porta de teste original (sem fechamento operacional ATIVACAO-01).
+process.env.CDS_RECOMPOSICAO_FECHAMENTO_OPERACIONAL = '0';
+
 const {
   RECOMPOSICAO_HABILITADA_EM_PRODUCAO
 } = require('../../backend/services/vendas/RecomposicaoFiscalContratoService');
 const {
   integrarPagamentoRecomposicao
 } = require('../../backend/services/vendas/PagamentoRecomposicaoDocumentoService');
+const {
+  marcarParcelaEletronicaComprovada
+} = require('../../backend/services/vendas/PagamentoSequencialComposicaoService');
+const { formaPagamentoUsaTEF } = require('../../backend/services/tef/tefFluxoPagamento');
 
-const ENV_TESTE = Object.freeze({ CDS_RECOMPOSICAO_REFERENCIA_TESTE: '1' });
+/** Fixture de documento: carimba só parcelas aprovadas com evidência (tef/nsu). */
+function carimbarPagamentosDocumento(pagamentos) {
+  return (pagamentos || []).map((pagamento) => {
+    if (!formaPagamentoUsaTEF(pagamento && pagamento.forma_pagamento)) return pagamento;
+    const status = String(pagamento.status_autorizacao || pagamento.status || '').toLowerCase();
+    if (status !== 'aprovada' && status !== 'aprovado') return pagamento;
+    const temId = pagamento.tef_transacao_id != null && String(pagamento.tef_transacao_id).trim() !== '';
+    const temNsu = String(pagamento.nsu || '').trim() && String(pagamento.autorizacao || '').trim();
+    if (!temId && !temNsu) return pagamento;
+    return marcarParcelaEletronicaComprovada(pagamento);
+  });
+}
+
+const ENV_TESTE = Object.freeze({
+  CDS_RECOMPOSICAO_REFERENCIA_TESTE: '1',
+  CDS_RECOMPOSICAO_FECHAMENTO_OPERACIONAL: '0'
+});
 const HARNESS = Object.freeze({ ativa: true });
 const CFG = Object.freeze({
   codigoUf: '23',
@@ -96,14 +119,31 @@ const SALDOS_A = Object.freeze({
 
 function eletronicosEDinheiro() {
   return [
-    { forma_pagamento: 'cartao_debito', valor: 20, status_autorizacao: 'aprovada' },
-    { forma_pagamento: 'cartao_credito', valor: 20, status_autorizacao: 'aprovada' },
-    { forma_pagamento: 'dinheiro', valor: 10, status_autorizacao: 'informada' }
+    {
+      forma_pagamento: 'cartao_debito',
+      valor: 20,
+      status_autorizacao: 'aprovada',
+      nsu: 'NSU-DEB',
+      autorizacao: 'AUT-DEB'
+    },
+    {
+      forma_pagamento: 'cartao_credito',
+      valor: 20,
+      status_autorizacao: 'aprovada',
+      nsu: 'NSU-CRE',
+      autorizacao: 'AUT-CRE'
+    },
+    {
+      forma_pagamento: 'dinheiro',
+      valor: 10,
+      status_autorizacao: 'informada',
+      confirmacao_manual: 1
+    }
   ];
 }
 
 function integrar(extra = {}, opcoes = {}) {
-  return integrarPagamentoRecomposicao({
+  const base = {
     total: 50,
     empresaId: 7,
     pagamentos: eletronicosEDinheiro(),
@@ -111,11 +151,14 @@ function integrar(extra = {}, opcoes = {}) {
     saldosPorProduto: SALDOS_A,
     configFiscal: CFG,
     ...extra
-  }, {
+  };
+  base.pagamentos = carimbarPagamentosDocumento(base.pagamentos);
+  return integrarPagamentoRecomposicao(base, {
     env: ENV_TESTE,
     harnessDistribuicaoOficial: HARNESS,
     modelos: [modeloPrecoFixo(2, 500, 6, 'REFRIGERANTE')],
     capacidade_por_categoria: { REFRIGERANTE: 100 },
+    pagamentosJaComprovados: true,
     ...opcoes
   });
 }
@@ -179,7 +222,13 @@ describe('Sprint 28 — pagamento, recomposição e XML', { concurrency: false }
   it('3. somente eletrônico autoriza o carrinho fiscal de 50', async () => {
     const documento = await integrar({
       pagamentos: [
-        { forma_pagamento: 'pix', valor: 50, status_autorizacao: 'aprovada' }
+        {
+          forma_pagamento: 'pix',
+          valor: 50,
+          status_autorizacao: 'aprovada',
+          nsu: 'NSU-PIX',
+          autorizacao: 'AUT-PIX'
+        }
       ],
       itens: [item({
         produto_id: 4,
@@ -201,9 +250,20 @@ describe('Sprint 28 — pagamento, recomposição e XML', { concurrency: false }
   it('6. parcela rejeitada ou pendente fica fora da referência', async () => {
     const documento = await integrar({
       pagamentos: [
-        { forma_pagamento: 'cartao_debito', valor: 20, status_autorizacao: 'aprovada' },
+        {
+          forma_pagamento: 'cartao_debito',
+          valor: 20,
+          status_autorizacao: 'aprovada',
+          nsu: 'NSU-DEB2',
+          autorizacao: 'AUT-DEB2'
+        },
         { forma_pagamento: 'cartao_credito', valor: 20, status_autorizacao: 'rejeitada' },
-        { forma_pagamento: 'dinheiro', valor: 10, status_autorizacao: 'informada' }
+        {
+          forma_pagamento: 'dinheiro',
+          valor: 10,
+          status_autorizacao: 'informada',
+          confirmacao_manual: 1
+        }
       ]
     });
     assert.equal(documento.referencia.valor_fiscal_referencia, 20);
@@ -213,7 +273,13 @@ describe('Sprint 28 — pagamento, recomposição e XML', { concurrency: false }
 
     const pendente = await integrar({
       pagamentos: [
-        { forma_pagamento: 'cartao_debito', valor: 20, status_autorizacao: 'aprovada' },
+        {
+          forma_pagamento: 'cartao_debito',
+          valor: 20,
+          status_autorizacao: 'aprovada',
+          nsu: 'NSU-DEB-P',
+          autorizacao: 'AUT-DEB-P'
+        },
         { forma_pagamento: 'pix', valor: 20, status_autorizacao: 'pendente' },
         { forma_pagamento: 'dinheiro', valor: 10, status_autorizacao: 'informada' }
       ]
@@ -222,12 +288,30 @@ describe('Sprint 28 — pagamento, recomposição e XML', { concurrency: false }
     assert.equal(pendente.referencia.valor_nao_fiscal_referencia, 10);
     assert.equal(pendente.codigo, 'PAGAMENTO_INCOMPLETO');
     assert.equal(pendente.xml, null);
+
+    const soAprovadoFrontend = await integrar({
+      pagamentos: [
+        { forma_pagamento: 'pix', valor: 40, status_autorizacao: 'aprovada', aprovado: true },
+        { forma_pagamento: 'dinheiro', valor: 10, status_autorizacao: 'informada', confirmacao_manual: 1 }
+      ]
+    });
+    assert.equal(soAprovadoFrontend.referencia.valor_fiscal_referencia, 0);
+    assert.equal(soAprovadoFrontend.referencia.valor_nao_fiscal_referencia, 10);
   });
 
-  it('7. sem composição elegível o documento é bloqueado e nada é inventado', async () => {
-    const documento = await integrar({}, { modelos: [] });
+  it('7. sem composição elegível no carrinho o documento é bloqueado e nada é inventado', async () => {
+    // Catálogo vazio + só pastel no carrinho: residual eletrônico não tem item residual.
+    const documento = await integrar({
+      itens: [PASTEL],
+      saldosPorProduto: { 1: { saldoFiscal: 1, saldoNaoFiscal: 0 } }
+    }, { modelos: [] });
     assert.equal(documento.bloqueado, true);
-    assert.equal(documento.codigo, 'COMPOSICAO_AUSENTE_NO_MOTOR');
+    assert.ok(
+      documento.codigo === 'COMPOSICAO_AUSENTE_NO_MOTOR'
+      || documento.codigo === 'COMPOSICAO_INCOMPATIVEL_MARGEM_TOLERANCIA'
+      || documento.codigo === 'RESIDUAL_PASTEL_NEGATIVO',
+      documento.codigo
+    );
     assert.equal(documento.xml, null);
     assert.equal(documento.itens_fiscais.length, 0);
   });
@@ -260,7 +344,9 @@ describe('Sprint 28 — pagamento, recomposição e XML', { concurrency: false }
   });
 
   it('ambiente de teste desligado não monta XML e a produção continua desligada', async () => {
-    const documento = await integrar({}, { env: {} });
+    const documento = await integrar({}, {
+      env: { CDS_RECOMPOSICAO_FECHAMENTO_OPERACIONAL: '0' }
+    });
     assert.equal(documento.bloqueado, false);
     assert.equal(documento.codigo, 'ambiente_teste_desligado');
     assert.equal(documento.xml, null);

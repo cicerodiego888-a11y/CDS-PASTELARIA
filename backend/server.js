@@ -130,6 +130,9 @@ app.get(['/mobile-mesas', '/mobile-mesas/'], (req, res) => {
 app.get(['/mobile-pdv', '/mobile-pdv/'], (req, res) => {
     res.sendFile(path.join(frontendRoot, 'mobile-pdv/index.html'));
 });
+app.get(['/mobile-contagem', '/mobile-contagem/'], (req, res) => {
+    res.sendFile(path.join(frontendRoot, 'mobile-contagem/index.html'));
+});
 
 app.get(['/erp', '/erp/'], verificarToken, (req, res) => {
     res.sendFile(path.join(frontendRoot, 'erp/index.html'));

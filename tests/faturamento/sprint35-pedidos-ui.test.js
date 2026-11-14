@@ -85,6 +85,10 @@ describe('Sprint 3.5 — frontend e rotas', () => {
     assert.match(rotas, /desconto: composicao\.desconto/);
     assert.match(pdv, /descontoHandoffCentavos/);
     assert.match(pdv, /brutoHandoffCentavos - descontoHandoffCentavos !== totalHandoffCentavos/);
+    assert.match(pdv, /avisarErpListaPedidosAtualizar/);
+    assert.match(ui, /ligarSincronizacaoListaPdv/);
+    assert.match(ui, /agendarRecarregarListaAposPdv/);
+    assert.match(ui, /cds_pedidos_lista_tick|CHAVE_LISTA_PEDIDOS_TICK/);
   });
 
   it('Núcleo e FaturamentoService não referenciam UI pedidos', () => {

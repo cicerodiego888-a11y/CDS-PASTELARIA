@@ -42,12 +42,25 @@ router.get('/contrato-operacional', async (req, res) => {
 router.get('/canais-venda', exigirSuperAdmin, async (req, res) => {
   try {
     const db = require('../database');
+    await new Promise((resolve, reject) => {
+      if (typeof db.whenReady !== 'function') return resolve();
+      db.whenReady((readyErr) => (readyErr ? reject(readyErr) : resolve()));
+    });
     const configServiceLocal = require('../services/configuracaoService');
-    const { listarCanais } = require('../services/vendas/CanalVendaEmpresaService');
-    const canais = await listarCanais(db, { cfg: configServiceLocal.readConfig() });
-    res.json({ canais });
+    const { consultarListagemCanais } = require('../services/vendas/CanalVendaEmpresaService');
+    let cfg = null;
+    try {
+      cfg = configServiceLocal.readConfig();
+    } catch (cfgErr) {
+      console.error('[canais-venda] leitura de configuração', cfgErr && cfgErr.stack ? cfgErr.stack : cfgErr);
+    }
+    const lista = await consultarListagemCanais(db, cfg ? { cfg } : {});
+    res.json(lista);
   } catch (err) {
-    res.status(err.statusCode || 500).json({ error: err.message, code: err.code || undefined });
+    console.error('[canais-venda] GET /api/configuracoes-avancadas/canais-venda', err && err.stack ? err.stack : err);
+    const { respostaHttpListagem } = require('../services/vendas/CanalVendaEmpresaService');
+    const resposta = respostaHttpListagem(err);
+    res.status(resposta.status).json(resposta.body);
   }
 });
 
@@ -61,6 +74,24 @@ router.post('/canais-venda', exigirSuperAdmin, async (req, res) => {
     const status = err.code === 'SQLITE_CONSTRAINT' ? 409 : (err.statusCode || 500);
     res.status(status).json({
       error: err.code === 'SQLITE_CONSTRAINT' ? 'Já existe um canal com este código.' : err.message,
+      code: err.code || undefined
+    });
+  }
+});
+
+router.get('/canais-venda/:id/historico', exigirSuperAdmin, async (req, res) => {
+  try {
+    const db = require('../database');
+    await new Promise((resolve, reject) => {
+      if (typeof db.whenReady !== 'function') return resolve();
+      db.whenReady((readyErr) => (readyErr ? reject(readyErr) : resolve()));
+    });
+    const { consultarHistoricoCanal } = require('../services/vendas/CanalVendaEmpresaService');
+    const auditoria = await consultarHistoricoCanal(db, Number(req.params.id));
+    res.json({ auditoria });
+  } catch (err) {
+    res.status(err.statusCode || 500).json({
+      error: err.message || 'Não foi possível carregar o histórico do canal.',
       code: err.code || undefined
     });
   }

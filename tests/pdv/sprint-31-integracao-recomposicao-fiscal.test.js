@@ -21,6 +21,8 @@ process.env.CDS_TEST_ISOLATION = '1';
 process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
 process.env.CDS_FORCAR_LOCAL = '1';
 process.env.CDS_RECOMPOSICAO_REFERENCIA_TESTE = '1';
+// Regressão Sprint 31: isola autorização via env/harness (sem fechamento operacional ATIVACAO-01).
+process.env.CDS_RECOMPOSICAO_FECHAMENTO_OPERACIONAL = '0';
 delete process.env.CDS_ALLOW_OFFICIAL_DB;
 delete process.env.CDS_RECOMPOSICAO_HOMOLOGACAO_DISTRIBUIR;
 delete process.env.CDS_RECOMPOSICAO_APLICAR_DISTRIBUICAO;
@@ -45,8 +47,12 @@ const {
   RECOMPOSICAO_HABILITADA_EM_PRODUCAO
 } = require('../../backend/services/vendas/RecomposicaoFiscalContratoService');
 const {
-  avaliarReferenciaRecomposicao
+  avaliarReferenciaRecomposicao,
+  marcarParcelaEletronicaComprovada
 } = require('../../backend/services/vendas/PagamentoSequencialComposicaoService');
+const {
+  comprovarPagamentosParaReferenciaFiscal
+} = require('../../backend/services/OrquestradorPagamento');
 const PagamentoSequencial = require('../../frontend/pdv/js/pagamentoSequencial');
 const vendasRouter = require('../../backend/rotas/vendas');
 const { emitirPorVendaId, selecionarItensFiscaisParaNfce } = require('../../backend/services/fiscal/emissor');
@@ -100,8 +106,10 @@ function all(sql, params = []) {
 
 let empresaA;
 let empresaB;
+let operadorId;
 let token;
 let terminalId;
+let seqTef31 = 0;
 let server;
 let pastelId;
 let ref200Id;
@@ -218,18 +226,38 @@ function carrinhoPrincipal() {
   ];
 }
 
-function pagamentosPrincipais(dinheiro = {}) {
-  return [
-    parcela('pix', 20, 'aprovada', { aprovado: true, tipo_recebimento: 'fiscal' }),
-    parcela('cartao_debito', 20, 'aprovada', { aprovado: true, tipo_recebimento: 'fiscal' }),
-    parcela('cartao_credito', 10, 'aprovada', { aprovado: true, tipo_recebimento: 'fiscal' }),
-    parcela('dinheiro', 10, 'informada', {
-      aprovado: false,
-      tipo_recebimento: 'nao_fiscal',
-      confirmacao_manual: 1,
-      ...dinheiro
-    })
+async function pagamentosPrincipais(dinheiro = {}) {
+  const eletronicos = [
+    { forma: 'pix', valor: 20, tipo: 'pix_tef', nsu: 'NSU-SIM', aut: 'AUT-SIM' },
+    { forma: 'cartao_debito', valor: 20, tipo: 'cartao_debito', nsu: 'NSU-DEB', aut: 'AUT-DEB' },
+    { forma: 'cartao_credito', valor: 10, tipo: 'cartao_credito', nsu: 'NSU-CRE', aut: 'AUT-CRE' }
   ];
+  const lista = [];
+  for (const item of eletronicos) {
+    seqTef31 += 1;
+    const nsu = `${item.nsu}-${seqTef31}`;
+    const aut = `${item.aut}-${seqTef31}`;
+    const tef = await run(
+      `INSERT INTO tef_transacoes (
+         venda_id, empresa_id, operador_id, tipo, valor, status, provedor, nsu, autorizacao
+       ) VALUES (NULL, ?, ?, ?, ?, 'aprovado', 'SITEF', ?, ?)`,
+      [empresaA.id, operadorId, item.tipo, item.valor, nsu, aut]
+    );
+    lista.push(marcarParcelaEletronicaComprovada(parcela(item.forma, item.valor, 'aprovada', {
+      aprovado: true,
+      tef_transacao_id: tef.lastID,
+      nsu,
+      autorizacao: aut,
+      tipo_recebimento: 'fiscal'
+    })));
+  }
+  lista.push(parcela('dinheiro', 10, 'informada', {
+    aprovado: false,
+    tipo_recebimento: 'nao_fiscal',
+    confirmacao_manual: 1,
+    ...dinheiro
+  }));
+  return lista;
 }
 
 describe('Sprint 31 — integração da referência fiscal', { concurrency: false }, () => {
@@ -300,12 +328,13 @@ describe('Sprint 31 — integração da referência fiscal', { concurrency: fals
       `INSERT INTO usuarios (username, password_hash, role, nome, perfil, ativo)
        VALUES ('op31', 'x', 'operador', 'Operador 31', 'CAIXA', 1)`
     );
+    operadorId = operador.lastID;
     await run(
       `INSERT INTO usuario_empresas (usuario_id, empresa_id, ativo) VALUES (?, ?, 1)`,
-      [operador.lastID, empresaA.id]
+      [operadorId, empresaA.id]
     );
     token = jwt.sign(
-      { id: operador.lastID, usuario_id: operador.lastID, username: 'op31', role: 'operador', perfil: 'CAIXA' },
+      { id: operadorId, usuario_id: operadorId, username: 'op31', role: 'operador', perfil: 'CAIXA' },
       getJwtSecret(),
       { expiresIn: '2h' }
     );
@@ -319,7 +348,7 @@ describe('Sprint 31 — integração da referência fiscal', { concurrency: fals
       `INSERT INTO caixa_sessoes (
          caixa_turno_id, terminal_id, operador_id, empresa_id, status, valor_abertura, aberto_em
        ) VALUES (?, ?, ?, ?, 'aberto', 0, DATETIME('now','localtime'))`,
-      [turno.lastID, terminalId, operador.lastID, empresaA.id]
+      [turno.lastID, terminalId, operadorId, empresaA.id]
     );
     const app = express();
     app.use(express.json());
@@ -346,11 +375,18 @@ describe('Sprint 31 — integração da referência fiscal', { concurrency: fals
     assert.equal(dinheiro.tipo_recebimento, 'nao_fiscal');
     assert.equal(dinheiro.confirmacao_manual, 1);
     assert.equal(dinheiro.aprovado, undefined);
-    const ref = referenciaDe(exportado);
+    // Payload do frontend sozinho não autoriza referência fiscal.
+    assert.equal(referenciaDe(exportado).valor_fiscal_referencia, 0);
+    const carimbados = exportado.map((linha) => (
+      linha.forma_pagamento === 'dinheiro'
+        ? linha
+        : marcarParcelaEletronicaComprovada(linha)
+    ));
+    const ref = referenciaDe(carimbados);
     assert.equal(ref.valor_fiscal_referencia, 50);
     assert.equal(ref.valor_nao_fiscal_referencia, 10);
 
-    const manualAntigo = referenciaDe(pagamentosPrincipais());
+    const manualAntigo = referenciaDe(await pagamentosPrincipais());
     assert.equal(manualAntigo.valor_fiscal_referencia, 50);
     assert.equal(manualAntigo.valor_nao_fiscal_referencia, 10);
 
@@ -361,13 +397,17 @@ describe('Sprint 31 — integração da referência fiscal', { concurrency: fals
     assert.equal(soDinheiro.valor_nao_fiscal_referencia, 60);
 
     const soEletronico = referenciaDe([
-      parcela('pix', 60, 'aprovada', { aprovado: true })
+      marcarParcelaEletronicaComprovada(
+        parcela('pix', 60, 'aprovada', { aprovado: true, nsu: 'NSU-SIM', autorizacao: 'AUT-SIM' })
+      )
     ]);
     assert.equal(soEletronico.valor_fiscal_referencia, 60);
     assert.equal(soEletronico.valor_nao_fiscal_referencia, 0);
 
     const pendente = referenciaDe([
-      parcela('pix', 20, 'aprovada', { aprovado: true }),
+      marcarParcelaEletronicaComprovada(
+        parcela('pix', 20, 'aprovada', { aprovado: true, nsu: 'NSU-SIM', autorizacao: 'AUT-SIM' })
+      ),
       parcela('cartao_debito', 20, 'pendente', { aprovado: false }),
       parcela('dinheiro', 20, 'informada', { aprovado: false, confirmacao_manual: 1 })
     ]);
@@ -394,9 +434,9 @@ describe('Sprint 31 — integração da referência fiscal', { concurrency: fals
     assert.equal(Number(dinheiro.body.valor_nao_fiscal), 60);
     const tef = await run(
       `INSERT INTO tef_transacoes (
-         venda_id, empresa_id, tipo, valor, parcelas, status, provedor, nsu, autorizacao, criado_em, atualizado_em
-       ) VALUES (NULL, ?, 'pix_tef', 60, 1, 'aprovado', 'SIMULADO', 'NSU-SIM', 'AUT-SIM', datetime('now'), datetime('now'))`,
-      [empresaA.id]
+         venda_id, empresa_id, operador_id, tipo, valor, parcelas, status, provedor, nsu, autorizacao, criado_em, atualizado_em
+       ) VALUES (NULL, ?, ?, 'pix_tef', 60, 1, 'aprovado', 'SITEF', 'NSU-SIM-60', 'AUT-SIM-60', datetime('now'), datetime('now'))`,
+      [empresaA.id, operadorId]
     );
     const eletronica = await httpJson('/api/vendas', pedido(
       'pdv-sprint31-so-eletronica',
@@ -404,8 +444,8 @@ describe('Sprint 31 — integração da referência fiscal', { concurrency: fals
         aprovado: true,
         tipo_recebimento: 'fiscal',
         tef_transacao_id: tef.lastID,
-        nsu: 'NSU-SIM',
-        autorizacao: 'AUT-SIM'
+        nsu: 'NSU-SIM-60',
+        autorizacao: 'AUT-SIM-60'
       })],
       carrinhoPrincipal(),
       60
@@ -420,7 +460,7 @@ describe('Sprint 31 — integração da referência fiscal', { concurrency: fals
     const antes = await get('SELECT COUNT(*) AS n FROM vendas');
     const resposta = await httpJson('/api/vendas', pedido(
       'pdv-sprint31-sem-autorizacao',
-      pagamentosPrincipais(),
+      (await pagamentosPrincipais()),
       carrinhoPrincipal(),
       60
     ));
@@ -441,7 +481,7 @@ describe('Sprint 31 — integração da referência fiscal', { concurrency: fals
     delete process.env.CDS_RECOMPOSICAO_REFERENCIA_TESTE;
     const semAmbiente = await httpJson('/api/vendas', pedido(
       'pdv-sprint31-sem-ambiente',
-      pagamentosPrincipais(),
+      (await pagamentosPrincipais()),
       carrinhoPrincipal(),
       60
     ));
@@ -456,7 +496,7 @@ describe('Sprint 31 — integração da referência fiscal', { concurrency: fals
     const chave = 'pdv-sprint31-principal';
     const resposta = await httpJson('/api/vendas', pedido(
       chave,
-      pagamentosPrincipais(),
+      (await pagamentosPrincipais()),
       carrinhoPrincipal(),
       60
     ));
@@ -480,7 +520,7 @@ describe('Sprint 31 — integração da referência fiscal', { concurrency: fals
 
     const repetida = await httpJson('/api/vendas', pedido(
       chave,
-      pagamentosPrincipais(),
+      (await pagamentosPrincipais()),
       carrinhoPrincipal(),
       60
     ));
@@ -493,7 +533,8 @@ describe('Sprint 31 — integração da referência fiscal', { concurrency: fals
       db.get('SELECT * FROM vendas WHERE id = ?', [vendaId], (err, row) => (err ? reject(err) : resolve(row)));
     });
     const pagamentos = await all(
-      `SELECT forma_pagamento, valor, tipo_recebimento, status
+      `SELECT forma_pagamento, valor, tipo_recebimento, status,
+              tef_transacao_id, nsu, autorizacao
        FROM venda_recebimentos WHERE venda_id = ?`,
       [vendaId]
     );
@@ -506,9 +547,15 @@ describe('Sprint 31 — integração da referência fiscal', { concurrency: fals
       unidade: 'UN',
       origem: 0
     }));
+    const pagamentosComprovados = (await comprovarPagamentosParaReferenciaFiscal(pagamentos, {
+      empresaId: empresaA.id,
+      operadorId,
+      vendaIdPermitida: vendaId,
+      db
+    })).pagamentos;
     const selecao = selecionarItensFiscaisParaNfce({
       ...carregada,
-      pagamentos
+      pagamentos: pagamentosComprovados
     }, itensDocumento);
     assert.equal(selecao.bloqueado, false);
     const emissao = await emitirPorVendaId(vendaId, {
@@ -538,7 +585,10 @@ describe('Sprint 31 — integração da referência fiscal', { concurrency: fals
       quantidade_nao_fiscal: 0,
       valor_nao_fiscal: 0
     }));
-    const bloqueioComercial = selecionarItensFiscaisParaNfce({ ...carregada, pagamentos }, comercial);
+    const bloqueioComercial = selecionarItensFiscaisParaNfce({
+      ...carregada,
+      pagamentos: pagamentosComprovados
+    }, comercial);
     assert.equal(bloqueioComercial.bloqueado, true);
     assert.equal(bloqueioComercial.codigo, 'DISTRIBUICAO_NAO_AUTORIZADA');
 
@@ -556,7 +606,7 @@ describe('Sprint 31 — integração da referência fiscal', { concurrency: fals
   it('9 a 12 e 16. bloqueios de composição, empresa e divergência não montam NFC-e', async () => {
     const semPastel = await httpJson('/api/vendas', pedido(
       'pdv-sprint31-sem-pastel',
-      pagamentosPrincipais(),
+      (await pagamentosPrincipais()),
       [item(ref200Id, 12, 5, 'REFRIGERANTES')],
       60
     ));
@@ -569,7 +619,7 @@ describe('Sprint 31 — integração da referência fiscal', { concurrency: fals
     );
     const semSaldo = await httpJson('/api/vendas', pedido(
       'pdv-sprint31-sem-saldo',
-      pagamentosPrincipais(),
+      (await pagamentosPrincipais()),
       carrinhoPrincipal(),
       60
     ));
@@ -582,10 +632,21 @@ describe('Sprint 31 — integração da referência fiscal', { concurrency: fals
     assert.equal(Number(outraEmpresa.saldo_fiscal), 50);
 
     await run('UPDATE produtos SET ativo = 0 WHERE id = ?', [ref200Id]);
+    const tefSemModelo = await run(
+      `INSERT INTO tef_transacoes (
+         venda_id, empresa_id, operador_id, tipo, valor, status, provedor, nsu, autorizacao
+       ) VALUES (NULL, ?, ?, 'pix_tef', 15, 'aprovado', 'SITEF', 'NSU-SEM-MOD', 'AUT-SEM-MOD')`,
+      [empresaA.id, operadorId]
+    );
     const semModelo = await httpJson('/api/vendas', pedido(
       'pdv-sprint31-sem-modelo',
       [
-        parcela('pix', 15, 'aprovada', { aprovado: true }),
+        parcela('pix', 15, 'aprovada', {
+          aprovado: true,
+          tef_transacao_id: tefSemModelo.lastID,
+          nsu: 'NSU-SEM-MOD',
+          autorizacao: 'AUT-SEM-MOD'
+        }),
         parcela('dinheiro', 5, 'informada', { aprovado: false, confirmacao_manual: 1 })
       ],
       [item(pastelId, 1, 10, 'PASTEIS'), item(semModeloId, 1, 10, 'DOCES')],
@@ -597,16 +658,17 @@ describe('Sprint 31 — integração da referência fiscal', { concurrency: fals
 
     const divergente = selecionarItensFiscaisParaNfce({
       total: 60,
-      pagamentos: pagamentosPrincipais()
+      pagamentos: (await pagamentosPrincipais())
     }, [{ produto_id: 1, quantidade: 1, subtotal: 60, quantidade_fiscal: 1, valor_fiscal: 60 }]);
     assert.equal(divergente.codigo, 'DISTRIBUICAO_NAO_AUTORIZADA');
 
     const pagamentosXml = resolverPagamentosNfce({
       valor_fiscal: 50,
       valor_nao_fiscal: 10,
-      pagamentos: pagamentosPrincipais()
+      pagamentos: (await pagamentosPrincipais())
     }, 50);
     assert.equal(pagamentosXml.pagamentos.some((pagamento) => pagamento.forma_pagamento === 'dinheiro'), false);
     assert.equal(pagamentosXml.somaPagamentos, 50);
   });
 });
+

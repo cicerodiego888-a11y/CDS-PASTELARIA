@@ -26,6 +26,7 @@
     <link rel="stylesheet" href="/css/cds-smart-select.css">
     <link rel="stylesheet" href="/shared/design-system/cds-ui-foundation.css">
     <link rel="stylesheet" href="/css/mesas-painel.css">
+    <link rel="stylesheet" href="/css/contagem-fisica.css">
 </head>
 <body>
     <div class="container-fluid">
@@ -39,8 +40,10 @@
                     </div>
                     <div class="text-center mb-2" id="sidebar-brand">
                         <div id="sidebar-brand-content">
-                            <img src="/branding/logo-oficial.png" alt="CDS Sistemas" class="img-fluid brand-sidebar-logo" style="max-height:88px;object-fit:contain;margin:0 auto 0.35rem;display:block;">
-                            <small class="text-muted brand-sidebar-slogan" style="display:block;line-height:1.25;max-width:11.5rem;margin:0.15rem auto 0;">Inteligência para gerir, Tecnologia para crescer</small>
+                            <span class="brand-mark">
+                                <img src="/branding/logo-oficial.png" alt="CDS Sistemas" class="img-fluid brand-sidebar-logo">
+                            </span>
+                            <small class="text-muted brand-sidebar-slogan" style="display:block;margin:0 auto;">Inteligência para gerir, Tecnologia para crescer</small>
                         </div>
                         <div id="sidebar-modo-fiscal-bar" class="sidebar-modo-fiscal-bar sidebar-modo-fiscal-bar--on" title="Modo fiscal ativo"></div>
                     </div>
@@ -73,7 +76,7 @@
                             <div class="nav-group-label"><i class="fas fa-store" aria-hidden="true"></i><span>Comercial</span></div>
                             <ul class="nav flex-column nav-group-items">
                                 <li class="nav-item" id="nav-abrir-pdv" data-recurso="pdv">
-                                    <a class="nav-link text-success" href="/pdv" title="Abrir PDV">
+                                    <a class="nav-link text-success" href="/pdv" id="link-abrir-pdv" title="Abrir PDV" data-cds-abrir-pdv="1">
                                         <i class="fas fa-cash-register" aria-hidden="true"></i><span>PDV</span>
                                     </a>
                                 </li>

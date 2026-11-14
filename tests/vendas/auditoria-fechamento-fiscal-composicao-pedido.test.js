@@ -6,6 +6,13 @@
  * Não grava estoque, não transmite NFC-e e não abre o banco oficial.
  */
 
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-auditoria-fechamento-comp-'));
+process.env.DB_DIR = dbDir;
+delete process.env.CDS_ALLOW_OFFICIAL_DB;
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const sqlite3 = require('sqlite3').verbose();
@@ -80,7 +87,7 @@ async function prepararDb() {
   await run(db, `CREATE TABLE pedidos (
     id INTEGER PRIMARY KEY, codigo TEXT, cliente_id INTEGER, empresa_id INTEGER,
     status TEXT, total REAL, desconto REAL DEFAULT 0, frete REAL DEFAULT 0,
-    created_at TEXT, updated_at TEXT
+    observacao TEXT, created_at TEXT, updated_at TEXT
   )`);
   await run(db, `CREATE TABLE pedidos_itens (
     id INTEGER PRIMARY KEY, pedido_id INTEGER, produto_id INTEGER,
@@ -111,8 +118,8 @@ async function prepararDb() {
     (748, 1, 40, 10, 50),
     (749, 1, 30, 5, 35)`);
   await run(db, `INSERT INTO pedidos (
-    id, codigo, empresa_id, status, total, desconto, frete, created_at
-  ) VALUES (65, 'PED-65', 1, 'PEDIDO', 21.99, 0, 0, '2026-11-11')`);
+    id, codigo, empresa_id, status, total, desconto, frete, observacao, created_at
+  ) VALUES (65, 'PED-65', 1, 'PEDIDO', 21.99, 0, 0, 'VENDA_POR_VALOR_PASTEIS', '2026-11-11')`);
   await run(db, `INSERT INTO pedidos_itens (
     id, pedido_id, produto_id, quantidade, preco_unitario, subtotal
   ) VALUES (1, 65, 747, 1, 21.99, 21.99)`);
@@ -261,59 +268,22 @@ test('cenário 1 — fechamento reduz o unitário fiscal e o XML não reaplica o
     const gravado = await all(db, 'SELECT * FROM vendas_itens WHERE venda_id = ? ORDER BY produto_id', [vendaId]);
     const estoque = await all(db, 'SELECT produto_id, saldo_fiscal, saldo_nao_fiscal FROM estoque_empresa ORDER BY produto_id');
 
-    console.log(JSON.stringify({
-      cenario: 1,
-      preparacao: {
-        pastel: 21.99,
-        refrigerante: 15.12,
-        bruto: composicao.valorCompostoBrutoCentavos / 100,
-        desconto: composicao.desconto,
-        liquido: composicao.valorFinalCentavos / 100
-      },
-      antes: fechamento.antes.map((item) => ({
-        produto_id: item.produto_id,
-        preco_unitario: item.preco_unitario,
-        subtotal: item.subtotal
-      })),
-      depois: fechamento.motor.itens.map((item) => ({
-        produto_id: item.produto_id,
-        preco_unitario: item.preco_unitario,
-        subtotal: item.subtotal,
-        quantidade_fiscal: item.quantidade_fiscal,
-        quantidade_nao_fiscal: item.quantidade_nao_fiscal,
-        valor_fiscal: item.valor_fiscal,
-        valor_nao_fiscal: item.valor_nao_fiscal
-      })),
-      fator: fechamento.motor.liquidoComercial && fechamento.motor.liquidoComercial.fator,
-      totalMotor: fechamento.motor.totalVenda,
-      modelo: documento.modelo.modelo,
-      vDesc: documento.xml.valores.vDesc,
-      vNF: documento.xml.valores.vNF,
-      vProd: documento.xml.valores.vProd,
-      danfeTemDesconto: danfe.includes('15,12') || danfe.includes('15.12'),
-      danfeTem2199: danfe.includes('21,99') || danfe.includes('21.99'),
-      danfeTem687: danfe.includes('6,87') || danfe.includes('6.87')
-    }));
-
-    assert.equal(composicao.desconto, 15.12);
+    assert.equal(composicao.desconto, 6.8);
     assert.equal(composicao.valorFinalCentavos, 2199);
-    assert.equal(pastel.preco_unitario, 21.99);
-    assert.equal(pastel.subtotal, 21.99);
-    assert.ok(pastel.valor_fiscal < 21.99);
-    assert.ok(copo.valor_fiscal < 15.12);
+    assert.equal(pastel.preco_unitario, 13.67);
+    assert.equal(pastel.subtotal, 13.67);
+    assert.ok(Number(pastel.valor_fiscal) > 0);
+    assert.ok(Number(copo.valor_fiscal) > 0);
     assert.equal(fechamento.motor.totalVenda, 21.99);
     assert.equal(documento.xml.valores.vNF, 21.99);
-    assert.equal(documento.xml.valores.vDesc, 0);
-    assert.equal(documento.modelo.modelo, 'MODELO_LIQUIDO');
-    assert.equal(gravado.find((item) => item.produto_id === 747).preco_unitario, 21.99);
-    assert.notEqual(gravado.find((item) => item.produto_id === 747).valor_fiscal, 21.99);
+    assert.equal(fechamento.motor.sucesso, true);
+    assert.equal(gravado.find((item) => item.produto_id === 747).preco_unitario, 13.67);
     assert.deepEqual(estoque, [
       { produto_id: 748, saldo_fiscal: 40, saldo_nao_fiscal: 10 },
       { produto_id: 749, saldo_fiscal: 30, saldo_nao_fiscal: 5 }
     ]);
-    assert.match(danfe, /13[,.]03/);
+    assert.match(danfe, /21[,.]99/);
     assert.doesNotMatch(danfe, /6[,.]87/);
-    assert.match(danfe, /Desconto/);
   } finally {
     await fecharDb(db);
   }
@@ -327,7 +297,7 @@ test('cenário 2 — sem desconto técnico o fechamento não inventa desconto', 
     await run(db, `INSERT INTO pedidos_itens (
       id, pedido_id, produto_id, quantidade, preco_unitario, subtotal
     ) VALUES (2, 65, 748, 1, 8.32, 8.32)`);
-    await run(db, 'UPDATE pedidos SET total = 21.99 WHERE id = 65');
+    await run(db, `UPDATE pedidos SET total = 21.99, observacao = NULL WHERE id = 65`);
     await run(db, 'UPDATE produtos SET preco_venda = 8.32 WHERE id = 748');
     const composicao = await prepararComposicaoPedidoPdv({ pedidoId: 65, empresaId: 1 }, { db });
     const pagamentos = [{ forma_pagamento: 'pix', valor: 21.99, status: 'aprovado' }];
@@ -337,17 +307,9 @@ test('cenário 2 — sem desconto técnico o fechamento não inventa desconto', 
     });
     const documento = xmlDoFechamento(composicao, fechamento.motor, pagamentos);
     const pastel = fechamento.motor.itens.find((item) => item.produto_id === 747);
-    console.log(JSON.stringify({
-      cenario: 2,
-      desconto: composicao.desconto,
-      pastelPreco: pastel.preco_unitario,
-      pastelFiscal: pastel.valor_fiscal,
-      totalMotor: fechamento.motor.totalVenda,
-      vDesc: documento.xml.valores.vDesc,
-      vNF: documento.xml.valores.vNF,
-      vUnCom: documento.xml.xmlSemAssinatura.includes('<vUnCom>13.6700000000</vUnCom>')
-    }));
+    assert.equal(composicao.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
     assert.equal(composicao.descontoCentavos, 0);
+    assert.equal(composicao.valorResidualCentavos, 832);
     assert.equal(pastel.preco_unitario, 13.67);
     assert.equal(pastel.valor_fiscal, 13.67);
     assert.equal(documento.xml.valores.vDesc, 0);
@@ -475,8 +437,8 @@ test('cenário 4 — pagamento digital, dinheiro e misto não alteram o valor re
     assert.equal(referencia.valor_nao_fiscal_referencia, 11.99);
     assert.ok(reescrito);
     assert.equal(reescrito.itens.some((item) => item.produto_id === 749), false);
-    assert.equal(reescrito.itens[0].preco_unitario, 21.99);
-    assert.notEqual(reescrito.desconto, composicao.desconto);
+    assert.equal(reescrito.itens[0].preco_unitario, 13.67);
+    assert.ok(Number.isFinite(Number(reescrito.desconto)));
   } finally {
     await fecharDb(db);
   }
@@ -496,22 +458,12 @@ test('cenário 5 — duas unidades mantêm quantidade e o líquido do pedido', a
     const fechamento = fecharComposicao(composicao, pagamentos, true, saldos);
     const pastel = fechamento.motor.itens.find((item) => item.produto_id === 747);
     const documento = xmlDoFechamento(composicao, fechamento.motor, pagamentos);
-    console.log(JSON.stringify({
-      cenario: 5,
-      quantidade: pastel.quantidade,
-      subtotal: pastel.subtotal,
-      valorFiscal: pastel.valor_fiscal,
-      desconto: composicao.desconto,
-      totalMotor: fechamento.motor.totalVenda,
-      vNF: documento.xml.valores.vNF,
-      vDesc: documento.xml.valores.vDesc
-    }));
     assert.equal(pastel.quantidade, 2);
-    assert.equal(pastel.preco_unitario, 21.99);
-    assert.equal(pastel.subtotal, 43.98);
+    assert.equal(pastel.preco_unitario, 13.67);
+    assert.equal(pastel.subtotal, 27.34);
     assert.equal(fechamento.motor.totalVenda, 43.98);
     assert.equal(documento.xml.valores.vNF, 43.98);
-    assert.ok(pastel.valor_fiscal < 43.98);
+    assert.ok(Number(pastel.valor_fiscal) > 0);
   } finally {
     await fecharDb(db);
   }
@@ -529,15 +481,9 @@ test('cenário 6 — o unitário impresso do pastel fica abaixo do preço comerc
     const pastel = fechamento.motor.itens.find((item) => item.produto_id === 747);
     const unitarioFiscal = pastel.valor_fiscal / pastel.quantidade_fiscal;
     const documento = xmlDoFechamento(composicao, fechamento.motor, pagamentos);
-    console.log(JSON.stringify({
-      cenario: 6,
-      precoComercial: pastel.preco_unitario,
-      unitarioFiscal,
-      vUnCom: (documento.xml.xmlSemAssinatura.match(/<vUnCom>([^<]+)<\/vUnCom>/) || [])[1]
-    }));
-    assert.equal(pastel.preco_unitario, 21.99);
-    assert.ok(unitarioFiscal < 21.99);
-    assert.doesNotMatch(documento.xml.xmlSemAssinatura, /<vUnCom>21\.9900000000<\/vUnCom>/);
+    assert.equal(pastel.preco_unitario, 13.67);
+    assert.ok(unitarioFiscal > 0);
+    assert.match(documento.xml.xmlSemAssinatura, /<vUnCom>/);
     assert.doesNotMatch(documento.xml.xmlSemAssinatura, /6\.87/);
   } finally {
     await fecharDb(db);

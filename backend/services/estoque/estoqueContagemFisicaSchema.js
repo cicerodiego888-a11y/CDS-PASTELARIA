@@ -34,6 +34,7 @@ const DDL_ITENS = `
     diferenca_fiscal REAL NOT NULL,
     diferenca_nao_fiscal REAL NOT NULL,
     ajuste_id INTEGER,
+    tipo_ajuste TEXT,
     FOREIGN KEY (contagem_id) REFERENCES estoque_contagens_fisicas(id) ON DELETE CASCADE,
     FOREIGN KEY (empresa_id) REFERENCES empresas(id),
     FOREIGN KEY (produto_id) REFERENCES produtos(id)
@@ -65,6 +66,12 @@ function garantirSchemaEstoqueContagemFisica(db, callback) {
     await runSql(db, DDL_ITENS);
     await runSql(db, IDX_IDEMPOTENCIA);
     await runSql(db, IDX_ITENS_CONTAGEM);
+    await runSql(
+      db,
+      'ALTER TABLE estoque_contagens_fisicas_itens ADD COLUMN tipo_ajuste TEXT'
+    ).catch((err) => {
+      if (!/duplicate column/i.test(String(err && err.message || ''))) throw err;
+    });
   })().then(
     () => done(null),
     (err) => {

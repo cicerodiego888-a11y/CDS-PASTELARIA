@@ -13,6 +13,8 @@ const { internos: ComposicaoInterna } = ComposicaoFiscalPedidoService;
 const CATEGORIA_PASTEIS = 'PASTEIS';
 const CATEGORIA_REFRIGERANTES = 'REFRIGERANTES';
 const VOLUMES_REFRIGERANTE_ELEGIVEIS_ML = new Set([200, 300, 500]);
+/** Origem da venda por valor: massa comercial no pastel + distribuição fiscal. */
+const OBS_VENDA_POR_VALOR_PASTEIS = 'VENDA_POR_VALOR_PASTEIS';
 
 function erro(code, message, detalhes = null) {
   const err = new Error(message);
@@ -331,21 +333,25 @@ function precoComercialPersistido(itensPedido, produtoId, quantidade) {
 }
 
 /**
- * Pedidos sem pastéis elegíveis: envia as linhas comerciais originais ao PDV
- * (refrigerantes e demais produtos independentes), sem composição residual nem
- * inclusão artificial de pastel. A composição pastel→refrigerante permanece
- * obrigatória apenas quando há pelo menos um pastel elegível.
+ * Pedidos sem pastel elegível: preserva identidade/quantidade das linhas e cota
+ * o preço vigente do cadastro. Personalizações mantêm o preço da linha.
+ *
+ * Pedidos com pastel usam o núcleo residual compartilhado
+ * (`prepararComposicaoPastelRefrigerante`), o mesmo da venda por valor.
  */
-async function prepararPassthroughPedidoPdv({
+async function prepararComposicaoIdentidadeCatalogo({
   empresaId,
   pedidoId,
   pedido,
   itens,
   totalCentavos,
   produtoPorId,
-  agora
+  agora,
+  db
 }) {
-  const itensVenda = [];
+  const quantidadePadraoPorProduto = new Map();
+  const itensPersonalizados = [];
+
   for (const item of itens) {
     const produtoId = Number(item.produto_id);
     const produto = produtoPorId.get(produtoId);
@@ -359,17 +365,81 @@ async function prepararPassthroughPedidoPdv({
         { produto_id: produtoId, quantidade: item.quantidade }
       );
     }
+
+    if (Number(item.personalizacao_ingredientes_snapshot) === 1) {
+      itensPersonalizados.push({ item, produto, quantidade });
+      continue;
+    }
+
+    quantidadePadraoPorProduto.set(
+      produtoId,
+      (quantidadePadraoPorProduto.get(produtoId) || 0) + quantidade
+    );
+  }
+
+  const itensVenda = [];
+  let valorPastelCentavos = 0;
+
+  for (const [produtoId, quantidade] of [...quantidadePadraoPorProduto.entries()]
+    .sort(([idA], [idB]) => idA - idB)) {
+    const produto = produtoPorId.get(produtoId);
+    let cotador;
+    try {
+      cotador = await criarCotadorPreco({
+        db,
+        empresaId,
+        produtoId,
+        tipoVenda: TIPO_VENDA.PESO,
+        agora
+      });
+    } catch (err) {
+      if (err instanceof CotacaoPrecoErro) {
+        throw erro(
+          'PRECO_CATALOGO_INVALIDO',
+          `Não foi possível cotar o preço vigente de ${produto.nome}: ${err.message}`,
+          { produto_id: produtoId, codigo_cotacao: err.codigo }
+        );
+      }
+      throw err;
+    }
+    const cotacao = cotador.cotar(quantidade);
+    if (!Number.isSafeInteger(cotacao.subtotalCentavos)
+      || cotacao.subtotalCentavos <= 0
+      || !Number.isFinite(cotacao.precoUnitarioInterno)
+      || cotacao.precoUnitarioInterno <= 0) {
+      throw erro(
+        'PRECO_CATALOGO_INVALIDO',
+        `O preço vigente de ${produto.nome} não produziu valores válidos em centavos.`,
+        { produto_id: produtoId, quantidade }
+      );
+    }
+    const metadados = metadadosDaCotacao(produto, quantidade, cotacao);
+    const linha = mapearItemVenda(
+      produtoId,
+      quantidade,
+      cotacao.precoUnitarioInterno,
+      cotacao.subtotalCentavos,
+      metadados
+    );
+    itensVenda.push(linha);
+    if (String(produto.categoria_nome || '').trim().toUpperCase() === CATEGORIA_PASTEIS) {
+      valorPastelCentavos = somarCentavos(valorPastelCentavos, linha.subtotal);
+    }
+  }
+
+  for (const { item, produto, quantidade } of itensPersonalizados) {
+    const produtoId = Number(produto.id);
     const precoUnitario = Number(item.preco_unitario);
     const subtotalCentavos = Math.round(Number(item.subtotal) * 100);
     if (!Number.isFinite(precoUnitario) || precoUnitario <= 0
       || !Number.isSafeInteger(subtotalCentavos) || subtotalCentavos <= 0) {
       throw erro(
         'PRECO_ITEM_INVALIDO',
-        `O item ${produto.nome || produtoId} não possui preço/subtotal válido no Pedido.`,
+        `O item personalizado ${produto.nome || produtoId} não possui preço/subtotal válido no Pedido.`,
         { produto_id: produtoId }
       );
     }
-    itensVenda.push(mapearItemVenda(
+    const linha = mapearItemVenda(
       produtoId,
       quantidade,
       precoUnitario,
@@ -383,7 +453,11 @@ async function prepararPassthroughPedidoPdv({
         promocao_id: null,
         preco_origem: Number(precoUnitario.toFixed(6))
       }
-    ));
+    );
+    itensVenda.push(linha);
+    if (String(produto.categoria_nome || '').trim().toUpperCase() === CATEGORIA_PASTEIS) {
+      valorPastelCentavos = somarCentavos(valorPastelCentavos, linha.subtotal);
+    }
   }
 
   if (!itensVenda.length) {
@@ -402,17 +476,22 @@ async function prepararPassthroughPedidoPdv({
   );
   const descontoCentavos = Math.round(Number(pedido.desconto || 0) * 100);
   const totalLiquidoCentavos = totalCompostoCentavos - descontoCentavos;
-  if (!Number.isSafeInteger(descontoCentavos) || descontoCentavos < 0
-    || !Number.isSafeInteger(totalLiquidoCentavos)
-    || totalLiquidoCentavos !== totalCentavos) {
+  if (!Number.isSafeInteger(descontoCentavos) || descontoCentavos < 0) {
     throw erro(
-      'TOTAL_COMPOSICAO_DIVERGENTE',
-      'O total dos itens elegíveis, após o desconto do Pedido, não corresponde ao total persistido; a geração foi bloqueada.',
+      'DESCONTO_PEDIDO_INVALIDO',
+      'O desconto persistido do Pedido é inválido.',
+      { desconto_centavos: descontoCentavos }
+    );
+  }
+  if (!Number.isSafeInteger(totalLiquidoCentavos) || totalLiquidoCentavos <= 0) {
+    throw erro(
+      'TOTAL_COMPOSICAO_INVALIDO',
+      'O total da composição (catálogo − desconto legítimo) é inválido.',
       {
-        total_pedido_centavos: totalCentavos,
-        total_itens_centavos: totalCompostoCentavos,
+        total_composicao_bruto_centavos: totalCompostoCentavos,
         desconto_centavos: descontoCentavos,
-        total_liquido_centavos: totalLiquidoCentavos
+        total_composicao_liquido_centavos: totalLiquidoCentavos,
+        total_pedido_historico_centavos: totalCentavos
       }
     );
   }
@@ -422,7 +501,7 @@ async function prepararPassthroughPedidoPdv({
     pedidoId,
     pedidoStatus: pedido.status,
     pedidoUpdatedAt: pedido.updated_at || null,
-    totalCentavos,
+    totalCentavos: totalLiquidoCentavos,
     descontoCentavos,
     itensPedido: itens.map((item) => ({
       id: Number(item.id),
@@ -436,13 +515,13 @@ async function prepararPassthroughPedidoPdv({
 
   return {
     sucesso: true,
-    modo: 'PASSTHROUGH',
+    modo: 'COMPOSICAO_IDENTIDADE_CATALOGO',
     pedidoId,
     empresaId,
     pedidoCodigo: pedido.codigo || null,
     clienteId: pedido.cliente_id || null,
     valorOriginalCentavos: totalCentavos,
-    valorPastelCentavos: 0,
+    valorPastelCentavos,
     valorResidualCentavos: 0,
     valorCompostoBrutoCentavos: totalCompostoCentavos,
     descontoCentavos,
@@ -458,56 +537,26 @@ async function prepararPassthroughPedidoPdv({
   };
 }
 
-async function prepararComposicaoPedidoPdv(params = {}, opts = {}) {
-  const db = opts.db;
-  if (!db) throw erro('DB_OBRIGATORIO', 'A composição exige uma conexão de banco explícita.');
-  const empresaId = inteiroPositivo(params.empresaId, 'empresaId');
-  const pedidoId = inteiroPositivo(params.pedidoId, 'pedidoId');
-  const agora = params.dataReferencia != null ? new Date(params.dataReferencia) : new Date();
-  if (Number.isNaN(agora.getTime())) throw erro('DATA_REFERENCIA_INVALIDA', 'Data de referência inválida.');
-
-  const { pedido, itens, totalCentavos } = await ComposicaoInterna.carregarPedido(
-    empresaId,
-    pedidoId,
-    db
-  );
-  const produtosPedido = await carregarCategoriasPedido(itens, db);
-  const produtoPorId = new Map(produtosPedido.map((produto) => [Number(produto.id), produto]));
-  const quantidadePastelPorProduto = new Map();
-
-  for (const item of itens) {
-    const produto = produtoPorId.get(Number(item.produto_id));
-    if (!produto
-      || String(produto.categoria_nome || '').trim().toUpperCase() !== CATEGORIA_PASTEIS
-      || !produtoComercialAtivoNoPedido(produto)) {
-      continue;
-    }
-    const quantidade = Number(item.quantidade);
-    if (!Number.isSafeInteger(quantidade) || quantidade <= 0) {
-      throw erro(
-        'QUANTIDADE_PASTEL_INVALIDA',
-        `O item de pastel ${produto.nome} precisa ter quantidade inteira para compor a venda.`,
-        { produto_id: produto.id, quantidade: item.quantidade }
-      );
-    }
-    quantidadePastelPorProduto.set(
-      Number(produto.id),
-      (quantidadePastelPorProduto.get(Number(produto.id)) || 0) + quantidade
-    );
-  }
-
-  if (!quantidadePastelPorProduto.size) {
-    return prepararPassthroughPedidoPdv({
-      empresaId,
-      pedidoId,
-      pedido,
-      itens,
-      totalCentavos,
-      produtoPorId,
-      agora
-    });
-  }
-
+/**
+ * Núcleo compartilhado: quantidade de pastéis + total do pedido → cotação de
+ * cadastro → residual → refrigerantes elegíveis → desconto de ajuste.
+ *
+ * - Pedido comercial: linhas de pastel no preço de cadastro; total final = total do pedido.
+ * - Venda por valor: massa comercial no pastel (invariante do adaptador) e, ao final,
+ *   `distribuirValorFiscalVendaPorValor` reaplica o cadastro fiscal.
+ */
+async function prepararComposicaoPastelRefrigerante({
+  empresaId,
+  pedidoId,
+  pedido,
+  itens,
+  totalCentavos,
+  produtoPorId,
+  quantidadePastelPorProduto,
+  origemVendaPorValor,
+  agora,
+  db
+}) {
   const itensPastel = [];
   let valorPastelCatalogoCentavos = 0;
   for (const [produtoId, quantidade] of [...quantidadePastelPorProduto.entries()]
@@ -547,23 +596,36 @@ async function prepararComposicaoPedidoPdv(params = {}, opts = {}) {
       valorPastelCatalogoCentavos,
       cotacao.subtotalCentavos
     );
-    const comercial = precoComercialPersistido(itens, produtoId, quantidade);
-    itensPastel.push(mapearItemVenda(
-      produtoId,
-      quantidade,
-      comercial.precoUnitario,
-      comercial.subtotalCentavos,
-      {
-        desconto_percentual: 0,
-        desconto_valor: 0,
-        desconto_atacado: 0,
-        desconto_manual: 0,
-        tipo_preco: 'varejo',
-        promocao_id: null,
-        preco_origem: Number(Number(comercial.precoUnitario).toFixed(6))
-      }
-    ));
+
+    if (origemVendaPorValor) {
+      const comercial = precoComercialPersistido(itens, produtoId, quantidade);
+      itensPastel.push(mapearItemVenda(
+        produtoId,
+        quantidade,
+        comercial.precoUnitario,
+        comercial.subtotalCentavos,
+        {
+          desconto_percentual: 0,
+          desconto_valor: 0,
+          desconto_atacado: 0,
+          desconto_manual: 0,
+          tipo_preco: 'varejo',
+          promocao_id: null,
+          preco_origem: Number(Number(comercial.precoUnitario).toFixed(6))
+        }
+      ));
+    } else {
+      const metadados = metadadosDaCotacao(produto, quantidade, cotacao);
+      itensPastel.push(mapearItemVenda(
+        produtoId,
+        quantidade,
+        cotacao.precoUnitarioInterno,
+        cotacao.subtotalCentavos,
+        metadados
+      ));
+    }
   }
+
   const valorPastelCentavos = itensPastel.reduce(
     (total, item) => somarCentavos(total, item.subtotal),
     0
@@ -751,12 +813,84 @@ async function prepararComposicaoPedidoPdv(params = {}, opts = {}) {
     dataReferenciaCotacao: agora.toISOString(),
     efeitosOperacionais: false
   };
-  // Só a Venda por Valor troca a massa comercial pelo cadastro fiscal.
-  // Pedido sem essa origem mantém o preço comercial da linha.
-  if (String(pedido.observacao || '') !== 'VENDA_POR_VALOR_PASTEIS') return resultado;
+
+  if (!origemVendaPorValor) return resultado;
   const produtoPastelId = itensPastel.length === 1 ? itensPastel[0].produto_id : null;
   const { distribuirValorFiscalVendaPorValor } = require('./VendaPorValorPasteisService');
   return distribuirValorFiscalVendaPorValor(resultado, produtoPastelId);
+}
+
+async function prepararComposicaoPedidoPdv(params = {}, opts = {}) {
+  const db = opts.db;
+  if (!db) throw erro('DB_OBRIGATORIO', 'A composição exige uma conexão de banco explícita.');
+  const empresaId = inteiroPositivo(params.empresaId, 'empresaId');
+  const pedidoId = inteiroPositivo(params.pedidoId, 'pedidoId');
+  const agora = params.dataReferencia != null ? new Date(params.dataReferencia) : new Date();
+  if (Number.isNaN(agora.getTime())) throw erro('DATA_REFERENCIA_INVALIDA', 'Data de referência inválida.');
+
+  const { pedido, itens, totalCentavos } = await ComposicaoInterna.carregarPedido(
+    empresaId,
+    pedidoId,
+    db
+  );
+  const produtosPedido = await carregarCategoriasPedido(itens, db);
+  const produtoPorId = new Map(produtosPedido.map((produto) => [Number(produto.id), produto]));
+  const origemVendaPorValor = String(pedido.observacao || '') === OBS_VENDA_POR_VALOR_PASTEIS;
+
+  const quantidadePastelPorProduto = new Map();
+  for (const item of itens) {
+    const produto = produtoPorId.get(Number(item.produto_id));
+    if (!produto
+      || String(produto.categoria_nome || '').trim().toUpperCase() !== CATEGORIA_PASTEIS
+      || !produtoComercialAtivoNoPedido(produto)) {
+      continue;
+    }
+    const quantidade = Number(item.quantidade);
+    if (!Number.isSafeInteger(quantidade) || quantidade <= 0) {
+      throw erro(
+        'QUANTIDADE_PASTEL_INVALIDA',
+        `O item de pastel ${produto.nome} precisa ter quantidade inteira para compor a venda.`,
+        { produto_id: produto.id, quantidade: item.quantidade }
+      );
+    }
+    quantidadePastelPorProduto.set(
+      Number(produto.id),
+      (quantidadePastelPorProduto.get(Number(produto.id)) || 0) + quantidade
+    );
+  }
+
+  // Sem pastel: identidade de catálogo. Com pastel: mesmo núcleo residual da VV.
+  if (!quantidadePastelPorProduto.size) {
+    if (origemVendaPorValor) {
+      throw erro(
+        'PEDIDO_SEM_ITENS_ELEGIVEIS',
+        'A venda por valor exige pastel elegível no Pedido para compor a venda no PDV.'
+      );
+    }
+    return prepararComposicaoIdentidadeCatalogo({
+      empresaId,
+      pedidoId,
+      pedido,
+      itens,
+      totalCentavos,
+      produtoPorId,
+      agora,
+      db
+    });
+  }
+
+  return prepararComposicaoPastelRefrigerante({
+    empresaId,
+    pedidoId,
+    pedido,
+    itens,
+    totalCentavos,
+    produtoPorId,
+    quantidadePastelPorProduto,
+    origemVendaPorValor,
+    agora,
+    db
+  });
 }
 
 /**

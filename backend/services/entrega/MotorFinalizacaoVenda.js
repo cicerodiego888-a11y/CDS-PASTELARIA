@@ -41,7 +41,7 @@ const { agoraLocalBrasil, validarSomaPagamentosVenda } = VendaFinanceiroService;
 const { emitirFiscalSeSolicitado } = VendaFiscalService;
 const {
   gravarRecebimentos,
-  aplicarRegraStatusPagamentoVenda
+  aplicarClassificacaoERegraStatusPagamentoVenda
 } = VendaPagamentoService;
 
 /** Lock em memória — impede duas prestações simultâneas da mesma venda neste processo */
@@ -298,7 +298,7 @@ async function _finalizarPrestacaoInterno({ vendaId, body = {}, req = {}, contex
     throw err;
   }
 
-  const resultadoStatus = aplicarRegraStatusPagamentoVenda({
+  const resultadoStatus = aplicarClassificacaoERegraStatusPagamentoVenda({
     valorFiscal: totalFiscal,
     valorNaoFiscal: totalNaoFiscal,
     statusPagamento: resultadoPagamento.statusPagamento,

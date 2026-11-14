@@ -22,6 +22,9 @@
     { id: 'diagnostico', icon: 'fa-stethoscope', label: 'Diagnóstico', keywords: 'central sync nsu scheduler logs debug sefaz saúde mib busca', fiscal: true }
   ]);
 
+  let canaisVendaCache = [];
+  let canalVendaEditandoId = null;
+
   function configPermiteFiscalUi() {
     if (typeof global.fiscalHabilitado === 'function' && global.fiscalHabilitado()) return true;
     try {
@@ -602,6 +605,7 @@
         `, 'canal pdv empresa única múltiplas')}
         ${card('<i class="fas fa-plus"></i> Novo canal', `
           <p class="cds-cfg-hint mb-3">O código fica estável. O CNPJ vem do cadastro da empresa, sem uma segunda ficha.</p>
+          <div id="canalVendaModoEdicao" class="small text-primary mb-2 d-none">Editando canal existente. O código não pode ser alterado.</div>
           <div class="row g-2">
             <div class="col-md-4">
               <label class="cds-cfg-label" for="canalVendaNome">Nome</label>
@@ -633,8 +637,32 @@
             </div>
           </div>
           <button type="button" class="btn btn-primary btn-sm mt-3" id="btnSalvarCanalVenda">Salvar canal</button>
+          <button type="button" class="btn btn-outline-secondary btn-sm mt-3 d-none" id="btnCancelarEdicaoCanalVenda">Cancelar edição</button>
         `, 'cadastrar canal ifood whatsapp delivery')}
         ${card('<i class="fas fa-link"></i> Vínculos', `
+          <div id="canaisVendaAlerta" class="alert d-none" role="alert"></div>
+          <button type="button" class="btn btn-outline-secondary btn-sm d-none mb-2" id="btnRecarregarCanaisVenda">Tentar novamente</button>
+          <div class="row g-2 mb-2">
+            <div class="col-md-5">
+              <label class="visually-hidden" for="canalVendaBusca">Buscar canal</label>
+              <input type="search" class="form-control form-control-sm" id="canalVendaBusca" placeholder="Buscar por nome ou código">
+            </div>
+            <div class="col-md-4">
+              <label class="visually-hidden" for="canalVendaFiltroEmpresa">Filtrar por empresa</label>
+              <select class="form-select form-select-sm" id="canalVendaFiltroEmpresa">
+                <option value="">Todas as empresas</option>
+                <option value="__SEM_EMPRESA__">Sem empresa</option>
+              </select>
+            </div>
+            <div class="col-md-3">
+              <label class="visually-hidden" for="canalVendaFiltroStatus">Filtrar por situação</label>
+              <select class="form-select form-select-sm" id="canalVendaFiltroStatus">
+                <option value="">Todas as situações</option>
+                <option value="1">Ativos</option>
+                <option value="0">Inativos</option>
+              </select>
+            </div>
+          </div>
           <div class="table-responsive">
             <table class="table table-sm align-middle mb-0">
               <thead>
@@ -875,130 +903,305 @@
 
   async function preencherEmpresasDoCanal() {
     const sel = document.getElementById('canalVendaEmpresa');
-    if (!sel) return;
+    const filtro = document.getElementById('canalVendaFiltroEmpresa');
+    if (!sel && !filtro) return '';
     let lista = [];
     try {
       if (global.CdsEmpresaContexto && typeof global.CdsEmpresaContexto.listarDisponiveis === 'function') {
         lista = await global.CdsEmpresaContexto.listarDisponiveis();
       }
-    } catch (_e) {
-      lista = [];
+    } catch (erro) {
+      return (erro && erro.message) || 'Não foi possível carregar as empresas.';
     }
     if (!Array.isArray(lista)) lista = [];
-    sel.innerHTML = ['<option value="">Selecione a empresa</option>']
-      .concat(lista.map((empresa) => {
-        const id = Number(empresa && empresa.id);
-        if (!Number.isInteger(id) || id <= 0) return '';
-        return `<option value="${id}">${escapeHtml(rotuloEmpresaOperacionalCfg(empresa))}</option>`;
-      }))
-      .join('');
+    const opcoes = lista.map((empresa) => {
+      const id = Number(empresa && empresa.id);
+      if (!Number.isInteger(id) || id <= 0) return '';
+      return `<option value="${id}">${escapeHtml(rotuloEmpresaOperacionalCfg(empresa))}</option>`;
+    }).join('');
+    if (sel) sel.innerHTML = '<option value="">Selecione a empresa</option>' + opcoes;
+    if (filtro) {
+      filtro.innerHTML = '<option value="">Todas as empresas</option>'
+        + '<option value="__SEM_EMPRESA__">Sem empresa</option>'
+        + opcoes;
+    }
+    return '';
+  }
+
+  function mostrarEstadoCanais(tipo, texto) {
+    const alerta = document.getElementById('canaisVendaAlerta');
+    const tentar = document.getElementById('btnRecarregarCanaisVenda');
+    const corpo = document.getElementById('listaCanaisVenda');
+    if (alerta) {
+      alerta.classList.toggle('d-none', !texto);
+      alerta.classList.toggle('alert-danger', tipo === 'erro');
+      alerta.classList.toggle('alert-warning', tipo === 'aviso');
+      alerta.textContent = texto || '';
+    }
+    if (tentar) tentar.classList.toggle('d-none', tipo !== 'erro');
+    if (tipo === 'erro' && corpo) {
+      corpo.dataset.estado = 'erro';
+      corpo.innerHTML = '<tr><td colspan="6">A listagem não foi carregada.</td></tr>';
+    }
+  }
+
+  function renderizarCanaisVenda() {
+    const corpo = document.getElementById('listaCanaisVenda');
+    if (!corpo) return;
+    const busca = String(document.getElementById('canalVendaBusca')?.value || '').trim().toLowerCase();
+    const empresaFiltro = String(document.getElementById('canalVendaFiltroEmpresa')?.value || '');
+    const statusFiltro = String(document.getElementById('canalVendaFiltroStatus')?.value || '');
+    const seletorEmpresa = document.getElementById('canalVendaFiltroEmpresa');
+    if (seletorEmpresa) {
+      canaisVendaCache.forEach((canal) => {
+        if (canal.empresa_id == null || Array.from(seletorEmpresa.options)
+          .some((option) => String(option.value) === String(canal.empresa_id))) return;
+        const invalida = document.createElement('option');
+        invalida.value = String(canal.empresa_id);
+        invalida.textContent = `Empresa #${canal.empresa_id} (vínculo inválido)`;
+        seletorEmpresa.appendChild(invalida);
+      });
+    }
+    const canais = canaisVendaCache.filter((canal) => {
+      const texto = `${canal.nome || ''} ${canal.codigo || ''}`.toLowerCase();
+      if (busca && !texto.includes(busca)) return false;
+      if (empresaFiltro === '__SEM_EMPRESA__' && canal.empresa_id != null) return false;
+      if (empresaFiltro && empresaFiltro !== '__SEM_EMPRESA__'
+        && String(canal.empresa_id || '') !== empresaFiltro) return false;
+      if (statusFiltro !== '' && String(Number(canal.ativo) === 1 ? 1 : 0) !== statusFiltro) return false;
+      return true;
+    });
+
+    if (!canais.length) {
+      const mensagem = canaisVendaCache.length
+        ? 'Nenhum canal corresponde aos filtros.'
+        : 'Nenhum canal cadastrado.';
+      corpo.innerHTML = `<tr><td colspan="6" class="text-muted">${mensagem}</td></tr>`;
+      return;
+    }
+
+    corpo.innerHTML = canais.map((canal) => {
+      const id = Number(canal.id);
+      const empresa = canal.nome_fantasia || canal.razao_social
+        || (canal.empresa_id ? `Empresa #${canal.empresa_id}` : 'Sem empresa');
+      const vinculoInvalido = canal.empresa_id != null && canal.empresa_vinculo_valido === false;
+      const empresaCelula = `${escapeHtml(empresa)}${vinculoInvalido
+        ? '<div class="small text-danger">Vínculo inválido</div>'
+        : ''}`;
+      const pdv = canal.codigo === 'PDV';
+      const botaoHistorico = `<button type="button" class="btn btn-outline-info btn-sm" data-canal-historico="${id}">Histórico</button>`;
+      const acao = pdv
+        ? `<div class="d-flex flex-wrap gap-1"><span class="text-muted">Usa o bloco Canal PDV</span>${botaoHistorico}</div>`
+        : `<div class="d-flex flex-wrap gap-1">
+            <button type="button" class="btn btn-outline-primary btn-sm" data-canal-editar="${id}">Editar</button>
+            <button type="button" class="btn btn-outline-secondary btn-sm" data-canal-alterar-status="${id}" data-ativo="${Number(canal.ativo) === 1 ? '0' : '1'}">${Number(canal.ativo) === 1 ? 'Inativar' : 'Reativar'}</button>
+            ${botaoHistorico}
+          </div>`;
+      return `<tr data-canal-row="${id}">
+        <td>${escapeHtml(canal.nome)}</td>
+        <td>${escapeHtml(canal.codigo)}</td>
+        <td>${empresaCelula}</td>
+        <td>${escapeHtml(canal.cnpj || '—')}</td>
+        <td>${Number(canal.ativo) === 1 ? 'Ativo' : 'Inativo'}</td>
+        <td>${acao}</td>
+      </tr>`;
+    }).join('');
+
+    corpo.querySelectorAll('[data-canal-editar]').forEach((botao) => {
+      botao.addEventListener('click', () => editarCanalVenda(botao.getAttribute('data-canal-editar')));
+    });
+    corpo.querySelectorAll('[data-canal-alterar-status]').forEach((botao) => {
+      botao.addEventListener('click', () => alterarStatusCanalVenda(
+        botao.getAttribute('data-canal-alterar-status'),
+        botao.getAttribute('data-ativo') === '1'
+      ));
+    });
+    corpo.querySelectorAll('[data-canal-historico]').forEach((botao) => {
+      botao.addEventListener('click', () => consultarHistoricoCanalVenda(
+        botao.getAttribute('data-canal-historico')
+      ));
+    });
   }
 
   async function carregarCanaisVenda() {
     const corpo = document.getElementById('listaCanaisVenda');
     if (!corpo) return;
-    await preencherEmpresasDoCanal();
+    const falhaEmpresas = await preencherEmpresasDoCanal();
     try {
       const resposta = await fetch(`${global.API_URL}/configuracoes-avancadas/canais-venda`, {
         headers: headersCfg()
       });
-      const dados = await resposta.json();
-      if (!resposta.ok) throw new Error(dados.error || 'Não foi possível listar os canais.');
-      const canais = Array.isArray(dados.canais) ? dados.canais : [];
-      if (!canais.length) {
-        corpo.innerHTML = '<tr><td colspan="6" class="text-muted">Nenhum canal cadastrado.</td></tr>';
-        return;
+      let dados = {};
+      try {
+        dados = await resposta.json();
+      } catch (_parse) {
+        dados = {};
       }
-      corpo.innerHTML = canais.map((canal) => {
-        const empresa = canal.nome_fantasia || canal.razao_social || (canal.empresa_id ? `Empresa #${canal.empresa_id}` : '—');
-        const opcoes = Array.from(document.getElementById('canalVendaEmpresa')?.options || [])
-          .map((opcao) => `<option value="${escapeHtml(opcao.value)}" ${String(opcao.value) === String(canal.empresa_id || '') ? 'selected' : ''}>${escapeHtml(opcao.text)}</option>`)
-          .join('');
-        const empresaCelula = canal.codigo === 'PDV'
-          ? escapeHtml(empresa)
-          : `<select class="form-select form-select-sm" data-canal-empresa="${canal.id}">${opcoes}</select>`;
-        const acao = canal.codigo === 'PDV'
-          ? '<span class="text-muted">Usa o bloco Canal PDV</span>'
-          : `<button type="button" class="btn btn-outline-secondary btn-sm" data-canal-desativar="${canal.id}" ${Number(canal.ativo) === 1 ? '' : 'disabled'}>Desativar</button>`;
-        return `<tr>
-          <td>${escapeHtml(canal.nome)}</td>
-          <td>${escapeHtml(canal.codigo)}</td>
-          <td>${empresaCelula}</td>
-          <td>${escapeHtml(canal.cnpj || '—')}</td>
-          <td>${Number(canal.ativo) === 1 ? 'Ativo' : 'Inativo'}</td>
-          <td>${acao}</td>
-        </tr>`;
-      }).join('');
-      corpo.querySelectorAll('[data-canal-desativar]').forEach((botao) => {
-        botao.addEventListener('click', () => desativarCanalVenda(botao.getAttribute('data-canal-desativar')));
-      });
-      corpo.querySelectorAll('[data-canal-empresa]').forEach((campo) => {
-        campo.addEventListener('change', () => alterarEmpresaDoCanal(
-          campo.getAttribute('data-canal-empresa'),
-          campo.value
-        ));
-      });
+      if (!resposta.ok) {
+        throw new Error(dados.error || dados.erro || 'Não foi possível listar os canais.');
+      }
+      canaisVendaCache = Array.isArray(dados.canais) ? dados.canais : [];
+      const avisos = [];
+      if (falhaEmpresas) avisos.push(falhaEmpresas);
+      if (Array.isArray(dados.avisos)) avisos.push(...dados.avisos.filter(Boolean));
+      renderizarCanaisVenda();
+      corpo.dataset.estado = 'carregado';
+      mostrarEstadoCanais(avisos.length ? 'aviso' : '', avisos.join(' '));
     } catch (error) {
-      corpo.innerHTML = `<tr><td colspan="6" class="text-danger">${escapeHtml(error.message)}</td></tr>`;
+      canaisVendaCache = [];
+      const texto = [falhaEmpresas, error.message].filter(Boolean).join(' ');
+      mostrarEstadoCanais('erro', texto);
     }
   }
 
+  function limparFormularioCanalVenda() {
+    canalVendaEditandoId = null;
+    ['canalVendaNome', 'canalVendaCodigo', 'canalVendaTipo', 'canalVendaDescricao'].forEach((id) => {
+      const campo = document.getElementById(id);
+      if (campo) campo.value = '';
+    });
+    const ativo = document.getElementById('canalVendaAtivo');
+    if (ativo) ativo.checked = true;
+    const codigo = document.getElementById('canalVendaCodigo');
+    if (codigo) codigo.readOnly = false;
+    const botaoSalvar = document.getElementById('btnSalvarCanalVenda');
+    if (botaoSalvar) botaoSalvar.textContent = 'Salvar canal';
+    document.getElementById('btnCancelarEdicaoCanalVenda')?.classList.add('d-none');
+    document.getElementById('canalVendaModoEdicao')?.classList.add('d-none');
+  }
+
+  function editarCanalVenda(id) {
+    const canal = canaisVendaCache.find((item) => Number(item.id) === Number(id));
+    if (!canal || canal.codigo === 'PDV') return;
+    canalVendaEditandoId = Number(canal.id);
+    document.getElementById('canalVendaNome').value = canal.nome || '';
+    document.getElementById('canalVendaCodigo').value = canal.codigo || '';
+    document.getElementById('canalVendaCodigo').readOnly = true;
+    document.getElementById('canalVendaTipo').value = canal.tipo_origem || '';
+    document.getElementById('canalVendaDescricao').value = canal.descricao || '';
+    document.getElementById('canalVendaAtivo').checked = Number(canal.ativo) === 1;
+    const empresaSelect = document.getElementById('canalVendaEmpresa');
+    if (canal.empresa_id != null && !Array.from(empresaSelect.options)
+      .some((option) => String(option.value) === String(canal.empresa_id))) {
+      const invalida = document.createElement('option');
+      invalida.value = String(canal.empresa_id);
+      invalida.textContent = `Empresa #${canal.empresa_id} (vínculo inválido)`;
+      empresaSelect.appendChild(invalida);
+    }
+    empresaSelect.value = canal.empresa_id == null ? '' : String(canal.empresa_id);
+    document.getElementById('canalVendaModoEdicao')?.classList.remove('d-none');
+    document.getElementById('btnCancelarEdicaoCanalVenda')?.classList.remove('d-none');
+    document.getElementById('btnSalvarCanalVenda').textContent = 'Salvar alterações';
+    document.getElementById('canalVendaNome')?.focus();
+  }
+
   async function salvarCanalVenda() {
+    const editando = canalVendaEditandoId != null;
+    if (editando && !global.confirm('Salvar as alterações deste canal?')) return;
     const corpo = {
       nome: document.getElementById('canalVendaNome')?.value || '',
-      codigo: document.getElementById('canalVendaCodigo')?.value || '',
       tipo_origem: document.getElementById('canalVendaTipo')?.value || '',
       descricao: document.getElementById('canalVendaDescricao')?.value || '',
       empresa_id: document.getElementById('canalVendaEmpresa')?.value || '',
       ativo: document.getElementById('canalVendaAtivo')?.checked !== false
     };
+    if (!editando) corpo.codigo = document.getElementById('canalVendaCodigo')?.value || '';
     try {
-      const resposta = await fetch(`${global.API_URL}/configuracoes-avancadas/canais-venda`, {
-        method: 'POST',
+      const url = editando
+        ? `${global.API_URL}/configuracoes-avancadas/canais-venda/${canalVendaEditandoId}`
+        : `${global.API_URL}/configuracoes-avancadas/canais-venda`;
+      const resposta = await fetch(url, {
+        method: editando ? 'PUT' : 'POST',
         headers: headersCfg(),
         body: JSON.stringify(corpo)
       });
       const dados = await resposta.json();
       if (!resposta.ok) throw new Error(dados.error || 'Não foi possível salvar o canal.');
-      if (typeof global.showNotification === 'function') global.showNotification('Canal de venda salvo.', 'success');
-      ['canalVendaNome', 'canalVendaCodigo', 'canalVendaTipo', 'canalVendaDescricao'].forEach((id) => {
-        const campo = document.getElementById(id);
-        if (campo) campo.value = '';
-      });
+      if (typeof global.showNotification === 'function') {
+        global.showNotification(editando ? 'Canal de venda atualizado.' : 'Canal de venda salvo.', 'success');
+      }
+      limparFormularioCanalVenda();
       await carregarCanaisVenda();
     } catch (error) {
       if (typeof global.showNotification === 'function') global.showNotification(error.message, 'warning');
     }
   }
 
-  async function alterarEmpresaDoCanal(id, empresaId) {
+  async function alterarStatusCanalVenda(id, ativo) {
+    const confirmacao = ativo
+      ? 'Reativar este canal? Novas operações poderão resolvê-lo.'
+      : 'Inativar este canal? O histórico de pedidos e vendas será preservado.';
+    if (!global.confirm(confirmacao)) return;
     try {
       const resposta = await fetch(`${global.API_URL}/configuracoes-avancadas/canais-venda/${id}`, {
         method: 'PUT',
         headers: headersCfg(),
-        body: JSON.stringify({ empresa_id: empresaId })
+        body: JSON.stringify({ ativo })
       });
       const dados = await resposta.json();
-      if (!resposta.ok) throw new Error(dados.error || 'Não foi possível alterar a empresa do canal.');
+      if (!resposta.ok) throw new Error(dados.error || 'Não foi possível alterar a situação do canal.');
       await carregarCanaisVenda();
     } catch (error) {
       if (typeof global.showNotification === 'function') global.showNotification(error.message, 'warning');
     }
   }
 
-  async function desativarCanalVenda(id) {
+  function descreverMudancaHistorico(rotulo, anterior, novo, ativo = false) {
+    const anteriorNormalizado = anterior == null ? null : String(anterior);
+    const novoNormalizado = novo == null ? null : String(novo);
+    if (anteriorNormalizado === novoNormalizado) return '';
+    const mostrar = (valor) => {
+      if (ativo) {
+        if (valor == null) return '—';
+        return Number(valor) === 1 ? 'Ativo' : 'Inativo';
+      }
+      return valor == null || valor === '' ? '—' : String(valor);
+    };
+    return `<div><strong>${rotulo}:</strong> ${escapeHtml(mostrar(anterior))} → ${escapeHtml(mostrar(novo))}</div>`;
+  }
+
+  async function consultarHistoricoCanalVenda(id) {
     try {
-      const resposta = await fetch(`${global.API_URL}/configuracoes-avancadas/canais-venda/${id}`, {
-        method: 'PUT',
-        headers: headersCfg(),
-        body: JSON.stringify({ ativo: false })
-      });
+      const resposta = await fetch(
+        `${global.API_URL}/configuracoes-avancadas/canais-venda/${id}/historico`,
+        { headers: headersCfg() }
+      );
       const dados = await resposta.json();
-      if (!resposta.ok) throw new Error(dados.error || 'Não foi possível desativar o canal.');
-      await carregarCanaisVenda();
+      if (!resposta.ok) throw new Error(dados.error || 'Não foi possível carregar o histórico.');
+      const linha = document.querySelector(`[data-canal-row="${Number(id)}"]`);
+      if (!linha) return;
+      document.querySelector(`[data-canal-historico-row="${Number(id)}"]`)?.remove();
+      const auditoria = Array.isArray(dados.auditoria) ? dados.auditoria : [];
+      const detalhe = document.createElement('tr');
+      detalhe.setAttribute('data-canal-historico-row', String(Number(id)));
+      const conteudo = auditoria.length
+        ? auditoria.map((evento) => {
+          const mudancas = [
+            descreverMudancaHistorico('Nome', evento.nome_anterior, evento.nome_novo),
+            descreverMudancaHistorico('Descrição', evento.descricao_anterior, evento.descricao_nova),
+            descreverMudancaHistorico('Tipo/origem', evento.tipo_origem_anterior, evento.tipo_origem_novo),
+            descreverMudancaHistorico('Empresa', evento.empresa_anterior_id, evento.empresa_nova_id),
+            descreverMudancaHistorico('Situação', evento.ativo_anterior, evento.ativo_novo, true)
+          ].filter(Boolean).join('');
+          return `<li class="mb-2"><div><strong>${escapeHtml(evento.criado_em || 'Data não informada')}</strong> · Usuário #${escapeHtml(evento.usuario_id || '—')}</div>${mudancas || '<div class="text-muted">Sem detalhes de alteração disponíveis.</div>'}</li>`;
+        }).join('')
+        : '<li>Nenhum histórico registrado.</li>';
+      detalhe.innerHTML = `<td colspan="6"><ul class="mb-0 ps-3">${conteudo}</ul></td>`;
+      linha.after(detalhe);
     } catch (error) {
       if (typeof global.showNotification === 'function') global.showNotification(error.message, 'warning');
     }
+  }
+
+  function atualizarFiltrosCanaisVenda() {
+    renderizarCanaisVenda();
+  }
+
+  function configurarEventosCanaisVenda() {
+    document.getElementById('canalVendaBusca')?.addEventListener('input', atualizarFiltrosCanaisVenda);
+    document.getElementById('canalVendaFiltroEmpresa')?.addEventListener('change', atualizarFiltrosCanaisVenda);
+    document.getElementById('canalVendaFiltroStatus')?.addEventListener('change', atualizarFiltrosCanaisVenda);
+    document.getElementById('btnCancelarEdicaoCanalVenda')?.addEventListener('click', limparFormularioCanalVenda);
   }
 
   function ativarCategoria(id) {
@@ -1535,7 +1738,9 @@
     document.getElementById('btnAbrirEmpresasCanalVenda')?.addEventListener('click', () => {
       if (typeof global.loadPage === 'function') global.loadPage('empresas');
     });
+    configurarEventosCanaisVenda();
     document.getElementById('btnSalvarCanalVenda')?.addEventListener('click', salvarCanalVenda);
+    document.getElementById('btnRecarregarCanaisVenda')?.addEventListener('click', carregarCanaisVenda);
     carregarCanaisVenda();
     document.getElementById('btnConfiguracaoTEF')?.addEventListener('click', abrirTefLazy);
     document.getElementById('btnConfiguracaoTEFIntegracoes')?.addEventListener('click', abrirTefLazy);

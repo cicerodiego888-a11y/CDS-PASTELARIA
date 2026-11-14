@@ -18,10 +18,11 @@ const {
   parcelaEfetivamenteConfirmada
 } = require('./PagamentoSequencialComposicaoService');
 const {
-  calcularMargemToleranciaDinheiro
+  calcularMargemToleranciaDinheiro,
+  complementoMaximoPermitidoCentavos
 } = require('./RecomposicaoFiscalToleranciaDinheiroSimulacaoService');
 const {
-  avaliarCandidatoComBuscarComposicao
+  avaliarCandidatoComComplementoDinheiro
 } = require('./RecomposicaoFiscalComposicaoMotorSimulacaoService');
 const {
   encaminharPropostaValidadaAoDistribuidorOficial
@@ -126,6 +127,232 @@ function propostaDoComposto(composto) {
   };
 }
 
+/**
+ * Modelos de preço fixo a partir dos itens vendidos (centavos inteiros).
+ * A composição fiscal do PDV só pode usar produto_id do carrinho — o catálogo
+ * global de refrigerantes inventaria itens e estoura PRODUTO_INCOMPATIVEL.
+ */
+function modelosPrecoFixoDosItens(itens, opcoes = {}) {
+  const excluirPastel = opcoes.excluirPastel === true;
+  const modelos = [];
+  const capacidade = {};
+  for (const item of itens || []) {
+    if (excluirPastel && categoriaDoItem(item) === CATEGORIA_PASTEL) continue;
+    const produtoId = Number(item.produto_id != null ? item.produto_id : item.id);
+    const quantidade = Number(item.quantidade);
+    if (!Number.isInteger(produtoId) || produtoId <= 0) continue;
+    if (!Number.isSafeInteger(quantidade) || quantidade <= 0) continue;
+    const subtotalC = Math.round(subtotalDoItem(item) * 100);
+    if (!(subtotalC > 0) || subtotalC % quantidade !== 0) continue;
+    const precoC = subtotalC / quantidade;
+    const categoria = categoriaDoItem(item) || 'ITEM';
+    capacidade[categoria] = (capacidade[categoria] || 0) + quantidade;
+    modelos.push({
+      produtoId,
+      nome: item.produto_nome || item.nome || `Produto ${produtoId}`,
+      categoriaFiscal: categoria,
+      volumeMlPorUnidade: 1,
+      quantidadeMaxima: quantidade,
+      cotador: {
+        precoUnitarioMinimoInterno: precoC / 100,
+        cotar(qtd) {
+          return {
+            subtotalCentavos: precoC * qtd,
+            precoUnitarioInterno: precoC / 100,
+            regrasAplicadas: [],
+            fingerprint: `carrinho-${produtoId}-${qtd}`
+          };
+        }
+      }
+    });
+  }
+  return { modelos, capacidade_por_categoria: capacidade };
+}
+
+function idsProdutosVendidos(itens) {
+  const ids = new Set();
+  for (const item of itens || []) {
+    const id = Number(item.produto_id != null ? item.produto_id : item.id);
+    if (Number.isInteger(id) && id > 0) ids.add(id);
+  }
+  return ids;
+}
+
+/** Motor só é utilizável se todos os compostos existirem no carrinho vendido. */
+function motorCompativelComItensVendidos(motor, itens) {
+  if (!motor || motor.distribuicao_possivel !== true) return false;
+  const vendidos = idsProdutosVendidos(itens);
+  const compostos = Array.isArray(motor.itens_compostos) ? motor.itens_compostos : [];
+  if (!compostos.length && motor.complemento_dinheiro > 0.009) return false;
+  for (const composto of compostos) {
+    const id = Number(composto.produto_id != null ? composto.produto_id : composto.produtoId);
+    if (!vendidos.has(id)) return false;
+  }
+  return true;
+}
+
+/**
+ * Filtra modelos do catálogo PDV aos produto_id já vendidos (preço/capacidade
+ * do catálogo só entram se o item estiver no carrinho).
+ */
+function filtrarModelosAosVendidos(modelos, itens) {
+  const vendidos = idsProdutosVendidos(itens);
+  return (modelos || []).filter((modelo) => vendidos.has(Number(modelo.produtoId)));
+}
+
+/**
+ * Snapshot só para o rateio F×NF: reduz o dinheiro gerencial e representa o
+ * complemento como capacidade não-dinheiro (não inventa TEF persistido).
+ */
+function pagamentosParaDistribuicaoComComplemento(confirmados, complementoReais) {
+  const complemento = round2(Number(complementoReais || 0));
+  if (!(complemento > 0.009)) {
+    return (confirmados || []).map((pagamento) => ({ ...pagamento }));
+  }
+  const saida = [];
+  let restante = complemento;
+  for (const pagamento of confirmados || []) {
+    if (!formaEhDinheiro(pagamento.forma_pagamento)) {
+      saida.push({ ...pagamento });
+      continue;
+    }
+    const valor = round2(Number(pagamento.valor || 0));
+    const usar = round2(Math.min(valor, restante));
+    const gerencial = round2(valor - usar);
+    restante = round2(restante - usar);
+    if (gerencial > 0.009) {
+      saida.push({ ...pagamento, valor: gerencial, tipo_recebimento: 'nao_fiscal' });
+    }
+  }
+  if (complemento > 0.009) {
+    saida.push({
+      forma_pagamento: 'outros',
+      valor: complemento,
+      status_autorizacao: 'informada',
+      confirmacao_manual: 1,
+      tipo_recebimento: 'fiscal',
+      complemento_dinheiro_recomposicao: true
+    });
+  }
+  return saida;
+}
+
+/**
+ * Desconto de ajuste só no fiscal; os centavos saem do F e entram no NF para
+ * preservar total_original = fiscal_final + gerencial_final.
+ */
+function aplicarDescontoAjustePreservandoTotal(resultadoOficial, descontoAjuste) {
+  const desconto = round2(Number(descontoAjuste || 0));
+  if (!(desconto > 0.009) || !resultadoOficial || !Array.isArray(resultadoOficial.itens)) {
+    return resultadoOficial;
+  }
+  const itens = resultadoOficial.itens.map((linha) => ({ ...linha }));
+  let restante = desconto;
+  const ordemFiscal = itens
+    .map((linha, indice) => ({ indice, valor: Number(linha.valor_fiscal || 0) }))
+    .filter((entrada) => entrada.valor > 0.009)
+    .sort((a, b) => b.valor - a.valor);
+  for (const entrada of ordemFiscal) {
+    if (restante <= 0.009) break;
+    const linha = itens[entrada.indice];
+    const tirar = round2(Math.min(Number(linha.valor_fiscal || 0), restante));
+    linha.valor_fiscal = round2(Number(linha.valor_fiscal || 0) - tirar);
+    restante = round2(restante - tirar);
+  }
+  if (restante > 0.009) return null;
+  let devolver = desconto;
+  const ordemNf = itens
+    .map((linha, indice) => ({ indice, valor: Number(linha.valor_nao_fiscal || 0) }))
+    .filter((entrada) => entrada.valor > 0.009)
+    .sort((a, b) => b.valor - a.valor);
+  if (!ordemNf.length) {
+    // Sem linha NF prévia: cria a parcela gerencial na maior linha fiscal ajustada.
+    const alvo = ordemFiscal[0] && itens[ordemFiscal[0].indice];
+    if (!alvo) return null;
+    alvo.valor_nao_fiscal = round2(Number(alvo.valor_nao_fiscal || 0) + desconto);
+    devolver = 0;
+  } else {
+    for (const entrada of ordemNf) {
+      if (devolver <= 0.009) break;
+      itens[entrada.indice].valor_nao_fiscal = round2(
+        Number(itens[entrada.indice].valor_nao_fiscal || 0) + devolver
+      );
+      devolver = 0;
+    }
+  }
+  const totalFiscal = soma(itens, 'valor_fiscal');
+  const totalNao = soma(itens, 'valor_nao_fiscal');
+  return {
+    ...resultadoOficial,
+    itens,
+    valorFiscalEfetivo: totalFiscal,
+    valorFiscalLiquido: totalFiscal,
+    valorNaoFiscal: totalNao,
+    valorNaoFiscalLiquido: totalNao
+  };
+}
+
+function inferirFormaEletronicaDocumento(pagamentos) {
+  const { formaPagamentoUsaTEF } = require('../tef/tefFluxoPagamento');
+  for (const pagamento of pagamentos || []) {
+    if (!pagamento || formaEhDinheiro(pagamento.forma_pagamento)) continue;
+    if (formaPagamentoUsaTEF(pagamento.forma_pagamento)) {
+      return String(pagamento.forma_pagamento);
+    }
+  }
+  return 'pix';
+}
+
+/**
+ * Pagamentos do XML fiscal: eletrônicos + complemento de dinheiro fiscal.
+ * Não altera os recebimentos persistidos da venda.
+ *
+ * Se o TEF não reconstitui o carimbo na emissão, usa o snapshot
+ * valor_fiscal_referencia_inicial — nunca substitui o vNF por dinheiro.
+ */
+function pagamentosParaDocumentoFiscal(confirmados, complementoReais, opcoes = {}) {
+  const docs = [];
+  for (const pagamento of confirmados || []) {
+    if (formaEhDinheiro(pagamento.forma_pagamento)) continue;
+    if (!parcelaEfetivamenteConfirmada(pagamento)) continue;
+    docs.push({
+      forma_pagamento: pagamento.forma_pagamento,
+      valor: Number(pagamento.valor),
+      tipo_recebimento: 'fiscal'
+    });
+  }
+
+  const eletronicoSnapshot = round2(Number(
+    opcoes.valor_fiscal_referencia_inicial != null
+      ? opcoes.valor_fiscal_referencia_inicial
+      : (opcoes.valor_fiscal_eletronico || 0)
+  ));
+  if (docs.length === 0 && eletronicoSnapshot > 0.009) {
+    docs.push({
+      forma_pagamento: opcoes.forma_pagamento_eletronica
+        || inferirFormaEletronicaDocumento(confirmados),
+      valor: eletronicoSnapshot,
+      tipo_recebimento: 'fiscal',
+      eletronico_snapshot_referencia: true,
+      status: 'aprovado',
+      status_autorizacao: 'aprovado'
+    });
+  }
+
+  const complemento = round2(Number(complementoReais || 0));
+  if (complemento > 0.009) {
+    docs.push({
+      forma_pagamento: 'dinheiro',
+      valor: complemento,
+      tipo_recebimento: 'fiscal',
+      // xmlBuilder: em misto, dinheiro só entra no <pag> com esta marca.
+      dinheiro_moeda_fechamento: true,
+      complemento_dinheiro_recomposicao: true
+    });
+  }
+  return docs;
+}
+
 function montarXml(itensFiscais, pagamentos, configFiscal, totalFiscal) {
   const somaItens = soma(itensFiscais, 'valor_fiscal');
   if (Math.abs(somaItens - totalFiscal) > 0.02) {
@@ -138,7 +365,10 @@ function montarXml(itensFiscais, pagamentos, configFiscal, totalFiscal) {
   const pagamentosDocumento = (pagamentos || []).map((pagamento) => ({
     forma_pagamento: pagamento.forma_pagamento,
     valor: Number(pagamento.valor),
-    tipo_recebimento: formaEhDinheiro(pagamento.forma_pagamento) ? 'nao_fiscal' : 'fiscal'
+    tipo_recebimento: pagamento.tipo_recebimento
+      || (formaEhDinheiro(pagamento.forma_pagamento) ? 'nao_fiscal' : 'fiscal'),
+    dinheiro_moeda_fechamento: pagamento.dinheiro_moeda_fechamento === true,
+    complemento_dinheiro_recomposicao: pagamento.complemento_dinheiro_recomposicao === true
   }));
   const xml = buildNfceXml({
     config: configFiscal,
@@ -171,6 +401,7 @@ async function distribuirProposta(entrada, proposta, modelos, capacidade) {
   return encaminharPropostaValidadaAoDistribuidorOficial({
     env: entrada.env || process.env,
     harnessDistribuicaoOficial: entrada.harnessDistribuicaoOficial || null,
+    contextoFechamentoPdv: entrada.contexto || null,
     validacao: {
       composicao_validada_em_homologacao: true,
       itens_composicao: proposta
@@ -178,8 +409,11 @@ async function distribuirProposta(entrada, proposta, modelos, capacidade) {
     itensVendidos: entrada.itens,
     pagamentos: entrada.pagamentosConfirmados,
     totalComercial: entrada.total,
-    desconto: 0,
-    acrescimo: 0,
+    desconto: round2(Number(entrada.desconto || 0)),
+    acrescimo: round2(Number(entrada.acrescimo || 0)),
+    // Desconto comercial do PDV não pode reduzir o fiscal da referência
+    // (eletrônico + complemento ≤20%); absorve no gerencial.
+    preferirNaoFiscal: true,
     empresaId: entrada.empresaId,
     db: entrada.db || null,
     saldosPorProduto: entrada.saldosPorProduto,
@@ -191,22 +425,39 @@ async function distribuirProposta(entrada, proposta, modelos, capacidade) {
 
 async function integrarPagamentoRecomposicao(entrada = {}, opcoes = {}) {
   const env = opcoes.env || process.env;
+  const contextoFechamento = opcoes.contexto || entrada.contexto || null;
   const total = round2(Number(entrada.total != null ? entrada.total : entrada.total_comercial));
-  const pagamentos = Array.isArray(entrada.pagamentos) ? entrada.pagamentos : [];
+  let pagamentos = Array.isArray(entrada.pagamentos) ? entrada.pagamentos : [];
+  const dbConn = opcoes.db || entrada.db || null;
+  // CONFIRMACAO-AUTORITATIVA-01: se ainda não carimbados, comprova contra tef_transacoes.
+  if (opcoes.pagamentosJaComprovados !== true) {
+    const empresaId = entrada.empresaId != null ? entrada.empresaId : entrada.empresa_id;
+    const operadorId = opcoes.operadorId != null
+      ? opcoes.operadorId
+      : (entrada.operadorId != null ? entrada.operadorId : null);
+    const { comprovarPagamentosParaReferenciaFiscal } = require('../OrquestradorPagamento');
+    const comprovacao = await comprovarPagamentosParaReferenciaFiscal(pagamentos, {
+      empresaId,
+      operadorId,
+      vendaIdPermitida: opcoes.vendaIdPermitida || entrada.venda_id || null,
+      db: dbConn
+    });
+    pagamentos = comprovacao.pagamentos;
+  }
   const itens = await completarCategorias(
-    opcoes.db || entrada.db || null,
+    dbConn,
     Array.isArray(entrada.itens) ? entrada.itens : []
   );
   const referencia = avaliarReferenciaRecomposicao({
     total,
     pagamentos,
     itens
-  }, { env });
+  }, { env, contexto: contextoFechamento });
 
   if (referencia.recomposicao_executada !== true) {
     return bloqueio(
       referencia.motivo_recomposicao || 'ambiente_teste_desligado',
-      'A recomposição não está ativa neste ambiente. A flag de produção permanece desligada.',
+      'A recomposição não está ativa neste ambiente. Ative o fechamento operacional ou o ambiente de teste.',
       { bloqueado: false, aplicavel: false, referencia }
     );
   }
@@ -249,7 +500,8 @@ async function integrarPagamentoRecomposicao(entrada = {}, opcoes = {}) {
     db: opcoes.db || entrada.db || null,
     saldosPorProduto: opcoes.saldosPorProduto || entrada.saldosPorProduto || null,
     harnessDistribuicaoOficial: opcoes.harnessDistribuicaoOficial || null,
-    pagamentosConfirmados: conferencia.confirmados
+    pagamentosConfirmados: conferencia.confirmados,
+    contexto: contextoFechamento
   };
 
   if (!pastéis.length) {
@@ -319,18 +571,24 @@ async function integrarPagamentoRecomposicao(entrada = {}, opcoes = {}) {
   }
 
   const valorPastel = soma(pastéis.map((item) => ({ valor: subtotalDoItem(item) })), 'valor');
+  // Residual negativo (pastel > eletrônico): não bloqueia ainda — tenta recomposição
+  // pelo eletrônico cheio com os itens do carrinho (passo 2 abaixo).
   const residual = round2(fiscal - valorPastel);
-  if (residual < -0.009) {
-    return bloqueio(
-      'RESIDUAL_PASTEL_NEGATIVO',
-      'O valor dos pastéis excede a referência fiscal. Nenhuma composição foi gerada.',
-      { referencia }
-    );
-  }
+  const residualUtilizavel = residual > 0.009;
 
+  // Fonte preferencial: itens vendidos do carrinho (preço/qtd da venda).
+  // Catálogo PDV (carregarModelosRefrigerante) só entra filtrado aos ids vendidos.
+  const doCarrinhoResidual = modelosPrecoFixoDosItens(itens, { excluirPastel: true });
+  const doCarrinhoCheio = modelosPrecoFixoDosItens(itens);
   let modelos = Array.isArray(opcoes.modelos) ? opcoes.modelos : (Array.isArray(entrada.modelos) ? entrada.modelos : []);
   let capacidade = opcoes.capacidade_por_categoria || entrada.capacidade_por_categoria || {};
-  if (residual > 0.009 && modelos.length === 0 && contexto.db && contexto.empresaId) {
+  if (modelos.length) {
+    modelos = filtrarModelosAosVendidos(modelos, itens);
+  }
+  if (residualUtilizavel && doCarrinhoResidual.modelos.length) {
+    modelos = doCarrinhoResidual.modelos;
+    capacidade = doCarrinhoResidual.capacidade_por_categoria;
+  } else if (residualUtilizavel && modelos.length === 0 && contexto.db && contexto.empresaId) {
     try {
       const pdv = require('./PedidoPdvComposicaoService');
       const contextoModelos = await pdv.obterContextoComposicaoPdvParaDiagnostico({
@@ -339,7 +597,7 @@ async function integrarPagamentoRecomposicao(entrada = {}, opcoes = {}) {
         db: contexto.db
       });
       if (contextoModelos && Array.isArray(contextoModelos.modelos) && contextoModelos.modelos.length) {
-        modelos = contextoModelos.modelos;
+        modelos = filtrarModelosAosVendidos(contextoModelos.modelos, itens);
         if (!Object.keys(capacidade).length) {
           capacidade = contextoModelos.capacidade_por_categoria || {};
         }
@@ -348,82 +606,221 @@ async function integrarPagamentoRecomposicao(entrada = {}, opcoes = {}) {
       modelos = [];
     }
   }
-  let proposta = pastéis.map((item) => ({
-    produto_id: Number(item.produto_id != null ? item.produto_id : item.id),
-    quantidade: Number(item.quantidade),
-    subtotal: subtotalDoItem(item)
-  }));
+  // residual === 0: pastel fecha o eletrônico sozinho; residual < 0: proposta vem do retry.
+  let proposta = residual >= -0.009
+    ? pastéis.map((item) => ({
+      produto_id: Number(item.produto_id != null ? item.produto_id : item.id),
+      quantidade: Number(item.quantidade),
+      subtotal: subtotalDoItem(item)
+    }))
+    : [];
 
   let motor = null;
-  if (residual > 0.009) {
-    const margem = calcularMargemToleranciaDinheiro(conferencia.confirmados);
-    motor = avaliarCandidatoComBuscarComposicao({
+  let complementoDinheiro = 0;
+  let descontoAjuste = 0;
+  let propostaSomenteMotor = false;
+  const margemInfo = complementoMaximoPermitidoCentavos(conferencia.confirmados);
+  if (residualUtilizavel && modelos.length) {
+    // 1) Tentativa preferencial: residual após pastel fiscal integral (só itens do carrinho).
+    motor = avaliarCandidatoComComplementoDinheiro({
       valorFiscalCandidato: residual,
-      margemMaxima: margem && margem.margem_maxima,
+      margemMaxima: margemInfo.margem_maxima,
+      dinheiroConfirmado: margemInfo.dinheiro_recebido,
       modelos,
       capacidadePorCategoria: capacidade
     });
-    if (!motor || motor.distribuicao_possivel !== true) {
-      return bloqueio(
-        motor && motor.codigo ? motor.codigo : 'COMPOSICAO_AUSENTE_NO_MOTOR',
-        motor && motor.motivo
-          ? motor.motivo
-          : 'O motor não encontrou composição válida para o residual. Nenhum produto foi inventado.',
-        { referencia, motor }
-      );
+    if (!motorCompativelComItensVendidos(motor, itens)) {
+      motor = null;
     }
-    proposta = proposta.concat((motor.itens_compostos || []).map(propostaDoComposto));
   }
 
-  const aplicacao = await distribuirProposta(contexto, proposta, modelos, capacidade);
+  // 2) Residual inviável, pastel > eletrônico, ou residual no teto 20% com
+  //    desconto alto: tenta o eletrônico cheio e prefere menor complemento.
+  const residualNoTeto20 = !!(motor
+    && motor.distribuicao_possivel === true
+    && motor.modo === 'acima_teto_20_com_desconto');
+  if (
+    ((!motor || motor.distribuicao_possivel !== true) || residualNoTeto20)
+    && fiscal > 0.009
+  ) {
+    const modelosCheios = doCarrinhoCheio.modelos.length
+      ? doCarrinhoCheio.modelos
+      : filtrarModelosAosVendidos(modelos, itens);
+    const capacidadeCheia = Object.keys(doCarrinhoCheio.capacidade_por_categoria || {}).length
+      ? doCarrinhoCheio.capacidade_por_categoria
+      : capacidade;
+    if (modelosCheios.length) {
+      const motorCheio = avaliarCandidatoComComplementoDinheiro({
+        valorFiscalCandidato: fiscal,
+        margemMaxima: margemInfo.margem_maxima,
+        dinheiroConfirmado: margemInfo.dinheiro_recebido,
+        modelos: modelosCheios,
+        capacidadePorCategoria: capacidadeCheia
+      });
+      if (motorCompativelComItensVendidos(motorCheio, itens)) {
+        const semMotor = !motor || motor.distribuicao_possivel !== true;
+        const complementoCheio = round2(Number(motorCheio.complemento_dinheiro || 0));
+        const complementoAtual = round2(Number(motor && motor.complemento_dinheiro || 0));
+        const descontoCheio = round2(Number(motorCheio.desconto_ajuste || 0));
+        const descontoAtual = round2(Number(motor && motor.desconto_ajuste || 0));
+        const melhorComplemento = complementoCheio + 0.009 < complementoAtual;
+        const mesmoComplementoMenorDesconto = Math.abs(complementoCheio - complementoAtual) <= 0.02
+          && descontoCheio + 0.009 < descontoAtual;
+        if (semMotor || melhorComplemento || mesmoComplementoMenorDesconto) {
+          motor = motorCheio;
+          modelos = modelosCheios;
+          capacidade = capacidadeCheia;
+          propostaSomenteMotor = true;
+          proposta = (motor.itens_compostos || []).map(propostaDoComposto);
+        }
+      }
+    }
+  }
+
+  if (residualUtilizavel || propostaSomenteMotor || residual < -0.009) {
+    if (!motor || motor.distribuicao_possivel !== true) {
+      return bloqueio(
+        motor && motor.codigo
+          ? motor.codigo
+          : (residual < -0.009 ? 'RESIDUAL_PASTEL_NEGATIVO' : 'COMPOSICAO_AUSENTE_NO_MOTOR'),
+        motor && motor.motivo
+          ? motor.motivo
+          : (residual < -0.009
+            ? 'O valor dos pastéis excede a referência fiscal e nenhuma composição alternativa coube no eletrônico + margem.'
+            : 'O motor não encontrou composição válida para o residual. Nenhum produto foi inventado.'),
+        { referencia, motor, margem_complemento: margemInfo }
+      );
+    }
+    complementoDinheiro = round2(Number(motor.complemento_dinheiro || 0));
+    descontoAjuste = round2(Number(motor.desconto_ajuste || 0));
+    if (!propostaSomenteMotor) {
+      proposta = proposta.concat((motor.itens_compostos || []).map(propostaDoComposto));
+    }
+  }
+
+  const fiscalFinal = round2(fiscal + complementoDinheiro);
+  const naoFiscalFinal = round2(naoFiscal - complementoDinheiro);
+  if (naoFiscalFinal < -0.009) {
+    return bloqueio(
+      'COMPLEMENTO_DINHEIRO_EXCEDE_DISPONIVEL',
+      'O complemento fiscal calculado ultrapassa o dinheiro confirmado.',
+      { referencia, motor, complemento_dinheiro: complementoDinheiro }
+    );
+  }
+  const referenciaAjustada = Object.freeze({
+    ...referencia,
+    valor_fiscal_referencia: fiscalFinal,
+    valor_nao_fiscal_referencia: naoFiscalFinal,
+    valor_fiscal_referencia_inicial: fiscal,
+    valor_nao_fiscal_referencia_inicial: naoFiscal,
+    complemento_dinheiro_utilizado: complementoDinheiro,
+    desconto_ajuste: descontoAjuste,
+    margem_complemento_maxima: margemInfo.complemento_maximo
+  });
+
+  const descontoComercialEntrada = round2(Number(
+    entrada.desconto != null ? entrada.desconto : (contexto.desconto || 0)
+  ));
+  const contextoDistribuicao = {
+    ...contexto,
+    total,
+    desconto: descontoComercialEntrada,
+    pagamentosConfirmados: pagamentosParaDistribuicaoComComplemento(
+      conferencia.confirmados,
+      complementoDinheiro
+    )
+  };
+  // Desconto de ajuste NÃO entra no rateio comercial global (preserva total).
+  const aplicacao = await distribuirProposta(
+    contextoDistribuicao,
+    proposta,
+    modelos,
+    capacidade
+  );
   if (!aplicacao || aplicacao.distribuicao_aplicada !== true) {
     return bloqueio(
       aplicacao && aplicacao.codigo ? aplicacao.codigo : 'AUTORIZACAO_AUSENTE',
       aplicacao && aplicacao.motivo
         ? aplicacao.motivo
         : 'A distribuição oficial não foi autorizada. O XML não foi montado com o carrinho comercial.',
-      { referencia, motor }
+      { referencia: referenciaAjustada, motor }
     );
   }
 
-  const fiscais = linhasFiscais(aplicacao.resultado_oficial);
+  let resultadoOficial = aplicacao.resultado_oficial;
+  if (descontoAjuste > 0.009) {
+    resultadoOficial = aplicarDescontoAjustePreservandoTotal(resultadoOficial, descontoAjuste);
+    if (!resultadoOficial) {
+      return bloqueio(
+        'DESCONTO_AJUSTE_INCOMPATIVEL',
+        'Não foi possível aplicar o desconto de ajuste preservando o total original.',
+        { referencia: referenciaAjustada, motor }
+      );
+    }
+  }
+
+  const fiscais = linhasFiscais(resultadoOficial);
   const somaFiscal = soma(fiscais, 'valor_fiscal');
-  if (Math.abs(somaFiscal - Number(aplicacao.resultado_oficial.valorFiscalEfetivo || 0)) > 0.02) {
+  if (Math.abs(somaFiscal - Number(resultadoOficial.valorFiscalEfetivo || 0)) > 0.02) {
     return bloqueio(
       'XML_ITENS_DIVERGENTES',
       'As linhas fiscais não fecham o total devolvido pelo distribuidor oficial.',
-      { referencia }
+      { referencia: referenciaAjustada }
     );
   }
-  if (Math.abs(somaFiscal - fiscal) > 0.02) {
+  if (Math.abs(somaFiscal - fiscalFinal) > 0.02) {
     return bloqueio(
       'TOTAL_FISCAL_DIVERGENTE_DA_REFERENCIA',
-      'O total fiscal autorizado diverge da referência das parcelas confirmadas.',
-      { referencia, itens_fiscais: Object.freeze(fiscais) }
+      'O total fiscal autorizado diverge da referência eletrônica acrescida do complemento de dinheiro.',
+      { referencia: referenciaAjustada, itens_fiscais: Object.freeze(fiscais) }
     );
   }
 
-  const naoFiscais = (aplicacao.resultado_oficial.itens || []).filter(
+  const naoFiscais = (resultadoOficial.itens || []).filter(
     (linha) => Number(linha.valor_nao_fiscal || 0) > 0.009
   );
+  const somaNao = soma(naoFiscais, 'valor_nao_fiscal');
+  if (Math.abs(somaNao - naoFiscalFinal) > 0.05) {
+    return bloqueio(
+      'TOTAL_NAO_FISCAL_DIVERGENTE_DA_REFERENCIA',
+      'O total gerencial autorizado diverge do dinheiro remanescente após o complemento.',
+      { referencia: referenciaAjustada, itens_nao_fiscais: Object.freeze(naoFiscais) }
+    );
+  }
+  if (Math.abs(round2(somaFiscal + somaNao) - round2(fiscal + naoFiscal)) > 0.02) {
+    return bloqueio(
+      'TOTAL_ORIGINAL_NAO_PRESERVADO',
+      'A soma fiscal + gerencial não preserva o total original da venda.',
+      { referencia: referenciaAjustada }
+    );
+  }
   if (!entrada.configFiscal) {
     return resposta({
       bloqueado: false,
       codigo: 'ITENS_FISCAIS_AUTORIZADOS',
-      referencia,
+      referencia: referenciaAjustada,
       motor,
+      complemento_dinheiro_utilizado: complementoDinheiro,
+      desconto_ajuste: descontoAjuste,
       itens_fiscais: Object.freeze(fiscais),
       itens_nao_fiscais: Object.freeze(naoFiscais),
       xml: null
     });
   }
-  const xml = montarXml(fiscais, conferencia.confirmados, entrada.configFiscal, fiscal);
-  if (xml && xml.bloqueado) return resposta({ ...xml, referencia });
+  const xml = montarXml(
+    fiscais,
+    pagamentosParaDocumentoFiscal(conferencia.confirmados, complementoDinheiro),
+    entrada.configFiscal,
+    fiscalFinal
+  );
+  if (xml && xml.bloqueado) return resposta({ ...xml, referencia: referenciaAjustada });
   return resposta({
     bloqueado: false,
     codigo: 'DOCUMENTO_FISCAL_AUTORIZADO',
-    referencia,
+    referencia: referenciaAjustada,
     motor,
+    complemento_dinheiro_utilizado: complementoDinheiro,
+    desconto_ajuste: descontoAjuste,
     itens_fiscais: Object.freeze(fiscais),
     itens_nao_fiscais: Object.freeze(naoFiscais),
     xml: xml.xmlSemAssinatura,
@@ -448,10 +845,20 @@ function apresentacaoComposicaoFiscal(documento, referencia) {
     valor_fiscal: Number(referencia && referencia.valor_fiscal_referencia || 0),
     valor_nao_fiscal: Number(referencia && referencia.valor_nao_fiscal_referencia || 0),
     diferenca_monetaria: motor && motor.diferenca_monetaria != null ? motor.diferenca_monetaria : null,
-    desconto_ajuste: 0,
+    desconto_ajuste: Number(
+      documento && documento.desconto_ajuste != null
+        ? documento.desconto_ajuste
+        : (referencia && referencia.desconto_ajuste) || 0
+    ),
+    complemento_dinheiro_utilizado: Number(
+      documento && documento.complemento_dinheiro_utilizado != null
+        ? documento.complemento_dinheiro_utilizado
+        : (referencia && referencia.complemento_dinheiro_utilizado) || 0
+    ),
     desconto_convertido_da_margem: false,
     motivo_desconto:
-      'A tolerância de 20% do dinheiro avalia quantidade inteira. O contrato existente não converte essa margem em desconto.'
+      'Complemento = parcela do dinheiro (múltiplo de R$ 0,05) classificada como fiscal. '
+      + 'Desconto de ajuste apenas alinha o bruto da composição ao valor fiscal final.'
   });
 }
 
@@ -623,6 +1030,8 @@ module.exports = {
   integrarPagamentoRecomposicao,
   apresentacaoComposicaoFiscal,
   itensFiscaisInteirosParaReferencia,
+  pagamentosParaDocumentoFiscal,
+  pagamentosParaDistribuicaoComComplemento,
   centavosMoedaReal,
   CATEGORIA_PASTEL
 };

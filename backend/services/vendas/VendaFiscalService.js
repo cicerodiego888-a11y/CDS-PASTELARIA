@@ -130,16 +130,32 @@ async function emitirFiscalSeSolicitado(vendaId, emitirFiscal, venda) {
   }
 }
 
+/**
+ * CDS-PDV-CORRECAO-STATUS-FISCAL-HANDOFF-01
+ * Status HTTP deve espelhar o resultado já confirmado pela operação
+ * (Orquestrador → aplicarRegraStatusPagamentoVenda → persistência).
+ * Não recalcular com recebimentos artificiais [] — isso rebaixava quitada
+ * para aguardando_nao_fiscal e disparava handoff indevido no PDV.
+ */
+const STATUS_PAGAMENTO_RESPOSTA = new Set([
+  'quitada',
+  'aguardando_nao_fiscal',
+  'pendente'
+]);
+
+function resolverStatusPagamentoRespostaHttp(payload = {}) {
+  const informado = String(payload.statusPagamento || '').trim().toLowerCase();
+  if (STATUS_PAGAMENTO_RESPOSTA.has(informado)) {
+    return informado;
+  }
+  // Sem status autoritativo da operação: não inventar handoff nem quitação.
+  return 'pendente';
+}
+
 async function responderVendaComFiscal(res, payload) {
-  const { resolverStatusPagamentoVenda } = require('./VendaPagamentoService');
   const valorFiscal = Number(payload.valorFiscal || 0);
   const valorNaoFiscal = Number(payload.valorNaoFiscal || 0);
-  const statusPagamento = resolverStatusPagamentoVenda(
-    valorNaoFiscal,
-    [],
-    payload.statusPagamento || 'quitada',
-    { valorFiscal }
-  );
+  const statusPagamento = resolverStatusPagamentoRespostaHttp(payload);
 
   const respostaBase = {
     id: payload.vendaId,
@@ -263,5 +279,6 @@ module.exports = {
   vincularNfceTransacoesVenda,
   emitirFiscalSeSolicitado,
   responderVendaComFiscal,
+  resolverStatusPagamentoRespostaHttp,
   registrarPoliticaSnapshotReprocessamento
 };

@@ -2,6 +2,7 @@
  * Contagem física absoluta F×NF — CDS-ESTOQUE-MANUAL-01.
  * CDS-ESTOQUE-CONTAGEM-CONCORRENCIA-03: observação carrega saldo de referência;
  * confirmação em BEGIN IMMEDIATE rejeita snapshot desatualizado (CONTAGEM_DESATUALIZADA).
+ * CDS-ESTOQUE-CONTAGEM-REDESIGN-PREVIEW-05.3 — consulta de saldo atual somente leitura.
  *
  * @module services/estoque/EstoqueContagemFisicaService
  */
@@ -16,7 +17,9 @@ const {
 } = require('./estoqueContagemFisicaSchema');
 const { registrarAjusteEstoque } = require('../ajusteEstoqueService');
 const {
-  converterQuantidadeContagem
+  converterQuantidadeContagem,
+  obterMetadadosConversaoProduto,
+  listarApresentacoes
 } = require('./EstoqueContagemConversaoService');
 
 const MOTIVO_CONTAGEM = 'CONTAGEM_FISICA';
@@ -41,6 +44,41 @@ function resolverOmitirNaoFiscal(params = {}, item = {}) {
   if (modo == null || modo === '') return false;
   const s = String(modo).trim().toLowerCase();
   return s === '1' || s === 'true' || s === 'on' || s === 'sim';
+}
+
+/**
+ * Ajuste direcionado: a quantidade convertida é a movimentação, não o saldo final.
+ * Ausência de tipo preserva a contagem física absoluta.
+ */
+function normalizarTipoAjuste(valor) {
+  if (valor == null || valor === '') return null;
+  const s = String(valor).trim().toUpperCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+  if (s === 'BAIXA' || s === 'OFF') return 'BAIXA';
+  if (s === 'ACRESCIMO' || s === 'ON') return 'ACRESCIMO';
+  throw erroContagem(
+    'TIPO_AJUSTE_INVALIDO',
+    'Tipo de ajuste inválido. Use BAIXA ou ACRESCIMO.'
+  );
+}
+
+function resolverTipoAjusteItem(params, item) {
+  const fonte = item || {};
+  const op = String(fonte.operacao != null ? fonte.operacao : (params.operacao || ''))
+    .trim()
+    .toUpperCase();
+  if (op === 'CONTAGEM_FISICA' || op === 'CONTAGEM') return null;
+  const bruto = fonte.tipo_ajuste != null ? fonte.tipo_ajuste : fonte.tipoAjuste;
+  if ((bruto == null || bruto === '') && op !== 'AJUSTE_DIRECIONADO') return null;
+  if (bruto == null || bruto === '') return 'BAIXA';
+  return normalizarTipoAjuste(bruto);
+}
+
+function mensagemSaldoInsuficiente(bucket, disponivel, solicitado, unidade) {
+  const un = unidade ? ` ${unidade}` : '';
+  const nome = bucket === 'NAO_FISCAL' ? 'não fiscal' : 'fiscal';
+  return `Saldo ${nome} insuficiente para a baixa. Disponível: ${disponivel}${un}. Solicitado: ${solicitado}${un}.`;
 }
 
 function quantidadeInformadaOpcional(valor, campo, { obrigatorio }) {
@@ -266,19 +304,24 @@ async function registrarContagemFisica(params = {}) {
     const convNf = omitirNf
       ? null
       : await converterQuantidadeContagem(db, produtoId, qNfInformada, convOpts);
+    const tipoAjuste = resolverTipoAjusteItem(params, item);
 
     itensNorm.push({
       produto_id: produtoId,
       produto_nome: produto.nome || null,
       omitir_nao_fiscal: omitirNf,
+      tipo_ajuste: tipoAjuste,
       quantidade_fiscal_informada: convF.quantidade_informada,
       quantidade_nao_fiscal_informada: convNf ? convNf.quantidade_informada : null,
       unidade_informada: convF.unidade_informada,
       unidade_base: convF.unidade_base,
       fator_total: convF.fator_total,
-      // Persistidos / comparados na unidade-base.
-      quantidade_fiscal_contada: convF.quantidade_convertida,
-      quantidade_nao_fiscal_contada: convNf ? convNf.quantidade_convertida : null,
+      quantidade_fiscal_movimento: tipoAjuste ? convF.quantidade_convertida : null,
+      quantidade_nao_fiscal_movimento: tipoAjuste && convNf ? convNf.quantidade_convertida : null,
+      // Contagem absoluta: a convertida é o saldo-alvo. No ajuste direcionado o alvo
+      // é calculado na transação a partir do snapshot, não da quantidade convertida.
+      quantidade_fiscal_contada: tipoAjuste ? null : convF.quantidade_convertida,
+      quantidade_nao_fiscal_contada: tipoAjuste ? null : (convNf ? convNf.quantidade_convertida : null),
       saldo_esperado: extrairSaldoEsperadoItem(item)
     });
   }
@@ -352,16 +395,63 @@ async function registrarContagemFisica(params = {}) {
           }
         }
 
-        const diferencaFiscal = roundStockQuantity(
+        const diferencaFiscalAbsoluta = roundStockQuantity(
           item.quantidade_fiscal_contada - saldoFiscalAnterior
         );
-        // F12 ON: não interpreta ausência como zero — preserva NF sem ajuste.
-        const quantidadeNfPersistida = item.omitir_nao_fiscal
+        let diferencaFiscal = diferencaFiscalAbsoluta;
+        let quantidadeFiscalPersistida = item.quantidade_fiscal_contada;
+        let quantidadeNfPersistida = item.omitir_nao_fiscal
           ? saldoNaoFiscalAnterior
           : item.quantidade_nao_fiscal_contada;
-        const diferencaNaoFiscal = item.omitir_nao_fiscal
+        let diferencaNaoFiscal = item.omitir_nao_fiscal
           ? 0
           : roundStockQuantity(quantidadeNfPersistida - saldoNaoFiscalAnterior);
+
+        if (item.tipo_ajuste === 'BAIXA' || item.tipo_ajuste === 'ACRESCIMO') {
+          const sinal = item.tipo_ajuste === 'BAIXA' ? -1 : 1;
+          const movF = roundStockQuantity(item.quantidade_fiscal_movimento);
+          const unidade = item.unidade_base || '';
+          if (item.tipo_ajuste === 'BAIXA' && movF - saldoFiscalAnterior > EPS_SALDO) {
+            throw erroContagem(
+              'SALDO_INSUFICIENTE',
+              mensagemSaldoInsuficiente('FISCAL', saldoFiscalAnterior, movF, unidade),
+              409,
+              {
+                empresa_id: empresaId,
+                produto_id: item.produto_id,
+                bucket: 'FISCAL',
+                tipo_ajuste: 'BAIXA',
+                saldo_disponivel: saldoFiscalAnterior,
+                quantidade_solicitada: movF
+              }
+            );
+          }
+          diferencaFiscal = roundStockQuantity(sinal * movF);
+          quantidadeFiscalPersistida = roundStockQuantity(saldoFiscalAnterior + diferencaFiscal);
+          if (item.omitir_nao_fiscal) {
+            diferencaNaoFiscal = 0;
+            quantidadeNfPersistida = saldoNaoFiscalAnterior;
+          } else {
+            const movNf = roundStockQuantity(item.quantidade_nao_fiscal_movimento);
+            if (item.tipo_ajuste === 'BAIXA' && movNf - saldoNaoFiscalAnterior > EPS_SALDO) {
+              throw erroContagem(
+                'SALDO_INSUFICIENTE',
+                mensagemSaldoInsuficiente('NAO_FISCAL', saldoNaoFiscalAnterior, movNf, unidade),
+                409,
+                {
+                  empresa_id: empresaId,
+                  produto_id: item.produto_id,
+                  bucket: 'NAO_FISCAL',
+                  tipo_ajuste: 'BAIXA',
+                  saldo_disponivel: saldoNaoFiscalAnterior,
+                  quantidade_solicitada: movNf
+                }
+              );
+            }
+            diferencaNaoFiscal = roundStockQuantity(sinal * movNf);
+            quantidadeNfPersistida = roundStockQuantity(saldoNaoFiscalAnterior + diferencaNaoFiscal);
+          }
+        }
 
         let ajusteId = null;
         if (Math.abs(diferencaFiscal) > EPS_SALDO || Math.abs(diferencaNaoFiscal) > EPS_SALDO) {
@@ -378,11 +468,14 @@ async function registrarContagemFisica(params = {}) {
               ? depois.estoque_atual
               : (Number(depois.saldo_fiscal || 0) + Number(depois.saldo_nao_fiscal || 0)))
           );
+          const motivoAjuste = item.tipo_ajuste
+            ? (`AJUSTE_DIRECIONADO_${item.tipo_ajuste}` + (observacao ? ` ${observacao}` : '')).slice(0, 240)
+            : (observacao || MOTIVO_CONTAGEM);
           ajusteId = await registrarAjusteAsync(db, {
             produto_id: item.produto_id,
             usuario_id: usuarioId,
             usuario_nome: usuarioNome,
-            motivo: observacao || MOTIVO_CONTAGEM,
+            motivo: motivoAjuste,
             ajuste_fiscal: diferencaFiscal,
             ajuste_nao_fiscal: diferencaNaoFiscal,
             saldo_fiscal_antes: saldoFiscalAnterior,
@@ -400,19 +493,20 @@ async function registrarContagemFisica(params = {}) {
             contagem_id, empresa_id, produto_id,
             saldo_fiscal_anterior, saldo_nao_fiscal_anterior,
             quantidade_fiscal_contada, quantidade_nao_fiscal_contada,
-            diferenca_fiscal, diferenca_nao_fiscal, ajuste_id
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            diferenca_fiscal, diferenca_nao_fiscal, ajuste_id, tipo_ajuste
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             contagemId,
             empresaId,
             item.produto_id,
             saldoFiscalAnterior,
             saldoNaoFiscalAnterior,
-            item.quantidade_fiscal_contada,
+            quantidadeFiscalPersistida,
             quantidadeNfPersistida,
             diferencaFiscal,
             diferencaNaoFiscal,
-            ajusteId
+            ajusteId,
+            item.tipo_ajuste || null
           ]
         );
       }
@@ -440,6 +534,48 @@ async function registrarContagemFisica(params = {}) {
   }
 
   return obterContagemPorId(db, contagemIdFinal.id, empresaId);
+}
+
+async function enriquecerHistoricoComTipoAjuste(db, empresaId, hist) {
+  if (!hist || !Array.isArray(hist.itens) || hist.itens.length === 0) return hist;
+  const ids = hist.itens
+    .map((item) => Number(item.id))
+    .filter((id) => Number.isInteger(id) && id > 0);
+  if (!ids.length) return hist;
+  let rows = [];
+  try {
+    rows = await dbAll(
+      db,
+      `SELECT contagem_id, tipo_ajuste
+         FROM estoque_contagens_fisicas_itens
+        WHERE empresa_id = ? AND contagem_id IN (${ids.map(() => '?').join(',')})`,
+      [Number(empresaId), ...ids]
+    );
+  } catch (err) {
+    if (/no such column|no such table/i.test(String(err && err.message || ''))) return hist;
+    throw err;
+  }
+  const porContagem = new Map();
+  rows.forEach((row) => {
+    const id = Number(row.contagem_id);
+    if (!porContagem.has(id)) porContagem.set(id, new Set());
+    if (row.tipo_ajuste) porContagem.get(id).add(String(row.tipo_ajuste));
+  });
+  return Object.assign({}, hist, {
+    itens: hist.itens.map((item) => {
+      const tipos = Array.from(porContagem.get(Number(item.id)) || []);
+      let resultado = item.resultado || null;
+      if (tipos.length === 1 && tipos[0] === 'BAIXA') resultado = 'BAIXA';
+      else if (tipos.length === 1 && tipos[0] === 'ACRESCIMO') resultado = 'ACRÉSCIMO';
+      else if (tipos.indexOf('BAIXA') >= 0 && tipos.indexOf('ACRESCIMO') >= 0) {
+        resultado = 'BAIXA e ACRÉSCIMO';
+      }
+      return Object.assign({}, item, {
+        tipos_ajuste: tipos,
+        resultado: resultado
+      });
+    })
+  });
 }
 
 async function obterContagemPorId(db, contagemId, empresaId) {
@@ -475,7 +611,8 @@ async function obterContagemPorId(db, contagemId, empresaId) {
       quantidade_nao_fiscal_contada: Number(row.quantidade_nao_fiscal_contada),
       diferenca_fiscal: Number(row.diferenca_fiscal),
       diferenca_nao_fiscal: Number(row.diferenca_nao_fiscal),
-      ajuste_id: row.ajuste_id != null ? Number(row.ajuste_id) : null
+      ajuste_id: row.ajuste_id != null ? Number(row.ajuste_id) : null,
+      tipo_ajuste: row.tipo_ajuste || null
     }))
   };
 }
@@ -532,6 +669,56 @@ async function previsualizarContagem(params = {}) {
   const saldoNaoFiscalAnterior = roundStockQuantity(Number(antes.saldo_nao_fiscal || 0));
   const qF = convF.quantidade_convertida;
   const qNf = omitirNf ? null : convNf.quantidade_convertida;
+  const tipoAjuste = resolverTipoAjusteItem(params, params);
+
+  if (tipoAjuste) {
+    const sinal = tipoAjuste === 'BAIXA' ? -1 : 1;
+    const diferencaFiscal = roundStockQuantity(sinal * qF);
+    const diferencaNaoFiscal = omitirNf || qNf == null ? null : roundStockQuantity(sinal * qNf);
+    const saldoFiscalPrevisto = roundStockQuantity(saldoFiscalAnterior + diferencaFiscal);
+    const saldoNaoFiscalPrevisto = omitirNf
+      ? saldoNaoFiscalAnterior
+      : roundStockQuantity(saldoNaoFiscalAnterior + diferencaNaoFiscal);
+    const insuficienteFiscal = tipoAjuste === 'BAIXA' && qF - saldoFiscalAnterior > EPS_SALDO;
+    const insuficienteNaoFiscal = tipoAjuste === 'BAIXA'
+      && !omitirNf
+      && qNf - saldoNaoFiscalAnterior > EPS_SALDO;
+    return {
+      empresa_id: empresaId,
+      produto_id: produtoId,
+      operacao: 'AJUSTE_DIRECIONADO',
+      tipo_ajuste: tipoAjuste,
+      modo_fiscal: omitirNf ? '1' : '0',
+      omitir_nao_fiscal: omitirNf,
+      saldo_fiscal_anterior: saldoFiscalAnterior,
+      saldo_nao_fiscal_anterior: saldoNaoFiscalAnterior,
+      saldo_fiscal_esperado: saldoFiscalAnterior,
+      saldo_nao_fiscal_esperado: saldoNaoFiscalAnterior,
+      quantidade_fiscal_informada: convF.quantidade_informada,
+      quantidade_nao_fiscal_informada: omitirNf ? null : convNf.quantidade_informada,
+      unidade_informada: convF.unidade_informada,
+      unidade_base: convF.unidade_base,
+      fator_total: convF.fator_total,
+      mensagem_conversao_fiscal: convF.mensagem_conversao,
+      mensagem_conversao_nao_fiscal: omitirNf ? null : convNf.mensagem_conversao,
+      quantidade_fiscal_convertida: qF,
+      quantidade_nao_fiscal_convertida: qNf,
+      quantidade_fiscal_contada: qF,
+      quantidade_nao_fiscal_contada: qNf,
+      diferenca_fiscal: diferencaFiscal,
+      diferenca_nao_fiscal: diferencaNaoFiscal,
+      saldo_fiscal_previsto: saldoFiscalPrevisto,
+      saldo_nao_fiscal_previsto: saldoNaoFiscalPrevisto,
+      saldo_insuficiente_fiscal: insuficienteFiscal,
+      saldo_insuficiente_nao_fiscal: insuficienteNaoFiscal,
+      saldo_insuficiente: insuficienteFiscal || insuficienteNaoFiscal,
+      saldo_disponivel_fiscal: saldoFiscalAnterior,
+      saldo_disponivel_nao_fiscal: saldoNaoFiscalAnterior,
+      quantidade_solicitada_fiscal: qF,
+      quantidade_solicitada_nao_fiscal: qNf,
+      movimentou_estoque: false
+    };
+  }
 
   return {
     empresa_id: empresaId,
@@ -560,10 +747,139 @@ async function previsualizarContagem(params = {}) {
   };
 }
 
+async function carregarProdutoLeituraContagem(db, produtoId) {
+  const tentativas = [
+    `SELECT id, nome, codigo, codigo_barras,
+            COALESCE(unidade_comercial, unidade, 'UN') AS unidade
+       FROM produtos WHERE id = ?`,
+    `SELECT id, nome, codigo, COALESCE(unidade, 'UN') AS unidade
+       FROM produtos WHERE id = ?`,
+    `SELECT id, nome FROM produtos WHERE id = ?`
+  ];
+  let ultimoErroColuna = null;
+  for (const sql of tentativas) {
+    try {
+      const row = await dbGet(db, sql, [produtoId]);
+      if (!row) return null;
+      return {
+        id: Number(row.id),
+        nome: row.nome || '',
+        codigo: row.codigo != null ? row.codigo : null,
+        codigo_barras: row.codigo_barras != null ? row.codigo_barras : null,
+        unidade: row.unidade || 'UN'
+      };
+    } catch (err) {
+      if (!/no such column/i.test(String(err && err.message || ''))) throw err;
+      ultimoErroColuna = err;
+    }
+  }
+  if (ultimoErroColuna) throw ultimoErroColuna;
+  return null;
+}
+
+/**
+ * Saldo atual da empresa selecionada para a tela de contagem.
+ * Somente leitura: não grava estoque, histórico, ajuste, reserva ou receita.
+ * O snapshot devolvido é o saldo observado agora, na unidade-base, sem reconversão.
+ */
+async function consultarSaldoAtualContagem(params = {}) {
+  const db = params.db;
+  if (!db) throw erroContagem('DB_OBRIGATORIO', 'db é obrigatório.', 500);
+  const empresaId = resolverEmpresaId(params.empresaId != null ? params.empresaId : params.empresa_id);
+  if (empresaId == null) {
+    throw erroContagem('EMPRESA_OBRIGATORIA', 'empresaId é obrigatório.');
+  }
+  const produtoId = Number(params.produtoId != null ? params.produtoId : params.produto_id);
+  if (!Number.isInteger(produtoId) || produtoId <= 0) {
+    throw erroContagem('PRODUTO_INVALIDO', 'produto_id inválido.');
+  }
+
+  const produto = await carregarProdutoLeituraContagem(db, produtoId);
+  if (!produto) {
+    throw erroContagem('PRODUTO_NAO_ENCONTRADO', `Produto ${produtoId} não encontrado.`, 404);
+  }
+
+  const antes = await estoqueSaldosPublico.consultarSaldo(produtoId, {
+    db,
+    empresaId,
+    legado: false
+  });
+  if (!antes || antes.legado === true || Number(antes.empresa_id) !== empresaId) {
+    throw erroContagem(
+      'SALDO_EMPRESA_NAO_ISOLADO',
+      'O saldo atual precisa ser lido do estoque da empresa selecionada.',
+      409,
+      { empresa_id: empresaId, produto_id: produtoId }
+    );
+  }
+
+  let meta = null;
+  let metaErro = null;
+  try {
+    meta = await obterMetadadosConversaoProduto(db, produtoId);
+  } catch (err) {
+    metaErro = err;
+  }
+
+  let apresentacoes = [];
+  try {
+    const lista = await listarApresentacoes(db, produtoId);
+    apresentacoes = (Array.isArray(lista) ? lista : []).map((a) => ({
+      id: Number(a.id),
+      tipo: a.tipo || null,
+      quantidade: a.quantidade != null ? Number(a.quantidade) : null,
+      unidade: a.unidade || null,
+      principal: Number(a.principal) === 1,
+      venda: Number(a.venda) === 1
+    }));
+  } catch (_) {
+    apresentacoes = [];
+  }
+
+  const utiliza = !!(meta && meta.utiliza_conversao);
+  const fatorBruto = meta && meta.fator_conversao != null ? Number(meta.fator_conversao) : null;
+  const conversaoConfiavel = metaErro
+    ? false
+    : (utiliza
+      ? (Number.isFinite(fatorBruto) && fatorBruto > 0 && !!(meta && meta.unidade_base))
+      : true);
+  const unidadeComercial = (meta && meta.unidade_comercial) || produto.unidade || 'UN';
+  const unidadeBase = (meta && meta.unidade_base) || (conversaoConfiavel ? unidadeComercial : null);
+  const saldoFiscal = roundStockQuantity(Number(antes.saldo_fiscal || 0));
+  const saldoNaoFiscal = roundStockQuantity(Number(antes.saldo_nao_fiscal || 0));
+
+  return {
+    ok: true,
+    somente_leitura: true,
+    movimentou_estoque: false,
+    origem_saldo: 'estoque_empresa',
+    empresa_id: empresaId,
+    produto_id: produtoId,
+    nome: produto.nome,
+    codigo: produto.codigo,
+    codigo_interno: produto.codigo,
+    codigo_barras: produto.codigo_barras,
+    unidade_comercial: unidadeComercial,
+    unidade_base: unidadeBase,
+    utiliza_conversao: utiliza,
+    fator_conversao: conversaoConfiavel ? (utiliza ? fatorBruto : 1) : null,
+    apresentacao_id: meta && meta.apresentacao_id != null ? Number(meta.apresentacao_id) : null,
+    apresentacoes,
+    conversao_confiavel: conversaoConfiavel,
+    conversao_codigo: metaErro && metaErro.code ? metaErro.code : null,
+    saldo_fiscal_atual: saldoFiscal,
+    saldo_nao_fiscal_atual: saldoNaoFiscal,
+    saldo_fiscal_esperado: saldoFiscal,
+    saldo_nao_fiscal_esperado: saldoNaoFiscal
+  };
+}
+
 module.exports = {
   MOTIVO_CONTAGEM,
   registrarContagemFisica,
   obterContagemPorId,
   previsualizarContagem,
-  resolverOmitirNaoFiscal
+  consultarSaldoAtualContagem,
+  resolverOmitirNaoFiscal,
+  enriquecerHistoricoComTipoAjuste
 };

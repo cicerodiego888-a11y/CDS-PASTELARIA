@@ -68,9 +68,10 @@
   /** HTML padrão da marca na sidebar (quando não há logo da empresa). */
   function htmlSidebarPadrao(modulo) {
     return (
-      '<img src="' + url('logoOficial') + '" alt="' + NOME + '" class="img-fluid brand-sidebar-logo" ' +
-      'style="max-height:88px;object-fit:contain;margin:0 auto 0.35rem;display:block;">' +
-      '<small class="text-muted brand-sidebar-slogan" style="display:block;line-height:1.25;max-width:11.5rem;margin:0.15rem auto 0;">' +
+      '<span class="brand-mark" aria-hidden="false">' +
+        '<img src="' + url('logoOficial') + '" alt="' + NOME + '" class="img-fluid brand-sidebar-logo">' +
+      '</span>' +
+      '<small class="text-muted brand-sidebar-slogan" style="display:block;margin:0 auto;">' +
         SLOGAN +
       '</small>'
     );

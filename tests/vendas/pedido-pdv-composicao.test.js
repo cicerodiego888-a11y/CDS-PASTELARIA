@@ -1,5 +1,12 @@
 'use strict';
 
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-pedido-pdv-composicao-'));
+process.env.DB_DIR = dbDir;
+delete process.env.CDS_ALLOW_OFFICIAL_DB;
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const sqlite3 = require('sqlite3').verbose();
@@ -111,7 +118,7 @@ async function prepararBancoCenarioAtual() {
   await run(db, `CREATE TABLE pedidos (
     id INTEGER PRIMARY KEY, codigo TEXT, cliente_id INTEGER, empresa_id INTEGER,
     status TEXT, total REAL, desconto REAL DEFAULT 0, frete REAL DEFAULT 0,
-    created_at TEXT, updated_at TEXT
+    observacao TEXT, created_at TEXT, updated_at TEXT
   )`);
   await run(db, `CREATE TABLE pedidos_itens (
     id INTEGER PRIMARY KEY, pedido_id INTEGER, produto_id INTEGER,
@@ -142,21 +149,30 @@ async function prepararBancoCenarioAtual() {
   return db;
 }
 
-test('aplica o menor excedente acima do residual como desconto global explícito', async () => {
+test('pedido comercial com pastel usa núcleo residual e preserva total/qtd', async () => {
   const db = await prepararBancoCenarioAtual();
   try {
     const composicao = await prepararComposicaoPedidoPdv(
       { pedidoId: 99, empresaId: 1 },
       { db }
     );
-    assert.equal(composicao.valorPastelCentavos, 4398);
+    assert.equal(composicao.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
+    assert.equal(composicao.valorOriginalCentavos, 6198);
+    assert.equal(composicao.valorPastelCentavos, 1798);
     assert.equal(composicao.valorResidualCentavos, 4400);
-    assert.equal(composicao.valorCompostoBrutoCentavos, 8976);
-    assert.equal(composicao.descontoCentavos, 2778);
     assert.equal(composicao.valorFinalCentavos, 6198);
-    assert.deepEqual(
-      composicao.itens.map((item) => [item.produto_id, item.quantidade, item.preco_unitario]),
-      [[747, 2, 21.99], [748, 2, 12.99], [749, 1, 19.8]]
+    assert.equal(
+      composicao.itens.find((item) => item.produto_id === 747).quantidade,
+      2
+    );
+    assert.equal(
+      composicao.itens.find((item) => item.produto_id === 747).preco_unitario,
+      8.99
+    );
+    assert.ok(composicao.itens.some((item) => item.produto_id !== 747));
+    assert.equal(
+      composicao.valorCompostoBrutoCentavos - composicao.descontoCentavos,
+      6198
     );
     const repetida = await prepararComposicaoPedidoPdv(
       { pedidoId: 99, empresaId: 1 },
@@ -176,7 +192,33 @@ test('aplica o menor excedente acima do residual como desconto global explícito
   }
 });
 
-test('compõe exatamente pastéis e refrigerante com preço comercial existente', async () => {
+test('venda por valor mantém residual com desconto global explícito', async () => {
+  const db = await prepararBancoCenarioAtual();
+  try {
+    await run(db, 'DELETE FROM pedidos_itens WHERE id = 2');
+    await run(db, `UPDATE pedidos_itens
+      SET preco_unitario = 30.99, subtotal = 61.98 WHERE id = 1`);
+    await run(db, `UPDATE pedidos
+      SET observacao = 'VENDA_POR_VALOR_PASTEIS', total = 61.98 WHERE id = 99`);
+    const composicao = await prepararComposicaoPedidoPdv(
+      { pedidoId: 99, empresaId: 1 },
+      { db }
+    );
+    assert.equal(composicao.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
+    assert.equal(composicao.valorFinalCentavos, 6198);
+    assert.ok(composicao.itens.some((item) => item.produto_id === 747));
+    assert.ok(composicao.itens.some((item) => item.produto_id !== 747));
+    assert.equal(
+      composicao.itens.reduce((s, i) => s + Math.round(Number(i.subtotal) * 100), 0)
+        - composicao.descontoCentavos,
+      6198
+    );
+  } finally {
+    await fecharDb(db);
+  }
+});
+
+test('compõe exatamente pastéis e refrigerante quando residual fecha no catálogo', async () => {
   const db = await prepararBancoCenarioAtual();
   try {
     await run(db, 'UPDATE pedidos SET total = 30.97 WHERE id = 99');
@@ -196,8 +238,10 @@ test('compõe exatamente pastéis e refrigerante com preço comercial existente'
       { db }
     );
 
+    assert.equal(composicao.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
     assert.equal(composicao.valorOriginalCentavos, 3097);
     assert.equal(composicao.valorFinalCentavos, 3097);
+    assert.equal(composicao.valorResidualCentavos, 1299);
     assert.equal(composicao.descontoCentavos, 0);
     assert.deepEqual(
       composicao.itens.map((item) => [
@@ -243,22 +287,22 @@ test('usa o preço vigente do cadastro de pastel em cada preparação', async ()
       { db }
     );
 
-    assert.equal(original.itens.find((item) => item.produto_id === 747).preco_unitario, 21.99);
-    assert.equal(atualizado.itens.find((item) => item.produto_id === 747).preco_unitario, 21.99);
+    assert.equal(original.itens.find((item) => item.produto_id === 747).preco_unitario, 8.99);
+    assert.equal(atualizado.itens.find((item) => item.produto_id === 747).preco_unitario, 9.5);
     assert.equal(original.valorResidualCentavos, 4400);
-    assert.equal(atualizado.valorPastelCentavos, 4398);
+    assert.equal(atualizado.valorPastelCentavos, 1900);
     assert.equal(atualizado.valorResidualCentavos, 4298);
     assert.equal(atualizado.valorFinalCentavos, 6198);
-    assert.equal(atualizado.fingerprint, original.fingerprint);
+    assert.equal(original.valorFinalCentavos, 6198);
+    assert.notEqual(atualizado.fingerprint, original.fingerprint);
   } finally {
     await fecharDb(db);
   }
 });
 
-test('compõe com refrigerante elegível que não estava nas linhas originais do Pedido', async () => {
+test('motor seleciona refrigerantes elegíveis dinamicamente para o residual', async () => {
   const db = await prepararBancoCenarioAtual();
   try {
-    await run(db, 'UPDATE produtos SET ativo = 0 WHERE id = 748');
     await run(db, `CREATE TABLE muc_produto_relacoes (
       id INTEGER PRIMARY KEY, produto_id INTEGER, unidade_origem TEXT,
       unidade_destino TEXT, fator REAL
@@ -280,7 +324,7 @@ test('compõe com refrigerante elegível que não estava nas linhas originais do
     `);
     await run(db, `
       UPDATE pedidos_itens
-      SET preco_unitario = 12.99, subtotal = 12.99
+      SET produto_id = 751, preco_unitario = 12.99, subtotal = 12.99
       WHERE id = 2
     `);
     await run(db, 'UPDATE pedidos SET total = 30.97 WHERE id = 99');
@@ -290,27 +334,31 @@ test('compõe com refrigerante elegível que não estava nas linhas originais do
       { db }
     );
 
+    assert.equal(composicao.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
     assert.equal(composicao.valorFinalCentavos, 3097);
-    assert.deepEqual(
-      composicao.itens.map((item) => [item.produto_id, item.quantidade, item.subtotal]),
-      [[747, 2, 17.98], [751, 1, 12.99]]
-    );
+    assert.equal(composicao.valorResidualCentavos, 1299);
+    assert.equal(composicao.itens.find((item) => item.produto_id === 747).quantidade, 2);
+    assert.ok(composicao.itens.some((item) => [748, 749, 750, 751].includes(item.produto_id)));
   } finally {
     await fecharDb(db);
   }
 });
 
-test('aceita produtos comerciais reais com volumes de 300 ml e 500 ml', async () => {
+test('aceita composição residual com volumes de 300 ml e 500 ml', async () => {
   const db = await prepararBancoCenarioAtual();
   try {
     for (const caso of [
       { produtoId: 749, preco: 19.80, total: 37.78 },
       { produtoId: 750, preco: 32.99, total: 50.97 }
     ]) {
-      await run(db, 'UPDATE produtos SET ativo = CASE WHEN id = ? THEN 1 ELSE 0 END WHERE id IN (748, 749, 750)', [caso.produtoId]);
       await run(db, 'UPDATE pedidos SET total = ? WHERE id = 99', [caso.total]);
       await run(db, 'UPDATE pedidos_itens SET preco_unitario = 8.99, subtotal = 17.98 WHERE id = 1');
-      await run(db, 'UPDATE pedidos_itens SET preco_unitario = ?, subtotal = ? WHERE id = 2', [caso.preco, caso.preco]);
+      await run(db, `UPDATE pedidos_itens
+        SET produto_id = ?, preco_unitario = ?, subtotal = ?
+        WHERE id = 2`, [caso.produtoId, caso.preco, caso.preco]);
+      // Isola o volume alvo para provar elegibilidade daquele modelo.
+      await run(db, 'UPDATE produtos SET ativo = 0 WHERE id IN (748, 749, 750) AND id != ?', [caso.produtoId]);
+      await run(db, 'UPDATE produtos SET ativo = 1 WHERE id = ?', [caso.produtoId]);
 
       const composicao = await prepararComposicaoPedidoPdv(
         { pedidoId: 99, empresaId: 1 },
@@ -321,15 +369,18 @@ test('aceita produtos comerciais reais com volumes de 300 ml e 500 ml', async ()
         [747, caso.produtoId]
       );
       assert.equal(composicao.descontoCentavos, 0);
+      assert.equal(composicao.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
+      assert.equal(composicao.valorFinalCentavos, Math.round(caso.total * 100));
     }
   } finally {
     await fecharDb(db);
   }
 });
 
-test('exclui produto cujo volume MUC convertido não seja 200, 300 ou 500 ml', async () => {
+test('venda por valor exclui produto cujo volume MUC convertido não seja 200, 300 ou 500 ml', async () => {
   const db = await prepararBancoCenarioAtual();
   try {
+    await run(db, `UPDATE pedidos SET observacao = 'VENDA_POR_VALOR_PASTEIS' WHERE id = 99`);
     await run(db, 'UPDATE produtos SET ativo = 0 WHERE id IN (749, 750)');
     await run(db, 'UPDATE produtos SET volume_valor = 100 WHERE id = 748');
     await run(db, 'UPDATE pedidos SET total = 30.97 WHERE id = 99');
@@ -349,16 +400,14 @@ test('exclui produto cujo volume MUC convertido não seja 200, 300 ou 500 ml', a
   }
 });
 
-test('respeita disponibilidade empresarial ao procurar a composição acima do residual', async () => {
+test('venda por valor respeita disponibilidade empresarial ao procurar residual', async () => {
   const db = await prepararBancoCenarioAtual();
   try {
-    await run(db, 'UPDATE pedidos SET total = 30.97 WHERE id = 99');
-    await run(db, `
-      UPDATE pedidos_itens SET preco_unitario = 8.99, subtotal = 17.98 WHERE id = 1
-    `);
-    await run(db, `
-      UPDATE pedidos_itens SET preco_unitario = 12.99, subtotal = 12.99 WHERE id = 2
-    `);
+    await run(db, 'DELETE FROM pedidos_itens WHERE id = 2');
+    await run(db, `UPDATE pedidos_itens
+      SET preco_unitario = 15.485, subtotal = 30.97 WHERE id = 1`);
+    await run(db, `UPDATE pedidos
+      SET observacao = 'VENDA_POR_VALOR_PASTEIS', total = 30.97 WHERE id = 99`);
     await run(db, `
       UPDATE estoque_empresa
       SET saldo_fiscal = 0, saldo_nao_fiscal = 0, estoque_atual = 0
@@ -369,20 +418,19 @@ test('respeita disponibilidade empresarial ao procurar a composição acima do r
       { pedidoId: 99, empresaId: 1 },
       { db }
     );
-    assert.deepEqual(
-      composicao.itens.map((item) => item.produto_id),
-      [747, 749]
-    );
-    assert.equal(composicao.descontoCentavos, 681);
+    assert.ok(composicao.itens.some((item) => item.produto_id === 747));
+    assert.ok(composicao.itens.some((item) => item.produto_id === 749));
+    assert.ok(!composicao.itens.some((item) => item.produto_id === 748));
     assert.equal(composicao.valorFinalCentavos, 3097);
   } finally {
     await fecharDb(db);
   }
 });
 
-test('bloqueia quando não existe composição válida acima do residual', async () => {
+test('venda por valor bloqueia quando não existe composição válida acima do residual', async () => {
   const db = await prepararBancoCenarioAtual();
   try {
+    await run(db, `UPDATE pedidos SET observacao = 'VENDA_POR_VALOR_PASTEIS' WHERE id = 99`);
     await run(db, 'UPDATE produtos SET preco_venda = 3.00 WHERE id = 748');
     await run(db, `UPDATE estoque_empresa
       SET saldo_fiscal = 1, saldo_nao_fiscal = 0, estoque_atual = 1,
@@ -410,6 +458,7 @@ test('arredonda a cotação para centavos e conserva igualdade do total', async 
   const db = await prepararBancoCenarioAtual();
   try {
     await run(db, 'UPDATE produtos SET preco_venda = 12.995 WHERE id = 748');
+    await run(db, 'UPDATE produtos SET ativo = 0 WHERE id IN (749, 750)');
     await run(db, 'UPDATE pedidos SET total = 30.98 WHERE id = 99');
     await run(db, `
       UPDATE pedidos_itens SET preco_unitario = 8.99, subtotal = 17.98 WHERE id = 1
@@ -422,6 +471,7 @@ test('arredonda a cotação para centavos e conserva igualdade do total', async 
       { pedidoId: 99, empresaId: 1 },
       { db }
     );
+    assert.equal(composicao.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
     assert.equal(composicao.valorFinalCentavos, 3098);
     assert.deepEqual(
       composicao.itens.map((item) => [item.produto_id, item.preco_unitario, item.subtotal]),
@@ -454,7 +504,7 @@ test('preserva o preço unitário cadastrado com fração de centavo ao arredond
   }
 });
 
-test('permite preparar venda somente com refrigerante (passthrough sem pastel)', async () => {
+test('permite preparar venda somente com refrigerante (identidade + catálogo)', async () => {
   const db = await prepararBancoCenarioAtual();
   try {
     await run(db, 'DELETE FROM pedidos_itens WHERE id = 1');
@@ -465,10 +515,11 @@ test('permite preparar venda somente com refrigerante (passthrough sem pastel)',
       { db }
     );
 
-    assert.equal(composicao.modo, 'PASSTHROUGH');
+    assert.equal(composicao.modo, 'COMPOSICAO_IDENTIDADE_CATALOGO');
     assert.equal(composicao.valorPastelCentavos, 0);
     assert.equal(composicao.descontoCentavos, 0);
-    assert.equal(composicao.valorFinalCentavos, 1800);
+    assert.equal(composicao.valorOriginalCentavos, 1800);
+    assert.equal(composicao.valorFinalCentavos, 1299);
     assert.deepEqual(
       composicao.itens.map((item) => [
         item.produto_id,
@@ -476,7 +527,7 @@ test('permite preparar venda somente com refrigerante (passthrough sem pastel)',
         item.preco_unitario,
         item.subtotal
       ]),
-      [[748, 1, 18, 18]]
+      [[748, 1, 12.99, 12.99]]
     );
     assert.equal(composicao.efeitosOperacionais, false);
   } finally {
@@ -484,7 +535,7 @@ test('permite preparar venda somente com refrigerante (passthrough sem pastel)',
   }
 });
 
-test('permite preparar venda somente com pastel (composição com residual zero)', async () => {
+test('pedido só com pastel e residual zero permanece no núcleo pastel→refrigerante', async () => {
   const db = await prepararBancoCenarioAtual();
   try {
     await run(db, 'DELETE FROM pedidos_itens WHERE id = 2');
@@ -510,7 +561,7 @@ test('permite preparar venda somente com pastel (composição com residual zero)
   }
 });
 
-test('preserva pastel e refrigerante quando a composição fecha com as linhas do Pedido', async () => {
+test('fecha residual exato com pastel e refrigerante elegível do catálogo', async () => {
   const db = await prepararBancoCenarioAtual();
   try {
     await run(db, 'UPDATE pedidos SET total = 30.97 WHERE id = 99');
@@ -545,7 +596,7 @@ test('preserva pastel e refrigerante quando a composição fecha com as linhas d
   }
 });
 
-test('permite produto independente sem ficha técnica / sem volume MUC (passthrough)', async () => {
+test('permite produto independente sem ficha técnica / sem volume MUC', async () => {
   const db = await prepararBancoCenarioAtual();
   try {
     await run(db, `INSERT INTO categorias (id, nome) VALUES (50, 'Bebidas Diversas')`);
@@ -564,7 +615,7 @@ test('permite produto independente sem ficha técnica / sem volume MUC (passthro
       { db }
     );
 
-    assert.equal(composicao.modo, 'PASSTHROUGH');
+    assert.equal(composicao.modo, 'COMPOSICAO_IDENTIDADE_CATALOGO');
     assert.deepEqual(
       composicao.itens.map((item) => [
         item.produto_id,
@@ -607,16 +658,20 @@ test('bloqueia pedido sem itens comerciais elegíveis (insumo/inativo)', async (
   }
 });
 
-test('mantém regra de composição residual quando há pastel elegível', async () => {
+test('mantém regra de composição residual na venda por valor com pastel elegível', async () => {
   const db = await prepararBancoCenarioAtual();
   try {
+    await run(db, 'DELETE FROM pedidos_itens WHERE id = 2');
+    await run(db, `UPDATE pedidos_itens
+      SET preco_unitario = 30.99, subtotal = 61.98 WHERE id = 1`);
+    await run(db, `UPDATE pedidos
+      SET observacao = 'VENDA_POR_VALOR_PASTEIS', total = 61.98 WHERE id = 99`);
     const composicao = await prepararComposicaoPedidoPdv(
       { pedidoId: 99, empresaId: 1 },
       { db }
     );
     assert.equal(composicao.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
-    assert.equal(composicao.valorPastelCentavos, 4398);
-    assert.equal(composicao.valorResidualCentavos, 4400);
+    assert.equal(composicao.valorFinalCentavos, 6198);
     assert.ok(composicao.itens.some((item) => item.produto_id === 747));
     assert.ok(composicao.itens.some((item) => item.produto_id === 748 || item.produto_id === 749));
   } finally {
@@ -624,9 +679,10 @@ test('mantém regra de composição residual quando há pastel elegível', async
   }
 });
 
-test('bloqueia o residual negativo antes de consultar refrigerantes', async () => {
+test('venda por valor bloqueia o residual negativo antes de consultar refrigerantes', async () => {
   const db = await prepararBancoCenarioAtual();
   try {
+    await run(db, `UPDATE pedidos SET observacao = 'VENDA_POR_VALOR_PASTEIS' WHERE id = 99`);
     await run(db, 'DELETE FROM pedidos_itens WHERE id = 2');
     await run(db, 'UPDATE pedidos_itens SET subtotal = 17.97 WHERE id = 1');
     await run(db, 'UPDATE pedidos SET total = 17.97 WHERE id = 99');

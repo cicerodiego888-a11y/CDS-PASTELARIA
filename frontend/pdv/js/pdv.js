@@ -420,7 +420,7 @@ async function retomarVinculoVendaConsolidada(handoff) {
             );
         }
         if (data.mesa && data.mesa.encerrado) {
-            sessionStorage.removeItem('pdvPedidoHandoff');
+            limparHandoffPedidoPdvStorage();
         }
         showNotification(
             data.mesa && data.mesa.encerrado
@@ -431,6 +431,27 @@ async function retomarVinculoVendaConsolidada(handoff) {
     } catch (error) {
         showNotification(error.message || 'Não foi possível recuperar o vínculo da venda consolidada.', 'danger');
     }
+}
+
+function avisarErpListaPedidosAtualizar() {
+    if (typeof notificarPedidoPdvFinalizado === 'function') {
+        notificarPedidoPdvFinalizado({
+            pedido_id: pdvPedidoHandoff && pdvPedidoHandoff.pedido_id,
+            consolidacao_id: pdvPedidoHandoff && pdvPedidoHandoff.consolidacao_id
+        });
+        return;
+    }
+    try {
+        localStorage.setItem('cds_pedidos_lista_tick', JSON.stringify({
+            ts: Date.now(),
+            pedido_id: pdvPedidoHandoff && pdvPedidoHandoff.pedido_id
+                ? Number(pdvPedidoHandoff.pedido_id)
+                : null,
+            consolidacao_id: pdvPedidoHandoff && pdvPedidoHandoff.consolidacao_id
+                ? Number(pdvPedidoHandoff.consolidacao_id)
+                : null
+        }));
+    } catch (_e) { /* ignore */ }
 }
 
 async function finalizarPedidoPdv(vendaId) {
@@ -453,6 +474,7 @@ async function finalizarPedidoPdv(vendaId) {
             );
         }
         pdvPedidoHandoffFinalizado = true;
+        avisarErpListaPedidosAtualizar();
         return;
     }
     const pedidoId = Number(pdvPedidoHandoff.pedido_id);
@@ -473,10 +495,33 @@ async function finalizarPedidoPdv(vendaId) {
         );
     }
     pdvPedidoHandoffFinalizado = true;
+    avisarErpListaPedidosAtualizar();
+}
+
+function limparHandoffPedidoPdvStorage() {
+    try { sessionStorage.removeItem('pdvPedidoHandoff'); } catch (_e) { /* ignore */ }
+    try { localStorage.removeItem('pdvPedidoHandoff'); } catch (_e2) { /* ignore */ }
+}
+
+function lerHandoffPedidoPdvRaw() {
+    try {
+        const daSessao = sessionStorage.getItem('pdvPedidoHandoff');
+        if (daSessao) return daSessao;
+    } catch (_e) { /* ignore */ }
+    // Janela PDV independente: o ERP grava no localStorage (compartilhado na origem).
+    try {
+        const compartilhado = localStorage.getItem('pdvPedidoHandoff');
+        if (!compartilhado) return null;
+        sessionStorage.setItem('pdvPedidoHandoff', compartilhado);
+        localStorage.removeItem('pdvPedidoHandoff');
+        return compartilhado;
+    } catch (_e2) {
+        return null;
+    }
 }
 
 function aplicarHandoffPedidoPdv() {
-    const raw = sessionStorage.getItem('pdvPedidoHandoff');
+    const raw = lerHandoffPedidoPdvRaw();
     if (!raw) return;
     let handoff;
     try {
@@ -518,7 +563,7 @@ function aplicarHandoffPedidoPdv() {
     }
     if (handoff.venda_concluida) {
         showNotification(`O Pedido já possui a venda ${handoff.venda_id || ''} concluída.`, 'info');
-        sessionStorage.removeItem('pdvPedidoHandoff');
+        limparHandoffPedidoPdvStorage();
         return;
     }
     if (handoff.venda_id) {
@@ -537,6 +582,26 @@ function aplicarHandoffPedidoPdv() {
         return;
     }
 
+    // Catálogo ainda não chegou (ex.: chamada precoce após abrir janela). O loadPDV reaplica.
+    if (!Array.isArray(produtosDisponiveis) || produtosDisponiveis.length === 0) {
+        return;
+    }
+
+    const ausentes = [];
+    for (const item of handoff.itens) {
+        const produto = produtosDisponiveis.find(
+            (candidato) => Number(candidato.id) === Number(item.produto_id)
+        );
+        if (!produto) ausentes.push(Number(item.produto_id));
+    }
+    if (ausentes.length) {
+        showNotification(
+            `Produto${ausentes.length > 1 ? 's' : ''} ${ausentes.join(', ')} não está disponível no catálogo do PDV.`,
+            'danger'
+        );
+        return;
+    }
+
     pdvPedidoHandoff = handoff;
     pdvCarregandoHandoff = true;
     try {
@@ -544,9 +609,6 @@ function aplicarHandoffPedidoPdv() {
             const produto = produtosDisponiveis.find(
                 (candidato) => Number(candidato.id) === Number(item.produto_id)
             );
-            if (!produto) {
-                throw new Error(`Produto ${item.produto_id} não está disponível no catálogo do PDV.`);
-            }
             adicionarItemNoCarrinho(
                 produto,
                 Number(item.quantidade),
@@ -1144,7 +1206,7 @@ function resolverFormaPagamentoNaoFiscalConhecida(opcoes = {}) {
  * Se a forma já foi escolhida, apenas confirma (não pergunta de novo).
  */
 function abrirModalPagamentoNaoFiscal(valor, onConfirm, onCancel, formaPredefinida) {
-    const valorNum = Number(valor || 0);
+    const valorNum = Number(valor);
     const formaConhecida = formaPredefinida
         ? String(formaPredefinida).toLowerCase().trim()
         : resolverFormaPagamentoNaoFiscalConhecida({
@@ -1153,12 +1215,16 @@ function abrirModalPagamentoNaoFiscal(valor, onConfirm, onCancel, formaPredefini
         });
     const modoConfirmacao = Boolean(formaConhecida);
 
-    if (valorNum <= 0) {
-        if (typeof onConfirm === 'function') {
-            onConfirm({
-                forma_pagamento: formaConhecida || 'dinheiro',
-                valor: 0
-            });
+    // CDS-PDV-CORRECAO-STATUS-FISCAL-HANDOFF-01 — nunca confirmar valor zero/ inválido.
+    if (!Number.isFinite(valorNum) || valorNum <= 0) {
+        showNotification(
+            Number.isFinite(valorNum) && valorNum < 0
+                ? 'Saldo não fiscal inconsistente. A cobrança foi interrompida.'
+                : 'Não há valor não fiscal pendente para cobrança.',
+            Number.isFinite(valorNum) && valorNum < 0 ? 'danger' : 'info'
+        );
+        if (typeof onCancel === 'function') {
+            onCancel();
         }
         return;
     }
@@ -1713,17 +1779,53 @@ function marcarParcelaConfirmacaoManual(pagamento) {
     };
 }
 
+function headersPagamentoNaoFiscalVenda(extra = {}) {
+    const headers = {
+        Authorization: `Bearer ${localStorage.getItem('token') || ''}`
+    };
+    if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.headersJson === 'function') {
+        const contexto = CdsEmpresaContexto.headersJson();
+        if (contexto && typeof contexto === 'object') {
+            Object.keys(contexto).forEach((chave) => {
+                if (contexto[chave] != null && contexto[chave] !== '') {
+                    headers[chave] = contexto[chave];
+                }
+            });
+        }
+    }
+    if (extra && typeof extra === 'object') {
+        Object.keys(extra).forEach((chave) => {
+            if (extra[chave] != null && extra[chave] !== '') {
+                headers[chave] = extra[chave];
+            }
+        });
+    }
+    return headers;
+}
+
 async function concluirPagamentoNaoFiscalVenda(vendaId, pagamento, emitirFiscal = false) {
     if (!obterTerminalIdPdv()) {
         throw new Error('Terminal não registrado. Aguarde o registro do PDV ou reinicie a aplicação.');
     }
 
+    const valorInformado = Number(pagamento && pagamento.valor);
+    if (!Number.isFinite(valorInformado) || valorInformado <= 0) {
+        throw new Error('Valor do pagamento não fiscal deve ser maior que zero.');
+    }
+    if (
+        pagamento
+        && pagamento.saldo_pendente != null
+        && Number.isFinite(Number(pagamento.saldo_pendente))
+        && valorInformado - Number(pagamento.saldo_pendente) > 0.009
+    ) {
+        throw new Error('Valor do pagamento não fiscal excede o saldo pendente.');
+    }
+
     const response = await fetch(`${API_URL}/vendas/${vendaId}/pagamento-nao-fiscal`, {
         method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${localStorage.getItem('token')}`
-        },
+        headers: headersPagamentoNaoFiscalVenda({
+            'Content-Type': 'application/json'
+        }),
         body: JSON.stringify(getTerminalRequestData({
             pagamentos: [pagamento],
             emitir_fiscal: emitirFiscal
@@ -1743,9 +1845,7 @@ async function obterSaldoPagamentoNaoFiscalVenda(vendaId) {
     const response = await fetch(
         `${API_URL}/vendas/${vendaId}/pagamento-nao-fiscal${buildTerminalQueryString()}`,
         {
-        headers: {
-            'Authorization': `Bearer ${localStorage.getItem('token')}`
-        }
+        headers: headersPagamentoNaoFiscalVenda()
     }
     );
 
@@ -1803,6 +1903,33 @@ function processarFiscalPosPagamentoPosVenda(vendaId, resultado) {
     setTimeout(() => emitirNFCeVenda(vendaId), 300);
 }
 
+/**
+ * CDS-PDV-CORRECAO-STATUS-FISCAL-HANDOFF-01
+ * Interpreta o GET de saldo NF sem converter silêncio/ausência em zero cobrável.
+ */
+function interpretarSaldoPagamentoNaoFiscal(info) {
+    if (!info || typeof info !== 'object') {
+        return { ok: false, codigo: 'SALDO_AUSENTE', valor: null };
+    }
+    const bruto = info.saldo_pendente !== undefined
+        ? info.saldo_pendente
+        : info.valor_nao_fiscal;
+    if (bruto === undefined || bruto === null || bruto === '') {
+        return { ok: false, codigo: 'SALDO_AUSENTE', valor: null };
+    }
+    const valor = Number(bruto);
+    if (!Number.isFinite(valor)) {
+        return { ok: false, codigo: 'SALDO_INVALIDO', valor: null };
+    }
+    if (valor < 0) {
+        return { ok: false, codigo: 'SALDO_NEGATIVO', valor };
+    }
+    if (valor <= 0.009) {
+        return { ok: true, codigo: 'SEM_PENDENCIA', valor: 0 };
+    }
+    return { ok: true, codigo: 'PENDENTE', valor };
+}
+
 function iniciarFluxoPosVendaComNaoFiscal(vendaId, opcoes = {}) {
     const processarFiscalPosPagamento =
         opcoes.processarFiscalPosPagamento || processarFiscalPosPagamentoPosVenda;
@@ -1811,21 +1938,38 @@ function iniciarFluxoPosVendaComNaoFiscal(vendaId, opcoes = {}) {
 
     obterSaldoPagamentoNaoFiscalVenda(vendaId)
         .then(function(info) {
-            const valorPendente = Number(
-                info.saldo_pendente ??
-                info.valor_nao_fiscal ??
-                0
-            );
+            const saldo = interpretarSaldoPagamentoNaoFiscal(info);
             const emitirFiscal = opcoes.emitirFiscal === true
                 || (opcoes.emitirFiscal !== false && pdvEmitirFiscalNaVenda === true);
 
+            if (!saldo.ok) {
+                vendaEmProcessamento = false;
+                showNotification(
+                    saldo.codigo === 'SALDO_NEGATIVO'
+                        ? 'Saldo não fiscal inconsistente. A cobrança foi interrompida.'
+                        : 'Não foi possível obter o saldo não fiscal da venda.',
+                    'danger'
+                );
+                return;
+            }
+
+            if (saldo.codigo === 'SEM_PENDENCIA') {
+                vendaEmProcessamento = false;
+                finalizarPosVenda();
+                showNotification('Não há valor não fiscal pendente. Venda já quitada.', 'info');
+                return;
+            }
+
             abrirModalPagamentoNaoFiscal(
-                valorPendente,
+                saldo.valor,
                 async function(pagamento) {
                     try {
                         const resultado = await concluirPagamentoNaoFiscalVenda(
                             vendaId,
-                            pagamento,
+                            {
+                                ...pagamento,
+                                saldo_pendente: saldo.valor
+                            },
                             emitirFiscal
                         );
 
@@ -6329,7 +6473,7 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
 
 function finalizarPosVenda() {
     if (pdvPedidoHandoffFinalizado) {
-        sessionStorage.removeItem('pdvPedidoHandoff');
+        limparHandoffPedidoPdvStorage();
         pdvPedidoHandoff = null;
         pdvPedidoHandoffFinalizado = false;
     }
@@ -6392,7 +6536,7 @@ async function cancelarVendaAtual() {
 
     if (!window.confirm('Tem certeza que deseja cancelar esta venda?')) return;
     if (pdvPedidoHandoff) {
-        sessionStorage.removeItem('pdvPedidoHandoff');
+        limparHandoffPedidoPdvStorage();
         pdvPedidoHandoff = null;
         $('#descontoPdv, #acrescimoPdv').prop('disabled', false);
     }
@@ -6676,7 +6820,18 @@ async function mostrarModalProcessandoNFCe(vendaId) {
 // Impressão fiscal/não fiscal: ver frontend/shared/js/fiscalImpressao.js
 
 function limparModaisTravados() {
-    document.querySelectorAll('.modal-backdrop').forEach(backdrop => backdrop.remove());
+    // Alinha com core.js: nunca limpar enquanto modal Bootstrap ainda está em uso
+    // (senão remove backdrop/aria e o caret some em qualquer tela).
+    if (typeof haModalBootstrapEmUso === 'function' && haModalBootstrapEmUso()) return;
+    if (
+        document.querySelector('.modal.show')
+        || document.querySelector('.modal.showing')
+        || document.querySelector('.modal[aria-modal="true"]')
+    ) {
+        return;
+    }
+
+    document.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.remove());
     document.body.classList.remove('modal-open');
     document.body.style.removeProperty('overflow');
     document.body.style.removeProperty('padding-right');

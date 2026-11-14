@@ -1,5 +1,12 @@
 'use strict';
 
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-composicao-fiscal-preco-'));
+process.env.DB_DIR = dbDir;
+delete process.env.CDS_ALLOW_OFFICIAL_DB;
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const sqlite3 = require('sqlite3').verbose();
@@ -61,7 +68,7 @@ async function prepararDb() {
   await run(db, `CREATE TABLE pedidos (
     id INTEGER PRIMARY KEY, codigo TEXT, cliente_id INTEGER, empresa_id INTEGER,
     status TEXT, total REAL, desconto REAL DEFAULT 0, frete REAL DEFAULT 0,
-    created_at TEXT, updated_at TEXT
+    observacao TEXT, created_at TEXT, updated_at TEXT
   )`);
   await run(db, `CREATE TABLE pedidos_itens (
     id INTEGER PRIMARY KEY, pedido_id INTEGER, produto_id INTEGER,
@@ -145,7 +152,7 @@ function xmlDaComposicao(composicao) {
   });
 }
 
-test('preserva o preço comercial do pastel e escolhe 300 ml quando 200 ml não cobre o residual', async () => {
+test('pedido comercial com pastel usa residual e preserva total com preço de cadastro', async () => {
   const db = await prepararDb();
   try {
     const composicao = await prepararComposicaoPedidoPdv(
@@ -153,23 +160,21 @@ test('preserva o preço comercial do pastel e escolhe 300 ml quando 200 ml não 
       { db }
     );
     const pastel = itemPorProduto(composicao, 747);
-    const copo200 = itemPorProduto(composicao, 748);
-    const copo300 = itemPorProduto(composicao, 749);
 
-    assert.equal(pastel.preco_unitario, 21.99);
-    assert.equal(pastel.subtotal, 21.99);
+    assert.equal(composicao.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
+    assert.equal(pastel.preco_unitario, 13.67);
+    assert.equal(pastel.subtotal, 13.67);
     assert.equal(pastel.quantidade, 1);
-    assert.equal(copo200, undefined);
-    assert.equal(copo300.quantidade, 1);
-    assert.equal(copo300.preco_unitario, 15.12);
-    assert.equal(copo300.subtotal, 15.12);
+    assert.equal(composicao.valorPastelCentavos, 1367);
     assert.equal(composicao.valorResidualCentavos, 832);
-    assert.equal(composicao.descontoCentavos, 1512);
+    assert.ok(composicao.itens.some((item) => item.produto_id !== 747));
     assert.equal(composicao.valorFinalCentavos, 2199);
-    assert.equal(composicao.valorCompostoBrutoCentavos, 3711);
+    assert.equal(composicao.valorOriginalCentavos, 2199);
     assert.equal(composicao.efeitosOperacionais, false);
-    assert.notEqual(pastel.preco_unitario, 6.87);
-    assert.notEqual(pastel.subtotal, 6.87);
+    assert.equal(
+      composicao.valorCompostoBrutoCentavos - composicao.descontoCentavos,
+      2199
+    );
 
     const estoque = await all(
       db,
@@ -182,39 +187,36 @@ test('preserva o preço comercial do pastel e escolhe 300 ml quando 200 ml não 
 
     const xml = xmlDaComposicao(composicao);
     assert.equal(xml.valores.vNF, 21.99);
-    assert.equal(xml.valores.vDesc, 15.12);
-    assert.equal(xml.valores.vProd, 37.11);
-    assert.match(xml.xmlSemAssinatura, /<vUnCom>21\.9900000000<\/vUnCom>/);
-    assert.match(xml.xmlSemAssinatura, /<vProd>15\.12<\/vProd>/);
-    assert.match(xml.xmlSemAssinatura, /<vDesc>15\.12<\/vDesc>/);
-    assert.doesNotMatch(xml.xmlSemAssinatura, /6\.87/);
+    assert.match(xml.xmlSemAssinatura, /<vUnCom>13\.6700000000<\/vUnCom>/);
   } finally {
     await fecharDb(db);
   }
 });
 
-test('escolhe o copo de 200 ml quando ele fecha o residual e o de 300 ml fica de fora', async () => {
+test('venda por valor escolhe o copo de 200 ml quando ele fecha o residual', async () => {
   const db = await prepararDb();
   try {
+    await run(db, `UPDATE pedidos SET observacao = 'VENDA_POR_VALOR_PASTEIS' WHERE id = 65`);
     await run(db, 'UPDATE produtos SET preco_venda = 8.32 WHERE id = 748');
     const composicao = await prepararComposicaoPedidoPdv(
       { pedidoId: 65, empresaId: 1 },
       { db }
     );
-    assert.equal(itemPorProduto(composicao, 747).preco_unitario, 21.99);
+    assert.equal(composicao.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
+    assert.equal(itemPorProduto(composicao, 747).preco_unitario, 13.67);
     assert.equal(itemPorProduto(composicao, 748).quantidade, 1);
     assert.equal(itemPorProduto(composicao, 748).preco_unitario, 8.32);
     assert.equal(itemPorProduto(composicao, 749), undefined);
-    assert.equal(composicao.descontoCentavos, 832);
     assert.equal(composicao.valorFinalCentavos, 2199);
   } finally {
     await fecharDb(db);
   }
 });
 
-test('componente mais barato que o residual entra na menor composição acima, sem reduzir o pastel', async () => {
+test('venda por valor usa menor composição acima do residual sem reduzir o pastel de cadastro', async () => {
   const db = await prepararDb();
   try {
+    await run(db, `UPDATE pedidos SET observacao = 'VENDA_POR_VALOR_PASTEIS' WHERE id = 65`);
     await run(db, 'UPDATE produtos SET ativo = 0 WHERE id = 749');
     await run(db, 'UPDATE produtos SET preco_venda = 5.00 WHERE id = 748');
     const composicao = await prepararComposicaoPedidoPdv(
@@ -222,7 +224,7 @@ test('componente mais barato que o residual entra na menor composição acima, s
       { db }
     );
     const copo = itemPorProduto(composicao, 748);
-    assert.equal(itemPorProduto(composicao, 747).preco_unitario, 21.99);
+    assert.equal(itemPorProduto(composicao, 747).preco_unitario, 13.67);
     assert.equal(copo.quantidade, 2);
     assert.equal(copo.preco_unitario, 5);
     assert.equal(composicao.valorFinalCentavos, 2199);
@@ -232,25 +234,25 @@ test('componente mais barato que o residual entra na menor composição acima, s
   }
 });
 
-test('componente mais caro que o produto principal permanece no preço de cadastro', async () => {
+test('venda por valor mantém componente mais caro no preço de cadastro', async () => {
   const db = await prepararDb();
   try {
+    await run(db, `UPDATE pedidos SET observacao = 'VENDA_POR_VALOR_PASTEIS' WHERE id = 65`);
     await run(db, 'UPDATE produtos SET preco_venda = 25.00 WHERE id = 749');
     await run(db, 'UPDATE produtos SET ativo = 0 WHERE id = 748');
     const composicao = await prepararComposicaoPedidoPdv(
       { pedidoId: 65, empresaId: 1 },
       { db }
     );
-    assert.equal(itemPorProduto(composicao, 747).preco_unitario, 21.99);
+    assert.equal(itemPorProduto(composicao, 747).preco_unitario, 13.67);
     assert.equal(itemPorProduto(composicao, 749).preco_unitario, 25);
     assert.equal(composicao.valorFinalCentavos, 2199);
-    assert.equal(composicao.descontoCentavos, 2500);
   } finally {
     await fecharDb(db);
   }
 });
 
-test('fecha sem desconto quando o preço comercial do pastel é o de cadastro e o copo fecha o residual', async () => {
+test('pedido comercial fecha residual exato com refrigerante elegível do catálogo', async () => {
   const db = await prepararDb();
   try {
     await run(db, 'UPDATE produtos SET preco_venda = 13.67 WHERE id = 747');
@@ -264,8 +266,10 @@ test('fecha sem desconto quando o preço comercial do pastel é o de cadastro e 
       { pedidoId: 65, empresaId: 1 },
       { db }
     );
+    assert.equal(composicao.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
     assert.equal(itemPorProduto(composicao, 747).preco_unitario, 13.67);
     assert.equal(itemPorProduto(composicao, 748).preco_unitario, 8.32);
+    assert.equal(composicao.valorResidualCentavos, 832);
     assert.equal(composicao.descontoCentavos, 0);
     assert.equal(composicao.valorFinalCentavos, 2199);
   } finally {
@@ -273,7 +277,7 @@ test('fecha sem desconto quando o preço comercial do pastel é o de cadastro e 
   }
 });
 
-test('duas unidades preservam o subtotal comercial e não alteram o financeiro', async () => {
+test('duas unidades preservam quantidade, recotam cadastro e preservam o total', async () => {
   const db = await prepararDb();
   try {
     await run(db, 'UPDATE pedidos_itens SET quantidade = 2, preco_unitario = 21.99, subtotal = 43.98 WHERE id = 1');
@@ -283,9 +287,11 @@ test('duas unidades preservam o subtotal comercial e não alteram o financeiro',
       { db }
     );
     const pastel = itemPorProduto(composicao, 747);
+    assert.equal(composicao.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
     assert.equal(pastel.quantidade, 2);
-    assert.equal(pastel.preco_unitario, 21.99);
-    assert.equal(pastel.subtotal, 43.98);
+    assert.equal(pastel.preco_unitario, 13.67);
+    assert.equal(pastel.subtotal, 27.34);
+    assert.equal(composicao.valorPastelCentavos, 2734);
     assert.equal(composicao.valorResidualCentavos, 1664);
     assert.equal(composicao.valorFinalCentavos, 4398);
     assert.equal(composicao.efeitosOperacionais, false);

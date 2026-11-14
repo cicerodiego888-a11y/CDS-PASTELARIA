@@ -44,42 +44,47 @@ function itemEntraNaNfce(item) {
 
 function selecionarItensFiscaisParaNfce(venda, itens) {
   const {
-    calcularReferenciasConfirmadas
+    calcularReferenciasConfirmadas,
+    validarReferenciaFiscalFinalComComplemento
   } = require('../vendas/PagamentoSequencialComposicaoService');
   const lista = Array.isArray(itens) ? itens : [];
-  const referencias = calcularReferenciasConfirmadas(venda && venda.pagamentos);
-  const fiscal = Number(referencias.valor_fiscal_referencia || 0);
-  const naoFiscal = Number(referencias.valor_nao_fiscal_referencia || 0);
-  const somaFiscal = Math.round(lista.reduce((total, item) => (
-    total + Number(item && item.valor_fiscal || 0)
-  ), 0) * 100) / 100;
-  const separacao = fiscal > 0.009 && naoFiscal > 0.009;
-  if (separacao && Math.abs(somaFiscal - fiscal) > 0.02) {
+  const referenciasPagamento = calcularReferenciasConfirmadas(venda && venda.pagamentos);
+  // CDS-PDV-NFCE-HANDOFF-COMPLEMENTO-FISCAL-01: referência final = eletrônico + complemento persistido.
+  const validacao = validarReferenciaFiscalFinalComComplemento({
+    pagamentos: venda && venda.pagamentos,
+    itens: lista,
+    venda,
+    referenciaPersistida: venda && (
+      venda.__referencia_composicao_persistida
+      || venda.referencia_composicao_persistida
+      || null
+    )
+  });
+  if (validacao.ok !== true) {
     return {
       bloqueado: true,
-      codigo: 'DISTRIBUICAO_NAO_AUTORIZADA',
-      motivo: 'A referência fiscal não corresponde aos itens persistidos. A NFC-e não foi montada com o carrinho comercial.',
+      codigo: validacao.codigo || 'DISTRIBUICAO_NAO_AUTORIZADA',
+      motivo: validacao.motivo
+        || 'A referência fiscal não corresponde aos itens persistidos. A NFC-e não foi montada com o carrinho comercial.',
       itens: [],
-      referencia: referencias,
-      somaFiscal
+      referencia: validacao.referencia_final || referenciasPagamento,
+      referencia_pagamentos: referenciasPagamento,
+      complemento_dinheiro_utilizado: Number(validacao.complemento_dinheiro_utilizado || 0),
+      somaFiscal: Number(validacao.somaFiscal || 0),
+      somaNaoFiscal: Number(validacao.somaNao || 0)
     };
   }
-  if (separacao && somaFiscal <= 0.009) {
-    return {
-      bloqueado: true,
-      codigo: 'DISTRIBUICAO_NAO_AUTORIZADA',
-      motivo: 'Não há distribuição fiscal autorizada para a referência da venda.',
-      itens: [],
-      referencia: referencias,
-      somaFiscal
-    };
-  }
+  const referencia = validacao.referencia_final || referenciasPagamento;
   return {
     bloqueado: false,
     codigo: null,
     itens: lista,
-    referencia: referencias,
-    somaFiscal
+    referencia,
+    referencia_pagamentos: referenciasPagamento,
+    complemento_dinheiro_utilizado: Number(validacao.complemento_dinheiro_utilizado || 0),
+    desconto_ajuste: Number(validacao.desconto_ajuste || 0),
+    somaFiscal: Number(validacao.somaFiscal || 0),
+    somaNaoFiscal: Number(validacao.somaNao || 0)
   };
 }
 
@@ -167,6 +172,7 @@ function carregarVenda(vendaId, conn = db) {
             forma_pagamento,
             valor,
             tipo_recebimento,
+            status,
             tef_transacao_id,
             nsu,
             autorizacao
@@ -293,6 +299,41 @@ async function emitirPorVendaId(vendaId, opcoes = {}) {
     };
   }
 
+  // CONFIRMACAO-AUTORITATIVA-01: revalida recebimentos eletrônicos contra tef_transacoes.
+  if (Array.isArray(venda.pagamentos) && venda.pagamentos.length > 0) {
+    const { comprovarPagamentosParaReferenciaFiscal } = require('../OrquestradorPagamento');
+    const comprovacao = await comprovarPagamentosParaReferenciaFiscal(venda.pagamentos, {
+      empresaId,
+      operadorId: opcoes.operadorId || null,
+      vendaIdPermitida: Number(vendaId) || Number(venda.id) || null,
+      db: conn
+    });
+    venda.pagamentos = comprovacao.pagamentos;
+  }
+
+  // HANDOFF-COMPLEMENTO: carrega referência fiscal final persistida na mesma venda.
+  const {
+    carregarReferenciaRecomposicao
+  } = require('../vendas/PagamentoSequencialComposicaoService');
+  const referenciaPersistida = await carregarReferenciaRecomposicao(conn, vendaId);
+  if (referenciaPersistida) {
+    if (Number(referenciaPersistida.venda_id) !== Number(venda.id)) {
+      return {
+        success: false,
+        status: 'recomposicao_bloqueada',
+        code: 'COMPLEMENTO_SEM_VINCULO',
+        message: 'Referência de recomposição não pertence à venda carregada.'
+      };
+    }
+    venda.__referencia_composicao_persistida = referenciaPersistida;
+  }
+
+  // Recebimentos reais preservados; XML usa classificação fiscal do complemento quando válido.
+  const pagamentosRecebidos = Array.isArray(venda.pagamentos)
+    ? venda.pagamentos.map((pagamento) => ({ ...pagamento }))
+    : [];
+  venda.__pagamentos_recebidos = pagamentosRecebidos;
+
   let selecaoFiscal = selecionarItensFiscaisParaNfce(venda, itens);
   let itensDocumento = selecaoFiscal.itens;
   if (selecaoFiscal.bloqueado) {
@@ -347,6 +388,54 @@ async function emitirPorVendaId(vendaId, opcoes = {}) {
       code: selecaoFiscal.codigo,
       message: selecaoFiscal.motivo
     };
+  }
+
+  const complementoValidado = Number(selecaoFiscal.complemento_dinheiro_utilizado || 0);
+  const refSelecao = selecaoFiscal.referencia || {};
+  const refPersistida = venda.__referencia_composicao_persistida || null;
+  const eletronicoInicial = Number(
+    refSelecao.valor_fiscal_referencia_inicial != null
+      ? refSelecao.valor_fiscal_referencia_inicial
+      : (refPersistida && refPersistida.valor_fiscal_referencia_inicial != null
+        ? refPersistida.valor_fiscal_referencia_inicial
+        : 0)
+  );
+  const gerencialFinal = Number(
+    refSelecao.valor_nao_fiscal_referencia != null
+      ? refSelecao.valor_nao_fiscal_referencia
+      : (refPersistida && refPersistida.valor_nao_fiscal_referencia != null
+        ? refPersistida.valor_nao_fiscal_referencia
+        : Number(venda.valor_nao_fiscal || 0))
+  );
+  const fiscalFinalRef = Number(
+    refSelecao.valor_fiscal_referencia != null
+      ? refSelecao.valor_fiscal_referencia
+      : (refPersistida && refPersistida.valor_fiscal_referencia != null
+        ? refPersistida.valor_fiscal_referencia
+        : Number(venda.valor_fiscal || 0))
+  );
+  // Misto / eletrônico: sempre monta <pag> fiscal (eletrônico + complemento).
+  // Não depende só de complemento > 0 — senão o xmlBuilder estica dinheiro = vNF.
+  const montarPagFiscal = eletronicoInicial > 0.009
+    || complementoValidado > 0.009
+    || (fiscalFinalRef > 0.009 && gerencialFinal > 0.009)
+    || (Number(venda.valor_fiscal || 0) > 0.009 && Number(venda.valor_nao_fiscal || 0) > 0.009);
+  if (montarPagFiscal) {
+    const {
+      pagamentosParaDocumentoFiscal
+    } = require('../vendas/PagamentoRecomposicaoDocumentoService');
+    const eletronicoDoc = eletronicoInicial > 0.009
+      ? eletronicoInicial
+      : Math.round(((fiscalFinalRef - complementoValidado) + Number.EPSILON) * 100) / 100;
+    // Não altera venda_pagamentos persistidos: só a visão do documento fiscal.
+    venda.pagamentos = pagamentosParaDocumentoFiscal(
+      pagamentosRecebidos,
+      complementoValidado,
+      { valor_fiscal_referencia_inicial: eletronicoDoc > 0.009 ? eletronicoDoc : 0 }
+    );
+    if (fiscalFinalRef > 0.009) {
+      venda.valor_fiscal = fiscalFinalRef;
+    }
   }
 
   const itensFiscal = itensDocumento.filter(itemEntraNaNfce);

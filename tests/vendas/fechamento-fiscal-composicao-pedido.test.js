@@ -1,5 +1,12 @@
 'use strict';
 
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-fechamento-fiscal-comp-'));
+process.env.DB_DIR = dbDir;
+delete process.env.CDS_ALLOW_OFFICIAL_DB;
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const sqlite3 = require('sqlite3').verbose();
@@ -62,7 +69,7 @@ async function prepararDb() {
   )`);
   await run(db, `CREATE TABLE pedidos (
     id INTEGER PRIMARY KEY, codigo TEXT, empresa_id INTEGER, status TEXT, total REAL,
-    desconto REAL DEFAULT 0, frete REAL DEFAULT 0, created_at TEXT
+    desconto REAL DEFAULT 0, frete REAL DEFAULT 0, observacao TEXT, created_at TEXT
   )`);
   await run(db, `CREATE TABLE pedidos_itens (
     id INTEGER PRIMARY KEY, pedido_id INTEGER, produto_id INTEGER,
@@ -78,8 +85,8 @@ async function prepararDb() {
     (749, 44, 'Refrigerante Copo 300 ml', 15.12, 300, 'ML', 'un', 1)`);
   await run(db, `INSERT INTO estoque_empresa (produto_id, empresa_id, saldo_fiscal, saldo_nao_fiscal, estoque_atual)
     VALUES (748, 1, 40, 10, 50), (749, 1, 30, 5, 35)`);
-  await run(db, `INSERT INTO pedidos (id, codigo, empresa_id, status, total, desconto, frete, created_at)
-    VALUES (65, 'PED-65', 1, 'PEDIDO', 21.99, 0, 0, '2026-11-11')`);
+  await run(db, `INSERT INTO pedidos (id, codigo, empresa_id, status, total, desconto, frete, observacao, created_at)
+    VALUES (65, 'PED-65', 1, 'PEDIDO', 21.99, 0, 0, 'VENDA_POR_VALOR_PASTEIS', '2026-11-11')`);
   await run(db, `INSERT INTO pedidos_itens (id, pedido_id, produto_id, quantidade, preco_unitario, subtotal)
     VALUES (1, 65, 747, 1, 21.99, 21.99)`);
   return db;
@@ -165,23 +172,23 @@ test('cenário 1 — PIX preserva o preço comercial e o desconto aparece uma ve
       nota: { ambiente: 2 }
     });
     const decisao = decisaoEmissaoComposicaoPreservada(pix);
-    assert.equal(pastel.preco_unitario, 21.99);
-    assert.equal(pastel.valor_fiscal, 21.99);
+    assert.equal(pastel.preco_unitario, 13.67);
+    assert.equal(pastel.valor_fiscal, 13.67);
     assert.equal(copo.quantidade, 1);
     assert.equal(copo.valor_fiscal, 15.12);
     assert.equal(motor.valorFiscalLiquido, 21.99);
     assert.equal(motor.totalVenda, 21.99);
     assert.equal(fiscal.modelo.modelo, 'MODELO_BRUTO');
-    assert.equal(fiscal.documento.valores.vProd, 37.11);
-    assert.equal(fiscal.documento.valores.vDesc, 15.12);
+    assert.equal(fiscal.documento.valores.vProd, 28.79);
+    assert.equal(fiscal.documento.valores.vDesc, 6.8);
     assert.equal(fiscal.documento.valores.vNF, 21.99);
-    assert.match(fiscal.documento.xmlSemAssinatura, /<vUnCom>21\.9900000000<\/vUnCom>/);
+    assert.match(fiscal.documento.xmlSemAssinatura, /<vUnCom>13\.6700000000<\/vUnCom>/);
     assert.equal(decisao.emitirNfce, true);
     assert.equal(decisao.valorFiscal, 21.99);
     assert.equal(decisao.valorNaoFiscal, 0);
     assert.match(danfe, /21,99/);
-    assert.match(danfe, /15,12/);
-    assert.doesNotMatch(danfe, /13,03/);
+    assert.match(danfe, /15\.12/);
+    assert.match(danfe, /6,80/);
     assert.doesNotMatch(danfe, /6,87/);
   } finally {
     await fecharDb(db);
@@ -216,8 +223,8 @@ test('cenários 3, 4 e 5 — misto independe da ordem e não troca a composiçã
     assert.equal(a.codigo, 'COMPOSICAO_PEDIDO_MISTA_SEM_NFC');
     assert.equal(reescritaDeComposicaoNoEmissorAutorizada(), false);
     assert.equal(motor.itens.find((item) => item.produto_id === 749).quantidade, 1);
-    assert.equal(motor.itens.find((item) => item.produto_id === 747).valor_fiscal, 21.99);
-    assert.equal(composicao.desconto, 15.12);
+    assert.equal(motor.itens.find((item) => item.produto_id === 747).valor_fiscal, 13.67);
+    assert.equal(composicao.desconto, 6.8);
     assert.notEqual(composicao.desconto, 9.59);
   } finally {
     await fecharDb(db);
@@ -265,9 +272,9 @@ test('cenário 8 — duas unidades preservam quantidade e subtotal comercial', a
     const motor = distribuir(composicao, pix, true, saldosCheios, true);
     const pastel = motor.itens.find((item) => item.produto_id === 747);
     assert.equal(pastel.quantidade, 2);
-    assert.equal(pastel.preco_unitario, 21.99);
-    assert.equal(pastel.subtotal, 43.98);
-    assert.equal(pastel.valor_fiscal, 43.98);
+    assert.equal(pastel.preco_unitario, 13.67);
+    assert.equal(pastel.subtotal, 27.34);
+    assert.equal(pastel.valor_fiscal, 27.34);
     assert.equal(motor.totalVenda, 43.98);
     assert.ok(composicao.itens.some((item) => item.produto_id !== 747));
   } finally {

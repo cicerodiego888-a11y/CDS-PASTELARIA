@@ -31,6 +31,7 @@
 
 const {
   RECOMPOSICAO_HABILITADA_EM_PRODUCAO,
+  recomposicaoFechamentoOperacionalAtiva,
   round2
 } = require('./RecomposicaoFiscalContratoService');
 
@@ -1391,12 +1392,26 @@ function resultadoBloqueado(codigo, motivo, extra = {}) {
  * Harness `__cdsRecomposicaoDistribuicaoOficial` existe só para teste interno.
  * Body, payload da venda e CDS_RECOMPOSICAO_APLICAR_DISTRIBUICAO não ativam.
  */
-function obterAutorizacaoDistribuicaoOficialInterna(env = process.env, harness = null) {
+function obterAutorizacaoDistribuicaoOficialInterna(env = process.env, harness = null, contexto = null) {
   const flagLegada = String(env[ENV_APLICAR_DISTRIBUICAO] || '') === '1';
   if (harness && typeof harness === 'object' && harness.ativa === true) {
     return Object.freeze({
       ativa: true,
       fonte: 'harness_teste',
+      permite_aplicar_distribuicao_oficial: true,
+      producao: false,
+      env_flag: ENV_DISTRIBUICAO_OFICIAL,
+      flag_legada_nao_considerada: true,
+      flag_legada_detectada: flagLegada
+    });
+  }
+  // ATIVACAO-01 + HARDENING-01: só com contexto PDV (caixa/origem/chave).
+  // Não altera RECOMPOSICAO_HABILITADA_EM_PRODUCAO (reescrita no emissor permanece off).
+  const ctx = contexto || (harness && harness.contexto) || null;
+  if (recomposicaoFechamentoOperacionalAtiva(env, ctx)) {
+    return Object.freeze({
+      ativa: true,
+      fonte: 'fechamento_operacional',
       permite_aplicar_distribuicao_oficial: true,
       producao: false,
       env_flag: ENV_DISTRIBUICAO_OFICIAL,
@@ -1533,7 +1548,47 @@ function saldoDoMapa(mapa, produtoId) {
   return null;
 }
 
-async function lerSaldoEmpresaProduto(db, empresaId, produtoId) {
+function consultarControlaEstoqueProduto(db, produtoId) {
+  return new Promise((resolve, reject) => {
+    if (!db || typeof db.get !== 'function') {
+      resolve(1);
+      return;
+    }
+    db.get(
+      `SELECT COALESCE(controla_estoque, 1) AS controla_estoque FROM produtos WHERE id = ?`,
+      [produtoId],
+      (err, row) => (err ? reject(err) : resolve(row && row.controla_estoque != null ? row.controla_estoque : 1))
+    );
+  });
+}
+
+/**
+ * Lê saldo F×NF da empresa. Produto com controla_estoque=0 (PDV fiscal/elegível)
+ * não valida estoque: saldo virtual = quantidade vendida em ambos os buckets.
+ */
+async function lerSaldoEmpresaProduto(db, empresaId, produtoId, quantidadeVendida) {
+  const {
+    produtoControlaEstoque,
+    saldosParaDistribuicaoVenda
+  } = require('../estoque/produtoControlaEstoque');
+  let controla = 1;
+  try {
+    controla = await consultarControlaEstoqueProduto(db, produtoId);
+  } catch (_flag) {
+    controla = 1;
+  }
+  const produtoFlag = { controla_estoque: controla };
+  if (!produtoControlaEstoque(produtoFlag)) {
+    const virtuais = saldosParaDistribuicaoVenda(produtoFlag, quantidadeVendida, 0, 0);
+    return {
+      ok: true,
+      saldoFiscal: virtuais.saldoFiscal,
+      saldoNaoFiscal: virtuais.saldoNaoFiscal,
+      origem: 'sem_controle_estoque',
+      controla_estoque: 0
+    };
+  }
+
   const EstoqueEmpresaService = require('../estoque/EstoqueEmpresaService');
   try {
     const saldo = await EstoqueEmpresaService.consultarSaldoParaEmpresa({
@@ -1546,14 +1601,16 @@ async function lerSaldoEmpresaProduto(db, empresaId, produtoId) {
         ok: true,
         saldoFiscal: 0,
         saldoNaoFiscal: 0,
-        origem: 'estoque_empresa'
+        origem: 'estoque_empresa',
+        controla_estoque: 1
       };
     }
     return {
       ok: true,
       saldoFiscal: Number(saldo.saldoFiscal || 0),
       saldoNaoFiscal: Number(saldo.saldoNaoFiscal || 0),
-      origem: 'estoque_empresa'
+      origem: 'estoque_empresa',
+      controla_estoque: 1
     };
   } catch (err) {
     const code = err && (err.code || err.codigo);
@@ -1623,7 +1680,7 @@ function parcelaOficialDoBucket(bruto, liquido) {
  * bruto fiscal e o não fiscal da composição, depois aplicarValorFiscalLiquidoNosItens.
  * Cada bucket recebe só a própria parcela.
  */
-function rateioOficialDaComposicao(planos, desconto, acrescimo) {
+function rateioOficialDaComposicao(planos, desconto, acrescimo, opcoes = {}) {
   const brutos = planos.map((plano) => ({
     produto_id: plano.produto_id,
     valor_fiscal: round2(plano.quantidade_fiscal * plano.preco_unitario),
@@ -1635,7 +1692,9 @@ function rateioOficialDaComposicao(planos, desconto, acrescimo) {
     valorFiscalBruto,
     valorNaoFiscalBruto,
     desconto,
-    acrescimo
+    acrescimo,
+    // Recomposição com referência eletrônico+complemento: desconto comercial no NF.
+    preferirNaoFiscal: opcoes.preferirNaoFiscal === true
   });
   const liquidos = aplicarValorFiscalLiquidoNosItens(brutos, rateio);
   const porProduto = new Map();
@@ -1684,7 +1743,11 @@ async function encaminharPropostaValidadaAoDistribuidorOficial(params = {}) {
   }
 
   const auth = params.autorizacao
-    || obterAutorizacaoDistribuicaoOficialInterna(env, params.harnessDistribuicaoOficial || null);
+    || obterAutorizacaoDistribuicaoOficialInterna(
+      env,
+      params.harnessDistribuicaoOficial || null,
+      params.contextoFechamentoPdv || params.contexto || null
+    );
   if (!auth || auth.ativa !== true) {
     return resultadoBloqueado(
       'AUTORIZACAO_AUSENTE',
@@ -1752,11 +1815,21 @@ async function encaminharPropostaValidadaAoDistribuidorOficial(params = {}) {
   const somaSubtotais = round2(
     [...vendidos.mapa.values()].reduce((s, acc) => s + Number(acc.subtotal || 0), 0)
   );
-  if (!Number.isFinite(totalComercial) || Math.abs(somaSubtotais - totalComercial) > 0.02) {
+  const descontoCabecalho = Math.max(0, round2(Number(params.desconto || 0)));
+  const acrescimoCabecalho = Math.max(0, round2(Number(params.acrescimo || 0)));
+  const liquidoComercialItens = round2(somaSubtotais - descontoCabecalho + acrescimoCabecalho);
+  // Aceita itens já no líquido (= total) ou bruto com desconto/acréscimo no cabeçalho.
+  if (
+    !Number.isFinite(totalComercial)
+    || (
+      Math.abs(somaSubtotais - totalComercial) > 0.02
+      && Math.abs(liquidoComercialItens - totalComercial) > 0.02
+    )
+  ) {
     return resultadoBloqueado(
       'TOTAL_COMERCIAL_DIVERGENTE',
       'Subtotais vendidos divergem do total comercial. Nada foi aplicado.',
-      { total_comercial: totalComercial }
+      { total_comercial: totalComercial, desconto: descontoCabecalho, acrescimo: acrescimoCabecalho }
     );
   }
 
@@ -1846,21 +1919,52 @@ async function encaminharPropostaValidadaAoDistribuidorOficial(params = {}) {
     return resultadoBloqueado(capacidade.codigo, capacidade.motivo, { total_comercial: totalComercial });
   }
 
+  const {
+    produtoControlaEstoque,
+    saldosParaDistribuicaoVenda
+  } = require('../estoque/produtoControlaEstoque');
   const saldos = new Map();
   for (const plano of planos) {
     const informado = saldoDoMapa(params.saldosPorProduto, plano.produto_id);
     let saldo;
     if (informado) {
+      const brutoF = Number(
+        informado.saldoFiscal != null ? informado.saldoFiscal : informado.saldo_fiscal || 0
+      );
+      const brutoNf = Number(
+        informado.saldoNaoFiscal != null ? informado.saldoNaoFiscal : informado.saldo_nao_fiscal || 0
+      );
+      let controla = informado.controla_estoque;
+      if (controla == null && params.db) {
+        try {
+          controla = await consultarControlaEstoqueProduto(params.db, plano.produto_id);
+        } catch (_c) {
+          controla = 1;
+        }
+      }
+      if (controla == null) controla = 1;
+      const normalizados = saldosParaDistribuicaoVenda(
+        { controla_estoque: controla },
+        plano.quantidade_vendida,
+        brutoF,
+        brutoNf
+      );
       saldo = {
         ok: true,
-        saldoFiscal: Number(informado.saldoFiscal != null ? informado.saldoFiscal : informado.saldo_fiscal || 0),
-        saldoNaoFiscal: Number(
-          informado.saldoNaoFiscal != null ? informado.saldoNaoFiscal : informado.saldo_nao_fiscal || 0
-        ),
-        origem: 'saldos_do_fechamento'
+        saldoFiscal: normalizados.saldoFiscal,
+        saldoNaoFiscal: normalizados.saldoNaoFiscal,
+        origem: produtoControlaEstoque({ controla_estoque: controla })
+          ? 'saldos_do_fechamento'
+          : 'sem_controle_estoque',
+        controla_estoque: Number(controla) === 0 ? 0 : 1
       };
     } else if (params.db) {
-      saldo = await lerSaldoEmpresaProduto(params.db, empresaId, plano.produto_id);
+      saldo = await lerSaldoEmpresaProduto(
+        params.db,
+        empresaId,
+        plano.produto_id,
+        plano.quantidade_vendida
+      );
     } else {
       saldo = {
         ok: false,
@@ -1890,7 +1994,12 @@ async function encaminharPropostaValidadaAoDistribuidorOficial(params = {}) {
 
   const descontoComercial = Math.max(0, round2(Number(params.desconto || 0)));
   const acrescimoComercial = Math.max(0, round2(Number(params.acrescimo || 0)));
-  const rateioComposicao = rateioOficialDaComposicao(planos, descontoComercial, acrescimoComercial);
+  const rateioComposicao = rateioOficialDaComposicao(
+    planos,
+    descontoComercial,
+    acrescimoComercial,
+    { preferirNaoFiscal: params.preferirNaoFiscal === true }
+  );
 
   const chamadas = [];
   const linhas = [];

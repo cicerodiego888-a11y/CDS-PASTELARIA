@@ -103,7 +103,10 @@ router.post('/', async (req, res) => {
       body: req.body || {},
       operadorId: req.user?.id || null,
       empresaId: empresaIdDoReqPedido(req),
-      chaveIdempotencia: req.get('Idempotency-Key')
+      chaveIdempotencia: req.get('Idempotency-Key'),
+      canalVendaCodigo: req.canalVendaCodigo,
+      usuario: req.user,
+      db
     });
     res.status(201).json(out);
   } catch (err) {

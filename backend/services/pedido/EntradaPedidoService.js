@@ -12,6 +12,7 @@
 
 const PedidoOperacional = require('./PedidoOperacionalService');
 const { empresaIdDoReqPedido } = require('./empresaIdDoReqPedido');
+const CanalVendaEmpresaService = require('../vendas/CanalVendaEmpresaService');
 
 const CanalOrigem = Object.freeze({
   EQUIPE: 'EQUIPE',
@@ -54,14 +55,46 @@ async function receber({
   body,
   empresaId,
   operadorId = null,
-  chaveIdempotencia
+  chaveIdempotencia,
+  canalVendaCodigo,
+  usuario,
+  db
 } = {}) {
-  const origemCanal = validarCanal(canal);
+  let origemCanal = validarCanal(canal);
   const empresa = empresaIdDoReqPedido({ empresaId });
   if (!empresa) {
     throw erro('Contexto de empresa obrigatório.', 400, 'EMPRESA_CONTEXT_REQUIRED');
   }
+
+  if (canalVendaCodigo !== undefined && canalVendaCodigo !== null) {
+    const banco = db || require('../../database');
+    const resolucao = await CanalVendaEmpresaService.resolverEmpresaDoCanal(
+      banco,
+      { codigo: canalVendaCodigo, usuario },
+      { db: banco }
+    );
+    if (
+      resolucao.aplicada
+      && Number(resolucao.empresa_id) !== Number(empresa)
+    ) {
+      throw erro(
+        'A empresa do canal de venda diverge da empresa selecionada para a operação.',
+        409,
+        'CANAL_EMPRESA_DIVERGENTE'
+      );
+    }
+    if (!resolucao.aplicada && resolucao.motivo !== 'PDV_MULTIPLAS') {
+      throw erro(
+        'O canal de venda não possui uma empresa responsável aplicável.',
+        409,
+        'CANAL_EMPRESA_NAO_RESOLVIDA'
+      );
+    }
+    origemCanal = resolucao.codigo;
+  }
+
   return PedidoOperacional.criar(body || {}, operadorId, {
+    ...(db ? { db } : {}),
     empresaId: empresa,
     origemCanal,
     chaveIdempotencia,

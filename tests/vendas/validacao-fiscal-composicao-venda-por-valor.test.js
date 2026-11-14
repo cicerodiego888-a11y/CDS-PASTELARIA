@@ -381,7 +381,7 @@ test('quantidades 1, 2 e 3 mantêm o pastel fiscal no cadastro', async () => {
   }
 });
 
-test('composição normal permanece com desconto de R$ 27,78', async () => {
+test('pedido comercial com pastel unifica residual e preserva total 61,98', async () => {
   const db = await prepararCatalogo();
   try {
     await run(db, `INSERT INTO pedidos (
@@ -390,12 +390,14 @@ test('composição normal permanece com desconto de R$ 27,78', async () => {
     await run(db, `INSERT INTO pedidos_itens (pedido_id, produto_id, quantidade, preco_unitario, subtotal)
       VALUES (96, 747, 2, 21.99, 43.98), (96, 748, 1, 18.00, 18.00)`);
     const normal = await prepararComposicaoPedidoPdv({ pedidoId: 96, empresaId: 1 }, { db });
-    const pix = [{ forma_pagamento: 'pix', valor: 61.98, status: 'aprovada', aprovado: true }];
+    const pix = [{ forma_pagamento: 'pix', valor: normal.valorFinalCentavos / 100, status: 'aprovada', aprovado: true }];
     const motor = distribuir(normal, pix, true);
-    assert.equal(normal.descontoCentavos, 2778);
-    assert.equal(normal.valorPastelCentavos, 4398);
-    assert.equal(motor.itens.find((item) => item.produto_id === 747).valor_fiscal, 43.98);
-    assert.equal(motor.valorFiscalLiquido, 61.98);
+    assert.equal(normal.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
+    assert.equal(normal.valorFinalCentavos, 6198);
+    assert.equal(normal.valorResidualCentavos, 4400);
+    assert.equal(normal.valorPastelCentavos, 1798);
+    assert.equal(motor.itens.find((item) => item.produto_id === 747).valor_fiscal, 17.98);
+    assert.equal(motor.valorFiscalLiquido, normal.valorFinalCentavos / 100);
   } finally {
     await fecharDb(db);
   }

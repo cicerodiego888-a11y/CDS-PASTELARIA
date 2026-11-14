@@ -21,14 +21,15 @@
     const tom = a.tom || 'neutral';
     return `
       <div class="cds-status-bar" data-tom="${escapeHtml(tom)}" role="contentinfo" aria-label="Status da plataforma CDS">
-        <div class="cds-status-bar__inner">
-          <span class="cds-status-bar__brand">${escapeHtml(status.marca || 'CDS Sistemas')}</span>
+        <div class="cds-status-bar__inner">        
           <span class="cds-status-bar__sep" aria-hidden="true">•</span>
           <span class="cds-status-bar__item">Plano: <strong>${escapeHtml(status.plano || '—')}</strong></span>
           <span class="cds-status-bar__sep" aria-hidden="true">•</span>
           <span class="cds-status-bar__assinatura" data-cor="${escapeHtml(a.cor || 'cinza')}">${escapeHtml(a.mensagem || 'Assinatura')}</span>
           <span class="cds-status-bar__sep" aria-hidden="true">•</span>
           <span class="cds-status-bar__item">Versão: <strong>${escapeHtml(status.versao || '—')}</strong></span>
+          <span class="cds-status-bar__sep" aria-hidden="true">•</span>
+          <span class="cds-status-bar__copyright">© Todos os direitos reservados a CDS Sistemas.</span>
         </div>
         <div class="cds-status-bar__slots" hidden aria-hidden="true" data-slots-futuros="${SLOTS_FUTUROS.join(',')}"></div>
       </div>`;
@@ -44,6 +45,7 @@
       .cds-status-bar__brand{font-weight:700;color:#f9fafb;letter-spacing:.02em}
       .cds-status-bar__sep{opacity:.45}
       .cds-status-bar__item strong{color:#f3f4f6;font-weight:600}
+      .cds-status-bar__copyright{color:#9ca3af;font-weight:500}
       .cds-status-bar__assinatura{font-weight:600}
       .cds-status-bar[data-tom="ok"] .cds-status-bar__assinatura{color:#34d399}
       .cds-status-bar[data-tom="warn"] .cds-status-bar__assinatura{color:#fbbf24}
@@ -54,7 +56,7 @@
       @media (max-width:720px){
         .cds-status-bar__inner{justify-content:flex-start;padding:8px 10px}
         .cds-status-bar__sep{display:none}
-        .cds-status-bar__item,.cds-status-bar__assinatura,.cds-status-bar__brand{width:100%}
+        .cds-status-bar__item,.cds-status-bar__assinatura,.cds-status-bar__brand,.cds-status-bar__copyright{width:100%}
       }
     `;
     document.head.appendChild(style);

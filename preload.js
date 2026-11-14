@@ -22,6 +22,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   forcarReflow: () => ipcRenderer.send('forcar-reflow'),
 
+  /** CDS-ERP-PDV-JANELA-INDEPENDENTE-01 — abre/foca janela PDV independente. */
+  abrirPdv: (opcoes) => ipcRenderer.invoke('cds:abrir-pdv', opcoes || {}),
+
+  /** Foca o ERP já aberto; não cria segunda janela ERP se já existir. */
+  abrirErp: (opcoes) => ipcRenderer.invoke('cds:abrir-erp', opcoes || {}),
+
   abrirComprovante: (html, options) =>
     ipcRenderer.send('abrir-comprovante', html, options || {}),
 

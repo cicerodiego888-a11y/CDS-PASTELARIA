@@ -28,7 +28,7 @@ if (!fs.existsSync(DB_DIR)) {
 
 let bancoPronto = false;
 const filaProntidao = [];
-let inicializacoesPendentes = 3;
+let inicializacoesPendentes = 4;
 
 function marcarBancoPronto(err) {
   if (err) {
@@ -1686,6 +1686,20 @@ function criarTabelas() {
       });
     } catch (requireErr) {
       console.error('Erro ao carregar schema empresas:', requireErr.message);
+    }
+
+    try {
+      const { garantirSchemaCanaisVenda } = require('./services/vendas/canaisVendaSchema');
+      garantirSchemaCanaisVenda(db, (schemaErr) => {
+        if (schemaErr) {
+          console.error('Erro ao garantir schema canais_venda:', schemaErr.message);
+          sinalizarInicializacaoParcial(schemaErr);
+          return;
+        }
+        sinalizarInicializacaoParcial(null);
+      });
+    } catch (requireErr) {
+      console.error('Erro ao carregar schema canais_venda:', requireErr.message);
     }
 
     try {

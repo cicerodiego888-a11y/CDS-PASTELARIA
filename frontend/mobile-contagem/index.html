@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0f2744">
+    <title>Contagem Física — CDS Sistemas</title>
+    <link rel="icon" type="image/x-icon" href="/branding/favicon.ico">
+    <link rel="stylesheet" href="/mobile-pedido/mobile-pedido.css">
+    <link rel="stylesheet" href="/mobile-contagem/mobile-contagem.css">
+</head>
+<body>
+    <div id="mc-app" class="mp mc">
+        <header class="mp-topo">
+            <img src="/branding/logo-oficial.png" alt="CDS Sistemas" class="mp-logo" width="40" height="40">
+            <div class="mp-topo-texto">
+                <strong>Contagem Física</strong>
+                <span id="mc-empresa">Empresa não selecionada</span>
+                <span id="mc-operador"></span>
+            </div>
+            <nav class="mp-modulos" aria-label="Módulos do CDS">
+                <a href="/mobile/">Início</a>
+                <a href="/mobile-contagem/" aria-current="page">Contagem</a>
+            </nav>
+        </header>
+        <p id="mc-contexto" class="mc-contexto"></p>
+        <div id="mc-alerta" class="mp-alerta" role="alert" hidden></div>
+        <main id="mc-conteudo">
+            <section id="mc-bloqueio" class="mp-card" hidden>
+                <h1>Acesso não autorizado</h1>
+                <p class="mp-ajuda">Contagem Física exige perfil autorizado a ajustar estoque (ADMIN ou SUPER_ADMIN). Nenhuma movimentação foi realizada.</p>
+                <a class="mp-btn mp-link-btn" href="/mobile/">Voltar ao início</a>
+            </section>
+            <section id="mc-operacao">
+                <h1>Contagem Física</h1>
+                <div class="mc-modos" role="group" aria-label="Modalidade da contagem">
+                    <button type="button" id="mc-modo-ajuste" class="is-ativa">Ajuste direcionado</button>
+                    <button type="button" id="mc-modo-absoluta">Contagem física</button>
+                </div>
+                <p id="mc-modo-ajuda" class="mp-ajuda">A quantidade informada é a movimentação. OFF retira do saldo e ON soma ao saldo.</p>
+                <section class="mp-card mc-form">
+                    <div class="mc-form-head">
+                        <h2>Incluir produto</h2>
+                        <button type="button" class="mc-switch is-off" id="mc-switch" aria-pressed="false">
+                            <span class="mc-knob" aria-hidden="true"></span>
+                            <span id="mc-switch-rotulo">BAIXA DE ESTOQUE</span>
+                        </button>
+                    </div>
+                    <label class="mp-label" for="mc-busca">Pesquisar produto</label>
+                    <input id="mc-busca" class="mp-campo" type="search" autocomplete="off" enterkeyhint="search" placeholder="Nome, código de barras ou código interno">
+                    <p id="mc-busca-status" class="mp-status" hidden></p>
+                    <div id="mc-busca-lista" class="mp-lista"></div>
+                    <div id="mc-produto" class="mc-produto" hidden></div>
+                    <div id="mc-qtd">
+                        <label class="mp-label" id="mc-label-qf" for="mc-qf">Quantidade fiscal para ajuste</label>
+                        <input id="mc-qf" class="mp-campo" type="number" min="0" step="0.000001" inputmode="decimal" placeholder="Ex.: 10">
+                        <div id="mc-wrap-qnf">
+                            <label class="mp-label" id="mc-label-qnf" for="mc-qnf">Quantidade não fiscal para ajuste</label>
+                            <input id="mc-qnf" class="mp-campo" type="number" min="0" step="0.000001" inputmode="decimal" placeholder="Ex.: 2">
+                        </div>
+                    </div>
+                    <div id="mc-preview" class="mc-preview"></div>
+                    <button type="button" class="mp-btn mp-btn-primario" id="mc-incluir">Incluir na lista</button>
+                </section>
+                <section>
+                    <h2>Produtos</h2>
+                    <div id="mc-resumo" class="mc-resumo"></div>
+                    <div id="mc-lista"></div>
+                    <label class="mp-label" for="mc-obs">Observação (opcional)</label>
+                    <textarea id="mc-obs" class="mp-campo" rows="2" maxlength="500"></textarea>
+                    <button type="button" class="mp-btn mp-btn-primario" id="mc-revisar">Revisar contagem</button>
+                </section>
+                <section id="mc-painel-confirmar" class="mp-card" hidden>
+                    <h2>Confirmar contagem</h2>
+                    <p class="mp-ajuda">A movimentação acontece somente neste passo.</p>
+                    <div id="mc-resumo-final"></div>
+                    <button type="button" class="mp-btn mp-btn-primario" id="mc-confirmar">CONFIRMAR CONTAGEM</button>
+                    <button type="button" class="mp-btn" id="mc-confirmar-voltar">Voltar</button>
+                </section>
+                <section id="mc-resultado" class="mp-card" hidden></section>
+                <section>
+                    <h2>Histórico recente</h2>
+                    <div id="mc-historico" class="mp-lista"></div>
+                </section>
+            </section>
+        </main>
+    </div>
+    <script src="/shared/js/cds-empresa-contexto.js"></script>
+    <script src="/shared/js/access-control.js"></script>
+    <script src="/erp/js/contagem-estoque.js"></script>
+    <script src="/mobile-contagem/mobile-contagem.js"></script>
+</body>
+</html>

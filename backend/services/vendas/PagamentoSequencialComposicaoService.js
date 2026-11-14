@@ -10,6 +10,7 @@
 
 const {
   RECOMPOSICAO_HABILITADA_EM_PRODUCAO,
+  recomposicaoFechamentoOperacionalAtiva,
   prepararContratoRecomposicaoFiscal,
   formaEhDinheiro
 } = require('./RecomposicaoFiscalContratoService');
@@ -30,6 +31,20 @@ const STATUS_NAO_CONFIRMADO = new Set([
   'negada'
 ]);
 
+const STATUS_CANCELADO = new Set([
+  'cancelado',
+  'cancelada',
+  'cancelados',
+  'canceladas',
+  'cancelled',
+  'canceled',
+  'estornado',
+  'estornada',
+  'estorno'
+]);
+
+const STATUS_ELETRONICO_APROVADO = new Set(['aprovada', 'aprovado']);
+
 const ENV_REFERENCIA_TESTE = 'CDS_RECOMPOSICAO_REFERENCIA_TESTE';
 
 function arredondar(valor) {
@@ -41,10 +56,19 @@ function ambienteTesteRecomposicaoReferencia(env = process.env) {
     && RECOMPOSICAO_HABILITADA_EM_PRODUCAO !== true;
 }
 
+/**
+ * Porta operacional (contexto PDV) ou ambiente de teste (Sprint 26).
+ * Não liga reescrita no emissor.
+ */
+function ambienteRecomposicaoReferenciaAtivo(env = process.env, contexto = null) {
+  if (recomposicaoFechamentoOperacionalAtiva(env, contexto)) return true;
+  return ambienteTesteRecomposicaoReferencia(env);
+}
+
 function parcelaManualDeDinheiro(pagamento) {
   if (!formaEhDinheiro(pagamento && pagamento.forma_pagamento)) return false;
   const status = String(pagamento.status_autorizacao || pagamento.status || '').toLowerCase();
-  if (STATUS_NAO_CONFIRMADO.has(status)) return false;
+  if (STATUS_NAO_CONFIRMADO.has(status) || STATUS_CANCELADO.has(status)) return false;
   return status === 'informada'
     || status === 'aprovada'
     || status === 'aprovado'
@@ -62,13 +86,37 @@ function classificarTipoRecebimento(pagamento) {
   return null;
 }
 
+/**
+ * CONFIRMACAO-AUTORITATIVA-01: só carimbo pós-consulta a tef_transacoes.
+ * Payload com tef_transacao_id / NSU / autorização NÃO prova sozinho.
+ */
+function evidenciaConfirmacaoEletronica(pagamento) {
+  return !!(pagamento && pagamento.confirmacao_eletronica_comprovada === true);
+}
+
 function parcelaEfetivamenteConfirmada(pagamento) {
   if (!pagamento || !(Number(pagamento.valor) > 0)) return false;
   const status = String(pagamento.status_autorizacao || pagamento.status || '').toLowerCase();
-  if (STATUS_NAO_CONFIRMADO.has(status)) return false;
+  if (STATUS_NAO_CONFIRMADO.has(status) || STATUS_CANCELADO.has(status)) return false;
   if (parcelaManualDeDinheiro(pagamento)) return true;
+  if (!formaPagamentoUsaTEF(pagamento.forma_pagamento)) return false;
+  if (!STATUS_ELETRONICO_APROVADO.has(status)) return false;
   if (pagamento.aprovado === false) return false;
-  return true;
+  return evidenciaConfirmacaoEletronica(pagamento);
+}
+
+/**
+ * Atalho de teste/fixtures: carimba parcela já comprovada pelo backend.
+ * Não usar a partir do frontend.
+ */
+function marcarParcelaEletronicaComprovada(pagamento, extras = {}) {
+  return {
+    ...pagamento,
+    ...extras,
+    status: extras.status || pagamento.status || 'aprovado',
+    status_autorizacao: extras.status_autorizacao || pagamento.status_autorizacao || 'aprovado',
+    confirmacao_eletronica_comprovada: true
+  };
 }
 
 function calcularReferenciasConfirmadas(pagamentos) {
@@ -119,7 +167,8 @@ function avaliarPagamentosSequenciais(entrada = {}) {
 function avaliarReferenciaRecomposicao(entrada = {}, opcoes = {}) {
   const base = avaliarPagamentosSequenciais(entrada);
   const env = opcoes.env || process.env;
-  if (!ambienteTesteRecomposicaoReferencia(env)) {
+  const contexto = opcoes.contexto || entrada.contexto || null;
+  if (!ambienteRecomposicaoReferenciaAtivo(env, contexto)) {
     return Object.freeze({
       ...base,
       recomposicao_executada: false,
@@ -168,6 +217,63 @@ function avaliarReferenciaRecomposicao(entrada = {}, opcoes = {}) {
   });
 }
 
+const SQL_TABELA_COMPOSICAO_REFERENCIA = `
+  CREATE TABLE IF NOT EXISTS venda_composicao_referencia (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    venda_id INTEGER NOT NULL UNIQUE,
+    total_financeiro REAL NOT NULL,
+    dinheiro_recebido REAL NOT NULL,
+    valor_fiscal_referencia REAL NOT NULL,
+    valor_nao_fiscal_referencia REAL NOT NULL,
+    motor_codigo TEXT,
+    distribuicao_possivel INTEGER NOT NULL DEFAULT 0,
+    aplica_ao_fluxo_oficial INTEGER NOT NULL DEFAULT 0,
+    distribuicao_oficial_alterada INTEGER NOT NULL DEFAULT 0,
+    criado_em DATETIME
+  )`;
+
+const COLUNAS_COMPLEMENTO_COMPOSICAO = Object.freeze([
+  ['complemento_dinheiro_utilizado', 'REAL NOT NULL DEFAULT 0'],
+  ['desconto_ajuste', 'REAL NOT NULL DEFAULT 0'],
+  ['valor_fiscal_referencia_inicial', 'REAL'],
+  ['valor_nao_fiscal_referencia_inicial', 'REAL'],
+  ['origem_recomposicao', 'TEXT']
+]);
+
+function runSql(dbConnection, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    dbConnection.run(sql, params, function onRun(err) {
+      if (err) reject(err);
+      else resolve(this);
+    });
+  });
+}
+
+function getSql(dbConnection, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    dbConnection.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
+  });
+}
+
+/**
+ * CDS-PDV-NFCE-HANDOFF-COMPLEMENTO-FISCAL-01
+ * Garante tabela + colunas do complemento fiscal persistido por venda.
+ */
+async function garantirSchemaVendaComposicaoReferencia(dbConnection) {
+  await runSql(dbConnection, SQL_TABELA_COMPOSICAO_REFERENCIA);
+  for (const [coluna, tipo] of COLUNAS_COMPLEMENTO_COMPOSICAO) {
+    try {
+      await runSql(
+        dbConnection,
+        `ALTER TABLE venda_composicao_referencia ADD COLUMN ${coluna} ${tipo}`
+      );
+    } catch (erro) {
+      const msg = String(erro && erro.message || erro || '');
+      if (!/duplicate column|already exists/i.test(msg)) throw erro;
+    }
+  }
+}
+
 function gravarReferenciaRecomposicao(dbConnection, vendaId, avaliacao) {
   if (!avaliacao || avaliacao.recomposicao_executada !== true) {
     return Promise.resolve(null);
@@ -175,47 +281,379 @@ function gravarReferenciaRecomposicao(dbConnection, vendaId, avaliacao) {
   if (RECOMPOSICAO_HABILITADA_EM_PRODUCAO === true) {
     return Promise.resolve(null);
   }
-  const sqlTabela = `
-    CREATE TABLE IF NOT EXISTS venda_composicao_referencia (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      venda_id INTEGER NOT NULL UNIQUE,
-      total_financeiro REAL NOT NULL,
-      dinheiro_recebido REAL NOT NULL,
-      valor_fiscal_referencia REAL NOT NULL,
-      valor_nao_fiscal_referencia REAL NOT NULL,
-      motor_codigo TEXT,
-      distribuicao_possivel INTEGER NOT NULL DEFAULT 0,
-      aplica_ao_fluxo_oficial INTEGER NOT NULL DEFAULT 0,
-      distribuicao_oficial_alterada INTEGER NOT NULL DEFAULT 0,
-      criado_em DATETIME
-    )`;
-  const inserir = `
-    INSERT INTO venda_composicao_referencia (
+  const motor = avaliacao.avaliacao_motor || {};
+  const fiscalFinal = Number(avaliacao.valor_fiscal_referencia || 0);
+  const naoFiscalFinal = Number(avaliacao.valor_nao_fiscal_referencia || 0);
+  const fiscalInicial = Number(
+    avaliacao.valor_fiscal_referencia_inicial != null
+      ? avaliacao.valor_fiscal_referencia_inicial
+      : fiscalFinal
+  );
+  const naoFiscalInicial = Number(
+    avaliacao.valor_nao_fiscal_referencia_inicial != null
+      ? avaliacao.valor_nao_fiscal_referencia_inicial
+      : naoFiscalFinal
+  );
+  const complemento = Number(avaliacao.complemento_dinheiro_utilizado || 0);
+  const descontoAjuste = Number(avaliacao.desconto_ajuste || 0);
+  const dinheiroRecebido = naoFiscalInicial > 0.009 ? naoFiscalInicial : naoFiscalFinal;
+  const origem = complemento > 0.009
+    ? 'recomposicao_complemento_20'
+    : (avaliacao.origem_recomposicao || 'recomposicao_referencia');
+
+  return garantirSchemaVendaComposicaoReferencia(dbConnection).then(() => runSql(
+    dbConnection,
+    `INSERT INTO venda_composicao_referencia (
       venda_id, total_financeiro, dinheiro_recebido,
       valor_fiscal_referencia, valor_nao_fiscal_referencia,
       motor_codigo, distribuicao_possivel, aplica_ao_fluxo_oficial,
-      distribuicao_oficial_alterada, criado_em
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, datetime('now'))`;
-  const motor = avaliacao.avaliacao_motor || {};
-  return new Promise((resolve, reject) => {
-    dbConnection.run(sqlTabela, (err) => {
-      if (err) {
-        reject(err);
-        return;
+      distribuicao_oficial_alterada, criado_em,
+      complemento_dinheiro_utilizado, desconto_ajuste,
+      valor_fiscal_referencia_inicial, valor_nao_fiscal_referencia_inicial,
+      origem_recomposicao
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, datetime('now'), ?, ?, ?, ?, ?)`,
+    [
+      vendaId,
+      Number(avaliacao.total_financeiro != null ? avaliacao.total_financeiro : (fiscalFinal + naoFiscalFinal)),
+      dinheiroRecebido,
+      fiscalFinal,
+      naoFiscalFinal,
+      motor.codigo || null,
+      motor.distribuicao_possivel === true ? 1 : 0,
+      complemento,
+      descontoAjuste,
+      fiscalInicial,
+      naoFiscalInicial,
+      origem
+    ]
+  ).then((result) => ({ lastID: result.lastID })));
+}
+
+function carregarReferenciaRecomposicao(dbConnection, vendaId) {
+  const id = Number(vendaId);
+  if (!Number.isInteger(id) || id <= 0 || !dbConnection) {
+    return Promise.resolve(null);
+  }
+  return garantirSchemaVendaComposicaoReferencia(dbConnection).then(() => getSql(
+    dbConnection,
+    `SELECT * FROM venda_composicao_referencia WHERE venda_id = ?`,
+    [id]
+  )).catch(() => null);
+}
+
+/**
+ * Valida complemento persistido contra pagamentos confirmados e totais da venda/itens.
+ * Não aceita complemento vindo só do payload do frontend.
+ */
+function validarReferenciaFiscalFinalComComplemento({
+  pagamentos,
+  itens,
+  venda,
+  referenciaPersistida
+} = {}) {
+  const refsPag = calcularReferenciasConfirmadas(pagamentos);
+  const eletronicoPagamentos = arredondar(refsPag.valor_fiscal_referencia || 0);
+  const dinheiroPagamentos = arredondar(refsPag.valor_nao_fiscal_referencia || 0);
+  const lista = Array.isArray(itens) ? itens : [];
+  const somaFiscal = arredondar(lista.reduce(
+    (total, item) => total + Number(item && item.valor_fiscal || 0),
+    0
+  ));
+  const somaNao = arredondar(lista.reduce(
+    (total, item) => total + Number(item && item.valor_nao_fiscal || 0),
+    0
+  ));
+  const totalVenda = arredondar(Number(venda && venda.total || 0));
+  const valorFiscalVenda = arredondar(Number(venda && venda.valor_fiscal || 0));
+  const valorNaoFiscalVenda = arredondar(Number(venda && venda.valor_nao_fiscal || 0));
+
+  const {
+    complementoMaximoPermitidoCentavos,
+    ehComplementoMoeda5Centavos,
+    pisoComplementoMoeda5Centavos
+  } = require('./RecomposicaoFiscalToleranciaDinheiroSimulacaoService');
+
+  const persistida = referenciaPersistida || null;
+  let complemento = 0;
+  let descontoAjuste = 0;
+  // Base do complemento: preferir snapshot persistido na composição.
+  // Releitura sem carimbo TEF zera o eletrônico e gerava falso
+  // COMPLEMENTO_INCOERENTE_COM_ELETRONICO após a venda já gravada.
+  let eletronico = eletronicoPagamentos;
+  let dinheiro = dinheiroPagamentos;
+  let fiscalFinal = eletronico;
+  let gerencialFinal = dinheiro;
+
+  if (persistida) {
+    complemento = arredondar(Number(persistida.complemento_dinheiro_utilizado || 0));
+    descontoAjuste = arredondar(Number(persistida.desconto_ajuste || 0));
+    if (persistida.valor_fiscal_referencia_inicial != null) {
+      const inicialF = arredondar(Number(persistida.valor_fiscal_referencia_inicial));
+      if (eletronicoPagamentos <= 0.009 && inicialF > 0.009) {
+        eletronico = inicialF;
+      } else if (
+        eletronicoPagamentos > 0.009
+        && Math.abs(eletronicoPagamentos - inicialF) <= 0.02
+      ) {
+        eletronico = eletronicoPagamentos;
+      } else if (inicialF > 0.009) {
+        eletronico = inicialF;
       }
-      dbConnection.run(inserir, [
-        vendaId,
-        avaliacao.total_financeiro,
-        avaliacao.valor_nao_fiscal_referencia,
-        avaliacao.valor_fiscal_referencia,
-        avaliacao.valor_nao_fiscal_referencia,
-        motor.codigo || null,
-        motor.distribuicao_possivel === true ? 1 : 0
-      ], function onInsert(erroInsert) {
-        if (erroInsert) reject(erroInsert);
-        else resolve({ lastID: this.lastID });
+    }
+    if (persistida.valor_nao_fiscal_referencia_inicial != null) {
+      const inicialNf = arredondar(Number(persistida.valor_nao_fiscal_referencia_inicial));
+      if (dinheiroPagamentos <= 0.009 && inicialNf > 0.009) {
+        dinheiro = inicialNf;
+      } else if (
+        dinheiroPagamentos > 0.009
+        && Math.abs(dinheiroPagamentos - inicialNf) <= 0.02
+      ) {
+        dinheiro = dinheiroPagamentos;
+      } else if (inicialNf > 0.009) {
+        dinheiro = inicialNf;
+      }
+    }
+    fiscalFinal = arredondar(Number(
+      persistida.valor_fiscal_referencia != null
+        ? persistida.valor_fiscal_referencia
+        : (eletronico + complemento)
+    ));
+    gerencialFinal = arredondar(Number(
+      persistida.valor_nao_fiscal_referencia != null
+        ? persistida.valor_nao_fiscal_referencia
+        : (dinheiro - complemento)
+    ));
+  }
+
+  // Itens com fatia acima do eletrônico sem evidência persistida válida → bloqueio.
+  if ((!persistida || !(complemento > 0.009)) && eletronico > 0.009 && dinheiro > 0.009) {
+    if (somaFiscal - eletronico > 0.02) {
+      return Object.freeze({
+        ok: false,
+        codigo: 'COMPLEMENTO_NAO_PERSISTIDO',
+        motivo:
+          'Os itens fiscais excedem o eletrônico confirmado sem complemento persistido e validado.',
+        referencia_pagamentos: refsPag,
+        somaFiscal,
+        somaNao
       });
+    }
+  }
+
+  if (!(complemento > 0.009) && persistida && eletronico > 0.009) {
+    if (Math.abs(fiscalFinal - eletronico) > 0.02) {
+      return Object.freeze({
+        ok: false,
+        codigo: 'REFERENCIA_FISCAL_SEM_COMPLEMENTO_DIVERGENTE',
+        motivo:
+          'Referência fiscal persistida diverge do eletrônico sem complemento registrado.',
+        fiscalFinal,
+        eletronico,
+        referencia_pagamentos: refsPag,
+        somaFiscal,
+        somaNao
+      });
+    }
+  }
+
+  if (complemento > 0.009) {
+    if (!persistida || (
+      venda && venda.id != null
+      && Number(persistida.venda_id) !== Number(venda.id)
+    )) {
+      return Object.freeze({
+        ok: false,
+        codigo: 'COMPLEMENTO_SEM_VINCULO',
+        motivo: 'Complemento fiscal sem vínculo persistido com a venda.',
+        referencia_pagamentos: refsPag,
+        somaFiscal,
+        somaNao
+      });
+    }
+    const margem = complementoMaximoPermitidoCentavos(pagamentos || []);
+    const complementoC = Math.round(complemento * 100);
+    // Dinheiro pode vir do snapshot persistido (releitura sem carimbo); a margem
+    // efetiva é o maior entre a live e 20% desse dinheiro restaurado.
+    const dinheiroC = Math.round(Number(dinheiro || 0) * 100);
+    const margemSnapshotC = pisoComplementoMoeda5Centavos(
+      Math.min(dinheiroC, Math.floor(dinheiroC * 0.2))
+    );
+    const margemEfetivaC = Math.max(
+      Number(margem.complemento_maximo_centavos || 0),
+      margemSnapshotC
+    );
+    if (!ehComplementoMoeda5Centavos(complementoC)) {
+      return Object.freeze({
+        ok: false,
+        codigo: 'COMPLEMENTO_MOEDA_INVALIDA',
+        motivo: 'Complemento persistido não é múltiplo de R$ 0,05.',
+        complemento,
+        referencia_pagamentos: refsPag,
+        somaFiscal,
+        somaNao
+      });
+    }
+    if (complementoC > margemEfetivaC || complemento - dinheiro > 0.009) {
+      return Object.freeze({
+        ok: false,
+        codigo: 'COMPLEMENTO_ACIMA_DA_MARGEM',
+        motivo: 'Complemento persistido ultrapassa 20% do dinheiro ou o disponível.',
+        complemento,
+        margem_maxima: arredondar(margemEfetivaC / 100),
+        referencia_pagamentos: refsPag,
+        somaFiscal,
+        somaNao
+      });
+    }
+    if (Math.abs(fiscalFinal - (eletronico + complemento)) > 0.02) {
+      return Object.freeze({
+        ok: false,
+        codigo: 'COMPLEMENTO_INCOERENTE_COM_ELETRONICO',
+        motivo: 'Referência fiscal final não fecha eletrônico + complemento.',
+        complemento,
+        fiscalFinal,
+        eletronico,
+        referencia_pagamentos: refsPag,
+        somaFiscal,
+        somaNao
+      });
+    }
+    if (Math.abs(gerencialFinal - (dinheiro - complemento)) > 0.02) {
+      return Object.freeze({
+        ok: false,
+        codigo: 'COMPLEMENTO_INCOERENTE_COM_DINHEIRO',
+        motivo: 'Referência gerencial final não fecha dinheiro − complemento.',
+        complemento,
+        gerencialFinal,
+        dinheiro,
+        referencia_pagamentos: refsPag,
+        somaFiscal,
+        somaNao
+      });
+    }
+    // Defesa: piso da margem efetiva nunca arredonda para cima.
+    if (pisoComplementoMoeda5Centavos(margemEfetivaC) < complementoC) {
+      return Object.freeze({
+        ok: false,
+        codigo: 'COMPLEMENTO_ACIMA_DA_MARGEM',
+        motivo: 'Complemento excede o piso de R$ 0,05 da margem.',
+        complemento,
+        referencia_pagamentos: refsPag,
+        somaFiscal,
+        somaNao
+      });
+    }
+  }
+
+  const separacao = fiscalFinal > 0.009 && gerencialFinal > 0.009;
+  if (separacao && Math.abs(somaFiscal - fiscalFinal) > 0.02) {
+    return Object.freeze({
+      ok: false,
+      codigo: 'DISTRIBUICAO_NAO_AUTORIZADA',
+      motivo:
+        'A referência fiscal final não corresponde aos itens persistidos. A NFC-e não foi montada com o carrinho comercial.',
+      referencia_pagamentos: refsPag,
+      referencia_final: Object.freeze({
+        valor_fiscal_referencia: fiscalFinal,
+        valor_nao_fiscal_referencia: gerencialFinal,
+        complemento_dinheiro_utilizado: complemento,
+        desconto_ajuste: descontoAjuste
+      }),
+      somaFiscal,
+      somaNao
     });
+  }
+  if (separacao && somaFiscal <= 0.009) {
+    return Object.freeze({
+      ok: false,
+      codigo: 'DISTRIBUICAO_NAO_AUTORIZADA',
+      motivo: 'Não há distribuição fiscal autorizada para a referência da venda.',
+      referencia_pagamentos: refsPag,
+      somaFiscal,
+      somaNao
+    });
+  }
+  if (separacao && Math.abs(somaNao - gerencialFinal) > 0.05) {
+    return Object.freeze({
+      ok: false,
+      codigo: 'DISTRIBUICAO_NAO_FISCAL_DIVERGENTE',
+      motivo: 'A referência gerencial final não corresponde aos itens persistidos.',
+      referencia_pagamentos: refsPag,
+      somaFiscal,
+      somaNao,
+      gerencialFinal
+    });
+  }
+  // Itens já líquidos (= total) OU itens brutos com desconto/acréscimo no cabeçalho
+  // (contrato preservar composição de pedido / desconto comercial). Ambos fecham a venda.
+  const descontoVenda = arredondar(Number(venda && venda.desconto || 0));
+  const acrescimoVenda = arredondar(Number(venda && venda.acrescimo || 0));
+  const somaItensFnNf = arredondar(somaFiscal + somaNao);
+  const liquidoViaCabecalho = arredondar(somaItensFnNf - descontoVenda + acrescimoVenda);
+  const fechaTotalDireto = Math.abs(somaItensFnNf - totalVenda) <= 0.05;
+  const fechaTotalComDescontoCabecalho = (descontoVenda > 0.009 || acrescimoVenda > 0.009)
+    && Math.abs(liquidoViaCabecalho - totalVenda) <= 0.05;
+  // Venda só eletrônica sem fatias F/NF preenchidas: não aplicar o contrato misto aqui.
+  const exclusivamenteEletronico = eletronico > 0.009
+    && dinheiro <= 0.009
+    && complemento <= 0.009;
+  const fatiasAusentes = somaItensFnNf <= 0.009;
+  if (
+    totalVenda > 0.009
+    && !(exclusivamenteEletronico && fatiasAusentes)
+    && !fechaTotalDireto
+    && !fechaTotalComDescontoCabecalho
+  ) {
+    return Object.freeze({
+      ok: false,
+      codigo: 'TOTAL_VENDA_DIVERGENTE',
+      motivo: 'A soma fiscal + gerencial diverge do total da venda.',
+      somaFiscal,
+      somaNao,
+      totalVenda,
+      desconto: descontoVenda,
+      acrescimo: acrescimoVenda
+    });
+  }
+  if (fiscalFinal > 0.009 && Math.abs(valorFiscalVenda - fiscalFinal) > 0.05) {
+    return Object.freeze({
+      ok: false,
+      codigo: 'CABECALHO_FISCAL_DIVERGENTE',
+      motivo: 'vendas.valor_fiscal diverge da referência fiscal final.',
+      valorFiscalVenda,
+      fiscalFinal,
+      somaFiscal
+    });
+  }
+  // Também detecta cabeçalho gerencial zerado indevidamente (não só divergência > 0).
+  if (gerencialFinal > 0.009 && Math.abs(valorNaoFiscalVenda - gerencialFinal) > 0.05) {
+    return Object.freeze({
+      ok: false,
+      codigo: 'CABECALHO_NAO_FISCAL_DIVERGENTE',
+      motivo: 'vendas.valor_nao_fiscal diverge da referência gerencial final.',
+      valorNaoFiscalVenda,
+      gerencialFinal,
+      somaNao
+    });
+  }
+
+  return Object.freeze({
+    ok: true,
+    codigo: null,
+    motivo: null,
+    referencia_pagamentos: refsPag,
+    referencia_final: Object.freeze({
+      valor_fiscal_referencia: fiscalFinal,
+      valor_nao_fiscal_referencia: gerencialFinal,
+      valor_fiscal_referencia_inicial: eletronico,
+      valor_nao_fiscal_referencia_inicial: dinheiro,
+      complemento_dinheiro_utilizado: complemento,
+      desconto_ajuste: descontoAjuste
+    }),
+    complemento_dinheiro_utilizado: complemento,
+    desconto_ajuste: descontoAjuste,
+    somaFiscal,
+    somaNao
   });
 }
 
@@ -223,9 +661,16 @@ module.exports = {
   avaliarPagamentosSequenciais,
   avaliarReferenciaRecomposicao,
   ambienteTesteRecomposicaoReferencia,
+  ambienteRecomposicaoReferenciaAtivo,
   calcularReferenciasConfirmadas,
   classificarTipoRecebimento,
   parcelaEfetivamenteConfirmada,
+  evidenciaConfirmacaoEletronica,
+  marcarParcelaEletronicaComprovada,
   gravarReferenciaRecomposicao,
-  ENV_REFERENCIA_TESTE
+  carregarReferenciaRecomposicao,
+  garantirSchemaVendaComposicaoReferencia,
+  validarReferenciaFiscalFinalComComplemento,
+  ENV_REFERENCIA_TESTE,
+  STATUS_CANCELADO
 };

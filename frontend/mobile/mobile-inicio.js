@@ -93,6 +93,7 @@
         pintarIdentidade();
       }
       $('mi-modulos').hidden = false;
+      atualizarAcessoContagem();
     } catch (erro) {
       if (erro && erro.status === 401 && root.location) {
         root.location.replace('/login?next=/mobile/');
@@ -101,6 +102,20 @@
       $('mi-modulos').hidden = true;
       mostrarAlerta((erro && erro.message) || 'A empresa padrão da loja não pôde ser usada.');
     }
+  }
+
+  function podeAjustarEstoqueLocal() {
+    if (typeof root.podeAjustarEstoque === 'function') return !!root.podeAjustarEstoque();
+    const atual = usuario();
+    if (!atual) return false;
+    const perfil = String(atual.perfil || atual.nivel || '').trim().toUpperCase();
+    return atual.role === 'admin' || perfil === 'SUPER_ADMIN' || perfil === 'ADMIN';
+  }
+
+  function atualizarAcessoContagem() {
+    const link = $('mi-contagem');
+    if (!link) return;
+    link.hidden = !podeAjustarEstoqueLocal();
   }
 
   function sair() {
@@ -116,6 +131,7 @@
     if (!exigirSessao()) return;
     pintarIdentidade();
     pintarOperacao();
+    atualizarAcessoContagem();
     const sairBtn = $('mi-sair');
     if (sairBtn) sairBtn.addEventListener('click', sair);
     await consultarLicenca();

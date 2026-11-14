@@ -43,6 +43,7 @@
     setText('loginFooterName', BrandService.NOME);
     setText('loginFooterVersion', 'Versão ' + (BrandService.VERSAO || '1.0.0'));
     setText('loginFooterSubtitle', BrandService.SUBTITULO);
+    setText('loginFooterCopyright', '© Todos os direitos reservados a ' + BrandService.NOME + '.');
 
     document.title = 'Login — ' + BrandService.NOME;
   }

@@ -24,7 +24,10 @@ const {
 } = require('./RecomposicaoFiscalContratoService');
 const {
   calcularMargemToleranciaDinheiro,
-  PERCENTUAL_TOLERANCIA_DINHEIRO_PADRAO
+  PERCENTUAL_TOLERANCIA_DINHEIRO_PADRAO,
+  pisoComplementoMoeda5Centavos,
+  ceilComplementoMoeda5Centavos,
+  ehComplementoMoeda5Centavos
 } = require('./RecomposicaoFiscalToleranciaDinheiroSimulacaoService');
 
 const { buscarComposicao, comporItens } = ComposicaoFiscalPedidoService.internos;
@@ -391,9 +394,385 @@ async function avaliarCandidatosComMotorComposicao(entrada = {}, opts = {}) {
   });
 }
 
+/**
+ * Registra candidato acima com complemento ceildado e candidato oficial atualizado.
+ * Desconto de ajuste só quando o bruto supera o fiscal final (nunca negativo).
+ */
+function registrarCandidatoAcimaComComplemento(candidatos, modelos, busca, candidatoC, complementoC, brutoC) {
+  if (
+    !(complementoC > 0)
+    || !ehComplementoMoeda5Centavos(complementoC)
+    || !busca
+    || !Array.isArray(busca.quantidades)
+    || brutoC == null
+  ) {
+    return;
+  }
+  const fiscalResidualFinalC = candidatoC + complementoC;
+  if (brutoC < fiscalResidualFinalC) return;
+  const descontoC = brutoC - fiscalResidualFinalC;
+  if (descontoC < 0) return;
+  const itens = comporItens(modelos, busca.quantidades);
+  candidatos.push({
+    modo: 'acima_com_complemento',
+    codigo: descontoC > 0
+      ? 'OK_COMPOSICAO_ACIMA_COM_COMPLEMENTO_E_DESCONTO'
+      : 'OK_COMPOSICAO_ACIMA_COM_COMPLEMENTO',
+    bruto_centavos: brutoC,
+    complemento_centavos: complementoC,
+    desconto_ajuste_centavos: descontoC,
+    distancia_centavos: Math.abs(brutoC - candidatoC),
+    valor_fiscal_candidato_oficial_centavos: fiscalResidualFinalC,
+    itens_compostos: itens,
+    busca,
+    motor_abaixo: null
+  });
+}
+
+/**
+ * CDS-PDV-RECOMPOSICAO-MISTA-COMPLEMENTO-20-PORCENTO-01
+ * + CDS-PDV-CORRECAO-COMPOSICAO-CANDIDATO-OFICIAL-ARREDONDAMENTO-05-CENTAVOS-01
+ *
+ * Busca residual abaixo e acima da referência eletrônica.
+ * Diferença necessária → ceil ao múltiplo de R$ 0,05 (limitado à margem/dinheiro).
+ * Atualiza o candidato fiscal oficial e reexecuta a seleção nesse alvo.
+ * Desconto de ajuste permanece separado do complemento.
+ */
+function avaliarCandidatoComComplementoDinheiro(params = {}) {
+  const candidatoC = centavos(params.valorFiscalCandidato, 'valor_fiscal_candidato');
+  const dinheiroC = centavos(params.dinheiroConfirmado != null ? params.dinheiroConfirmado : 0, 'dinheiro');
+  const margemRawC = centavos(params.margemMaxima != null ? params.margemMaxima : 0, 'margem_maxima');
+  // Margem máxima continua com piso (nunca arredonda a margem para cima).
+  const maxComplementoC = pisoComplementoMoeda5Centavos(Math.min(margemRawC, dinheiroC));
+  const modelos = Array.isArray(params.modelos) ? params.modelos : [];
+  const capacidade = params.capacidadePorCategoria || {};
+
+  if (!modelos.length) {
+    return Object.freeze({
+      distribuicao_possivel: false,
+      codigo: 'COMPOSICAO_AUSENTE_NO_MOTOR',
+      motivo: 'Nenhum modelo fiscal elegível foi fornecido ao motor de composição.',
+      complemento_dinheiro: 0,
+      desconto_ajuste: 0,
+      aplicou_desconto: false,
+      itens_compostos: []
+    });
+  }
+
+  const candidatos = [];
+  const alvosComplementoJaAvaliados = new Set();
+
+  const abaixo = avaliarCandidatoComBuscarComposicao({
+    valorFiscalCandidato: deCentavos(candidatoC),
+    margemMaxima: deCentavos(maxComplementoC),
+    modelos,
+    capacidadePorCategoria: capacidade,
+    limiteEstados: params.limiteEstados
+  });
+  // Persistência exige fechar o fiscal final: abaixo só entra se for exata
+  // (sem complemento). Abaixo com folga na margem não cobre o eletrônico.
+  if (
+    abaixo.distribuicao_possivel === true
+    && abaixo.composicao_encontrada != null
+    && (abaixo.encontrou_exato === true
+      || centavos(abaixo.composicao_encontrada, 'composicao_abaixo') === candidatoC)
+  ) {
+    const brutoC = candidatoC;
+    candidatos.push({
+      modo: 'exata',
+      codigo: 'OK_COMPOSICAO_EXATA',
+      bruto_centavos: brutoC,
+      complemento_centavos: 0,
+      desconto_ajuste_centavos: 0,
+      distancia_centavos: 0,
+      valor_fiscal_candidato_oficial_centavos: candidatoC,
+      itens_compostos: abaixo.itens_compostos || [],
+      busca: abaixo.busca || null,
+      motor_abaixo: abaixo
+    });
+  }
+
+  function avaliarAlvoComplemento(complementoC, buscaSinal) {
+    if (
+      !(complementoC > 0)
+      || complementoC > maxComplementoC
+      || complementoC > dinheiroC
+      || !ehComplementoMoeda5Centavos(complementoC)
+      || alvosComplementoJaAvaliados.has(complementoC)
+    ) {
+      return;
+    }
+    alvosComplementoJaAvaliados.add(complementoC);
+    const alvoOficialC = candidatoC + complementoC;
+    const alvoMaxFaixaC = candidatoC + maxComplementoC;
+
+    if (
+      buscaSinal
+      && buscaSinal.otimalidadeComprovada
+      && buscaSinal.totalCentavos === alvoOficialC
+      && Array.isArray(buscaSinal.quantidades)
+    ) {
+      registrarCandidatoAcimaComComplemento(
+        candidatos, modelos, buscaSinal, candidatoC, complementoC, buscaSinal.totalCentavos
+      );
+      return;
+    }
+
+    // Candidato oficial atualizado: reexecuta a composição no alvo ceildado.
+    const rebuscaExata = buscarComposicao(
+      modelos,
+      capacidade,
+      alvoOficialC,
+      alvoOficialC,
+      params.limiteEstados,
+      { objetivo: 'MINIMO' }
+    );
+    if (
+      rebuscaExata.otimalidadeComprovada
+      && rebuscaExata.totalCentavos === alvoOficialC
+      && Array.isArray(rebuscaExata.quantidades)
+    ) {
+      registrarCandidatoAcimaComComplemento(
+        candidatos, modelos, rebuscaExata, candidatoC, complementoC, rebuscaExata.totalCentavos
+      );
+      return;
+    }
+
+    // Bruto acima do candidato oficial, ainda na faixa da margem → desconto de ajuste.
+    if (alvoOficialC < alvoMaxFaixaC) {
+      const rebuscaAcima = buscarComposicao(
+        modelos,
+        capacidade,
+        alvoMaxFaixaC,
+        alvoOficialC + 1,
+        params.limiteEstados,
+        { objetivo: 'MINIMO' }
+      );
+      if (
+        rebuscaAcima.otimalidadeComprovada
+        && rebuscaAcima.totalCentavos > alvoOficialC
+        && rebuscaAcima.totalCentavos <= alvoMaxFaixaC
+        && Array.isArray(rebuscaAcima.quantidades)
+      ) {
+        const excessoFinalC = rebuscaAcima.totalCentavos - candidatoC;
+        const complementoFinalC = ceilComplementoMoeda5Centavos(excessoFinalC);
+        if (
+          complementoFinalC > 0
+          && complementoFinalC <= maxComplementoC
+          && complementoFinalC <= dinheiroC
+          && rebuscaAcima.totalCentavos >= candidatoC + complementoFinalC
+        ) {
+          registrarCandidatoAcimaComComplemento(
+            candidatos,
+            modelos,
+            rebuscaAcima,
+            candidatoC,
+            complementoFinalC,
+            rebuscaAcima.totalCentavos
+          );
+        }
+      }
+    }
+  }
+
+  if (maxComplementoC > 0) {
+    const alvoMaxC = candidatoC + maxComplementoC;
+    // Percorre composições atingíveis acima do eletrônico; cada diferença vira ceil de R$ 0,05.
+    let minimoBuscaC = candidatoC + 1;
+    let guard = 0;
+    while (minimoBuscaC <= alvoMaxC && guard < 64) {
+      guard += 1;
+      const acima = buscarComposicao(
+        modelos,
+        capacidade,
+        alvoMaxC,
+        minimoBuscaC,
+        params.limiteEstados,
+        { objetivo: 'MINIMO' }
+      );
+      if (
+        !acima.otimalidadeComprovada
+        || !(acima.totalCentavos > candidatoC)
+        || acima.totalCentavos > alvoMaxC
+        || !Array.isArray(acima.quantidades)
+      ) {
+        break;
+      }
+      const excessoC = acima.totalCentavos - candidatoC;
+      const antesCeil = candidatos.length;
+      // 1) Preferir ceil (ex.: 3,96 → 4,00) quando o alvo ceildado for atingível.
+      const complementoCeilC = ceilComplementoMoeda5Centavos(excessoC);
+      if (complementoCeilC <= maxComplementoC && complementoCeilC <= dinheiroC) {
+        avaliarAlvoComplemento(complementoCeilC, acima);
+      }
+      // 2) Se o alvo ceil não existir no catálogo, fallback piso + desconto de ajuste
+      //    (ex.: bruto 19,80 / eletrônico 16,99 → complemento 2,80 + desconto 0,01).
+      if (candidatos.length === antesCeil) {
+        const complementoPisoC = pisoComplementoMoeda5Centavos(
+          Math.min(maxComplementoC, excessoC)
+        );
+        if (
+          complementoPisoC > 0
+          && ehComplementoMoeda5Centavos(complementoPisoC)
+          && complementoPisoC <= dinheiroC
+          && complementoPisoC <= maxComplementoC
+        ) {
+          const fiscalResidualFinalC = candidatoC + complementoPisoC;
+          const descontoC = acima.totalCentavos - fiscalResidualFinalC;
+          if (descontoC >= 0 && complementoPisoC + descontoC === excessoC) {
+            registrarCandidatoAcimaComComplemento(
+              candidatos,
+              modelos,
+              acima,
+              candidatoC,
+              complementoPisoC,
+              acima.totalCentavos
+            );
+          }
+        }
+      }
+      minimoBuscaC = acima.totalCentavos + 1;
+    }
+  }
+
+  // 3) Ultrapassou a faixa dos 20%: usa o teto de 20%, pega a composição
+  //    elegível mais próxima acima do eletrônico e aplica desconto de ajuste.
+  //    Ex.: eletrônico 26,99 + dinheiro 10 → complemento máx. 2,00; bruto 38,97
+  //    → fiscal final 28,99 + desconto 9,98.
+  if (!candidatos.length && maxComplementoC > 0) {
+    let capacidadeTotalC = 0;
+    for (const modelo of modelos) {
+      const precoC = Math.round(Number(
+        modelo && modelo.cotador && modelo.cotador.precoUnitarioMinimoInterno != null
+          ? Number(modelo.cotador.precoUnitarioMinimoInterno) * 100
+          : 0
+      ));
+      const qMax = Number(modelo && modelo.quantidadeMaxima != null ? modelo.quantidadeMaxima : 0);
+      if (precoC > 0 && qMax > 0) capacidadeTotalC += precoC * qMax;
+    }
+    const alvoBuscaLongeC = Math.max(candidatoC + maxComplementoC + 1, capacidadeTotalC);
+    if (alvoBuscaLongeC > candidatoC) {
+      const proxima = buscarComposicao(
+        modelos,
+        capacidade,
+        alvoBuscaLongeC,
+        candidatoC + 1,
+        params.limiteEstados,
+        { objetivo: 'MINIMO' }
+      );
+      if (
+        proxima
+        && proxima.otimalidadeComprovada
+        && Array.isArray(proxima.quantidades)
+        && proxima.totalCentavos > candidatoC
+      ) {
+        const brutoC = proxima.totalCentavos;
+        const fiscalAlvoC = candidatoC + maxComplementoC;
+        if (brutoC >= fiscalAlvoC) {
+          registrarCandidatoAcimaComComplemento(
+            candidatos,
+            modelos,
+            proxima,
+            candidatoC,
+            maxComplementoC,
+            brutoC
+          );
+          if (candidatos.length) {
+            candidatos[candidatos.length - 1].modo = 'acima_teto_20_com_desconto';
+            candidatos[candidatos.length - 1].codigo = 'OK_COMPOSICAO_TETO_20_COM_DESCONTO';
+          }
+        }
+      }
+    }
+  }
+
+  if (!candidatos.length) {
+    const motivoBloqueio = (() => {
+      if (
+        abaixo.distribuicao_possivel === true
+        && abaixo.composicao_encontrada != null
+        && abaixo.codigo === 'OK_COMPOSICAO_DENTRO_DA_MARGEM'
+      ) {
+        return (
+          'Motor encontrou composição abaixo da referência dentro da margem, mas ela não cobre o eletrônico. ' +
+          'Nenhum complemento ceildado (múltiplo de R$ 0,05) atualizou o candidato oficial com composição válida na faixa.'
+        );
+      }
+      return abaixo.motivo
+        || 'Nenhuma composição válida foi encontrada abaixo ou acima da referência dentro da margem de complemento.';
+    })();
+    return Object.freeze({
+      distribuicao_possivel: false,
+      codigo: abaixo.codigo === 'OK_COMPOSICAO_DENTRO_DA_MARGEM'
+        ? 'COMPOSICAO_INCOMPATIVEL_MARGEM_TOLERANCIA'
+        : (abaixo.codigo || 'COMPOSICAO_INCOMPATIVEL_MARGEM_TOLERANCIA'),
+      motivo: motivoBloqueio,
+      complemento_dinheiro: 0,
+      desconto_ajuste: 0,
+      aplicou_desconto: false,
+      margem_complemento_maxima: deCentavos(maxComplementoC),
+      itens_compostos: [],
+      busca_abaixo: abaixo
+    });
+  }
+
+  candidatos.sort((a, b) => {
+    if (a.distancia_centavos !== b.distancia_centavos) {
+      return a.distancia_centavos - b.distancia_centavos;
+    }
+    if (a.complemento_centavos !== b.complemento_centavos) {
+      return a.complemento_centavos - b.complemento_centavos;
+    }
+    if (a.desconto_ajuste_centavos !== b.desconto_ajuste_centavos) {
+      return a.desconto_ajuste_centavos - b.desconto_ajuste_centavos;
+    }
+    if (a.bruto_centavos !== b.bruto_centavos) return a.bruto_centavos - b.bruto_centavos;
+    return String(a.modo).localeCompare(String(b.modo));
+  });
+
+  const vencedor = candidatos[0];
+  const candidatoOficialC = vencedor.valor_fiscal_candidato_oficial_centavos != null
+    ? vencedor.valor_fiscal_candidato_oficial_centavos
+    : (candidatoC + vencedor.complemento_centavos);
+  return Object.freeze({
+    distribuicao_possivel: true,
+    codigo: vencedor.codigo,
+    motivo: vencedor.modo === 'acima_teto_20_com_desconto'
+      ? (
+        'Composição acima do teto de 20% do dinheiro: complemento limitado ao máximo permitido, '
+        + 'elegível mais próximo selecionado e desconto de ajuste no excedente.'
+      )
+      : (vencedor.modo === 'acima_com_complemento'
+        ? (
+          'Composição acima da referência eletrônica: diferença ceildada ao múltiplo de R$ 0,05, '
+          + 'candidato oficial atualizado e desconto de ajuste aplicado quando o bruto supera o fiscal final.'
+        )
+        : (vencedor.motor_abaixo && vencedor.motor_abaixo.motivo) || 'Composição selecionada dentro da regra de complemento.'),
+    valor_fiscal_candidato: deCentavos(candidatoC),
+    valor_fiscal_candidato_inicial: deCentavos(candidatoC),
+    valor_fiscal_candidato_oficial: deCentavos(candidatoOficialC),
+    valor_fiscal_candidato_oficial_centavos: candidatoOficialC,
+    candidato_oficial_atualizado: candidatoOficialC !== candidatoC,
+    composicao_encontrada: deCentavos(vencedor.bruto_centavos),
+    composicao_encontrada_centavos: vencedor.bruto_centavos,
+    complemento_dinheiro: deCentavos(vencedor.complemento_centavos),
+    complemento_dinheiro_centavos: vencedor.complemento_centavos,
+    desconto_ajuste: deCentavos(vencedor.desconto_ajuste_centavos),
+    desconto_ajuste_centavos: vencedor.desconto_ajuste_centavos,
+    valor_fiscal_residual_final: deCentavos(candidatoOficialC),
+    aplicou_desconto: vencedor.desconto_ajuste_centavos > 0,
+    margem_complemento_maxima: deCentavos(maxComplementoC),
+    modo: vencedor.modo,
+    itens_compostos: Object.freeze((vencedor.itens_compostos || []).map((it) => Object.freeze({ ...it }))),
+    busca: vencedor.busca || null,
+    candidatos_avaliados: candidatos.length
+  });
+}
+
 module.exports = {
   avaliarCandidatosComMotorComposicao,
   avaliarCandidatoComBuscarComposicao,
+  avaliarCandidatoComComplementoDinheiro,
   /** Expostos para auditoria da Sprint — confirmam a interface oficial. */
   MOTOR_OFICIAL: 'ComposicaoFiscalPedidoService',
   INTERFACE_PUBLICA: 'simularComposicao',

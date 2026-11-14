@@ -45,6 +45,48 @@ function deCentavos(c) {
 }
 
 /**
+ * CDS-PDV-RECOMPOSICAO-MISTA-COMPLEMENTO-20-PORCENTO-01
+ * Teto da margem / dinheiro: exclusivamente múltiplos de R$ 0,05 para baixo.
+ * Nunca arredonda a margem máxima para cima.
+ */
+function pisoComplementoMoeda5Centavos(centavos) {
+  const valor = Math.max(0, Math.floor(Number(centavos) || 0));
+  return valor - (valor % 5);
+}
+
+/**
+ * CDS-PDV-CORRECAO-COMPOSICAO-CANDIDATO-OFICIAL-ARREDONDAMENTO-05-CENTAVOS-01
+ * Complemento a partir da diferença necessária: ceil para o próximo múltiplo de R$ 0,05.
+ * Trabalha só com centavos inteiros. Quem chama deve limitar a margem/dinheiro.
+ * Ex.: 396 → 400; 393 → 395; 390 → 390.
+ */
+function ceilComplementoMoeda5Centavos(diferencaCentavos) {
+  const bruto = Math.max(0, Math.ceil(Number(diferencaCentavos) || 0));
+  if (bruto <= 0) return 0;
+  return Math.ceil(bruto / 5) * 5;
+}
+
+function ehComplementoMoeda5Centavos(centavos) {
+  const valor = Math.floor(Number(centavos));
+  return Number.isFinite(valor) && valor >= 0 && valor % 5 === 0;
+}
+
+/**
+ * Maior complemento permitido: piso de 5 centavos sobre min(margem_maxima, dinheiro).
+ */
+function complementoMaximoPermitidoCentavos(pagamentos, opcoes = {}) {
+  const margem = calcularMargemToleranciaDinheiro(pagamentos, opcoes);
+  const margemC = centavos(margem.margem_maxima, 'margem_maxima');
+  const dinheiroC = centavos(margem.dinheiro_recebido, 'dinheiro_recebido');
+  const bruto = Math.min(margemC, dinheiroC);
+  return {
+    ...margem,
+    complemento_maximo_centavos: pisoComplementoMoeda5Centavos(bruto),
+    complemento_maximo: deCentavos(pisoComplementoMoeda5Centavos(bruto))
+  };
+}
+
+/**
  * Soma pagamentos em dinheiro (centavos). Não classifica F/NF.
  * @param {Array<{forma_pagamento?:string, valor?:number}>} pagamentos
  */
@@ -365,6 +407,10 @@ module.exports = {
   PERCENTUAL_TOLERANCIA_DINHEIRO_PADRAO,
   calcularMargemToleranciaDinheiro,
   somarDinheiroRecebidoCentavos,
+  pisoComplementoMoeda5Centavos,
+  ceilComplementoMoeda5Centavos,
+  ehComplementoMoeda5Centavos,
+  complementoMaximoPermitidoCentavos,
   listarTotaisFiscaisQuantidadeInteira,
   avaliarCandidatosComToleranciaDinheiro
 };

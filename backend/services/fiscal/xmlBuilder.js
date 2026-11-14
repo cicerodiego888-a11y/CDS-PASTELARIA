@@ -196,9 +196,29 @@ function vendaExigeSeparacaoDePagamento(venda, pagamentos) {
   return (temTipoNaoFiscal || dinheiroConfirmado) && eletronicoConfirmado && (valoresSeparados || temTipoNaoFiscal);
 }
 
+function vendaTemPagamentoEletronicoEsperado(venda, pagamentos) {
+  const lista = pagamentos || [];
+  if (lista.some((p) => pagamentoEletronicoNfce(p) && !pagamentoRecusadoNfce(p))) return true;
+  if (lista.some((p) => p && p.eletronico_snapshot_referencia === true)) return true;
+  const ref = venda && (
+    venda.__referencia_composicao_persistida
+    || venda.referencia_composicao_persistida
+    || null
+  );
+  if (ref && Number(ref.valor_fiscal_referencia_inicial || 0) > 0.009) return true;
+  if (
+    Number(venda && venda.valor_fiscal || 0) > 0.009
+    && Number(venda && venda.valor_nao_fiscal || 0) > 0.009
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function resolverPagamentosNfce(venda, totalFiscal) {
   const pagamentosBrutos = Array.isArray(venda?.pagamentos) ? venda.pagamentos : [];
   const separacao = vendaExigeSeparacaoDePagamento(venda, pagamentosBrutos);
+  const eletronicoEsperado = vendaTemPagamentoEletronicoEsperado(venda, pagamentosBrutos);
   let pagamentosFiscais = pagamentosBrutos.filter((pagamento) => {
     if (!pagamento || pagamentoRecusadoNfce(pagamento)) return false;
     if (pagamento.tipo_recebimento === 'nao_fiscal' || pagamento.tipo_recebimento === 'outros') return false;
@@ -206,18 +226,36 @@ function resolverPagamentosNfce(venda, totalFiscal) {
     if (separacao && !pagamento.tipo_recebimento) return false;
     return !pagamento.tipo_recebimento || pagamento.tipo_recebimento === 'fiscal';
   });
-  if (separacao && pagamentosFiscais.length === 0) {
-    return { pagamentos: [], vTroco: 0, somaPagamentos: 0, separacaoExigida: true };
+  if ((separacao || eletronicoEsperado) && pagamentosFiscais.length === 0) {
+    return {
+      pagamentos: [],
+      vTroco: 0,
+      somaPagamentos: 0,
+      separacaoExigida: true,
+      divergente: true
+    };
   }
 
   if (pagamentosFiscais.length === 0 && venda?.forma_pagamento) {
-    pagamentosFiscais = [{
-      forma_pagamento: venda.forma_pagamento,
-      valor: totalFiscal
-    }];
+    // Não inventar dinheiro no lugar de eletrônico/misto.
+    if (!eletronicoEsperado || !pagamentoDinheiroNfce({ forma_pagamento: venda.forma_pagamento })) {
+      pagamentosFiscais = [{
+        forma_pagamento: venda.forma_pagamento,
+        valor: totalFiscal
+      }];
+    }
   }
 
   if (pagamentosFiscais.length === 0) {
+    if (eletronicoEsperado) {
+      return {
+        pagamentos: [],
+        vTroco: 0,
+        somaPagamentos: 0,
+        separacaoExigida: true,
+        divergente: true
+      };
+    }
     pagamentosFiscais = [{
       forma_pagamento: 'dinheiro',
       valor: totalFiscal
@@ -235,12 +273,24 @@ function resolverPagamentosNfce(venda, totalFiscal) {
   const vNF = round2(totalFiscal);
   let vTroco = 0;
 
+  const unico = pagamentosFiscais.length === 1 ? pagamentosFiscais[0] : null;
+  const dinheiroComplemento = !!(unico && pagamentoDinheiroNfce(unico) && (
+    unico.dinheiro_moeda_fechamento === true
+    || unico.complemento_dinheiro_recomposicao === true
+  ));
+  // Proibido esticar complemento/dinheiro até o vNF quando o eletrônico era esperado.
+  const podeNormalizarUnico = !separacao
+    && !eletronicoEsperado
+    && !dinheiroComplemento
+    && unico
+    && Math.abs(somaPagamentos - vNF) > 0.01;
+
   if (somaPagamentos > vNF + 0.009) {
     vTroco = round2(somaPagamentos - vNF);
-  } else if (!separacao && Math.abs(somaPagamentos - vNF) > 0.01 && pagamentosFiscais.length === 1) {
+  } else if (podeNormalizarUnico) {
     // Pagamento único aquém / ruído: normaliza para vNF (sem troco).
     pagamentosFiscais = [{
-      ...pagamentosFiscais[0],
+      ...unico,
       valor: vNF
     }];
   }
@@ -248,12 +298,14 @@ function resolverPagamentosNfce(venda, totalFiscal) {
   const somaFinal = round2(
     pagamentosFiscais.reduce((t, p) => t + Number(p.valor || 0), 0)
   );
+  const divergenteMisto = (separacao || eletronicoEsperado)
+    && Math.abs(somaFinal - vTroco - vNF) > 0.02;
   return {
     pagamentos: pagamentosFiscais,
     vTroco,
     somaPagamentos: somaFinal,
-    separacaoExigida: separacao,
-    divergente: separacao && Math.abs(somaFinal - vTroco - vNF) > 0.02
+    separacaoExigida: separacao || eletronicoEsperado,
+    divergente: divergenteMisto
   };
 }
 
