@@ -647,11 +647,11 @@ function loadPedidos() {
                 <div class="form-text" id="pedMesaAviso"></div>
               </div>
               <div class="col-md-5 position-relative">
-                <label class="form-label">Cliente <small class="text-muted">(opcional · Ctrl+F)</small></label>
-                <input type="text" class="form-control" id="pedClienteBusca" placeholder="Pesquisar por nome, CPF ou telefone" autocomplete="off">
+                <label class="form-label">Cliente <small class="text-muted">(opcional · digite o nome)</small></label>
+                <input type="text" class="form-control" id="pedClienteBusca" placeholder="Digite o nome (cadastro opcional)" autocomplete="off">
                 <input type="hidden" id="pedClienteId">
                 <div id="pedClienteSugestoes" class="list-group position-absolute w-100 shadow" style="z-index:1050;display:none;max-height:220px;overflow:auto;"></div>
-                <div class="form-text" id="pedClienteSelecionadoLabel">Nenhum cliente selecionado</div>
+                <div class="form-text" id="pedClienteSelecionadoLabel">Sem cliente — digite um nome se desejar</div>
               </div>
               <div class="col-md-3">
                 <label class="form-label">Desconto (R$)</label>
@@ -1164,6 +1164,14 @@ function loadPedidos() {
     });
   }
 
+  function fecharModalConsolidada() {
+    const el = document.getElementById('pedConsolidadaModal');
+    if (window.bootstrap && el) {
+      window.bootstrap.Modal.getOrCreateInstance(el).hide();
+    }
+    consolidadaAtual = null;
+  }
+
   async function confirmarConsolidada() {
     if (
       !consolidadaAtual
@@ -1212,6 +1220,15 @@ function loadPedidos() {
         itens: data.itens,
         cliente_id: data.cliente_id || null
       };
+      try {
+        sessionStorage.removeItem('pdvPedidoHandoff');
+        localStorage.removeItem('pdvPedidoHandoff');
+      } catch (_e) { /* ignore */ }
+      // Fecha na hora do encaminhamento: a reserva já está confirmada.
+      fecharModalConsolidada();
+      try {
+        await carregarLista();
+      } catch (_e) { /* lista atualiza no próximo tick do PDV */ }
       if (typeof window.abrirPdvOficial === 'function') {
         const resultado = await window.abrirPdvOficial({ handoff: handoffConsolidado });
         if (resultado && resultado.ok === false) {
@@ -1224,12 +1241,14 @@ function loadPedidos() {
     } catch (err) {
       const codigo = err.codigo ? ` [${err.codigo}]` : '';
       alertar(`${err.message || 'Falha ao reservar a venda consolidada.'}${codigo}`, 'danger');
-      consolidadaAtual.enviando = false;
-      $('.ped-consolidada-item').prop('disabled', false);
-      $('#pedConsolidadaConfirmar').prop(
-        'disabled',
-        consolidadaAtual.pedidos.filter((pedido) => pedido.incluir).length < 2
-      );
+      if (consolidadaAtual) {
+        consolidadaAtual.enviando = false;
+        $('.ped-consolidada-item').prop('disabled', false);
+        $('#pedConsolidadaConfirmar').prop(
+          'disabled',
+          consolidadaAtual.pedidos.filter((pedido) => pedido.incluir).length < 2
+        );
+      }
     }
   }
 
@@ -1262,7 +1281,13 @@ function loadPedidos() {
     if (timerRecargaListaPedidos) clearTimeout(timerRecargaListaPedidos);
     timerRecargaListaPedidos = setTimeout(() => {
       timerRecargaListaPedidos = null;
-      if ($('#pedidosRoot').length) carregarLista();
+      if (!$('#pedidosRoot').length) return;
+      // Venda já finalizada no PDV: não manter a consolidada aberta sobre a lista.
+      const modalEl = document.getElementById('pedConsolidadaModal');
+      if (modalEl && modalEl.classList.contains('show')) {
+        fecharModalConsolidada();
+      }
+      carregarLista();
     }, 120);
   }
 
@@ -1439,8 +1464,29 @@ function loadPedidos() {
       { method: 'POST', headers: _pedHeaders(), body: '{}' }
     );
     const preparacao = await resp.json().catch(() => ({}));
-    if (!resp.ok) throw new Error(montarDiagnosticoPreparacao(preparacao));
+    if (!resp.ok) {
+      const erro = new Error(montarDiagnosticoPreparacao(preparacao));
+      erro.codigo = preparacao.codigo || preparacao.code || null;
+      erro.consolidacao_id = preparacao.consolidacao_id || null;
+      throw erro;
+    }
     return preparacao;
+  }
+
+  async function liberarConsolidacaoPedido(consolidacaoId) {
+    const id = Number(consolidacaoId);
+    if (!Number.isInteger(id) || id <= 0) return false;
+    const resp = await fetch(
+      `${API_URL}/pedidos/venda-consolidada-mesa/${id}/liberar`,
+      { method: 'POST', headers: _pedHeaders(), body: '{}' }
+    );
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      const erro = new Error(data.mensagem || data.error || 'Não foi possível liberar a consolidação da mesa.');
+      erro.codigo = data.codigo || null;
+      throw erro;
+    }
+    return true;
   }
 
   async function requisitarFinalizacaoVendaPdv(id) {
@@ -1505,7 +1551,20 @@ function loadPedidos() {
 
     operacoesVendaPdvPendentes.add(id);
     try {
-      const preparacao = await requisitarPreparacaoVendaPdv(id);
+      let preparacao;
+      try {
+        preparacao = await requisitarPreparacaoVendaPdv(id);
+      } catch (erroPrep) {
+        if (
+          erroPrep.codigo === 'PEDIDO_EM_CONSOLIDACAO'
+          && Number(erroPrep.consolidacao_id) > 0
+        ) {
+          await liberarConsolidacaoPedido(erroPrep.consolidacao_id);
+          preparacao = await requisitarPreparacaoVendaPdv(id);
+        } else {
+          throw erroPrep;
+        }
+      }
       if (preparacao.venda_concluida) {
         alertar(`Este Pedido já possui a venda ${preparacao.venda_id || ''} concluída.`, 'info');
         await carregarLista();
@@ -1705,7 +1764,7 @@ function loadPedidos() {
     $('#btnPedImprimir').prop('disabled', true);
     $('#pedClienteId').val('');
     $('#pedClienteBusca').val('');
-    $('#pedClienteSelecionadoLabel').text('Nenhum cliente selecionado');
+    $('#pedClienteSelecionadoLabel').text('Sem cliente — digite um nome se desejar');
     $('#pedDesconto').val('0');
     $('#pedObservacao').val('');
     $('#pedMesaId').val('');
@@ -1941,10 +2000,16 @@ function loadPedidos() {
       freteAtual = Number(p.frete || 0);
       $('#btnPedImprimir').prop('disabled', false);
       $('#pedEditorTitulo').text('Editar pedido ' + (p.codigo || ('#' + p.id)));
-      clienteSelecionado = p.cliente_id ? { id: p.cliente_id, nome: p.cliente_nome } : null;
+      clienteSelecionado = (p.cliente_id || p.cliente_nome)
+        ? { id: p.cliente_id || null, nome: p.cliente_nome || '' }
+        : null;
       $('#pedClienteId').val(p.cliente_id || '');
       $('#pedClienteBusca').val(p.cliente_nome || '');
-      $('#pedClienteSelecionadoLabel').text(p.cliente_nome || 'Nenhum cliente selecionado');
+      $('#pedClienteSelecionadoLabel').text(
+        p.cliente_nome
+          ? (p.cliente_id ? p.cliente_nome : `Nome no pedido: ${p.cliente_nome}`)
+          : 'Sem cliente — digite um nome se desejar'
+      );
       $('#pedDesconto').val(p.desconto || 0);
       $('#pedObservacao').val(p.observacao || '');
       itensEditor = (p.itens || []).map((i) => ({
@@ -2174,8 +2239,11 @@ function loadPedidos() {
     }
     headers = _pedHeaders();
     const t = calcTotaisDetalhe();
+    const clienteNomeDigitado = String($('#pedClienteBusca').val() || '').trim();
+    const clienteIdSelecionado = $('#pedClienteId').val() ? Number($('#pedClienteId').val()) : null;
     const payload = {
-      cliente_id: $('#pedClienteId').val() ? Number($('#pedClienteId').val()) : null,
+      cliente_id: clienteIdSelecionado,
+      cliente_nome: clienteNomeDigitado || null,
       mesa_id: $('#pedMesaId').val() ? Number($('#pedMesaId').val()) : null,
       representante_nome: representanteAtual,
       observacao: $('#pedObservacao').val() || null,
@@ -2208,7 +2276,8 @@ function loadPedidos() {
       payload.status = 'PEDIDO';
     }
     try {
-      if (!pedidoEditandoId && payload.mesa_id) {
+      // Criação ou edição: atribuir mesa exige atendimento aberto (senão a mesa fica LIVRE).
+      if (payload.mesa_id) {
         await garantirAtendimentoAbertoParaNovoPedido(payload.mesa_id);
       }
       const url = pedidoEditandoId ? `${API_URL}/pedidos/${pedidoEditandoId}` : `${API_URL}/pedidos`;
@@ -2236,11 +2305,11 @@ function loadPedidos() {
         bootstrap.Modal.getInstance(document.getElementById('modalPedidoEditor'))?.hide();
         return;
       }
+      bootstrap.Modal.getInstance(document.getElementById('modalPedidoEditor'))?.hide();
       if (salao) {
         alertar(`Pedido ${pedido.codigo || ''} salvo. A preparação ainda não foi acionada.`, 'success');
         return;
       }
-      bootstrap.Modal.getInstance(document.getElementById('modalPedidoEditor'))?.hide();
       alertar(`Pedido ${pedido.codigo || ''} salvo.`, 'success');
       if (method === 'POST' && !data.idempotente) {
         await iniciarVendaPdv(
@@ -2823,9 +2892,25 @@ function loadPedidos() {
   });
   $('#pedClienteBusca').on('input', function () {
     $('#pedClienteId').val('');
-    clienteSelecionado = null;
-    $('#pedClienteSelecionadoLabel').text('Nenhum cliente selecionado');
+    const nome = String($(this).val() || '').trim();
+    clienteSelecionado = nome ? { id: null, nome } : null;
+    $('#pedClienteSelecionadoLabel').text(
+      nome ? `Nome no pedido: ${nome}` : 'Sem cliente — digite um nome se desejar'
+    );
     buscarClientes($(this).val());
+  });
+  $('#pedClienteBusca').on('blur', function () {
+    const nome = String($(this).val() || '').trim();
+    if (!nome) {
+      clienteSelecionado = null;
+      $('#pedClienteId').val('');
+      $('#pedClienteSelecionadoLabel').text('Sem cliente — digite um nome se desejar');
+      return;
+    }
+    if (!$('#pedClienteId').val()) {
+      clienteSelecionado = { id: null, nome };
+      $('#pedClienteSelecionadoLabel').text(`Nome no pedido: ${nome}`);
+    }
   });
   $('#pedProdutoBusca').on('input', function () {
     $('#pedProdutoId').val('');

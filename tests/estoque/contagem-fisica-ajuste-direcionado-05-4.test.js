@@ -302,8 +302,11 @@ describe('CDS-ESTOQUE-AJUSTE-DIRECIONADO-05.4', { concurrency: false }, () => {
   });
 
   it('04 alternar OFF/ON recalcula o saldo previsto sem alterar os demais itens', () => {
-    assert.equal(ui.calcularSaldoPrevisto(24000, 15000, 'BAIXA'), 9000);
-    assert.equal(ui.calcularSaldoPrevisto(24000, 15000, 'ACRESCIMO'), 39000);
+    // Quantidade = contado; previsto = contado; movimento = |saldo − contado|.
+    assert.equal(ui.calcularSaldoPrevisto(24000, 9000, 'BAIXA'), 9000);
+    assert.equal(ui.calcularMovimentoAjuste(24000, 9000, 'BAIXA'), 15000);
+    assert.equal(ui.calcularSaldoPrevisto(24000, 39000, 'ACRESCIMO'), 39000);
+    assert.equal(ui.calcularMovimentoAjuste(24000, 39000, 'ACRESCIMO'), 15000);
     const baixa = ui.snapshotDaLinha({
       produto_id: 1,
       operacao: 'AJUSTE_DIRECIONADO',
@@ -312,8 +315,9 @@ describe('CDS-ESTOQUE-AJUSTE-DIRECIONADO-05.4', { concurrency: false }, () => {
       saldo_nao_fiscal_esperado: 0,
       saldo_fiscal_previsto: 9000,
       saldo_nao_fiscal_previsto: 0,
-      quantidade_fiscal_contada: 15000,
+      quantidade_fiscal_contada: 9000,
       quantidade_nao_fiscal_contada: 0,
+      quantidade_fiscal_movimento: 15000,
       diferenca_fiscal: -15000,
       diferenca_nao_fiscal: 0
     }, { nome: 'Coca-Cola 1,5 L' });
@@ -325,8 +329,9 @@ describe('CDS-ESTOQUE-AJUSTE-DIRECIONADO-05.4', { concurrency: false }, () => {
       saldo_nao_fiscal_esperado: 0,
       saldo_fiscal_previsto: 15000,
       saldo_nao_fiscal_previsto: 0,
-      quantidade_fiscal_contada: 10000,
+      quantidade_fiscal_contada: 15000,
       quantidade_nao_fiscal_contada: 0,
+      quantidade_fiscal_movimento: 10000,
       diferenca_fiscal: 10000,
       diferenca_nao_fiscal: 0
     }, { nome: 'Água 500 ml' });
@@ -338,8 +343,9 @@ describe('CDS-ESTOQUE-AJUSTE-DIRECIONADO-05.4', { concurrency: false }, () => {
       saldo_nao_fiscal_esperado: 0,
       saldo_fiscal_previsto: 39000,
       saldo_nao_fiscal_previsto: 0,
-      quantidade_fiscal_contada: 15000,
+      quantidade_fiscal_contada: 39000,
       quantidade_nao_fiscal_contada: 0,
+      quantidade_fiscal_movimento: 15000,
       diferenca_fiscal: 15000,
       diferenca_nao_fiscal: 0
     }, { nome: 'Coca-Cola 1,5 L' });
@@ -374,22 +380,27 @@ describe('CDS-ESTOQUE-AJUSTE-DIRECIONADO-05.4', { concurrency: false }, () => {
     await closeDb(db);
   });
 
-  it('07 e 08 baixa subtrai a quantidade convertida e apresenta o saldo previsto', async () => {
+  it('07 e 08 baixa usa quantidade contada e baixa a diferença até o saldo previsto', async () => {
     const { db, empresa } = await setup();
     const id = await criarCoca(db);
     await saldo(db, empresa.id, id, 24000, 0);
+    // 10 UN contadas = 15.000 ML → baixa 9.000; previsto = 15.000
     const preview = await previewAjuste(db, empresa.id, id);
     assert.equal(preview.saldo_fiscal_anterior, 24000);
-    assert.equal(preview.diferenca_fiscal, -15000);
-    assert.equal(preview.saldo_fiscal_previsto, 9000);
-    assert.equal(ui.calcularSaldoPrevisto(24000, 15000, 'OFF'), 9000);
+    assert.equal(preview.quantidade_fiscal_contada, 15000);
+    assert.equal(preview.quantidade_fiscal_movimento, 9000);
+    assert.equal(preview.diferenca_fiscal, -9000);
+    assert.equal(preview.saldo_fiscal_previsto, 15000);
+    assert.equal(ui.calcularSaldoPrevisto(24000, 15000, 'OFF'), 15000);
+    assert.equal(ui.calcularMovimentoAjuste(24000, 15000, 'OFF'), 9000);
     await closeDb(db);
   });
 
-  it('09 baixa superior ao saldo é rejeitada com disponível e solicitado', async () => {
+  it('09 contado acima do saldo na baixa é rejeitado', async () => {
     const { db, empresa } = await setup();
     const id = await criarCoca(db);
     await saldo(db, empresa.id, id, 24000, 0);
+    // 20 UN = 30.000 ML contados > 24.000 → incompatível com BAIXA
     const preview = await previewAjuste(db, empresa.id, id, {
       quantidade_fiscal_informada: 20,
       quantidade_nao_fiscal_informada: 0
@@ -397,7 +408,7 @@ describe('CDS-ESTOQUE-AJUSTE-DIRECIONADO-05.4', { concurrency: false }, () => {
     assert.equal(preview.saldo_insuficiente, true);
     assert.equal(preview.saldo_disponivel_fiscal, 24000);
     assert.equal(preview.quantidade_solicitada_fiscal, 30000);
-    assert.equal(preview.saldo_fiscal_previsto, -6000);
+    assert.equal(preview.saldo_fiscal_previsto, 30000);
     const antes = await lerSaldo(db, empresa.id, id);
     await assert.rejects(
       () => confirmarPreview(db, empresa, preview, { chave: 'baixa-insuficiente' }),
@@ -427,6 +438,8 @@ describe('CDS-ESTOQUE-AJUSTE-DIRECIONADO-05.4', { concurrency: false }, () => {
     assert.equal(consulta.movimentou_estoque, false);
     assert.equal(preview.movimentou_estoque, false);
     assert.equal(preview.saldo_fiscal_esperado, 24000);
+    assert.ok('ultima_origem_saldo' in consulta);
+    assert.equal(consulta.ultima_origem_saldo, null);
     const depois = await lerSaldo(db, empresa.id, id);
     assert.deepEqual(depois, antes);
     const contagens = await get(db, 'SELECT COUNT(*) AS n FROM estoque_contagens_fisicas');
@@ -436,13 +449,19 @@ describe('CDS-ESTOQUE-AJUSTE-DIRECIONADO-05.4', { concurrency: false }, () => {
     await closeDb(db);
   });
 
-  it('11 e 12 acréscimo converte e soma a quantidade convertida', async () => {
+  it('11 e 12 acréscimo usa contado acima do saldo', async () => {
     const { db, empresa } = await setup();
     const id = await criarCoca(db);
     await saldo(db, empresa.id, id, 24000, 0);
-    const preview = await previewAjuste(db, empresa.id, id, { tipo_ajuste: 'ON' });
+    // Contado 26 UN = 39.000 ML → acréscimo 15.000
+    const preview = await previewAjuste(db, empresa.id, id, {
+      tipo_ajuste: 'ON',
+      quantidade_fiscal_informada: 26,
+      quantidade_nao_fiscal_informada: 0
+    });
     assert.equal(preview.tipo_ajuste, 'ACRESCIMO');
-    assert.equal(preview.quantidade_fiscal_convertida, 15000);
+    assert.equal(preview.quantidade_fiscal_convertida, 39000);
+    assert.equal(preview.quantidade_fiscal_movimento, 15000);
     assert.equal(preview.diferenca_fiscal, 15000);
     assert.equal(preview.saldo_fiscal_previsto, 39000);
     const antes = await lerSaldo(db, empresa.id, id);
@@ -450,11 +469,15 @@ describe('CDS-ESTOQUE-AJUSTE-DIRECIONADO-05.4', { concurrency: false }, () => {
     await closeDb(db);
   });
 
-  it('13 saldo previsto do acréscimo é apresentado corretamente', async () => {
+  it('13 saldo previsto do acréscimo é o contado', async () => {
     const { db, empresa } = await setup();
     const id = await criarCoca(db);
     await saldo(db, empresa.id, id, 24000, 0);
-    const preview = await previewAjuste(db, empresa.id, id, { tipo_ajuste: 'ACRESCIMO' });
+    const preview = await previewAjuste(db, empresa.id, id, {
+      tipo_ajuste: 'ACRESCIMO',
+      quantidade_fiscal_informada: 26,
+      quantidade_nao_fiscal_informada: 0
+    });
     assert.equal(preview.saldo_fiscal_anterior, 24000);
     assert.equal(preview.saldo_fiscal_previsto, 39000);
     assert.equal(ui.calcularSaldoPrevisto(preview.saldo_fiscal_anterior, preview.quantidade_fiscal_convertida, 'ON'), 39000);
@@ -478,6 +501,8 @@ describe('CDS-ESTOQUE-AJUSTE-DIRECIONADO-05.4', { concurrency: false }, () => {
     const { db, empresa } = await setup();
     const id = await criarCoca(db);
     await saldo(db, empresa.id, id, 24000, 10000);
+    // Contado F 10 UN=15.000 → previsto 15.000 (baixa 9.000)
+    // Contado NF 2 UN=3.000 → previsto 3.000 (baixa 7.000)
     const preview = await previewAjuste(db, empresa.id, id, {
       tipo_ajuste: 'BAIXA',
       quantidade_fiscal_informada: 10,
@@ -487,14 +512,14 @@ describe('CDS-ESTOQUE-AJUSTE-DIRECIONADO-05.4', { concurrency: false }, () => {
     assert.equal(preview.omitir_nao_fiscal, false);
     assert.equal(preview.quantidade_fiscal_convertida, 15000);
     assert.equal(preview.quantidade_nao_fiscal_convertida, 3000);
-    assert.equal(preview.saldo_fiscal_previsto, 9000);
-    assert.equal(preview.saldo_nao_fiscal_previsto, 7000);
+    assert.equal(preview.saldo_fiscal_previsto, 15000);
+    assert.equal(preview.saldo_nao_fiscal_previsto, 3000);
     const conf = await confirmarPreview(db, empresa, preview, { chave: 'baixa-fxnf' });
     const depois = await lerSaldo(db, empresa.id, id);
-    assert.deepEqual(depois, { fiscal: 9000, naoFiscal: 7000 });
+    assert.deepEqual(depois, { fiscal: 15000, naoFiscal: 3000 });
     assert.equal(conf.itens[0].tipo_ajuste, 'BAIXA');
-    assert.equal(conf.itens[0].diferenca_fiscal, -15000);
-    assert.equal(conf.itens[0].diferenca_nao_fiscal, -3000);
+    assert.equal(conf.itens[0].diferenca_fiscal, -9000);
+    assert.equal(conf.itens[0].diferenca_nao_fiscal, -7000);
     await closeDb(db);
   });
 
@@ -502,16 +527,17 @@ describe('CDS-ESTOQUE-AJUSTE-DIRECIONADO-05.4', { concurrency: false }, () => {
     const { db, empresa } = await setup();
     const id = await criarCoca(db);
     await saldo(db, empresa.id, id, 24000, 10000);
+    // Contado F 26 UN=39.000; NF 8 UN=12.000 → previstos 39.000 / 12.000
     const preview = await previewAjuste(db, empresa.id, id, {
       tipo_ajuste: 'ACRESCIMO',
-      quantidade_fiscal_informada: 10,
-      quantidade_nao_fiscal_informada: 2
+      quantidade_fiscal_informada: 26,
+      quantidade_nao_fiscal_informada: 8
     });
     assert.equal(preview.saldo_fiscal_previsto, 39000);
-    assert.equal(preview.saldo_nao_fiscal_previsto, 13000);
+    assert.equal(preview.saldo_nao_fiscal_previsto, 12000);
     await confirmarPreview(db, empresa, preview, { chave: 'entrada-fxnf' });
     const depois = await lerSaldo(db, empresa.id, id);
-    assert.deepEqual(depois, { fiscal: 39000, naoFiscal: 13000 });
+    assert.deepEqual(depois, { fiscal: 39000, naoFiscal: 12000 });
     await closeDb(db);
   });
 
@@ -519,6 +545,14 @@ describe('CDS-ESTOQUE-AJUSTE-DIRECIONADO-05.4', { concurrency: false }, () => {
     assert.match(UI, /id="cef-wrap-qnf"/);
     assert.match(UI, /f12On[\s\S]{0,80}d-none|cef-wrap-qnf.*d-none/);
     assert.match(UI, /F12 ON — somente quantidade fiscal/);
+  });
+
+  it('card exibe última entrada/ajuste e labels de quantidade contada', () => {
+    assert.match(UI, /ultima_origem_saldo/);
+    assert.match(UI, /Última entrada \(compra\/NF\)/);
+    assert.match(UI, /Último ajuste manual/);
+    assert.match(UI, /Quantidade fiscal contada|Quantidade física encontrada \(contada\)/);
+    assert.match(UI, /saldo atual − contado|saldo físico contado/);
   });
 
   it('18 e 19 F12 ON preserva o saldo não fiscal e não gera ajuste não fiscal', async () => {
@@ -535,12 +569,14 @@ describe('CDS-ESTOQUE-AJUSTE-DIRECIONADO-05.4', { concurrency: false }, () => {
     assert.equal(preview.quantidade_nao_fiscal_convertida, null);
     assert.equal(preview.saldo_nao_fiscal_previsto, 10000);
     assert.equal(preview.diferenca_nao_fiscal, null);
+    assert.equal(preview.saldo_fiscal_previsto, 15000);
+    assert.equal(preview.diferenca_fiscal, -9000);
     await confirmarPreview(db, empresa, preview, { chave: 'f12-preserva-nf', modo_fiscal: '1' });
     const depois = await lerSaldo(db, empresa.id, id);
-    assert.deepEqual(depois, { fiscal: 9000, naoFiscal: 10000 });
+    assert.deepEqual(depois, { fiscal: 15000, naoFiscal: 10000 });
     const ajustes = await all(db, 'SELECT ajuste_fiscal, ajuste_nao_fiscal, motivo FROM produtos_ajustes_estoque');
     assert.equal(ajustes.length, 1);
-    assert.equal(Number(ajustes[0].ajuste_fiscal), -15000);
+    assert.equal(Number(ajustes[0].ajuste_fiscal), -9000);
     assert.equal(Number(ajustes[0].ajuste_nao_fiscal), 0);
     assert.match(String(ajustes[0].motivo), /^AJUSTE_DIRECIONADO_BAIXA/);
     await closeDb(db);
@@ -576,7 +612,10 @@ describe('CDS-ESTOQUE-AJUSTE-DIRECIONADO-05.4', { concurrency: false }, () => {
     const { db, empresa } = await setup();
     const id = await criarCoca(db);
     await saldo(db, empresa.id, id, 24000, 0);
-    const preview = await previewAjuste(db, empresa.id, id, { tipo_ajuste: 'ACRESCIMO' });
+    const preview = await previewAjuste(db, empresa.id, id, {
+      tipo_ajuste: 'ACRESCIMO',
+      quantidade_fiscal_informada: 26
+    });
     const primeira = await confirmarPreview(db, empresa, preview, { chave: 'mesma-chave' });
     const segunda = await confirmarPreview(db, empresa, preview, { chave: 'mesma-chave' });
     assert.equal(segunda.id, primeira.id);
@@ -630,8 +669,9 @@ describe('CDS-ESTOQUE-AJUSTE-DIRECIONADO-05.4', { concurrency: false }, () => {
       quantidade_fiscal_informada: 4,
       quantidade_fiscal_convertida: 6000,
       quantidade_fiscal_contada: 6000,
-      diferenca_fiscal: -6000,
-      saldo_fiscal_previsto: 18000
+      quantidade_fiscal_movimento: 18000,
+      diferenca_fiscal: -18000,
+      saldo_fiscal_previsto: 6000
     }), { nome: 'Coca-Cola 1,5 L' });
     const remocao = ui.removerDaLista(edicao.linhas, 0);
     assert.equal(inclusao.ok, true);
@@ -666,14 +706,71 @@ describe('CDS-ESTOQUE-AJUSTE-DIRECIONADO-05.4', { concurrency: false }, () => {
     const cocaItem = conf.itens.find((item) => item.produto_id === coca);
     const aguaItem = conf.itens.find((item) => item.produto_id === agua);
     assert.equal(cocaItem.saldo_fiscal_anterior, 24000);
-    assert.equal(cocaItem.quantidade_fiscal_contada, 9000);
+    assert.equal(cocaItem.quantidade_fiscal_contada, 15000);
     assert.equal(aguaItem.saldo_fiscal_anterior, 5000);
-    assert.equal(aguaItem.quantidade_fiscal_contada, 15000);
+    assert.equal(aguaItem.quantidade_fiscal_contada, 10000);
     const motivos = await all(db, 'SELECT motivo, ajuste_fiscal FROM produtos_ajustes_estoque ORDER BY id');
     assert.match(String(motivos[0].motivo), /AJUSTE_DIRECIONADO_BAIXA/);
     assert.match(String(motivos[1].motivo), /AJUSTE_DIRECIONADO_ACRESCIMO/);
-    assert.equal(Number(motivos[0].ajuste_fiscal), -15000);
-    assert.equal(Number(motivos[1].ajuste_fiscal), 10000);
+    assert.equal(Number(motivos[0].ajuste_fiscal), -9000);
+    assert.equal(Number(motivos[1].ajuste_fiscal), 5000);
+    await closeDb(db);
+  });
+
+  it('consulta saldo atual prioriza a data mais recente entre compra/NF e ajuste', async () => {
+    const { db, empresa } = await setup();
+    const id = await criarCoca(db);
+    await saldo(db, empresa.id, id, 24000, 0);
+    await run(db, `
+      CREATE TABLE IF NOT EXISTS compras (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        empresa_id INTEGER,
+        data_entrada TEXT,
+        data_emissao TEXT,
+        data_compra TEXT,
+        created_at TEXT
+      )
+    `);
+    await run(db, `
+      CREATE TABLE IF NOT EXISTS compras_itens (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        compra_id INTEGER,
+        produto_id INTEGER
+      )
+    `);
+    await run(
+      db,
+      `INSERT INTO compras (empresa_id, data_entrada) VALUES (?, ?)`,
+      [empresa.id, '2026-11-08']
+    );
+    const compra = await get(db, 'SELECT id FROM compras ORDER BY id DESC LIMIT 1');
+    await run(
+      db,
+      `INSERT INTO compras_itens (compra_id, produto_id) VALUES (?, ?)`,
+      [compra.id, id]
+    );
+    await run(
+      db,
+      `INSERT INTO produtos_ajustes_estoque (produto_id, motivo, ajuste_fiscal, criado_em)
+       VALUES (?, 'AJUSTE_DIRECIONADO_BAIXA', -4, ?)`,
+      [id, '2026-11-14 10:00:00']
+    );
+    const consulta = await EstoqueContagemFisicaService.consultarSaldoAtualContagem({
+      db,
+      empresaId: empresa.id,
+      produtoId: id
+    });
+    assert.ok(consulta.ultima_origem_saldo);
+    assert.equal(consulta.ultima_origem_saldo.origem, 'AJUSTE');
+    assert.match(String(consulta.ultima_origem_saldo.data), /^2026-11-14/);
+    await run(db, `DELETE FROM produtos_ajustes_estoque`);
+    const soCompra = await EstoqueContagemFisicaService.consultarSaldoAtualContagem({
+      db,
+      empresaId: empresa.id,
+      produtoId: id
+    });
+    assert.equal(soCompra.ultima_origem_saldo.origem, 'COMPRA');
+    assert.match(String(soCompra.ultima_origem_saldo.data), /^2026-11-08/);
     await closeDb(db);
   });
 
@@ -689,7 +786,7 @@ describe('CDS-ESTOQUE-AJUSTE-DIRECIONADO-05.4', { concurrency: false }, () => {
     );
     const preview = await previewAjuste(db, empresa.id, id, { tipo_ajuste: 'BAIXA' });
     await confirmarPreview(db, empresa, preview, { chave: 'isola-empresa' });
-    assert.deepEqual(await lerSaldo(db, empresa.id, id), { fiscal: 9000, naoFiscal: 0 });
+    assert.deepEqual(await lerSaldo(db, empresa.id, id), { fiscal: 15000, naoFiscal: 0 });
     assert.deepEqual(await lerSaldo(db, empresaB.id, id), { fiscal: 8000, naoFiscal: 400 });
     await closeDb(db);
   });
@@ -721,12 +818,13 @@ describe('CDS-ESTOQUE-AJUSTE-DIRECIONADO-05.4', { concurrency: false }, () => {
     await saldo(db, empresa.id, r.lastID, 40, 0);
     const preview = await previewAjuste(db, empresa.id, r.lastID, {
       tipo_ajuste: 'ACRESCIMO',
-      quantidade_fiscal_informada: 10,
+      quantidade_fiscal_informada: 50,
       quantidade_nao_fiscal_informada: 0
     });
-    assert.equal(preview.quantidade_fiscal_convertida, 10);
+    assert.equal(preview.quantidade_fiscal_convertida, 50);
     assert.equal(preview.fator_total, 1);
     assert.equal(preview.saldo_fiscal_previsto, 50);
+    assert.equal(preview.quantidade_fiscal_movimento, 10);
     await closeDb(db);
   });
 
@@ -741,8 +839,10 @@ describe('CDS-ESTOQUE-AJUSTE-DIRECIONADO-05.4', { concurrency: false }, () => {
       quantidade_nao_fiscal_informada: 0
     });
     assert.equal(preview.quantidade_fiscal_convertida, direto.quantidade_convertida);
-    assert.equal(preview.saldo_fiscal_previsto, ui.calcularSaldoPrevisto(1000, direto.quantidade_convertida, 'BAIXA'));
-    assert.equal(preview.diferenca_fiscal, -direto.quantidade_convertida);
+    assert.equal(preview.quantidade_fiscal_contada, direto.quantidade_convertida);
+    assert.equal(preview.saldo_fiscal_previsto, direto.quantidade_convertida);
+    assert.equal(preview.diferenca_fiscal, -preview.quantidade_fiscal_movimento);
+    assert.ok(preview.quantidade_fiscal_movimento >= 0);
     await closeDb(db);
   });
 

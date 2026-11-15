@@ -20,6 +20,8 @@ let pdvCarregandoHandoff = false;
 let pdvPedidoHandoffFinalizado = false;
 /** Escolha explícita do operador: emitir NFC-e nesta venda (null = ainda não definido). */
 let pdvEmitirFiscalNaVenda = null;
+/** CPF/CNPJ na nota capturado antes do pagamento (undefined = ainda não perguntado). */
+let pdvCpfCnpjNotaValor = undefined;
 /** PDV-SEL-01 — snapshot informativo da empresa selecionada pelo servidor (não editável). */
 let selecaoEmpresaPdvSnapshot = null;
 let selecaoEmpresaPdvTimer = null;
@@ -602,13 +604,20 @@ function aplicarHandoffPedidoPdv() {
         return;
     }
 
+    // Substitui qualquer preparação individual pendente (ex.: Retomar no PDV de outra mesa).
+    limparHandoffPedidoPdvStorage();
+    try {
+        sessionStorage.setItem('pdvPedidoHandoff', JSON.stringify(handoff));
+    } catch (_e) { /* ignore */ }
     pdvPedidoHandoff = handoff;
+    pdvPedidoHandoffFinalizado = false;
     pdvCarregandoHandoff = true;
     try {
         for (const item of handoff.itens) {
             const produto = produtosDisponiveis.find(
                 (candidato) => Number(candidato.id) === Number(item.produto_id)
             );
+            const tamanhoAntes = carrinho.length;
             adicionarItemNoCarrinho(
                 produto,
                 Number(item.quantidade),
@@ -617,9 +626,20 @@ function aplicarHandoffPedidoPdv() {
                 null,
                 { tipo_venda: item.tipo_venda || 'PESO' }
             );
-            const itemCarrinho = carrinho.find(
-                (candidato) => Number(candidato.id) === Number(item.produto_id)
-            );
+            let itemCarrinho = carrinho.length > tamanhoAntes
+                ? carrinho[carrinho.length - 1]
+                : null;
+            if (
+                !itemCarrinho
+                || Number(itemCarrinho.id) !== Number(item.produto_id)
+            ) {
+                for (let i = carrinho.length - 1; i >= 0; i -= 1) {
+                    if (Number(carrinho[i].id) === Number(item.produto_id)) {
+                        itemCarrinho = carrinho[i];
+                        break;
+                    }
+                }
+            }
             if (!itemCarrinho) {
                 throw new Error(`Não foi possível inserir o produto ${item.produto_id} no carrinho.`);
             }
@@ -644,7 +664,7 @@ function aplicarHandoffPedidoPdv() {
         $('#descontoPdv, #acrescimoPdv').prop('disabled', true);
         showNotification(
             consolidado
-                ? 'Pedidos da mesa carregados em uma única venda. Finalize o pagamento normalmente no PDV.'
+                ? 'Pedidos da mesa carregados com composição fiscal. Finalize o pagamento normalmente no PDV.'
                 : `Composição do Pedido ${handoff.pedido_id} carregada. Finalize o pagamento normalmente no PDV.`,
             'info'
         );
@@ -3596,10 +3616,14 @@ function adicionarItemNoCarrinho(produto, quantidade, precoUnitario, mensagemExt
     // calcula preco final considerando promoção primeiro, depois atacado (se mais vantajoso)
     let precoFinal = precoPromocional;
     let descontoAtacadoItem = 0;
-    
-    const itemExistente = carrinho.find(item =>
-        Number(item.id) === Number(produto.id) && normalizarTipoVendaItem(item) === tipoVenda
-    );
+
+    // Handoff de pedido/consolidada: cada linha do snapshot vira uma linha no carrinho.
+    // Mesclar pelo produto_id apagaria o segundo pastel (ou a segunda bebida) da mesa.
+    const itemExistente = pdvCarregandoHandoff
+        ? null
+        : carrinho.find(item =>
+            Number(item.id) === Number(produto.id) && normalizarTipoVendaItem(item) === tipoVenda
+        );
 
     if (itemExistente) {
         const novaQuantidadeBruta = Number(itemExistente.quantidade) + quantidade;
@@ -4481,6 +4505,7 @@ function limparCarrinho() {
     formaPagamentoSelecionada = null;
     vendaPrazoInfo = null;
     clienteSelecionado = null;
+    limparCpfCnpjNotaCapturado();
     $('#descontoPdv').val(0);
     $('#formaPagamentoPdv').val('');
     $('#pdvClienteBox').hide();
@@ -5207,9 +5232,20 @@ function abrirModalDecisaoFiscal(skipPagamento = false) {
     prosseguirFinalizacaoConformeModoFiscal(formaPagamento);
 }
 
+function deveSolicitarCpfCnpjNaNota() {
+    if (typeof implantacaoPermiteFiscal === 'function' && !implantacaoPermiteFiscal()) {
+        return false;
+    }
+    return typeof pdvModoFiscalAtivo === 'function' ? pdvModoFiscalAtivo() : false;
+}
+
+function limparCpfCnpjNotaCapturado() {
+    pdvCpfCnpjNotaValor = undefined;
+}
+
 /**
  * F12 ativo → venda fiscal (CPF/NFC-e). F12 desativado → venda não fiscal direta.
- * Sem modal de escolha manual.
+ * CPF/CNPJ já foi pedido antes do pagamento; aqui só finaliza.
  */
 function prosseguirFinalizacaoConformeModoFiscal(formaPagamentoOverride) {
     const forma = formaPagamentoOverride || formaPagamentoSelecionadaPDV;
@@ -5222,7 +5258,12 @@ function prosseguirFinalizacaoConformeModoFiscal(formaPagamentoOverride) {
 
     if (pdvModoFiscalAtivo()) {
         pdvEmitirFiscalNaVenda = true;
-        mostrarModalCpfCnpjNota();
+        if (pdvCpfCnpjNotaValor !== undefined) {
+            executarFinalizacaoVenda(true, pdvCpfCnpjNotaValor, forma);
+            return;
+        }
+        // Fallback: se o pagamento abriu sem passar pelo CPF, pergunta agora.
+        mostrarModalCpfCnpjNota({ momento: 'apos_pagamento' });
         return;
     }
 
@@ -5631,13 +5672,29 @@ function abrirPagamentoMisto() {
 }
 
 
-function mostrarModalCpfCnpjNota() {
+/**
+ * @param {object} [opcoes]
+ * @param {'antes_pagamento'|'apos_pagamento'} [opcoes.momento]
+ * @param {(cpfLimpo: string|null) => void} [opcoes.onContinuar]
+ */
+function mostrarModalCpfCnpjNota(opcoes = {}) {
+    const momento = opcoes.momento || 'antes_pagamento';
+    const onContinuar = typeof opcoes.onContinuar === 'function' ? opcoes.onContinuar : null;
+
     if (!pdvModoFiscalAtivo()) {
+        if (onContinuar) {
+            onContinuar(null);
+            return;
+        }
         prosseguirFinalizacaoConformeModoFiscal();
         return;
     }
 
     pdvEmitirFiscalNaVenda = true;
+    const rotuloPrimario = momento === 'antes_pagamento' ? 'Continuar' : 'Finalizar Venda';
+    const rotuloSecundario = momento === 'antes_pagamento'
+        ? 'Continuar sem CPF/CNPJ'
+        : 'Finalizar sem CPF/CNPJ';
 
     $('#modal-container').html(`
         <div class="modal fade" id="cpfCnpjNotaModal" tabindex="-1" aria-hidden="true">
@@ -5665,11 +5722,11 @@ function mostrarModalCpfCnpjNota() {
 
                         <div class="d-grid gap-2 mt-3">
                             <button type="button" class="btn btn-success" id="btnConfirmarCpfNota">
-                                Finalizar Venda
+                                ${rotuloPrimario}
                             </button>
 
                             <button type="button" class="btn btn-secondary" id="btnEmitirSemCpf">
-                                Finalizar sem CPF/CNPJ
+                                ${rotuloSecundario}
                             </button>
                         </div>
                     </div>
@@ -5701,6 +5758,22 @@ function mostrarModalCpfCnpjNota() {
         this.value = v;
     });
 
+    function concluirCpfNota(cpfLimpo) {
+        pdvCpfCnpjNotaValor = cpfLimpo;
+        if (document.activeElement) {
+            document.activeElement.blur();
+        }
+        modal.hide();
+        setTimeout(() => {
+            if (onContinuar) {
+                onContinuar(cpfLimpo);
+                return;
+            }
+            const emitirFiscal = pdvEmitirFiscalNaVenda === true;
+            executarFinalizacaoVenda(emitirFiscal, cpfLimpo, formaPagamentoSelecionadaPDV);
+        }, 300);
+    }
+
     $('#btnConfirmarCpfNota').off('click').on('click', function () {
         const cpfCnpj = $('#cpfCnpjNotaFiscal').val();
 
@@ -5710,29 +5783,11 @@ function mostrarModalCpfCnpjNota() {
             return;
         }
 
-        if (document.activeElement) {
-            document.activeElement.blur();
-        }
-
-        modal.hide();
-
-        setTimeout(() => {
-            const emitirFiscal = pdvEmitirFiscalNaVenda === true;
-            executarFinalizacaoVenda(emitirFiscal, limparCpfCnpj(cpfCnpj), formaPagamentoSelecionadaPDV);
-        }, 300);
+        concluirCpfNota(cpfCnpj ? limparCpfCnpj(cpfCnpj) : null);
     });
 
     $('#btnEmitirSemCpf').off('click').on('click', function () {
-        if (document.activeElement) {
-            document.activeElement.blur();
-        }
-
-        modal.hide();
-
-        setTimeout(() => {
-            const emitirFiscal = pdvEmitirFiscalNaVenda === true;
-            executarFinalizacaoVenda(emitirFiscal, null, formaPagamentoSelecionadaPDV);
-        }, 300);
+        concluirCpfNota(null);
     });
 }
 
@@ -6487,6 +6542,7 @@ function finalizarPosVenda() {
     if (typeof PagamentoSequencial !== 'undefined') PagamentoSequencial.reset();
     supervisorAuthToken = null;
     pdvEmitirFiscalNaVenda = null;
+    limparCpfCnpjNotaCapturado();
     window.pdvTipoVenda = 'BALCAO';
     $('#descontoPdv').val(0);
     $('#descontoPdv, #acrescimoPdv').prop('disabled', false);
@@ -6509,6 +6565,68 @@ function finalizarPosVenda() {
 
     if (typeof loadVendas === 'function' && typeof currentPage !== 'undefined' && currentPage === 'vendas') {
         loadVendas();
+    }
+}
+
+async function liberarConsolidacaoHandoffPdv(handoff) {
+    if (!handoffConsolidado(handoff) || handoff.venda_id) return;
+    const consolidacaoId = Number(handoff.consolidacao_id);
+    if (!Number.isInteger(consolidacaoId) || consolidacaoId <= 0) return;
+    try {
+        const response = await fetch(
+            `${API_URL}/pedidos/venda-consolidada-mesa/${consolidacaoId}/liberar`,
+            {
+                method: 'POST',
+                headers: headersPedidoPdv(),
+                body: '{}'
+            }
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            console.warn(
+                '[PDV] Não foi possível liberar a consolidação abandonada.',
+                data.codigo || data.mensagem || response.status
+            );
+        }
+    } catch (erroLiberar) {
+        console.warn('[PDV] Falha ao liberar consolidação abandonada.', erroLiberar);
+    }
+    try {
+        const mesaId = Number(handoff.mesa_id || 0);
+        if (mesaId > 0) {
+            const prefixo = 'cds:pedido:venda-consolidada:';
+            for (let i = sessionStorage.length - 1; i >= 0; i -= 1) {
+                const chave = sessionStorage.key(i);
+                if (chave && chave.startsWith(prefixo) && chave.includes(`:${mesaId}:`)) {
+                    sessionStorage.removeItem(chave);
+                }
+            }
+        }
+    } catch (_e) { /* ignore */ }
+}
+
+async function liberarPreparacaoIndividualHandoffPdv(handoff) {
+    if (!handoff || handoffConsolidado(handoff) || handoff.venda_id) return;
+    const pedidoId = Number(handoff.pedido_id);
+    if (!Number.isInteger(pedidoId) || pedidoId <= 0) return;
+    try {
+        const response = await fetch(
+            `${API_URL}/pedidos/${pedidoId}/abandonar-venda-pdv`,
+            {
+                method: 'POST',
+                headers: headersPedidoPdv(),
+                body: '{}'
+            }
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            console.warn(
+                '[PDV] Não foi possível abandonar a preparação individual.',
+                data.codigo || data.mensagem || response.status
+            );
+        }
+    } catch (erroLiberar) {
+        console.warn('[PDV] Falha ao abandonar preparação individual.', erroLiberar);
     }
 }
 
@@ -6536,6 +6654,10 @@ async function cancelarVendaAtual() {
 
     if (!window.confirm('Tem certeza que deseja cancelar esta venda?')) return;
     if (pdvPedidoHandoff) {
+        const handoffAbandonado = pdvPedidoHandoff;
+        await liberarConsolidacaoHandoffPdv(handoffAbandonado);
+        await liberarPreparacaoIndividualHandoffPdv(handoffAbandonado);
+        avisarErpListaPedidosAtualizar();
         limparHandoffPedidoPdvStorage();
         pdvPedidoHandoff = null;
         $('#descontoPdv, #acrescimoPdv').prop('disabled', false);
@@ -6566,6 +6688,8 @@ async function cancelarVendaAtual() {
     formaPagamentoSelecionada = null;
     clienteSelecionado = null;
     vendaPrazoInfo = null;
+    limparCpfCnpjNotaCapturado();
+    pdvEmitirFiscalNaVenda = null;
     $('#descontoPdv').val(0);
     $('#formaPagamentoPdv').val('');
     $('#valorRecebidoPDV').val('');
@@ -7015,6 +7139,17 @@ function abrirTelaPagamento() {
 }
 
 function abrirTelaPagamentoBalcao(opcoes = {}) {
+    // CPF/CNPJ na nota: antes da forma de pagamento (F12 fiscal).
+    if (!opcoes.cpfJaCapturado && deveSolicitarCpfCnpjNaNota() && pdvCpfCnpjNotaValor === undefined) {
+        mostrarModalCpfCnpjNota({
+            momento: 'antes_pagamento',
+            onContinuar: () => {
+                abrirTelaPagamentoBalcao(Object.assign({}, opcoes, { cpfJaCapturado: true }));
+            }
+        });
+        return;
+    }
+
     window.pdvDocumentoFiscalBloqueado = null;
     const totalVenda = obterTotalVendaPDV();
     if (!opcoes.preservarParcelas && typeof PagamentoSequencial !== 'undefined') {

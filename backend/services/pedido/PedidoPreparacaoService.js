@@ -346,10 +346,17 @@ async function listarPorMesa(empresaId, mesaId, opts = {}) {
     return { success: true, atendimento_id: null, mesa_id: mesa.id, numero: mesa.numero, pedidos: [] };
   }
   const agora = await agoraServidor(db, opts);
+  const colunasPedidos = await all(db, 'PRAGMA table_info(pedidos)');
+  const temClienteNomeLivre = (colunasPedidos || []).some((c) => String(c.name) === 'cliente_nome');
+  const clienteNomeSelect = temClienteNomeLivre
+    ? "COALESCE(NULLIF(TRIM(p.cliente_nome), ''), c.nome)"
+    : 'c.nome';
   const rows = await all(db, `
     SELECT p.id, p.codigo, p.status, p.total, p.mesa_atendimento_id,
+           ${clienteNomeSelect} AS cliente_nome,
            pr.estado, pr.enviado_em, pr.concluido_em, pr.operador_envio_id, pr.operador_conclusao_id
     FROM pedidos p
+    LEFT JOIN clientes c ON c.id = p.cliente_id
     LEFT JOIN pedido_preparacoes pr ON pr.pedido_id = p.id AND pr.empresa_id = p.empresa_id
     WHERE p.empresa_id = ? AND p.mesa_atendimento_id = ?
     ORDER BY p.id
@@ -364,6 +371,7 @@ async function listarPorMesa(empresaId, mesaId, opts = {}) {
       codigo: row.codigo,
       status: row.status,
       total: row.total,
+      cliente_nome: row.cliente_nome || null,
       mesa_atendimento_id: row.mesa_atendimento_id,
       preparacao: apresentar(row, agora)
     }))

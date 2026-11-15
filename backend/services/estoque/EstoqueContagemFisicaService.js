@@ -47,8 +47,9 @@ function resolverOmitirNaoFiscal(params = {}, item = {}) {
 }
 
 /**
- * Ajuste direcionado: a quantidade convertida é a movimentação, não o saldo final.
- * Ausência de tipo preserva a contagem física absoluta.
+ * Ajuste direcionado: a quantidade informada é o **saldo contado** (físico encontrado).
+ * Movimento = |saldo_atual − contado|; BAIXA exige contado ≤ saldo; ACRÉSCIMO exige contado ≥ saldo.
+ * Ausência de tipo preserva a contagem física absoluta (mesma semântica de alvo).
  */
 function normalizarTipoAjuste(valor) {
   if (valor == null || valor === '') return null;
@@ -78,7 +79,41 @@ function resolverTipoAjusteItem(params, item) {
 function mensagemSaldoInsuficiente(bucket, disponivel, solicitado, unidade) {
   const un = unidade ? ` ${unidade}` : '';
   const nome = bucket === 'NAO_FISCAL' ? 'não fiscal' : 'fiscal';
-  return `Saldo ${nome} insuficiente para a baixa. Disponível: ${disponivel}${un}. Solicitado: ${solicitado}${un}.`;
+  return `Saldo ${nome} insuficiente para a baixa. Disponível: ${disponivel}${un}. Contado/solicitado: ${solicitado}${un}.`;
+}
+
+function mensagemContadoIncompativel(tipoAjuste, saldo, contado, unidade) {
+  const un = unidade ? ` ${unidade}` : '';
+  if (tipoAjuste === 'BAIXA') {
+    return `Na baixa, a quantidade contada (${contado}${un}) deve ser menor ou igual ao saldo atual (${saldo}${un}). `
+      + 'Se o físico for maior, use acréscimo de estoque.';
+  }
+  return `No acréscimo, a quantidade contada (${contado}${un}) deve ser maior ou igual ao saldo atual (${saldo}${un}). `
+    + 'Se o físico for menor, use baixa de estoque.';
+}
+
+/**
+ * @returns {{ movimento: number, previsto: number, diferenca: number, incompativel: boolean }}
+ */
+function calcularAjustePorQuantidadeContada(saldoAtual, quantidadeContada, tipoAjuste) {
+  const saldo = roundStockQuantity(Number(saldoAtual) || 0);
+  const contado = roundStockQuantity(Number(quantidadeContada) || 0);
+  if (tipoAjuste === 'BAIXA') {
+    const movimento = roundStockQuantity(saldo - contado);
+    return {
+      movimento,
+      previsto: contado,
+      diferenca: roundStockQuantity(-movimento),
+      incompativel: movimento < -EPS_SALDO
+    };
+  }
+  const movimento = roundStockQuantity(contado - saldo);
+  return {
+    movimento,
+    previsto: contado,
+    diferenca: movimento,
+    incompativel: movimento < -EPS_SALDO
+  };
 }
 
 function quantidadeInformadaOpcional(valor, campo, { obrigatorio }) {
@@ -316,12 +351,9 @@ async function registrarContagemFisica(params = {}) {
       unidade_informada: convF.unidade_informada,
       unidade_base: convF.unidade_base,
       fator_total: convF.fator_total,
-      quantidade_fiscal_movimento: tipoAjuste ? convF.quantidade_convertida : null,
-      quantidade_nao_fiscal_movimento: tipoAjuste && convNf ? convNf.quantidade_convertida : null,
-      // Contagem absoluta: a convertida é o saldo-alvo. No ajuste direcionado o alvo
-      // é calculado na transação a partir do snapshot, não da quantidade convertida.
-      quantidade_fiscal_contada: tipoAjuste ? null : convF.quantidade_convertida,
-      quantidade_nao_fiscal_contada: tipoAjuste ? null : (convNf ? convNf.quantidade_convertida : null),
+      // Contagem / ajuste direcionado: quantidade convertida = saldo físico contado (alvo).
+      quantidade_fiscal_contada: convF.quantidade_convertida,
+      quantidade_nao_fiscal_contada: convNf ? convNf.quantidade_convertida : null,
       saldo_esperado: extrairSaldoEsperadoItem(item)
     });
   }
@@ -408,48 +440,83 @@ async function registrarContagemFisica(params = {}) {
           : roundStockQuantity(quantidadeNfPersistida - saldoNaoFiscalAnterior);
 
         if (item.tipo_ajuste === 'BAIXA' || item.tipo_ajuste === 'ACRESCIMO') {
-          const sinal = item.tipo_ajuste === 'BAIXA' ? -1 : 1;
-          const movF = roundStockQuantity(item.quantidade_fiscal_movimento);
           const unidade = item.unidade_base || '';
-          if (item.tipo_ajuste === 'BAIXA' && movF - saldoFiscalAnterior > EPS_SALDO) {
+          const calcF = calcularAjustePorQuantidadeContada(
+            saldoFiscalAnterior,
+            item.quantidade_fiscal_contada,
+            item.tipo_ajuste
+          );
+          if (calcF.incompativel) {
             throw erroContagem(
-              'SALDO_INSUFICIENTE',
-              mensagemSaldoInsuficiente('FISCAL', saldoFiscalAnterior, movF, unidade),
+              item.tipo_ajuste === 'BAIXA' ? 'SALDO_INSUFICIENTE' : 'CONTADO_INCOMPATIVEL',
+              item.tipo_ajuste === 'BAIXA'
+                ? mensagemSaldoInsuficiente(
+                  'FISCAL',
+                  saldoFiscalAnterior,
+                  item.quantidade_fiscal_contada,
+                  unidade
+                )
+                : mensagemContadoIncompativel(
+                  item.tipo_ajuste,
+                  saldoFiscalAnterior,
+                  item.quantidade_fiscal_contada,
+                  unidade
+                ),
               409,
               {
                 empresa_id: empresaId,
                 produto_id: item.produto_id,
                 bucket: 'FISCAL',
-                tipo_ajuste: 'BAIXA',
+                tipo_ajuste: item.tipo_ajuste,
                 saldo_disponivel: saldoFiscalAnterior,
-                quantidade_solicitada: movF
+                quantidade_solicitada: item.quantidade_fiscal_contada,
+                quantidade_contada: item.quantidade_fiscal_contada,
+                movimento: calcF.movimento
               }
             );
           }
-          diferencaFiscal = roundStockQuantity(sinal * movF);
-          quantidadeFiscalPersistida = roundStockQuantity(saldoFiscalAnterior + diferencaFiscal);
+          diferencaFiscal = calcF.diferenca;
+          quantidadeFiscalPersistida = calcF.previsto;
           if (item.omitir_nao_fiscal) {
             diferencaNaoFiscal = 0;
             quantidadeNfPersistida = saldoNaoFiscalAnterior;
           } else {
-            const movNf = roundStockQuantity(item.quantidade_nao_fiscal_movimento);
-            if (item.tipo_ajuste === 'BAIXA' && movNf - saldoNaoFiscalAnterior > EPS_SALDO) {
+            const calcNf = calcularAjustePorQuantidadeContada(
+              saldoNaoFiscalAnterior,
+              item.quantidade_nao_fiscal_contada,
+              item.tipo_ajuste
+            );
+            if (calcNf.incompativel) {
               throw erroContagem(
-                'SALDO_INSUFICIENTE',
-                mensagemSaldoInsuficiente('NAO_FISCAL', saldoNaoFiscalAnterior, movNf, unidade),
+                item.tipo_ajuste === 'BAIXA' ? 'SALDO_INSUFICIENTE' : 'CONTADO_INCOMPATIVEL',
+                item.tipo_ajuste === 'BAIXA'
+                  ? mensagemSaldoInsuficiente(
+                    'NAO_FISCAL',
+                    saldoNaoFiscalAnterior,
+                    item.quantidade_nao_fiscal_contada,
+                    unidade
+                  )
+                  : mensagemContadoIncompativel(
+                    item.tipo_ajuste,
+                    saldoNaoFiscalAnterior,
+                    item.quantidade_nao_fiscal_contada,
+                    unidade
+                  ),
                 409,
                 {
                   empresa_id: empresaId,
                   produto_id: item.produto_id,
                   bucket: 'NAO_FISCAL',
-                  tipo_ajuste: 'BAIXA',
+                  tipo_ajuste: item.tipo_ajuste,
                   saldo_disponivel: saldoNaoFiscalAnterior,
-                  quantidade_solicitada: movNf
+                  quantidade_solicitada: item.quantidade_nao_fiscal_contada,
+                  quantidade_contada: item.quantidade_nao_fiscal_contada,
+                  movimento: calcNf.movimento
                 }
               );
             }
-            diferencaNaoFiscal = roundStockQuantity(sinal * movNf);
-            quantidadeNfPersistida = roundStockQuantity(saldoNaoFiscalAnterior + diferencaNaoFiscal);
+            diferencaNaoFiscal = calcNf.diferenca;
+            quantidadeNfPersistida = calcNf.previsto;
           }
         }
 
@@ -672,17 +739,12 @@ async function previsualizarContagem(params = {}) {
   const tipoAjuste = resolverTipoAjusteItem(params, params);
 
   if (tipoAjuste) {
-    const sinal = tipoAjuste === 'BAIXA' ? -1 : 1;
-    const diferencaFiscal = roundStockQuantity(sinal * qF);
-    const diferencaNaoFiscal = omitirNf || qNf == null ? null : roundStockQuantity(sinal * qNf);
-    const saldoFiscalPrevisto = roundStockQuantity(saldoFiscalAnterior + diferencaFiscal);
-    const saldoNaoFiscalPrevisto = omitirNf
-      ? saldoNaoFiscalAnterior
-      : roundStockQuantity(saldoNaoFiscalAnterior + diferencaNaoFiscal);
-    const insuficienteFiscal = tipoAjuste === 'BAIXA' && qF - saldoFiscalAnterior > EPS_SALDO;
-    const insuficienteNaoFiscal = tipoAjuste === 'BAIXA'
-      && !omitirNf
-      && qNf - saldoNaoFiscalAnterior > EPS_SALDO;
+    const calcF = calcularAjustePorQuantidadeContada(saldoFiscalAnterior, qF, tipoAjuste);
+    const calcNf = omitirNf || qNf == null
+      ? null
+      : calcularAjustePorQuantidadeContada(saldoNaoFiscalAnterior, qNf, tipoAjuste);
+    const insuficienteFiscal = calcF.incompativel;
+    const insuficienteNaoFiscal = !!(calcNf && calcNf.incompativel);
     return {
       empresa_id: empresaId,
       produto_id: produtoId,
@@ -703,15 +765,21 @@ async function previsualizarContagem(params = {}) {
       mensagem_conversao_nao_fiscal: omitirNf ? null : convNf.mensagem_conversao,
       quantidade_fiscal_convertida: qF,
       quantidade_nao_fiscal_convertida: qNf,
+      // Contado (alvo). Movimento = |diferença|.
       quantidade_fiscal_contada: qF,
       quantidade_nao_fiscal_contada: qNf,
-      diferenca_fiscal: diferencaFiscal,
-      diferenca_nao_fiscal: diferencaNaoFiscal,
-      saldo_fiscal_previsto: saldoFiscalPrevisto,
-      saldo_nao_fiscal_previsto: saldoNaoFiscalPrevisto,
+      quantidade_fiscal_movimento: calcF.movimento,
+      quantidade_nao_fiscal_movimento: calcNf ? calcNf.movimento : null,
+      diferenca_fiscal: calcF.diferenca,
+      diferenca_nao_fiscal: calcNf ? calcNf.diferenca : null,
+      saldo_fiscal_previsto: calcF.previsto,
+      saldo_nao_fiscal_previsto: omitirNf
+        ? saldoNaoFiscalAnterior
+        : (calcNf ? calcNf.previsto : null),
       saldo_insuficiente_fiscal: insuficienteFiscal,
       saldo_insuficiente_nao_fiscal: insuficienteNaoFiscal,
       saldo_insuficiente: insuficienteFiscal || insuficienteNaoFiscal,
+      contado_incompativel: insuficienteFiscal || insuficienteNaoFiscal,
       saldo_disponivel_fiscal: saldoFiscalAnterior,
       saldo_disponivel_nao_fiscal: saldoNaoFiscalAnterior,
       quantidade_solicitada_fiscal: qF,
@@ -847,6 +915,7 @@ async function consultarSaldoAtualContagem(params = {}) {
   const unidadeBase = (meta && meta.unidade_base) || (conversaoConfiavel ? unidadeComercial : null);
   const saldoFiscal = roundStockQuantity(Number(antes.saldo_fiscal || 0));
   const saldoNaoFiscal = roundStockQuantity(Number(antes.saldo_nao_fiscal || 0));
+  const ultimaOrigem = await consultarUltimaOrigemSaldoProduto(db, empresaId, produtoId);
 
   return {
     ok: true,
@@ -870,8 +939,86 @@ async function consultarSaldoAtualContagem(params = {}) {
     saldo_fiscal_atual: saldoFiscal,
     saldo_nao_fiscal_atual: saldoNaoFiscal,
     saldo_fiscal_esperado: saldoFiscal,
-    saldo_nao_fiscal_esperado: saldoNaoFiscal
+    saldo_nao_fiscal_esperado: saldoNaoFiscal,
+    ultima_origem_saldo: ultimaOrigem
   };
+}
+
+/**
+ * Última entrada por compra (NF) ou último ajuste manual — o mais recente prevalece.
+ */
+async function consultarUltimaOrigemSaldoProduto(db, empresaId, produtoId) {
+  const candidatos = [];
+
+  try {
+    const temCompras = await dbGet(
+      db,
+      "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'compras'"
+    );
+    const temItens = await dbGet(
+      db,
+      "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'compras_itens'"
+    );
+    if (temCompras && temItens) {
+      const cols = await dbAll(db, 'PRAGMA table_info(compras)');
+      const nomes = new Set((cols || []).map((c) => String(c.name || '').toLowerCase()));
+      const temEmpresa = nomes.has('empresa_id');
+      const sql = `
+        SELECT c.id AS referencia_id,
+               COALESCE(c.data_entrada, c.data_emissao, c.data_compra, c.created_at) AS data_ref
+          FROM compras_itens ci
+          JOIN compras c ON c.id = ci.compra_id
+         WHERE ci.produto_id = ?
+           ${temEmpresa ? 'AND (c.empresa_id = ? OR c.empresa_id IS NULL)' : ''}
+         ORDER BY datetime(COALESCE(c.data_entrada, c.data_emissao, c.data_compra, c.created_at)) DESC,
+                  c.id DESC
+         LIMIT 1`;
+      const row = await dbGet(db, sql, temEmpresa ? [produtoId, empresaId] : [produtoId]);
+      if (row && row.data_ref) {
+        candidatos.push({
+          origem: 'COMPRA',
+          rotulo: 'Última entrada (compra/NF)',
+          data: String(row.data_ref),
+          referencia_id: row.referencia_id != null ? Number(row.referencia_id) : null
+        });
+      }
+    }
+  } catch (_) { /* schema parcial — ignora */ }
+
+  try {
+    const temAjustes = await dbGet(
+      db,
+      "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'produtos_ajustes_estoque'"
+    );
+    if (temAjustes) {
+      const row = await dbGet(
+        db,
+        `SELECT id AS referencia_id, criado_em AS data_ref, motivo
+           FROM produtos_ajustes_estoque
+          WHERE produto_id = ?
+          ORDER BY datetime(criado_em) DESC, id DESC
+          LIMIT 1`,
+        [produtoId]
+      );
+      if (row && row.data_ref) {
+        candidatos.push({
+          origem: 'AJUSTE',
+          rotulo: 'Último ajuste manual',
+          data: String(row.data_ref),
+          referencia_id: row.referencia_id != null ? Number(row.referencia_id) : null,
+          motivo: row.motivo || null
+        });
+      }
+    }
+  } catch (_) { /* schema parcial — ignora */ }
+
+  if (!candidatos.length) return null;
+  candidatos.sort((a, b) => {
+    const ta = Date.parse(a.data) || 0;
+    const tb = Date.parse(b.data) || 0;
+    return tb - ta;
+  });
+  return candidatos[0];
 }
 
 module.exports = {

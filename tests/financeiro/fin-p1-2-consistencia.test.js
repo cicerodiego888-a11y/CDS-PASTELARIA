@@ -162,7 +162,8 @@ async function criarFixtureFinanceira() {
     empresaId: empresaA.id,
     descricao: 'Título MCF aberto',
     valor_original: 250,
-    data_vencimento: '2026-11-01',
+    // Vencimento futuro — não entra em inadimplência do cenário de referência
+    data_vencimento: '2027-06-01',
     origem: 'manual',
     idempotency_key: 'fin-p1-2-ap-a-2'
   });
@@ -553,11 +554,16 @@ describe('FIN-P1.2 — segurança e consistência financeira', () => {
       assert.equal(dashboard.body.grafico.recebido, 100);
       assert.equal(dashboard.body.grafico.receber, 225);
 
-      const historico = await invocarHandler(handlerDaRota(router, '/'), empresaA.id);
+      const listagemLegada = await invocarHandler(handlerDaRota(router, '/'), empresaA.id);
+      assert.equal(listagemLegada.status, 200);
+      assert.equal(listagemLegada.body.some(row => row.descricao === 'Venda cancelada por status'), false);
+      assert.equal(listagemLegada.body.some(row => row.descricao === 'Venda cancelada por flag'), false);
+      assert.equal(listagemLegada.body.some(row => row.origem === 'mcf_compatibilidade'), false);
+      assert.equal(listagemLegada.body.some(row => row.empresa_id === empresaB.id), false);
+
+      const historico = await invocarHandler(handlerDaRota(router, '/historico'), empresaA.id);
       assert.equal(historico.status, 200);
-      assert.equal(historico.body.some(row => row.descricao === 'Venda cancelada por status'), false);
-      assert.equal(historico.body.some(row => row.descricao === 'Venda cancelada por flag'), false);
-      assert.equal(historico.body.some(row => row.origem === 'mcf_compatibilidade'), false);
+      assert.equal(historico.body.some(row => row.origem === 'mcf_compatibilidade'), true);
       assert.equal(historico.body.some(row => row.empresa_id === empresaB.id), false);
 
       const inadimplencia = await invocarHandler(

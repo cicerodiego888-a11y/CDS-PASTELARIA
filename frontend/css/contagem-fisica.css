@@ -186,6 +186,12 @@
   font-size: 0.75rem;
 }
 .cef-saldo strong { font-size: 0.95rem; color: var(--cef-brand-deep); }
+.cef-saldo--origem {
+  flex: 1 1 100%;
+  background: #f7fafc;
+  border-style: dashed;
+}
+.cef-saldo--origem strong { font-size: 0.9rem; font-variant-numeric: tabular-nums; }
 
 .cef-conv, .cef-diff {
   margin-top: 0.75rem;

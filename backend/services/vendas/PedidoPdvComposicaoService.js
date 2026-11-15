@@ -11,10 +11,26 @@ const {
 
 const { internos: ComposicaoInterna } = ComposicaoFiscalPedidoService;
 const CATEGORIA_PASTEIS = 'PASTEIS';
-const CATEGORIA_REFRIGERANTES = 'REFRIGERANTES';
-const VOLUMES_REFRIGERANTE_ELEGIVEIS_ML = new Set([200, 300, 500]);
+const CATEGORIA_FISCAL_REFRIGERANTE = 'REFRIGERANTE';
+const CATEGORIA_FISCAL_AGUA = 'AGUA';
 /** Origem da venda por valor: massa comercial no pastel + distribuição fiscal. */
 const OBS_VENDA_POR_VALOR_PASTEIS = 'VENDA_POR_VALOR_PASTEIS';
+
+function normalizarNomeCategoria(nome) {
+  return String(nome || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toUpperCase();
+}
+
+/** Categoria comercial (cadastro) → categoria fiscal do residual MUC. */
+function mapearCategoriaComercialParaFiscal(nome) {
+  const n = normalizarNomeCategoria(nome);
+  if (n === 'REFRIGERANTES' || n === 'REFRIGERANTE') return CATEGORIA_FISCAL_REFRIGERANTE;
+  if (n === 'AGUA' || n === 'AGUAS') return CATEGORIA_FISCAL_AGUA;
+  return null;
+}
 
 function erro(code, message, detalhes = null) {
   const err = new Error(message);
@@ -132,7 +148,29 @@ async function carregarCategoriasPedido(itens, db) {
   );
 }
 
-async function carregarModelosRefrigerante(empresaId, pedidoId, residualCentavos, db, agora) {
+/**
+ * Modelos fiscais de bebida com volume MUC (Refrigerantes / Água).
+ * Cadastro novo na categoria comercial correspondente entra sozinho — sem allowlist de ml.
+ * @param {string[]} categoriasFiscais — ex.: ['REFRIGERANTE'], ['AGUA'] ou ambos
+ */
+async function carregarModelosBebidaVolume(
+  empresaId,
+  pedidoId,
+  residualCentavos,
+  db,
+  agora,
+  categoriasFiscais = [CATEGORIA_FISCAL_REFRIGERANTE]
+) {
+  const fiscais = [...new Set(
+    (Array.isArray(categoriasFiscais) ? categoriasFiscais : [CATEGORIA_FISCAL_REFRIGERANTE])
+      .map((c) => String(c || '').trim().toUpperCase())
+      .filter((c) => c === CATEGORIA_FISCAL_REFRIGERANTE || c === CATEGORIA_FISCAL_AGUA)
+  )].sort();
+  if (!fiscais.length) {
+    throw erro('CATEGORIAS_BEBIDA_INVALIDAS', 'Informe REFRIGERANTE e/ou AGUA para carregar modelos.');
+  }
+  const fiscaisSet = new Set(fiscais);
+
   const estoqueEmpresaSchema = await dbAll(
     db,
     "SELECT 1 AS existe FROM sqlite_master WHERE type = 'table' AND name = 'estoque_empresa'"
@@ -160,14 +198,14 @@ async function carregarModelosRefrigerante(empresaId, pedidoId, residualCentavos
        JOIN categorias c ON c.id = p.categoria_id
        LEFT JOIN estoque_empresa ee
          ON ee.produto_id = p.id AND ee.empresa_id = ?
-      WHERE UPPER(TRIM(c.nome)) = ?
-        AND LOWER(TRIM(COALESCE(c.tipo, 'produto'))) = 'produto'
+      WHERE LOWER(TRIM(COALESCE(c.tipo, 'produto'))) = 'produto'
       ORDER BY p.id`,
-    [empresaId, CATEGORIA_REFRIGERANTES]
+    [empresaId]
   );
   const produtosAtivos = produtos.filter((produto) => (
     Number(produto.ativo) === 1
     && String(produto.tipo_operacional || '').toUpperCase() !== 'INSUMO'
+    && fiscaisSet.has(mapearCategoriaComercialParaFiscal(produto.categoria_nome))
   ));
   const creditoPedido = await obterCreditoReservaPedido(pedidoId, { db });
   const modelos = [];
@@ -175,20 +213,19 @@ async function carregarModelosRefrigerante(empresaId, pedidoId, residualCentavos
 
   for (const produto of produtosAtivos) {
     const produtoId = Number(produto.id);
+    const categoriaFiscal = mapearCategoriaComercialParaFiscal(produto.categoria_nome);
     const invalidar = (motivo, mensagem) => invalidos.push({
       produto_id: produtoId,
       motivo,
       ...(mensagem ? { mensagem } : {})
     });
-    if (Number(produto.utiliza_volume) !== 1
-      || !(Number(produto.volume_valor) > 0)
-      || !String(produto.volume_unidade || '').trim()) {
-      invalidar('VOLUME_COMERCIAL_NAO_CONFIGURADO');
-      continue;
-    }
+    const volumeConfigurado = Number(produto.utiliza_volume) === 1
+      && Number(produto.volume_valor) > 0
+      && Boolean(String(produto.volume_unidade || '').trim());
 
     let cotador;
-    let volume;
+    let volumeMlPorUnidade;
+    let volumeConfiguracao;
     try {
       cotador = await criarCotadorPreco({
         db,
@@ -202,7 +239,22 @@ async function carregarModelosRefrigerante(empresaId, pedidoId, residualCentavos
         invalidar('PRECO_CATALOGO_INVALIDO');
         continue;
       }
-      volume = await ComposicaoInterna.converterVolumeParaMl(db, produto);
+      if (volumeConfigurado) {
+        const volume = await ComposicaoInterna.converterVolumeParaMl(db, produto);
+        volumeMlPorUnidade = Number(volume.quantidadeMl);
+        volumeConfiguracao = volume.configuracao;
+        if (!Number.isSafeInteger(volumeMlPorUnidade) || volumeMlPorUnidade <= 0) {
+          invalidar('VOLUME_ML_INVALIDO');
+          continue;
+        }
+      } else if (categoriaFiscal === CATEGORIA_FISCAL_AGUA) {
+        // Água comercial por unidade (ex.: garrafa) entra sem MUC; refrigerante segue exigindo volume.
+        volumeMlPorUnidade = 1;
+        volumeConfiguracao = { modo: 'UNIDADE_AGUA_SEM_VOLUME_MUC' };
+      } else {
+        invalidar('VOLUME_COMERCIAL_NAO_CONFIGURADO');
+        continue;
+      }
     } catch (err) {
       if (err instanceof CotacaoPrecoErro) {
         invalidar(err.codigo, err.message);
@@ -213,16 +265,6 @@ async function carregarModelosRefrigerante(empresaId, pedidoId, residualCentavos
         continue;
       }
       throw err;
-    }
-
-    const volumeMlPorUnidade = Number(volume.quantidadeMl);
-    if (!Number.isSafeInteger(volumeMlPorUnidade) || volumeMlPorUnidade <= 0) {
-      invalidar('VOLUME_ML_INVALIDO');
-      continue;
-    }
-    if (!VOLUMES_REFRIGERANTE_ELEGIVEIS_ML.has(volumeMlPorUnidade)) {
-      invalidar('VOLUME_FORA_DA_REGRA', `Volume convertido ${volumeMlPorUnidade} ml não é elegível.`);
-      continue;
     }
 
     const calc = creditarDisponibilidadeComReservaPedido(
@@ -236,12 +278,12 @@ async function carregarModelosRefrigerante(empresaId, pedidoId, residualCentavos
     modelos.push({
       produtoId,
       nome: produto.nome,
-      categoriaFiscal: 'REFRIGERANTE',
+      categoriaFiscal,
       cotador,
       cotacaoDependenciasFingerprint: cotador.dependenciasFingerprint,
       precoUnitarioMaximoCentavos: Math.ceil(cotador.precoUnitarioMaximoInterno * 100),
       volumeMlPorUnidade,
-      volumeConfiguracao: volume.configuracao,
+      volumeConfiguracao,
       quantidadeMaxima,
       produtoUpdatedAt: produto.updated_at || null,
       disponibilidade: {
@@ -259,7 +301,12 @@ async function carregarModelosRefrigerante(empresaId, pedidoId, residualCentavos
   if (!Number.isSafeInteger(limiteBuscaCentavos)) {
     throw erro('LIMITE_COMPOSICAO_INVALIDO', 'O limite monetário da busca não é seguro em centavos.');
   }
-  const capacidadeMl = modelos.reduce((total, modelo) => {
+
+  const capacidadePorCategoria = {};
+  for (const fiscal of fiscais) {
+    capacidadePorCategoria[fiscal] = 0;
+  }
+  for (const modelo of modelos) {
     const porValor = ComposicaoInterna.quantidadeMaximaPorValor(
       modelo,
       limiteBuscaCentavos
@@ -269,18 +316,33 @@ async function carregarModelosRefrigerante(empresaId, pedidoId, residualCentavos
       : Number(porValor);
     const quantidadeLimitada = Math.min(modelo.quantidadeMaxima, maximoPorValor);
     const capacidade = quantidadeLimitada * modelo.volumeMlPorUnidade;
-    if (!Number.isSafeInteger(capacidade) || !Number.isSafeInteger(total + capacidade)) {
+    const atual = capacidadePorCategoria[modelo.categoriaFiscal] || 0;
+    if (!Number.isSafeInteger(capacidade) || !Number.isSafeInteger(atual + capacidade)) {
       throw erro('CAPACIDADE_COMPOSICAO_INVALIDA', 'A capacidade de busca excede o limite seguro.');
     }
-    return total + capacidade;
-  }, 0);
+    capacidadePorCategoria[modelo.categoriaFiscal] = atual + capacidade;
+  }
+  const capacidadeMl = Object.values(capacidadePorCategoria).reduce((a, b) => a + b, 0);
 
   return {
     modelos,
     invalidos,
     capacidadeMl,
+    capacidadePorCategoria,
+    categoriasFiscais: fiscais,
     produtosPorId: new Map(produtosAtivos.map((produto) => [Number(produto.id), produto]))
   };
+}
+
+async function carregarModelosRefrigerante(empresaId, pedidoId, residualCentavos, db, agora) {
+  return carregarModelosBebidaVolume(
+    empresaId,
+    pedidoId,
+    residualCentavos,
+    db,
+    agora,
+    [CATEGORIA_FISCAL_REFRIGERANTE]
+  );
 }
 
 function produtoComercialAtivoNoPedido(produto) {
@@ -333,11 +395,8 @@ function precoComercialPersistido(itensPedido, produtoId, quantidade) {
 }
 
 /**
- * Pedidos sem pastel elegível: preserva identidade/quantidade das linhas e cota
- * o preço vigente do cadastro. Personalizações mantêm o preço da linha.
- *
- * Pedidos com pastel usam o núcleo residual compartilhado
- * (`prepararComposicaoPastelRefrigerante`), o mesmo da venda por valor.
+ * Pedidos sem pastel e sem refrigerante: passthrough comercial
+ * (preço/quantidade do pedido). O total líquido permanece o do pedido.
  */
 async function prepararComposicaoIdentidadeCatalogo({
   empresaId,
@@ -349,8 +408,8 @@ async function prepararComposicaoIdentidadeCatalogo({
   agora,
   db
 }) {
-  const quantidadePadraoPorProduto = new Map();
-  const itensPersonalizados = [];
+  const itensVenda = [];
+  let valorPastelCentavos = 0;
 
   for (const item of itens) {
     const produtoId = Number(item.produto_id);
@@ -361,84 +420,22 @@ async function prepararComposicaoIdentidadeCatalogo({
     if (!Number.isFinite(quantidade) || quantidade <= 0) {
       throw erro(
         'QUANTIDADE_ITEM_INVALIDA',
-        `O item ${produto.nome || produtoId} precisa ter quantidade positiva para gerar a venda.`,
+        'O item ' + (produto.nome || produtoId) + ' precisa ter quantidade positiva para gerar a venda.',
         { produto_id: produtoId, quantidade: item.quantidade }
       );
     }
 
-    if (Number(item.personalizacao_ingredientes_snapshot) === 1) {
-      itensPersonalizados.push({ item, produto, quantidade });
-      continue;
-    }
-
-    quantidadePadraoPorProduto.set(
-      produtoId,
-      (quantidadePadraoPorProduto.get(produtoId) || 0) + quantidade
-    );
-  }
-
-  const itensVenda = [];
-  let valorPastelCentavos = 0;
-
-  for (const [produtoId, quantidade] of [...quantidadePadraoPorProduto.entries()]
-    .sort(([idA], [idB]) => idA - idB)) {
-    const produto = produtoPorId.get(produtoId);
-    let cotador;
-    try {
-      cotador = await criarCotadorPreco({
-        db,
-        empresaId,
-        produtoId,
-        tipoVenda: TIPO_VENDA.PESO,
-        agora
-      });
-    } catch (err) {
-      if (err instanceof CotacaoPrecoErro) {
-        throw erro(
-          'PRECO_CATALOGO_INVALIDO',
-          `Não foi possível cotar o preço vigente de ${produto.nome}: ${err.message}`,
-          { produto_id: produtoId, codigo_cotacao: err.codigo }
-        );
-      }
-      throw err;
-    }
-    const cotacao = cotador.cotar(quantidade);
-    if (!Number.isSafeInteger(cotacao.subtotalCentavos)
-      || cotacao.subtotalCentavos <= 0
-      || !Number.isFinite(cotacao.precoUnitarioInterno)
-      || cotacao.precoUnitarioInterno <= 0) {
-      throw erro(
-        'PRECO_CATALOGO_INVALIDO',
-        `O preço vigente de ${produto.nome} não produziu valores válidos em centavos.`,
-        { produto_id: produtoId, quantidade }
-      );
-    }
-    const metadados = metadadosDaCotacao(produto, quantidade, cotacao);
-    const linha = mapearItemVenda(
-      produtoId,
-      quantidade,
-      cotacao.precoUnitarioInterno,
-      cotacao.subtotalCentavos,
-      metadados
-    );
-    itensVenda.push(linha);
-    if (String(produto.categoria_nome || '').trim().toUpperCase() === CATEGORIA_PASTEIS) {
-      valorPastelCentavos = somarCentavos(valorPastelCentavos, linha.subtotal);
-    }
-  }
-
-  for (const { item, produto, quantidade } of itensPersonalizados) {
-    const produtoId = Number(produto.id);
     const precoUnitario = Number(item.preco_unitario);
     const subtotalCentavos = Math.round(Number(item.subtotal) * 100);
     if (!Number.isFinite(precoUnitario) || precoUnitario <= 0
       || !Number.isSafeInteger(subtotalCentavos) || subtotalCentavos <= 0) {
       throw erro(
         'PRECO_ITEM_INVALIDO',
-        `O item personalizado ${produto.nome || produtoId} não possui preço/subtotal válido no Pedido.`,
+        'O item ' + (produto.nome || produtoId) + ' não possui preço/subtotal válido no Pedido.',
         { produto_id: produtoId }
       );
     }
+
     const linha = mapearItemVenda(
       produtoId,
       quantidade,
@@ -486,12 +483,22 @@ async function prepararComposicaoIdentidadeCatalogo({
   if (!Number.isSafeInteger(totalLiquidoCentavos) || totalLiquidoCentavos <= 0) {
     throw erro(
       'TOTAL_COMPOSICAO_INVALIDO',
-      'O total da composição (catálogo − desconto legítimo) é inválido.',
+      'O total da composição comercial do Pedido é inválido.',
       {
         total_composicao_bruto_centavos: totalCompostoCentavos,
         desconto_centavos: descontoCentavos,
         total_composicao_liquido_centavos: totalLiquidoCentavos,
         total_pedido_historico_centavos: totalCentavos
+      }
+    );
+  }
+  if (totalLiquidoCentavos !== totalCentavos) {
+    throw erro(
+      'TOTAL_COMPOSICAO_DIVERGENTE',
+      'O passthrough comercial não confere com o total do Pedido.',
+      {
+        total_composicao_liquido_centavos: totalLiquidoCentavos,
+        total_pedido_centavos: totalCentavos
       }
     );
   }
@@ -535,6 +542,32 @@ async function prepararComposicaoIdentidadeCatalogo({
     dataReferenciaCotacao: agora.toISOString(),
     efeitosOperacionais: false
   };
+}
+
+function categoriasFiscaisBebidaNoPedido(itens, produtoPorId) {
+  const set = new Set();
+  for (const item of itens) {
+    const produto = produtoPorId.get(Number(item.produto_id));
+    if (!produtoComercialAtivoNoPedido(produto)) continue;
+    if (normalizarNomeCategoria(produto.categoria_nome) === CATEGORIA_PASTEIS) continue;
+    const fiscal = mapearCategoriaComercialParaFiscal(produto.categoria_nome);
+    if (fiscal) set.add(fiscal);
+  }
+  return [...set].sort();
+}
+
+/** Pedido só com refrigerante e/ou água (volume MUC) — sem outros comerciais. */
+function pedidoSoBebidasVolume(itens, produtoPorId) {
+  let elegiveis = 0;
+  for (const item of itens) {
+    const produto = produtoPorId.get(Number(item.produto_id));
+    if (!produtoComercialAtivoNoPedido(produto)) continue;
+    elegiveis += 1;
+    if (!mapearCategoriaComercialParaFiscal(produto.categoria_nome)) {
+      return false;
+    }
+  }
+  return elegiveis > 0;
 }
 
 /**
@@ -643,23 +676,34 @@ async function prepararComposicaoPastelRefrigerante({
     );
   }
 
+  const categoriasBebidaPedido = categoriasFiscaisBebidaNoPedido(itens, produtoPorId);
+  // Sem bebida tipada no pedido (ex.: residual da venda por valor): mantém refrigerante.
+  const categoriasFiscaisBusca = categoriasBebidaPedido.length
+    ? categoriasBebidaPedido
+    : [CATEGORIA_FISCAL_REFRIGERANTE];
   const {
     modelos,
     invalidos,
-    capacidadeMl,
-    produtosPorId: produtosRefrigerantesPorId
-  } = await carregarModelosRefrigerante(
+    capacidadePorCategoria,
+    produtosPorId: produtosBebidaPorId
+  } = await carregarModelosBebidaVolume(
     empresaId,
     pedidoId,
     residualCentavos,
     db,
-    agora
+    agora,
+    categoriasFiscaisBusca
   );
+  const budgetsMl = { ...(capacidadePorCategoria || {}) };
   if (residualCentavos > 0 && modelos.length === 0) {
+    const soAgua = categoriasFiscaisBusca.length === 1
+      && categoriasFiscaisBusca[0] === CATEGORIA_FISCAL_AGUA;
     throw erro(
-      'REFRIGERANTES_INSUFICIENTES',
-      'Não há refrigerantes ativos, com preço e volume MUC válidos e disponibilidade suficiente para compor o valor restante.',
-      { modelos_invalidos: invalidos }
+      soAgua ? 'AGUAS_INSUFICIENTES' : 'REFRIGERANTES_INSUFICIENTES',
+      soAgua
+        ? 'Não há águas ativas, com preço e volume MUC válidos e disponibilidade suficiente para compor o valor restante.'
+        : 'Não há refrigerantes ativos, com preço e volume MUC válidos e disponibilidade suficiente para compor o valor restante.',
+      { modelos_invalidos: invalidos, categorias_fiscais: categoriasFiscaisBusca }
     );
   }
 
@@ -673,7 +717,7 @@ async function prepararComposicaoPastelRefrigerante({
   if (residualCentavos > 0) {
     busca = ComposicaoInterna.buscarComposicao(
       modelos,
-      { REFRIGERANTE: capacidadeMl },
+      budgetsMl,
       residualCentavos
     );
     if (!busca.otimalidadeComprovada) {
@@ -691,7 +735,7 @@ async function prepararComposicaoPastelRefrigerante({
       }
       const buscaAcima = ComposicaoInterna.buscarComposicao(
         modelos,
-        { REFRIGERANTE: capacidadeMl },
+        budgetsMl,
         limiteBuscaCentavos,
         residualCentavos + 1,
         undefined,
@@ -707,14 +751,15 @@ async function prepararComposicaoPastelRefrigerante({
       if (buscaAcima.totalCentavos < 0) {
         throw erro(
           'COMPOSICAO_PDV_SEM_COBERTURA',
-          `Não existe combinação válida de refrigerantes acima do valor restante de R$ ${(residualCentavos / 100).toFixed(2)} com os preços e a disponibilidade atuais.`,
+          `Não existe combinação válida de bebidas (refrigerante/água) acima do valor restante de R$ ${(residualCentavos / 100).toFixed(2)} com os preços e a disponibilidade atuais.`,
           {
             residual_centavos: residualCentavos,
             melhor_valor_abaixo_centavos: busca.totalCentavos >= 0 ? busca.totalCentavos : null,
             composicao_abaixo: busca.totalCentavos >= 0
               ? ComposicaoInterna.comporItens(modelos, busca.quantidades)
               : [],
-            modelos_invalidos: invalidos
+            modelos_invalidos: invalidos,
+            categorias_fiscais: categoriasFiscaisBusca
           }
         );
       }
@@ -723,7 +768,7 @@ async function prepararComposicaoPastelRefrigerante({
   }
 
   const bebidas = ComposicaoInterna.comporItens(modelos, busca.quantidades).map((item) => {
-    const produto = produtosRefrigerantesPorId.get(Number(item.produtoId));
+    const produto = produtosBebidaPorId.get(Number(item.produtoId));
     if (!produto) {
       throw erro(
         'PRODUTO_COMPOSICAO_AUSENTE',
@@ -859,13 +904,28 @@ async function prepararComposicaoPedidoPdv(params = {}, opts = {}) {
     );
   }
 
-  // Sem pastel: identidade de catálogo. Com pastel: mesmo núcleo residual da VV.
+  // Sem pastel: refrigerante/água → núcleo residual (valor → unidades MUC + desconto).
+  // Demais produtos independentes → passthrough comercial.
   if (!quantidadePastelPorProduto.size) {
     if (origemVendaPorValor) {
       throw erro(
         'PEDIDO_SEM_ITENS_ELEGIVEIS',
         'A venda por valor exige pastel elegível no Pedido para compor a venda no PDV.'
       );
+    }
+    if (pedidoSoBebidasVolume(itens, produtoPorId)) {
+      return prepararComposicaoPastelRefrigerante({
+        empresaId,
+        pedidoId,
+        pedido,
+        itens,
+        totalCentavos,
+        produtoPorId,
+        quantidadePastelPorProduto,
+        origemVendaPorValor,
+        agora,
+        db
+      });
     }
     return prepararComposicaoIdentidadeCatalogo({
       empresaId,

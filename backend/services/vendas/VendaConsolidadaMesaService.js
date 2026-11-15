@@ -227,6 +227,109 @@ function montarContrato(pedidos, consolidacaoId) {
   };
 }
 
+/**
+ * Contrato do PDV com composição fiscal por pedido (mesmo motor do preparar-venda-pdv).
+ * Pedidos com pastel elegível entram no núcleo residual F×NF.
+ * Pedidos sem pastel mantêm as linhas comerciais (total da mesa não muda).
+ */
+async function montarContratoComposto(db, empresaId, pedidos, consolidacaoId) {
+  const { prepararComposicaoPedidoPdv } = require('./PedidoPdvComposicaoService');
+  const itens = [];
+  let brutoCentavos = 0;
+  let descontoCentavos = 0;
+  let liquidoCentavos = 0;
+  let esperadoCentavos = 0;
+  const clientes = new Set(pedidos.map((pedido) => pedido.cliente_id).filter((id) => id != null));
+
+  for (const pedido of pedidos) {
+    esperadoCentavos += centavos(pedido.total);
+    const composicao = await prepararComposicaoPedidoPdv({
+      empresaId,
+      pedidoId: pedido.id
+    }, { db });
+    if (!composicao || composicao.sucesso !== true || !Array.isArray(composicao.itens)) {
+      throw erro(
+        `Não foi possível compor o pedido ${pedido.codigo || pedido.id} para a venda consolidada.`,
+        409,
+        'COMPOSICAO_CONSOLIDADA_FALHOU'
+      );
+    }
+
+    if (composicao.modo === 'COMPOSICAO_PASTEL_REFRIGERANTE') {
+      if (Number(composicao.valorFinalCentavos) !== centavos(pedido.total)) {
+        throw erro(
+          `A composição do pedido ${pedido.codigo || pedido.id} divergiu do total comercial.`,
+          409,
+          'TOTAL_COMPOSICAO_DIVERGENTE'
+        );
+      }
+      brutoCentavos += Number(composicao.valorCompostoBrutoCentavos || 0);
+      descontoCentavos += Number(composicao.descontoCentavos || 0);
+      liquidoCentavos += Number(composicao.valorFinalCentavos || 0);
+      for (const item of composicao.itens) {
+        itens.push({
+          produto_id: Number(item.produto_id),
+          quantidade: Number(item.quantidade),
+          preco_unitario: Number(item.preco_unitario),
+          subtotal: Number(item.subtotal),
+          desconto_percentual: Number(item.desconto_percentual || 0),
+          desconto_valor: Number(item.desconto_valor || 0),
+          desconto_atacado: Number(item.desconto_atacado || 0),
+          desconto_manual: Number(item.desconto_manual || 0),
+          tipo_preco: item.tipo_preco || 'varejo',
+          promocao_id: item.promocao_id || null,
+          preco_origem: Number(item.preco_origem != null ? item.preco_origem : item.preco_unitario),
+          tipo_venda: item.tipo_venda || 'PESO',
+          pedido_id: pedido.id,
+          observacao: pedido.observacao || '',
+          modo_composicao: composicao.modo
+        });
+      }
+      continue;
+    }
+
+    const comercial = montarContrato([pedido], null);
+    for (const item of comercial.itens) {
+      brutoCentavos += centavos(item.subtotal);
+      itens.push({
+        ...item,
+        modo_composicao: composicao.modo || 'COMPOSICAO_IDENTIDADE_CATALOGO'
+      });
+    }
+    descontoCentavos += centavos(comercial.desconto);
+    liquidoCentavos += centavos(comercial.total);
+  }
+
+  if (liquidoCentavos !== esperadoCentavos) {
+    throw erro(
+      'O total composto da mesa não confere com a soma dos pedidos.',
+      409,
+      'TOTAL_COMPOSICAO_DIVERGENTE'
+    );
+  }
+  if (brutoCentavos - descontoCentavos !== liquidoCentavos) {
+    throw erro(
+      'O bruto e o desconto da composição consolidada não fecham o total líquido.',
+      409,
+      'TOTAL_COMPOSICAO_DIVERGENTE'
+    );
+  }
+  if (!itens.length) {
+    throw erro('A composição consolidada não gerou itens para o PDV.', 409, 'COMPOSICAO_SEM_ITENS');
+  }
+
+  return {
+    origem: VendaOrigin.PDV,
+    emitir_fiscal: false,
+    pedido_id: null,
+    consolidacao_id: consolidacaoId || null,
+    cliente_id: clientes.size === 1 ? [...clientes][0] : null,
+    total: liquidoCentavos / 100,
+    desconto: descontoCentavos / 100,
+    itens
+  };
+}
+
 function assinaturaItem(item) {
   const produtoId = Number(item && item.produto_id);
   const quantidade = Math.round(Number(item && item.quantidade) * 1000);
@@ -393,6 +496,7 @@ async function buscarReservaPorSelecao(db, empresaId, mesaId, ids) {
 
   for (const candidato of candidatos) {
     const consolidacao = await lerConsolidacao(db, candidato.id, empresaId);
+    if (consolidacao.status === 'CANCELADA') continue;
     const participantes = consolidacao.pedidos.map((pedido) => Number(pedido.pedido_id)).sort((a, b) => a - b);
     if (
       participantes.length !== solicitados.length
@@ -479,23 +583,10 @@ async function reservar(db, entrada) {
         );
       }
       reservaExistente = await lerConsolidacao(db, chaveAlias.consolidacao_id, empresaId);
-      if (!selecaoConsolidacaoCoincide(reservaExistente, mesaId, ids)) {
-        throw erro(
-          'A chave de idempotência já foi usada com outra mesa ou seleção de pedidos.',
-          409,
-          'IDEMPOTENCIA_CONTEUDO_DIVERGENTE'
-        );
-      }
-      validarReservaRecuperavel(reservaExistente);
-    } else {
-      const existente = await get(db, `
-        SELECT * FROM venda_consolidacoes WHERE idempotency_key = ?
-      `, [chave]);
-      if (existente) {
-        if (Number(existente.empresa_id) !== empresaId) {
-          throw erro('A chave de idempotência pertence a outra empresa.', 409, 'IDEMPOTENCIA_OUTRA_EMPRESA');
-        }
-        reservaExistente = await lerConsolidacao(db, existente.id, empresaId);
+      if (reservaExistente && reservaExistente.status === 'CANCELADA') {
+        await run(db, 'DELETE FROM venda_consolidacao_chaves WHERE idempotency_key = ?', [chave]);
+        reservaExistente = null;
+      } else {
         if (!selecaoConsolidacaoCoincide(reservaExistente, mesaId, ids)) {
           throw erro(
             'A chave de idempotência já foi usada com outra mesa ou seleção de pedidos.',
@@ -504,6 +595,28 @@ async function reservar(db, entrada) {
           );
         }
         validarReservaRecuperavel(reservaExistente);
+      }
+    } else {
+      const existente = await get(db, `
+        SELECT * FROM venda_consolidacoes WHERE idempotency_key = ?
+      `, [chave]);
+      if (existente) {
+        if (Number(existente.empresa_id) !== empresaId) {
+          throw erro('A chave de idempotência pertence a outra empresa.', 409, 'IDEMPOTENCIA_OUTRA_EMPRESA');
+        }
+        if (existente.status === 'CANCELADA') {
+          reservaExistente = null;
+        } else {
+          reservaExistente = await lerConsolidacao(db, existente.id, empresaId);
+          if (!selecaoConsolidacaoCoincide(reservaExistente, mesaId, ids)) {
+            throw erro(
+              'A chave de idempotência já foi usada com outra mesa ou seleção de pedidos.',
+              409,
+              'IDEMPOTENCIA_CONTEUDO_DIVERGENTE'
+            );
+          }
+          validarReservaRecuperavel(reservaExistente);
+        }
       }
     }
 
@@ -544,9 +657,16 @@ async function reservar(db, entrada) {
         SELECT id, venda_id, status FROM pedido_faturamento_operacoes
         WHERE pedido_id = ? AND empresa_id = ?
       `, [pedido.id, empresaId]);
-      if (operacao) {
-        throw erro('O pedido já está em um fechamento individual.', 409, 'PEDIDO_FECHAMENTO_INDIVIDUAL');
+      if (!operacao) continue;
+      if (operacao.venda_id == null && String(operacao.status || '').toUpperCase() === 'INICIADA') {
+        // Preparação individual abandonada (ex.: Retomar no PDV sem finalizar).
+        await run(db, `
+          DELETE FROM pedido_faturamento_operacoes
+          WHERE id = ? AND pedido_id = ? AND empresa_id = ? AND venda_id IS NULL
+        `, [operacao.id, pedido.id, empresaId]);
+        continue;
       }
+      throw erro('O pedido já está em um fechamento individual.', 409, 'PEDIDO_FECHAMENTO_INDIVIDUAL');
     }
     if (reservaExistente) {
       await registrarChave(db, chave, reservaExistente, assinatura);
@@ -554,7 +674,8 @@ async function reservar(db, entrada) {
       return reservaExistente;
     }
 
-    const contrato = montarContrato(pedidos, null);
+    const contratoOrigem = montarContrato(pedidos, null);
+    const contrato = await montarContratoComposto(db, empresaId, pedidos, null);
     const inserida = await run(db, `
       INSERT INTO venda_consolidacoes (
         empresa_id, mesa_id, mesa_atendimento_id, idempotency_key, status,
@@ -569,7 +690,7 @@ async function reservar(db, entrada) {
         INSERT INTO venda_consolidacao_pedidos (consolidacao_id, pedido_id, empresa_id)
         VALUES (?, ?, ?)
       `, [inserida.lastID, pedido.id, empresaId]);
-      for (const item of contrato.itens.filter((linha) => linha.pedido_id === pedido.id)) {
+      for (const item of contratoOrigem.itens.filter((linha) => linha.pedido_id === pedido.id)) {
         await run(db, `
           INSERT INTO venda_consolidacao_itens (
             consolidacao_id, pedido_id, pedido_item_id, produto_id,
@@ -605,6 +726,82 @@ async function liberarFalha(db, consolidacao) {
       WHERE id = ? AND venda_id IS NULL
     `, [consolidacao.id]);
     await run(db, 'COMMIT');
+  } catch (err) {
+    try { await run(db, 'ROLLBACK'); } catch (_rollback) { /* ignore */ }
+    throw err;
+  }
+}
+
+/**
+ * Abandona reserva sem venda (ex.: cancelar no PDV) e libera os pedidos
+ * para nova consolidação ou fechamento individual.
+ * Deve rodar dentro de transação já aberta quando `emTransacao` for true.
+ */
+async function liberarReservaNoTx(db, empresaId, consolidacaoId) {
+  const consolidacao = await get(db, `
+    SELECT id, empresa_id, status, venda_id, idempotency_key
+    FROM venda_consolidacoes
+    WHERE id = ?
+  `, [consolidacaoId]);
+  if (!consolidacao || Number(consolidacao.empresa_id) !== Number(empresaId)) {
+    throw erro('Consolidação não encontrada.', 404, 'CONSOLIDACAO_NAO_ENCONTRADA');
+  }
+  if (
+    consolidacao.venda_id != null
+    || consolidacao.status === 'VENDA_CRIADA'
+    || consolidacao.status === 'VINCULADA'
+  ) {
+    throw erro(
+      'A consolidação já possui venda e não pode ser liberada.',
+      409,
+      'CONSOLIDACAO_JA_VINCULADA'
+    );
+  }
+  if (consolidacao.status === 'CANCELADA') {
+    return { success: true, idempotente: true, consolidacao_id: Number(consolidacaoId) };
+  }
+  if (!['RESERVADA', 'EM_CRIACAO', 'FALHA_CRIACAO'].includes(consolidacao.status)) {
+    throw erro(
+      'O estado da consolidação não permite liberação.',
+      409,
+      'CONSOLIDACAO_NAO_LIBERAVEL'
+    );
+  }
+
+  await run(db, 'DELETE FROM venda_consolidacao_itens WHERE consolidacao_id = ?', [consolidacaoId]);
+  await run(db, 'DELETE FROM venda_consolidacao_pedidos WHERE consolidacao_id = ?', [consolidacaoId]);
+  await run(db, 'DELETE FROM venda_consolidacao_chaves WHERE consolidacao_id = ?', [consolidacaoId]);
+  await run(db, `
+    UPDATE venda_consolidacoes
+    SET status = 'CANCELADA',
+        idempotency_key = ?,
+        updated_at = datetime('now')
+    WHERE id = ? AND venda_id IS NULL
+  `, [
+    `cancelada:${consolidacaoId}:${consolidacao.idempotency_key}`,
+    consolidacaoId
+  ]);
+
+  return { success: true, idempotente: false, consolidacao_id: Number(consolidacaoId) };
+}
+
+async function liberarReserva(entrada, opts = {}) {
+  const db = conn(opts);
+  const empresaId = Number(entrada && entrada.empresaId);
+  const consolidacaoId = Number(entrada && entrada.consolidacaoId);
+  if (!Number.isInteger(empresaId) || empresaId <= 0) {
+    throw erro('Empresa inválida.', 400, 'EMPRESA_INVALIDA');
+  }
+  if (!Number.isInteger(consolidacaoId) || consolidacaoId <= 0) {
+    throw erro('Consolidação inválida.', 400, 'CONSOLIDACAO_INVALIDA');
+  }
+
+  await garantirSchema(db);
+  await run(db, 'BEGIN IMMEDIATE');
+  try {
+    const out = await liberarReservaNoTx(db, empresaId, consolidacaoId);
+    await run(db, 'COMMIT');
+    return out;
   } catch (err) {
     try { await run(db, 'ROLLBACK'); } catch (_rollback) { /* ignore */ }
     throw err;
@@ -846,6 +1043,9 @@ module.exports = {
   preparar,
   concluir,
   vincular,
+  liberarReserva,
+  liberarReservaNoTx,
   montarContrato,
+  montarContratoComposto,
   nucleoOficial
 };

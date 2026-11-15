@@ -162,6 +162,10 @@ async function montarCabecalho(body = {}, opcoes = {}) {
     frete,
     total,
     clienteId: body.cliente_id != null && body.cliente_id !== '' ? Number(body.cliente_id) : null,
+    clienteNome: (() => {
+      const bruto = body.cliente_nome != null ? String(body.cliente_nome).trim() : '';
+      return bruto || null;
+    })(),
     representanteId: body.representante_id != null ? Number(body.representante_id) : null,
     representanteNome: body.representante_nome != null ? String(body.representante_nome).trim() : null,
     observacao: body.observacao || null,
@@ -440,6 +444,7 @@ async function criar(body = {}, operadorId = null, opcoes = {}) {
         codigo,
         dataPedido,
         clienteId: cab.clienteId,
+        clienteNome: cab.clienteNome,
         total: cab.total,
         desconto: cab.desconto,
         frete: cab.frete,
@@ -526,6 +531,7 @@ async function atualizar(pedidoId, body = {}, opcoes = {}) {
   }
 
   await PedidoConsumoEstoqueService.garantirSchema(db);
+  await garantirSchemaMesas(db);
   await executarTransacaoPedido(db, async () => {
     const atual = await repo.obterPorId(id, { db });
     const empresaAtual = exigirOperacaoDoPedido(atual, empresaIdContexto);
@@ -533,6 +539,7 @@ async function atualizar(pedidoId, body = {}, opcoes = {}) {
     await repo.substituirPedido({
       pedidoId: id,
       clienteId: cab.clienteId,
+      clienteNome: cab.clienteNome,
       total: cab.total,
       desconto: cab.desconto,
       frete: cab.frete,
@@ -545,6 +552,45 @@ async function atualizar(pedidoId, body = {}, opcoes = {}) {
       db,
       jaEmTransacao: true
     });
+
+    // Atribuir/trocar mesa na edição: vincular atendimento (abertura já feita pela UI).
+    if (cab.mesaId !== undefined) {
+      const mesaNova = mesaAtualizada == null ? null : Number(mesaAtualizada);
+      const atendimentoAntes = atual.mesa_atendimento_id != null
+        ? Number(atual.mesa_atendimento_id)
+        : null;
+
+      if (mesaNova == null) {
+        if (atendimentoAntes != null) {
+          await repo.desvincularAtendimentoDaMesa(id, empresaAtual, { db });
+        }
+      } else {
+        const atendimentoId = await MesaAtendimentoService.resolverParaNovoPedido(
+          empresaAtual,
+          mesaNova,
+          { db }
+        );
+        if (atendimentoAntes == null) {
+          await repo.vincularAtendimentoDaMesa(id, empresaAtual, atendimentoId, { db });
+          try {
+            await PedidoPreparacaoService.registrarNaoEnviado({
+              db,
+              empresaId: empresaAtual,
+              pedidoId: id,
+              atendimentoId
+            });
+          } catch (prepErr) {
+            // ux_pedido_preparacoes_pedido: pedido já tinha preparação (reatribuição parcial).
+            if (!/UNIQUE|unique|SQLITE_CONSTRAINT/i.test(String(prepErr && prepErr.message))) {
+              throw prepErr;
+            }
+          }
+        } else if (atendimentoAntes !== Number(atendimentoId)) {
+          await repo.reatribuirAtendimentoDaMesa(id, empresaAtual, atendimentoId, { db });
+        }
+      }
+    }
+
     if (statusExigeConfirmacaoFiscal(atual.status)) {
       const pedido = await repo.obterPorId(id, { db });
       await PedidoConsumoEstoqueService.reservarConsumo({

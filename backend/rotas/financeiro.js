@@ -29,6 +29,38 @@ const {
 
 const anexarEmpresaFinanceiro = middlewareResolverEmpresaFinanceiro({ db });
 
+/**
+ * Histórico é consulta de movimentações: inclui projeções MCF (ex.: compra paga).
+ * Contas a Pagar / listagens de obrigação continuam excluindo projeções (MCF-02.1).
+ */
+function normalizarLinhaHistoricoFinanceiro(row) {
+  if (!row) return row;
+  const out = { ...row };
+  const compraId = out.compra_id != null ? Number(out.compra_id) : NaN;
+  if (ehProjecaoMcfRow(out) && Number.isInteger(compraId) && compraId > 0) {
+    out.referencia_tipo = 'compra';
+    out.referencia_id = compraId;
+    out.origem_exibicao = 'compra';
+  } else if (ehProjecaoMcfRow(out)) {
+    out.origem_exibicao = 'contas_pagar';
+  }
+  if (out.observacao && String(out.observacao).includes('[MCF_PROJECAO_SINTETICA]')) {
+    const limpa = String(out.observacao).replace(/\[MCF_PROJECAO_SINTETICA\]/g, '').trim();
+    out.observacao = limpa || null;
+  }
+  return out;
+}
+
+function montarSqlHistoricoFinanceiro({ empresaClauseSql, excluirProjecaoMcf = false }) {
+  let sql = `SELECT f.* FROM financeiro f WHERE 1=1`
+    + (empresaClauseSql || '')
+    + ` AND ${sqlExcluirFinanceiroVendaCancelada('f')}`;
+  if (excluirProjecaoMcf) {
+    sql += sqlExcluirProjecaoMcf('f');
+  }
+  return sql;
+}
+
 async function obterEmpresasAutorizadasFinanceiro(req, res) {
   if (!req.user || !req.user.id) {
     res.status(401).json({
@@ -455,10 +487,11 @@ router.get('/multiempresa/historico', async (req, res) => {
     const empresaIds = empresas.map((empresa) => Number(empresa.id));
     const placeholders = empresaIds.map(() => '?').join(', ');
     const { dataInicio, dataFim, tipo, status, busca } = req.query;
-    let sql = `SELECT f.* FROM financeiro f
-      WHERE f.empresa_id IN (${placeholders})
-        AND ${sqlExcluirFinanceiroVendaCancelada('f')}
-        ${sqlExcluirProjecaoMcf('f')}`;
+    // Inclui projeções MCF: compra paga / AP quitada devem aparecer como saída.
+    let sql = montarSqlHistoricoFinanceiro({
+      empresaClauseSql: ` AND f.empresa_id IN (${placeholders})`,
+      excluirProjecaoMcf: false
+    });
     const params = empresaIds.slice();
 
     if (dataInicio && dataFim) {
@@ -485,7 +518,7 @@ router.get('/multiempresa/historico', async (req, res) => {
       metadadosEmpresaFinanceiro(empresa)
     ]));
     return res.json(rows.map((row) => ({
-      ...row,
+      ...normalizarLinhaHistoricoFinanceiro(row),
       ...(empresasPorId.get(Number(row.empresa_id)) || {})
     })));
   } catch (err) {
@@ -1228,15 +1261,51 @@ function inserirMovimentacao(data) {
   });
 }
 
+/** Histórico da empresa atual — inclui saídas de compra paga (projeção MCF). */
+router.get('/historico', (req, res) => {
+  const { dataInicio, dataFim, tipo, status, busca } = req.query;
+  const emp = filtroEmpresaSql(req.empresaId, 'f');
+  let sql = montarSqlHistoricoFinanceiro({
+    empresaClauseSql: emp.sql,
+    excluirProjecaoMcf: false
+  });
+  const params = [emp.param];
+
+  if (dataInicio && dataFim) {
+    sql += ` AND date(f.data_movimento) BETWEEN ? AND ?`;
+    params.push(dataInicio, dataFim);
+  }
+  if (tipo) {
+    sql += ` AND f.tipo = ?`;
+    params.push(tipo);
+  }
+  if (status) {
+    sql += ` AND f.status = ?`;
+    params.push(status);
+  }
+  if (busca) {
+    sql += ` AND (f.descricao LIKE ? OR f.documento LIKE ?)`;
+    params.push(`%${busca}%`, `%${busca}%`);
+  }
+  sql += ` ORDER BY date(f.data_movimento) DESC, f.id DESC`;
+
+  db.all(sql, params, (err, rows) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json((rows || []).map(normalizarLinhaHistoricoFinanceiro));
+  });
+});
+
 router.get('/', (req, res) => {
   const { dataInicio, dataFim, tipo, status, busca } = req.query;
   const emp = filtroEmpresaSql(req.empresaId, 'f');
 
   // MCF-02.1 — não listar projeções MCF como obrigações independentes
-  let sql = `SELECT f.* FROM financeiro f WHERE 1=1`
-    + emp.sql
-    + ` AND ${sqlExcluirFinanceiroVendaCancelada('f')}`
-    + sqlExcluirProjecaoMcf('f');
+  let sql = montarSqlHistoricoFinanceiro({
+    empresaClauseSql: emp.sql,
+    excluirProjecaoMcf: true
+  });
   const params = [emp.param];
 
   if (dataInicio && dataFim) {

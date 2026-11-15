@@ -126,7 +126,7 @@ async function prepararBancoCenarioAtual() {
   )`);
   await run(db, `INSERT INTO empresas (id) VALUES (1)`);
   await run(db, `INSERT INTO categorias (id, nome) VALUES
-    (43, 'Pasteis'), (44, 'Refrigerantes')`);
+    (43, 'Pasteis'), (44, 'Refrigerantes'), (45, 'Água')`);
   await run(db, `INSERT INTO produtos (
     id, categoria_id, nome, preco_venda, volume_valor, volume_unidade, unidade,
     utiliza_volume, utiliza_conversao, controla_estoque
@@ -377,23 +377,37 @@ test('aceita composição residual com volumes de 300 ml e 500 ml', async () => 
   }
 });
 
-test('venda por valor exclui produto cujo volume MUC convertido não seja 200, 300 ou 500 ml', async () => {
+test('volume MUC novo (ex.: 100 ml) entra sozinho sem allowlist fixa', async () => {
   const db = await prepararBancoCenarioAtual();
   try {
-    await run(db, `UPDATE pedidos SET observacao = 'VENDA_POR_VALOR_PASTEIS' WHERE id = 99`);
-    await run(db, 'UPDATE produtos SET ativo = 0 WHERE id IN (749, 750)');
-    await run(db, 'UPDATE produtos SET volume_valor = 100 WHERE id = 748');
-    await run(db, 'UPDATE pedidos SET total = 30.97 WHERE id = 99');
-    await run(db, 'UPDATE pedidos_itens SET preco_unitario = 8.99, subtotal = 17.98 WHERE id = 1');
-    await run(db, 'UPDATE pedidos_itens SET preco_unitario = 12.99, subtotal = 12.99 WHERE id = 2');
+    await run(db, `INSERT INTO produtos (
+      id, categoria_id, nome, preco_venda, volume_valor, volume_unidade, unidade,
+      utiliza_volume, utiliza_conversao, controla_estoque, ativo
+    ) VALUES (753, 44, 'Refrigerante Copo 100 ml', 6.50, 100, 'ML', 'ml', 1, 0, 1, 1)`);
+    await run(db, `INSERT INTO estoque_empresa (
+      produto_id, empresa_id, saldo_fiscal, saldo_nao_fiscal, estoque_atual
+    ) VALUES (753, 1, 100, 100, 200)`);
+    await run(db, 'DELETE FROM pedidos_itens');
+    await run(db, `INSERT INTO pedidos_itens (
+      id, pedido_id, produto_id, quantidade, preco_unitario, subtotal
+    ) VALUES (11, 99, 749, 1, 6.50, 6.50)`);
+    await run(db, 'UPDATE pedidos SET total = 6.50 WHERE id = 99');
 
-    await assert.rejects(
-      prepararComposicaoPedidoPdv({ pedidoId: 99, empresaId: 1 }, { db }),
-      (err) => {
-        assert.equal(err.code, 'REFRIGERANTES_INSUFICIENTES');
-        assert.equal(err.detalhes.modelos_invalidos[0].motivo, 'VOLUME_FORA_DA_REGRA');
-        return true;
-      }
+    const composicao = await prepararComposicaoPedidoPdv(
+      { pedidoId: 99, empresaId: 1 },
+      { db }
+    );
+
+    assert.equal(composicao.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
+    assert.equal(composicao.valorFinalCentavos, 650);
+    assert.deepEqual(
+      composicao.itens.map((item) => [
+        item.produto_id,
+        item.quantidade,
+        item.preco_unitario,
+        item.subtotal
+      ]),
+      [[753, 1, 6.5, 6.5]]
     );
   } finally {
     await fecharDb(db);
@@ -504,7 +518,7 @@ test('preserva o preço unitário cadastrado com fração de centavo ao arredond
   }
 });
 
-test('permite preparar venda somente com refrigerante (identidade + catálogo)', async () => {
+test('permite preparar venda somente com refrigerante (valor → copos MUC + desconto)', async () => {
   const db = await prepararBancoCenarioAtual();
   try {
     await run(db, 'DELETE FROM pedidos_itens WHERE id = 1');
@@ -515,11 +529,40 @@ test('permite preparar venda somente com refrigerante (identidade + catálogo)',
       { db }
     );
 
-    assert.equal(composicao.modo, 'COMPOSICAO_IDENTIDADE_CATALOGO');
+    assert.equal(composicao.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
     assert.equal(composicao.valorPastelCentavos, 0);
-    assert.equal(composicao.descontoCentavos, 0);
     assert.equal(composicao.valorOriginalCentavos, 1800);
-    assert.equal(composicao.valorFinalCentavos, 1299);
+    assert.equal(composicao.valorFinalCentavos, 1800);
+    assert.equal(composicao.valorResidualCentavos, 1800);
+    assert.ok(composicao.descontoCentavos >= 0);
+    assert.equal(
+      composicao.valorCompostoBrutoCentavos - composicao.descontoCentavos,
+      1800
+    );
+    assert.ok(composicao.itens.every((item) => [748, 749, 750].includes(item.produto_id)));
+    assert.equal(composicao.efeitosOperacionais, false);
+  } finally {
+    await fecharDb(db);
+  }
+});
+
+test('refrigerante R$ 9,00 escolhe o menor copo acima e aplica desconto técnico', async () => {
+  const db = await prepararBancoCenarioAtual();
+  try {
+    await run(db, 'DELETE FROM pedidos_itens');
+    await run(db, `INSERT INTO pedidos_itens (
+      id, pedido_id, produto_id, quantidade, preco_unitario, subtotal
+    ) VALUES (10, 99, 749, 1, 9.00, 9.00)`);
+    await run(db, 'UPDATE pedidos SET total = 9.00 WHERE id = 99');
+
+    const composicao = await prepararComposicaoPedidoPdv(
+      { pedidoId: 99, empresaId: 1 },
+      { db }
+    );
+
+    assert.equal(composicao.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
+    assert.equal(composicao.valorFinalCentavos, 900);
+    assert.equal(composicao.descontoCentavos, 399);
     assert.deepEqual(
       composicao.itens.map((item) => [
         item.produto_id,
@@ -529,7 +572,123 @@ test('permite preparar venda somente com refrigerante (identidade + catálogo)',
       ]),
       [[748, 1, 12.99, 12.99]]
     );
-    assert.equal(composicao.efeitosOperacionais, false);
+  } finally {
+    await fecharDb(db);
+  }
+});
+
+test('produto fiscal novo (150 ml) é descoberto no cadastro e vence o 200 ml no residual de R$ 9,00', async () => {
+  const db = await prepararBancoCenarioAtual();
+  try {
+    await run(db, `INSERT INTO produtos (
+      id, categoria_id, nome, preco_venda, volume_valor, volume_unidade, unidade,
+      utiliza_volume, utiliza_conversao, controla_estoque, ativo
+    ) VALUES (752, 44, 'Refrigerante Copo 150 ml', 9.75, 150, 'ML', 'ml', 1, 0, 1, 1)`);
+    await run(db, `INSERT INTO estoque_empresa (
+      produto_id, empresa_id, saldo_fiscal, saldo_nao_fiscal, estoque_atual
+    ) VALUES (752, 1, 100, 100, 200)`);
+    await run(db, 'DELETE FROM pedidos_itens');
+    await run(db, `INSERT INTO pedidos_itens (
+      id, pedido_id, produto_id, quantidade, preco_unitario, subtotal
+    ) VALUES (11, 99, 749, 1, 9.00, 9.00)`);
+    await run(db, 'UPDATE pedidos SET total = 9.00 WHERE id = 99');
+
+    const composicao = await prepararComposicaoPedidoPdv(
+      { pedidoId: 99, empresaId: 1 },
+      { db }
+    );
+
+    assert.equal(composicao.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
+    assert.equal(composicao.valorFinalCentavos, 900);
+    assert.equal(composicao.descontoCentavos, 75);
+    assert.deepEqual(
+      composicao.itens.map((item) => [
+        item.produto_id,
+        item.quantidade,
+        item.preco_unitario,
+        item.subtotal
+      ]),
+      [[752, 1, 9.75, 9.75]]
+    );
+  } finally {
+    await fecharDb(db);
+  }
+});
+
+test('pedido com água usa modelos fiscais da categoria Água (cadastro MUC), não refrigerante', async () => {
+  const db = await prepararBancoCenarioAtual();
+  try {
+    await run(db, `INSERT INTO produtos (
+      id, categoria_id, nome, preco_venda, volume_valor, volume_unidade, unidade,
+      utiliza_volume, utiliza_conversao, controla_estoque, ativo
+    ) VALUES
+      (760, 45, 'Água 300 ml', 4.50, 300, 'ML', 'ml', 1, 0, 1, 1),
+      (761, 45, 'Água 500 ml', 6.00, 500, 'ML', 'ml', 1, 0, 1, 1)`);
+    await run(db, `INSERT INTO estoque_empresa (
+      produto_id, empresa_id, saldo_fiscal, saldo_nao_fiscal, estoque_atual
+    ) VALUES (760, 1, 100, 100, 200), (761, 1, 100, 100, 200)`);
+    await run(db, 'DELETE FROM pedidos_itens');
+    await run(db, `INSERT INTO pedidos_itens (
+      id, pedido_id, produto_id, quantidade, preco_unitario, subtotal
+    ) VALUES (12, 99, 760, 1, 3.50, 3.50)`);
+    await run(db, 'UPDATE pedidos SET total = 3.50 WHERE id = 99');
+
+    const composicao = await prepararComposicaoPedidoPdv(
+      { pedidoId: 99, empresaId: 1 },
+      { db }
+    );
+
+    assert.equal(composicao.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
+    assert.equal(composicao.valorFinalCentavos, 350);
+    assert.equal(composicao.descontoCentavos, 100);
+    assert.deepEqual(
+      composicao.itens.map((item) => [
+        item.produto_id,
+        item.quantidade,
+        item.preco_unitario,
+        item.subtotal
+      ]),
+      [[760, 1, 4.5, 4.5]]
+    );
+    assert.ok(!composicao.itens.some((item) => [748, 749, 750].includes(item.produto_id)));
+  } finally {
+    await fecharDb(db);
+  }
+});
+
+test('água sem volume MUC mas com estoque e preço entra por unidade (não AGUAS_INSUFICIENTES)', async () => {
+  const db = await prepararBancoCenarioAtual();
+  try {
+    await run(db, `INSERT INTO produtos (
+      id, categoria_id, nome, preco_venda, volume_valor, volume_unidade, unidade,
+      utiliza_volume, utiliza_conversao, controla_estoque, ativo
+    ) VALUES (751, 45, 'Agua Mineral', 7.99, NULL, NULL, 'un', 0, 0, 0, 1)`);
+    await run(db, `INSERT INTO estoque_empresa (
+      produto_id, empresa_id, saldo_fiscal, saldo_nao_fiscal, estoque_atual
+    ) VALUES (751, 1, 200, 0, 200)`);
+    await run(db, 'DELETE FROM pedidos_itens');
+    await run(db, `INSERT INTO pedidos_itens (
+      id, pedido_id, produto_id, quantidade, preco_unitario, subtotal
+    ) VALUES (13, 99, 751, 1, 7.99, 7.99)`);
+    await run(db, 'UPDATE pedidos SET total = 7.99 WHERE id = 99');
+
+    const composicao = await prepararComposicaoPedidoPdv(
+      { pedidoId: 99, empresaId: 1 },
+      { db }
+    );
+
+    assert.equal(composicao.modo, 'COMPOSICAO_PASTEL_REFRIGERANTE');
+    assert.equal(composicao.valorFinalCentavos, 799);
+    assert.equal(composicao.descontoCentavos, 0);
+    assert.deepEqual(
+      composicao.itens.map((item) => [
+        item.produto_id,
+        item.quantidade,
+        item.preco_unitario,
+        item.subtotal
+      ]),
+      [[751, 1, 7.99, 7.99]]
+    );
   } finally {
     await fecharDb(db);
   }

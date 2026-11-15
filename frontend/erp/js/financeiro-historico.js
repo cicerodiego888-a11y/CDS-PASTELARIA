@@ -219,7 +219,7 @@ async function carregarHistoricoFinanceiro(periodo) {
     const query = params.toString();
     const endpoint = typeof financeiroEscopoTodasEmpresas === 'function' && financeiroEscopoTodasEmpresas()
       ? '/api/financeiro/multiempresa/historico'
-      : '/api/financeiro';
+      : '/api/financeiro/historico';
     const url = query ? `${endpoint}?${query}` : endpoint;
     const res = await fetch(url, { headers: __headersFin() });
 
@@ -386,8 +386,17 @@ function criarCelulaHistorico(valor, classe = '') {
 
 function criarCelulaReferenciaHistorico(item) {
   const celula = document.createElement('td');
-  const tipo = item.referencia_tipo;
-  const idBruto = item.referencia_id;
+  let tipo = item.referencia_tipo;
+  let idBruto = item.referencia_id;
+  // Projeção MCF / compra paga: preferir compra_id para o link do histórico
+  if (
+    (tipo === 'contas_pagar_mcf' || item.origem === 'mcf_compatibilidade' || item.origem_exibicao === 'compra')
+    && item.compra_id != null
+    && Number(item.compra_id) > 0
+  ) {
+    tipo = 'compra';
+    idBruto = item.compra_id;
+  }
   const idFormatoValido = typeof idBruto === 'number'
     ? Number.isSafeInteger(idBruto)
     : typeof idBruto === 'string' && /^\d+$/.test(idBruto);

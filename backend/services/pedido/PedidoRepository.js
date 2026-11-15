@@ -322,6 +322,11 @@ async function persistirIngredientesPersonalizados(db, pedidoId, pedidoItemId, e
 async function listarAguardandoFaturamento(filtros = {}) {
   const db = filtros.db;
   const empresaId = filtros.empresaId != null ? Number(filtros.empresaId) : null;
+  const colunasPedidos = await obterColunasTabela('pedidos', db);
+  const temClienteNomeLivre = colunasPedidos.has('cliente_nome');
+  const clienteNomeSelect = temClienteNomeLivre
+    ? "COALESCE(NULLIF(TRIM(p.cliente_nome), ''), c.nome)"
+    : 'c.nome';
   const where = [`p.status IN ('AGUARDANDO_FATURAMENTO')`];
   const params = [];
   if (Number.isInteger(empresaId) && empresaId > 0) {
@@ -336,7 +341,7 @@ async function listarAguardandoFaturamento(filtros = {}) {
       p.codigo,
       p.data_pedido,
       p.cliente_id,
-      c.nome AS cliente_nome,
+      ${clienteNomeSelect} AS cliente_nome,
       p.total,
       p.desconto,
       p.status,
@@ -361,6 +366,10 @@ async function listarPedidos(filtros = {}) {
   const colunasPedidos = await obterColunasTabela('pedidos', db);
   const temMesa = colunasPedidos.has('mesa_id') && (await obterColunasTabela('mesas', db)).size > 0;
   const temOrigem = colunasPedidos.has('origem_canal');
+  const temClienteNomeLivre = colunasPedidos.has('cliente_nome');
+  const clienteNomeSelect = temClienteNomeLivre
+    ? "COALESCE(NULLIF(TRIM(p.cliente_nome), ''), c.nome)"
+    : 'c.nome';
   const colunasOperacaoPdv = await obterColunasTabela('pedido_faturamento_operacoes', db);
   const temOperacaoPdv = [
     'pedido_id',
@@ -477,9 +486,15 @@ async function listarPedidos(filtros = {}) {
     params.push(...statusLista);
   }
   if (filtros.cliente) {
-    where.push('(IFNULL(c.nome, "") LIKE ? OR CAST(IFNULL(p.cliente_id, 0) AS TEXT) = ?)');
-    const q = `%${String(filtros.cliente).trim()}%`;
-    params.push(q, String(filtros.cliente).trim());
+    if (temClienteNomeLivre) {
+      where.push('(IFNULL(c.nome, "") LIKE ? OR IFNULL(p.cliente_nome, "") LIKE ? OR CAST(IFNULL(p.cliente_id, 0) AS TEXT) = ?)');
+      const q = `%${String(filtros.cliente).trim()}%`;
+      params.push(q, q, String(filtros.cliente).trim());
+    } else {
+      where.push('(IFNULL(c.nome, "") LIKE ? OR CAST(IFNULL(p.cliente_id, 0) AS TEXT) = ?)');
+      const q = `%${String(filtros.cliente).trim()}%`;
+      params.push(q, String(filtros.cliente).trim());
+    }
   }
   if (filtros.representante) {
     where.push('IFNULL(p.representante_nome, "") LIKE ?');
@@ -508,7 +523,7 @@ async function listarPedidos(filtros = {}) {
       p.codigo,
       p.data_pedido,
       p.cliente_id,
-      c.nome AS cliente_nome,
+      ${clienteNomeSelect} AS cliente_nome,
       p.total,
       p.desconto,
       p.frete,
@@ -562,10 +577,11 @@ async function obterPorId(pedidoId, opts = {}) {
     : 'pr.nome';
   const colunasPedidos = await obterColunasTabela('pedidos', db);
   const temMesa = colunasPedidos.has('mesa_id') && (await obterColunasTabela('mesas', db)).size > 0;
+  const temClienteNomeLivre = colunasPedidos.has('cliente_nome');
   const pedido = await get(`
     SELECT
       p.*,
-      c.nome AS cliente_nome,
+      COALESCE(${temClienteNomeLivre ? "NULLIF(TRIM(p.cliente_nome), ''), " : ''}c.nome) AS cliente_nome,
       ${temMesa ? 'm.numero' : 'NULL'} AS mesa_numero,
       COALESCE(u.username, u.nome) AS usuario_nome
     FROM pedidos p
@@ -630,6 +646,7 @@ async function criarPedido({
   codigo,
   dataPedido,
   clienteId,
+  clienteNome,
   total,
   desconto,
   frete,
@@ -683,6 +700,14 @@ async function criarPedido({
     if (origemCanal != null) {
       await run('UPDATE pedidos SET origem_canal = ? WHERE id = ?', [String(origemCanal), pedidoId], db);
     }
+    if (colunasPedidosCriar.has('cliente_nome')) {
+      const nomeLivre = clienteNome != null ? String(clienteNome).trim() : '';
+      await run(
+        'UPDATE pedidos SET cliente_nome = ? WHERE id = ? AND empresa_id = ?',
+        [nomeLivre || null, pedidoId, Number(empresaId)],
+        db
+      );
+    }
     for (const item of itens) {
       const snapshot = combinarSnapshotProdutoComItem(
         snapshots.get(Number(item.produto_id)),
@@ -710,6 +735,7 @@ async function criarPedido({
 async function substituirPedido({
   pedidoId,
   clienteId,
+  clienteNome,
   total,
   desconto,
   frete,
@@ -846,6 +872,14 @@ async function substituirPedido({
       await run(
         'UPDATE pedidos SET mesa_id = ? WHERE id = ? AND empresa_id = ?',
         [mesaId == null ? null : Number(mesaId), pedidoId, emp],
+        db
+      );
+    }
+    if (colunasPedidos.has('cliente_nome') && clienteNome !== undefined) {
+      const nomeLivre = clienteNome == null ? null : String(clienteNome).trim();
+      await run(
+        'UPDATE pedidos SET cliente_nome = ? WHERE id = ? AND empresa_id = ?',
+        [nomeLivre || null, pedidoId, emp],
         db
       );
     }
@@ -1081,6 +1115,41 @@ async function vincularAtendimentoDaMesa(pedidoId, empresaId, atendimentoId, opt
   }
 }
 
+/** Troca o atendimento já vinculado (ex.: pedido mudou de mesa na edição). */
+async function reatribuirAtendimentoDaMesa(pedidoId, empresaId, atendimentoId, opts = {}) {
+  const db = conn(opts.db);
+  const colunas = await obterColunasTabela('pedidos', db);
+  if (!colunas.has('mesa_atendimento_id')) {
+    throw new Error('Schema de pedidos sem mesa_atendimento_id: migração de mesas pendente.');
+  }
+  const atualizado = await run(
+    `UPDATE pedidos
+     SET mesa_atendimento_id = ?
+     WHERE id = ? AND empresa_id = ?`,
+    [Number(atendimentoId), Number(pedidoId), Number(empresaId)],
+    db
+  );
+  if (atualizado.changes !== 1) {
+    const err = new Error('Não foi possível reatribuir o pedido ao atendimento da mesa.');
+    err.statusCode = 409;
+    err.codigo = 'ATENDIMENTO_VINCULO_CONCORRENTE';
+    throw err;
+  }
+}
+
+async function desvincularAtendimentoDaMesa(pedidoId, empresaId, opts = {}) {
+  const db = conn(opts.db);
+  const colunas = await obterColunasTabela('pedidos', db);
+  if (!colunas.has('mesa_atendimento_id')) return;
+  await run(
+    `UPDATE pedidos
+     SET mesa_atendimento_id = NULL
+     WHERE id = ? AND empresa_id = ?`,
+    [Number(pedidoId), Number(empresaId)],
+    db
+  );
+}
+
 module.exports = {
   listarAguardandoFaturamento,
   listarPedidos,
@@ -1089,6 +1158,8 @@ module.exports = {
   criarErroPedidoImutavel,
   criarPedido,
   vincularAtendimentoDaMesa,
+  reatribuirAtendimentoDaMesa,
+  desvincularAtendimentoDaMesa,
   substituirPedido,
   atualizarStatus,
   excluirOrcamento,

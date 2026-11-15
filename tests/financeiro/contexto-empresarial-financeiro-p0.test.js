@@ -225,7 +225,7 @@ describe('P0 — Contexto empresarial Financeiro', () => {
       ['frontend/erp/js/financeiro-dashboard.js', /\/api\/financeiro\/dashboard/, /__headersFin\(/],
       ['frontend/erp/js/financeiro-receber.js', /\/api\/financeiro\/receber/, /headersReceberDaEmpresa\(|__headersFin\(/],
       ['frontend/erp/js/financeiro-pagar.js', /\/api\/contas-pagar/, /headersAuthPagar\(/],
-      ['frontend/erp/js/financeiro-historico.js', /\/api\/financeiro['"`?]/, /__headersFin\(/],
+      ['frontend/erp/js/financeiro-historico.js', /\/api\/financeiro\/historico|\/api\/financeiro\/multiempresa\/historico/, /__headersFin\(/],
       ['frontend/erp/js/financeiro-relatorios.js', /\/api\/financeiro\/relatorios|\/api\/contas-pagar/, /__headersFin\(/]
     ];
 

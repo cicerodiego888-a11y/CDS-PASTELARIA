@@ -36,6 +36,8 @@ function responderErro(res, err) {
   if (err.plano) payload.plano = err.plano;
   if (err.consultas) payload.consultas = err.consultas;
   if (err.detalhes) payload.detalhes = err.detalhes;
+  if (err.consolidacao_id != null) payload.consolidacao_id = err.consolidacao_id;
+  if (err.pedido_id != null) payload.pedido_id = err.pedido_id;
   if (err.codigo === 'MODULO_NAO_LICENCIADO') {
     payload.erro = 'MODULO_NAO_LICENCIADO';
     payload.modulo = 'pedidos';
@@ -171,6 +173,22 @@ router.post('/venda-consolidada-mesa/:consolidacaoId/vincular', async (req, res)
   }
 });
 
+router.post('/venda-consolidada-mesa/:consolidacaoId/liberar', async (req, res) => {
+  try {
+    const out = await VendaConsolidadaMesa.liberarReserva({
+      empresaId: empresaIdDoReqPedido(req),
+      consolidacaoId: Number(req.params.consolidacaoId)
+    }, { db });
+    res.json({
+      success: true,
+      consolidacao_id: out.consolidacao_id,
+      idempotente: out.idempotente === true
+    });
+  } catch (err) {
+    responderErro(res, err);
+  }
+});
+
 router.post('/:id/preparar-venda-pdv', async (req, res) => {
   try {
     const empresaId = empresaIdDoReqPedido(req);
@@ -244,6 +262,24 @@ router.post('/:id/finalizar-venda-pdv', async (req, res) => {
       venda_id: out.venda_id,
       idempotente: out.idempotente === true,
       mesa: out.mesa || null
+    });
+  } catch (err) {
+    responderErro(res, err);
+  }
+});
+
+router.post('/:id/abandonar-venda-pdv', async (req, res) => {
+  try {
+    const out = await PedidoFaturamentoOperacaoRepository.abandonarOperacaoPdv(
+      Number(req.params.id),
+      empresaIdDoReqPedido(req),
+      { db }
+    );
+    res.json({
+      success: true,
+      pedido_id: Number(req.params.id),
+      liberado: out.liberado === true,
+      idempotente: out.idempotente === true
     });
   } catch (err) {
     responderErro(res, err);

@@ -564,7 +564,7 @@ describe('venda consolidada da mesa', () => {
     }
   });
 
-  it('21. o fechamento individual e o consolidado não correm juntos', async () => {
+  it('21. consolidada reserva bloqueia individual; consolidada recupera preparação INICIADA órfã', async () => {
     const ctx = await ambiente();
     const sala = await mesaComPedidos(ctx, 20, [9, 10]);
     await Consolidada.preparar(entrada(ctx, sala.mesa, sala.pedidos, 'reserva'), { db: ctx.db });
@@ -580,10 +580,73 @@ describe('venda consolidada da mesa', () => {
       total: 6,
       itens: [{ produto_id: ctx.produtoId, quantidade: 1, preco_unitario: 6, subtotal: 6 }]
     });
-    await assert.rejects(
-      () => Consolidada.concluir(entrada(ctx, individual.mesa, individual.pedidos, 'corrida'), { db: ctx.db, nucleo: nucleoDe(ctx, {}) }),
-      (err) => err.codigo === 'PEDIDO_FECHAMENTO_INDIVIDUAL'
+    // Preparação INICIADA sem venda é abandonável: a consolidada libera e segue.
+    const recuperada = await Consolidada.preparar(
+      entrada(ctx, individual.mesa, individual.pedidos, 'corrida'),
+      { db: ctx.db }
     );
+    assert.ok(Number(recuperada.consolidacao_id) > 0);
+    const op = await get(ctx.db, `
+      SELECT id FROM pedido_faturamento_operacoes WHERE pedido_id = ?
+    `, [individual.pedidos[0].id]);
+    assert.equal(op, null);
+  });
+
+  it('21b. cancelar no PDV libera a reserva e permite gerar venda de novo', async () => {
+    const ctx = await ambiente();
+    const sala = await mesaComPedidos(ctx, 40, [11, 12]);
+    const reservada = await Consolidada.preparar(
+      entrada(ctx, sala.mesa, sala.pedidos, 'abandono-pdv'),
+      { db: ctx.db }
+    );
+    await assert.rejects(
+      () => Operacao.prepararOperacaoPdv(sala.pedidos[0].id, ctx.a.id, {
+        pedidoId: sala.pedidos[0].id,
+        empresaId: ctx.a.id,
+        total: 11,
+        itens: [{ produto_id: ctx.produtoId, quantidade: 1, preco_unitario: 11, subtotal: 11 }]
+      }),
+      (err) => err.codigo === 'PEDIDO_EM_CONSOLIDACAO'
+    );
+
+    const liberada = await Consolidada.liberarReserva({
+      empresaId: ctx.a.id,
+      consolidacaoId: reservada.consolidacao_id
+    }, { db: ctx.db });
+    assert.equal(liberada.success, true);
+
+    const individual = await Operacao.prepararOperacaoPdv(sala.pedidos[0].id, ctx.a.id, {
+      pedidoId: sala.pedidos[0].id,
+      empresaId: ctx.a.id,
+      total: 11,
+      itens: [{ produto_id: ctx.produtoId, quantidade: 1, preco_unitario: 11, subtotal: 11 }]
+    });
+    assert.equal(individual.operacao.status, 'INICIADA');
+
+    // Com preparação individual INICIADA, a consolidada abandona a órfã e reserva de novo.
+    const reaberta = await Consolidada.preparar(
+      entrada(ctx, sala.mesa, sala.pedidos, 'abandono-pdv-nova'),
+      { db: ctx.db }
+    );
+    assert.ok(Number(reaberta.consolidacao_id) > 0);
+    assert.equal(reaberta.status, 'RESERVADA');
+
+    const outra = await mesaComPedidos(ctx, 41, [13, 14]);
+    const reserva2 = await Consolidada.preparar(
+      entrada(ctx, outra.mesa, outra.pedidos, 'abandono-reabrir'),
+      { db: ctx.db }
+    );
+    await Consolidada.liberarReserva({
+      empresaId: ctx.a.id,
+      consolidacaoId: reserva2.consolidacao_id
+    }, { db: ctx.db });
+    const deNovo = await Consolidada.preparar(
+      entrada(ctx, outra.mesa, outra.pedidos, 'abandono-reabrir'),
+      { db: ctx.db }
+    );
+    assert.ok(Number(deNovo.consolidacao_id) > 0);
+    assert.equal(deNovo.status, 'RESERVADA');
+    assert.notEqual(Number(deNovo.consolidacao_id), Number(reserva2.consolidacao_id));
   });
 
   it('22 a 24. vincula os participantes e só encerra o atendimento resolvido', async () => {
@@ -623,6 +686,8 @@ describe('venda consolidada da mesa', () => {
     const pdvJs = fs.readFileSync(path.join(__dirname, '../../frontend/pdv/js/pdv.js'), 'utf8');
     assert.match(pdvJs, /retomarVinculoVendaConsolidada/);
     assert.match(pdvJs, /mesa-consolidacao-/);
+    assert.match(pdvJs, /liberarConsolidacaoHandoffPdv/);
+    assert.match(pdvJs, /venda-consolidada-mesa\/\$\{consolidacaoId\}\/liberar/);
 
     const semMesa = await criarPedido(ctx, ctx.a.id, null, { preco: 7 });
     await assert.rejects(
@@ -646,7 +711,7 @@ describe('venda consolidada da mesa', () => {
     assert.equal((await get(ctx.db, 'SELECT status FROM pedidos WHERE id = ?', [livre.id])).status, 'PEDIDO');
   });
 
-  it('26 e 27. o núcleo recebe os itens uma vez e a consolidação não recalcula F×NF', async () => {
+  it('26 e 27. o núcleo recebe os itens uma vez; reserva compõe F×NF sem baixar estoque', async () => {
     const ctx = await ambiente();
     const antes = ctx.baixas.length;
     const sala = await mesaComPedidos(ctx, 24, [{ preco: 9, quantidade: 1 }, { preco: 10, quantidade: 2 }]);
@@ -657,9 +722,9 @@ describe('venda consolidada da mesa', () => {
     assert.equal(ctx.baixas[ctx.baixas.length - 1].quantidade, 3);
     const fonte = fs.readFileSync(path.join(__dirname, '../../backend/services/vendas/VendaConsolidadaMesaService.js'), 'utf8');
     assert.match(fonte, /concluirVendaNoNucleoOficial/);
-    assert.equal(fonte.includes('saldo_fiscal'), false);
+    assert.match(fonte, /prepararComposicaoPedidoPdv/);
+    assert.match(fonte, /montarContratoComposto/);
     assert.equal(fonte.includes('FichaTecnica'), false);
-    assert.equal(fonte.includes('saldo_nao_fiscal'), false);
     const selecaoFonte = fs.readFileSync(path.join(__dirname, '../../frontend/erp/js/mesas-venda-consolidada.js'), 'utf8');
     const grupo = selecao.grupos([
       { id: 1, status: 'PEDIDO', mesa_id: 1, mesa_atendimento_id: 9, empresa_id: 1, total: 9 },
@@ -669,6 +734,119 @@ describe('venda consolidada da mesa', () => {
     assert.equal(grupo.length, 1);
     assert.equal(grupo[0].pedidos.length, 2);
     assert.match(selecaoFonte, /criarVenda: false/);
+    const pdvJs = fs.readFileSync(path.join(__dirname, '../../frontend/pdv/js/pdv.js'), 'utf8');
+    assert.match(pdvJs, /pdvCarregandoHandoff\s*\?\s*null/);
+  });
+
+  it('26b. consolidada da mesa compõe pastel+bebida e preserva total 64,98', async () => {
+    const ctx = await ambiente();
+    await run(ctx.db, `
+      CREATE TABLE IF NOT EXISTS categorias (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nome TEXT NOT NULL,
+        tipo TEXT DEFAULT 'produto'
+      )
+    `);
+    const catPasteis = await run(ctx.db, `INSERT INTO categorias (nome, tipo) VALUES ('Pasteis', 'produto')`);
+    const catRefri = await run(ctx.db, `INSERT INTO categorias (nome, tipo) VALUES ('Refrigerantes', 'produto')`);
+    const catOutros = await run(ctx.db, `INSERT INTO categorias (nome, tipo) VALUES ('Outros', 'produto')`);
+    const pastel = await run(ctx.db, `
+      INSERT INTO produtos (
+        nome, categoria_id, preco_venda, unidade, unidade_estoque, utiliza_conversao,
+        saldo_fiscal, estoque_atual, ativo, tipo_operacional, controla_estoque
+      ) VALUES ('Pastel do Cheff', ?, 8.99, 'UN', 'UN', 0, 500, 500, 1, 'COMERCIAL', 1)
+    `, [catPasteis.lastID]);
+    const refri = await run(ctx.db, `
+      INSERT INTO produtos (
+        nome, categoria_id, preco_venda, unidade, unidade_estoque, utiliza_conversao,
+        utiliza_volume, volume_valor, volume_unidade,
+        saldo_fiscal, estoque_atual, ativo, tipo_operacional, controla_estoque
+      ) VALUES ('Refrigerante Copo 200ML', ?, 12.99, 'ml', 'ml', 0, 1, 200, 'ML', 500, 500, 1, 'COMERCIAL', 1)
+    `, [catRefri.lastID]);
+    const cajuina = await run(ctx.db, `
+      INSERT INTO produtos (
+        nome, categoria_id, preco_venda, unidade, unidade_estoque, utiliza_conversao,
+        saldo_fiscal, estoque_atual, ativo, tipo_operacional, controla_estoque
+      ) VALUES ('Cajuina Sao Geraldo 1L', ?, 9.00, 'UN', 'UN', 0, 500, 500, 1, 'COMERCIAL', 1)
+    `, [catOutros.lastID]);
+    for (const produtoId of [pastel.lastID, refri.lastID, cajuina.lastID]) {
+      await EstoqueEmpresaService.criarRegistro({
+        produtoId,
+        empresaId: ctx.a.id,
+        saldo_fiscal: 500,
+        saldo_nao_fiscal: 0,
+        estoque_atual: 500,
+        reservado_fiscal: 0
+      }, { db: ctx.db });
+    }
+
+    const mesa = await MesaService.criar(ctx.a.id, { numero: 42 }, { db: ctx.db });
+    await Atendimento.abrir(ctx.a.id, mesa.mesa.id, { operadorId: 8 }, { db: ctx.db });
+    const original = configService.recursoHabilitado;
+    configService.recursoHabilitado = () => true;
+    let pedBebida;
+    let pedMisto;
+    try {
+      pedBebida = (await PedidoOperacional.criar({
+        itens: [{
+          produto_id: cajuina.lastID,
+          quantidade: 1,
+          preco_unitario: 9,
+          desconto_percentual: 0,
+          subtotal: 9
+        }],
+        total: 9,
+        mesa_id: mesa.mesa.id
+      }, 8, { empresaId: ctx.a.id, db: ctx.db })).pedido;
+      pedMisto = (await PedidoOperacional.criar({
+        itens: [
+          {
+            produto_id: pastel.lastID,
+            quantidade: 1,
+            preco_unitario: 24.99,
+            desconto_percentual: 0,
+            subtotal: 24.99
+          },
+          {
+            produto_id: pastel.lastID,
+            quantidade: 1,
+            preco_unitario: 21.99,
+            desconto_percentual: 0,
+            subtotal: 21.99
+          },
+          {
+            produto_id: cajuina.lastID,
+            quantidade: 1,
+            preco_unitario: 9,
+            desconto_percentual: 0,
+            subtotal: 9
+          }
+        ],
+        total: 55.98,
+        mesa_id: mesa.mesa.id
+      }, 8, { empresaId: ctx.a.id, db: ctx.db })).pedido;
+    } finally {
+      configService.recursoHabilitado = original;
+    }
+
+    const preparada = await Consolidada.preparar(
+      entrada(ctx, mesa.mesa, [pedBebida, pedMisto], 'mesa1-composicao'),
+      { db: ctx.db }
+    );
+    assert.equal(Number(preparada.total), 64.98);
+    assert.ok(Array.isArray(preparada.itens) && preparada.itens.length >= 2);
+    const linhasComerciaisBrutas = 4;
+    assert.notEqual(preparada.itens.length, linhasComerciaisBrutas);
+    assert.ok(preparada.itens.some((item) => Number(item.produto_id) === Number(pastel.lastID)));
+    assert.ok(preparada.itens.some((item) => item.modo_composicao === 'COMPOSICAO_PASTEL_REFRIGERANTE'));
+    const pastelLinha = preparada.itens.find((item) => Number(item.produto_id) === Number(pastel.lastID));
+    assert.equal(Number(pastelLinha.quantidade), 2);
+    assert.equal(Number(pastelLinha.preco_unitario), 8.99);
+    assert.ok(Number(preparada.desconto) >= 0);
+    const origem = await get(ctx.db, `
+      SELECT COUNT(*) AS total FROM venda_consolidacao_itens WHERE consolidacao_id = ?
+    `, [preparada.consolidacao_id]);
+    assert.equal(Number(origem.total), linhasComerciaisBrutas);
   });
 
   it('mantém a chave na repetição da mesma seleção e cria outra para seleção diferente', () => {

@@ -367,6 +367,17 @@ describe('FIN-UX-08 — Dashboard Financeiro Multiempresa', () => {
       assert.equal(response.body.some((row) => row.empresa_id === 3), false);
       assert.equal(response.body.every((row) => row.tipo === 'receita' && row.status === 'recebido'), true);
 
+      const saidas = await requestHandler(handler, 10, {
+        dataInicio: '2026-10-01',
+        dataFim: '2026-10-31',
+        tipo: 'despesa',
+        status: 'pago'
+      });
+      assert.equal(saidas.statusCode, 200);
+      // Projeção MCF de Contas a Pagar (compra/AP) deve aparecer no Histórico de saídas
+      assert.equal(saidas.body.some((row) => row.origem === 'mcf_compatibilidade'), true);
+      assert.equal(saidas.body.some((row) => Number(row.valor) === 30 && row.empresa_id === 1), true);
+
       const restrita = await requestHandler(handler, 11);
       assert.equal(restrita.statusCode, 200);
       assert.equal(restrita.body.length > 0, true);

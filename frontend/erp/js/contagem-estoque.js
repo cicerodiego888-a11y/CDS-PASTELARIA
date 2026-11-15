@@ -165,16 +165,33 @@
     return 'BAIXA DE ESTOQUE';
   }
 
-  function calcularSaldoPrevisto(saldo, quantidadeConvertida, tipo) {
+  /**
+   * Quantidade informada = saldo contado (alvo). Previsto = contado.
+   * Movimento = |saldo − contado| (BAIXA se contado < saldo; ACRÉSCIMO se contado > saldo).
+   */
+  function calcularSaldoPrevisto(saldo, quantidadeContada, tipo) {
+    const contado = arredondarQtdEstoque(quantidadeContada);
+    if (contado == null) return null;
+    const normalizado = String(tipo || '').trim().toUpperCase();
+    if (
+      normalizado === 'ACRESCIMO' || normalizado === 'ACRÉSCIMO' || normalizado === 'ON'
+      || normalizado === 'BAIXA' || normalizado === 'OFF'
+    ) {
+      return contado;
+    }
+    return null;
+  }
+
+  function calcularMovimentoAjuste(saldo, quantidadeContada, tipo) {
     const base = arredondarQtdEstoque(saldo);
-    const movimento = arredondarQtdEstoque(quantidadeConvertida);
-    if (base == null || movimento == null) return null;
+    const contado = arredondarQtdEstoque(quantidadeContada);
+    if (base == null || contado == null) return null;
     const normalizado = String(tipo || '').trim().toUpperCase();
     if (normalizado === 'ACRESCIMO' || normalizado === 'ACRÉSCIMO' || normalizado === 'ON') {
-      return arredondarQtdEstoque(base + movimento);
+      return arredondarQtdEstoque(contado - base);
     }
     if (normalizado === 'BAIXA' || normalizado === 'OFF') {
-      return arredondarQtdEstoque(base - movimento);
+      return arredondarQtdEstoque(base - contado);
     }
     return null;
   }
@@ -338,10 +355,17 @@
           ? preview.saldo_nao_fiscal_esperado
           : preview.quantidade_nao_fiscal_contada),
       saldo_insuficiente: !!preview.saldo_insuficiente,
+      contado_incompativel: !!preview.contado_incompativel,
       saldo_disponivel_fiscal: preview.saldo_disponivel_fiscal,
       saldo_disponivel_nao_fiscal: preview.saldo_disponivel_nao_fiscal,
       quantidade_solicitada_fiscal: preview.quantidade_solicitada_fiscal,
-      quantidade_solicitada_nao_fiscal: preview.quantidade_solicitada_nao_fiscal
+      quantidade_solicitada_nao_fiscal: preview.quantidade_solicitada_nao_fiscal,
+      quantidade_fiscal_movimento: preview.quantidade_fiscal_movimento != null
+        ? preview.quantidade_fiscal_movimento
+        : (preview.diferenca_fiscal != null ? Math.abs(Number(preview.diferenca_fiscal)) : null),
+      quantidade_nao_fiscal_movimento: preview.quantidade_nao_fiscal_movimento != null
+        ? preview.quantidade_nao_fiscal_movimento
+        : (preview.diferenca_nao_fiscal != null ? Math.abs(Number(preview.diferenca_nao_fiscal)) : null)
     };
   }
 
@@ -522,21 +546,13 @@
     }
     if (inputNf && f12On) inputNf.value = '';
     if (labelQf) {
-      if (operacaoForm === 'AJUSTE_DIRECIONADO') {
-        labelQf.textContent = f12On
-          ? 'Quantidade para ajuste'
-          : 'Quantidade fiscal para ajuste';
-      } else {
-        labelQf.textContent = f12On
-          ? 'Quantidade física encontrada'
-          : 'Quantidade fiscal contada';
-      }
+      labelQf.textContent = f12On
+        ? 'Quantidade física encontrada (contada)'
+        : 'Quantidade fiscal contada';
     }
     const labelQnf = document.getElementById('cef-label-qnf');
     if (labelQnf) {
-      labelQnf.textContent = operacaoForm === 'AJUSTE_DIRECIONADO'
-        ? 'Quantidade não fiscal para ajuste'
-        : 'Qtd não fiscal contada';
+      labelQnf.textContent = 'Qtd não fiscal contada';
     }
     if (badge) {
       badge.textContent = f12On
@@ -601,6 +617,19 @@
         }).join('')
         + '</select></div>';
     }
+    const ultima = saldo && saldo.ultima_origem_saldo ? saldo.ultima_origem_saldo : null;
+    const ultimaDataTxt = ultima && ultima.data
+      ? formatarBrData(ultima.data)
+      : null;
+    const ultimaHtml = ultimaDataTxt
+      ? ('<div class="cef-saldo cef-saldo--origem"><span>'
+        + escapeHtml(ultima.rotulo || (ultima.origem === 'COMPRA'
+          ? 'Última entrada (compra/NF)'
+          : 'Último ajuste manual'))
+        + '</span><strong>' + escapeHtml(ultimaDataTxt) + '</strong></div>')
+      : (saldo
+        ? '<div class="cef-saldo cef-saldo--origem"><span>Última entrada / ajuste</span><strong>Sem registro</strong></div>'
+        : '');
     card.classList.remove('d-none');
     card.innerHTML = '<h3>' + escapeHtml(nome || 'Produto') + '</h3>'
       + '<dl class="cef-meta">'
@@ -612,7 +641,9 @@
       + '<div class="cef-saldos"><div class="cef-saldo"><span>Saldo atual fiscal</span><strong>'
       + escapeHtml(fiscalTxt) + '</strong></div>'
       + '<div class="cef-saldo ' + (f12On ? 'd-none' : '') + '" id="cef-card-nf"><span>Saldo atual não fiscal</span><strong>'
-      + escapeHtml(nfTxt) + '</strong></div></div>'
+      + escapeHtml(nfTxt) + '</strong></div>'
+      + ultimaHtml
+      + '</div>'
       + selectHtml;
     const selAp = document.getElementById('cef-apresentacao');
     if (selAp) {
@@ -644,8 +675,8 @@
       btn.classList.toggle('is-off', direcionado && !ligado);
       btn.setAttribute('aria-pressed', ligado ? 'true' : 'false');
       btn.title = ligado
-        ? 'ON: a quantidade informada será adicionada ao saldo atual.'
-        : 'OFF: a quantidade informada será retirada do saldo atual.';
+        ? 'ON: informe o saldo físico contado; o sistema acrescenta (contado − saldo atual).'
+        : 'OFF: informe o saldo físico contado; o sistema baixa (saldo atual − contado).';
     }
     if (rotulo) {
       rotulo.innerHTML = ligado
@@ -712,15 +743,23 @@
     conv.innerHTML = formula;
     if (data.operacao === 'AJUSTE_DIRECIONADO') {
       const tipoTxt = data.tipo_ajuste === 'ACRESCIMO' ? 'Acréscimo' : 'Baixa';
+      const movF = data.quantidade_fiscal_movimento != null
+        ? data.quantidade_fiscal_movimento
+        : Math.abs(Number(data.diferenca_fiscal) || 0);
       let diffHtml = '<strong>' + escapeHtml(rotuloTipoAjuste(data.tipo_ajuste)) + '</strong>'
-        + '<p class="mb-1">Tipo: ' + escapeHtml(tipoTxt) + '.</p>'
+        + '<p class="mb-1">Tipo: ' + escapeHtml(tipoTxt)
+        + '. Quantidade informada = saldo contado.</p>'
         + '<div>Fiscal: ' + htmlSaldoSeta(data.saldo_fiscal_anterior, data.saldo_fiscal_previsto, un) + '</div>'
-        + '<div class="mt-1">Movimento: ' + htmlMovimentoConvertido(data.tipo_ajuste, data.quantidade_fiscal_contada, un) + '</div>';
+        + '<div class="mt-1">Movimento: ' + htmlMovimentoConvertido(data.tipo_ajuste, movF, un) + '</div>';
       if (!data.omitir_nao_fiscal) {
         diffHtml += '<div class="mt-1"><span class="small text-muted">Não fiscal </span>'
           + htmlSaldoSeta(data.saldo_nao_fiscal_anterior, data.saldo_nao_fiscal_previsto, un) + '</div>';
       }
-      diffHtml += '<p class="small text-muted mb-0 mt-1">Ajuste previsto. Aguardando confirmação.</p>';
+      if (data.saldo_insuficiente || data.contado_incompativel) {
+        diffHtml += '<p class="small text-danger mb-0 mt-1">Quantidade contada incompatível com o tipo de ajuste / saldo.</p>';
+      } else {
+        diffHtml += '<p class="small text-muted mb-0 mt-1">Ajuste previsto. Aguardando confirmação.</p>';
+      }
       diff.innerHTML = diffHtml;
       return;
     }
@@ -1573,11 +1612,19 @@
         + (f12On || l.omitir_nao_fiscal
           ? ''
           : '<div class="mt-1">' + htmlSaldoSeta(l.saldo_nao_fiscal_esperado, l.saldo_nao_fiscal_previsto, un) + '</div>');
+      const movFLista = l.quantidade_fiscal_movimento != null
+        ? l.quantidade_fiscal_movimento
+        : Math.abs(Number(l.diferenca_fiscal) || 0);
+      const movNfLista = l.quantidade_nao_fiscal_movimento != null
+        ? l.quantidade_nao_fiscal_movimento
+        : Math.abs(Number(l.diferenca_nao_fiscal) || 0);
       const convertida = l.tipo_ajuste
-        ? htmlMovimentoConvertido(l.tipo_ajuste, l.quantidade_fiscal_contada, un)
+        ? ('Contado ' + formatarQtd(l.quantidade_fiscal_contada) + ' ' + un
+          + '<div class="mt-1">' + htmlMovimentoConvertido(l.tipo_ajuste, movFLista, un) + '</div>'
           + (f12On || l.omitir_nao_fiscal
             ? ''
-            : '<div class="mt-1">' + htmlMovimentoConvertido(l.tipo_ajuste, l.quantidade_nao_fiscal_contada, un) + '</div>')
+            : '<div class="small text-muted mt-1">NF contado ' + formatarQtd(l.quantidade_nao_fiscal_contada) + ' '
+              + escapeHtml(un) + ' · ' + htmlMovimentoConvertido(l.tipo_ajuste, movNfLista, un) + '</div>'))
         : (formatarQtd(l.quantidade_fiscal_contada) + ' ' + un
           + (f12On || l.omitir_nao_fiscal
             ? ''
@@ -1915,6 +1962,7 @@
     estadoInicialAjusteDirecionado: estadoInicialAjusteDirecionado,
     rotuloTipoAjuste: rotuloTipoAjuste,
     calcularSaldoPrevisto: calcularSaldoPrevisto,
+    calcularMovimentoAjuste: calcularMovimentoAjuste,
     resumoDirecionado: resumoDirecionado
   };
 })(typeof window !== 'undefined' ? window : globalThis);

@@ -552,6 +552,8 @@ function aplicarAlteracoesPosCriacao() {
   aplicarAlteracaoSegura('pedidos', `ALTER TABLE pedidos ADD COLUMN peso REAL DEFAULT 0`);
   aplicarAlteracaoSegura('pedidos', `ALTER TABLE pedidos ADD COLUMN dados_adicionais TEXT`);
   aplicarAlteracaoSegura('pedidos', `ALTER TABLE pedidos ADD COLUMN mod_frete TEXT`);
+  // Nome livre no pedido — não exige cadastro prévio em clientes
+  aplicarAlteracaoSegura('pedidos', `ALTER TABLE pedidos ADD COLUMN cliente_nome TEXT`);
   aplicarAlteracaoSegura(
     'pedidos_itens',
     `ALTER TABLE pedidos_itens ADD COLUMN classificacao_operacional_snapshot TEXT`

@@ -498,12 +498,51 @@ async function registrarVendaCriada(db, operacaoId, pedidoId, empresaId, vendaId
   }
 }
 
+async function abandonarOperacaoPdv(pedidoId, empresaId, opts = {}) {
+  const db = opts.db || require('../../database');
+  await garantirSchema(db);
+  const operacao = await get(db, `
+    SELECT id, pedido_id, empresa_id, venda_id, status, tipo_operacao
+    FROM pedido_faturamento_operacoes
+    WHERE pedido_id = ?
+  `, [pedidoId]);
+  if (!operacao || Number(operacao.empresa_id) !== Number(empresaId)) {
+    return { success: true, idempotente: true, liberado: false };
+  }
+  if (String(operacao.tipo_operacao || '') !== 'PDV_COMPOSICAO') {
+    throw erroConflito('A operação do Pedido não é uma preparação PDV.', {
+      codigo: 'OPERACAO_TIPO_INVALIDO',
+      pedido_id: pedidoId
+    });
+  }
+  if (operacao.venda_id != null) {
+    throw erroConflito('A preparação já possui venda e não pode ser abandonada.', {
+      codigo: 'OPERACAO_JA_VINCULADA',
+      pedido_id: pedidoId,
+      venda_id: operacao.venda_id
+    });
+  }
+  if (String(operacao.status || '').toUpperCase() !== 'INICIADA') {
+    throw erroConflito('O estado da operação não permite abandono.', {
+      codigo: 'OPERACAO_NAO_ABANDONAVEL',
+      pedido_id: pedidoId,
+      status: operacao.status
+    });
+  }
+  await run(db, `
+    DELETE FROM pedido_faturamento_operacoes
+    WHERE id = ? AND pedido_id = ? AND empresa_id = ? AND venda_id IS NULL
+  `, [operacao.id, pedidoId, empresaId]);
+  return { success: true, idempotente: false, liberado: true, pedido_id: Number(pedidoId) };
+}
+
 module.exports = {
   garantirSchema,
   prepararOperacao,
   prepararOperacaoPdv,
   consultarOperacaoPdv,
   registrarVendaCriada,
+  abandonarOperacaoPdv,
   erroConflito,
   run,
   get,

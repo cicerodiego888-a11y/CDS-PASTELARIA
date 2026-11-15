@@ -564,7 +564,7 @@
       corpo = `
         <p>Estado <strong>FECHAMENTO</strong>.</p>
         <p>Esta mesa está em processo de fechamento.</p>
-        ${blocoAtendimento(atendimento, instante)}
+        ${blocoAtendimento(atendimento, instante, estado.pedidos)}
         ${blocoPedidos(estado.pedidos)}
         <button type="button" class="btn btn-outline-primary mb-3" data-acao="pedidos">Ver todos os pedidos</button>
       `;
@@ -574,7 +574,7 @@
       const destino = livres.find((item) => String(item.id) === String(estado.destinoId));
       corpo = `
         <p>Estado <strong>OCUPADA</strong>.</p>
-        ${blocoAtendimento(atendimento, instante)}
+        ${blocoAtendimento(atendimento, instante, estado.pedidos)}
         ${blocoPedidos(estado.pedidos)}
         <div class="d-flex flex-wrap gap-2 mb-3">
           ${mesa && mesa.ativo === false ? '' : '<button type="button" class="btn btn-success" data-acao="lancar">Lançar pedido</button>'}
@@ -601,11 +601,25 @@
       </div>`;
   }
 
-  function blocoAtendimento(atendimento, instante) {
+  function nomesClientesDosPedidos(pedidos) {
+    const nomes = [];
+    (pedidos || []).forEach((pedido) => {
+      const nome = String(pedido && pedido.cliente_nome || '').trim();
+      if (nome && !nomes.includes(nome)) nomes.push(nome);
+    });
+    return nomes;
+  }
+
+  function blocoAtendimento(atendimento, instante, pedidos) {
     if (!atendimento) return '';
+    const nomesPedidos = nomesClientesDosPedidos(pedidos);
     const cliente = atendimento.cliente_nome
       ? `Cliente: ${escapar(atendimento.cliente_nome)}`
-      : (atendimento.cliente_id != null ? `Cliente nº ${escapar(atendimento.cliente_id)}` : 'Cliente não identificado');
+      : (atendimento.cliente_id != null
+        ? `Cliente nº ${escapar(atendimento.cliente_id)}`
+        : (nomesPedidos.length
+          ? `Cliente: ${escapar(nomesPedidos.join(', '))}`
+          : 'Cliente não identificado'));
     return `
       <ul class="list-unstyled">
         <li>${cliente}</li>
@@ -638,6 +652,9 @@
         ? 'mesas-prep--estado'
         : (estado === 'CONCLUIDO' ? 'mesas-prep--concluido' : 'mesas-prep--neutra');
       const total = pedido.total != null ? `<div>Total do pedido ${escapar(pedido.total)}</div>` : '';
+      const clientePedido = String(pedido.cliente_nome || '').trim()
+        ? `<div>Cliente ${escapar(String(pedido.cliente_nome).trim())}</div>`
+        : '';
       const acao = acaoDoPedido(pedido);
       const botaoPdv = podeGerarVendaPdv(pedido)
         ? `<button type="button" class="btn btn-outline-success btn-sm mt-2" data-acao="venda-pdv" data-pedido-id="${escapar(pedido.id)}" title="Preparar e abrir a venda deste pedido no PDV">Gerar venda no PDV</button>`
@@ -645,6 +662,7 @@
       return `
         <article class="mesas-pedido">
           <strong>${escapar(pedido.codigo || ('Pedido ' + pedido.id))}</strong>
+          ${clientePedido}
           <div>Estado comercial ${escapar(pedido.status || '—')}</div>
           <div>Preparação <span class="mesas-prep ${classeEstado}">${escapar(rotuloEstadoPreparacao(estado))}</span> ${classificacao}</div>
           <div>Envio ${escapar(prep.enviado_em || '—')}</div>
