@@ -60,6 +60,9 @@ test('ETAPA 3 — bridge só retorna cedo com financeiro completo', () => {
   assert.match(bridgeJs, /financeiroPayloadCompleto\(payload\)/);
   assert.match(bridgeHelper, /function financeiroPayloadCompleto/);
   assert.doesNotMatch(bridgeJs, /gradeComVencimento\) return payload/);
+  assert.match(bridgeJs, /valor_icms_st:\s*payload\.valor_icms_st\s*\?\?/);
+  assert.match(bridgeJs, /valor_fcp_st:\s*payload\.valor_fcp_st\s*\?\?/);
+  assert.match(bridgeJs, /temStPersistido/);
 });
 
 test('ETAPA 3 — financeiroPayloadCompleto exige forma e condição', () => {

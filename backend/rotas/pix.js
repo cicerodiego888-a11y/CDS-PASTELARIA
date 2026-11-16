@@ -1,6 +1,14 @@
 const express = require('express');
 const router = express.Router();
 const pixService = require('../services/pix/pixService');
+const pixEvidenciaService = require('../services/pix/pixEvidenciaService');
+
+function empresaDoPedido(req) {
+  const header = req.headers['x-empresa-id'];
+  if (header != null && String(header).trim() !== '') return Number(header);
+  if (req.body && req.body.empresa_id != null) return Number(req.body.empresa_id);
+  return null;
+}
 
 router.get('/provedores', (req, res) => {
   res.json({
@@ -43,10 +51,24 @@ router.post('/criar-cobranca', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Valor inválido.' });
     }
 
+    const empresaId = empresaDoPedido(req);
+    const parcelaLocalId = req.body.parcela_local_id != null
+      ? Number(req.body.parcela_local_id)
+      : null;
+    const sessaoPagamento = req.body.sessao_pagamento || null;
+    const chaveParcela = req.body.chave_parcela
+      || (sessaoPagamento && parcelaLocalId
+        ? `${sessaoPagamento}:${parcelaLocalId}:${Number(valor).toFixed(2)}`
+        : null);
+
     const cobranca = await pixService.criarCobranca({
       valor,
       descricao: req.body.descricao || 'Venda PDV',
-      vendaId: req.body.venda_id || null
+      vendaId: req.body.venda_id || null,
+      empresaId,
+      parcelaLocalId,
+      sessaoPagamento,
+      chaveParcela
     });
 
     res.json({
@@ -68,6 +90,28 @@ router.get('/status/:txid', async (req, res) => {
     });
   } catch (err) {
     console.error('Erro ao consultar status Pix:', err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.post('/comprovar/:txid', async (req, res) => {
+  try {
+    const prova = await pixEvidenciaService.comprovarCobrancaPixPago({
+      txid: req.params.txid,
+      empresaId: empresaDoPedido(req),
+      valor: req.body && req.body.valor,
+      vendaId: req.body && req.body.venda_id,
+      parcelaLocalId: req.body && req.body.parcela_local_id,
+      sessaoPagamento: req.body && req.body.sessao_pagamento,
+      chaveParcela: req.body && req.body.chave_parcela,
+      consultarProvedor: req.body && req.body.consultar_provedor === true
+    });
+    if (!prova.sucesso) {
+      return res.status(409).json({ success: false, ...prova });
+    }
+    res.json({ success: true, prova });
+  } catch (err) {
+    console.error('Erro ao comprovar Pix:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });

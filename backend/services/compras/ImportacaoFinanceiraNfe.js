@@ -143,6 +143,8 @@ function montarImportacaoFinanceiraNfe({ pag, cobr, icmsTot } = {}) {
 
   const valorIpi = moeda(icmsTot?.vIPI);
   const valorSeguro = moeda(icmsTot?.vSeg);
+  const valorIcmsSt = moeda(icmsTot?.vST);
+  const valorFcpSt = moeda(icmsTot?.vFCPST);
   const valorProdutos = moeda(icmsTot?.vProd);
   const valorDesconto = moeda(icmsTot?.vDesc);
   const valorFrete = moeda(icmsTot?.vFrete);
@@ -169,6 +171,8 @@ function montarImportacaoFinanceiraNfe({ pag, cobr, icmsTot } = {}) {
   return {
     valor_ipi: valorIpi,
     valor_seguro: valorSeguro,
+    valor_icms_st: valorIcmsSt,
+    valor_fcp_st: valorFcpSt,
     valor_produtos: valorProdutos,
     valor_desconto: valorDesconto,
     valor_frete: valorFrete,
@@ -187,7 +191,7 @@ function montarImportacaoFinanceiraNfe({ pag, cobr, icmsTot } = {}) {
 
 /**
  * Total esperado conforme componentes da NF-e.
- * total = produtos - desconto + frete + seguro + outras + ipi
+ * total = produtos - desconto + frete + seguro + outras + ipi + icms_st + fcp_st
  *
  * @param {Object} totais
  * @returns {number}
@@ -200,6 +204,8 @@ function calcularTotalComponentes(totais = {}) {
     + moeda(totais.valor_seguro)
     + moeda(totais.valor_outras_despesas)
     + moeda(totais.valor_ipi)
+    + moeda(totais.valor_icms_st)
+    + moeda(totais.valor_fcp_st)
   );
 }
 

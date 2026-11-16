@@ -20,12 +20,22 @@ const {
 } = require('../financeiro/FinanceiroEmpresaContextoService');
 const { logFiscalRuntime } = require('../fiscal/core/FiscalRuntimeLog');
 const PedidoConsumoEstoqueService = require('../pedido/PedidoConsumoEstoqueService');
+const {
+  criarAutorizacaoCancelamentoOperador
+} = require('../fiscal/autorizacaoTransmissaoSefaz');
 
 const { devolverEstoqueItensVenda } = VendaDevolucaoService;
 const {
   buscarNfceAutorizadaVenda,
   cancelarNfceAutorizadaVenda
 } = VendaFiscalService;
+
+function autorizacaoCancelamentoDaRequisicao(req) {
+  return criarAutorizacaoCancelamentoOperador({
+    empresaId: req.empresaId,
+    usuarioId: req.user?.id || null
+  });
+}
 
 /**
  * Único ponto de estoque no cancelamento: item comercial + estorno do snapshot da ficha.
@@ -267,7 +277,10 @@ db.get('SELECT * FROM vendas WHERE id = ?', [id], (err, venda) => {
       });
     }
 
-    cancelarNfceAutorizadaVenda(id, motivo, { empresaIdContexto: req.empresaId })
+    cancelarNfceAutorizadaVenda(id, motivo, {
+      empresaIdContexto: req.empresaId,
+      autorizacaoTransmissaoSefaz: autorizacaoCancelamentoDaRequisicao(req)
+    })
       .then(() => executarCancelamentoVenda())
       .catch((cancelErr) => res.status(cancelErr.statusCode || 400).json({
         success: false,
@@ -506,7 +519,8 @@ db.get(
 
         cancelarNfceAutorizadaVenda(vendaId, justificativa, {
           empresaIdContexto: req.empresaId,
-          correlationId
+          correlationId,
+          autorizacaoTransmissaoSefaz: autorizacaoCancelamentoDaRequisicao(req)
         })
           .then(() => estornarTefFiscal())
           .then(() => executarCancelamentoLocal())

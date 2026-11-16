@@ -56,6 +56,9 @@ global.WebSocket = bloquearRede;
 
 const cancelarNfce = require('../../backend/services/fiscal/cancelarNfce');
 const { extrairCnpjDoCertificadoPem } = require('../../backend/services/fiscal/certificateService');
+const {
+  criarAutorizacaoCancelamentoOperador
+} = require('../../backend/services/fiscal/autorizacaoTransmissaoSefaz');
 const databaseModule = require.resolve('../../backend/database');
 const CHAVE = '23260112345678000195650010000000011000000001';
 const PROTOCOLO = '123456789012345';
@@ -171,12 +174,19 @@ function opcoes(db, enviarCancelamento, overrides = {}) {
   return {
     db,
     getFiscalConfig: async () => ({ ...config }),
+    // Stub do gate A1: o harness não usa path real de certificado da empresa.
+    exigirCertificadoAptoParaUsoFiscal: async () => ({
+      certificadoPath: config.certificadoPath,
+      certificadoSenha: config.certificadoSenha
+    }),
     carregarCertificadoPfx: () => ({
       privateKeyPem: 'chave-falsa',
       certPem: overrides.certPem || CERTIFICADO_TESTE_PEM
     }),
     assinarEvento: () => ({ xmlAssinado: '<evento-assinado-falso />' }),
-    enviarCancelamento
+    enviarCancelamento,
+    autorizacaoTransmissaoSefaz: overrides.autorizacaoTransmissaoSefaz
+      || criarAutorizacaoCancelamentoOperador({ empresaId: EMPRESA_ID, usuarioId: 1 })
   };
 }
 

@@ -23,8 +23,13 @@ const MODO_TESTE_ISOLADO = 'TESTE_ISOLADO';
 const TOKEN_TESTE_ISOLADO = 'CDS_SEFAZ_AUTH_TESTE_ISOLADO_P08';
 const MODO_OPERACAO_REAL = 'OPERACAO_REAL';
 const TOKEN_PREFIXO_OPERACAO_REAL = 'CDS_SEFAZ_AUTH_OPERACAO_REAL_';
+/** Cancelamento NFC-e/NF-e iniciado por operador autenticado no ERP (só evento 110111). */
+const MODO_CANCELAMENTO_OPERADOR = 'CANCELAMENTO_OPERADOR';
+const TOKEN_PREFIXO_CANCELAMENTO_OPERADOR = 'CDS_SEFAZ_AUTH_CANCEL_OP_';
 /** Autorização de sessão: 15 minutos. */
 const TTL_OPERACAO_REAL_MS = 15 * 60 * 1000;
+/** Autorização curta para um cancelamento ERP: 5 minutos. */
+const TTL_CANCELAMENTO_OPERADOR_MS = 5 * 60 * 1000;
 
 const CODIGOS = Object.freeze({
   NAO_AUTORIZADA: 'TRANSMISSAO_SEFAZ_NAO_AUTORIZADA',
@@ -261,6 +266,103 @@ function montarTokenOperacaoReal(empresaId, tokenSeed, emitidoEm) {
   return `${TOKEN_PREFIXO_OPERACAO_REAL}${hash}`;
 }
 
+function montarTokenCancelamentoOperador(empresaId, emitidoEm, usuarioId) {
+  const base = `${TOKEN_PREFIXO_CANCELAMENTO_OPERADOR}${empresaId}:${usuarioId || 0}:${emitidoEm}`;
+  const hash = crypto.createHash('sha256').update(base).digest('hex').slice(0, 32);
+  return `${TOKEN_PREFIXO_CANCELAMENTO_OPERADOR}${hash}`;
+}
+
+function sufixoOperacaoNaoExecutada(tipoConsulta) {
+  const tipo = String(tipoConsulta || '');
+  if (TIPOS_CANCELAMENTO.includes(tipo)) {
+    return 'O cancelamento não foi executado.';
+  }
+  if (TIPOS_MANIFESTACAO.includes(tipo)) {
+    return 'A manifestação não foi executada.';
+  }
+  return 'A consulta não foi executada.';
+}
+
+/**
+ * Autorização servidor-side para cancelamento (110111) no ERP.
+ * Não cobre DistDFe, consChNFe nem manifestação. Nunca aceitar do body do cliente.
+ */
+function criarAutorizacaoCancelamentoOperador(params = {}) {
+  const empresaId = empresaIdValido(params.empresaId);
+  if (!empresaId) {
+    throw new Error('Autorização de cancelamento do operador exige empresaId válido.');
+  }
+  const emitidoEm = Date.now();
+  const usuarioId = params.usuarioId != null ? Number(params.usuarioId) || null : null;
+  return Object.freeze({
+    modo: MODO_CANCELAMENTO_OPERADOR,
+    token: montarTokenCancelamentoOperador(empresaId, emitidoEm, usuarioId),
+    producao: false,
+    operacional: false,
+    empresaId,
+    usuarioId,
+    tiposConsulta: Object.freeze([TIPOS_CONSULTA.CANCELAMENTO_110111]),
+    emitidoEm,
+    expiraEm: emitidoEm + TTL_CANCELAMENTO_OPERADOR_MS,
+    origem: 'erp_cancelamento_operador'
+  });
+}
+
+function avaliarCancelamentoOperador(autorizacao, emp, tipoConsulta) {
+  if (autorizacao.modo !== MODO_CANCELAMENTO_OPERADOR) {
+    return {
+      ok: false,
+      codigo: CODIGOS.NAO_AUTORIZADA,
+      mensagem: `Transmissão SEFAZ não autorizada. ${sufixoOperacaoNaoExecutada(tipoConsulta)}`
+    };
+  }
+  if (empresaIdValido(autorizacao.empresaId) !== emp) {
+    return {
+      ok: false,
+      codigo: CODIGOS.EMPRESA_DIVERGENTE,
+      mensagem: `Autorização de cancelamento vinculada a outra empresa. ${sufixoOperacaoNaoExecutada(tipoConsulta)}`
+    };
+  }
+  const emitidoEm = Number(autorizacao.emitidoEm) || 0;
+  const expiraEm = Number(autorizacao.expiraEm) || (emitidoEm + TTL_CANCELAMENTO_OPERADOR_MS);
+  if (!emitidoEm || Date.now() > expiraEm) {
+    return {
+      ok: false,
+      codigo: CODIGOS.NAO_AUTORIZADA,
+      mensagem: 'Autorização de cancelamento expirada. Confirme o cancelamento novamente.'
+    };
+  }
+  const esperado = montarTokenCancelamentoOperador(emp, emitidoEm, autorizacao.usuarioId);
+  if (!autorizacao.token || autorizacao.token !== esperado) {
+    return {
+      ok: false,
+      codigo: CODIGOS.NAO_AUTORIZADA,
+      mensagem: `Token de cancelamento inválido. ${sufixoOperacaoNaoExecutada(tipoConsulta)}`
+    };
+  }
+  if (tipoConsulta && String(tipoConsulta) !== TIPOS_CONSULTA.CANCELAMENTO_110111) {
+    return {
+      ok: false,
+      codigo: CODIGOS.TIPO_NAO_COBERTO,
+      mensagem: 'Autorização de cancelamento do operador não cobre outras operações SEFAZ.'
+    };
+  }
+  const tipos = Array.isArray(autorizacao.tiposConsulta) ? autorizacao.tiposConsulta : [];
+  if (!tipos.includes(TIPOS_CONSULTA.CANCELAMENTO_110111)) {
+    return {
+      ok: false,
+      codigo: CODIGOS.TIPO_NAO_COBERTO,
+      mensagem: 'Autorização de cancelamento do operador sem cobertura do evento 110111.'
+    };
+  }
+  return {
+    ok: true,
+    empresaId: emp,
+    modo: MODO_CANCELAMENTO_OPERADOR,
+    tipoConsulta: tipoConsulta || TIPOS_CONSULTA.CANCELAMENTO_110111
+  };
+}
+
 function normalizarCnpjAuth(valor) {
   const d = String(valor || '').replace(/\D/g, '');
   return d.length === 14 ? d : null;
@@ -433,11 +535,12 @@ function avaliarAutorizacaoTransmissao({
   exigirSeedPersistido
 } = {}) {
   const emp = empresaIdValido(empresaId);
+  const sufixo = sufixoOperacaoNaoExecutada(tipoConsulta);
   if (!emp) {
     return {
       ok: false,
       codigo: CODIGOS.EMPRESA_AUSENTE,
-      mensagem: 'Transmissão SEFAZ exige empresaId explícito. A consulta não foi executada.'
+      mensagem: `Transmissão SEFAZ exige empresaId explícito. ${sufixo}`
     };
   }
 
@@ -445,8 +548,13 @@ function avaliarAutorizacaoTransmissao({
     return {
       ok: false,
       codigo: CODIGOS.NAO_AUTORIZADA,
-      mensagem: 'Transmissão SEFAZ não autorizada. A consulta não foi executada.'
+      mensagem: `Transmissão SEFAZ não autorizada. ${sufixo}`
     };
+  }
+
+  // Cancelamento ERP (somente 110111) — antes de OPERACAO_REAL/DistDFe.
+  if (autorizacao.modo === MODO_CANCELAMENTO_OPERADOR) {
+    return avaliarCancelamentoOperador(autorizacao, emp, tipoConsulta);
   }
 
   // OPERACAO_REAL controlada (P0.8 fiscal) — antes do rejeite genérico de "producao".
@@ -469,7 +577,7 @@ function avaliarAutorizacaoTransmissao({
     return {
       ok: false,
       codigo: CODIGOS.PRODUCAO_INDISPONIVEL,
-      mensagem: 'Autorização de produção sem ativação controlada OPERACAO_REAL. A consulta não foi executada.'
+      mensagem: `Autorização de produção sem ativação controlada OPERACAO_REAL. ${sufixo}`
     };
   }
 
@@ -477,7 +585,7 @@ function avaliarAutorizacaoTransmissao({
     return {
       ok: false,
       codigo: CODIGOS.NAO_AUTORIZADA,
-      mensagem: 'Transmissão SEFAZ não autorizada. A consulta não foi executada.'
+      mensagem: `Transmissão SEFAZ não autorizada. ${sufixo}`
     };
   }
 
@@ -485,7 +593,7 @@ function avaliarAutorizacaoTransmissao({
     return {
       ok: false,
       codigo: CODIGOS.EMPRESA_DIVERGENTE,
-      mensagem: 'Autorização de transmissão vinculada a outra empresa. A consulta não foi executada.'
+      mensagem: `Autorização de transmissão vinculada a outra empresa. ${sufixo}`
     };
   }
 
@@ -494,7 +602,7 @@ function avaliarAutorizacaoTransmissao({
     return {
       ok: false,
       codigo: CODIGOS.TIPO_NAO_COBERTO,
-      mensagem: `Autorização de teste não cobre ${tipoConsulta}. A consulta não foi executada.`
+      mensagem: `Autorização de teste não cobre ${tipoConsulta}. ${sufixo}`
     };
   }
 
@@ -523,6 +631,9 @@ module.exports = {
   MODO_OPERACAO_REAL,
   TOKEN_PREFIXO_OPERACAO_REAL,
   TTL_OPERACAO_REAL_MS,
+  MODO_CANCELAMENTO_OPERADOR,
+  TOKEN_PREFIXO_CANCELAMENTO_OPERADOR,
+  TTL_CANCELAMENTO_OPERADOR_MS,
   CODIGOS_AUTORIZACAO_SEFAZ: CODIGOS,
   TIPOS_CONSULTA_SEFAZ: TIPOS_CONSULTA,
   TIPOS_MANIFESTACAO_SEFAZ: TIPOS_MANIFESTACAO,
@@ -532,6 +643,7 @@ module.exports = {
   empresaIdValido,
   normalizarCnpjAuth,
   tipoConsultaManifestacao,
+  criarAutorizacaoCancelamentoOperador,
   criarAutorizacaoTesteIsolado,
   criarAutorizacaoOperacaoReal,
   montarTokenOperacaoReal,

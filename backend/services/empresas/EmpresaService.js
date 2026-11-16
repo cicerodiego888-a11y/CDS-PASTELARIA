@@ -299,13 +299,23 @@ async function inativarEmpresa(id, opts = {}) {
 /**
  * Empresas ativas + vínculo ativo do usuário (03.3).
  * Sem usuarioId não lista nada (não vaza o cadastro completo).
+ * Se o usuário comum estiver sem vínculo, auto-cura antes de listar
+ * (evita PDV/ERP sem X-Empresa-Id para usuário novo ou legado).
  */
 async function listarEmpresasDisponiveis(opts = {}) {
   const UsuarioEmpresaService = require('./UsuarioEmpresaService');
-  const uid = UsuarioEmpresaService.exigirUsuarioId(
-    opts.usuarioId != null ? opts.usuarioId : (opts.usuario != null ? opts.usuario : opts.user)
-  );
-  return UsuarioEmpresaService.listarEmpresasPermitidas(uid, opts);
+  const fonte = opts.usuarioId != null
+    ? opts.usuarioId
+    : (opts.usuario != null ? opts.usuario : opts.user);
+  const uid = UsuarioEmpresaService.exigirUsuarioId(fonte);
+  const sujeito = (fonte && typeof fonte === 'object')
+    ? fonte
+    : (opts.user && typeof opts.user === 'object' ? opts.user : { id: uid });
+  const garantido = await UsuarioEmpresaService.garantirAcessoEmpresarialMinimo(sujeito, {
+    db: opts.db,
+    user: sujeito
+  });
+  return Array.isArray(garantido.empresas) ? garantido.empresas : [];
 }
 
 /**

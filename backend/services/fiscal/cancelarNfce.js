@@ -14,6 +14,10 @@ const {
   coerenciaDocumentoComVenda
 } = require('./FiscalEmpresaContextoService');
 const { exigirCertificadoAptoParaUsoFiscal } = require('./CertificadoUsoFiscalGate');
+const {
+  exigirAutorizacaoTransmissao,
+  TIPOS_CONSULTA_SEFAZ
+} = require('./autorizacaoTransmissaoSefaz');
 
 const STATUS_RETRYABLE = [
   'autorizada',
@@ -21,6 +25,58 @@ const STATUS_RETRYABLE = [
   'cancelamento_falha_pre_envio'
 ];
 const EVENT_TYPE_CANCELAMENTO = '110111';
+
+function codigoErroCancelamento(err) {
+  return String((err && (err.code || err.codigo || err.codigoErro)) || '');
+}
+
+function ehBloqueioAutorizacaoCancelamento(err) {
+  if (!err) return false;
+  if (err.bloqueadoAutorizacao === true) return true;
+  return codigoErroCancelamento(err).startsWith('TRANSMISSAO_SEFAZ_');
+}
+
+/**
+ * HTTP para falha comprovada antes do envio SOAP.
+ * Não tratar configuração/autorização/certificado como "Service Unavailable".
+ */
+function statusHttpFalhaPreEnvio(err) {
+  if (!err) return 503;
+  const code = codigoErroCancelamento(err);
+  if (ehBloqueioAutorizacaoCancelamento(err)) {
+    return Number(err.statusCode) || 403;
+  }
+  if (
+    code.startsWith('CERTIFICADO_')
+    || code === 'CANCELAMENTO_CERTIFICADO_DIVERGENTE'
+    || code.includes('CONFIG')
+    || code === 'CONFIGURACAO_FISCAL_EMPRESA_INVALIDA'
+  ) {
+    return Number(err.statusCode) || 400;
+  }
+  const sc = Number(err.statusCode);
+  if (sc >= 400 && sc < 500) return sc;
+  // Transporte/serviço externo indisponível ou recusa antes do POST SOAP
+  return 503;
+}
+
+function mensagemFalhaPreEnvio(err) {
+  const detalhe = err && (err.message || err.error || err.mensagem);
+  if (detalhe && String(detalhe).trim()) {
+    return String(detalhe).trim();
+  }
+  return 'O cancelamento falhou antes do envio e pode ser tentado novamente. Verifique certificado, configuração fiscal e disponibilidade do serviço.';
+}
+
+async function restaurarStatusPreClaim(db, nota) {
+  if (!nota || nota.id == null || !nota.status) return;
+  await dbRun(db, `
+    UPDATE nfce_notas
+    SET status = ?,
+        updated_at = datetime('now', 'localtime')
+    WHERE id = ? AND status = 'cancelamento_em_andamento'
+  `, [nota.status, nota.id]);
+}
 
 function dbGet(db, sql, params = []) {
   return new Promise((resolve, reject) => {
@@ -74,6 +130,15 @@ async function persistirResultado(db, notaId, status, registro, retorno) {
         'Não foi possível persistir o resultado do cancelamento. A operação permanece bloqueada para evitar reenvio.',
         500
       );
+    }
+    // Alinha histórico de vendas ao cancelamento fiscal confirmado da NFC-e.
+    if (String(status || '').toLowerCase() === 'cancelada') {
+      await dbRun(db, `
+        UPDATE vendas
+        SET status = 'cancelada'
+        WHERE id = (SELECT venda_id FROM nfce_notas WHERE id = ?)
+          AND LOWER(TRIM(COALESCE(status, ''))) <> 'cancelada'
+      `, [notaId]);
     }
     logFiscalRuntime('CANCELAMENTO', {
       correlationId: registro.correlationId,
@@ -140,7 +205,11 @@ async function cancelarNfce(vendaId, justificativa, opcoes = {}) {
   });
 
   if (!notaAutorizada) {
-    throw new Error('Nenhuma NFC-e autorizada encontrada para cancelar.');
+    throw erroCancelamentoFiscal(
+      'CANCELAMENTO_NOTA_NAO_ELEGIVEL',
+      'Nenhuma NFC-e autorizada encontrada para cancelar.',
+      409
+    );
   }
   coerenciaDocumentoComVenda({ nota: notaAutorizada, empresaFiscal });
   if (notaAutorizada.status === 'cancelamento_em_andamento') {
@@ -184,12 +253,38 @@ async function cancelarNfce(vendaId, justificativa, opcoes = {}) {
     deps: opcoes.certDeps || {}
   });
 
+  // Barreira de transmissão ANTES de qualquer claim de estado.
+  // Rotas ERP devem injetar criarAutorizacaoCancelamentoOperador (nunca do body).
+  try {
+    exigirAutorizacaoTransmissao({
+      autorizacao: opcoes.autorizacaoTransmissaoSefaz || null,
+      empresaId: empresaFiscal,
+      tipoConsulta: TIPOS_CONSULTA_SEFAZ.CANCELAMENTO_110111
+    });
+  } catch (authErr) {
+    throw erroCancelamentoFiscal(
+      authErr.code || authErr.codigo || 'TRANSMISSAO_SEFAZ_NAO_AUTORIZADA',
+      authErr.message
+        || 'Transmissão SEFAZ não autorizada. O cancelamento não foi executado.',
+      authErr.statusCode || 403,
+      {
+        bloqueadoAutorizacao: true,
+        notaId: notaAutorizada.id,
+        correlationId
+      }
+    );
+  }
+
   const authSefaz = extrairChaveEProtocoloAutorizados(notaAutorizada.xml_retorno);
   const chaveAcesso = authSefaz?.chaveAcesso || notaAutorizada.chave_acesso;
   const protocolo = authSefaz?.protocolo || notaAutorizada.protocolo;
 
   if (!chaveAcesso || !protocolo) {
-    throw new Error('NFC-e autorizada sem chave ou protocolo.');
+    throw erroCancelamentoFiscal(
+      'CANCELAMENTO_SEM_AUTORIZACAO_FISCAL',
+      'NFC-e sem chave de acesso ou protocolo de autorização. Cancelamento não permitido.',
+      409
+    );
   }
   const cnpjEmpresa = validarCnpjFiscal(config.cnpj);
   const chaveNormalizada = String(chaveAcesso);
@@ -413,12 +508,33 @@ async function cancelarNfce(vendaId, justificativa, opcoes = {}) {
     if (envio && envio.bloqueadoAutorizacao === true) {
       throw erroCancelamentoFiscal(
         envio.codigo || envio.code || 'TRANSMISSAO_SEFAZ_NAO_AUTORIZADA',
-        envio.error || envio.mensagem || 'Cancelamento NFC-e não executado: falta autorização operacional explícita.',
-        403,
-        { transmissionState: 'NOT_SENT', bloqueadoAutorizacao: true, notaId: notaAutorizada.id, correlationId }
+        envio.error || envio.mensagem
+          || 'Cancelamento NFC-e não executado: falta autorização operacional explícita.',
+        envio.statusCode || 403,
+        {
+          transmissionState: 'NOT_SENT',
+          bloqueadoAutorizacao: true,
+          notaId: notaAutorizada.id,
+          correlationId
+        }
       );
     }
   } catch (sendError) {
+    if (ehBloqueioAutorizacaoCancelamento(sendError)) {
+      await restaurarStatusPreClaim(db, notaAutorizada);
+      throw erroCancelamentoFiscal(
+        sendError.code || sendError.codigo || 'TRANSMISSAO_SEFAZ_NAO_AUTORIZADA',
+        sendError.message
+          || 'Transmissão SEFAZ não autorizada. O cancelamento não foi executado.',
+        sendError.statusCode || 403,
+        {
+          bloqueadoAutorizacao: true,
+          transmissionState: 'NOT_SENT',
+          notaId: notaAutorizada.id,
+          correlationId
+        }
+      );
+    }
     const notSent = sendError.transmissionState === 'NOT_SENT';
     const status = notSent
       ? 'cancelamento_falha_pre_envio'
@@ -433,9 +549,9 @@ async function cancelarNfce(vendaId, justificativa, opcoes = {}) {
     throw erroCancelamentoFiscal(
       notSent ? 'CANCELAMENTO_FALHA_PRE_ENVIO' : 'CANCELAMENTO_RESULTADO_DESCONHECIDO',
       notSent
-        ? 'O cancelamento falhou antes do envio e pode ser tentado novamente.'
+        ? mensagemFalhaPreEnvio(sendError)
         : 'Não foi possível confirmar o resultado fiscal. A operação está bloqueada até reconciliação oficial; não tente reenviar.',
-      notSent ? 503 : 202,
+      notSent ? statusHttpFalhaPreEnvio(sendError) : 202,
       { resultUnknown: !notSent, notaId: notaAutorizada.id, correlationId }
     );
   }
@@ -505,9 +621,11 @@ async function cancelarNfce(vendaId, justificativa, opcoes = {}) {
         ? 'CANCELAMENTO_FALHA_PRE_ENVIO'
         : 'CANCELAMENTO_REJEITADO',
       statusFinal === 'cancelamento_falha_pre_envio'
-        ? 'O cancelamento falhou antes do envio e pode ser tentado novamente.'
+        ? mensagemFalhaPreEnvio(envio)
         : (envio.xMotivo || 'Cancelamento rejeitado pela SEFAZ.'),
-      statusFinal === 'cancelamento_falha_pre_envio' ? 503 : 400,
+      statusFinal === 'cancelamento_falha_pre_envio'
+        ? statusHttpFalhaPreEnvio(envio)
+        : 400,
       { notaId: notaAutorizada.id, correlationId, cStatEvento: cStatEvento || null }
     );
   }

@@ -772,28 +772,48 @@ function setupBackupManualListener() {
                 }
             });
 
-            const dados = await resposta.json();
+            const dados = await resposta.json().catch(() => ({}));
 
-            if (!dados.sucesso) {
-                throw new Error(dados.mensagem || "Erro ao fazer backup.");
+            if (!resposta.ok || !dados.sucesso) {
+                throw new Error(dados.mensagem || dados.erro || `Erro ao fazer backup (HTTP ${resposta.status}).`);
             }
 
             resultadoBackup.innerHTML = `
                 <div style="color: green;">
-                    ✅ Backup realizado com sucesso!<br>
+                    ✅ Cópia recuperável do banco gerada!<br>
                     Arquivo: ${dados.backup.arquivo}<br>
-                    Local: ${dados.backup.caminho}
+                    Local: ${dados.backup.caminho}<br>
+                    ${dados.backup.ultimo ? `Recuperação rápida: ${dados.backup.ultimo}<br>` : ''}
+                    ${dados.backup.tamanho_bytes != null ? `Tamanho: ${Math.round(Number(dados.backup.tamanho_bytes) / 1024)} KB` : ''}
                 </div>
             `;
             showNotification('Backup realizado com sucesso!', 'success');
+            carregarPastaBackup();
         } catch (error) {
             resultadoBackup.innerHTML = `
                 <div style="color: red;">
                     ❌ Erro ao fazer backup: ${error.message}
                 </div>
             `;
+            showNotification(error.message || 'Erro ao fazer backup', 'danger');
         }
     });
+
+    // Na abertura da tela: garante backup do dia (se ainda não existir)
+    void garantirBackupDiarioSilencioso();
+}
+
+async function garantirBackupDiarioSilencioso() {
+    try {
+        await fetch(`${API_URL}/backup/garantir-diario`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${localStorage.getItem('token') || ''}`,
+                'Content-Type': 'application/json'
+            },
+            body: '{}'
+        });
+    } catch (_e) { /* silencioso */ }
 }
 
 // Carregar pasta de backup atual
@@ -809,7 +829,10 @@ async function carregarPastaBackup() {
         const pastaDiv = document.getElementById('pastaAtual');
 
         if (data.sucesso && data.caminho) {
-            pastaDiv.innerHTML = `<i class="fas fa-folder"></i> Pasta atual: ${escapeHtml(data.caminho)}`;
+            const extra = data.origem_pasta === 'padrao_persistido' || data.origem_pasta === 'padrao_banco'
+                ? ' <span class="text-muted">(padrão do sistema)</span>'
+                : '';
+            pastaDiv.innerHTML = `<i class="fas fa-folder"></i> Pasta atual: ${escapeHtml(data.caminho)}${extra}`;
         } else {
             pastaDiv.innerHTML = `<i class="fas fa-exclamation-triangle text-warning"></i> Nenhuma pasta de backup configurada`;
         }

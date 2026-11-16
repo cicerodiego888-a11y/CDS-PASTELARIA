@@ -11,6 +11,8 @@
 const { beforeEach, describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 
+const DecisaoConfirmacaoPagamento = require('../../frontend/pdv/js/decisaoConfirmacaoPagamento');
+globalThis.DecisaoConfirmacaoPagamento = DecisaoConfirmacaoPagamento;
 const PagamentoSequencial = require('../../frontend/pdv/js/pagamentoSequencial');
 const InteracaoPagamentoMisto = require('../../frontend/pdv/js/interacaoPagamentoMisto');
 const SimulatedGatewayAdapter = require('../../backend/services/tef/adapters/SimulatedGatewayAdapter');
@@ -67,10 +69,11 @@ function autorizarPeloSimulador(sequencia, resultado) {
 }
 
 async function confirmar(tela, forma, valor, sequencia, resultado) {
-  assert.equal(InteracaoPagamentoMisto.modoConfirmacaoDireta(forma), 'tef');
+  assert.equal(InteracaoPagamentoMisto.modoConfirmacaoDireta(forma, { tefHabilitado: true }), 'tef');
   tela.escolherForma(forma);
   assert.equal(tela.visao().solicitarValor, true);
   return tela.confirmarValor(valor, {
+    formaUsaTef: () => true,
     autorizarTef: autorizarPeloSimulador(sequencia, resultado)
   });
 }
@@ -137,6 +140,8 @@ describe('orquestração do pagamento direto', () => {
     const sequencia = [];
     tela.escolherForma('cartao_credito');
     const passo = await tela.confirmarValor(20, {
+      tefHabilitado: true,
+      formaUsaTef: () => true,
       autorizarTef: autorizarPeloSimulador(sequencia, 'timeout')
     });
     assert.equal(sequencia[1].codigo, 'TIMEOUT');
@@ -181,6 +186,8 @@ describe('orquestração do pagamento direto', () => {
     const espera = new Promise((resolve) => { liberar = resolve; });
     const sequencia = [];
     const envio = tela.confirmarValor(20, {
+      tefHabilitado: true,
+      formaUsaTef: () => true,
       autorizarTef: async (forma, valor) => {
         sequencia.push('solicitacao');
         await espera;
@@ -202,6 +209,8 @@ describe('orquestração do pagamento direto', () => {
     const seqPendente = [];
     pendente.escolherForma('cartao_credito');
     const aguardando = await pendente.confirmarValor(10, {
+      tefHabilitado: true,
+      formaUsaTef: () => true,
       autorizarTef: autorizarPeloSimulador(seqPendente, 'pendente')
     });
     assert.equal(aguardando.codigo, 'PENDENTE');

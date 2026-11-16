@@ -159,7 +159,7 @@ describe('Mobile Pedido — página e contrato', () => {
     assert.match(falhaCliente.mensagem, /Falha ao buscar clientes/);
 
     const produtos = await ctx.MobilePedido.buscarProdutos('pastel', async (url) => {
-      assert.match(url, /\/produtos\/consulta-pdv\/buscar\?q=pastel&limite=15/);
+      assert.match(url, /\/produtos\/consulta-pedido\/buscar\?q=pastel&limite=15/);
       return { ok: true, json: async () => [produtoPedido()] };
     }, ctx.CdsEmpresaContexto.headersAuth());
     assert.equal(produtos.itens[0].nome, 'Pastel de carne');

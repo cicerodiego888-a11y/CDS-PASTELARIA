@@ -426,7 +426,7 @@
     let resp;
     try {
       resp = await fetchFn(
-        apiUrl() + '/produtos/consulta-pdv/buscar?q=' + encodeURIComponent(texto) + '&limite=15',
+        apiUrl() + '/produtos/consulta-pedido/buscar?q=' + encodeURIComponent(texto) + '&limite=15',
         { headers }
       );
     } catch (_erro) {

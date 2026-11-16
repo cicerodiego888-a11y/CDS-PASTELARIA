@@ -333,15 +333,15 @@ describe('3. Consulta bloqueada pelo cooldown', () => {
         }
       }
     });
-    await notif.notificarSyncConcluida({
+    const criada = await notif.notificarSyncConcluida({
       sucesso: false,
       ignorado: true,
       consultaExecutada: false,
       mensagem: r.mensagem
     });
-    assert.equal(gravados[0].tipo, 'SYNC_CONSULTA_NAO_ENVIADA');
-    assert.equal(gravados[0].titulo, 'Consulta DF-e não enviada');
-    assert.doesNotMatch(gravados[0].titulo, /Erro na sincronização/);
+    // Cooldown/fila esgotada: sem toast — operador não deve ver como erro do sistema.
+    assert.equal(criada, null);
+    assert.equal(gravados.length, 0);
   });
 });
 

@@ -23,5 +23,11 @@ module.exports = {
   inter: { nome: 'Banco Inter', campos: [] },
   sicoob: { nome: 'Sicoob', campos: [] },
   sicredi: { nome: 'Sicredi', campos: [] },
-  infinitypay: { nome: 'Infinity Pay', campos: [] }
+  infinitypay: { nome: 'Infinity Pay', campos: [] },
+  simulador: {
+    nome: 'Simulador (testes)',
+    campos: [
+      { name: 'statusInicial', label: 'Status inicial', type: 'text', required: false, default: 'PENDENTE' }
+    ]
+  }
 };

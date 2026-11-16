@@ -1066,6 +1066,18 @@ async function processarPagamentoTEF(tipo, valor, parcelas = 1, opcoes = {}) {
             return null;
         }
 
+        // TEF desabilitado: não chama /tef/pagar, não abre modal e não exige provedor.
+        const tefLigado = await obterTefHabilitadoConfig();
+        if (!tefLigado) {
+            return {
+                sucesso: false,
+                aprovado: false,
+                codigo: 'TEF_DESABILITADO',
+                mensagem: 'TEF está desabilitado na configuração.',
+                status: 'negado'
+            };
+        }
+
         window.__tefPagamentoEmAndamento = true;
 
         const tipoTef = TefFluxoPagamento.normalizarTipoTef(tipo);
@@ -1252,7 +1264,11 @@ function abrirModalPagamentoNaoFiscal(valor, onConfirm, onCancel, formaPredefini
     const rotuloForma = rotuloFormaRecebimentoNaoFiscal(formaConhecida || 'pix');
     const corpoConfirmacao = modoConfirmacao
         ? `
-            <p class="text-muted mb-2">Confirme o recebimento da parcela não fiscal.</p>
+            <p class="text-muted mb-2">
+                ${isFormaDinheiroNaoFiscal(formaConhecida)
+                    ? 'Confirme o dinheiro fora da NFC-e (parcela não fiscal). Eventual complemento do dinheiro já entrou no passo fiscal anterior.'
+                    : 'Confirme o recebimento da parcela não fiscal.'}
+            </p>
             <h4 class="text-center mb-3">Valor: ${formatCurrency(valorNum)}</h4>
             <div class="p-3 bg-light rounded text-center mb-2">
                 <small class="text-muted d-block mb-1">Forma de recebimento</small>
@@ -1384,6 +1400,170 @@ function abrirModalPagamentoNaoFiscal(valor, onConfirm, onCancel, formaPredefini
     }
 }
 
+function resumirParcelasConfirmacaoFiscalManual(parcelas) {
+    const lista = Array.isArray(parcelas) ? parcelas : [];
+    let eletronico = 0;
+    let dinheiro = 0;
+    const formasEletronicas = new Set();
+    for (const parcela of lista) {
+        const valor = Number(parcela && parcela.valor || 0);
+        if (!(valor > 0)) continue;
+        const forma = normalizarFormaPagamentoTEF(parcela && parcela.forma_pagamento);
+        if (forma === 'dinheiro' || forma === 'especie' || forma === 'cash') {
+            dinheiro += valor;
+            continue;
+        }
+        if (formaPagamentoUsaTEF(forma)) {
+            eletronico += valor;
+            formasEletronicas.add(
+                forma.includes('pix') ? 'PIX'
+                    : (forma.includes('credito') ? 'Crédito'
+                        : (forma.includes('debito') ? 'Débito' : 'Cartão'))
+            );
+        }
+    }
+    return {
+        eletronico: Math.round((eletronico + Number.EPSILON) * 100) / 100,
+        dinheiro: Math.round((dinheiro + Number.EPSILON) * 100) / 100,
+        rotuloEletronico: [...formasEletronicas].join(' / ') || 'eletrônico'
+    };
+}
+
+function extrairReferenciaComposicaoParaModal(avaliacao) {
+    const apresentacao = avaliacao && avaliacao.composicao_fiscal;
+    const documento = avaliacao && avaliacao.documento_fiscal;
+    const refDoc = documento && documento.referencia;
+    // Documento.referencia já traz F final (eletrônico + complemento) e NF residual.
+    const fiscal = Number(
+        (refDoc && refDoc.valor_fiscal_referencia)
+        ?? (apresentacao && apresentacao.valor_fiscal)
+        ?? (documento && documento.valor_fiscal)
+        ?? (avaliacao && avaliacao.valor_fiscal_referencia)
+        ?? 0
+    );
+    const naoFiscal = Number(
+        (refDoc && refDoc.valor_nao_fiscal_referencia)
+        ?? (apresentacao && apresentacao.valor_nao_fiscal)
+        ?? (documento && documento.valor_nao_fiscal)
+        ?? (avaliacao && avaliacao.valor_nao_fiscal_referencia)
+        ?? 0
+    );
+    const complemento = Number(
+        (refDoc && refDoc.complemento_dinheiro_utilizado)
+        ?? (documento && documento.complemento_dinheiro_utilizado)
+        ?? (apresentacao && apresentacao.complemento_dinheiro_utilizado)
+        ?? (avaliacao && avaliacao.complemento_dinheiro_utilizado)
+        ?? 0
+    );
+    // Se a API ainda devolveu só o eletrônico inicial, reconstruir F = eletrônico + complemento.
+    let fiscalFinal = Math.round((fiscal + Number.EPSILON) * 100) / 100;
+    let naoFiscalFinal = Math.round((naoFiscal + Number.EPSILON) * 100) / 100;
+    const complementoFinal = Math.round((complemento + Number.EPSILON) * 100) / 100;
+    const fiscalInicial = Number(
+        (refDoc && refDoc.valor_fiscal_referencia_inicial)
+        ?? (avaliacao && avaliacao.valor_fiscal_referencia)
+        ?? 0
+    );
+    if (
+        complementoFinal > 0.009
+        && fiscalInicial > 0.009
+        && Math.abs(fiscalFinal - fiscalInicial) < 0.009
+    ) {
+        fiscalFinal = Math.round((fiscalInicial + complementoFinal + Number.EPSILON) * 100) / 100;
+        const naoInicial = Number(
+            (refDoc && refDoc.valor_nao_fiscal_referencia_inicial)
+            ?? (avaliacao && avaliacao.valor_nao_fiscal_referencia)
+            ?? naoFiscalFinal
+        );
+        if (naoInicial > 0.009) {
+            naoFiscalFinal = Math.max(
+                0,
+                Math.round((naoInicial - complementoFinal + Number.EPSILON) * 100) / 100
+            );
+        }
+    }
+    return {
+        fiscal: fiscalFinal,
+        naoFiscal: naoFiscalFinal,
+        complemento: complementoFinal
+    };
+}
+
+function montarOpcoesConfirmacaoFiscalManual({
+    tefHabilitado,
+    totalFiscal,
+    totalNaoFiscal,
+    parcelas,
+    referenciaComposicao
+} = {}) {
+    const resumo = resumirParcelasConfirmacaoFiscalManual(parcelas);
+    const ref = referenciaComposicao || {};
+    const temRefComposicao = Number(ref.fiscal || 0) > 0.009 || Number(ref.naoFiscal || 0) > 0.009;
+
+    // Preferir composição oficial (eletrônico + complemento). Evita tratar todo o dinheiro como fiscal.
+    let complemento = Number(ref.complemento || 0);
+    if (!(complemento > 0.009) && temRefComposicao && resumo.eletronico > 0.009) {
+        complemento = Math.max(
+            0,
+            Math.round((Number(ref.fiscal || 0) - resumo.eletronico + Number.EPSILON) * 100) / 100
+        );
+    }
+    if (!(complemento > 0.009) && !temRefComposicao) {
+        // Sem composição: nunca assumir (totalFiscal − eletrônico) quando há dinheiro informado.
+        complemento = 0;
+    }
+
+    const fiscal = temRefComposicao
+        ? Number(ref.fiscal || 0)
+        : Math.round((resumo.eletronico + complemento + Number.EPSILON) * 100) / 100;
+    const dinheiroNaoFiscal = temRefComposicao
+        ? Number(ref.naoFiscal || 0)
+        : Math.max(
+            0,
+            Math.round((resumo.dinheiro - complemento + Number.EPSILON) * 100) / 100
+        );
+
+    const linhas = [];
+    if (resumo.eletronico > 0.009) {
+        linhas.push(
+            `<div class="d-flex justify-content-between"><span>Recebido via ${resumo.rotuloEletronico}</span><strong>${formatCurrency(resumo.eletronico)}</strong></div>`
+        );
+    }
+    if (complemento > 0.009) {
+        linhas.push(
+            `<div class="d-flex justify-content-between"><span>Complemento em dinheiro (NFC-e)</span><strong>${formatCurrency(complemento)}</strong></div>`
+        );
+    }
+    if (dinheiroNaoFiscal > 0.009) {
+        linhas.push(
+            `<div class="small text-muted mt-2 mb-0">Em seguida: dinheiro fora da NFC-e ${formatCurrency(dinheiroNaoFiscal)}.</div>`
+        );
+    }
+
+    const texto = tefHabilitado
+        ? 'Confirme que o valor fiscal foi recebido.'
+        : (
+            resumo.eletronico > 0.009
+                ? 'TEF do CDS desligado. Confirme o recebimento eletrônico na maquininha/PIX. O dinheiro fora da NFC-e será confirmado no próximo passo.'
+                : 'TEF do CDS desligado. Confirme que o pagamento fiscal foi recebido.'
+        );
+
+    const valorConfirmacao = fiscal > 0.009
+        ? fiscal
+        : (resumo.eletronico > 0.009 ? resumo.eletronico : Number(totalFiscal || 0));
+
+    return {
+        valorConfirmacao,
+        valorFiscalEfetivo: valorConfirmacao,
+        valorNaoFiscalEfetivo: dinheiroNaoFiscal,
+        titulo: 'Confirmação de recebimento',
+        texto,
+        detalheHtml: linhas.length
+            ? `<div class="border rounded p-3 bg-light mt-3">${linhas.join('')}</div>`
+            : ''
+    };
+}
+
 function abrirModalConfirmacaoFiscalManual(valor, onConfirm, onCancel, opcoes) {
     const valorNum = Number(valor || 0);
     const valorConfirmacao = Number(
@@ -1398,23 +1578,28 @@ function abrirModalConfirmacaoFiscalManual(valor, onConfirm, onCancel, opcoes) {
     }
 
     const valorExibido = valorConfirmacao > 0 ? valorConfirmacao : valorNum;
-    const rotuloValor = valorNum > 0 ? 'Valor fiscal' : 'Valor recebido';
+    const rotuloValor = valorNum > 0 ? 'Valor fiscal (NFC-e)' : 'Valor recebido';
+    const titulo = (opcoes && opcoes.titulo) || 'Confirmação de Recebimento';
+    const texto = (opcoes && opcoes.texto)
+        || 'Confirme que o valor foi recebido (maquininha, PIX ou dinheiro).';
+    const detalheHtml = (opcoes && opcoes.detalheHtml) || '';
 
     const modalHtml = `
         <div class="modal fade" id="confirmacaoFiscalManualModal" tabindex="-1" aria-hidden="true">
             <div class="modal-dialog">
                 <div class="modal-content">
                     <div class="modal-header">
-                        <h5 class="modal-title">Confirmação de Recebimento Fiscal</h5>
+                        <h5 class="modal-title">${titulo}</h5>
                         <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                     </div>
                     <div class="modal-body">
-                        <p class="mb-3">Confirme que o valor fiscal foi recebido.</p>
+                        <p class="mb-3">${texto}</p>
                         <h4 class="text-center mb-0">${rotuloValor}: ${formatCurrency(valorExibido)}</h4>
+                        ${detalheHtml}
                     </div>
                     <div class="modal-footer">
                         <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancelar</button>
-                        <button type="button" class="btn btn-primary" id="confirmar-recebimento-fiscal-manual">Confirmar</button>
+                        <button type="button" class="btn btn-primary" id="confirmar-recebimento-fiscal-manual">Confirmar recebimento</button>
                     </div>
                 </div>
             </div>
@@ -1707,7 +1892,7 @@ function aplicarDescontoProporcionalDistribuicao(distribuicao, subtotal, descont
 
 async function processarVendaFiscalManual(dadosVenda, valorFiscal, opcoes) {
     try {
-        await confirmarRecebimentoFiscalManual(valorFiscal, opcoes);
+        await confirmarRecebimentoFiscalManual(valorFiscal, opcoes || {});
         pagamentoFiscalAtual = { manual: true, valor: valorFiscal };
         return { sucesso: true };
     } catch (error) {
@@ -1785,6 +1970,7 @@ function marcarParcelaConfirmacaoManual(pagamento) {
             confirmacao_manual: 0
         };
     }
+    const forma = normalizarFormaPagamentoTEF(pagamento && pagamento.forma_pagamento);
     const copia = { ...(pagamento || {}) };
     delete copia.nsu;
     delete copia.autorizacao;
@@ -1792,10 +1978,23 @@ function marcarParcelaConfirmacaoManual(pagamento) {
     delete copia.adquirente;
     delete copia.tef_transacao_id;
     delete copia.tef;
+    if (pagamento && pagamento.pix_confirmado && pagamento.pix_txid) {
+        return {
+            ...copia,
+            confirmacao_modalidade: 'pix',
+            confirmacao_manual: 0,
+            recebimento_confirmado: true,
+            pix_txid: pagamento.pix_txid,
+            pix_confirmado: true
+        };
+    }
     return {
         ...copia,
         confirmacao_modalidade: 'manual',
-        confirmacao_manual: 1
+        confirmacao_manual: 1,
+        recebimento_confirmado: true,
+        confirmacao_operacional_externa: formaPagamentoUsaTEF(forma) ? true : undefined,
+        status_autorizacao: copia.status_autorizacao || 'confirmada'
     };
 }
 
@@ -2413,6 +2612,13 @@ function produtoControlaEstoquePdv(produto) {
     return Number(produto.controla_estoque) !== 0;
 }
 
+/** CDS-PDV-ESTOQUE-PRODUTOS-COMERCIAIS-FISCAIS-01 — acabado comercial sem saldo próprio. */
+function pdvProdutoComercialSemSaldoProprio(produto) {
+    if (!produto) return false;
+    const tipo = String(produto.tipo_operacional || 'COMERCIAL').trim().toUpperCase();
+    return tipo !== 'INSUMO';
+}
+
 /**
  * Validação local de estoque (UX). Autoridade final: capacidade multiempresa no servidor.
  * Produto sem ficha: bucket exclusivo da operação (M08/M13). Não usa total F+NF como elegível.
@@ -2420,6 +2626,16 @@ function produtoControlaEstoquePdv(produto) {
 function validarEstoqueVenda(produto, quantidade, modoFiscal) {
     if (!produtoControlaEstoquePdv(produto)) {
         return { sucesso: true };
+    }
+
+    // Comercial: não valida saldo próprio (insumos via seletor/ficha no servidor).
+    if (pdvProdutoComercialSemSaldoProprio(produto)) {
+        return {
+            sucesso: true,
+            diferidoSeletor: true,
+            comercialSemSaldoProprio: true,
+            ficha: pdvProdutoUsaFichaTecnica(produto)
+        };
     }
 
     const exigeFiscal = modoFiscal === true;
@@ -5274,7 +5490,7 @@ function prosseguirFinalizacaoConformeModoFiscal(formaPagamentoOverride) {
 function mostrarModalDecisaoFiscal() {
     const bloqueio = window.pdvDocumentoFiscalBloqueado;
     if (bloqueio && bloqueio.bloqueado) {
-        if (bloqueio.codigo === 'REFERENCIA_FISCAL_ZERO') {
+        if (!codigoBloqueioImpedeAceitePagamento(bloqueio.codigo)) {
             pdvEmitirFiscalNaVenda = false;
             executarFinalizacaoVenda(false, null, formaPagamentoSelecionadaPDV);
             return;
@@ -5316,18 +5532,44 @@ function itensCarrinhoParaComposicao() {
     }));
 }
 
+/**
+ * Bloqueios que não impedem receber o pagamento no PDV.
+ * AUTORIZACAO_AUSENTE = distribuição oficial F×NF (emissão); a referência financeira já basta para fechar.
+ */
+function codigoBloqueioImpedeAceitePagamento(codigo) {
+    const c = String(codigo || '');
+    if (!c) return false;
+    if (c === 'REFERENCIA_FISCAL_ZERO') return false;
+    if (c === 'AUTORIZACAO_AUSENTE') return false;
+    return true;
+}
+
+function documentoFiscalImpedeAceitePagamento(documento) {
+    return Boolean(
+        documento
+        && documento.bloqueado
+        && codigoBloqueioImpedeAceitePagamento(documento.codigo)
+    );
+}
+
 function registrarBloqueioDocumentoFiscal(avaliacao) {
     const documento = avaliacao && avaliacao.documento_fiscal;
+    if (documento && documento.bloqueado && !documentoFiscalImpedeAceitePagamento(documento)) {
+        // Soft: guarda refs no painel, não trava o fechamento do pagamento.
+        window.pdvDocumentoFiscalBloqueado = null;
+        return null;
+    }
     window.pdvDocumentoFiscalBloqueado = documento && documento.bloqueado ? documento : null;
     return window.pdvDocumentoFiscalBloqueado;
 }
 
 function htmlComposicaoFiscalPdv(dados) {
     const documento = dados && dados.documento_fiscal;
-    if (documento && documento.bloqueado) {
+    if (documentoFiscalImpedeAceitePagamento(documento)) {
         return `<strong>Composição fiscal da venda</strong><p class="mb-0">Bloqueada. ${documento.codigo}: ${documento.motivo || 'A distribuição não foi autorizada.'}</p>`;
     }
     const apresentacao = dados && dados.composicao_fiscal;
+    const refDoc = documento && documento.referencia;
     const itens = (apresentacao && apresentacao.itens) || (documento && documento.itens_fiscais) || [];
     const linhas = itens.map((item) => {
         const quantidade = Number(item.quantidade != null ? item.quantidade : item.quantidade_fiscal || 0);
@@ -5335,13 +5577,30 @@ function htmlComposicaoFiscalPdv(dados) {
         const volume = item.volume_ml != null ? ` · ${item.volume_ml} ml` : '';
         return `<li>Produto ${item.produto_id}: ${quantidade} un${volume} · R$ ${valor.toFixed(2).replace('.', ',')}</li>`;
     }).join('');
-    const fiscal = apresentacao ? apresentacao.valor_fiscal : (dados && dados.valor_fiscal_referencia);
-    const naoFiscal = apresentacao ? apresentacao.valor_nao_fiscal : (dados && dados.valor_nao_fiscal_referencia);
+    const fiscal = Number(
+        (refDoc && refDoc.valor_fiscal_referencia)
+        ?? (apresentacao && apresentacao.valor_fiscal)
+        ?? (dados && dados.valor_fiscal_referencia)
+        ?? 0
+    );
+    const naoFiscal = Number(
+        (refDoc && refDoc.valor_nao_fiscal_referencia)
+        ?? (apresentacao && apresentacao.valor_nao_fiscal)
+        ?? (dados && dados.valor_nao_fiscal_referencia)
+        ?? 0
+    );
+    const complemento = Number(
+        (refDoc && refDoc.complemento_dinheiro_utilizado)
+        ?? (documento && documento.complemento_dinheiro_utilizado)
+        ?? (apresentacao && apresentacao.complemento_dinheiro_utilizado)
+        ?? 0
+    );
     return `<strong>Composição fiscal da venda</strong>
         <p class="mb-1">Esta é a composição fiscal. O carrinho comercial permanece.</p>
         <ul class="mb-1">${linhas || '<li>Nenhum item fiscal autorizado.</li>'}</ul>
         <div>Valor fiscal: R$ ${Number(fiscal || 0).toFixed(2).replace('.', ',')}</div>
         <div>Dinheiro, fora da NFC-e: R$ ${Number(naoFiscal || 0).toFixed(2).replace('.', ',')}</div>
+        ${complemento > 0.009 ? `<div>Complemento em dinheiro (NFC-e): R$ ${Number(complemento).toFixed(2).replace('.', ',')}</div>` : ''}
         <div>Desconto de ajuste: R$ 0,00. A tolerância de 20% não vira desconto.</div>`;
 }
 
@@ -5473,7 +5732,7 @@ function abrirPagamentoMisto() {
             return;
         }
         const bloqueio = registrarBloqueioDocumentoFiscal(dados);
-        if (bloqueio && bloqueio.codigo !== 'REFERENCIA_FISCAL_ZERO') {
+        if (documentoFiscalImpedeAceitePagamento(bloqueio)) {
             PagamentoSequencial.invalidarComposicao();
             showNotification(bloqueio.motivo || 'A recomposição não autorizou o documento fiscal.', 'warning');
             desenhar();
@@ -5563,8 +5822,15 @@ function abrirPagamentoMisto() {
     modal.show();
     desenhar();
 
-    $('#painelEscolhaFormaMista').on('click', '.btn-escolher-forma-mista', function () {
-        const escolha = interacao.escolherForma($(this).data('forma'));
+    $('#painelEscolhaFormaMista').on('click', '.btn-escolher-forma-mista', async function () {
+        const forma = $(this).data('forma');
+        const tefHabilitado = await obterTefHabilitadoConfig();
+        const pixIntegracaoHabilitada = await pixAutomaticoHabilitado();
+        const modo = InteracaoPagamentoMisto.modoConfirmacaoDireta(forma, {
+            tefHabilitado,
+            pixIntegracaoHabilitada
+        });
+        const escolha = interacao.escolherForma(forma);
         if (!escolha.ok) {
             showNotification('A venda já está completa. Confirme o pagamento.', 'warning');
             return;
@@ -5585,8 +5851,13 @@ function abrirPagamentoMisto() {
         if (botao.prop('disabled')) return;
         botao.prop('disabled', true);
         const valor = Number($('#valorParcelaSequencial').val() || 0);
+        const tefHabilitado = await obterTefHabilitadoConfig();
+        const pixIntegracaoHabilitada = await pixAutomaticoHabilitado();
         const resultado = await interacao.confirmarValor(valor, {
-            formaUsaTef: (formaParcela) => PagamentoSequencial.formaExigeAutorizador(formaParcela),
+            tefHabilitado,
+            pixIntegracaoHabilitada,
+            formaUsaTef: (formaParcela) => tefHabilitado
+                && PagamentoSequencial.formaExigeAutorizador(formaParcela),
             autorizarTef: async (formaParcela, valorParcela, chave) => processarPagamentoTEF(
                 TefFluxoPagamento.normalizarTipoTef(formaParcela),
                 valorParcela,
@@ -5601,6 +5872,8 @@ function abrirPagamentoMisto() {
                 AUTORIZADOR_AUSENTE: 'A forma eletrônica aguarda o autorizador.',
                 RECUSADO: 'A autorização foi recusada. A parcela não foi registrada.',
                 TEF_REJEITADO: 'A autorização foi recusada. As parcelas anteriores foram mantidas.',
+                TEF_DESABILITADO: resultado.mensagem
+                    || 'TEF está desabilitado neste autorizador.',
                 TIMEOUT: 'A autorização expirou. As parcelas anteriores foram mantidas.',
                 ERRO: resultado.mensagem || 'Falha de comunicação. As parcelas anteriores foram mantidas.',
                 PENDENTE: 'A autorização ficou pendente e não entrou no saldo recebido.',
@@ -5608,9 +5881,17 @@ function abrirPagamentoMisto() {
                 VALOR_ACIMA_DO_RESTANTE: 'O valor supera o restante da venda.',
                 VALOR_INVALIDO: 'Informe um valor maior que zero.'
             };
-            showNotification(mensagens[resultado.codigo] || 'Não foi possível adicionar a parcela.', 'warning');
+            showNotification(
+                mensagens[resultado.codigo]
+                    || resultado.mensagem
+                    || 'Não foi possível adicionar a parcela.',
+                'warning'
+            );
             desenhar();
             return;
+        }
+        if (resultado.mensagem) {
+            showNotification(resultado.mensagem, 'info');
         }
         $('#valorParcelaSequencial').val('');
         await avaliarSeHouverDinheiro();
@@ -5644,7 +5925,11 @@ function abrirPagamentoMisto() {
         if (document.activeElement) document.activeElement.blur();
         modal.hide();
 
-        const pagamentoPix = lista.find((parcela) => parcela.forma_pagamento === 'pix' && !parcela.tef_transacao_id);
+        const pagamentoPix = lista.find((parcela) => (
+            (parcela.forma_pagamento === 'pix' || parcela.forma_pagamento === 'pix_tef')
+            && !parcela.tef_transacao_id
+            && !parcela.pix_confirmado
+        ));
         if (pagamentoPix) {
             setTimeout(async () => {
                 const tefOn = await obterTefHabilitadoConfig();
@@ -5656,7 +5941,9 @@ function abrirPagamentoMisto() {
                 if (ativo) {
                     iniciarPixAutomaticoPDV(Number(pagamentoPix.valor), {
                         modoMisto: true,
-                        onPago: () => setTimeout(() => mostrarModalDecisaoFiscal(), 300)
+                        parcela: pagamentoPix,
+                        onPago: () => setTimeout(() => mostrarModalDecisaoFiscal(), 300),
+                        onCancel: () => setTimeout(() => mostrarModalDecisaoFiscal(), 300)
                     });
                 } else {
                     mostrarModalDecisaoFiscal();
@@ -5947,10 +6234,27 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
         emitir_fiscal: false,
         cpf_cnpj_nota: null,
         pagamentos: pagamentosMistos.length > 0 ? pagamentosMistos : [
-            {
-                forma_pagamento: formaPagamento,
-                valor: total
-            }
+            (() => {
+                const base = {
+                    forma_pagamento: formaPagamento,
+                    valor: total
+                };
+                const formaNorm = normalizarFormaPagamentoTEF(formaPagamento);
+                if (
+                    (formaNorm === 'pix' || formaNorm === 'pix_tef')
+                    && pixConfirmadoPdvAtual
+                    && pixConfirmadoPdvAtual.txid
+                    && Math.abs(Number(pixConfirmadoPdvAtual.valor || total) - Number(total)) <= 0.009
+                ) {
+                    base.pix_txid = pixConfirmadoPdvAtual.txid;
+                    base.pix_confirmado = true;
+                    base.confirmacao_efetiva = true;
+                    base.confirmacao_modalidade = 'pix';
+                    base.status_autorizacao = 'aprovada';
+                    base.aprovado = true;
+                }
+                return base;
+            })()
         ],
         itens: carrinho.map(item => {
             const produto = produtosDisponiveis.find(p => Number(p.id) === Number(item.id));
@@ -6150,25 +6454,103 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
             if (tefHabilitado && pagamentoExigeTef) {
                 parcelasFechamento = await processarPagamentosMistosTEF(parcelasFechamento);
             }
-            const confirmacao = TefFluxoPagamento.listaSequencialJaConfirmada(parcelasFechamento);
-            if (!confirmacao.dispensaModalExtra) {
+            const confirmacao = TefFluxoPagamento.listaSequencialJaConfirmada(parcelasFechamento, {
+                tefHabilitado
+            });
+            if (!confirmacao.dispensaModalExtra && !confirmacao.requerConfirmacaoManual) {
                 vendaEmProcessamento = false;
                 const mensagens = {
+                    PIX_SEM_CONFIRMACAO:
+                        'PIX ainda não confirmado. Confirme o recebimento ou aguarde a integração PIX.',
                     PARCELA_ELETRONICA_SEM_AUTORIZACAO: 'Há parcela eletrônica sem autorização. A venda não foi finalizada.',
                     PARCELA_NAO_CONFIRMADA: 'Há parcela pendente, recusada ou com falha. A venda não foi finalizada.',
                     PARCELA_INVALIDA: 'Há parcela inválida. A venda não foi finalizada.',
                     LISTA_VAZIA: 'Não há parcelas confirmadas. A venda não foi finalizada.'
                 };
                 showNotification(
-                    `${confirmacao.codigo || 'PAGAMENTO_INCOMPLETO'}: ${mensagens[confirmacao.codigo] || 'O pagamento não está integralmente confirmado.'}`,
+                    mensagens[confirmacao.codigo]
+                        || `${confirmacao.codigo || 'PAGAMENTO_INCOMPLETO'}: O pagamento não está integralmente confirmado.`,
                     'warning'
                 );
                 return;
             }
+            let carimbarManual = false;
+            if (confirmacao.requerConfirmacaoManual) {
+                let referenciaComposicao = null;
+                const temDinheiroParcela = parcelasFechamento.some((p) => {
+                    const f = normalizarFormaPagamentoTEF(p && p.forma_pagamento);
+                    return f === 'dinheiro' || f === 'especie' || f === 'cash';
+                });
+                if (temDinheiroParcela) {
+                    // Sempre recalcular: o modal precisa do F final (eletrônico + complemento),
+                    // não do total da venda nem só do eletrônico inicial.
+                    const avaliacao = await solicitarAvaliacaoComposicaoPagamento(
+                        total,
+                        parcelasFechamento
+                    ).catch(() => null);
+                    if (avaliacao && avaliacao.sucesso !== false) {
+                        referenciaComposicao = extrairReferenciaComposicaoParaModal(avaliacao);
+                        if (
+                            typeof PagamentoSequencial !== 'undefined'
+                            && typeof PagamentoSequencial.registrarComposicao === 'function'
+                        ) {
+                            PagamentoSequencial.registrarComposicao(avaliacao);
+                        }
+                    } else {
+                        const cached = typeof PagamentoSequencial !== 'undefined'
+                            && typeof PagamentoSequencial.composicaoAtual === 'function'
+                            ? PagamentoSequencial.composicaoAtual()
+                            : null;
+                        if (cached && cached.resultado) {
+                            referenciaComposicao = extrairReferenciaComposicaoParaModal(cached.resultado);
+                        }
+                    }
+                    if (
+                        referenciaComposicao
+                        && (
+                            referenciaComposicao.fiscal > 0.009
+                            || referenciaComposicao.naoFiscal > 0.009
+                        )
+                    ) {
+                        totalFiscal = referenciaComposicao.fiscal;
+                        totalNaoFiscal = referenciaComposicao.naoFiscal;
+                        dados.valor_fiscal = totalFiscal;
+                        dados.valor_nao_fiscal = totalNaoFiscal;
+                    }
+                }
+                const opcoesManual = montarOpcoesConfirmacaoFiscalManual({
+                    tefHabilitado,
+                    totalFiscal,
+                    totalNaoFiscal,
+                    parcelas: parcelasFechamento,
+                    referenciaComposicao
+                });
+                const resultadoManual = await processarVendaFiscalManual(
+                    dados,
+                    opcoesManual.valorFiscalEfetivo != null ? opcoesManual.valorFiscalEfetivo : totalFiscal,
+                    opcoesManual
+                );
+                if (!resultadoManual.sucesso) {
+                    vendaEmProcessamento = false;
+                    showNotification(resultadoManual.erro || 'Confirmação de recebimento cancelada.', 'danger');
+                    return;
+                }
+                carimbarManual = true;
+                dados.confirmacao_fiscal_manual = true;
+            }
             dados.pagamento_sequencial = true;
-            dados.pagamentos = TefFluxoPagamento.montarParcelasListaSequencial(parcelasFechamento);
+            dados.pagamentos = TefFluxoPagamento.montarParcelasListaSequencial(parcelasFechamento, {
+                carimbarConfirmacaoManual: carimbarManual
+            });
+            if (carimbarManual) {
+                dados.pagamentos = dados.pagamentos.map(marcarParcelaConfirmacaoManual);
+            }
             dados.forma_pagamento = formaClassificadaDasParcelas(dados.pagamentos, dados.forma_pagamento);
-            dados.confirmacao_fiscal_manual = dados.pagamentos.some((pagamento) => pagamento.confirmacao_manual === 1);
+            if (!dados.confirmacao_fiscal_manual) {
+                dados.confirmacao_fiscal_manual = dados.pagamentos.some(
+                    (pagamento) => pagamento.confirmacao_manual === 1
+                );
+            }
             ramoPagamentoConcluido = true;
         } else if (ramoFechamento === 'pagamento_unico_fiscal') {
             const resultadoProcessamento = await processarVendaFiscalNaoFiscal(dados, totalFiscal);
@@ -6266,9 +6648,47 @@ async function executarFinalizacaoVenda(emitirFiscal = false, cpfCnpjNota = null
             }
             ramoPagamentoConcluido = true;
         } else if (ramoFechamento === 'manual') {
-            const resultadoManual = await processarVendaFiscalManual(dados, totalFiscal, {
-                valorConfirmacao: total
+            const parcelasManual = ehPagamentoMisto
+                ? normalizarPagamentosSemTef(pagamentosMistos)
+                : [{
+                    forma_pagamento: formaPagamentoNormalizada,
+                    valor: totalFiscal > 0 ? totalFiscal : total
+                }];
+            let referenciaComposicaoManual = null;
+            const temDinheiroManual = parcelasManual.some((p) => {
+                const f = normalizarFormaPagamentoTEF(p && p.forma_pagamento);
+                return f === 'dinheiro' || f === 'especie' || f === 'cash';
             });
+            if (temDinheiroManual && ehPagamentoMisto) {
+                const avaliacaoManual = await solicitarAvaliacaoComposicaoPagamento(
+                    total,
+                    parcelasManual
+                ).catch(() => null);
+                if (avaliacaoManual && avaliacaoManual.sucesso !== false) {
+                    referenciaComposicaoManual = extrairReferenciaComposicaoParaModal(avaliacaoManual);
+                    if (
+                        referenciaComposicaoManual.fiscal > 0.009
+                        || referenciaComposicaoManual.naoFiscal > 0.009
+                    ) {
+                        totalFiscal = referenciaComposicaoManual.fiscal;
+                        totalNaoFiscal = referenciaComposicaoManual.naoFiscal;
+                        dados.valor_fiscal = totalFiscal;
+                        dados.valor_nao_fiscal = totalNaoFiscal;
+                    }
+                }
+            }
+            const opcoesManual = montarOpcoesConfirmacaoFiscalManual({
+                tefHabilitado,
+                totalFiscal,
+                totalNaoFiscal,
+                parcelas: parcelasManual,
+                referenciaComposicao: referenciaComposicaoManual
+            });
+            const resultadoManual = await processarVendaFiscalManual(
+                dados,
+                opcoesManual.valorFiscalEfetivo != null ? opcoesManual.valorFiscalEfetivo : totalFiscal,
+                opcoesManual
+            );
 
             if (!resultadoManual.sucesso) {
                 vendaEmProcessamento = false;
@@ -7518,11 +7938,7 @@ function abrirTelaPagamentoBalcao(opcoes = {}) {
             showNotification('Ainda há saldo restante.', 'warning');
             return;
         }
-        if (
-            window.pdvDocumentoFiscalBloqueado
-            && window.pdvDocumentoFiscalBloqueado.bloqueado
-            && window.pdvDocumentoFiscalBloqueado.codigo !== 'REFERENCIA_FISCAL_ZERO'
-        ) {
+        if (documentoFiscalImpedeAceitePagamento(window.pdvDocumentoFiscalBloqueado)) {
             showNotification(
                 `${window.pdvDocumentoFiscalBloqueado.codigo}: ${window.pdvDocumentoFiscalBloqueado.motivo || 'A recomposição não autorizou o documento fiscal.'}`,
                 'warning'
@@ -7551,11 +7967,8 @@ function abrirTelaPagamentoBalcao(opcoes = {}) {
                 <span>${moedaDireta(parcela.valor)}${Number(parcela.troco) > 0 ? ` <small class="text-muted">troco ${moedaDireta(parcela.troco)}</small>` : ''}</span>
             </div>
         `).join(''));
-        const bloqueioDocumento = window.pdvDocumentoFiscalBloqueado;
-        const documentoImpedeFechamento = Boolean(
-            bloqueioDocumento
-            && bloqueioDocumento.bloqueado
-            && bloqueioDocumento.codigo !== 'REFERENCIA_FISCAL_ZERO'
+        const documentoImpedeFechamento = documentoFiscalImpedeAceitePagamento(
+            window.pdvDocumentoFiscalBloqueado
         );
         $('#btnFecharPagamentoDireto').prop('disabled', !visao.podeFinalizar || documentoImpedeFechamento);
         const painelDireto = $('#painelComposicaoFiscalDireta');
@@ -7639,10 +8052,18 @@ function abrirTelaPagamentoBalcao(opcoes = {}) {
         if (botao.prop('disabled')) return;
         const valor = lerValorMonetarioBr(textoDigitado);
         const forma = interacao.visao().formaEscolhida;
-        const modo = InteracaoPagamentoMisto.modoConfirmacaoDireta(forma);
+        const tefHabilitado = await obterTefHabilitadoConfig();
+        const pixIntegracaoHabilitada = await pixAutomaticoHabilitado();
+        const modo = InteracaoPagamentoMisto.modoConfirmacaoDireta(forma, {
+            tefHabilitado,
+            pixIntegracaoHabilitada
+        });
         botao.prop('disabled', true);
         const resultado = await interacao.confirmarValor(valor, {
-            formaUsaTef: (formaParcela) => modo === 'tef' && PagamentoSequencial.formaExigeAutorizador(formaParcela),
+            tefHabilitado,
+            pixIntegracaoHabilitada,
+            formaUsaTef: (formaParcela) => modo === 'tef'
+                && PagamentoSequencial.formaExigeAutorizador(formaParcela),
             autorizarTef: async (formaParcela, valorParcela, chave) => processarPagamentoTEF(
                 TefFluxoPagamento.normalizarTipoTef(formaParcela),
                 valorParcela,
@@ -7656,6 +8077,8 @@ function abrirTelaPagamentoBalcao(opcoes = {}) {
                 AUTORIZADOR_AUSENTE: 'A forma eletrônica aguarda o autorizador.',
                 RECUSADO: 'A autorização foi recusada. A parcela não foi registrada.',
                 TEF_REJEITADO: 'A autorização foi recusada. A parcela não foi registrada.',
+                TEF_DESABILITADO: resultado.mensagem
+                    || 'TEF está desabilitado neste autorizador.',
                 TIMEOUT: 'A autorização expirou. A parcela não foi registrada.',
                 ERRO: resultado.mensagem || 'Falha de comunicação. A parcela não foi registrada.',
                 PENDENTE: 'A autorização ficou pendente e não entrou no saldo recebido.',
@@ -7663,9 +8086,18 @@ function abrirTelaPagamentoBalcao(opcoes = {}) {
                 VALOR_ACIMA_DO_RESTANTE: 'O valor supera o saldo restante.',
                 VALOR_INVALIDO: 'Informe um valor maior que zero.'
             };
-            showNotification(mensagens[resultado.codigo] || 'Não foi possível registrar a parcela.', 'warning');
-            desenharPagamentoDireto();
+            showNotification(
+                mensagens[resultado.codigo]
+                    || resultado.mensagem
+                    || 'Não foi possível registrar a parcela.',
+                'warning'
+            );
+            // Preserva o valor digitado para nova tentativa segura.
+            desenharPagamentoDireto({ limparValor: false });
             return;
+        }
+        if (resultado.mensagem) {
+            showNotification(resultado.mensagem, 'info');
         }
         $('#valorParcelaDireta').val('');
         fecharModalValorDireto();
@@ -7678,7 +8110,7 @@ function abrirTelaPagamentoBalcao(opcoes = {}) {
         ) {
             const avaliacao = await solicitarAvaliacaoComposicaoPagamento(totalVenda, lista).catch(() => null);
             const bloqueio = registrarBloqueioDocumentoFiscal(avaliacao);
-            if (bloqueio && bloqueio.codigo !== 'REFERENCIA_FISCAL_ZERO') {
+            if (documentoFiscalImpedeAceitePagamento(bloqueio)) {
                 showNotification(
                     `${bloqueio.codigo}: ${bloqueio.motivo || 'A recomposição não autorizou o documento fiscal.'}`,
                     'warning'
@@ -7687,17 +8119,28 @@ function abrirTelaPagamentoBalcao(opcoes = {}) {
                 return;
             }
             if (avaliacao && avaliacao.recomposicao_executada) {
+                const refModal = extrairReferenciaComposicaoParaModal(avaliacao);
                 $('#pdvDiretoRefs').removeClass('d-none');
-                $('#pdvDiretoRefFiscal').text(moedaDireta(avaliacao.valor_fiscal_referencia));
-                $('#pdvDiretoRefNaoFiscal').text(moedaDireta(avaliacao.valor_nao_fiscal_referencia));
+                $('#pdvDiretoRefFiscal').text(moedaDireta(
+                    refModal.fiscal > 0.009 ? refModal.fiscal : avaliacao.valor_fiscal_referencia
+                ));
+                $('#pdvDiretoRefNaoFiscal').text(moedaDireta(
+                    refModal.naoFiscal > 0.009 ? refModal.naoFiscal : avaliacao.valor_nao_fiscal_referencia
+                ));
                 $('#painelComposicaoFiscalDireta').removeClass('d-none').html(htmlComposicaoFiscalPdv(avaliacao));
+                if (
+                    typeof PagamentoSequencial !== 'undefined'
+                    && typeof PagamentoSequencial.registrarComposicao === 'function'
+                ) {
+                    PagamentoSequencial.registrarComposicao(avaliacao);
+                }
             }
             desenharPagamentoDireto();
         }
         if (interacao.visao().podeFinalizar) iniciarFechamentoDireto();
     }
 
-    function escolherFormaDireta(forma) {
+    async function escolherFormaDireta(forma) {
         if (!interacao) {
             selecionarPagamentoPDV(forma);
             return;
@@ -7709,6 +8152,12 @@ function abrirTelaPagamentoBalcao(opcoes = {}) {
         }
         desenharPagamentoDireto({ limparValor: true });
     }
+
+    // Débito/crédito/PIX ficam sempre clicáveis; com TEF off o fechamento pede confirmação operacional.
+    $('#modalPagamentoPDV .btn-forma-direta')
+        .prop('disabled', false)
+        .removeClass('opacity-50')
+        .removeAttr('title');
 
     $('#modalPagamentoPDV').on('click', '.btn-forma-direta', function () {
         escolherFormaDireta($(this).data('forma'));
@@ -7731,11 +8180,7 @@ function abrirTelaPagamentoBalcao(opcoes = {}) {
             showNotification('Ainda há saldo restante.', 'warning');
             return;
         }
-        if (
-            window.pdvDocumentoFiscalBloqueado
-            && window.pdvDocumentoFiscalBloqueado.bloqueado
-            && window.pdvDocumentoFiscalBloqueado.codigo !== 'REFERENCIA_FISCAL_ZERO'
-        ) {
+        if (documentoFiscalImpedeAceitePagamento(window.pdvDocumentoFiscalBloqueado)) {
             showNotification(
                 window.pdvDocumentoFiscalBloqueado.motivo || 'A recomposição não autorizou o documento fiscal.',
                 'warning'
@@ -7835,7 +8280,7 @@ function selecionarPagamentoPDV(forma) {
             status_autorizacao: 'informada'
         }]).then((avaliacao) => {
             const bloqueio = registrarBloqueioDocumentoFiscal(avaliacao);
-            if (bloqueio && bloqueio.codigo !== 'REFERENCIA_FISCAL_ZERO') {
+            if (documentoFiscalImpedeAceitePagamento(bloqueio)) {
                 showNotification(bloqueio.motivo || 'A recomposição não autorizou o documento fiscal.', 'warning');
             }
         }).catch(() => {});
@@ -7850,7 +8295,10 @@ function selecionarPagamentoPDV(forma) {
 
             const ativo = await pixAutomaticoHabilitado();
             if (ativo) {
-                iniciarPixAutomaticoPDV();
+                iniciarPixAutomaticoPDV(null, {
+                    onPago: () => setTimeout(() => mostrarModalDecisaoFiscal(), 300),
+                    onCancel: () => setTimeout(() => mostrarModalDecisaoFiscal(), 300)
+                });
             } else {
                 mostrarModalDecisaoFiscal();
             }
@@ -7867,6 +8315,8 @@ function selecionarPagamentoPDV(forma) {
 let intervaloConsultaPixPDV = null;
 let retomadaAposPixDireto = null;
 let pixAutomaticoAtivoCache = null;
+/** Evidência PIX própria da venda atual (fluxo simples, sem sequencial). */
+let pixConfirmadoPdvAtual = null;
 
 async function pixAutomaticoHabilitado() {
     if (pixAutomaticoAtivoCache !== null) {
@@ -7889,12 +8339,23 @@ async function pixAutomaticoHabilitado() {
     }
 }
 
+function obterEmpresaIdPdvAtual() {
+    if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.lerEmpresaId === 'function') {
+        const id = Number(CdsEmpresaContexto.lerEmpresaId());
+        if (id > 0) return id;
+    }
+    if (pdvModeloEmpresaSnapshot && pdvModeloEmpresaSnapshot.pdv_empresa_id) {
+        return Number(pdvModeloEmpresaSnapshot.pdv_empresa_id);
+    }
+    return null;
+}
+
 async function iniciarPixAutomaticoPDV(valorPix, opcoes = {}) {
     const ativo = await pixAutomaticoHabilitado();
 
     if (!ativo) {
-        if (typeof opcoes.onPago === 'function') {
-            opcoes.onPago();
+        if (typeof opcoes.onCancel === 'function') {
+            opcoes.onCancel();
         } else {
             setTimeout(() => mostrarModalDecisaoFiscal(), 300);
         }
@@ -7910,18 +8371,47 @@ async function iniciarPixAutomaticoPDV(valorPix, opcoes = {}) {
         return;
     }
 
+    const parcelaAlvo = opcoes.parcela
+        || (typeof PagamentoSequencial !== 'undefined'
+            && PagamentoSequencial.snapshot().find((p) => {
+                const f = String(p.forma_pagamento || '').toLowerCase();
+                return (f === 'pix' || f === 'pix_tef')
+                    && !p.pix_confirmado
+                    && Math.abs(Number(p.valor) - totalVenda) <= 0.009;
+            }));
+
     try {
         showNotification('Gerando cobrança Pix...', 'info');
 
+        const headers = {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${localStorage.getItem('token')}`
+        };
+        if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.headersJson === 'function') {
+            Object.assign(headers, CdsEmpresaContexto.headersJson());
+        }
+
+        const sessao = (parcelaAlvo && parcelaAlvo.sessao_pagamento)
+            || (typeof PagamentoSequencial !== 'undefined' && PagamentoSequencial.sessaoPagamento
+                ? PagamentoSequencial.sessaoPagamento()
+                : null);
+        const parcelaLocalId = parcelaAlvo ? parcelaAlvo.local_id : null;
+        const chaveParcela = parcelaAlvo && parcelaAlvo.chave_parcela
+            ? parcelaAlvo.chave_parcela
+            : (sessao && parcelaLocalId
+                ? `${sessao}:${parcelaLocalId}:${Number(totalVenda).toFixed(2)}`
+                : null);
+
         const resp = await fetch(`${API_URL}/pix/criar-cobranca`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${localStorage.getItem('token')}`
-            },
+            headers,
             body: JSON.stringify({
                 valor: totalVenda,
-                descricao: opcoes.modoMisto ? 'Venda PDV - Pagamento misto' : 'Venda PDV'
+                descricao: opcoes.modoMisto ? 'Venda PDV - Pagamento misto' : 'Venda PDV',
+                empresa_id: obterEmpresaIdPdvAtual(),
+                parcela_local_id: parcelaLocalId,
+                sessao_pagamento: sessao,
+                chave_parcela: chaveParcela
             })
         });
 
@@ -7931,8 +8421,15 @@ async function iniciarPixAutomaticoPDV(valorPix, opcoes = {}) {
             throw new Error(data.error || 'Erro ao gerar Pix.');
         }
 
-        mostrarModalAguardandoPixPDV(data.cobranca, totalVenda, opcoes);
-        consultarPixAteConfirmarPDV(data.cobranca.txid, opcoes);
+        const vinculo = {
+            ...opcoes,
+            parcelaLocalId,
+            valor: totalVenda,
+            sessaoPagamento: sessao,
+            chaveParcela
+        };
+        mostrarModalAguardandoPixPDV(data.cobranca, totalVenda, vinculo);
+        consultarPixAteConfirmarPDV(data.cobranca.txid, vinculo);
 
     } catch (err) {
         console.error('Erro Pix automático:', err);
@@ -8020,6 +8517,30 @@ function consultarPixAteConfirmarPDV(txid, opcoes = {}) {
                 intervaloConsultaPixPDV = null;
 
                 $('#statusPixPDV').text('Pix confirmado!');
+
+                const txidPago = data.status.txid || txid;
+                if (typeof PagamentoSequencial !== 'undefined' && opcoes.parcelaLocalId) {
+                    const confirmacaoParcela = PagamentoSequencial.confirmarParcelaPix({
+                        localId: opcoes.parcelaLocalId,
+                        txid: txidPago,
+                        valor: opcoes.valor
+                    });
+                    if (!confirmacaoParcela.ok) {
+                        showNotification(
+                            'PIX pago na integração, mas não foi possível vincular à parcela. A venda não foi concluída.',
+                            'danger'
+                        );
+                        if (typeof opcoes.onCancel === 'function') opcoes.onCancel();
+                        return;
+                    }
+                } else {
+                    pixConfirmadoPdvAtual = {
+                        txid: txidPago,
+                        valor: Number(opcoes.valor || 0),
+                        pix_confirmado: true,
+                        confirmacao_efetiva: true
+                    };
+                }
 
                 setTimeout(() => {
                     const modalEl = document.getElementById('modalPixAutomaticoPDV');

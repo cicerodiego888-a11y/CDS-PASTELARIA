@@ -11,9 +11,31 @@ const source = fs.readFileSync(
 );
 
 function extractFunction(name) {
-  const match = source.match(new RegExp(`function ${name}\\([\\s\\S]*?\\n\\}`));
-  assert.ok(match, `Função ${name} não encontrada.`);
-  return match[0];
+  const start = source.indexOf(`function ${name}(`);
+  assert.ok(start >= 0, `Função ${name} não encontrada.`);
+  let i = start + `function ${name}`.length;
+  let paren = 0;
+  let seenParen = false;
+  for (; i < source.length; i += 1) {
+    const ch = source[i];
+    if (ch === '(') {
+      paren += 1;
+      seenParen = true;
+    } else if (ch === ')') {
+      paren -= 1;
+    } else if (ch === '{' && seenParen && paren === 0) {
+      break;
+    }
+  }
+  let depth = 0;
+  for (; i < source.length; i += 1) {
+    if (source[i] === '{') depth += 1;
+    else if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  throw new Error(`Função ${name} sem fechamento.`);
 }
 
 const produtosCompraList = [
@@ -71,6 +93,9 @@ vm.runInContext([
   extractFunction('tipoOperacionalCadastroCompra'),
   extractFunction('resolverClassificacaoMiipCadastro'),
   extractFunction('prepararItemQuantidadesImportacaoCentral'),
+  extractFunction('derivarMargemMarkupCompra'),
+  extractFunction('extrairTotaisXmlItemCompra'),
+  extractFunction('resolverSubtotalFinanceiroItemCompra'),
   extractFunction('calcularSubtotalFinanceiroItemCompra'),
   extractFunction('normalizeItemCompra'),
   extractFunction('escapeHtml'),

@@ -56,6 +56,9 @@ const FichaTecnicaService = require('../services/produtos/FichaTecnicaService');
 const ProdutoConversaoConfigService = require('../services/produtos/ProdutoConversaoConfigService');
 const VolumeComercialProdutoService = require('../services/produtos/VolumeComercialProdutoService');
 const VolumeUnidadeComercialService = require('../services/produtos/VolumeUnidadeComercialService');
+const {
+  resolverComercializavelEPreco
+} = require('../services/produtos/insumoComercializavel');
 
 router.use(criarMiddlewareContextoEmpresa(db));
 
@@ -1452,6 +1455,39 @@ router.post('/mib/reset-learning', async (req, res) => {
   }
 });
 
+async function enriquecerItensComerciaisParaPedido(itensBrutos) {
+  const rows = Array.isArray(itensBrutos) ? itensBrutos : [];
+  const produtoIds = [...new Set(rows
+    .map((row) => Number(row.id))
+    .filter((id) => Number.isInteger(id) && id > 0))];
+  if (!produtoIds.length) return rows;
+
+  const placeholders = produtoIds.map(() => '?').join(',');
+  const dadosProdutos = await new Promise((resolve, reject) => {
+    db.all(
+      `SELECT p.id, p.categoria_id,
+              COALESCE(p.tipo_operacional, 'COMERCIAL') AS tipo_operacional,
+              c.nome AS categoria_nome
+         FROM produtos p
+         LEFT JOIN categorias c ON c.id = p.categoria_id
+        WHERE p.id IN (${placeholders})`,
+      produtoIds,
+      (err, produtos) => (err ? reject(err) : resolve(produtos || []))
+    );
+  });
+  const porId = new Map(dadosProdutos.map((p) => [Number(p.id), p]));
+  return rows.map((row) => {
+    const extra = porId.get(Number(row.id));
+    if (!extra) return row;
+    return {
+      ...row,
+      tipo_operacional: extra.tipo_operacional,
+      categoria_nome: extra.categoria_nome || null,
+      categoria: extra.categoria_nome || row.categoria || ''
+    };
+  });
+}
+
 // CONSULTA DE PRODUTOS NO PDV — via SearchService (MIB-RC3.0)
 router.get('/consulta-pdv/buscar', async (req, res) => {
   const termo = String(req.query.q || '').trim();
@@ -1519,6 +1555,83 @@ router.get('/consulta-pdv/buscar', async (req, res) => {
     }
     console.error('Erro na consulta SearchService PDV:', err.message);
     return res.status(500).json({ error: err.message });
+  }
+});
+
+// CONSULTA DO PEDIDO — comerciais (exceto refrigerante) + refrigerantes no catálogo de INSUMOS
+router.get('/consulta-pedido/buscar', async (req, res) => {
+  const termo = String(req.query.q || '').trim();
+  const modoFiscal = isModoFiscalQuery(req.query.modo_fiscal);
+  const limite = Math.min(Math.max(parseInt(req.query.limite, 10) || 20, 1), 20);
+
+  if (!termo) {
+    return res.json([]);
+  }
+
+  try {
+    const PedidoConsultaProdutosService = require('../services/pedido/PedidoConsultaProdutosService');
+    const { obterSearchService } = require('../motores/mib');
+    const user = req.user || {};
+
+    const itens = await PedidoConsultaProdutosService.buscarProdutosParaPedido({
+      db,
+      termo,
+      limite,
+      buscarComerciaisPdv: async ({ termo: q, limite: lim }) => {
+        const resultado = await obterSearchService(db).search({
+          entity: 'produto',
+          query: q,
+          limite: lim,
+          modoFiscal,
+          operador_id: user.id || req.operadorId || null,
+          filial_id: user.filial_id || null,
+          caixa_id: req.caixaId || null,
+          permissoes: user.permissoes || ['produtos', 'pdv', 'pedidos'],
+          perfil: user.perfil,
+          role: user.role || 'admin',
+          origem: 'pdv',
+          user,
+          skipAuth: true
+        });
+        const rows = resultado.itens || [];
+        const produtoIds = [...new Set(rows
+          .map((row) => Number(row.id))
+          .filter((id) => Number.isInteger(id) && id > 0))];
+        const dadosProdutoPorId = new Map();
+        if (produtoIds.length > 0) {
+          const placeholders = produtoIds.map(() => '?').join(',');
+          const dadosProdutos = await new Promise((resolve, reject) => {
+            db.all(
+              `SELECT id, nome_comercial, preco_pedido FROM produtos WHERE id IN (${placeholders})`,
+              produtoIds,
+              (produtoErr, produtos) => (produtoErr ? reject(produtoErr) : resolve(produtos || []))
+            );
+          });
+          dadosProdutos.forEach((produto) => {
+            dadosProdutoPorId.set(Number(produto.id), produto);
+          });
+        }
+        const comerciais = rows.map((row) => {
+          const dadosProduto = dadosProdutoPorId.get(Number(row.id));
+          return normalizarProdutoResposta({
+            ...row,
+            nome_comercial: dadosProduto?.nome_comercial ?? null,
+            preco_pedido: dadosProduto?.preco_pedido ?? null
+          }, modoFiscal);
+        });
+        return enriquecerItensComerciaisParaPedido(comerciais);
+      }
+    });
+    return res.json(itens);
+  } catch (err) {
+    if (err && err.code === 'MIB_CANCELLED') {
+      return res.status(499).json({ error: 'Busca cancelada', code: 'MIB_CANCELLED' });
+    }
+    console.error('Erro na consulta de produtos do Pedido:', err.message);
+    return res.status(err.statusCode || 500).json({
+      error: err.message,
+      code: err.code || undefined
+    });
   }
 });
 
@@ -2781,7 +2894,7 @@ router.post('/', validarUnidadeVolumeProduto, (req, res) => {
     });
   }
 
-  // Insumo não tem formação de preço de venda: grava 0 (coluna NOT NULL) e nunca deriva do custo.
+  // Insumo: preço de venda só quando comercializavel=1 (CDS-INSUMOS-PRODUTO-COMERCIALIZAVEL-01).
   const ehInsumoCriacao = tipoOperacionalGravar === TipoOperacionalProduto.INSUMO;
   let volumeComercialGravar;
   try {
@@ -2794,8 +2907,27 @@ router.post('/', validarUnidadeVolumeProduto, (req, res) => {
       code: volumeErr.code
     });
   }
-  const preco_venda = ehInsumoCriacao ? 0 : precoVendaBody;
-  const lucro_percentual = ehInsumoCriacao ? 0 : lucroPercentualBody;
+  let comercializavelGravar = 0;
+  let preco_venda;
+  let lucro_percentual;
+  try {
+    const resolvido = resolverComercializavelEPreco({
+      tipoOperacional: tipoOperacionalGravar,
+      comercializavelBody: req.body.comercializavel,
+      precoVendaBody,
+      lucroPercentualBody,
+      precoCompraBody: req.body.preco_compra,
+      modo: 'create'
+    });
+    comercializavelGravar = resolvido.comercializavel;
+    preco_venda = resolvido.preco_venda;
+    lucro_percentual = resolvido.lucro_percentual;
+  } catch (comErr) {
+    return res.status(comErr.statusCode || 400).json({
+      error: comErr.message,
+      code: comErr.code
+    });
+  }
   const nomeComercialGravar = normalizarTextoOpcional(nome_comercial);
   let personalizacaoIngredientesGravar;
   try {
@@ -2928,9 +3060,10 @@ router.post('/', validarUnidadeVolumeProduto, (req, res) => {
       marca_id, observacoes, imagem_principal, tipo_operacional,
       permite_personalizacao_ingredientes,
       utiliza_ficha_tecnica,
-      utiliza_volume, volume_valor, volume_unidade, volume_unidade_id
+      utiliza_volume, volume_valor, volume_unidade, volume_unidade_id,
+      comercializavel
     )
-    VALUES (${Array(46).fill('?').join(', ')})
+    VALUES (${Array(47).fill('?').join(', ')})
   `, [
     codigoFinal, nome, nomeComercialGravar, categoria_id, subcategoria_id, unidade,
     preco_compra, lucro_percentual, preco_venda,
@@ -2961,7 +3094,8 @@ router.post('/', validarUnidadeVolumeProduto, (req, res) => {
     volumeComercialGravar.utiliza_volume,
     volumeComercialGravar.utiliza_volume ? volumeComercialGravar.volume_valor : null,
     volumeComercialGravar.utiliza_volume ? volumeComercialGravar.volume_unidade : null,
-    volumeComercialGravar.utiliza_volume ? volumeComercialGravar.volume_unidade_id : null
+    volumeComercialGravar.utiliza_volume ? volumeComercialGravar.volume_unidade_id : null,
+    comercializavelGravar
   ],
     function(err) {
       if (err) {
@@ -3533,13 +3667,43 @@ router.put('/:id', (req, res, next) => {
 
     if (tipoResultante === TipoOperacionalProduto.INSUMO) {
       const virouInsumo = String(old.tipo_operacional || '').toUpperCase() !== TipoOperacionalProduto.INSUMO;
-      delete bodyUpdates.preco_venda;
-      delete bodyUpdates.lucro_percentual;
       VolumeComercialProdutoService.CAMPOS_VOLUME_COMERCIAL.forEach((campo) => delete bodyUpdates[campo]);
-      if (virouInsumo) {
-        bodyUpdates.preco_venda = 0;
-        bodyUpdates.lucro_percentual = 0;
+      try {
+        const resolvido = resolverComercializavelEPreco({
+          tipoOperacional: TipoOperacionalProduto.INSUMO,
+          comercializavelBody: Object.prototype.hasOwnProperty.call(bodyUpdates, 'comercializavel')
+            ? bodyUpdates.comercializavel
+            : old.comercializavel,
+          precoVendaBody: Object.prototype.hasOwnProperty.call(bodyUpdates, 'preco_venda')
+            ? bodyUpdates.preco_venda
+            : old.preco_venda,
+          lucroPercentualBody: Object.prototype.hasOwnProperty.call(bodyUpdates, 'lucro_percentual')
+            ? bodyUpdates.lucro_percentual
+            : old.lucro_percentual,
+          precoCompraBody: Object.prototype.hasOwnProperty.call(bodyUpdates, 'preco_compra')
+            ? bodyUpdates.preco_compra
+            : old.preco_compra,
+          modo: 'update',
+          precoVendaAtual: old.preco_venda
+        });
+        bodyUpdates.comercializavel = resolvido.comercializavel;
+        bodyUpdates.lucro_percentual = resolvido.lucro_percentual;
+        if (resolvido.atualizarPreco || virouInsumo) {
+          bodyUpdates.preco_venda = virouInsumo && !resolvido.comercializavel
+            ? 0
+            : resolvido.preco_venda;
+        } else {
+          delete bodyUpdates.preco_venda;
+        }
+      } catch (comErr) {
+        return res.status(comErr.statusCode || 400).json({
+          error: comErr.message,
+          code: comErr.code
+        });
       }
+    } else if (Object.prototype.hasOwnProperty.call(bodyUpdates, 'comercializavel')) {
+      // Flag só se aplica a INSUMO.
+      bodyUpdates.comercializavel = 0;
     }
 
     if (tipoResultante === TipoOperacionalProduto.COMERCIAL) {

@@ -56,6 +56,29 @@ function getFiltroItensFiscal(modoFiscal, alias = 'vi') {
   return '';
 }
 
+/** F12 ON: só vendas com parcela fiscal (exclui vendas 100% não fiscais da contagem/ticket). */
+function getFiltroVendaComValorNoModo(modoFiscal, alias = 'v') {
+  if (isModoFiscalRelatorio(modoFiscal)) {
+    return `AND COALESCE(${alias}.valor_fiscal, 0) > 0.009`;
+  }
+  return '';
+}
+
+function getExprContagemVendas(modoFiscal, alias = 'v') {
+  if (isModoFiscalRelatorio(modoFiscal)) {
+    return `COUNT(CASE WHEN COALESCE(${alias}.valor_fiscal, 0) > 0.009 THEN ${alias}.id END)`;
+  }
+  return `COUNT(${alias}.id)`;
+}
+
+function getExprTicketMedioVenda(modoFiscal, alias = 'v') {
+  const exprValor = getExprValorVenda(modoFiscal, alias);
+  if (isModoFiscalRelatorio(modoFiscal)) {
+    return `COALESCE(AVG(CASE WHEN COALESCE(${alias}.valor_fiscal, 0) > 0.009 THEN ${exprValor} END), 0)`;
+  }
+  return `COALESCE(AVG(${exprValor}), 0)`;
+}
+
 function getExprLucroItem(modoFiscal, aliasVi = 'vi', aliasP = 'p') {
   const valor = getExprValorItem(modoFiscal, aliasVi);
   const qtd = getExprQuantidadeItem(modoFiscal, aliasVi);
@@ -126,6 +149,9 @@ module.exports = {
   getExprQuantidadeItemFiscal,
   getExprQuantidadeItemNaoFiscal,
   getFiltroItensFiscal,
+  getFiltroVendaComValorNoModo,
+  getExprContagemVendas,
+  getExprTicketMedioVenda,
   getExprLucroItem,
   sqlRankingProdutos,
   sqlRankingProdutosDaEmpresa

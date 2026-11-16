@@ -55,6 +55,12 @@ function statusDeErroFiscalEmpresa(err) {
   ) {
     return err.statusCode || 409;
   }
+  if (String(code).startsWith('TRANSMISSAO_SEFAZ_')) {
+    return err.statusCode || 403;
+  }
+  if (String(code).startsWith('CANCELAMENTO_')) {
+    return err.statusCode || 409;
+  }
   return 500;
 }
 

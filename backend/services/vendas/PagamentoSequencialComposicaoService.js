@@ -94,12 +94,46 @@ function evidenciaConfirmacaoEletronica(pagamento) {
   return !!(pagamento && pagamento.confirmacao_eletronica_comprovada === true);
 }
 
+/**
+ * TEF desligado: operador confirma recebimento na maquininha/app externo.
+ * Não confunde com TEF real — exige carimbo manual explícito e sem tef_transacao_id.
+ */
+function evidenciaConfirmacaoOperacionalExterna(pagamento) {
+  if (!pagamento || !formaPagamentoUsaTEF(pagamento.forma_pagamento)) return false;
+  if (evidenciaConfirmacaoEletronica(pagamento)) return false;
+  const tefId = pagamento.tef_transacao_id != null
+    ? pagamento.tef_transacao_id
+    : (pagamento.tef && pagamento.tef.transacao_id);
+  if (tefId != null && String(tefId).trim() !== '') return false;
+  const status = String(pagamento.status_autorizacao || pagamento.status || '').toLowerCase();
+  if (STATUS_NAO_CONFIRMADO.has(status) || STATUS_CANCELADO.has(status)) return false;
+  if (pagamento.confirmacao_operacional_externa === true) return true;
+  const manual = pagamento.confirmacao_manual === 1
+    || pagamento.confirmacao_manual === true
+    || pagamento.confirmacao_manual === '1';
+  const modalidadeManual = String(pagamento.confirmacao_modalidade || '').toLowerCase() === 'manual';
+  // Persistido no fechamento TEF-off: confirmacao_manual + modalidade manual.
+  if (manual && (modalidadeManual || status === 'confirmada' || status === 'informada' || status === 'aprovado' || status === 'aprovada' || status === '')) {
+    return true;
+  }
+  return false;
+}
+
 function parcelaEfetivamenteConfirmada(pagamento) {
   if (!pagamento || !(Number(pagamento.valor) > 0)) return false;
   const status = String(pagamento.status_autorizacao || pagamento.status || '').toLowerCase();
   if (STATUS_NAO_CONFIRMADO.has(status) || STATUS_CANCELADO.has(status)) return false;
   if (parcelaManualDeDinheiro(pagamento)) return true;
   if (!formaPagamentoUsaTEF(pagamento.forma_pagamento)) return false;
+  // TEF off: PIX/cartão confirmados operacionalmente contam como fiscal.
+  if (evidenciaConfirmacaoOperacionalExterna(pagamento)) return true;
+  // Já classificado no fechamento (venda_recebimentos) — fonte persistida.
+  if (
+    String(pagamento.tipo_recebimento || '').toLowerCase() === 'fiscal'
+    && (status === 'aprovado' || status === 'aprovada' || STATUS_ELETRONICO_APROVADO.has(status) || status === '')
+  ) {
+    return true;
+  }
   if (!STATUS_ELETRONICO_APROVADO.has(status)) return false;
   if (pagamento.aprovado === false) return false;
   return evidenciaConfirmacaoEletronica(pagamento);
@@ -119,11 +153,32 @@ function marcarParcelaEletronicaComprovada(pagamento, extras = {}) {
   };
 }
 
-function calcularReferenciasConfirmadas(pagamentos) {
+/**
+ * Planejamento F×NF: eletrônico já informado (TEF off / aguardando modal operacional)
+ * entra como fiscal candidato. Emissão final continua exigindo parcelaEfetivamenteConfirmada.
+ */
+function parcelaAlocaReferenciaPlanejamento(pagamento) {
+  if (parcelaEfetivamenteConfirmada(pagamento)) return true;
+  if (!pagamento || !(Number(pagamento.valor) > 0)) return false;
+  if (!formaPagamentoUsaTEF(pagamento.forma_pagamento)) return false;
+  const status = String(pagamento.status_autorizacao || pagamento.status || '').toLowerCase();
+  if (STATUS_NAO_CONFIRMADO.has(status) || STATUS_CANCELADO.has(status)) return false;
+  return status === 'informada'
+    || status === 'confirmada'
+    || status === 'aprovada'
+    || status === 'aprovado'
+    || status === '';
+}
+
+function calcularReferenciasConfirmadas(pagamentos, opcoes = {}) {
+  const planejamento = opcoes.planejamento === true;
   let fiscal = 0;
   let naoFiscal = 0;
   for (const pagamento of pagamentos || []) {
-    if (!parcelaEfetivamenteConfirmada(pagamento)) continue;
+    const conta = planejamento
+      ? parcelaAlocaReferenciaPlanejamento(pagamento)
+      : parcelaEfetivamenteConfirmada(pagamento);
+    if (!conta) continue;
     const valor = Number(pagamento.valor) || 0;
     if (formaEhDinheiro(pagamento.forma_pagamento)) naoFiscal += valor;
     else if (formaPagamentoUsaTEF(pagamento.forma_pagamento)) fiscal += valor;
@@ -168,7 +223,10 @@ function avaliarReferenciaRecomposicao(entrada = {}, opcoes = {}) {
   const base = avaliarPagamentosSequenciais(entrada);
   const env = opcoes.env || process.env;
   const contexto = opcoes.contexto || entrada.contexto || null;
-  if (!ambienteRecomposicaoReferenciaAtivo(env, contexto)) {
+  // Preview PDV (/composicao-sequencial) e fechamento operacional autorizam a referência F×NF.
+  const ativo = opcoes.forcarReferencia === true
+    || ambienteRecomposicaoReferenciaAtivo(env, contexto);
+  if (!ativo) {
     return Object.freeze({
       ...base,
       recomposicao_executada: false,
@@ -179,7 +237,8 @@ function avaliarReferenciaRecomposicao(entrada = {}, opcoes = {}) {
     });
   }
 
-  const referencias = calcularReferenciasConfirmadas(entrada.pagamentos);
+  // Planejamento: TEF-off informado (débito/PIX) já conta como fiscal candidato.
+  const referencias = calcularReferenciasConfirmadas(entrada.pagamentos, { planejamento: true });
   const fiscal = referencias.valor_fiscal_referencia;
   const naoFiscal = referencias.valor_nao_fiscal_referencia;
   if (!(fiscal > 0) && !(naoFiscal > 0)) {
@@ -413,16 +472,35 @@ function validarReferenciaFiscalFinalComComplemento({
         dinheiro = inicialNf;
       }
     }
-    fiscalFinal = arredondar(Number(
-      persistida.valor_fiscal_referencia != null
-        ? persistida.valor_fiscal_referencia
-        : (eletronico + complemento)
-    ));
-    gerencialFinal = arredondar(Number(
-      persistida.valor_nao_fiscal_referencia != null
-        ? persistida.valor_nao_fiscal_referencia
-        : (dinheiro - complemento)
-    ));
+    const fiscalPersistido = persistida.valor_fiscal_referencia != null
+      ? arredondar(Number(persistida.valor_fiscal_referencia))
+      : null;
+    const gerencialPersistido = persistida.valor_nao_fiscal_referencia != null
+      ? arredondar(Number(persistida.valor_nao_fiscal_referencia))
+      : null;
+    // Snapshot zerado indevidamente (ex.: PIX TEF-off não contado na gravação):
+    // prioriza o eletrônico/dinheiro recalculados dos pagamentos confirmados.
+    fiscalFinal = (fiscalPersistido != null && fiscalPersistido > 0.009)
+      ? fiscalPersistido
+      : arredondar(eletronico + complemento);
+    gerencialFinal = (gerencialPersistido != null && gerencialPersistido > 0.009)
+      ? gerencialPersistido
+      : (
+        dinheiro > 0.009
+          ? arredondar(Math.max(0, dinheiro - complemento))
+          : (gerencialPersistido != null ? gerencialPersistido : 0)
+      );
+    if (fiscalPersistido != null && fiscalPersistido <= 0.009 && eletronico > 0.009) {
+      fiscalFinal = arredondar(eletronico + complemento);
+    }
+    if (
+      gerencialPersistido != null
+      && gerencialPersistido > 0.009
+      && dinheiro > 0.009
+      && Math.abs(gerencialPersistido - (dinheiro - complemento)) <= 0.05
+    ) {
+      gerencialFinal = arredondar(dinheiro - complemento);
+    }
   }
 
   // Itens com fatia acima do eletrônico sem evidência persistida válida → bloqueio.
@@ -665,7 +743,9 @@ module.exports = {
   calcularReferenciasConfirmadas,
   classificarTipoRecebimento,
   parcelaEfetivamenteConfirmada,
+  parcelaAlocaReferenciaPlanejamento,
   evidenciaConfirmacaoEletronica,
+  evidenciaConfirmacaoOperacionalExterna,
   marcarParcelaEletronicaComprovada,
   gravarReferenciaRecomposicao,
   carregarReferenciaRecomposicao,

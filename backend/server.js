@@ -488,6 +488,12 @@ db.whenReady(async (readyErr) => {
 
         // Desacoplado do boot: não impede o listen nem a aceitação de conexões
         setImmediate(() => {
+            // Backup local diário 23:59 + primeira entrada do dia
+            try {
+                require('./services/backupAutomaticoLocal').iniciarBackupAutomaticoLocal();
+            } catch (errBackup) {
+                console.error('[BACKUP] Falha ao iniciar automático:', errBackup && errBackup.message);
+            }
             // RC12.1 — Observability Bus adapters (observe-only)
             try {
                 require('./observabilidade').iniciar();

@@ -195,55 +195,71 @@ function finalizarLoginComUsuario(req, res, usuario) {
     const terminalId = parsePositiveInteger(req.body?.terminal_id);
     const caixaSessaoId = parsePositiveInteger(req.body?.caixa_sessao_id);
 
-    try {
-      const token = jwt.sign(
-        {
-          id: usuario.id,
-          usuario_id: usuario.id,
-          username: usuario.username,
-          nome: usuario.nome || usuario.username,
-          role: usuario.role,
-          perfil: usuario.perfil || 'USUARIO',
-          permissoes,
-          terminal_id: terminalId,
-          caixa_sessao_id: caixaSessaoId
-        },
-        JWT_SECRET,
-        { expiresIn: '8h' }
-      );
+    const emitirToken = (extraDetalhe = {}) => {
+      try {
+        const token = jwt.sign(
+          {
+            id: usuario.id,
+            usuario_id: usuario.id,
+            username: usuario.username,
+            nome: usuario.nome || usuario.username,
+            role: usuario.role,
+            perfil: usuario.perfil || 'USUARIO',
+            permissoes,
+            terminal_id: terminalId,
+            caixa_sessao_id: caixaSessaoId
+          },
+          JWT_SECRET,
+          { expiresIn: '8h' }
+        );
 
-      res.json({
-        token,
-        user: {
-          id: usuario.id,
-          usuario_id: usuario.id,
-          username: usuario.username,
-          role: usuario.role,
-          perfil: usuario.perfil || 'USUARIO',
-          nome: usuario.nome || usuario.username,
-          permissoes,
-          terminal_id: terminalId,
-          caixa_sessao_id: caixaSessaoId,
+        res.json({
+          token,
+          user: {
+            id: usuario.id,
+            usuario_id: usuario.id,
+            username: usuario.username,
+            role: usuario.role,
+            perfil: usuario.perfil || 'USUARIO',
+            nome: usuario.nome || usuario.username,
+            permissoes,
+            terminal_id: terminalId,
+            caixa_sessao_id: caixaSessaoId,
+            troca_senha_obrigatoria: Number(usuario.troca_senha_obrigatoria) === 1
+          },
           troca_senha_obrigatoria: Number(usuario.troca_senha_obrigatoria) === 1
-        },
-        troca_senha_obrigatoria: Number(usuario.troca_senha_obrigatoria) === 1
-      });
+        });
 
-      gravarAuditoria({
-        usuario_id: usuario.id,
-        usuario_nome: usuario.username,
-        modulo: 'auth',
-        acao: 'login',
-        referencia_tipo: 'usuario',
-        referencia_id: usuario.id,
-        detalhes: { ip: req.ip, username: usuario.username },
-        ip_requisicao: req.ip || null
-      }).catch((auditErr) => {
-        console.error('Erro ao gravar auditoria de login:', auditErr);
+        gravarAuditoria({
+          usuario_id: usuario.id,
+          usuario_nome: usuario.username,
+          modulo: 'auth',
+          acao: 'login',
+          referencia_tipo: 'usuario',
+          referencia_id: usuario.id,
+          detalhes: { ip: req.ip, username: usuario.username, ...extraDetalhe },
+          ip_requisicao: req.ip || null
+        }).catch((auditErr) => {
+          console.error('Erro ao gravar auditoria de login:', auditErr);
+        });
+      } catch (tokenErr) {
+        responderErroInternoLogin(res, 'ERRO TOKEN', tokenErr);
+      }
+    };
+
+    // Garante vínculo empresarial mínimo antes de qualquer módulo (PDV/ERP/Caixa).
+    UsuarioEmpresaService.garantirAcessoEmpresarialMinimo(usuario, { db, user: usuario })
+      .then((acesso) => {
+        emitirToken({
+          empresas_disponiveis: Array.isArray(acesso.empresas) ? acesso.empresas.length : 0,
+          empresas_vinculo_auto: !!acesso.healed
+        });
+      })
+      .catch((errAcesso) => {
+        console.error('Falha ao garantir acesso empresarial no login:', errAcesso);
+        // Login não bloqueia por falha de vínculo; o seletor ainda tentará curar.
+        emitirToken({ empresas_vinculo_erro: errAcesso && errAcesso.message });
       });
-    } catch (tokenErr) {
-      responderErroInternoLogin(res, 'ERRO TOKEN', tokenErr);
-    }
   });
 }
 
@@ -623,13 +639,41 @@ router.post('/usuarios', exigirAdmin, (req, res) => {
 
     const hash = bcrypt.hashSync(password, 10);
 
-    const finalizarCadastro = (usuarioId) => {
+    const finalizarCadastro = async (usuarioId) => {
       const detalhesCadastro = {
         username,
         role,
         perfil,
         reativado: !!(existente && existente.ativo === 0)
       };
+
+      // Todo usuário não-admin nasce com vínculo às empresas ativas (PDV/ERP/Caixa).
+      let vinculosEmpresas = [];
+      if (!UsuarioEmpresaService.administradorOperacional({ role, perfil })) {
+        try {
+          vinculosEmpresas = await UsuarioEmpresaService.assegurarVinculosEmpresasAtivas(
+            usuarioId,
+            { db }
+          );
+          detalhesCadastro.empresas_vinculadas = vinculosEmpresas
+            .map((v) => v && (v.empresa_id != null ? v.empresa_id : v.empresaId))
+            .filter((id) => id != null);
+          if (!detalhesCadastro.empresas_vinculadas.length) {
+            return res.status(500).json({
+              error: 'Não há empresa ativa para vincular o usuário. Cadastre/ative uma empresa e tente de novo.',
+              code: 'EMPRESA_ATIVA_AUSENTE',
+              id: usuarioId
+            });
+          }
+        } catch (errVinculo) {
+          console.error('Falha ao vincular empresas ao novo operador:', errVinculo);
+          return res.status(500).json({
+            error: 'Usuário criado, mas não foi possível vincular às empresas. Tente novamente.',
+            code: 'VINCULO_EMPRESA_FALHOU',
+            id: usuarioId
+          });
+        }
+      }
 
       if (role === 'admin') {
         auditarAcaoUsuario(req, 'criar_usuario', usuarioId, detalhesCadastro);
@@ -655,6 +699,7 @@ router.post('/usuarios', exigirAdmin, (req, res) => {
           perfil,
           pode_alterar_senhas: podeAlterarSenhas,
           permissoes,
+          empresas_vinculadas: detalhesCadastro.empresas_vinculadas || [],
           message: existente
             ? 'Usuário reativado com sucesso.'
             : 'Usuário cadastrado com sucesso.'
@@ -809,8 +854,23 @@ router.put('/usuarios/:id', exigirAdmin, (req, res) => {
       return res.status(403).json({ error: 'Apenas SUPER_ADMIN pode alterar outro SUPER_ADMIN.' });
     }
 
-    const finalizar = () => {
+    const finalizar = async () => {
       const detalhesAtualizacao = { role, perfil, pode_alterar_senhas: podeAlterarSenhas, senha_alterada: !!password };
+      if (!UsuarioEmpresaService.administradorOperacional({ role, perfil })) {
+        try {
+          const vinculos = await UsuarioEmpresaService.assegurarVinculosEmpresasAtivas(id, { db });
+          detalhesAtualizacao.empresas_vinculadas = vinculos
+            .map((v) => v && v.empresa_id)
+            .filter((empresaId) => empresaId != null);
+        } catch (errVinculo) {
+          console.error('Falha ao garantir vínculos na atualização do usuário:', errVinculo);
+          return res.status(500).json({
+            error: 'Usuário atualizado parcialmente, mas sem vínculo de empresa. Tente novamente.',
+            code: 'VINCULO_EMPRESA_FALHOU'
+          });
+        }
+      }
+
       if (role === 'admin') {
         auditarAcaoUsuario(req, 'atualizar_usuario', id, detalhesAtualizacao);
         return res.json({
@@ -825,7 +885,8 @@ router.put('/usuarios/:id', exigirAdmin, (req, res) => {
         res.json({
           message: 'Usuário atualizado com sucesso.',
           perfil,
-          pode_alterar_senhas: podeAlterarSenhas
+          pode_alterar_senhas: podeAlterarSenhas,
+          empresas_vinculadas: detalhesAtualizacao.empresas_vinculadas || []
         });
       });
     };
@@ -914,12 +975,44 @@ router.patch('/usuarios/:id/ativar', verificarToken, exigirSuperAdmin, (req, res
         return res.status(404).json({ erro: 'Usuário não encontrado.' });
       }
 
-      auditarAcaoUsuario(req, 'reativar_usuario', idUsuario, { perfil_executor: perfilLogado });
+      db.get(
+        'SELECT id, role, perfil FROM usuarios WHERE id = ?',
+        [idUsuario],
+        async (errUser, usuarioAtivo) => {
+          if (errUser) {
+            console.error('Erro ao carregar usuário reativado:', errUser);
+            return res.status(500).json({ erro: 'Erro ao reativar usuário.' });
+          }
 
-      res.json({
-        sucesso: true,
-        mensagem: 'Usuário reativado com sucesso.'
-      });
+          let empresasVinculadas = [];
+          try {
+            if (usuarioAtivo && !UsuarioEmpresaService.administradorOperacional(usuarioAtivo)) {
+              const vinculos = await UsuarioEmpresaService.assegurarVinculosEmpresasAtivas(
+                idUsuario,
+                { db }
+              );
+              empresasVinculadas = vinculos.map((v) => v && v.empresa_id).filter(Boolean);
+            }
+          } catch (errVinculo) {
+            console.error('Falha ao vincular empresas na reativação:', errVinculo);
+            return res.status(500).json({
+              erro: 'Usuário reativado, mas sem vínculo de empresa. Tente novamente.',
+              code: 'VINCULO_EMPRESA_FALHOU'
+            });
+          }
+
+          auditarAcaoUsuario(req, 'reativar_usuario', idUsuario, {
+            perfil_executor: perfilLogado,
+            empresas_vinculadas: empresasVinculadas
+          });
+
+          res.json({
+            sucesso: true,
+            mensagem: 'Usuário reativado com sucesso.',
+            empresas_vinculadas: empresasVinculadas
+          });
+        }
+      );
     }
   );
 });

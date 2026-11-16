@@ -2417,7 +2417,7 @@ function loadPedidos() {
     }
     timerProduto = setTimeout(async () => {
       try {
-        const resp = await fetch(`${API_URL}/produtos/consulta-pdv/buscar?q=${encodeURIComponent(termo)}&limite=15`, { headers });
+        const resp = await fetch(`${API_URL}/produtos/consulta-pedido/buscar?q=${encodeURIComponent(termo)}&limite=15`, { headers });
         const rows = await resp.json().catch(() => []);
         if (!Array.isArray(rows) || !rows.length) {
           $('#pedProdutoSugestoes').html('<div class="list-group-item text-muted">Nenhum produto</div>').show();

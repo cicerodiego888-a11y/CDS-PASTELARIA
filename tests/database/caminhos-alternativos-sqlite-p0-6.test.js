@@ -199,7 +199,7 @@ async function main() {
       forcarProtegido: true
     });
     assert.equal(ok.permitido, true);
-    const r = fazerBackupManual(tmpDb, tmpDest);
+    const r = await Promise.resolve(fazerBackupManual(tmpDb, tmpDest));
     assert.equal(r.sucesso, true);
     assert.ok(fs.existsSync(r.caminho));
     assert.ok(String(r.caminho).startsWith(tmp));

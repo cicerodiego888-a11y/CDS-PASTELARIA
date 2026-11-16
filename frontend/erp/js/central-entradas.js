@@ -242,6 +242,44 @@ function montarMensagemConsultaNaoEnviadaCentral(resultado) {
     return msg;
 }
 
+/** DistDFe de produção off — estado esperado; não exibe toast ao abrir a Central. */
+function ehAvisoOperacaoFiscalRealDesabilitadaCentral(dados) {
+    const d = dados || {};
+    const codigo = String(d.codigo || d.code || d.tipo || '').toUpperCase();
+    if (
+        codigo === 'OPERACAO_REAL_DESABILITADA'
+        || codigo === 'DISTDFE_AUTOMATICO_DESABILITADO'
+    ) {
+        return true;
+    }
+    const texto = `${d.titulo || ''} ${d.mensagem || ''} ${d.mensagemAmigavel || ''}`;
+    return /opera[cç][aã]o fiscal real desabilitada/i.test(texto)
+        || /DistDFe autom[aá]tico bloqueado/i.test(texto);
+}
+
+/**
+ * Avisos de cooldown / fila esgotada / Gate — não são erro do sistema.
+ * Não exibir toast amarelo na Central (só silenciar o aviso; restante intacto).
+ */
+function ehAvisoConsultaDfeNaoEnviadaCentral(dados) {
+    const d = dados || {};
+    const tipo = String(d.tipo || d.codigo || d.code || '').toUpperCase();
+    if (
+        tipo === 'SYNC_CONSULTA_NAO_ENVIADA'
+        || tipo === 'AGUARDAR_JANELA_DFE'
+        || tipo === 'FILA_ESGOTADA'
+        || tipo === 'COOLDOWN_NSU'
+        || tipo === 'COOLDOWN_CNPJ'
+    ) {
+        return true;
+    }
+    const texto = `${d.titulo || ''} ${d.mensagem || ''} ${d.mensagemAmigavel || ''}`;
+    return /Consulta DF-e n[aã]o enviada/i.test(texto)
+        || /fila esgotada/i.test(texto)
+        || /ultNSU\s*=\s*maxNSU/i.test(texto)
+        || (/cooldown/i.test(texto) && /SEFAZ|DistDFe|DistNSU|NSU/i.test(texto));
+}
+
 /**
  * Data de exibição do documento: prioriza dataEmissao, depois dhRecbto.
  * Nunca usa created_at como data principal.
@@ -2143,19 +2181,37 @@ function mapearStatusParaFilaCentral(status) {
     const s = String(status || '').trim().toUpperCase();
     if (!s) return 'todos';
     if (s === 'EM_REVISAO' || s === 'AGUARDANDO_REVISAO') return 'em_revisao';
-    if (s === 'PRONTA_IMPORTACAO' || s === 'PRONTA_PARA_COMPRA' || s === 'REVISADA') return 'prontas';
+    // Prontas = liberadas p/ compra (inclui EM_IMPORTACAO enquanto “Importar Compra” segue ativo).
+    if (s === 'PRONTA_IMPORTACAO' || s === 'PRONTA_PARA_COMPRA' || s === 'REVISADA'
+        || s === 'EM_IMPORTACAO' || s === 'EM_COMPRA') {
+        return 'prontas';
+    }
     if (s === 'IMPORTADA' || s === 'GRAVADA' || s === 'DUPLICADA') return 'importadas';
     if (s === 'CANCELADA') return 'canceladas';
     if (s === 'DENEGADA') return 'denegadas';
     if (s === 'INUTILIZADA') return 'inutilizadas';
     if (s === 'ERRO') return 'erro';
-    if (s === 'EM_IMPORTACAO' || s === 'EM_COMPRA') return 'em_importacao';
     if (s === 'NOVA' || s === 'RESUMO_RECEBIDO' || s === 'XML_COMPLETO'
-        || s === 'RECEBIDA' || s === 'SINCRONIZADA' || s === 'EM_PROCESSAMENTO') {
+        || s === 'RECEBIDA' || s === 'SINCRONIZADA' || s === 'EM_PROCESSAMENTO'
+        || s === 'AGUARDANDO_XML_COMPLETO' || s === 'XML_IMPORTADO_MANUALMENTE') {
         return 'pendentes';
     }
     if (s === 'REVISAR') return 'em_revisao';
+    if (s === 'FINALIZADA' || s === 'DESCARTADA') return 'finalizadas';
     return null;
+}
+
+/** Destaque visual da linha na fila: revisão = amarelo, pronta p/ compra = verde claro. */
+function classeLinhaStatusDocumentoCentral(status) {
+    const s = String(status || '').trim().toUpperCase();
+    if (s === 'EM_REVISAO' || s === 'AGUARDANDO_REVISAO') {
+        return 'central-doc-row--revisao';
+    }
+    if (s === 'PRONTA_IMPORTACAO' || s === 'PRONTA_PARA_COMPRA' || s === 'REVISADA'
+        || s === 'EM_IMPORTACAO' || s === 'EM_COMPRA') {
+        return 'central-doc-row--pronta';
+    }
+    return '';
 }
 
 function executarAcaoAtencaoCentral(acao) {
@@ -4047,7 +4103,9 @@ function sincronizarAoAbrirCentralSuave() {
             const consultaIgnorada = data
                 && (data.consultaExecutada === false || data.ignorado === true);
             const deveAvisar = data && (data.mensagemAmigavel || data.mensagem) && !desabilitado
-                && (data.sucesso === false || consultaIgnorada);
+                && (data.sucesso === false || consultaIgnorada)
+                && !ehAvisoOperacaoFiscalRealDesabilitadaCentral(data)
+                && !ehAvisoConsultaDfeNaoEnviadaCentral(data);
             if (deveAvisar) {
                 showNotification(montarMensagemConsultaNaoEnviadaCentral(data), 'warning');
             }
@@ -4102,9 +4160,13 @@ async function pollNotificacoesCentral() {
         (notificacoes || []).forEach((n) => {
             if (centralEntradasState.notificacoesVistas.has(n.id)) return;
             centralEntradasState.notificacoesVistas.add(n.id);
+            // Marca como lida sem toast: DistDFe off / cooldown / fila esgotada ≠ erro do sistema.
+            if (ehAvisoOperacaoFiscalRealDesabilitadaCentral(n) || ehAvisoConsultaDfeNaoEnviadaCentral(n)) {
+                centralEntradasFetch(`/notificacoes/${n.id}/lida`, { method: 'PATCH' }).catch(() => {});
+                return;
+            }
             const tipo = n.tipo === 'SYNC_ERRO' || n.tipo === 'ERRO' ? 'danger'
-                : (n.tipo === 'NOVAS_NOTAS' ? 'success'
-                    : (n.tipo === 'SYNC_CONSULTA_NAO_ENVIADA' ? 'warning' : 'info'));
+                : (n.tipo === 'NOVAS_NOTAS' ? 'success' : 'info');
             showNotification(n.titulo + (n.mensagem ? ': ' + n.mensagem : ''), tipo);
             centralEntradasFetch(`/notificacoes/${n.id}/lida`, { method: 'PATCH' }).catch(() => {});
         });
@@ -4317,9 +4379,10 @@ function renderGridCentralEntradas() {
             const empNome = emp ? nomeEmpresaUiCentral(emp) : (doc.empresaNome || '—');
             const empCnpj = emp ? formatarCnpjUiCentral(emp.cnpj) : (doc.cnpjDestinatario || '—');
             const permiteRevisar = acao.acao === 'revisar' && typeof MiipCentralRevisao !== 'undefined';
+            const destaqueStatus = classeLinhaStatusDocumentoCentral(doc.status);
 
             return `
-                <tr class="central-0577-doc-row central-entradas-row ${selecionado}"
+                <tr class="central-0577-doc-row central-entradas-row ${selecionado} ${destaqueStatus}"
                      data-documento-id="${doc.id}"
                      tabindex="0"
                      role="button"
@@ -4362,13 +4425,14 @@ function renderGridCentralEntradas() {
         container.innerHTML = centralEntradasState.documentos.map((doc) => {
             const meta = metaStatusCentral(doc.status);
             const selecionado = centralEntradasState.documentoSelecionadoId === doc.id ? 'central-entradas-row-selected' : '';
+            const destaqueStatus = classeLinhaStatusDocumentoCentral(doc.status);
             const numero = doc.numero ? `${doc.numero}${doc.serie ? '/' + doc.serie : ''}` : '—';
             const miipBadge = doc.miipDisponivel
                 ? '<span class="central-entradas-badge-miip" title="Processado pelo MIIP"><i class="fas fa-brain"></i> MIIP</span>'
                 : '';
 
             return `
-                <tr class="central-entradas-row ${selecionado}" data-documento-id="${doc.id}"
+                <tr class="central-entradas-row ${selecionado} ${destaqueStatus}" data-documento-id="${doc.id}"
                     style="--row-cor:${meta.cor}"
                     tabindex="0"
                     role="button"
@@ -6842,27 +6906,33 @@ function loadCentralEntradas() {
             <div id="centralEntradasFiltrosRapidos" class="mb-2"></div>
 
             <div class="central-rc40-toolbar central-ux1-toolbar central-0577-toolbar">
-                <div class="central-ux1-busca flex-grow-1">
-                    <i class="fas fa-search" aria-hidden="true"></i>
-                    <input type="search" class="form-control" id="centralFiltroBusca"
-                        placeholder="Pesquisar: fornecedor, NF-e, chave, protocolo, CNPJ..."
-                        title="Pesquisa por fornecedor, NF-e, chave, protocolo ou CNPJ"
-                        autocomplete="off">
+                <div class="central-rc40-toolbar-linha central-rc40-toolbar-linha--principal">
+                    <div class="central-ux1-busca">
+                        <i class="fas fa-search" aria-hidden="true"></i>
+                        <input type="search" class="form-control" id="centralFiltroBusca"
+                            placeholder="Pesquisar: fornecedor, NF-e, chave, protocolo, CNPJ..."
+                            title="Pesquisa por fornecedor, NF-e, chave, protocolo ou CNPJ"
+                            autocomplete="off">
+                    </div>
+                    <select class="form-select form-select-sm" id="centralFiltroEmpresaToolbar" title="Empresa (mesmo seletor da área EMPRESAS)" aria-label="Empresa">
+                        <option value="todas">Todas as empresas</option>
+                    </select>
                 </div>
-                <select class="form-select form-select-sm" id="centralFiltroEmpresaToolbar" title="Empresa (mesmo seletor da área EMPRESAS)" aria-label="Empresa">
-                    <option value="todas">Todas as empresas</option>
-                </select>
-                <div class="central-rc40-periodo" title="Período">
-                    <input type="date" class="form-control form-control-sm" id="centralFiltroDataInicio" title="Data de emissão — início">
-                    <span class="text-muted small">até</span>
-                    <input type="date" class="form-control form-control-sm" id="centralFiltroDataFim" title="Data de emissão — fim">
+                <div class="central-rc40-toolbar-linha central-rc40-toolbar-linha--periodo">
+                    <div class="central-rc40-periodo" title="Período">
+                        <input type="date" class="form-control form-control-sm" id="centralFiltroDataInicio" title="Data de emissão — início">
+                        <span class="text-muted small">até</span>
+                        <input type="date" class="form-control form-control-sm" id="centralFiltroDataFim" title="Data de emissão — fim">
+                    </div>
+                    <div class="central-rc40-toolbar-acoes">
+                        <button type="button" class="btn btn-outline-secondary btn-sm" id="centralBtnFiltroAvancado" title="Filtros" aria-expanded="false">
+                            <i class="fas fa-sliders-h"></i> Filtros
+                        </button>
+                        <button type="button" class="btn btn-outline-secondary btn-sm" id="centralBtnAtualizar" title="Atualizar lista e indicadores">
+                            <i class="fas fa-redo-alt"></i> Atualizar
+                        </button>
+                    </div>
                 </div>
-                <button type="button" class="btn btn-outline-secondary btn-sm" id="centralBtnFiltroAvancado" title="Filtros" aria-expanded="false">
-                    <i class="fas fa-sliders-h"></i> Filtros
-                </button>
-                <button type="button" class="btn btn-outline-secondary btn-sm" id="centralBtnAtualizar" title="Atualizar lista e indicadores">
-                    <i class="fas fa-redo-alt"></i> Atualizar
-                </button>
             </div>
             <div id="centralFiltroAvancadoPainel" class="central-rc40-avancado d-none">
                 <div class="row g-2 align-items-end">
@@ -6890,8 +6960,10 @@ function loadCentralEntradas() {
 
             <div id="centralFiltrosAtivosWrap" class="d-none" aria-live="polite"></div>
 
-            <div id="centralRc75SaudeWrap" class="mb-2"></div>
-            <div id="centralSaudeWrap" class="mb-2"></div>
+            <div class="central-rc40-monitores mb-2" aria-label="Monitoramentos">
+                <div id="centralRc75SaudeWrap"></div>
+                <div id="centralSaudeWrap"></div>
+            </div>
 
             <div class="d-none" aria-hidden="true">
                 <button type="button" id="centralBtnExportarXml"></button>

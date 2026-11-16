@@ -183,7 +183,7 @@
     host.hidden = false;
     host.innerHTML =
       '<div class="cds-empresa-seletor__vazio text-muted small">' +
-      'Você não possui empresa disponível.' +
+      'Você não possui empresa disponível. Peça ao administrador para vincular seu usuário a uma empresa.' +
       '</div>';
   }
 

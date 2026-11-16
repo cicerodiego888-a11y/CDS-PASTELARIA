@@ -142,7 +142,21 @@ class TefManager {
         };
       }
 
-      const adapter = await obterAdapter();
+      let adapter;
+      try {
+        adapter = await obterAdapter();
+      } catch (adapterErr) {
+        if (adapterErr && adapterErr.code === 'TEF_DESABILITADO') {
+          return {
+            sucesso: false,
+            aprovado: false,
+            codigo: 'TEF_DESABILITADO',
+            mensagem: adapterErr.message || 'TEF está desabilitado na configuração.',
+            status: 'negado'
+          };
+        }
+        throw adapterErr;
+      }
 
       // Executar operação com circuit breaker e retry
       return await tefCircuitBreakerService.executarComCircuitBreaker(

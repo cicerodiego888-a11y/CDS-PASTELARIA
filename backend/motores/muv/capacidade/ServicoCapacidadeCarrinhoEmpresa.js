@@ -8,7 +8,10 @@
 
 const crypto = require('crypto');
 const { roundStockQuantity } = require('../../../services/estoque/quantityPrecision');
-const { produtoControlaEstoque } = require('../../../services/estoque/produtoControlaEstoque');
+const {
+  produtoControlaEstoque,
+  produtoExigeValidacaoSaldoProprio
+} = require('../../../services/estoque/produtoControlaEstoque');
 const { TipoSaldo, normalizarTipoSaldo } = require('../../../services/fiscalNaoFiscal/constants');
 const {
   classificarTipoEmpresa,
@@ -387,6 +390,7 @@ async function avaliarCapacidadeCarrinho(entrada = {}, deps = {}) {
           db,
           `SELECT id, nome, ativo, unidade,
                   COALESCE(controla_estoque, 1) AS controla_estoque,
+                  COALESCE(tipo_operacional, 'COMERCIAL') AS tipo_operacional,
                   utiliza_ficha_tecnica
            FROM produtos WHERE id = ?`,
           [item.produtoId]
@@ -535,8 +539,9 @@ async function avaliarCapacidadeCarrinho(entrada = {}, deps = {}) {
         continue;
       }
 
-      // Sem ficha: saldo do próprio produto (D-08).
-      if (!produtoControlaEstoque(produto)) {
+      // Sem ficha: saldo do próprio produto (D-08) — só INSUMO / quem exige saldo próprio.
+      // CDS-PDV-ESTOQUE-PRODUTOS-COMERCIAIS-FISCAIS-01: comercial não valida saldo próprio.
+      if (!produtoExigeValidacaoSaldoProprio(produto)) {
         capacidadeMaximaPorItem.push({ produtoId: item.produtoId, maxima: null });
         continue;
       }

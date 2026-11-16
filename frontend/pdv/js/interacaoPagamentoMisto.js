@@ -3,10 +3,10 @@
  * A forma é escolhida primeiro. O valor daquela forma só aparece depois.
  */
 (function (root, factory) {
-    const api = factory();
+    const api = factory(root);
     if (typeof module === 'object' && module.exports) module.exports = api;
     root.InteracaoPagamentoMisto = api;
-}(typeof window !== 'undefined' ? window : globalThis, function () {
+}(typeof window !== 'undefined' ? window : globalThis, function (root) {
     function arredondar(valor) {
         return Math.round((Number(valor) + Number.EPSILON) * 100) / 100;
     }
@@ -59,6 +59,8 @@
                 forma: formaEscolhida,
                 valor,
                 totalVenda,
+                tefHabilitado: autorizacao && autorizacao.tefHabilitado,
+                pixIntegracaoHabilitada: autorizacao && autorizacao.pixIntegracaoHabilitada,
                 formaUsaTef: autorizacao && autorizacao.formaUsaTef,
                 autorizarTef: autorizacao && autorizacao.autorizarTef
             });
@@ -73,17 +75,33 @@
             }
             formaEscolhida = '';
             etapa = 'forma';
-            return { ok: true, parcela: resultado.parcela, ...visao() };
+            return {
+                ok: true,
+                parcela: resultado.parcela,
+                mensagem: resultado.mensagem || null,
+                ...visao()
+            };
         }
 
         return { visao, escolherForma, confirmarValor, cancelarValor };
     }
 
-    function modoConfirmacaoDireta(forma) {
+    function modoConfirmacaoDireta(forma, contexto = {}) {
+        const decisao = (typeof root !== 'undefined' && root.DecisaoConfirmacaoPagamento)
+            || (typeof globalThis !== 'undefined' && globalThis.DecisaoConfirmacaoPagamento)
+            || null;
+        if (decisao && typeof decisao.modoConfirmacaoDireta === 'function') {
+            return decisao.modoConfirmacaoDireta(forma, contexto);
+        }
         const nome = String(forma || '').toLowerCase().trim();
-        if (nome === 'dinheiro') return 'manual';
-        if (['cartao', 'cartao_credito', 'cartao_debito', 'credito', 'debito', 'pix', 'pix_tef', 'tef'].includes(nome)) {
-            return 'tef';
+        if (nome === 'dinheiro' || nome === 'especie' || nome === 'cash') return 'manual';
+        if (['cartao', 'cartao_credito', 'cartao_debito', 'credito', 'debito', 'tef'].includes(nome)) {
+            return contexto.tefHabilitado === true ? 'tef' : 'informado';
+        }
+        if (nome === 'pix' || nome === 'pix_tef') {
+            if (contexto.tefHabilitado === true) return 'tef';
+            if (contexto.pixIntegracaoHabilitada === true) return 'pix_proprio';
+            return 'informado';
         }
         return 'manual';
     }

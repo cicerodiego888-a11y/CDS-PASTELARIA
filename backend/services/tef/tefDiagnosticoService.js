@@ -126,13 +126,23 @@ async function executarDiagnosticoCompleto() {
   const ambiente = String(config.tefAmbiente || 'simulacao').toLowerCase();
 
   try {
-    if (statusConfig?.configurado !== false) {
+    const tefLigado = statusConfig?.tefHabilitado === true
+      || config.tefHabilitado === true
+      || config.tefHabilitado === 'true'
+      || config.tefHabilitado === 1
+      || config.tefHabilitado === '1';
+    // TEF desabilitado: não carregar adaptador, DLL, SDK nem middleware.
+    if (tefLigado && statusConfig?.configurado !== false) {
       adapter = await obterAdapter();
       adapterDiag = await adapter.diagnosticar();
       adapterTeste = await adapter.testarConexao();
     }
   } catch (error) {
-    erroAdapter = error.message;
+    if (error && error.code === 'TEF_DESABILITADO') {
+      erroAdapter = null;
+    } else {
+      erroAdapter = error.message;
+    }
   }
 
   const middlewareSitef = sdk.sitef;

@@ -114,6 +114,19 @@ router.post('/pagar', verificarToken, async (req, res) => {
     if (!operadorId) {
       return res.status(401).json({ error: 'Sessão sem operador.', code: 'SESSAO_INVALIDA' });
     }
+
+    // Guarda central: TEF desabilitado não inicia pagamento nem carrega provedor.
+    const tefConfig = await tefConfigService.obterConfiguracao();
+    if (!tefFluxoPagamento.parseTefHabilitado(tefConfig.tefHabilitado)) {
+      return res.status(409).json({
+        sucesso: false,
+        aprovado: false,
+        codigo: 'TEF_DESABILITADO',
+        mensagem: 'TEF está desabilitado na configuração.',
+        status: 'negado'
+      });
+    }
+
     const resultado = await tefService.iniciarPagamento({
       venda_id: venda_id || null,
       empresa_id: empresaId,

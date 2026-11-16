@@ -15,7 +15,8 @@ const {
 const {
   avaliarReferenciaRecomposicao,
   calcularReferenciasConfirmadas,
-  parcelaEfetivamenteConfirmada
+  parcelaEfetivamenteConfirmada,
+  parcelaAlocaReferenciaPlanejamento
 } = require('./PagamentoSequencialComposicaoService');
 const {
   calcularMargemToleranciaDinheiro,
@@ -105,7 +106,11 @@ function soma(itens, campo) {
 function pagamentosConfirmadosNaReferencia(pagamentos, referencia) {
   const fiscal = Number(referencia && referencia.valor_fiscal_referencia || 0);
   const naoFiscal = Number(referencia && referencia.valor_nao_fiscal_referencia || 0);
-  const confirmados = (pagamentos || []).filter((pagamento) => parcelaEfetivamenteConfirmada(pagamento));
+  // Mesmo critério do planejamento F×NF (TEF-off informado conta como fiscal candidato).
+  const confirmados = (pagamentos || []).filter((pagamento) => (
+    parcelaAlocaReferenciaPlanejamento(pagamento)
+    || parcelaEfetivamenteConfirmada(pagamento)
+  ));
   return {
     confirmados,
     soma: round2(confirmados.reduce((total, pagamento) => total + Number(pagamento.valor || 0), 0)),
@@ -452,7 +457,11 @@ async function integrarPagamentoRecomposicao(entrada = {}, opcoes = {}) {
     total,
     pagamentos,
     itens
-  }, { env, contexto: contextoFechamento });
+  }, {
+    env,
+    contexto: contextoFechamento,
+    forcarReferencia: opcoes.forcarReferencia === true
+  });
 
   if (referencia.recomposicao_executada !== true) {
     return bloqueio(
@@ -831,6 +840,8 @@ async function integrarPagamentoRecomposicao(entrada = {}, opcoes = {}) {
 function apresentacaoComposicaoFiscal(documento, referencia) {
   const fiscal = documento && Array.isArray(documento.itens_fiscais) ? documento.itens_fiscais : [];
   const motor = documento && documento.motor;
+  // Preferir referência ajustada do documento (eletrônico + complemento), não a inicial.
+  const refAjustada = (documento && documento.referencia) || referencia || null;
   return Object.freeze({
     titulo: 'Composição fiscal da venda',
     nao_e_nova_venda: true,
@@ -842,18 +853,18 @@ function apresentacaoComposicaoFiscal(documento, referencia) {
       valor_fiscal: Number(item.valor_fiscal || 0),
       volume_ml: item.volume_total_ml != null ? Number(item.volume_total_ml) : null
     }))),
-    valor_fiscal: Number(referencia && referencia.valor_fiscal_referencia || 0),
-    valor_nao_fiscal: Number(referencia && referencia.valor_nao_fiscal_referencia || 0),
+    valor_fiscal: Number(refAjustada && refAjustada.valor_fiscal_referencia || 0),
+    valor_nao_fiscal: Number(refAjustada && refAjustada.valor_nao_fiscal_referencia || 0),
     diferenca_monetaria: motor && motor.diferenca_monetaria != null ? motor.diferenca_monetaria : null,
     desconto_ajuste: Number(
       documento && documento.desconto_ajuste != null
         ? documento.desconto_ajuste
-        : (referencia && referencia.desconto_ajuste) || 0
+        : (refAjustada && refAjustada.desconto_ajuste) || 0
     ),
     complemento_dinheiro_utilizado: Number(
       documento && documento.complemento_dinheiro_utilizado != null
         ? documento.complemento_dinheiro_utilizado
-        : (referencia && referencia.complemento_dinheiro_utilizado) || 0
+        : (refAjustada && refAjustada.complemento_dinheiro_utilizado) || 0
     ),
     desconto_convertido_da_margem: false,
     motivo_desconto:

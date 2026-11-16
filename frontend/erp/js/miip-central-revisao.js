@@ -61,6 +61,84 @@
     return (resultados || []).filter((r) => r.precisaConfirmacao || r.precisaCadastro);
   }
 
+  function normalizarGtinLocal(valor) {
+    return String(valor || '').replace(/\D/g, '');
+  }
+
+  function encontrarProdutoCatalogoParaXml(xml, produtos) {
+    const lista = Array.isArray(produtos) ? produtos : [];
+    const gtin = normalizarGtinLocal(xml?.codigo_barras || xml?.gtin || xml?.cEAN);
+    const codigoForn = String(xml?.codigo_fornecedor || xml?.cProd || xml?.codigo || '').trim().toUpperCase();
+    const nome = String(xml?.produto_nome || xml?.xProd || xml?.nome || '').trim().toLowerCase();
+
+    if (gtin) {
+      const porGtin = lista.find((p) => normalizarGtinLocal(p.codigo_barras || p.ean || p.codigoBarras) === gtin);
+      if (porGtin) return porGtin;
+    }
+    if (codigoForn) {
+      const porCodigo = lista.find((p) => String(p.codigo || '').trim().toUpperCase() === codigoForn);
+      if (porCodigo) return porCodigo;
+    }
+    if (nome) {
+      const porNome = lista.find((p) => String(p.nome || '').trim().toLowerCase() === nome);
+      if (porNome) return porNome;
+    }
+    return null;
+  }
+
+  /**
+   * Cache MIIP pode ficar desatualizado após cadastro na própria Central.
+   * Reata produtos já existentes no catálogo (GTIN/código/nome) e remove da fila de cadastro.
+   */
+  function reconciliarPendenciasComCatalogo(sessao, produtos) {
+    if (!sessao?.pendencias?.length || !Array.isArray(produtos) || !produtos.length) {
+      return [];
+    }
+    const autoResolvidas = [];
+    sessao.pendencias.forEach((pendencia) => {
+      if (!pendencia?.precisaCadastro || pendencia.produtoEncontrado?.id) return;
+      if (sessao.resolvidas.includes(pendencia.indice) || sessao.ignoradas.includes(pendencia.indice)) return;
+
+      const xml = pendencia.produtoXML || sessao.itens?.[pendencia.indice] || {};
+      const produto = encontrarProdutoCatalogoParaXml(xml, produtos);
+      if (!produto?.id) return;
+
+      pendencia.produtoEncontrado = {
+        id: Number(produto.id),
+        nome: produto.nome,
+        codigo: produto.codigo,
+        codigo_barras: produto.codigo_barras || produto.ean || '',
+        preco_compra: produto.preco_compra,
+        preco_venda: produto.preco_venda,
+        lucro_percentual: produto.lucro_percentual
+      };
+      pendencia.precisaCadastro = false;
+      pendencia.precisaConfirmacao = false;
+      pendencia.associadoAutomaticamente = true;
+      pendencia.score = Math.max(Number(pendencia.score || 0), 100);
+      pendencia.nivelCerteza = pendencia.nivelCerteza || 'ALTA';
+      pendencia.motor = pendencia.motor || 'catalogo_local';
+      pendencia.acao = 'auto_vincular';
+
+      const item = sessao.itens?.[pendencia.indice];
+      if (item) {
+        item.produto_id = Number(produto.id);
+        item.miip_revisao_status = 'confirmado';
+        item.miip_revisao_origem = 'Reconciliacao Catalogo';
+        if (produto.nome) item.produto_nome_associado = produto.nome;
+      }
+
+      if (!sessao.resolvidas.includes(pendencia.indice)) {
+        sessao.resolvidas.push(pendencia.indice);
+        if (Number(sessao.resumo?.precisamCadastro) > 0) {
+          sessao.resumo.precisamCadastro -= 1;
+        }
+        autoResolvidas.push({ pendencia, produto });
+      }
+    });
+    return autoResolvidas;
+  }
+
   function ordenarPendencias(pendencias) {
     return [...pendencias].sort((a, b) => {
       const semA = Boolean(a.precisaCadastro && !a.produtoEncontrado);
@@ -636,8 +714,11 @@
     const item = sessao.itens[pendencia.indice] || pendencia.produtoXML || {};
     const usuario = opcoes.obterUsuario ? opcoes.obterUsuario() : null;
     const fornecedorCnpj = sessao.fornecedorCnpj;
+    const codigoFornecedor = item.codigo_fornecedor || item.cProd || item.codigo || null;
+    const codigoBarras = item.codigo_barras || item.gtin || item.cEAN || null;
 
-    if (!fornecedorCnpj || !item.codigo_fornecedor) return Promise.resolve(false);
+    // Backend (MiipLearningService) exige CNPJ + codigoFornecedor.
+    if (!fornecedorCnpj || !codigoFornecedor) return Promise.resolve(false);
 
     return $.ajax({
       url: `${opcoes.apiUrl}/miip/feedback`,
@@ -647,10 +728,10 @@
         confirmado: true,
         produtoId: Number(produtoId),
         fornecedorCnpj,
-        codigoFornecedor: item.codigo_fornecedor,
+        codigoFornecedor,
         fornecedorNome: sessao.fornecedor,
         nomeItem: item.produto_nome,
-        codigoBarras: item.codigo_barras,
+        codigoBarras,
         ncm: item.ncm,
         unidade: item.unidade,
         usuarioId: usuario?.id ?? null,
@@ -1573,15 +1654,40 @@
     }
   }
 
+  function marcarLinhaIntelResolvida(pendencia, produtoId, produto) {
+    const linha = obterLinhaIntel(pendencia?.indice);
+    if (!linha) return;
+    linha.produtoId = Number(produtoId);
+    linha.semCadastro = false;
+    linha.produtoNovo = false;
+    linha.situacao = linha.situacao === 'sem_cadastro' ? 'sem_alteracao' : linha.situacao;
+    if (estado?.inteligencia?.indicadores && Number(estado.inteligencia.indicadores.semCadastro) > 0) {
+      estado.inteligencia.indicadores.semCadastro -= 1;
+    }
+    if (produto?.nome) linha.nome = produto.nome;
+  }
+
   function aplicarConfirmacao(pendencia, produtoId, produto, aprendeuExplicito) {
     if (!pendencia || !produtoId) {
       notificar('Selecione um produto para continuar.', 'warning');
       return;
     }
 
+    const idNum = Number(produtoId);
+    pendencia.produtoEncontrado = {
+      ...(pendencia.produtoEncontrado || {}),
+      ...(produto || {}),
+      id: idNum,
+      nome: produto?.nome || pendencia.produtoEncontrado?.nome || ''
+    };
+    pendencia.precisaCadastro = false;
+    if (!pendencia.candidatoSelecionado?.produto?.id) {
+      pendencia.precisaConfirmacao = false;
+    }
+
     const item = estado.sessao.itens[pendencia.indice];
     if (item) {
-      item.produto_id = Number(produtoId);
+      item.produto_id = idNum;
       item.miip_revisao_status = 'confirmado';
       item.miip_revisao_origem = 'Confirmacao Manual';
       if (produto?.nome) item.produto_nome_associado = produto.nome;
@@ -1603,15 +1709,18 @@
       }
     }
 
+    marcarLinhaIntelResolvida(pendencia, idNum, produto);
+
     if (!estado.sessao.resolvidas.includes(pendencia.indice)) {
       estado.sessao.resolvidas.push(pendencia.indice);
       estado.sessao.confirmadosManualmente += 1;
       atualizarIndicadoresAposResolucao(pendencia);
     }
 
+    // Cadastro novo também deve aprender (associação fornecedor/GTIN); false só se caller pedir skip explícito.
     const promessa = aprendeuExplicito === false
       ? Promise.resolve(false)
-      : enviarAprendizado(pendencia, produtoId, produto);
+      : enviarAprendizado(pendencia, idNum, produto);
 
     promessa.then((aprendeu) => {
       if (aprendeu) {
@@ -1624,6 +1733,13 @@
         return;
       }
 
+      proximaAberta(estado.sessao, 1);
+      renderTelaRevisao();
+    }).catch(() => {
+      if (contarAbertas(estado.sessao) === 0) {
+        encerrarRevisaoAutomaticamente('ultimo_item_resolvido');
+        return;
+      }
       proximaAberta(estado.sessao, 1);
       renderTelaRevisao();
     });
@@ -2442,19 +2558,22 @@
       elevarModalSobreMiip(el);
 
       let vinculado = false;
+      let cadastroEncerrado = false;
       const finalizarVinculo = (produto) => {
         if (vinculado) return;
+        if (!produto?.id) return; // sem id não consome o vínculo nem bloqueia o fallback do hidden
         vinculado = true;
         $(document).off('cds:produto-salvo.miipCadastro');
         incluirProdutoNoCatalogoRevisao(produto);
-        if (typeof callback === 'function') callback(produto || null);
-        if (produto?.id) {
-          notificar('Produto cadastrado e vinculado ao item da NF.', 'success');
-        }
+        if (typeof callback === 'function') callback(produto);
+        notificar('Produto cadastrado e vinculado ao item da NF.', 'success');
       };
 
       $(document).off('cds:produto-salvo.miipCadastro').on('cds:produto-salvo.miipCadastro', (_evt, produtoSalvo) => {
-        finalizarVinculo(produtoSalvo);
+        const produto = produtoSalvo?.id
+          ? produtoSalvo
+          : (window.__ultimoProdutoCadastrado || produtoSalvo);
+        finalizarVinculo(produto);
       });
 
       const aplicarPrefill = () => {
@@ -2490,21 +2609,35 @@
       else setTimeout(aplicarPrefill, 50);
 
       el.addEventListener('hidden.bs.modal', async () => {
+        // Empilhamento/backdrop pode disparar hidden cedo; se o cadastro voltar a abrir, ignore.
+        await new Promise((r) => setTimeout(r, 80));
+        const modalAtual = document.getElementById('produtoModal');
+        if (modalAtual && modalAtual.classList.contains('show') && !vinculado) {
+          return;
+        }
+        if (cadastroEncerrado) return;
+        cadastroEncerrado = true;
+
         el.classList.remove('produto-modal-sobre-miip');
         document.querySelectorAll('.produto-modal-sobre-miip-backdrop').forEach((b) => {
           b.classList.remove('produto-modal-sobre-miip-backdrop');
         });
-        $(document).off('cds:produto-salvo.miipCadastro');
 
-        if (vinculado) return;
+        if (vinculado) {
+          $(document).off('cds:produto-salvo.miipCadastro');
+          return;
+        }
 
         const $modal = $('#produtoModal');
-        const salvoDireto = $modal.data('produtoRecemSalvo') || null;
-        const salvouOk = $modal.data('produtoSalvoComSucesso') === true;
+        const salvoDireto = $modal.data('produtoRecemSalvo')
+          || window.__ultimoProdutoCadastrado
+          || null;
+        const ok = $modal.data('produtoSalvoComSucesso') === true || Boolean(salvoDireto?.id);
         $modal.removeData('produtoRecemSalvo');
         $modal.removeData('produtoSalvoComSucesso');
 
-        if (!salvouOk && !salvoDireto?.id) {
+        if (!ok) {
+          $(document).off('cds:produto-salvo.miipCadastro');
           if (typeof callback === 'function') callback(null);
           return;
         }
@@ -2519,7 +2652,7 @@
         if (!produto?.id) {
           notificar('Produto salvo, mas não foi possível vinculá-lo automaticamente. Use F2 para selecioná-lo.', 'warning');
         }
-      }, { once: true });
+      });
     } finally {
       if (estado) estado._abrindoCadastroProduto = false;
     }
@@ -2562,7 +2695,8 @@
     const item = montarItemCadastroXml(pendencia);
     const aoCadastrar = (produto) => {
       if (produto?.id) {
-        aplicarConfirmacao(pendencia, produto.id, produto, false);
+        // Aprende associação + remove da fila e avança para o próximo
+        aplicarConfirmacao(pendencia, produto.id, produto);
       }
     };
 
@@ -2808,11 +2942,13 @@
     }
 
     const sessao = montarSessao(opcoes.dadosImportacao);
+    const produtosCatalogo = opcoes.produtos || [];
+    const reconciliadas = reconciliarPendenciasComCatalogo(sessao, produtosCatalogo);
 
     estado = {
       opcoes: {
         apiUrl: opcoes.apiUrl || (typeof API_URL !== 'undefined' ? API_URL : '/api'),
-        produtos: opcoes.produtos || [],
+        produtos: produtosCatalogo,
         obterUsuario: opcoes.obterUsuario || (() => null),
         abrirCadastroProduto: opcoes.abrirCadastroProduto || null,
         onConcluir: opcoes.onConcluir,
@@ -2827,14 +2963,27 @@
     };
 
     estado.inteligencia = montarInteligenciaNaAbertura(
-      { ...opcoes, dadosImportacao: opcoes.dadosImportacao, produtos: opcoes.produtos },
+      { ...opcoes, dadosImportacao: opcoes.dadosImportacao, produtos: produtosCatalogo },
       sessao
     );
 
+    // Aprende associações dos itens já cadastrados (cache MIIP desatualizado).
+    reconciliadas.forEach(({ pendencia, produto }) => {
+      enviarAprendizado(pendencia, produto.id, produto).then((ok) => {
+        if (ok) estado.sessao.aprendizados += 1;
+      }).catch(() => {});
+    });
+
     // RC7.5 — sem pendências: conclui e devolve à Central (sem UI de Compra).
-    if (estado.sessao.pendencias.length === 0) {
-      encerrarRevisaoAutomaticamente('xml_sem_pendencias');
+    if (contarAbertas(estado.sessao) === 0) {
+      encerrarRevisaoAutomaticamente(
+        sessao.pendencias.length === 0 ? 'xml_sem_pendencias' : 'pendencias_reconciliadas_catalogo'
+      );
       return;
+    }
+
+    if (!pendenciaAberta(estado.sessao, estado.sessao.pendencias[estado.sessao.indiceAtual])) {
+      proximaAberta(estado.sessao, 1);
     }
 
     abrirModal();

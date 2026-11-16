@@ -115,6 +115,8 @@ function mapearInfNFe(infNFe) {
     valor_seguro: financeiro.valor_seguro,
     valor_outras_despesas: financeiro.valor_outras_despesas || parseNumero(total?.vOutro),
     valor_ipi: financeiro.valor_ipi,
+    valor_icms_st: financeiro.valor_icms_st ?? parseNumero(total?.vST),
+    valor_fcp_st: financeiro.valor_fcp_st ?? parseNumero(total?.vFCPST),
     valor_total_nota: financeiro.valor_total_nota || parseNumero(total?.vNF),
     observacao: infAdic?.infCpl || '',
     forma_pagamento: financeiro.forma_pagamento,

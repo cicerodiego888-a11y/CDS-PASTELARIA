@@ -1562,30 +1562,55 @@ function consultarControlaEstoqueProduto(db, produtoId) {
   });
 }
 
+function consultarFlagsEstoqueProduto(db, produtoId) {
+  return new Promise((resolve, reject) => {
+    if (!db || typeof db.get !== 'function') {
+      resolve({ controla_estoque: 1, tipo_operacional: 'COMERCIAL' });
+      return;
+    }
+    db.get(
+      `SELECT COALESCE(controla_estoque, 1) AS controla_estoque,
+              COALESCE(tipo_operacional, 'COMERCIAL') AS tipo_operacional
+       FROM produtos WHERE id = ?`,
+      [produtoId],
+      (err, row) => {
+        if (err) return reject(err);
+        resolve({
+          controla_estoque: row && row.controla_estoque != null ? row.controla_estoque : 1,
+          tipo_operacional: row && row.tipo_operacional ? row.tipo_operacional : 'COMERCIAL'
+        });
+      }
+    );
+  });
+}
+
 /**
  * Lê saldo F×NF da empresa. Produto com controla_estoque=0 (PDV fiscal/elegível)
- * não valida estoque: saldo virtual = quantidade vendida em ambos os buckets.
+ * ou comercial sem saldo próprio: saldo virtual = quantidade vendida em ambos os buckets.
  */
 async function lerSaldoEmpresaProduto(db, empresaId, produtoId, quantidadeVendida) {
   const {
-    produtoControlaEstoque,
+    produtoExigeValidacaoSaldoProprio,
     saldosParaDistribuicaoVenda
   } = require('../estoque/produtoControlaEstoque');
-  let controla = 1;
+  let flags = { controla_estoque: 1, tipo_operacional: 'COMERCIAL' };
   try {
-    controla = await consultarControlaEstoqueProduto(db, produtoId);
+    flags = await consultarFlagsEstoqueProduto(db, produtoId);
   } catch (_flag) {
-    controla = 1;
+    flags = { controla_estoque: 1, tipo_operacional: 'COMERCIAL' };
   }
-  const produtoFlag = { controla_estoque: controla };
-  if (!produtoControlaEstoque(produtoFlag)) {
+  const produtoFlag = {
+    controla_estoque: flags.controla_estoque,
+    tipo_operacional: flags.tipo_operacional
+  };
+  if (!produtoExigeValidacaoSaldoProprio(produtoFlag)) {
     const virtuais = saldosParaDistribuicaoVenda(produtoFlag, quantidadeVendida, 0, 0);
     return {
       ok: true,
       saldoFiscal: virtuais.saldoFiscal,
       saldoNaoFiscal: virtuais.saldoNaoFiscal,
-      origem: 'sem_controle_estoque',
-      controla_estoque: 0
+      origem: 'comercial_sem_saldo_proprio',
+      controla_estoque: Number(flags.controla_estoque) === 0 ? 0 : 1
     };
   }
 
@@ -1920,7 +1945,7 @@ async function encaminharPropostaValidadaAoDistribuidorOficial(params = {}) {
   }
 
   const {
-    produtoControlaEstoque,
+    produtoExigeValidacaoSaldoProprio,
     saldosParaDistribuicaoVenda
   } = require('../estoque/produtoControlaEstoque');
   const saldos = new Map();
@@ -1935,16 +1960,22 @@ async function encaminharPropostaValidadaAoDistribuidorOficial(params = {}) {
         informado.saldoNaoFiscal != null ? informado.saldoNaoFiscal : informado.saldo_nao_fiscal || 0
       );
       let controla = informado.controla_estoque;
-      if (controla == null && params.db) {
+      let tipoOp = informado.tipo_operacional;
+      if ((controla == null || tipoOp == null) && params.db) {
         try {
-          controla = await consultarControlaEstoqueProduto(params.db, plano.produto_id);
+          const flags = await consultarFlagsEstoqueProduto(params.db, plano.produto_id);
+          if (controla == null) controla = flags.controla_estoque;
+          if (tipoOp == null) tipoOp = flags.tipo_operacional;
         } catch (_c) {
-          controla = 1;
+          if (controla == null) controla = 1;
+          if (tipoOp == null) tipoOp = 'COMERCIAL';
         }
       }
       if (controla == null) controla = 1;
+      if (tipoOp == null) tipoOp = 'COMERCIAL';
+      const produtoFlag = { controla_estoque: controla, tipo_operacional: tipoOp };
       const normalizados = saldosParaDistribuicaoVenda(
-        { controla_estoque: controla },
+        produtoFlag,
         plano.quantidade_vendida,
         brutoF,
         brutoNf
@@ -1953,9 +1984,9 @@ async function encaminharPropostaValidadaAoDistribuidorOficial(params = {}) {
         ok: true,
         saldoFiscal: normalizados.saldoFiscal,
         saldoNaoFiscal: normalizados.saldoNaoFiscal,
-        origem: produtoControlaEstoque({ controla_estoque: controla })
+        origem: produtoExigeValidacaoSaldoProprio(produtoFlag)
           ? 'saldos_do_fechamento'
-          : 'sem_controle_estoque',
+          : 'comercial_sem_saldo_proprio',
         controla_estoque: Number(controla) === 0 ? 0 : 1
       };
     } else if (params.db) {

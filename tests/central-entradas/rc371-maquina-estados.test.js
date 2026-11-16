@@ -79,6 +79,7 @@ async function main() {
       XML_COMPLETO: 3,
       EM_REVISAO: 5,
       PRONTA_IMPORTACAO: 1,
+      EM_IMPORTACAO: 2,
       IMPORTADA: 4,
       CANCELADA: 2,
       ERRO: 1,
@@ -87,13 +88,16 @@ async function main() {
     const c = montarContadoresFilas(por);
     assert.strictEqual(c.pendentes, contarFila(por, 'pendentes'));
     assert.strictEqual(c.em_revisao, 5);
-    assert.strictEqual(c.prontas, 1);
+    assert.strictEqual(c.prontas, 3); // PRONTA_IMPORTACAO + EM_IMPORTACAO
+    assert.strictEqual(contarFila(por, 'em_importacao'), 3); // alias → prontas
     assert.strictEqual(c.importadas, 4);
     assert.strictEqual(c.canceladas, 2);
     assert.strictEqual(c.erro, 28);
     assert.strictEqual(c.aguardandoRevisao, c.em_revisao);
     assert.strictEqual(c.prontasParaCompra, c.prontas);
     assert.strictEqual(c.gravadas, c.importadas);
+    assert.ok(FILAS.prontas.statusIn.includes(S.EM_IMPORTACAO));
+    assert.ok(!FILAS.em_importacao);
   });
 
   await test('RESUMO → XML_COMPLETO e XML_INDISPONIVEL → XML_COMPLETO', async () => {

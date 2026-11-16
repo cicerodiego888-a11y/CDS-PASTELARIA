@@ -1,29 +1,51 @@
 /**
- * Sprint 23 — inclusão sequencial de parcelas no PDV Express.
- * Autoriza cada parcela TEF uma vez e preserva as já aprovadas.
+ * Sprint 23 + CDS-PDV-CORRECAO-FLUXO-PAGAMENTOS-ELETRONICOS-01
+ * Inclusão sequencial de parcelas. Separação: informada / pendente / confirmada.
  */
 (function (root, factory) {
-    const api = factory();
+    const api = factory(root);
     if (typeof module === 'object' && module.exports) module.exports = api;
     root.PagamentoSequencial = api;
-}(typeof window !== 'undefined' ? window : globalThis, function () {
+}(typeof window !== 'undefined' ? window : globalThis, function (root) {
     let parcelas = [];
     let composicao = null;
     let emCurso = false;
     let sequencia = 0;
     let sessaoPagamento = null;
 
+    function obterDecisao() {
+        if (root && root.DecisaoConfirmacaoPagamento) return root.DecisaoConfirmacaoPagamento;
+        try {
+            return require('./decisaoConfirmacaoPagamento');
+        } catch (_e) {
+            return null;
+        }
+    }
+
     function arredondar(valor) {
         return Math.round((Number(valor) + Number.EPSILON) * 100) / 100;
+    }
+
+    function formaExigeAutorizador(forma) {
+        const decisao = obterDecisao();
+        if (decisao && typeof decisao.formaExigeAutorizadorExterno === 'function') {
+            return decisao.formaExigeAutorizadorExterno(forma);
+        }
+        const f = String(forma || '').toLowerCase().trim();
+        return ['cartao', 'cartao_credito', 'cartao_debito', 'credito', 'debito', 'pix', 'pix_tef', 'tef'].includes(f);
     }
 
     function formaUsaTefPadrao(forma) {
         return formaExigeAutorizador(forma);
     }
 
-    function formaExigeAutorizador(forma) {
-        const f = String(forma || '').toLowerCase().trim();
-        return ['cartao', 'cartao_credito', 'cartao_debito', 'credito', 'debito', 'pix', 'pix_tef', 'tef'].includes(f);
+    function formaEhDinheiroLocal(forma) {
+        const decisao = obterDecisao();
+        if (decisao && typeof decisao.formaEhDinheiro === 'function') {
+            return decisao.formaEhDinheiro(forma);
+        }
+        const nome = String(forma || '').toLowerCase().trim();
+        return nome === 'dinheiro' || nome === 'especie' || nome === 'cash';
     }
 
     function classificarRetornoAutorizador(retorno) {
@@ -31,6 +53,7 @@
         const status = String(retorno.status || '').toLowerCase();
         const codigo = String(retorno.codigo || '').toUpperCase();
         const tipoErro = String(retorno.tipo_erro || '').toLowerCase();
+        if (codigo === 'TEF_DESABILITADO') return 'tef_desabilitado';
         if (codigo === 'TEF_JA_VINCULADO' || codigo === 'TEF_EMPRESA_DIVERGENTE') return 'recusado';
         if (codigo === 'TIMEOUT' || tipoErro === 'timeout' || status === 'timeout') return 'timeout';
         if (status === 'pendente' || status === 'pending' || status === 'processando') return 'pendente';
@@ -49,7 +72,21 @@
         return 'erro';
     }
 
+    /** Aloca valor no saldo da venda (inclui PIX informado). Não implica recebimento confirmado. */
+    function alocaSaldo(parcela) {
+        const decisao = obterDecisao();
+        if (decisao && typeof decisao.parcelaAlocaSaldo === 'function') {
+            return decisao.parcelaAlocaSaldo(parcela);
+        }
+        return String(parcela && parcela.status_autorizacao || '').toLowerCase() !== 'pendente';
+    }
+
+    /** Recebimento efetivamente comprovado. */
     function contaComoRecebido(parcela) {
+        const decisao = obterDecisao();
+        if (decisao && typeof decisao.parcelaRecebimentoConfirmado === 'function') {
+            return decisao.parcelaRecebimentoConfirmado(parcela);
+        }
         return String(parcela && parcela.status_autorizacao || '').toLowerCase() !== 'pendente';
     }
 
@@ -62,8 +99,21 @@
 
     function soma() {
         return arredondar(parcelas.reduce((total, parcela) => (
+            alocaSaldo(parcela) ? total + Number(parcela.valor || 0) : total
+        ), 0));
+    }
+
+    function somaConfirmada() {
+        return arredondar(parcelas.reduce((total, parcela) => (
             contaComoRecebido(parcela) ? total + Number(parcela.valor || 0) : total
         ), 0));
+    }
+
+    function temEletronicaAguardandoConfirmacao() {
+        return parcelas.some((parcela) => {
+            if (!formaExigeAutorizador(parcela.forma_pagamento)) return false;
+            return alocaSaldo(parcela) && !contaComoRecebido(parcela);
+        });
     }
 
     function assinatura() {
@@ -111,23 +161,43 @@
 
     function exportar() {
         return snapshot()
-            .filter((parcela) => contaComoRecebido(parcela))
+            .filter((parcela) => alocaSaldo(parcela))
             .map((parcela) => {
                 const eletronica = formaExigeAutorizador(parcela.forma_pagamento);
+                const viaTef = Boolean(parcela.tef_transacao_id);
+                const confirmada = contaComoRecebido(parcela);
+                const dinheiro = formaEhDinheiroLocal(parcela.forma_pagamento);
+                const viaPix = Boolean(parcela.pix_confirmado && parcela.pix_txid);
                 const linha = {
                     forma_pagamento: parcela.forma_pagamento,
                     valor: parcela.valor,
                     tef_transacao_id: parcela.tef_transacao_id || null,
-                    nsu: eletronica ? (parcela.nsu || null) : null,
-                    autorizacao: eletronica ? (parcela.autorizacao || null) : null,
+                    nsu: viaTef ? (parcela.nsu || null) : null,
+                    autorizacao: viaTef ? (parcela.autorizacao || null) : null,
                     status_autorizacao: parcela.status_autorizacao,
                     idempotency_key: parcela.idempotency_key || null,
-                    tipo_recebimento: eletronica ? 'fiscal' : 'nao_fiscal',
-                    confirmacao_manual: eletronica ? 0 : 1,
-                    confirmacao_modalidade: eletronica ? 'tef' : 'manual'
+                    local_id: parcela.local_id,
+                    sessao_pagamento: sessaoPagamento || null,
+                    chave_parcela: parcela.chave_parcela || null,
+                    tipo_recebimento: eletronica || !dinheiro ? (eletronica ? 'fiscal' : 'nao_fiscal') : 'nao_fiscal',
+                    recebimento_confirmado: confirmada,
+                    // Não carimba manual em eletrônico informado — confirmação vem no fechamento.
+                    confirmacao_manual: dinheiro && confirmada ? 1 : 0,
+                    confirmacao_modalidade: viaTef
+                        ? 'tef'
+                        : (viaPix ? 'pix' : (dinheiro ? 'manual' : null))
                 };
-                if (eletronica) linha.aprovado = parcela.status_autorizacao === 'aprovada';
-                if (formaEhDinheiroLocal(parcela.forma_pagamento)) {
+                if (eletronica && !dinheiro) {
+                    linha.tipo_recebimento = 'fiscal';
+                }
+                if (viaTef) linha.aprovado = parcela.status_autorizacao === 'aprovada';
+                if (viaPix) {
+                    linha.pix_txid = parcela.pix_txid;
+                    linha.pix_confirmado = true;
+                    linha.confirmacao_efetiva = true;
+                    linha.aprovado = true;
+                }
+                if (dinheiro) {
                     linha.valor_entregue = parcela.valor_entregue != null
                         ? parcela.valor_entregue
                         : parcela.valor;
@@ -137,9 +207,41 @@
             });
     }
 
-    function formaEhDinheiroLocal(forma) {
-        const nome = String(forma || '').toLowerCase().trim();
-        return nome === 'dinheiro' || nome === 'especie' || nome === 'cash';
+    /**
+     * Confirma parcela PIX com evidência (txid persistido). Idempotente no mesmo txid.
+     */
+    function confirmarParcelaPix(entrada = {}) {
+        const localId = Number(entrada.localId != null ? entrada.localId : entrada.local_id);
+        const txid = String(entrada.txid || entrada.pix_txid || '').trim();
+        const valor = entrada.valor != null ? arredondar(entrada.valor) : null;
+        if (!(localId > 0)) return { ok: false, codigo: 'PARCELA_AUSENTE', parcelas: snapshot() };
+        if (!txid) return { ok: false, codigo: 'PIX_TXID_AUSENTE', parcelas: snapshot() };
+        const parcela = parcelas.find((item) => Number(item.local_id) === localId);
+        if (!parcela) return { ok: false, codigo: 'PARCELA_AUSENTE', parcelas: snapshot() };
+        const forma = String(parcela.forma_pagamento || '').toLowerCase();
+        if (forma !== 'pix' && forma !== 'pix_tef') {
+            return { ok: false, codigo: 'FORMA_NAO_PIX', parcelas: snapshot() };
+        }
+        if (valor != null && Math.abs(Number(parcela.valor) - valor) > 0.009) {
+            return { ok: false, codigo: 'PIX_VALOR_DIVERGENTE', parcelas: snapshot() };
+        }
+        if (parcela.pix_confirmado === true && parcela.pix_txid) {
+            if (String(parcela.pix_txid) === txid) {
+                return { ok: true, parcela, parcelas: snapshot(), idempotente: true };
+            }
+            return { ok: false, codigo: 'PIX_JA_CONFIRMADO', parcelas: snapshot() };
+        }
+        const sessao = garantirSessaoPagamento();
+        parcela.pix_txid = txid;
+        parcela.pix_confirmado = true;
+        parcela.confirmacao_efetiva = true;
+        parcela.status_autorizacao = 'aprovada';
+        parcela.aprovado = true;
+        parcela.requer_confirmacao_posterior = false;
+        parcela.chave_parcela = parcela.chave_parcela
+            || `${sessao}:${parcela.local_id}:${Number(parcela.valor).toFixed(2)}`;
+        invalidarComposicao();
+        return { ok: true, parcela, parcelas: snapshot(), idempotente: false };
     }
 
     function recomposicaoNecessaria() {
@@ -150,6 +252,9 @@
         return parcelas.some((parcela) => {
             if (!formaExigeAutorizador(parcela.forma_pagamento)) return false;
             const status = String(parcela.status_autorizacao || '').toLowerCase();
+            if (status === 'pendente') return true;
+            // Informada sem TEF: aguarda confirmação posterior, não bloqueia composição dinheiro.
+            if (!parcela.tef_transacao_id && status === 'informada') return false;
             return status !== 'aprovada' && status !== 'aprovado';
         });
     }
@@ -177,10 +282,34 @@
         const forma = String(entrada.forma || entrada.forma_pagamento || '').toLowerCase().trim();
         const valor = arredondar(entrada.valor);
         const totalVenda = arredondar(entrada.totalVenda);
+        const decisaoApi = obterDecisao();
+        const politica = decisaoApi && typeof decisaoApi.resolverRegistroParcela === 'function'
+            ? decisaoApi.resolverRegistroParcela({
+                forma,
+                tefHabilitado: entrada.tefHabilitado,
+                pixIntegracaoHabilitada: entrada.pixIntegracaoHabilitada
+            })
+            : null;
+
         const eletronica = formaExigeAutorizador(forma);
-        const usaTef = eletronica || (typeof entrada.formaUsaTef === 'function'
-            ? entrada.formaUsaTef(forma)
-            : false);
+        let usaTef;
+        if (typeof entrada.formaUsaTef === 'function') {
+            usaTef = Boolean(entrada.formaUsaTef(forma));
+        } else if (politica && typeof politica.usaTef === 'boolean') {
+            usaTef = politica.usaTef;
+        } else {
+            usaTef = eletronica;
+        }
+
+        // Bloqueio de política (ex.: cartão sem TEF) só vale se o chamador não forçou TEF.
+        if (politica && politica.ok === false && !usaTef) {
+            return {
+                ok: false,
+                codigo: politica.codigo || 'FORMA_BLOQUEADA',
+                mensagem: politica.mensagem || null,
+                parcelas: snapshot()
+            };
+        }
 
         if (!forma) return { ok: false, codigo: 'FORMA_AUSENTE', parcelas: snapshot() };
         if (!(valor > 0)) return { ok: false, codigo: 'VALOR_INVALIDO', parcelas: snapshot() };
@@ -201,23 +330,28 @@
         } else if (valor - restante > 0.009) {
             return { ok: false, codigo: 'VALOR_ACIMA_DO_RESTANTE', parcelas: snapshot() };
         }
-        if (eletronica && typeof entrada.autorizarTef !== 'function') {
+        if (usaTef && typeof entrada.autorizarTef !== 'function') {
             return { ok: false, codigo: 'AUTORIZADOR_AUSENTE', parcelas: snapshot() };
         }
         if (usaTef && emCurso) {
             return { ok: false, codigo: 'AUTORIZACAO_EM_CURSO', parcelas: snapshot() };
         }
 
+        const sessao = garantirSessaoPagamento();
+        const localId = ++sequencia;
         const parcela = {
-            local_id: ++sequencia,
+            local_id: localId,
             forma_pagamento: forma,
             valor: valorAplicado,
             valor_entregue: formaEhDinheiroLocal(forma) ? valorEntregue : valorAplicado,
             troco: formaEhDinheiroLocal(forma) ? troco : 0,
-            status_autorizacao: usaTef ? 'pendente' : 'informada',
+            status_autorizacao: usaTef ? 'pendente' : (politica && politica.statusInicial) || 'informada',
             idempotency_key: usaTef
-                ? `pdv-${garantirSessaoPagamento()}-${sequencia}-${forma}-${valorAplicado.toFixed(2)}`
-                : null
+                ? `pdv-${sessao}-${localId}-${forma}-${valorAplicado.toFixed(2)}`
+                : null,
+            sessao_pagamento: sessao,
+            chave_parcela: `${sessao}:${localId}:${valorAplicado.toFixed(2)}`,
+            requer_confirmacao_posterior: Boolean(politica && politica.requerConfirmacaoPosterior)
         };
 
         if (usaTef) {
@@ -231,6 +365,7 @@
                     parcela.autorizacao = retorno.autorizacao || null;
                     parcela.status_autorizacao = 'aprovada';
                     parcela.aprovado = true;
+                    parcela.requer_confirmacao_posterior = false;
                 } else if (tipo === 'pendente') {
                     parcela.status_autorizacao = 'pendente';
                     parcela.aprovado = false;
@@ -238,12 +373,20 @@
                     invalidarComposicao();
                     return { ok: false, codigo: 'PENDENTE', parcela, parcelas: snapshot() };
                 } else {
-                    const codigos = { recusado: 'TEF_REJEITADO', timeout: 'TIMEOUT', erro: 'ERRO' };
+                    const codigos = {
+                        recusado: 'TEF_REJEITADO',
+                        timeout: 'TIMEOUT',
+                        erro: 'ERRO',
+                        tef_desabilitado: 'TEF_DESABILITADO'
+                    };
                     return {
                         ok: false,
                         codigo: codigos[tipo] || 'ERRO',
                         mensagem: retorno && retorno.mensagem ? retorno.mensagem : null,
-                        parcela: { ...parcela, status_autorizacao: tipo === 'recusado' ? 'rejeitada' : 'falha' },
+                        parcela: {
+                            ...parcela,
+                            status_autorizacao: tipo === 'recusado' ? 'rejeitada' : 'falha'
+                        },
                         parcelas: snapshot()
                     };
                 }
@@ -262,7 +405,13 @@
 
         parcelas.push(parcela);
         invalidarComposicao();
-        return { ok: true, parcela, parcelas: snapshot(), assinatura: assinatura() };
+        return {
+            ok: true,
+            parcela,
+            parcelas: snapshot(),
+            assinatura: assinatura(),
+            mensagem: politica && politica.mensagem ? politica.mensagem : null
+        };
     }
 
     function cancelar(localId) {
@@ -348,6 +497,10 @@
         reidratar,
         snapshot,
         soma,
+        somaConfirmada,
+        alocaSaldo,
+        contaComoRecebido,
+        temEletronicaAguardandoConfirmacao,
         assinatura,
         invalidarComposicao,
         registrarComposicao,
@@ -359,6 +512,8 @@
         formaExigeAutorizador,
         classificarRetornoAutorizador,
         autorizarParcelasPendentes,
+        confirmarParcelaPix,
+        sessaoPagamento: () => sessaoPagamento,
         emAutorizacao: () => emCurso
     };
 }));

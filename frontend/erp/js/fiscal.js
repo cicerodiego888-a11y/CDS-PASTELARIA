@@ -902,8 +902,25 @@ function cancelarNfce(id) {
         contador.textContent = textarea.value.length;
     });
 
+    let cancelamentoEmVoo = false;
+    const rotuloBotaoCancelar = '<i class="fas fa-ban"></i> Confirmar Cancelamento';
+
+    function mensagemErroCancelamento(resp, fallback) {
+        const base = (resp && (resp.error || resp.message)) || fallback || 'Cancelamento não confirmado.';
+        if (resp && resp.code && !String(base).includes(resp.code)) {
+            return `${base} (${resp.code})`;
+        }
+        return base;
+    }
+
+    function liberarBotaoCancelamento() {
+        cancelamentoEmVoo = false;
+        botaoConfirmar.disabled = false;
+        botaoConfirmar.innerHTML = rotuloBotaoCancelar;
+    }
+
     botaoConfirmar.addEventListener('click', () => {
-        if (botaoConfirmar.disabled) return;
+        if (botaoConfirmar.disabled || cancelamentoEmVoo) return;
         const justificativa = textarea.value.trim();
 
         const validacaoJustificativa = validarMotivoTexto(justificativa);
@@ -913,6 +930,7 @@ function cancelarNfce(id) {
             return;
         }
 
+        cancelamentoEmVoo = true;
         botaoConfirmar.disabled = true;
         botaoConfirmar.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processando cancelamento...';
         statusCancelamento.hidden = false;
@@ -927,8 +945,10 @@ function cancelarNfce(id) {
             success: function(resp) {
                 if (resp && (resp.resultUnknown || resp.code === 'CANCELAMENTO_EM_ANDAMENTO')) {
                     statusCancelamento.className = 'alert alert-warning';
-                    statusCancelamento.textContent = resp.error
-                        || 'O cancelamento está em andamento ou com resultado desconhecido. Não tente reenviar.';
+                    statusCancelamento.textContent = mensagemErroCancelamento(
+                        resp,
+                        'O cancelamento está em andamento ou com resultado desconhecido. Não tente reenviar.'
+                    );
                     showNotification(statusCancelamento.textContent, 'warning');
                     carregarFiscalNotas();
                     botaoConfirmar.innerHTML = 'Aguardando reconciliação';
@@ -936,13 +956,15 @@ function cancelarNfce(id) {
                 }
                 if (!resp || resp.success !== true) {
                     statusCancelamento.className = 'alert alert-danger';
-                    statusCancelamento.textContent = (resp && (resp.error || resp.message))
-                        || 'Cancelamento não confirmado.';
+                    statusCancelamento.textContent = mensagemErroCancelamento(
+                        resp,
+                        'Cancelamento não confirmado.'
+                    );
                     showNotification(statusCancelamento.textContent, 'danger');
-                    botaoConfirmar.disabled = false;
-                    botaoConfirmar.innerHTML = '<i class="fas fa-ban"></i> Confirmar Cancelamento';
+                    liberarBotaoCancelamento();
                     return;
                 }
+                cancelamentoEmVoo = false;
                 modal.hide();
                 showNotification(resp.message || 'NFC-e cancelada com confirmação fiscal.');
                 carregarFiscalNotas();
@@ -956,18 +978,24 @@ function cancelarNfce(id) {
                     || xhr.status === 0
                 ) {
                     statusCancelamento.className = 'alert alert-warning';
-                    statusCancelamento.textContent = resp.error
-                        || 'O cancelamento está em andamento ou com resultado desconhecido. Não tente reenviar.';
+                    statusCancelamento.textContent = mensagemErroCancelamento(
+                        resp,
+                        'O cancelamento está em andamento ou com resultado desconhecido. Não tente reenviar.'
+                    );
                     showNotification(statusCancelamento.textContent, 'warning');
                     carregarFiscalNotas();
                     botaoConfirmar.innerHTML = 'Aguardando reconciliação';
                     return;
                 }
                 statusCancelamento.className = 'alert alert-danger';
-                statusCancelamento.textContent = resp.error || resp.message || 'Cancelamento rejeitado ou não confirmado.';
+                statusCancelamento.textContent = mensagemErroCancelamento(
+                    resp,
+                    xhr.status === 503
+                        ? 'Serviço fiscal temporariamente indisponível. Tente novamente em instantes.'
+                        : 'Cancelamento rejeitado ou não confirmado.'
+                );
                 showNotification(statusCancelamento.textContent, 'danger');
-                botaoConfirmar.disabled = false;
-                botaoConfirmar.innerHTML = '<i class="fas fa-ban"></i> Confirmar Cancelamento';
+                liberarBotaoCancelamento();
             }
         });
     });

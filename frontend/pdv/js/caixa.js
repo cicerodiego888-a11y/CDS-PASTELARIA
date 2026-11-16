@@ -62,18 +62,38 @@ function getTerminalRequestQuery(params = {}) {
   return params;
 }
 
+function headersCaixaEmpresa(extra) {
+  if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.headersAuth === 'function') {
+    return CdsEmpresaContexto.headersAuth(extra || {});
+  }
+  const headers = Object.assign({}, extra || {});
+  try {
+    const emp = typeof localStorage !== 'undefined' ? localStorage.getItem('cds_empresa_id') : null;
+    if (emp) headers['X-Empresa-Id'] = emp;
+  } catch (_e) { /* ignore */ }
+  return headers;
+}
+
 function carregarCaixaAberto() {
   const carregar = () => {
+    const headers = headersCaixaEmpresa();
+    if (!headers['X-Empresa-Id']) {
+      showNotification(
+        'Selecione a empresa na barra lateral (ou peça ao administrador para vincular seu usuário a uma empresa).',
+        'warning'
+      );
+      renderStatusCaixa(null);
+      renderAbrirCaixa();
+      return;
+    }
+
     const ajaxOpts = {
       url: `${API_URL}/caixa/aberto`,
       method: 'GET',
       data: getTerminalRequestQuery(),
-      cache: false
+      cache: false,
+      headers
     };
-    try {
-      const emp = typeof localStorage !== 'undefined' ? localStorage.getItem('cds_empresa_id') : null;
-      if (emp) ajaxOpts.headers = { 'X-Empresa-Id': emp };
-    } catch (_e) { /* ignore */ }
 
     $.ajax(ajaxOpts).done(function(resumo) {
       if (!resumo) {
@@ -90,7 +110,15 @@ function carregarCaixaAberto() {
         renderAbrirCaixa();
         return;
       }
-      showNotification(xhr.responseJSON?.error || 'Erro ao carregar caixa.', 'danger');
+      const msg = xhr.responseJSON?.error || 'Erro ao carregar caixa.';
+      if (/X-Empresa-Id|empresa/i.test(msg)) {
+        showNotification(
+          'Sem empresa no contexto. Vincule o operador a uma empresa e selecione-a na barra lateral.',
+          'danger'
+        );
+        return;
+      }
+      showNotification(msg, 'danger');
     });
   };
 
@@ -563,13 +591,27 @@ function selecionarCaixaOntem() {
 
 async function carregarCaixaPorDia() {
   const data = $('#data_caixa_dia').val() || new Date().toISOString().split('T')[0];
+  const headers = headersCaixaEmpresa();
+  if (!headers['X-Empresa-Id']) {
+    showNotification(
+      'Selecione a empresa na barra lateral para consultar o caixa.',
+      'warning'
+    );
+    return;
+  }
 
   try {
-    const resposta = await $.get(`${API_URL}/caixa/por-data`, { data });
+    const resposta = await $.ajax({
+      url: `${API_URL}/caixa/por-data`,
+      method: 'GET',
+      data: { data },
+      headers
+    });
     renderizarCaixaDoDia(resposta);
   } catch (error) {
     console.error(error);
-    showNotification('Erro ao carregar caixa do dia.', 'danger');
+    const msg = error?.responseJSON?.error || 'Erro ao carregar caixa do dia.';
+    showNotification(msg, 'danger');
   }
 }
 

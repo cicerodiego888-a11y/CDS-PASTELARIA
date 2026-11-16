@@ -381,6 +381,8 @@ class CentralSyncExecucaoService {
           notasNovas: resultado.notasNovas || 0,
           sucesso: resultado.sucesso,
           mensagem: resultado.mensagem,
+          mensagemAmigavel: resultado.mensagemAmigavel,
+          codigo: resultado.codigo || resultado.code || null,
           origem,
           notificarNovas: cfgNotif.notificarNovasNotas,
           ignorado: resultado.ignorado === true,
@@ -423,8 +425,14 @@ class CentralSyncExecucaoService {
         await this._notificacoes.notificarSyncConcluida({
           sucesso: false,
           mensagem: error.message,
+          codigo: error.code || error.codigo || null,
           origem,
-          notasNovas: 0
+          notasNovas: 0,
+          ignorado: error.code === 'OPERACAO_REAL_DESABILITADA'
+            || error.codigo === 'OPERACAO_REAL_DESABILITADA'
+            || error.code === 'DISTDFE_AUTOMATICO_DESABILITADO'
+            || error.codigo === 'DISTDFE_AUTOMATICO_DESABILITADO',
+          consultaExecutada: false
         });
 
         return { ...falha, duracaoMs, origem, correlationId };

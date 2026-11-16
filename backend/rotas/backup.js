@@ -4,8 +4,15 @@ const db = require("../database");
 const {
   fazerBackupManual,
   listarHistoricoBackups,
-  aplicarRetencaoBackups
+  aplicarRetencaoBackups,
+  resolverPastaBackupOperacional,
+  existeBackupDoDia,
+  dataLocalBrasil
 } = require("../services/backupManual");
+const {
+  executarBackupDiarioLocal,
+  iniciarBackupAutomaticoLocal
+} = require("../services/backupAutomaticoLocal");
 const {
   isElectronRuntime,
   selecionarPastaBackup
@@ -18,6 +25,12 @@ const {
 } = require("../lib/sqliteOfficialGuard");
 
 const router = express.Router();
+
+try {
+  iniciarBackupAutomaticoLocal();
+} catch (err) {
+  console.error("[BACKUP] Falha ao iniciar automático na rota:", err.message || err);
+}
 
 function responderBloqueio(res, error) {
   const status = error.statusCode || (error.code === CODIGO_BLOQUEIO ? 403 : 500);
@@ -61,7 +74,7 @@ router.post("/selecionar-pasta", (req, res) => {
   }
 });
 
-router.post("/manual", (req, res) => {
+router.post("/manual", async (req, res) => {
   try {
     rejeitarCaminhoClienteBanco(req.body || {});
   } catch (error) {
@@ -70,7 +83,6 @@ router.post("/manual", (req, res) => {
 
   let dbPath;
   try {
-    // Origem controlada pelo servidor (conexão já aberta), nunca hardcode legado nem body.
     dbPath = resolverCaminhoBancoOperacional({
       dbPathPreferido: db.dbPath || process.env.DB_PATH
     });
@@ -78,31 +90,70 @@ router.post("/manual", (req, res) => {
     return responderBloqueio(res, error);
   }
 
-  db.get(
-    "SELECT valor FROM configuracoes WHERE chave = 'backup_path'",
-    [],
-    (err, row) => {
-      if (err || !row || !row.valor) {
-        return res.status(400).json({
-          sucesso: false,
-          mensagem: "Configure a pasta de backup primeiro."
-        });
-      }
+  try {
+    const { pasta, origem } = await resolverPastaBackupOperacional(db, dbPath);
+    exigirCaminhosBackup({ origem: dbPath, destino: path.join(pasta, "probe.db") });
+    const resultado = await fazerBackupManual(dbPath, pasta);
+    aplicarRetencaoBackups(pasta, 30, dbPath);
+    return res.json({
+      sucesso: true,
+      backup: resultado,
+      pasta,
+      origem_pasta: origem,
+      mensagem: "Cópia recuperável do banco gerada com sucesso."
+    });
+  } catch (error) {
+    console.error("[BACKUP] Erro no backup manual:", error);
+    return responderBloqueio(res, error);
+  }
+});
 
-      try {
-        exigirCaminhosBackup({ origem: dbPath, destino: path.join(row.valor, "probe.db") });
-        const resultado = fazerBackupManual(dbPath, row.valor);
+/** Garante backup do dia (primeira entrada / chamada explícita). */
+router.post("/garantir-diario", async (req, res) => {
+  try {
+    rejeitarCaminhoClienteBanco(req.body || {});
+  } catch (error) {
+    return responderBloqueio(res, error);
+  }
 
-        res.json({
-          sucesso: true,
-          backup: resultado
-        });
-        aplicarRetencaoBackups(row.valor || undefined, 30, dbPath);
-      } catch (error) {
-        return responderBloqueio(res, error);
-      }
-    }
-  );
+  const forcar = req.body && (req.body.forcar === true || req.body.forcar === 1);
+  const out = await executarBackupDiarioLocal({
+    forcar: !!forcar,
+    motivo: forcar ? "garantir_diario_forcado" : "garantir_diario_entrada"
+  });
+
+  if (!out.sucesso && !out.ignorado) {
+    return res.status(500).json({
+      sucesso: false,
+      mensagem: out.erro || "Falha ao garantir backup diário.",
+      codigo: out.codigo || null
+    });
+  }
+
+  return res.json({
+    sucesso: true,
+    ...out
+  });
+});
+
+router.get("/status-diario", async (req, res) => {
+  try {
+    const dbPath = resolverCaminhoBancoOperacional({
+      dbPathPreferido: db.dbPath || process.env.DB_PATH
+    });
+    const { pasta, origem } = await resolverPastaBackupOperacional(db, dbPath);
+    const hoje = dataLocalBrasil();
+    return res.json({
+      sucesso: true,
+      data: hoje,
+      pasta,
+      origem_pasta: origem,
+      existe_backup_hoje: existeBackupDoDia(pasta, hoje),
+      horario_automatico: "23:59"
+    });
+  } catch (error) {
+    return responderBloqueio(res, error);
+  }
 });
 
 router.get('/history', (req, res) => {
@@ -121,8 +172,6 @@ router.get('/history', (req, res) => {
     return responderBloqueio(res, error);
   }
 
-  // Pasta vem só da config interna ou query "pasta" já persistida pelo operador —
-  // não aceita caminho de banco. Query pasta é diretório de backups, não o .db.
   const pastaBackup = req.query.pasta || null;
   try {
     if (pastaBackup) {

@@ -120,8 +120,8 @@
 
 .central-0577-toolbar {
   display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
+  flex-direction: column;
+  align-items: stretch;
   gap: 0.5rem;
 }
 
@@ -214,7 +214,35 @@
   background: #f8fafc;
 }
 
-.central-0577-tabela tbody tr.is-selected {
+/* Em revisão MIIP — amarelo */
+.central-0577-tabela tbody tr.central-doc-row--revisao {
+  background: #fff8e1;
+  border-left: 3px solid #f59e0b;
+}
+
+.central-0577-tabela tbody tr.central-doc-row--revisao:hover {
+  background: #ffecb3;
+}
+
+.central-0577-tabela tbody tr.central-doc-row--revisao.is-selected {
+  background: #ffe082;
+}
+
+/* Pronta / em importação pela compra — verde claro */
+.central-0577-tabela tbody tr.central-doc-row--pronta {
+  background: #e8f5e9;
+  border-left: 3px solid #22c55e;
+}
+
+.central-0577-tabela tbody tr.central-doc-row--pronta:hover {
+  background: #c8e6c9;
+}
+
+.central-0577-tabela tbody tr.central-doc-row--pronta.is-selected {
+  background: #a5d6a7;
+}
+
+.central-0577-tabela tbody tr.is-selected:not(.central-doc-row--revisao):not(.central-doc-row--pronta) {
   background: #ecfdf5;
 }
 

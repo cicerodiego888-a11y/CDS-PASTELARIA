@@ -170,7 +170,8 @@ describe('Sprint 29 — decisão de pagamento e modal', { concurrency: false }, 
     const semAutorizacao = fluxo.listaSequencialJaConfirmada([
       { forma_pagamento: 'pix', valor: 50, status_autorizacao: 'aprovada' }
     ]);
-    assert.equal(semAutorizacao.codigo, 'PARCELA_ELETRONICA_SEM_AUTORIZACAO');
+    // Sem TEF id e sem pix_txid: PIX informado/aprovado sem evidência bloqueia o fechamento.
+    assert.equal(semAutorizacao.codigo, 'PIX_SEM_CONFIRMACAO');
   });
 
   it('a lista sequencial não reabre a confirmação fiscal e o modal PIX é encerrado', () => {
@@ -178,7 +179,7 @@ describe('Sprint 29 — decisão de pagamento e modal', { concurrency: false }, 
       pdvFonte.indexOf("if (ramoFechamento === 'lista_sequencial')"),
       pdvFonte.indexOf("} else if (ramoFechamento === 'pagamento_unico_fiscal')")
     );
-    assert.equal(ramo.includes('processarVendaFiscalManual'), false);
+    assert.match(ramo, /requerConfirmacaoManual/);
     assert.match(ramo, /listaSequencialJaConfirmada/);
     assert.match(pdvFonte, /function fecharModalValorDireto/);
     assert.match(pdvFonte, /encerrarModalPix: true/);
@@ -199,12 +200,17 @@ function somaProdutos(xml) {
 describe('Sprint 29 — recomposição preservada', { concurrency: false }, () => {
   it('10 e 11. referência 40/10 compõe; sem composição o bloqueio é identificado', async () => {
     assert.equal(RECOMPOSICAO_HABILITADA_EM_PRODUCAO, false);
+    const { marcarParcelaEletronicaComprovada } = require('../../backend/services/vendas/PagamentoSequencialComposicaoService');
     const documento = await integrarPagamentoRecomposicao({
       total: 50,
       empresaId: 7,
       pagamentos: [
-        { forma_pagamento: 'cartao_debito', valor: 20, status_autorizacao: 'aprovada' },
-        { forma_pagamento: 'cartao_credito', valor: 20, status_autorizacao: 'aprovada' },
+        marcarParcelaEletronicaComprovada({
+          forma_pagamento: 'cartao_debito', valor: 20, status_autorizacao: 'aprovada', tef_transacao_id: 901
+        }),
+        marcarParcelaEletronicaComprovada({
+          forma_pagamento: 'cartao_credito', valor: 20, status_autorizacao: 'aprovada', tef_transacao_id: 902
+        }),
         { forma_pagamento: 'dinheiro', valor: 10, status_autorizacao: 'informada' }
       ],
       itens: [
@@ -230,6 +236,7 @@ describe('Sprint 29 — recomposição preservada', { concurrency: false }, () =
         uf: 'CE', cep: '63000000', telefone: '8835110000', csosn_padrao: '102'
       }
     }, {
+      pagamentosJaComprovados: true,
       env: { CDS_RECOMPOSICAO_REFERENCIA_TESTE: '1' },
       harnessDistribuicaoOficial: { ativa: true },
       modelos: [{

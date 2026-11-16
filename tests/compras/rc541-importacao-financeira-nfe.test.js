@@ -109,8 +109,31 @@ test('XML com IPI participa do total componentes', () => {
   });
   assert.strictEqual(fin.valor_ipi, 100);
   assert.strictEqual(fin.valor_seguro, 10);
+  assert.strictEqual(fin.valor_icms_st, 0);
+  assert.strictEqual(fin.valor_fcp_st, 0);
   assert.strictEqual(fin.valor_total_nota, 1110);
   assert.strictEqual(calcularTotalComponentes(fin), 1110);
+});
+
+test('XML com ICMS ST + FCP-ST fecha o vNF', () => {
+  const fin = montarImportacaoFinanceiraNfe({
+    icmsTot: {
+      vProd: '1804.76',
+      vDesc: '0',
+      vFrete: '0',
+      vSeg: '0',
+      vOutro: '0',
+      vIPI: '34.69',
+      vST: '18.24',
+      vFCPST: '1.82',
+      vNF: '1859.51'
+    }
+  });
+  assert.strictEqual(fin.valor_icms_st, 18.24);
+  assert.strictEqual(fin.valor_fcp_st, 1.82);
+  assert.strictEqual(fin.valor_ipi, 34.69);
+  assert.strictEqual(calcularTotalComponentes(fin), 1859.51);
+  assert.strictEqual(fin.valor_total_nota, 1859.51);
 });
 
 test('XML com múltiplas formas de pagamento (maior vPag vence)', () => {
@@ -143,7 +166,7 @@ test('mapearInfNFe inclui financeiro no DTO', () => {
       },
       imposto: {}
     }],
-    total: { ICMSTot: { vProd: '100', vDesc: '0', vFrete: '0', vSeg: '0', vOutro: '0', vIPI: '15', vNF: '115' } },
+    total: { ICMSTot: { vProd: '100', vDesc: '0', vFrete: '0', vSeg: '0', vOutro: '0', vIPI: '15', vST: '2.50', vFCPST: '0.25', vNF: '117.75' } },
     pag: { detPag: { tPag: '15', vPag: '115.00', indPag: '1' } },
     cobr: {
       dup: [
@@ -155,7 +178,9 @@ test('mapearInfNFe inclui financeiro no DTO', () => {
   });
   const json = dto.toJSON();
   assert.strictEqual(json.valor_ipi, 15);
-  assert.strictEqual(json.valor_total_nota, 115);
+  assert.strictEqual(json.valor_icms_st, 2.5);
+  assert.strictEqual(json.valor_fcp_st, 0.25);
+  assert.strictEqual(json.valor_total_nota, 117.75);
   assert.strictEqual(json.forma_pagamento, 'boleto');
   assert.strictEqual(json.condicao_pagamento, 'prazo');
   assert.strictEqual(json.parcelas_detalhe.length, 2);

@@ -262,15 +262,17 @@ describe('PDV-SEL-03 capacidade ficha × saldo', { concurrency: false }, () => {
     await closeDb(db);
   });
 
-  it('produto sem ficha: tipoSaldo FISCAL não usa saldo não fiscal', async () => {
+  it('INSUMO sem ficha: tipoSaldo FISCAL não usa saldo não fiscal', async () => {
+    // CDS-PDV-ESTOQUE-PRODUTOS-COMERCIAIS-FISCAIS-01: comercial não valida saldo próprio;
+    // o bucket F×NF próprio permanece nos insumos.
     const { db, matriz, filialB, filialC } = await setupBase();
-    const pastel = await criarProduto(db, 'Pastel NF', 'COMERCIAL', 'UN', { utiliza_ficha_tecnica: 0 });
-    await setEstoque(db, pastel, matriz.id, 0, 10);
-    await setEstoque(db, pastel, filialB.id, 0, 0);
-    await setEstoque(db, pastel, filialC.id, 0, 0);
+    const insumo = await criarProduto(db, 'Insumo NF', 'INSUMO', 'UN', { utiliza_ficha_tecnica: 0 });
+    await setEstoque(db, insumo, matriz.id, 0, 10);
+    await setEstoque(db, insumo, filialB.id, 0, 0);
+    await setEstoque(db, insumo, filialC.id, 0, 0);
 
     const out = await avaliarCapacidadeCarrinho({
-      itens: [{ produtoId: pastel, quantidade: 1 }],
+      itens: [{ produtoId: insumo, quantidade: 1 }],
       modoOperacional: 'MULTIEMPRESA',
       tipoSaldo: TipoSaldo.FISCAL
     }, depsBase(db));
@@ -284,20 +286,41 @@ describe('PDV-SEL-03 capacidade ficha × saldo', { concurrency: false }, () => {
     await closeDb(db);
   });
 
-  it('produto sem ficha: tipoSaldo NAO_FISCAL usa saldo não fiscal', async () => {
+  it('INSUMO sem ficha: tipoSaldo NAO_FISCAL usa saldo não fiscal', async () => {
     const { db, matriz, filialB, filialC } = await setupBase();
-    const pastel = await criarProduto(db, 'Pastel NF2', 'COMERCIAL', 'UN', { utiliza_ficha_tecnica: 0 });
-    await setEstoque(db, pastel, matriz.id, 0, 10);
+    const insumo = await criarProduto(db, 'Insumo NF2', 'INSUMO', 'UN', { utiliza_ficha_tecnica: 0 });
+    await setEstoque(db, insumo, matriz.id, 0, 10);
+    await setEstoque(db, insumo, filialB.id, 0, 0);
+    await setEstoque(db, insumo, filialC.id, 0, 0);
+
+    const out = await avaliarCapacidadeCarrinho({
+      itens: [{ produtoId: insumo, quantidade: 1 }],
+      modoOperacional: 'MULTIEMPRESA',
+      tipoSaldo: TipoSaldo.NAO_FISCAL
+    }, depsBase(db));
+
+    assert.equal(out.selecionada.empresaId, matriz.id);
+    await closeDb(db);
+  });
+
+  it('COMERCIAL sem ficha e saldo próprio zero: permitido (CDS-01)', async () => {
+    const { db, matriz, filialB, filialC } = await setupBase();
+    const pastel = await criarProduto(db, 'Pastel comercial', 'COMERCIAL', 'UN', {
+      utiliza_ficha_tecnica: 0,
+      controla_estoque: 1
+    });
+    await setEstoque(db, pastel, matriz.id, 0, 0);
     await setEstoque(db, pastel, filialB.id, 0, 0);
     await setEstoque(db, pastel, filialC.id, 0, 0);
 
     const out = await avaliarCapacidadeCarrinho({
       itens: [{ produtoId: pastel, quantidade: 1 }],
       modoOperacional: 'MULTIEMPRESA',
-      tipoSaldo: TipoSaldo.NAO_FISCAL
+      tipoSaldo: TipoSaldo.FISCAL
     }, depsBase(db));
 
-    assert.equal(out.selecionada.empresaId, matriz.id);
+    assert.ok(out.selecionada);
+    assert.equal(out.bloqueio, null);
     await closeDb(db);
   });
 

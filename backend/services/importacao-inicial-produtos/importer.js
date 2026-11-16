@@ -458,7 +458,7 @@ async function executarImportacao(db, validacao, {
   try {
     const pasta = pastaBackup || await obterPastaBackupConfigurada(db);
     const caminhoDb = dbPath || dbModule.dbPath || path.join(process.cwd(), 'database.db');
-    backup = fazerBackupManual(caminhoDb, pasta || undefined);
+    backup = await fazerBackupManual(caminhoDb, pasta || undefined);
   } catch (e) {
     const err = new Error('Não foi possível criar o backup. A importação foi cancelada.');
     err.status = 500;

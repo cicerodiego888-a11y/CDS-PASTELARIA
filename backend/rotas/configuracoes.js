@@ -238,22 +238,27 @@ router.post('/backup-path', (req, res) => {
   });
 });
 
-// buscar pasta backup
-router.get('/backup-path', (req, res) => {
-  db.get(
-    "SELECT valor FROM configuracoes WHERE chave = 'backup_path'",
-    [],
-    (err, row) => {
-      if (err) {
-        return res.status(500).json({ sucesso: false });
-      }
-
-      res.json({
-        sucesso: true,
-        caminho: row?.valor || null
-      });
-    }
-  );
+// buscar pasta backup (usa padrão operacional se ainda não configurada)
+router.get('/backup-path', async (req, res) => {
+  try {
+    const { resolverPastaBackupOperacional } = require('../services/backupManual');
+    const { resolverCaminhoBancoOperacional } = require('../lib/sqliteOfficialGuard');
+    const dbPath = resolverCaminhoBancoOperacional({
+      dbPathPreferido: db.dbPath || process.env.DB_PATH
+    });
+    const { pasta, origem } = await resolverPastaBackupOperacional(db, dbPath);
+    return res.json({
+      sucesso: true,
+      caminho: pasta,
+      origem_pasta: origem
+    });
+  } catch (err) {
+    console.error('[BACKUP] Erro ao resolver pasta de backup:', err);
+    return res.status(500).json({
+      sucesso: false,
+      mensagem: err.message || 'Erro ao obter pasta de backup.'
+    });
+  }
 });
 
 // buscar impressora configurada

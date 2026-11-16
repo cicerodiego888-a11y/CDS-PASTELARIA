@@ -161,8 +161,131 @@ function migrarColunaTefConfiguracaoId(tabela) {
   });
 }
 
+/**
+ * Libera o mesmo nome em tipos diferentes (ex.: Refrigerantes produto + insumo).
+ * Antes: UNIQUE(nome) bloqueava criar categoria de insumo se já existisse em produto.
+ */
+function migrarCategoriasUniqueNomeTipo() {
+  const CHAVE = 'migracao_categorias_unique_nome_tipo';
+  db.get('SELECT valor FROM configuracoes WHERE chave = ?', [CHAVE], (cfgErr, cfg) => {
+    if (cfgErr) {
+      console.error('Erro ao verificar migração categorias nome+tipo:', cfgErr.message);
+      return;
+    }
+    if (cfg && String(cfg.valor) === '1') return;
+
+    db.get(
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'categorias'`,
+      (sqlErr, row) => {
+        if (sqlErr || !row || !row.sql) return;
+        const sql = String(row.sql);
+        const jaComposto = /UNIQUE\s*\(\s*nome\s*,\s*tipo\s*\)/i.test(sql)
+          || /UNIQUE\s*\(\s*tipo\s*,\s*nome\s*\)/i.test(sql);
+        const aindaNomeUnico = /nome\s+TEXT\s+NOT\s+NULL\s+UNIQUE/i.test(sql);
+
+        const marcarOk = () => {
+          db.run(
+            `INSERT OR REPLACE INTO configuracoes (chave, valor, tipo, descricao)
+             VALUES (?, '1', 'migracao', 'UNIQUE categorias (nome, tipo)')`,
+            [CHAVE],
+            (flagErr) => {
+              if (flagErr) console.error('Erro ao marcar migração categorias:', flagErr.message);
+              else console.log('Migração categorias UNIQUE(nome, tipo) concluída');
+            }
+          );
+        };
+
+        if (jaComposto && !aindaNomeUnico) {
+          marcarOk();
+          return;
+        }
+        if (!aindaNomeUnico && !jaComposto) {
+          // Tabela sem UNIQUE em nome: só garante índice composto.
+          db.run(
+            `CREATE UNIQUE INDEX IF NOT EXISTS idx_categorias_nome_tipo ON categorias(nome, tipo)`,
+            (idxErr) => {
+              if (idxErr && !/already exists/i.test(idxErr.message || '')) {
+                console.error('Erro ao criar idx_categorias_nome_tipo:', idxErr.message);
+                return;
+              }
+              marcarOk();
+            }
+          );
+          return;
+        }
+
+        db.serialize(() => {
+          db.run('BEGIN IMMEDIATE');
+          db.run(`
+            CREATE TABLE categorias_nome_tipo_mig (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              nome TEXT NOT NULL,
+              descricao TEXT,
+              tipo TEXT NOT NULL DEFAULT 'produto',
+              ativo INTEGER DEFAULT 1,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              UNIQUE(nome, tipo)
+            )
+          `, (createErr) => {
+            if (createErr) {
+              db.run('ROLLBACK');
+              console.error('Erro ao recriar categorias (nome,tipo):', createErr.message);
+              return;
+            }
+            db.run(`
+              INSERT INTO categorias_nome_tipo_mig
+                (id, nome, descricao, tipo, ativo, created_at, updated_at)
+              SELECT id, nome, descricao,
+                     COALESCE(NULLIF(TRIM(tipo), ''), 'produto'),
+                     COALESCE(ativo, 1), created_at, updated_at
+              FROM categorias
+            `, (copyErr) => {
+              if (copyErr) {
+                db.run('ROLLBACK');
+                console.error('Erro ao copiar categorias na migração:', copyErr.message);
+                return;
+              }
+              db.run('DROP TABLE categorias', (dropErr) => {
+                if (dropErr) {
+                  db.run('ROLLBACK');
+                  console.error('Erro ao dropar categorias legada:', dropErr.message);
+                  return;
+                }
+                db.run(
+                  'ALTER TABLE categorias_nome_tipo_mig RENAME TO categorias',
+                  (renameErr) => {
+                    if (renameErr) {
+                      db.run('ROLLBACK');
+                      console.error('Erro ao renomear categorias migrada:', renameErr.message);
+                      return;
+                    }
+                    db.run(
+                      'CREATE INDEX IF NOT EXISTS idx_mib3_categorias_nome ON categorias(nome)',
+                      () => {
+                        db.run('COMMIT', (commitErr) => {
+                          if (commitErr) {
+                            console.error('Erro ao commit migração categorias:', commitErr.message);
+                            return;
+                          }
+                          marcarOk();
+                        });
+                      }
+                    );
+                  }
+                );
+              });
+            });
+          });
+        });
+      }
+    );
+  });
+}
+
 function aplicarAlteracoesPosCriacao() {
   aplicarAlteracaoSegura('categorias', `ALTER TABLE categorias ADD COLUMN tipo TEXT DEFAULT 'produto'`);
+  migrarCategoriasUniqueNomeTipo();
   aplicarAlteracaoSegura('caixa', `ALTER TABLE caixa ADD COLUMN status TEXT DEFAULT 'aberto'`);
   aplicarAlteracaoSegura('caixa', `ALTER TABLE caixa ADD COLUMN terminal_id INTEGER REFERENCES terminais(id)`);
   aplicarAlteracaoSegura('vendas', `ALTER TABLE vendas ADD COLUMN caixa_id INTEGER REFERENCES caixa(id)`);
@@ -306,6 +429,8 @@ function aplicarAlteracoesPosCriacao() {
     `ALTER TABLE produtos ADD COLUMN imagem_principal TEXT`,
     // RC8.0.Y — controle opcional de estoque por produto (1 = controla, 0 = não controla)
     `ALTER TABLE produtos ADD COLUMN controla_estoque INTEGER DEFAULT 1`,
+    // CDS-INSUMOS-PRODUTO-COMERCIALIZAVEL-01 — INSUMO opt-in para venda no Pedido
+    `ALTER TABLE produtos ADD COLUMN comercializavel INTEGER NOT NULL DEFAULT 0`,
     ...MIGRACOES_VOLUME_COMERCIAL
   ];
 
@@ -330,6 +455,9 @@ function aplicarAlteracoesPosCriacao() {
     // RC COMPRAS 5.4.1 — IPI e seguro do XML
     `ALTER TABLE compras ADD COLUMN valor_ipi DECIMAL(10,2) DEFAULT 0`,
     `ALTER TABLE compras ADD COLUMN valor_seguro DECIMAL(10,2) DEFAULT 0`,
+    // ICMS ST / FCP-ST (vST + vFCPST) — entram no vNF
+    `ALTER TABLE compras ADD COLUMN valor_icms_st DECIMAL(10,2) DEFAULT 0`,
+    `ALTER TABLE compras ADD COLUMN valor_fcp_st DECIMAL(10,2) DEFAULT 0`,
     `ALTER TABLE compras ADD COLUMN valor_total_nota DECIMAL(10,2) DEFAULT 0`,
     `ALTER TABLE compras ADD COLUMN cancelada_em DATETIME`,
     `ALTER TABLE compras ADD COLUMN motivo_cancelamento TEXT`,
@@ -1594,16 +1722,17 @@ function criarTabelas() {
       addColuna('troco', 'DECIMAL(10,2)');
     });
 
-    // Tabela de categorias
+    // Tabela de categorias (UNIQUE por nome+tipo: produto/insumo/despesa podem repetir nome)
     db.run(`
       CREATE TABLE IF NOT EXISTS categorias (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nome TEXT NOT NULL UNIQUE,
+        nome TEXT NOT NULL,
         descricao TEXT,
         tipo TEXT NOT NULL DEFAULT 'produto',
         ativo INTEGER DEFAULT 1,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(nome, tipo)
       )
     `, (err) => {
       if (err) console.error('Erro ao criar tabela categorias:', err);
@@ -1770,6 +1899,7 @@ function criarTabelas() {
         permite_venda_unidade INTEGER DEFAULT 0,
         peso_medio_unidade REAL DEFAULT 0,
         preco_unidade REAL DEFAULT 0,
+        comercializavel INTEGER NOT NULL DEFAULT 0,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (categoria_id) REFERENCES categorias(id),
@@ -3017,6 +3147,10 @@ function garantirColunasCompras() {
       !colunas.includes('valor_desconto') && `ALTER TABLE compras ADD COLUMN valor_desconto DECIMAL(10,2) DEFAULT 0`,
       !colunas.includes('valor_frete') && `ALTER TABLE compras ADD COLUMN valor_frete DECIMAL(10,2) DEFAULT 0`,
       !colunas.includes('valor_outras_despesas') && `ALTER TABLE compras ADD COLUMN valor_outras_despesas DECIMAL(10,2) DEFAULT 0`,
+      !colunas.includes('valor_ipi') && `ALTER TABLE compras ADD COLUMN valor_ipi DECIMAL(10,2) DEFAULT 0`,
+      !colunas.includes('valor_seguro') && `ALTER TABLE compras ADD COLUMN valor_seguro DECIMAL(10,2) DEFAULT 0`,
+      !colunas.includes('valor_icms_st') && `ALTER TABLE compras ADD COLUMN valor_icms_st DECIMAL(10,2) DEFAULT 0`,
+      !colunas.includes('valor_fcp_st') && `ALTER TABLE compras ADD COLUMN valor_fcp_st DECIMAL(10,2) DEFAULT 0`,
       !colunas.includes('valor_total_nota') && `ALTER TABLE compras ADD COLUMN valor_total_nota DECIMAL(10,2) DEFAULT 0`
     ].filter(Boolean);
 

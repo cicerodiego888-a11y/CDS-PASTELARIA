@@ -58,9 +58,10 @@
   function formaAceitaConfirmacaoManual(forma, ehPagamentoMisto) {
     if (ehPagamentoMisto) return true;
     const normalizada = normalizarFormaPagamentoTEF(forma);
+    // Com TEF desligado, dinheiro e eletrônico usam confirmação operacional no fechamento.
     return normalizada === 'dinheiro'
-      || normalizada === 'debito'
-      || normalizada === 'credito'
+      || normalizada === 'especie'
+      || normalizada === 'cash'
       || formaPagamentoUsaTEF(normalizada);
   }
 
@@ -117,7 +118,7 @@
     'erro'
   ]);
 
-  function parcelaSequencialJaConfirmada(parcela) {
+  function parcelaSequencialJaConfirmada(parcela, opcoes = {}) {
     if (!parcela || !(Number(parcela.valor) > 0)) {
       return { ok: false, codigo: 'PARCELA_INVALIDA' };
     }
@@ -130,10 +131,25 @@
       const id = parcela.tef_transacao_id || (parcela.tef && parcela.tef.transacao_id);
       const aprovada = (status === 'aprovada' || status === 'aprovado' || parcela.aprovado === true)
         && parcela.aprovado !== false;
-      if (!id || !aprovada) {
-        return { ok: false, codigo: 'PARCELA_ELETRONICA_SEM_AUTORIZACAO' };
+      if (id && aprovada) {
+        return { ok: true };
       }
-      return { ok: true };
+      const ehPix = forma === 'pix' || forma === 'pix_tef';
+      const pixConfirmado = ehPix && (
+        parcela.pix_confirmado === true
+        || parcela.confirmacao_efetiva === true
+      ) && String(parcela.pix_txid || '').trim() !== '';
+      if (pixConfirmado && (aprovada || status === 'informada' || status === 'confirmada' || status === '')) {
+        return { ok: true };
+      }
+      // TEF desligado: eletrônico informado segue para confirmação operacional no fechamento.
+      if (opcoes.tefHabilitado === false && (status === 'informada' || status === '')) {
+        return { ok: true, requerConfirmacaoManual: true };
+      }
+      if (ehPix) {
+        return { ok: false, codigo: 'PIX_SEM_CONFIRMACAO' };
+      }
+      return { ok: false, codigo: 'PARCELA_ELETRONICA_SEM_AUTORIZACAO' };
     }
     if (status === 'informada' || status === 'aprovada' || status === 'aprovado' || status === '') {
       return { ok: true };
@@ -141,32 +157,47 @@
     return { ok: false, codigo: 'PARCELA_NAO_CONFIRMADA', status };
   }
 
-  function listaSequencialJaConfirmada(parcelas) {
+  function listaSequencialJaConfirmada(parcelas, opcoes = {}) {
     const lista = Array.isArray(parcelas) ? parcelas : [];
     if (!lista.length) return { dispensaModalExtra: false, codigo: 'LISTA_VAZIA' };
+    let requerConfirmacaoManual = false;
     for (const parcela of lista) {
-      const estado = parcelaSequencialJaConfirmada(parcela);
+      const estado = parcelaSequencialJaConfirmada(parcela, opcoes);
       if (!estado.ok) {
         return {
           dispensaModalExtra: false,
+          requerConfirmacaoManual: false,
           codigo: estado.codigo,
           status: estado.status || null
         };
       }
+      if (estado.requerConfirmacaoManual) requerConfirmacaoManual = true;
     }
-    return { dispensaModalExtra: true, codigo: null };
+    return {
+      dispensaModalExtra: !requerConfirmacaoManual,
+      requerConfirmacaoManual,
+      codigo: null
+    };
   }
 
-  function montarParcelasListaSequencial(parcelas) {
+  function montarParcelasListaSequencial(parcelas, opcoes = {}) {
+    const carimbarManual = opcoes.carimbarConfirmacaoManual === true;
     return (parcelas || []).map((pagamento) => {
       if (pagamento && pagamento.tef_transacao_id) {
         return {
           ...pagamento,
           confirmacao_modalidade: 'tef',
           confirmacao_manual: 0,
-          tipo_recebimento: 'fiscal'
+          tipo_recebimento: 'fiscal',
+          recebimento_confirmado: true
         };
       }
+      const forma = normalizarFormaPagamentoTEF(pagamento && pagamento.forma_pagamento);
+      const eletronica = formaPagamentoUsaTEF(forma);
+      const ehPix = forma === 'pix' || forma === 'pix_tef';
+      const pixConfirmado = ehPix && (
+        pagamento.pix_confirmado === true || pagamento.confirmacao_efetiva === true
+      ) && String(pagamento.pix_txid || '').trim() !== '';
       const copia = { ...(pagamento || {}) };
       delete copia.nsu;
       delete copia.autorizacao;
@@ -174,11 +205,33 @@
       delete copia.adquirente;
       delete copia.tef_transacao_id;
       delete copia.tef;
+      if (pixConfirmado) {
+        return {
+          ...copia,
+          tipo_recebimento: 'fiscal',
+          confirmacao_manual: 0,
+          confirmacao_modalidade: 'pix',
+          recebimento_confirmado: true,
+          pix_txid: pagamento.pix_txid,
+          pix_confirmado: true
+        };
+      }
+      if (eletronica && !carimbarManual) {
+        return {
+          ...copia,
+          tipo_recebimento: 'fiscal',
+          confirmacao_manual: 0,
+          confirmacao_modalidade: null,
+          recebimento_confirmado: false
+        };
+      }
       return {
         ...copia,
-        tipo_recebimento: 'nao_fiscal',
-        confirmacao_manual: 1,
-        confirmacao_modalidade: 'manual'
+        tipo_recebimento: eletronica ? 'fiscal' : 'nao_fiscal',
+        confirmacao_manual: carimbarManual || !eletronica ? 1 : 0,
+        confirmacao_modalidade: carimbarManual || !eletronica ? 'manual' : null,
+        recebimento_confirmado: carimbarManual || !eletronica,
+        confirmacao_operacional_externa: eletronica && carimbarManual ? true : undefined
       };
     });
   }

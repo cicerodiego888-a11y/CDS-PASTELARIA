@@ -15,6 +15,9 @@ const { sanitizarTextoCertificado } = require('../services/fiscal/ValidarCertifi
 const { CODIGOS_CERTIFICADO_A1, MENSAGENS_CERTIFICADO_A1 } = require('../services/fiscal/certificadoEstados');
 const { emitirPorVendaId, obterDanfeHtmlAtualizado } = require('../services/fiscal/emissor');
 const cancelarNfce = require('../services/fiscal/cancelarNfce');
+const {
+  criarAutorizacaoCancelamentoOperador
+} = require('../services/fiscal/autorizacaoTransmissaoSefaz');
 const { gravarAuditoria } = require('../services/auditoria');
 const { validarMotivoTexto } = require('../services/validacao/validarMotivoTexto');
 const { middlewareResolverEmpresaVenda } = require('../services/vendas/VendaEmpresaContextoService');
@@ -408,6 +411,21 @@ router.post('/notas/:id/cancelar', anexarEmpresaFiscal, async (req, res) => {
       });
     }
 
+    // Fail-closed: autorização SEFAZ nunca vem do cliente.
+    const body = req.body || {};
+    if (
+      body.autorizacaoTransmissaoSefaz != null
+      || body.tokenSeed != null
+      || body.token != null
+    ) {
+      return res.status(403).json({
+        success: false,
+        error: 'Autorização de transmissão SEFAZ não pode ser enviada pelo cliente.',
+        code: 'TRANSMISSAO_SEFAZ_NAO_AUTORIZADA',
+        status: 'transmissao_nao_autorizada'
+      });
+    }
+
     db.get(`
       SELECT n.*, v.empresa_id AS venda_empresa_id
       FROM nfce_notas n
@@ -459,7 +477,12 @@ router.post('/notas/:id/cancelar', anexarEmpresaFiscal, async (req, res) => {
 
         try {
           const cancelamento = await cancelarNfce(nota.venda_id, justificativa.trim(), {
-            empresaIdContexto: req.empresaId
+            empresaIdContexto: req.empresaId,
+            // Servidor-only: nunca aceitar autorizacaoTransmissaoSefaz do body.
+            autorizacaoTransmissaoSefaz: criarAutorizacaoCancelamentoOperador({
+              empresaId: req.empresaId,
+              usuarioId: req.user?.id || null
+            })
           });
           const notaIdAutorizada = cancelamento.notaId;
 
@@ -501,16 +524,30 @@ router.post('/notas/:id/cancelar', anexarEmpresaFiscal, async (req, res) => {
           }).catch((auditErr) => console.error('Erro ao gravar auditoria de cancelamento NFC-e:', auditErr));
         } catch (cancelErr) {
           const status = cancelErr.statusCode || statusDeErroFiscalEmpresa(cancelErr);
+          const code = cancelErr && cancelErr.code;
+          const bloqueadoAutorizacao = cancelErr.bloqueadoAutorizacao === true
+            || String(code || '').startsWith('TRANSMISSAO_SEFAZ_');
+          let statusOperacional;
+          if (cancelErr.resultUnknown) {
+            statusOperacional = 'cancelamento_desconhecido';
+          } else if (code === 'CANCELAMENTO_EM_ANDAMENTO') {
+            statusOperacional = 'cancelamento_em_andamento';
+          } else if (bloqueadoAutorizacao) {
+            statusOperacional = 'transmissao_nao_autorizada';
+          } else if (code === 'CANCELAMENTO_FALHA_PRE_ENVIO') {
+            statusOperacional = 'cancelamento_falha_pre_envio';
+          } else if (code === 'CANCELAMENTO_REJEITADO') {
+            statusOperacional = 'cancelamento_rejeitado';
+          } else if (code === 'CANCELAMENTO_NAO_ELEGIVEL') {
+            statusOperacional = 'cancelamento_nao_elegivel';
+          }
           return res.status(status).json({
             success: false,
             error: status === 404 ? 'NFC-e não encontrada.' : mensagemErroFiscalSanitizada(cancelErr),
-            code: cancelErr && cancelErr.code,
+            code,
             resultUnknown: cancelErr.resultUnknown === true,
-            status: cancelErr.resultUnknown
-              ? 'cancelamento_desconhecido'
-              : (cancelErr.code === 'CANCELAMENTO_EM_ANDAMENTO'
-                ? 'cancelamento_em_andamento'
-                : undefined),
+            bloqueadoAutorizacao: bloqueadoAutorizacao || undefined,
+            status: statusOperacional,
             correlationId: cancelErr.correlationId
           });
         }

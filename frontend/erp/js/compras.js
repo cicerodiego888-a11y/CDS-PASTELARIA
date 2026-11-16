@@ -236,23 +236,28 @@ function sincronizarDraftCompraDoFormulario(extras = {}) {
     return draft;
 }
 
-/** Formação de preço exclusivamente sobre o draft. */
+/**
+ * Formação de preço no draft.
+ * Regra: o operador define a venda; a margem só reflete o markup (não redefine preço).
+ */
 function recalcularFormacaoPrecoDraftCompra(origem = 'custo') {
     if (!itemDraftCompra) return;
     const draft = itemDraftCompra;
     draft.preco_unitario = Number(draft.preco_unitario || 0);
-    draft.margem_lucro = Number(draft.margem_lucro || 0);
     draft.preco_venda_sugerido = Number(draft.preco_venda_sugerido || 0);
 
-    if (origem === 'margem' || origem === 'custo' || origem === 'embalagem') {
-        draft.preco_venda_sugerido = Number(
-            (draft.preco_unitario * (1 + draft.margem_lucro / 100)).toFixed(2)
-        );
-    } else if (origem === 'venda') {
-        draft.margem_lucro = draft.preco_unitario > 0
-            ? Number((((draft.preco_venda_sugerido - draft.preco_unitario) / draft.preco_unitario) * 100).toFixed(2))
-            : 0;
+    // Sem venda ainda e custo informado: sugere a partir do cadastro/fallback só na 1ª vez.
+    if (draft.preco_venda_sugerido <= 0 && draft.preco_unitario > 0
+        && (origem === 'custo' || origem === 'embalagem' || origem === 'init')) {
+        const margemSeed = Number(draft.margem_lucro);
+        if (Number.isFinite(margemSeed) && margemSeed !== 0) {
+            draft.preco_venda_sugerido = Number(
+                (draft.preco_unitario * (1 + margemSeed / 100)).toFixed(2)
+            );
+        }
     }
+
+    draft.margem_lucro = derivarMargemMarkupCompra(draft.preco_unitario, draft.preco_venda_sugerido);
 
     if (Number(draft.quantidade_por_embalagem || 0) > 0 && Number(draft.preco_venda_sugerido || 0) > 0) {
         draft.valor_embalagem_venda = Number(
@@ -275,6 +280,14 @@ const ORIGEM_COMPRA = Object.freeze({
 
 /** RC4.31.26 — fallback do lançamento quando não há margem cadastrada (não usar 30%) */
 const MARGEM_PADRAO_FALLBACK_COMPRA = 35;
+
+/** Margem somente leitura no lançamento: markup = (venda − custo) / custo. */
+function derivarMargemMarkupCompra(custo, venda) {
+    const c = Number(custo) || 0;
+    const v = Number(venda) || 0;
+    if (c <= 0) return 0;
+    return Number((((v - c) / c) * 100).toFixed(2));
+}
 
 const ORIGEM_BASE_COMERCIAL_COMPRA = Object.freeze({
     ULTIMA_COMPRA: 'ultima_compra',
@@ -314,12 +327,32 @@ function extrairMargemCadastradaProduto(produto) {
         produto.margem_padrao,
         produto.percentual_lucro
     ];
+    let margemCadastro = null;
     for (const raw of candidatos) {
         if (raw === undefined || raw === null || raw === '') continue;
         const n = Number(raw);
         if (Number.isFinite(n)) {
-            return { margem: n, fallback: false, origem: ORIGEM_BASE_COMERCIAL_COMPRA.CADASTRO };
+            margemCadastro = n;
+            break;
         }
+    }
+
+    const compra = Number(produto.preco_compra || 0);
+    const venda = Number(produto.preco_venda || 0);
+    const ehInsumoComercializavel = String(produto.tipo_operacional || '').toUpperCase() === 'INSUMO'
+        && Number(produto.comercializavel || 0) === 1;
+    // Legado: INSUMO comercializável gravava lucro_percentual=0 com venda real → derivar margem.
+    if (ehInsumoComercializavel && compra > 0 && venda > 0
+        && (margemCadastro == null || margemCadastro === 0)) {
+        return {
+            margem: Number((((venda - compra) / compra) * 100).toFixed(2)),
+            fallback: false,
+            origem: ORIGEM_BASE_COMERCIAL_COMPRA.CADASTRO
+        };
+    }
+
+    if (margemCadastro != null) {
+        return { margem: margemCadastro, fallback: false, origem: ORIGEM_BASE_COMERCIAL_COMPRA.CADASTRO };
     }
     return { margem: MARGEM_PADRAO_FALLBACK_COMPRA, fallback: true, origem: ORIGEM_BASE_COMERCIAL_COMPRA.PADRAO };
 }
@@ -355,21 +388,26 @@ function deveReaplicarMargemCadastroItemCompra(item) {
  */
 function aplicarMargemDoProdutoNoItemCompra(draft, produto, opcoes = {}) {
     if (!draft) return draft;
-    if (Number(draft.margem_editada_manual) === 1 && !opcoes.forcar) {
-        return draft;
+    const custo = Number(draft.preco_unitario || 0);
+    let venda = Number(draft.preco_venda_sugerido || 0);
+    const vendaCadastro = Number(produto?.preco_venda || 0);
+
+    // Venda do operador/cadastro prevalece; margem nunca redefine o preço no lançamento.
+    if (venda <= 0 && vendaCadastro > 0) {
+        venda = vendaCadastro;
+        draft.preco_venda_sugerido = venda;
+    } else if (venda <= 0 && custo > 0) {
+        const info = extrairMargemCadastradaProduto(produto);
+        venda = Number((custo * (1 + Number(info.margem || 0) / 100)).toFixed(2));
+        draft.preco_venda_sugerido = venda;
+        draft.margem_fallback_padrao = info.fallback ? 1 : 0;
+        draft.origem_base_comercial = info.origem;
     }
-    const info = extrairMargemCadastradaProduto(produto);
-    draft.margem_lucro = Number(Number(info.margem).toFixed(2));
-    draft.margem_fallback_padrao = info.fallback ? 1 : 0;
-    draft.margem_origem = info.fallback ? 'fallback' : 'cadastro';
-    draft.origem_base_comercial = info.origem;
+
+    draft.margem_lucro = derivarMargemMarkupCompra(custo, Number(draft.preco_venda_sugerido || 0));
+    draft.margem_origem = Number(draft.preco_venda_sugerido || 0) > 0 ? 'venda' : (draft.margem_origem || 'cadastro');
     if (opcoes.forcar) {
         draft.margem_editada_manual = 0;
-    }
-    if (Number(draft.atualizar_preco_venda ?? 1) === 1 && Number(draft.preco_unitario) > 0) {
-        draft.preco_venda_sugerido = Number(
-            (Number(draft.preco_unitario) * (1 + draft.margem_lucro / 100)).toFixed(2)
-        );
     }
     return draft;
 }
@@ -399,12 +437,12 @@ function rotuloOrigemBaseComercialCompra(origem) {
 }
 
 function marcarMargemManualCompra() {
+    // Campo margem é readonly na UI; mantém flags por compatibilidade sem recalcular venda.
     margemInformadaManualCompra = true;
     if (itemDraftCompra) {
         itemDraftCompra.margem_editada_manual = 1;
         itemDraftCompra.margem_origem = 'manual';
     }
-    calcularValorVendaItem();
 }
 
 function atualizarIndicadorBaseComercialCompra(origem) {
@@ -456,13 +494,17 @@ function resolverDadosComerciaisProdutoCompra(produto, ultimaCompra = null) {
         atualizarPreco = Number(ultimaCompra.atualizar_preco_venda ?? 1) === 0 ? 0 : 1;
     }
 
-    const venda = preco > 0
-        ? Number((preco * (1 + margem / 100)).toFixed(2))
-        : (vendaCadastro > 0 ? vendaCadastro : 0);
+    // Preferência: preço de venda do cadastro; margem só para exibição.
+    const venda = vendaCadastro > 0
+        ? vendaCadastro
+        : (preco > 0 ? Number((preco * (1 + margem / 100)).toFixed(2)) : 0);
+    const margemExibicao = preco > 0 && venda > 0
+        ? derivarMargemMarkupCompra(preco, venda)
+        : margem;
 
     return {
         preco_unitario: preco,
-        margem_lucro: margem,
+        margem_lucro: margemExibicao,
         preco_venda_sugerido: venda,
         atualizar_preco_venda: atualizarPreco,
         origem: origemMargem,
@@ -856,7 +898,10 @@ function obterPrecoUnitarioCompraFormulario(item = {}, produto = null) {
     if (!modoEmb) {
         const unit = numeroPositivoCompra(item.preco_unitario);
         if (unit != null) {
-            return { valor: Number(unit.toFixed(4)), origem: 'preco_unitario', modoEmbalagem: false };
+            const casas = isOrigemCompraCentralNfe() && Number(item.preco_unitario_xml || item.subtotal_xml || 0) > 0
+                ? 6
+                : 4;
+            return { valor: Number(unit.toFixed(casas)), origem: 'preco_unitario', modoEmbalagem: false };
         }
         const qtd = numeroPositivoCompra(item.quantidade) || qtdComercial;
         const sub = numeroPositivoCompra(item.subtotal);
@@ -2794,10 +2839,63 @@ function formatarQuantidadeItemCompra(item = {}) {
     return `${formatQuantidadeExibicao(qtdFiscal, 3)} ${un !== 'UN' ? un : ''}`.trim();
 }
 
+/**
+ * Extrai vProd / vUnCom / qCom oficiais do item (carimbo ou nfe_item_original).
+ * Vale para qualquer NF-e importada — não depende de nota pontual.
+ */
+function extrairTotaisXmlItemCompra(item = {}) {
+    const prod = item?.nfe_item_original?.prod
+        || (item?.nfe_item_original?.vProd != null ? item.nfe_item_original : null)
+        || null;
+    const subXml = Number(item.subtotal_xml ?? prod?.vProd ?? item.subtotal ?? item.valor_total);
+    const qtdXml = Number(item.quantidade_xml ?? prod?.qCom ?? item.quantidade_comercial ?? item.quantidade);
+    const precoXml = Number(item.preco_unitario_xml ?? prod?.vUnCom ?? item.preco_unitario);
+    return {
+        subtotal_xml: Number.isFinite(subXml) && subXml > 0 ? Number(subXml.toFixed(2)) : null,
+        quantidade_xml: Number.isFinite(qtdXml) && qtdXml > 0 ? qtdXml : null,
+        preco_unitario_xml: Number.isFinite(precoXml) && precoXml > 0 ? precoXml : null
+    };
+}
+
+/**
+ * Subtotal financeiro da linha.
+ * Em NF-e, preserva o vProd oficial enquanto a quantidade XML não mudar e o operador
+ * não editar o preço manualmente — evita gap por arredondamento a 2 casas.
+ */
+function resolverSubtotalFinanceiroItemCompra({
+    quantidade,
+    preco_unitario,
+    subtotal_xml,
+    quantidade_xml,
+    preco_unitario_xml,
+    preco_editado_manual
+} = {}) {
+    const qtd = Number(quantidade || 0);
+    const preco = Number(preco_unitario || 0);
+    const subXml = Number(subtotal_xml);
+    const qtdXml = Number(quantidade_xml);
+    const editouPreco = Number(preco_editado_manual) === 1 || preco_editado_manual === true;
+    // Qualquer NF-e: enquanto qtd XML permanece e o preço não foi editado à mão, usa vProd.
+    if (!editouPreco
+        && Number.isFinite(subXml) && subXml > 0
+        && Number.isFinite(qtdXml) && qtdXml > 0
+        && Math.abs(qtd - qtdXml) < 0.0005) {
+        return Number(subXml.toFixed(2));
+    }
+    return Number((qtd * preco).toFixed(2));
+}
+
 function calcularSubtotalFinanceiroItemCompra(item = {}) {
     const quantidade = obterQuantidadeConvertidaItemCompra(item);
-    const preco = Number(item.preco_unitario || 0);
-    return Number((quantidade * preco).toFixed(2));
+    const xml = extrairTotaisXmlItemCompra(item);
+    return resolverSubtotalFinanceiroItemCompra({
+        quantidade,
+        preco_unitario: Number(item.preco_unitario || 0),
+        subtotal_xml: xml.subtotal_xml ?? item.subtotal_xml,
+        quantidade_xml: xml.quantidade_xml ?? item.quantidade_xml,
+        preco_unitario_xml: xml.preco_unitario_xml ?? item.preco_unitario_xml,
+        preco_editado_manual: item.preco_editado_manual
+    });
 }
 
 function tipoOperacionalCadastroCompra(produto) {
@@ -2910,10 +3008,25 @@ function normalizeItemCompra(itemBruto = {}) {
             : quantidadeConvertida)
         : (qtdFiscal + qtdNaoFiscal || quantidadeComercial || 1);
     const fracionado = itemCompraEhFracionado(item);
-    const casasCusto = fracionado ? 4 : 2;
-    const custo = fracionado
+    const xmlTotais = extrairTotaisXmlItemCompra(item);
+    const origemCentralNfeEarly = isOrigemCompraCentralNfe() || xmlTotais.subtotal_xml != null;
+    // NF-e: vUnCom tem até 6 casas — arredondar a 2 gera gap vs vProd.
+    const casasCusto = fracionado ? 4 : (origemCentralNfeEarly ? 6 : 2);
+    const custoBruto = fracionado
         ? resolverCustoUnitarioItemCompra(item, quantidade)
         : Number(item.preco_unitario || item.preco_compra || 0);
+    const custo = (origemCentralNfeEarly
+        && xmlTotais.preco_unitario_xml != null
+        && Number(item.preco_editado_manual) !== 1)
+        ? xmlTotais.preco_unitario_xml
+        : custoBruto;
+    const subtotalXmlPersistido = xmlTotais.subtotal_xml;
+    const quantidadeXmlPersistida = xmlTotais.quantidade_xml != null
+        ? xmlTotais.quantidade_xml
+        : (origemCentralNfeEarly && quantidade > 0 ? quantidade : null);
+    const precoUnitarioXmlPersistido = xmlTotais.preco_unitario_xml != null
+        ? xmlTotais.preco_unitario_xml
+        : (origemCentralNfeEarly && custo > 0 ? custo : null);
     const produtoRef = item.produto_id && typeof produtosCompraList !== 'undefined'
         ? produtosCompraList.find((p) => String(p.id) === String(item.produto_id))
         : null;
@@ -2938,29 +3051,33 @@ function normalizeItemCompra(itemBruto = {}) {
             percentual_lucro: item.percentual_lucro ?? produtoRef?.percentual_lucro
         });
     }
-    const margem = margemInfo.margem;
     const ultimoPrecoCompra = Number(item.ultimo_preco_compra || custo);
-    const precoVendaBase = Number(item.preco_venda_sugerido || item.preco_venda || 0);
-    let precoVenda = precoVendaBase > 0
-        ? precoVendaBase
-        : Number((custo * (1 + margem / 100)) || 0);
-    // Ao reaplicar % do cadastro, recalcula venda sugerida com a fórmula já existente (markup).
-    if (reaplicarMargemCadastro
-        && Number(item.atualizar_preco_venda ?? 1) === 1
-        && custo > 0) {
-        precoVenda = Number((custo * (1 + margem / 100)).toFixed(2));
+    // Venda: operador / linha / cadastro. Margem NÃO redefine preço no lançamento.
+    const vendaCadastro = Number(produtoRef?.preco_venda || 0);
+    let precoVenda = Number(item.preco_venda_sugerido || item.preco_venda || 0);
+    if (precoVenda <= 0 && vendaCadastro > 0) {
+        precoVenda = vendaCadastro;
+    } else if (precoVenda <= 0 && custo > 0) {
+        precoVenda = Number((custo * (1 + Number(margemInfo.margem || 0) / 100)).toFixed(2));
     }
-    const margemOrigemNormalizada = Number(item.margem_editada_manual || 0) === 1
-        ? 'manual'
-        : (reaplicarMargemCadastro
-            ? (margemInfo.fallback ? 'fallback' : 'cadastro')
-            : (item.margem_origem
-                || (itemCompraTemMargemGravada(item) ? 'item' : (margemInfo.fallback ? 'fallback' : 'cadastro'))));
+    const margem = derivarMargemMarkupCompra(custo, precoVenda);
+    const margemOrigemNormalizada = 'venda';
     const linhaId = item.linha_id || item.linhaId || gerarLinhaIdCompra();
-    const origemCentralNfe = isOrigemCompraCentralNfe();
+    const origemCentralNfe = origemCentralNfeEarly;
     const classificacaoMiip = origemCentralNfe
         ? resolverClassificacaoMiipCadastro(item)
         : null;
+    const precoUnitarioNormalizado = Number(custo.toFixed(casasCusto));
+    const subtotalNormalizado = resolverSubtotalFinanceiroItemCompra({
+        quantidade,
+        preco_unitario: precoUnitarioNormalizado,
+        subtotal_xml: subtotalXmlPersistido,
+        quantidade_xml: quantidadeXmlPersistida,
+        preco_unitario_xml: precoUnitarioXmlPersistido != null
+            ? Number(Number(precoUnitarioXmlPersistido).toFixed(casasCusto))
+            : null,
+        preco_editado_manual: item.preco_editado_manual
+    });
     const classificacaoConfirmada = item.classificacao_operacional_confirmada === true;
     const tipoOperacionalInformado = String(item.tipo_operacional || '').trim().toUpperCase();
     const tipoOperacional = classificacaoMiip?.status === 'miip_vinculo_divergente'
@@ -3000,7 +3117,13 @@ function normalizeItemCompra(itemBruto = {}) {
         quantidade_convertida: quantidadeConvertida,
         quantidade_fiscal: qtdFiscal,
         quantidade_nao_fiscal: qtdNaoFiscal,
-        preco_unitario: Number(custo.toFixed(casasCusto)),
+        preco_unitario: precoUnitarioNormalizado,
+        preco_unitario_xml: precoUnitarioXmlPersistido != null
+            ? Number(Number(precoUnitarioXmlPersistido).toFixed(casasCusto))
+            : null,
+        quantidade_xml: quantidadeXmlPersistida,
+        subtotal_xml: subtotalXmlPersistido,
+        preco_editado_manual: Number(item.preco_editado_manual || 0) === 1 ? 1 : 0,
         ultimo_preco_compra: Number(ultimoPrecoCompra.toFixed(casasCusto)),
         margem_lucro: Number(Number(margem).toFixed(2)),
         margem_fallback_padrao: margemInfo.fallback ? 1 : 0,
@@ -3016,10 +3139,7 @@ function normalizeItemCompra(itemBruto = {}) {
         desconto_rateado: Number(item.desconto_rateado || 0),
         outras_despesas_rateado: Number(item.outras_despesas_rateado || 0),
         custo_unitario_final: Number((item.custo_unitario_final || custo || 0).toFixed(casasCusto)),
-        subtotal: calcularSubtotalFinanceiroItemCompra({
-            quantidade,
-            preco_unitario: Number(custo.toFixed(casasCusto))
-        }),
+        subtotal: subtotalNormalizado,
         data_validade: item.data_validade || null,
         compra_em: item.compra_em || '',
         codigo_fornecedor: item.codigo_fornecedor || item.codigoFornecedor || '',
@@ -3068,17 +3188,10 @@ function recalcularLinhaCompra(index, origem = 'custo') {
         } else {
             draft.preco_unitario = Number(draft.preco_unitario || 0);
         }
-        draft.margem_lucro = Number(draft.margem_lucro || 0);
         draft.preco_venda_sugerido = Number(draft.preco_venda_sugerido || 0);
-        if (origem === 'margem' || origem === 'custo') {
-            draft.preco_venda_sugerido = Number(
-                (draft.preco_unitario * (1 + (draft.margem_lucro / 100))).toFixed(2)
-            );
-        } else if (origem === 'venda') {
-            draft.margem_lucro = draft.preco_unitario > 0
-                ? Number((((draft.preco_venda_sugerido - draft.preco_unitario) / draft.preco_unitario) * 100).toFixed(2))
-                : 0;
-        }
+        // Margem só acompanha a venda (nunca o contrário).
+        draft.margem_lucro = derivarMargemMarkupCompra(draft.preco_unitario, draft.preco_venda_sugerido);
+        draft.margem_origem = 'venda';
         draft.subtotal = calcularSubtotalFinanceiroItemCompra(draft);
         sincronizarPrecosCadastroItemCompra(draft);
     });
@@ -3092,7 +3205,9 @@ function recalcularTotaisCompraNota() {
     const seguro = Number($('#valor_seguro').val()) || 0;
     const outras = Number($('#valor_outras_despesas').val()) || 0;
     const ipi = Number($('#valor_ipi').val()) || 0;
-    const totalComponentes = Number((valorProdutos - desconto + frete + seguro + outras + ipi).toFixed(2));
+    const icmsSt = Number($('#valor_icms_st').val()) || 0;
+    const fcpSt = Number($('#valor_fcp_st').val()) || 0;
+    const totalComponentes = Number((valorProdutos - desconto + frete + seguro + outras + ipi + icmsSt + fcpSt).toFixed(2));
 
     // RC 5.4.1 — se veio do XML, o total oficial é o vNF (nunca recalcular diferente)
     const totalXmlImportado = Number(compraImportadaXml?.valor_total_nota);
@@ -3114,7 +3229,7 @@ function recalcularTotaisCompraNota() {
         let classe = Math.abs(diferenca) <= 0.05 ? 'alert-success' : 'alert-warning';
         let texto = Math.abs(diferenca) <= 0.05
             ? 'Conferência OK: total dos componentes bate com o total da NF-e.'
-            : `Atenção: diferença entre XML e componentes: ${formatCurrency(diferenca)}. Verifique frete, desconto, IPI ou despesas.`;
+            : `Atenção: diferença entre XML e componentes: ${formatCurrency(diferenca)}. Verifique frete, desconto, IPI, ICMS ST, FCP-ST ou despesas.`;
 
         $('#valor_total_nota').closest('.row').after(`
           <div class="col-12 mt-2" id="conferencia_total_compra">
@@ -3189,32 +3304,33 @@ function resolverCustoUnitarioItemCompra(item = {}, quantidadeInformada) {
 function sincronizarPrecosCadastroItemCompra(item = {}) {
     const fracionado = itemCompraEhFracionado(item);
     const quantidade = Number(item.quantidade || 0);
-    const casasCusto = fracionado ? 4 : 2;
-    const custo = fracionado
+    const xml = extrairTotaisXmlItemCompra(item);
+    const xmlAtivo = xml.subtotal_xml != null
+        || xml.preco_unitario_xml != null
+        || isOrigemCompraCentralNfe();
+    // NF-e: manter precisão do vUnCom (até 6 casas). 2 casas gera gap vs vProd.
+    const casasCusto = fracionado ? 4 : (xmlAtivo ? 6 : 2);
+    let custo = fracionado
         ? resolverCustoUnitarioItemCompra(item, quantidade)
         : Number(item.preco_unitario || 0);
+    if (xmlAtivo && xml.preco_unitario_xml != null && Number(item.preco_editado_manual) !== 1) {
+        custo = xml.preco_unitario_xml;
+    }
 
     item.preco_unitario = Number(custo.toFixed(casasCusto));
     item.custo_unitario_final = item.preco_unitario;
     item.custo_por_kg = item.preco_unitario;
-    if (deveReaplicarMargemCadastroItemCompra(item)) {
-        const produtoRef = resolverProdutoRefItemCompra(item);
-        const info = extrairMargemCadastradaProduto(produtoRef || item);
-        item.margem_lucro = info.margem;
-        item.margem_fallback_padrao = info.fallback ? 1 : 0;
-        item.margem_origem = info.fallback ? 'fallback' : 'cadastro';
-    } else if (!itemCompraTemMargemGravada(item)) {
-        const produtoRef = resolverProdutoRefItemCompra(item);
-        const info = extrairMargemCadastradaProduto(produtoRef || item);
-        item.margem_lucro = info.margem;
-        item.margem_fallback_padrao = info.fallback ? 1 : 0;
-        item.margem_origem = info.fallback ? 'fallback' : 'cadastro';
-    } else {
-        item.margem_lucro = Number(item.margem_lucro);
-    }
-
-    if (Number(item.atualizar_preco_venda ?? 1) === 1 && item.preco_unitario > 0) {
-        item.preco_venda_sugerido = Number((item.preco_unitario * (1 + item.margem_lucro / 100)).toFixed(2));
+    item.preco_venda_sugerido = Number(item.preco_venda_sugerido || 0);
+    // Margem é espelho do markup; não altera a venda do lançamento.
+    item.margem_lucro = derivarMargemMarkupCompra(item.preco_unitario, item.preco_venda_sugerido);
+    item.margem_origem = 'venda';
+    if (xml.subtotal_xml != null) {
+        item.subtotal_xml = xml.subtotal_xml;
+        item.quantidade_xml = xml.quantidade_xml;
+        item.preco_unitario_xml = xml.preco_unitario_xml != null
+            ? Number(Number(xml.preco_unitario_xml).toFixed(casasCusto))
+            : item.preco_unitario_xml;
+        item.subtotal = calcularSubtotalFinanceiroItemCompra(item);
     }
 
     return item;
@@ -3441,7 +3557,13 @@ function renderItensCompraTabelaCore() {
         const badgeProximo = indiceProximoDestaqueCompra === index
             ? '<span class="badge compra-item-proximo-badge ms-1">PRÓXIMO</span>'
             : '';
-        const vendaItemHtml = isOrigemCompraCentralNfe() && item.tipo_operacional === 'INSUMO'
+        const produtoLinha = item.produto_id
+            ? produtosCompraList.find((p) => String(p.id) === String(item.produto_id))
+            : null;
+        const insumoSemVenda = isOrigemCompraCentralNfe()
+            && item.tipo_operacional === 'INSUMO'
+            && Number(produtoLinha?.comercializavel || item.comercializavel || 0) !== 1;
+        const vendaItemHtml = insumoSemVenda
             ? '<span class="text-muted small">Não aplicável — Insumo sem preço de venda</span>'
             : `${formatCurrency(item.preco_venda_sugerido)}
               <br>
@@ -3472,7 +3594,7 @@ function renderItensCompraTabelaCore() {
                 ? `<br><small class="text-muted">Custo final: ${itemCompraEhFracionado(item) ? `R$ ${formatarCustoUnitarioVenda(item.custo_unitario_final)}` : formatCurrency(item.custo_unitario_final)}</small>` 
                 : ''}
             </td>
-            <td style="min-width:95px;">${formatNumberInput(item.margem_lucro)}%</td>
+            <td style="min-width:95px;" title="Markup visual (não define o preço)">${formatNumberInput(item.margem_lucro)}%</td>
             <td style="min-width:110px;">
               ${vendaItemHtml}
             </td>
@@ -4197,9 +4319,27 @@ function retornarAoLancamentoCompraAposCadastroProduto() {
     }
 
     const produto = upsertProdutoNasListasCompra(salvo);
+    sincronizarVendaCadastroNosItensCompra(produto || salvo);
     atualizarOpcoesSeletorProdutoCompra();
     renderItensCompraTabela();
     selecionarProdutoRecemCadastradoNoLancamento(produto || salvo, ctx);
+}
+
+/** Após editar cadastro: aplica preço de venda do produto nos itens vinculados (sem recalcular por %). */
+function sincronizarVendaCadastroNosItensCompra(produto) {
+    if (!produto?.id) return;
+    const venda = Number(produto.preco_venda || 0);
+    if (!(venda > 0) || !Array.isArray(itensCompraAtual) || !itensCompraAtual.length) return;
+
+    itensCompraAtual = itensCompraAtual.map((item) => {
+        if (String(item.produto_id) !== String(produto.id)) return item;
+        const draft = clonarDadosItemCompra(item) || { ...item };
+        draft.preco_venda_sugerido = venda;
+        draft.margem_lucro = derivarMargemMarkupCompra(draft.preco_unitario, venda);
+        draft.margem_origem = 'venda';
+        draft.margem_editada_manual = 0;
+        return draft;
+    });
 }
 
 function miipNovoProdutoItemCompra(index) {
@@ -4359,15 +4499,19 @@ function alterarProdutoItemCompra(index, produtoId) {
                     draft.preco_unitario = dados.preco_unitario;
                 }
                 draft.ultimo_preco_compra = dados.preco_unitario;
-                draft.margem_lucro = dados.margem_lucro;
-                draft.margem_fallback_padrao = dados.fallback ? 1 : 0;
                 draft.origem_base_comercial = dados.origem;
                 draft.atualizar_preco_venda = dados.atualizar_preco_venda;
-                if (dados.preco_venda_sugerido > 0) {
+                // Não sobrescreve venda já definida pelo operador na linha.
+                if (dados.preco_venda_sugerido > 0 && !Number(draft.preco_venda_sugerido)) {
                     draft.preco_venda_sugerido = dados.preco_venda_sugerido;
                 }
+                draft.margem_lucro = derivarMargemMarkupCompra(
+                    draft.preco_unitario,
+                    draft.preco_venda_sugerido
+                );
+                draft.margem_origem = 'venda';
             });
-            recalcularLinhaCompra(index, 'custo');
+            recalcularLinhaCompra(index, 'venda');
             renderItensCompraTabela();
         }).catch((err) => console.warn('[Compras] última compra na grade:', err));
     }
@@ -4599,6 +4743,10 @@ async function adicionarItemCompraAsync() {
         ? itensCompraAtual[encontrarIndiceItemCompraPorLinhaId(linhaIdEditandoCompra)]
         : (indiceEditandoCompra != null ? itensCompraAtual[indiceEditandoCompra] : null);
 
+    const xmlRef = extrairTotaisXmlItemCompra(itemExistente || itemDraftCompra || {});
+    const precoEditadoManual = xmlRef.preco_unitario_xml != null
+        && Math.abs(Number(preco) - Number(xmlRef.preco_unitario_xml)) > 0.0000005;
+
     // RC8.4.1 — monta exclusivamente no draft; commit só no final
     itemDraftCompra = normalizeItemCompra({
         linha_id: itemExistente
@@ -4617,6 +4765,19 @@ async function adicionarItemCompraAsync() {
         nfe_item_original: clonarDadosItemCompra(
             itemExistente?.nfe_item_original || itemDraftCompra?.nfe_item_original
         ),
+        subtotal_xml: xmlRef.subtotal_xml
+            ?? itemExistente?.subtotal_xml
+            ?? itemDraftCompra?.subtotal_xml
+            ?? null,
+        quantidade_xml: xmlRef.quantidade_xml
+            ?? itemExistente?.quantidade_xml
+            ?? itemDraftCompra?.quantidade_xml
+            ?? null,
+        preco_unitario_xml: xmlRef.preco_unitario_xml
+            ?? itemExistente?.preco_unitario_xml
+            ?? itemDraftCompra?.preco_unitario_xml
+            ?? null,
+        preco_editado_manual: precoEditadoManual ? 1 : 0,
         quantidade: qtds.quantidade,
         quantidade_fiscal: qtds.quantidade_fiscal,
         quantidade_nao_fiscal: qtds.quantidade_nao_fiscal,
@@ -4736,7 +4897,9 @@ function itemUsaModoPrecoEmbalagemCompra(item = {}, produto = null) {
  */
 function obterPrecoCampoFormularioEdicaoItem(draft = {}, produto = null) {
     const resolvido = obterPrecoUnitarioCompraFormulario(draft, produto);
-    const casas = itemCompraEhFracionado(draft) && !resolvido.modoEmbalagem ? 4 : 2;
+    const casas = itemCompraEhFracionado(draft) && !resolvido.modoEmbalagem
+        ? 4
+        : (isOrigemCompraCentralNfe() && Number(draft.preco_unitario_xml || draft.subtotal_xml || 0) > 0 ? 6 : 2);
     return {
         valor: resolvido.valor,
         modoEmbalagem: resolvido.modoEmbalagem,
@@ -4789,7 +4952,7 @@ function limparFormularioItemCompra() {
 }
 
 function calcularValorVendaItem() {
-    // RC8.4.1 — formação de preço só no draft
+    // Custo mudou: mantém a venda do operador e só atualiza a margem visual.
     sincronizarDraftCompraDoFormulario();
     if (obterModoPainelEmbalagemCompra(obterProdutoSelecionadoCompra())) {
         const custoPreview = Number(ultimaSimulacaoMucCompra?.custoUnitario || 0);
@@ -4798,7 +4961,10 @@ function calcularValorVendaItem() {
         }
     }
     recalcularFormacaoPrecoDraftCompra('custo');
-    $('#preco_venda_item').val(formatNumberInput(itemDraftCompra.preco_venda_sugerido));
+    $('#margem_padrao_item').val(formatNumberInput(itemDraftCompra.margem_lucro));
+    if (Number(itemDraftCompra.preco_venda_sugerido || 0) > 0) {
+        $('#preco_venda_item').val(formatNumberInput(itemDraftCompra.preco_venda_sugerido));
+    }
 }
 
 function calcularMargemItem() {
@@ -5406,7 +5572,7 @@ function showCompraModal() {
                                 <input type="hidden" id="custo_unitario_fracionado_item" value="">
                                 <div class="col-md-2">
                                     <label class="form-label">Margem %</label>
-                                    <input type="number" step="0.01" class="form-control" id="margem_padrao_item" value="" placeholder="cadastro / 35%" oninput="marcarMargemManualCompra()">
+                                    <input type="number" step="0.01" class="form-control bg-light" id="margem_padrao_item" value="" placeholder="markup %" readonly title="Somente visualização do markup (venda ÷ custo). O preço de venda é definido pelo operador.">
                                     <small id="hintMargemPadraoCompra" class="text-muted d-none"></small>
                                 </div>
                                 <div class="col-md-2">
@@ -5492,6 +5658,16 @@ function showCompraModal() {
     <div class="col-md-2" id="col_valor_ipi">
         <label class="form-label">IPI</label>
         <input type="number" step="0.01" class="form-control" id="valor_ipi" value="0.00" oninput="recalcularTotaisCompraNota(); recalcularTotalNotaAvulsa(); calcularParcelasCompra();">
+    </div>
+
+    <div class="col-md-2" id="col_valor_icms_st">
+        <label class="form-label">ICMS ST</label>
+        <input type="number" step="0.01" class="form-control" id="valor_icms_st" value="0.00" title="ICMS Substituição Tributária (vST)" oninput="recalcularTotaisCompraNota(); recalcularTotalNotaAvulsa(); calcularParcelasCompra();">
+    </div>
+
+    <div class="col-md-2" id="col_valor_fcp_st">
+        <label class="form-label">FCP-ST</label>
+        <input type="number" step="0.01" class="form-control" id="valor_fcp_st" value="0.00" title="Fundo de Combate à Pobreza ST (vFCPST)" oninput="recalcularTotaisCompraNota(); recalcularTotalNotaAvulsa(); calcularParcelasCompra();">
     </div>
 
     <div class="col-md-2" id="col_valor_total_itens">
@@ -5741,6 +5917,8 @@ function saveCompra() {
         valor_seguro: Number($('#valor_seguro').val()) || 0,
         valor_outras_despesas: Number($('#valor_outras_despesas').val()) || 0,
         valor_ipi: Number($('#valor_ipi').val()) || 0,
+        valor_icms_st: Number($('#valor_icms_st').val()) || 0,
+        valor_fcp_st: Number($('#valor_fcp_st').val()) || 0,
         valor_total_nota: Number($('#valor_total_nota').val()) || 0,
         total,
         itens: entradaSimplificada ? [] : itensCompraAtual.map((item) => {
@@ -6068,7 +6246,9 @@ function recalcularTotalNotaAvulsa() {
     const seguro = Number($('#valor_seguro').val()) || 0;
     const outras = Number($('#valor_outras_despesas').val()) || 0;
     const ipi = Number($('#valor_ipi').val()) || 0;
-    const totalNota = Number((valorTotalItens + frete + seguro + outras + ipi).toFixed(2));
+    const icmsSt = Number($('#valor_icms_st').val()) || 0;
+    const fcpSt = Number($('#valor_fcp_st').val()) || 0;
+    const totalNota = Number((valorTotalItens + frete + seguro + outras + ipi + icmsSt + fcpSt).toFixed(2));
 
     $('#valor_produtos').val(formatNumberInput(valorTotalItens));
     $('#valor_total_nota').val(formatNumberInput(totalNota));
@@ -6126,6 +6306,8 @@ function viewCompra(id) {
                                 | <strong>Seguro:</strong> ${formatCurrency(compra.valor_seguro || 0)}
                                 | <strong>Outras despesas:</strong> ${formatCurrency(compra.valor_outras_despesas || 0)}
                                 | <strong>IPI:</strong> ${formatCurrency(compra.valor_ipi || 0)}
+                                | <strong>ICMS ST:</strong> ${formatCurrency(compra.valor_icms_st || 0)}
+                                | <strong>FCP-ST:</strong> ${formatCurrency(compra.valor_fcp_st || 0)}
                             </p>
                             <p>
                                 <strong>Total nota:</strong> ${formatCurrency(compra.valor_total_nota || compra.total || 0)}
@@ -6431,6 +6613,8 @@ function preencherFormularioCompra(dataBruto) {
     $('#valor_seguro').val(formatNumberInput(data.valor_seguro || 0));
     $('#valor_outras_despesas').val(formatNumberInput(data.valor_outras_despesas || 0));
     $('#valor_ipi').val(formatNumberInput(data.valor_ipi || 0));
+    $('#valor_icms_st').val(formatNumberInput(data.valor_icms_st || 0));
+    $('#valor_fcp_st').val(formatNumberInput(data.valor_fcp_st || 0));
     $('#valor_total_nota').val(formatNumberInput(data.valor_total_nota || 0));
 
     // RC4.31.14 — financeiro antes dos itens (evita sobrescrita no render)

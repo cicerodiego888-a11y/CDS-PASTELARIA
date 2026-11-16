@@ -13,6 +13,8 @@ process.env.CDS_RECOMPOSICAO_REFERENCIA_TESTE = '1';
 delete process.env.CDS_RECOMPOSICAO_HOMOLOGACAO_DISTRIBUIR;
 delete process.env.CDS_RECOMPOSICAO_APLICAR_DISTRIBUICAO;
 
+const DecisaoConfirmacaoPagamento = require('../../frontend/pdv/js/decisaoConfirmacaoPagamento');
+globalThis.DecisaoConfirmacaoPagamento = DecisaoConfirmacaoPagamento;
 const PagamentoSequencial = require('../../frontend/pdv/js/pagamentoSequencial');
 const InteracaoPagamentoMisto = require('../../frontend/pdv/js/interacaoPagamentoMisto');
 const fluxo = require('../../backend/services/tef/tefFluxoPagamento');
@@ -20,7 +22,8 @@ const {
   RECOMPOSICAO_HABILITADA_EM_PRODUCAO
 } = require('../../backend/services/vendas/RecomposicaoFiscalContratoService');
 const {
-  avaliarReferenciaRecomposicao
+  avaliarReferenciaRecomposicao,
+  marcarParcelaEletronicaComprovada
 } = require('../../backend/services/vendas/PagamentoSequencialComposicaoService');
 
 function criar(total = 50) {
@@ -92,14 +95,41 @@ describe('fluxo direto de valor parcial', () => {
     assert.equal(repetidas.length, 0);
   });
 
-  it('PIX eletrônico não é registrado sem o autorizador', async () => {
-    assert.equal(InteracaoPagamentoMisto.modoConfirmacaoDireta('pix'), 'tef');
-    assert.equal(InteracaoPagamentoMisto.modoConfirmacaoDireta('cartao_debito'), 'tef');
-    assert.equal(InteracaoPagamentoMisto.modoConfirmacaoDireta('cartao_credito'), 'tef');
+  it('PIX com TEF desligado registra informado sem autorizador', async () => {
+    assert.equal(InteracaoPagamentoMisto.modoConfirmacaoDireta('pix', { tefHabilitado: false }), 'informado');
+    assert.equal(InteracaoPagamentoMisto.modoConfirmacaoDireta('pix', {
+      tefHabilitado: false,
+      pixIntegracaoHabilitada: true
+    }), 'pix_proprio');
+    assert.equal(InteracaoPagamentoMisto.modoConfirmacaoDireta('pix', { tefHabilitado: true }), 'tef');
+    assert.equal(InteracaoPagamentoMisto.modoConfirmacaoDireta('cartao_debito', { tefHabilitado: true }), 'tef');
+    assert.equal(InteracaoPagamentoMisto.modoConfirmacaoDireta('cartao_credito', { tefHabilitado: true }), 'tef');
+    assert.equal(InteracaoPagamentoMisto.modoConfirmacaoDireta('cartao_debito', { tefHabilitado: false }), 'informado');
 
     const tela = criar(50);
     tela.escolherForma('pix');
-    const semAutorizador = await tela.confirmarValor(15, { formaUsaTef: () => false });
+    let chamadasTef = 0;
+    const ok = await tela.confirmarValor(15, {
+      tefHabilitado: false,
+      pixIntegracaoHabilitada: true,
+      formaUsaTef: () => false,
+      autorizarTef: async () => {
+        chamadasTef += 1;
+        return { aprovado: true, status: 'aprovado', transacao_id: 99 };
+      }
+    });
+    assert.equal(ok.ok, true);
+    assert.equal(chamadasTef, 0);
+    assert.equal(PagamentoSequencial.snapshot().length, 1);
+    assert.equal(PagamentoSequencial.snapshot()[0].status_autorizacao, 'informada');
+    assert.equal(PagamentoSequencial.somaConfirmada(), 0);
+    assert.equal(ok.restante, 35);
+  });
+
+  it('PIX com TEF habilitado exige o autorizador', async () => {
+    const tela = criar(50);
+    tela.escolherForma('pix');
+    const semAutorizador = await tela.confirmarValor(15, { formaUsaTef: () => true });
     assert.equal(semAutorizador.codigo, 'AUTORIZADOR_AUSENTE');
     assert.equal(PagamentoSequencial.snapshot().length, 0);
     assert.equal(semAutorizador.restante, 50);
@@ -122,8 +152,13 @@ describe('fluxo direto de valor parcial', () => {
     const referencia = avaliarReferenciaRecomposicao({
       total: 30,
       pagamentos: [
-        { forma_pagamento: 'cartao_debito', valor: 20, status_autorizacao: 'aprovada' },
-        { forma_pagamento: 'dinheiro', valor: 10 }
+        marcarParcelaEletronicaComprovada({
+          forma_pagamento: 'cartao_debito',
+          valor: 20,
+          status_autorizacao: 'aprovada',
+          tef_transacao_id: 8
+        }),
+        { forma_pagamento: 'dinheiro', valor: 10, status_autorizacao: 'informada' }
       ]
     });
     assert.equal(referencia.valor_fiscal_referencia, 20);

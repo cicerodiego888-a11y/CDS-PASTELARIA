@@ -145,11 +145,9 @@
       const miip = resultadosByIndice.get(indice) || null;
       const produtoId = resolverProdutoId(item, miip, byId);
       const produto = produtoId ? byId.get(produtoId) : null;
-      const semCadastro = Boolean(
-        (miip && miip.precisaCadastro && !miip.produtoEncontrado)
-        || (!produtoId && !produto)
-      );
-      const produtoNovo = Boolean(miip?.precisaCadastro);
+      // Se o catálogo/item já tem produto_id (cadastro feito após o cache MIIP), não marca sem cadastro.
+      const semCadastro = Boolean(!produtoId && !produto);
+      const produtoNovo = Boolean(miip?.precisaCadastro && semCadastro);
       const descontinuado = produtoDescontinuado(produto);
       const custoNfe = custoNfeDoItem(item);
       const custoAtual = custoAtualDoCadastro(produto);

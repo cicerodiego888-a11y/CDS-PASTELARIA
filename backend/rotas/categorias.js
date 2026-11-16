@@ -44,33 +44,57 @@ router.post('/', (req, res) => {
         return res.status(400).json({ erro: 'Tipo inválido' });
     }
 
-    const sql = `INSERT INTO categorias (nome, descricao, tipo) VALUES (?, ?, ?)`;
+    const nomeTrim = nome.trim();
+    const tipoFinal = tipo || 'produto';
 
-    db.run(sql, [nome.trim(), descricao || '', tipo || 'produto'], function(err) {
-        if (err) {
-            if (err.message && err.message.includes('UNIQUE')) {
-                return res.status(400).json({ erro: 'Categoria já existe' });
-            }
-            return res.status(500).json({ erro: 'Erro ao criar categoria' });
+    // Idempotente: mesmo nome+tipo já cadastrado → devolve a existente (aparece no select).
+    db.get(
+        'SELECT * FROM categorias WHERE nome = ? AND tipo = ?',
+        [nomeTrim, tipoFinal],
+        (findErr, existente) => {
+            if (findErr) return res.status(500).json({ erro: 'Erro ao verificar categoria' });
+            if (existente) return res.json(existente);
+
+            const sql = `INSERT INTO categorias (nome, descricao, tipo) VALUES (?, ?, ?)`;
+            db.run(sql, [nomeTrim, descricao || '', tipoFinal], function(err) {
+                if (err) {
+                    if (err.message && err.message.includes('UNIQUE')) {
+                        return db.get(
+                            'SELECT * FROM categorias WHERE nome = ? AND tipo = ?',
+                            [nomeTrim, tipoFinal],
+                            (getDupErr, rowDup) => {
+                                if (!getDupErr && rowDup) return res.json(rowDup);
+                                return res.status(400).json({
+                                    erro: 'Categoria já existe neste tipo. Escolha-a na lista ou use outro nome.'
+                                });
+                            }
+                        );
+                    }
+                    return res.status(500).json({ erro: 'Erro ao criar categoria' });
+                }
+
+                db.get('SELECT * FROM categorias WHERE id = ?', [this.lastID], (getErr, row) => {
+                    if (getErr) {
+                        return res.status(500).json({
+                            erro: 'Categoria criada, mas não foi possível retornar os dados'
+                        });
+                    }
+                    gravarAuditoria({
+                        usuario_id: req.user?.id || null,
+                        usuario_nome: req.user?.nome || req.user?.username || null,
+                        modulo: 'categorias',
+                        acao: 'criar_categoria',
+                        referencia_tipo: 'categoria',
+                        referencia_id: this.lastID,
+                        detalhes: { nome: nomeTrim, tipo: tipoFinal },
+                        ip_requisicao: req.ip || null
+                    }).catch((auditErr) => console.error('Erro ao gravar auditoria de categoria:', auditErr));
+
+                    res.json(row);
+                });
+            });
         }
-
-        db.get('SELECT * FROM categorias WHERE id = ?', [this.lastID], (getErr, row) => {
-            if (getErr) return res.status(500).json({ erro: 'Categoria criada, mas não foi possível retornar os dados' });
-                // auditoria de criação de categoria
-                gravarAuditoria({
-                    usuario_id: req.user?.id || null,
-                    usuario_nome: req.user?.nome || req.user?.username || null,
-                    modulo: 'categorias',
-                    acao: 'criar_categoria',
-                    referencia_tipo: 'categoria',
-                    referencia_id: this.lastID,
-                    detalhes: { nome: nome.trim() },
-                    ip_requisicao: req.ip || null
-                }).catch((auditErr) => console.error('Erro ao gravar auditoria de categoria:', auditErr));
-
-                res.json(row);
-        });
-    });
+    );
 });
 
 // ATUALIZAR

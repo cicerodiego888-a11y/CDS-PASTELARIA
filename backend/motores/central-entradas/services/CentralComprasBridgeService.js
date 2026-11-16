@@ -56,13 +56,14 @@ class CentralComprasBridgeService {
 
   /**
    * RC COMPRAS 5.4.1 — completa financeiro a partir do XML se parse antigo não tiver.
-   * Não reprocessa MIIP/itens; só enriquece pag/cobr/IPI.
+   * Não reprocessa MIIP/itens; só enriquece pag/cobr/IPI/ICMS ST/FCP-ST.
    * @private
    */
   async _enriquecerFinanceiroDoXml(payload, xml) {
     if (!xml || typeof xml !== 'string') return payload;
 
-    if (financeiroPayloadCompleto(payload)) return payload;
+    const temStPersistido = payload.valor_icms_st != null && payload.valor_fcp_st != null;
+    if (financeiroPayloadCompleto(payload) && temStPersistido) return payload;
 
     try {
       const NFeParserService = require('../../../shared/nfe/NFeParserService');
@@ -77,6 +78,8 @@ class CentralComprasBridgeService {
         ...payload,
         valor_ipi: payload.valor_ipi ?? json.valor_ipi ?? 0,
         valor_seguro: payload.valor_seguro ?? json.valor_seguro ?? 0,
+        valor_icms_st: payload.valor_icms_st ?? json.valor_icms_st ?? 0,
+        valor_fcp_st: payload.valor_fcp_st ?? json.valor_fcp_st ?? 0,
         forma_pagamento: payload.forma_pagamento || json.forma_pagamento || null,
         condicao_pagamento: payload.condicao_pagamento || json.condicao_pagamento || null,
         pagamentos: (payload.pagamentos && payload.pagamentos.length)

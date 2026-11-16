@@ -213,10 +213,19 @@ function reduzirEstoqueDistribuido(
 
   const executarBaixaProduto = () => {
     dbConn.get(
-      `SELECT COALESCE(controla_estoque, 1) AS controla_estoque FROM produtos WHERE id = ?`,
+      `SELECT COALESCE(controla_estoque, 1) AS controla_estoque,
+              COALESCE(tipo_operacional, 'COMERCIAL') AS tipo_operacional
+       FROM produtos WHERE id = ?`,
       [produtoId],
       (errFlag, rowFlag) => {
         if (errFlag) return callback(errFlag);
+        const {
+          produtoExigeValidacaoSaldoProprio
+        } = require('../estoque/produtoControlaEstoque');
+        // Comercial: sem baixa de saldo próprio (consumo fica na ficha/insumos).
+        if (!produtoExigeValidacaoSaldoProprio(rowFlag || {})) {
+          return callback(null);
+        }
         if (!produtoControlaEstoque(rowFlag || {})) {
           return callback(null);
         }
@@ -1750,7 +1759,8 @@ db.all(`
       saldosPorProdutoRecomposicao[pid] = {
         saldoFiscal: entrada.saldoFiscal,
         saldoNaoFiscal: entrada.saldoNaoFiscal,
-        controla_estoque: produtoEntrada.controla_estoque
+        controla_estoque: produtoEntrada.controla_estoque,
+        tipo_operacional: produtoEntrada.tipo_operacional
       };
     }
     const documento = await integrarPagamentoRecomposicao({
@@ -2109,6 +2119,26 @@ db.all(`
         confirmadoEm: null
       };
     }
+    const forma = String(pagamento && pagamento.forma_pagamento || '')
+      .toLowerCase()
+      .trim()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '');
+    const pixTxid = pagamento && (pagamento.pix_txid || pagamento.txid);
+    // PIX com evidência de integração.
+    if ((forma === 'pix' || forma === 'pix_tef') && pixTxid && (
+      pagamento.confirmacao_eletronica_comprovada === true
+      || pagamento.pix_confirmado === true
+      || pagamento.confirmacao_modalidade === 'pix'
+    )) {
+      return {
+        modalidade: 'pix',
+        manual: 0,
+        operadorId: operadorId || null,
+        confirmadoEm: agoraLocalBrasil()
+      };
+    }
+    // TEF off / confirmação operacional explícita (incluindo cartão e PIX sem txid).
     if (!confirmacaoManualExplicitaNoPedido(pagamento)) {
       return { modalidade: null, manual: 0, operadorId: null, confirmadoEm: null };
     }
@@ -2132,6 +2162,7 @@ db.all(`
     `;
 
     if (pagamentosVenda.length > 0) {
+      const pixEvidenciaService = require('../pix/pixEvidenciaService');
       for (const pagamento of pagamentosVenda) {
         const tefId = pagamento.tef_transacao_id || pagamento.tef?.transacao_id || null;
         const confirmacao = camposConfirmacaoPagamento(pagamento, tefId);
@@ -2153,7 +2184,7 @@ db.all(`
           }
           nsu = row.nsu || null;
           autorizacao = row.autorizacao || null;
-        } else if (confirmacao.manual === 1) {
+        } else if (confirmacao.manual === 1 || confirmacao.modalidade === 'pix') {
           nsu = null;
           autorizacao = null;
           bandeira = null;
@@ -2179,6 +2210,7 @@ db.all(`
           registro.troco
         ]);
       }
+      await pixEvidenciaService.marcarConsumoCobrancasPix(pagamentosVenda, vendaId, transacaoDb);
       return;
     }
 

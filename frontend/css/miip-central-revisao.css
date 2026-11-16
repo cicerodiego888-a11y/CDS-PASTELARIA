@@ -17,6 +17,16 @@
   z-index: 22000 !important;
 }
 
+/* Criação rápida de categoria/subcategoria acima do cadastro empilhado na MIIP */
+#modalNomeCadastroRapido.modal-nome-cadastro-rapido-sobre,
+#modalNomeCadastroRapido.modal-nome-cadastro-rapido-sobre.show {
+  z-index: 23050 !important;
+}
+
+.modal-backdrop.modal-nome-cadastro-rapido-backdrop {
+  z-index: 23040 !important;
+}
+
 .modal-backdrop.produto-modal-sobre-miip-backdrop {
   z-index: 21990 !important;
 }

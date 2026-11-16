@@ -247,9 +247,37 @@
     border-left-color: var(--row-cor, #0d6efd);
 }
 
+.central-entradas-tabela tbody tr.central-doc-row--revisao {
+    background: #fff8e1;
+    border-left-color: #f59e0b;
+}
+
+.central-entradas-tabela tbody tr.central-doc-row--revisao:hover {
+    background: #ffecb3;
+}
+
+.central-entradas-tabela tbody tr.central-doc-row--pronta {
+    background: #e8f5e9;
+    border-left-color: #22c55e;
+}
+
+.central-entradas-tabela tbody tr.central-doc-row--pronta:hover {
+    background: #c8e6c9;
+}
+
 .central-entradas-row-selected {
     background: rgba(13, 110, 253, 0.08) !important;
     border-left-color: var(--row-cor, #0d6efd) !important;
+}
+
+.central-entradas-row-selected.central-doc-row--revisao {
+    background: #ffe082 !important;
+    border-left-color: #f59e0b !important;
+}
+
+.central-entradas-row-selected.central-doc-row--pronta {
+    background: #a5d6a7 !important;
+    border-left-color: #22c55e !important;
 }
 
 .central-entradas-cell-status {

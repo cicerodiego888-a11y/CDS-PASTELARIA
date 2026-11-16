@@ -113,7 +113,7 @@ function renderVendas(vendas) {
                                     <td>${escapeHtml(v.cliente_nome || 'Não informado')}</td>
                                     <td>${formatCurrency(v.total)}</td>
                                     <td>${rotuloPagamentoDaVenda(v)}</td>
-                                    <td>${rotuloStatusVenda(v.status)}</td>
+                                    <td>${rotuloStatusVenda(statusExibidoHistoricoVenda(v))}</td>
                                     <td class="historico-venda-acoes-col">${montarHtmlAcoesHistoricoVenda(v)}</td>
                                 </tr>
                             `).join('') || '<tr><td colspan="8" class="text-center">Nenhuma venda encontrada.</td></tr>'}
@@ -203,7 +203,7 @@ function showVendaModal(venda) {
                             <div class="col-sm-4"><strong>Pagamento:</strong> ${rotuloPagamentoDaVenda(venda)}</div>
                         </div>
                         <div class="row mb-3">
-                            <div class="col-sm-4"><strong>Status:</strong> ${rotuloStatusVenda(venda.status)}</div>
+                            <div class="col-sm-4"><strong>Status:</strong> ${rotuloStatusVenda(statusExibidoHistoricoVenda(venda))}</div>
                             <div class="col-sm-4"><strong>Documento:</strong> ${escapeHtml(venda.documento || '-')}</div>
                             <div class="col-sm-4"><strong>Número de itens:</strong> ${itens.length}</div>
                         </div>
@@ -296,6 +296,15 @@ function rotuloFormaPagamento(value) {
         prazo: 'A prazo'
     };
     return mapa[value] || (value ? String(value) : '-');
+}
+
+/** NFC-e cancelada no fisco deve aparecer como cancelada no histórico. */
+function statusExibidoHistoricoVenda(venda) {
+    const statusVenda = String(venda && venda.status || '').toLowerCase();
+    if (statusVenda === 'cancelada') return 'cancelada';
+    const nfce = String(venda && venda.nfce_status || '').toLowerCase();
+    if (nfce === 'cancelada') return 'cancelada';
+    return venda && venda.status;
 }
 
 function rotuloStatusVenda(status) {

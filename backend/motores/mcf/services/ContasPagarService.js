@@ -1009,6 +1009,124 @@ async function cancelar(params = {}) {
   return withTx(params.db, () => cancelarNaTransacaoAtual(params));
 }
 
+/**
+ * Estorna baixas automáticas da liquidação inicial da compra (pagamento-inicial).
+ * Se houver qualquer pagamento manual/adicional, mantém bloqueio (409).
+ * Deixa o título em aberto para o cancelamento da compra seguir.
+ */
+async function estornarBaixasIniciaisCompraNaTransacaoAtual(params = {}) {
+  const db = params.db;
+  const empresaId = exigirEmpresaId(params.empresaId);
+  const compraId = Number(params.compra_id ?? params.compraId ?? params.referencia_id);
+  const id = Number(params.id);
+  if (!Number.isInteger(compraId) || compraId <= 0) {
+    throw erroMcf(ERROS_MCF.STATUS_INVALIDO, 'compra_id inválido para estorno da liquidação inicial.', 400);
+  }
+  if (!Number.isInteger(id) || id <= 0) {
+    throw erroMcf(ERROS_MCF.CONTA_NAO_ENCONTRADA, 'Conta a pagar não encontrada.', 404);
+  }
+
+  const row = await dbGet(
+    db,
+    'SELECT * FROM contas_pagar WHERE id = ? AND empresa_id = ?',
+    [id, empresaId]
+  );
+  if (!row) {
+    throw erroMcf(ERROS_MCF.CONTA_NAO_ENCONTRADA, 'Conta a pagar não encontrada.', 404);
+  }
+  if (row.status === STATUS_CONTA_PAGAR.CANCELADA) {
+    return { ...mapRow(row), estornado: false, ja_cancelado: true };
+  }
+  if (
+    String(row.referencia_tipo || '') !== 'compra'
+    || Number(row.referencia_id) !== compraId
+  ) {
+    throw erroMcf(
+      ERROS_MCF.OPERACAO_CONFLITANTE,
+      'Título não pertence à compra informada.',
+      409,
+      { conta_pagar_id: id, compra_id: compraId }
+    );
+  }
+
+  const pagamentos = await dbAll(
+    db,
+    `SELECT * FROM contas_pagar_pagamentos
+     WHERE conta_pagar_id = ? AND empresa_id = ?
+     ORDER BY id ASC`,
+    [id, empresaId]
+  );
+
+  if (!pagamentos.length) {
+    if (row.status === STATUS_CONTA_PAGAR.QUITADA || round2(row.valor_restante) <= 0) {
+      // Quitada sem trilha de pagamento: reabre para permitir cancelar a compra.
+      const reaberto = await dbRun(
+        db,
+        `UPDATE contas_pagar
+         SET valor_restante = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND empresa_id = ?`,
+        [round2(row.valor_original), STATUS_CONTA_PAGAR.ABERTA, id, empresaId]
+      );
+      if (reaberto.changes !== 1) {
+        throw erroMcf(ERROS_MCF.OPERACAO_CONFLITANTE, 'Não foi possível reabrir o título quitado.', 409);
+      }
+      await sincronizarProjecaoFinanceira(
+        db,
+        empresaId,
+        id,
+        STATUS_CONTA_PAGAR.ABERTA,
+        null,
+        null
+      );
+      return { ...(await obter({ db, empresaId, id })), estornado: true };
+    }
+    return { ...mapRow(row), estornado: false };
+  }
+
+  const prefixo = `compra:${compraId}:parcela:`;
+  const soLiquidacaoInicial = pagamentos.every((p) => {
+    const key = String(p.idempotency_key || '');
+    const origem = String(p.origem_operacao || '');
+    return key.startsWith(prefixo)
+      && key.endsWith(':pagamento-inicial')
+      && (origem === 'compra' || origem === '');
+  });
+  if (!soLiquidacaoInicial) {
+    throw erroMcf(
+      ERROS_MCF.TITULO_QUITADO,
+      'Compra possui título com baixa manual. Devolução ou estorno deve ser tratado separadamente.',
+      409,
+      { conta_pagar_id: id, compra_id: compraId }
+    );
+  }
+
+  await dbRun(
+    db,
+    `DELETE FROM contas_pagar_pagamentos
+     WHERE conta_pagar_id = ? AND empresa_id = ?`,
+    [id, empresaId]
+  );
+  const atualizado = await dbRun(
+    db,
+    `UPDATE contas_pagar
+     SET valor_restante = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+     WHERE id = ? AND empresa_id = ?`,
+    [round2(row.valor_original), STATUS_CONTA_PAGAR.ABERTA, id, empresaId]
+  );
+  if (atualizado.changes !== 1) {
+    throw erroMcf(ERROS_MCF.OPERACAO_CONFLITANTE, 'Não foi possível estornar a liquidação inicial.', 409);
+  }
+  await sincronizarProjecaoFinanceira(
+    db,
+    empresaId,
+    id,
+    STATUS_CONTA_PAGAR.ABERTA,
+    null,
+    null
+  );
+  return { ...(await obter({ db, empresaId, id })), estornado: true };
+}
+
 module.exports = {
   criar,
   criarNaTransacaoAtual,
@@ -1021,6 +1139,7 @@ module.exports = {
   baixarNaTransacaoAtual,
   cancelar,
   cancelarNaTransacaoAtual,
+  estornarBaixasIniciaisCompraNaTransacaoAtual,
   assegurarProjecaoFinanceira,
   sincronizarProjecaoFinanceira,
   MARCADOR_PROJECAO_SINTETICA,

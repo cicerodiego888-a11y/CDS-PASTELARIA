@@ -1432,6 +1432,8 @@ router.post('/', (req, res) => {
     valor_outras_despesas,
     valor_ipi,
     valor_seguro,
+    valor_icms_st,
+    valor_fcp_st,
     valor_total_nota,
     total,
     itens,
@@ -1588,7 +1590,9 @@ router.post('/', (req, res) => {
       valor_frete,
       valor_seguro,
       valor_outras_despesas,
-      valor_ipi
+      valor_ipi,
+      valor_icms_st,
+      valor_fcp_st
     });
 
     const totalXml = moeda(valor_total_nota || totalNum);
@@ -1635,6 +1639,7 @@ router.post('/', (req, res) => {
           data_compra, data_emissao, data_entrada, fornecedor, fornecedor_cnpj,
           numero_nf, serie_nf, modelo_nf, chave_acesso,
           valor_produtos, valor_desconto, valor_frete, valor_seguro, valor_outras_despesas, valor_ipi,
+          valor_icms_st, valor_fcp_st,
           valor_total_nota, total, total_xml, total_itens_calculado, diferenca_total,
           status, condicao_pagamento, forma_pagamento, data_vencimento,
           parcelas, valor_entrada, dias_entre_parcelas, observacao, nota_fiscal_avulsa, tipo_entrada,
@@ -1643,7 +1648,7 @@ router.post('/', (req, res) => {
           csosn_cst, csosn_cst_xml, cst_pis, cst_pis_xml,
           cst_cofins, cst_cofins_xml, cst_ipi, cst_ipi_xml,
           escrituracao_alterada, escrituracao_motivo, empresa_id
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         data_compra,
         data_emissao || null,
@@ -1660,6 +1665,8 @@ router.post('/', (req, res) => {
         Number(valor_seguro) || 0,
         Number(valor_outras_despesas) || 0,
         Number(valor_ipi) || 0,
+        Number(valor_icms_st) || 0,
+        Number(valor_fcp_st) || 0,
         totalOficial,
         totalOficial,
         totalOficial,
@@ -1995,19 +2002,19 @@ router.post('/:id/cancelar', async (req, res) => {
             referencia_id: id,
             limite: 500
           });
-          const quitada = titulosMcf.find(
-            (titulo) => titulo.status === ContasPagarService.STATUS_CONTA_PAGAR.QUITADA
-          );
-          if (quitada) {
-            db.run('ROLLBACK');
-            return res.status(409).json({
-              error: 'Compra possui título quitado. Devolução ou estorno deve ser tratado separadamente.',
-              code: 'MCF_TITULO_QUITADO',
-              conta_pagar_id: quitada.id
-            });
-          }
           for (const titulo of titulosMcf) {
             if (titulo.status === ContasPagarService.STATUS_CONTA_PAGAR.CANCELADA) continue;
+            // À vista / sem pagamento gera liquidação inicial automática (quitada).
+            // Estorna só essa baixa automática; baixa manual continua bloqueada (409).
+            if (titulo.status === ContasPagarService.STATUS_CONTA_PAGAR.QUITADA
+              || Number(titulo.valor_restante) <= 0) {
+              await ContasPagarService.estornarBaixasIniciaisCompraNaTransacaoAtual({
+                db,
+                empresaId: empresaCompraId,
+                id: titulo.id,
+                compra_id: Number(id)
+              });
+            }
             await ContasPagarService.cancelarNaTransacaoAtual({
               db,
               empresaId: empresaCompraId,

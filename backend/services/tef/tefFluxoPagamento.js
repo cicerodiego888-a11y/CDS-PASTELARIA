@@ -60,8 +60,8 @@ function formaAceitaConfirmacaoManual(forma, ehPagamentoMisto) {
   if (ehPagamentoMisto) return true;
   const normalizada = normalizarFormaPagamentoTEF(forma);
   return normalizada === 'dinheiro'
-    || normalizada === 'debito'
-    || normalizada === 'credito'
+    || normalizada === 'especie'
+    || normalizada === 'cash'
     || formaPagamentoUsaTEF(normalizada);
 }
 

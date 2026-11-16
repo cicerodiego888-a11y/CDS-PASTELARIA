@@ -201,12 +201,13 @@ router.post('/composicao-sequencial', async (req, res) => {
       db
     });
     const pagamentosComprovados = comprovacao.pagamentos;
+    // Preview de composição no PDV: forçar referência para calcular complemento fiscal.
     const resultado = avaliarReferenciaRecomposicao({
       total: body.total,
       total_comercial: body.total_comercial,
       pagamentos: pagamentosComprovados,
       itens: body.itens
-    });
+    }, { forcarReferencia: true });
     let documentoFiscal = null;
     if (
       resultado.recomposicao_executada === true
@@ -218,12 +219,30 @@ router.post('/composicao-sequencial', async (req, res) => {
         pagamentos: pagamentosComprovados,
         itens: body.itens,
         empresaId: req.empresaId
-      }, { db, pagamentosJaComprovados: true });
+      }, { db, pagamentosJaComprovados: true, forcarReferencia: true });
     }
+    // Preview: mesmo com AUTORIZACAO_AUSENTE (distribuição oficial), a referência
+    // ajustada (eletrônico + complemento) já basta para o PDV fechar o pagamento.
+    const refDoc = documentoFiscal && documentoFiscal.referencia;
+    const resultadoComComplemento = refDoc
+      ? {
+        ...resultado,
+        valor_fiscal_referencia: Number(refDoc.valor_fiscal_referencia),
+        valor_nao_fiscal_referencia: Number(refDoc.valor_nao_fiscal_referencia),
+        complemento_dinheiro_utilizado: Number(refDoc.complemento_dinheiro_utilizado || 0),
+        desconto_ajuste: Number(refDoc.desconto_ajuste || 0),
+        valor_fiscal_referencia_inicial: refDoc.valor_fiscal_referencia_inicial != null
+          ? Number(refDoc.valor_fiscal_referencia_inicial)
+          : resultado.valor_fiscal_referencia,
+        valor_nao_fiscal_referencia_inicial: refDoc.valor_nao_fiscal_referencia_inicial != null
+          ? Number(refDoc.valor_nao_fiscal_referencia_inicial)
+          : resultado.valor_nao_fiscal_referencia
+      }
+      : resultado;
     return res.json({
-      ...resultado,
+      ...resultadoComComplemento,
       documento_fiscal: documentoFiscal,
-      composicao_fiscal: apresentacaoComposicaoFiscal(documentoFiscal, resultado)
+      composicao_fiscal: apresentacaoComposicaoFiscal(documentoFiscal, resultadoComComplemento)
     });
   } catch (err) {
     return res.status(err.statusCode || 400).json({

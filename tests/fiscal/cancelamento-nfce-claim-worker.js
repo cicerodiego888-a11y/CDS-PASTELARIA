@@ -104,11 +104,17 @@ async function main() {
           certificadoPath: 'certificado-sintetico',
           certificadoSenha: 'senha-sintetica'
         }),
+        exigirCertificadoAptoParaUsoFiscal: async () => ({
+          certificadoPath: 'certificado-sintetico',
+          certificadoSenha: 'senha-sintetica'
+        }),
         carregarCertificadoPfx: () => ({
           privateKeyPem: 'chave-sintetica',
           certPem: process.env.TEST_CERT_PEM
         }),
         assinarEvento: () => ({ xmlAssinado: '<evento-sintetico />' }),
+        autorizacaoTransmissaoSefaz: require('../../backend/services/fiscal/autorizacaoTransmissaoSefaz')
+          .criarAutorizacaoCancelamentoOperador({ empresaId: 7, usuarioId: 1 }),
         enviarCancelamento: async () => {
           sent = true;
           fs.appendFileSync(sendLogPath, `${workerId}\n`);

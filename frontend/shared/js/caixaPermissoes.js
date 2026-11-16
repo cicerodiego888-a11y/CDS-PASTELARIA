@@ -118,6 +118,18 @@ async function executarAcaoCaixaComPermissao(permissao, executar, opcoesSenha = 
   return executar(senhaAdmin);
 }
 
+function headersOperacaoCaixa(extra) {
+  if (typeof CdsEmpresaContexto !== 'undefined' && typeof CdsEmpresaContexto.headersJson === 'function') {
+    return CdsEmpresaContexto.headersJson(extra || {});
+  }
+  const headers = Object.assign({ 'Content-Type': 'application/json' }, extra || {});
+  try {
+    const emp = localStorage.getItem('cds_empresa_id');
+    if (emp) headers['X-Empresa-Id'] = emp;
+  } catch (_e) { /* ignore */ }
+  return headers;
+}
+
 async function enviarOperacaoCaixa(permissao, url, body, opcoes = {}) {
   const mensagemErro = opcoes.mensagemErro || 'Erro ao executar operação de caixa.';
 
@@ -132,11 +144,14 @@ async function enviarOperacaoCaixa(permissao, url, body, opcoes = {}) {
         ? getTerminalRequestData(payload)
         : payload;
 
-      const headers = { 'Content-Type': 'application/json' };
-      try {
-        const emp = typeof localStorage !== 'undefined' ? localStorage.getItem('cds_empresa_id') : null;
-        if (emp) headers['X-Empresa-Id'] = emp;
-      } catch (_e) { /* ignore */ }
+      const headers = headersOperacaoCaixa();
+      if (!headers['X-Empresa-Id']) {
+        return $.Deferred().reject({
+          responseJSON: {
+            error: 'Selecione a empresa na barra lateral antes de operar o caixa.'
+          }
+        }).promise();
+      }
 
       return $.ajax({
         url: `${API_URL}${url}`,

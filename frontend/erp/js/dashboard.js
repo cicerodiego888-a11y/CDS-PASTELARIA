@@ -256,6 +256,12 @@ function preencherDashboard(data) {
         modoFiscalAtivo
     );
     setDashboardText('dashboardVendas', data.total_vendas ?? 0);
+    const legendVendas = document.querySelector('#dashboardVendas')?.closest('.cc-kpi')?.querySelector('.cc-legend');
+    if (legendVendas) {
+      legendVendas.textContent = modoFiscalAtivo
+        ? 'Vendas fiscais no período'
+        : 'Quantidade no período';
+    }
     setDashboardText('dashboardTicket', formatarMoedaDashboard(data.ticket_medio));
     setDashboardText('dashboardProdutos', data.produtos_vendidos ?? 0);
     setDashboardText('dashboardLucro', formatarMoedaDashboard(data.lucro_estimado));

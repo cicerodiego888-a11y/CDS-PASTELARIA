@@ -2939,6 +2939,24 @@ function showProdutoModal(produto = null, opcoes = {}) {
                                     </div>
                                     <div class="cds-prod-cadastro__card-body">
                                         <div class="row g-3">
+                                            <div class="col-12" data-campo-insumo-comercializavel ${tipoOperacionalInicial === 'INSUMO' ? '' : 'hidden'}>
+                                                <div class="form-check form-switch mb-1">
+                                                    <input
+                                                        class="form-check-input"
+                                                        type="checkbox"
+                                                        role="switch"
+                                                        id="comercializavel"
+                                                        ${isEdit && Number(produto.comercializavel || 0) === 1 ? 'checked' : ''}
+                                                    >
+                                                    <label class="form-check-label fw-semibold" for="comercializavel">
+                                                        Produto comercializável?
+                                                    </label>
+                                                </div>
+                                                <small class="text-muted d-block">
+                                                    Ative esta opção quando o insumo também puder ser vendido diretamente ao cliente.
+                                                    Ao ativar, será necessário informar o valor de venda.
+                                                </small>
+                                            </div>
                                             <div class="col-md-3">
                                                 <label for="preco_compra" class="form-label" id="label_preco_compra_produto">Custo Unitário</label>
                                                 <input
@@ -2981,8 +2999,8 @@ function showProdutoModal(produto = null, opcoes = {}) {
                                                     <span class="input-group-text">%</span>
                                                 </div>
                                             </div>
-                                            <div class="col-md-3" data-campo-venda-comercial>
-                                                <label for="preco_venda" class="form-label">Preço comercial *</label>
+                                            <div class="col-md-3" data-campo-venda-comercial data-campo-preco-venda-campo>
+                                                <label for="preco_venda" class="form-label" id="label_preco_venda">Preço comercial *</label>
                                                 <input
                                                     type="number"
                                                     step="0.01"
@@ -3784,8 +3802,35 @@ function inicializarControleLoteInicial() {
 
 let cadastroRapidoNomeAberto = false;
 
+/** Z-index acima do cadastro empilhado (MIIP ~22000 / Compra ~21000). */
+function elevarModalNomeCadastroRapido(modalEl) {
+    if (!modalEl) return 1060;
+    let zBase = 1060;
+    document.querySelectorAll('.modal.show, #produtoModal.produto-modal-sobre-miip').forEach((el) => {
+        const z = parseInt(window.getComputedStyle(el).zIndex, 10);
+        if (Number.isFinite(z) && z > zBase) zBase = z;
+    });
+    const zModal = zBase + 40;
+    modalEl.classList.add('modal-nome-cadastro-rapido-sobre');
+    modalEl.style.zIndex = String(zModal);
+    requestAnimationFrame(() => {
+        const backdrops = document.querySelectorAll('.modal-backdrop');
+        const last = backdrops[backdrops.length - 1];
+        if (last) {
+            last.classList.add('modal-nome-cadastro-rapido-backdrop');
+            last.style.zIndex = String(zModal - 10);
+        }
+    });
+    return zModal;
+}
+
 function solicitarNomeCadastroRapido(titulo, rotulo) {
-    if (cadastroRapidoNomeAberto) return Promise.resolve(null);
+    // Flag órfã (modal nunca chegou a abrir / ficou atrás): libera novo clique.
+    if (cadastroRapidoNomeAberto) {
+        const aberto = document.getElementById('modalNomeCadastroRapido');
+        if (aberto && aberto.classList.contains('show')) return Promise.resolve(null);
+        cadastroRapidoNomeAberto = false;
+    }
     if (!window.bootstrap || !window.bootstrap.Modal) {
         showNotification('Não foi possível abrir o formulário de criação rápida.', 'danger');
         return Promise.resolve(null);
@@ -3849,6 +3894,12 @@ function solicitarNomeCadastroRapido(titulo, rotulo) {
             input.removeEventListener('input', limparValidacao);
             modalEl.removeEventListener('hidden.bs.modal', finalizar);
             cadastroRapidoNomeAberto = false;
+            modalEl.classList.remove('modal-nome-cadastro-rapido-sobre');
+            modalEl.style.removeProperty('z-index');
+            document.querySelectorAll('.modal-nome-cadastro-rapido-backdrop').forEach((b) => {
+                b.classList.remove('modal-nome-cadastro-rapido-backdrop');
+                b.style.removeProperty('z-index');
+            });
             // Fechar o modal aninhado remove o bloqueio de rolagem do cadastro que continua aberto.
             if (document.querySelector('.modal.show')) document.body.classList.add('modal-open');
             resolve(nome);
@@ -3868,8 +3919,13 @@ function solicitarNomeCadastroRapido(titulo, rotulo) {
         input.addEventListener('input', limparValidacao);
         form.addEventListener('submit', salvar);
         modalEl.addEventListener('hidden.bs.modal', finalizar, { once: true });
-        modalEl.addEventListener('shown.bs.modal', () => input.focus(), { once: true });
+        modalEl.addEventListener('shown.bs.modal', () => {
+            elevarModalNomeCadastroRapido(modalEl);
+            input.focus();
+        }, { once: true });
         modal.show();
+        // Eleva já no show (antes do shown) para não aparecer atrás do cadastro MIIP.
+        elevarModalNomeCadastroRapido(modalEl);
     });
 }
 
@@ -3879,7 +3935,13 @@ function inicializarBotoesCriacaoRapidaCategoriaSubcategoria() {
     const $btnSubcategoria = $('#btnCriarSubcategoriaRapida');
     if (!$btnCategoria.length && !$btnSubcategoria.length) return;
 
-    $btnCategoria.off('click.miipQuickCreate').on('click.miipQuickCreate', async function () {
+    $btnCategoria.off('click.miipQuickCreate').on('click.miipQuickCreate', async function (evt) {
+        evt.preventDefault();
+        evt.stopPropagation();
+        if (!window.categoriasAPI || typeof window.categoriasAPI.criar !== 'function') {
+            showNotification('Módulo de categorias indisponível. Atualize a página (Ctrl+F5) e tente novamente.', 'danger');
+            return;
+        }
         const nome = await solicitarNomeCadastroRapido('Nova categoria', 'Nome da categoria');
         if (!nome) return;
         try {
@@ -3908,14 +3970,40 @@ function inicializarBotoesCriacaoRapidaCategoriaSubcategoria() {
             $cat.trigger('change');
             showNotification('Categoria criada com sucesso.', 'success');
         } catch (err) {
+            const msg = String(err?.responseJSON?.erro || '');
+            // Nome já existe neste tipo: recarrega lista e seleciona (ex.: corrida / duplo clique).
+            if (/já existe/i.test(msg)) {
+                try {
+                    const categorias = await window.categoriasAPI.listar(tipoCategoria);
+                    const encontrada = (categorias || []).find(
+                        (cat) => String(cat.nome || '').trim().toLowerCase() === nome.trim().toLowerCase()
+                    );
+                    if (encontrada) {
+                        registrarCategoriasSistema(tipoCategoria, categorias || []);
+                        let options = '<option value="">Selecione</option>';
+                        (categorias || []).forEach((cat) => {
+                            options += `<option value="${cat.id}"${String(cat.id) === String(encontrada.id) ? ' selected' : ''}>${escapeHtml(cat.nome || '')}</option>`;
+                        });
+                        $('#categoria_id').html(options).val(String(encontrada.id)).trigger('change');
+                        showNotification('Categoria já existia neste tipo e foi selecionada.', 'info');
+                        return;
+                    }
+                } catch (_) { /* segue para erro original */ }
+            }
             showNotification(err?.responseJSON?.erro || 'Erro ao criar categoria.', 'danger');
         }
     });
 
-    $btnSubcategoria.off('click.miipQuickCreate').on('click.miipQuickCreate', async function () {
+    $btnSubcategoria.off('click.miipQuickCreate').on('click.miipQuickCreate', async function (evt) {
+        evt.preventDefault();
+        evt.stopPropagation();
         const categoriaId = $('#categoria_id').val();
         if (!categoriaId) {
             showNotification('Selecione uma categoria antes de criar uma subcategoria.', 'warning');
+            return;
+        }
+        if (!window.subcategoriasAPI || typeof window.subcategoriasAPI.criar !== 'function') {
+            showNotification('Módulo de subcategorias indisponível. Atualize a página (Ctrl+F5) e tente novamente.', 'danger');
             return;
         }
         const nome = await solicitarNomeCadastroRapido('Nova subcategoria', 'Nome da subcategoria');
@@ -4712,12 +4800,26 @@ async function inicializarUnidadesVolumeComercialCadastro(produto, isEdit) {
     });
 }
 
-// Insumos preservam valores comerciais existentes, mas não os exibem nem os reenviam no formulário.
+// Insumos: preço de venda só quando "Produto comercializável?" estiver ligado.
 function aplicarModoInsumoCamposVenda() {
     const insumo = cadastroEhInsumo();
-    $('#produtoModal [data-campo-venda-comercial]').prop('hidden', insumo);
+    const comercializavel = insumo && $('#comercializavel').is(':checked');
+    $('#produtoModal [data-campo-insumo-comercializavel]').prop('hidden', !insumo);
+    $('#produtoModal [data-campo-venda-comercial]')
+        .not('[data-campo-preco-venda-campo]')
+        .prop('hidden', insumo);
     $('#produtoModal [data-campo-produto-comercial]').prop('hidden', insumo);
-    $('#preco_venda').prop('required', !insumo);
+    if (insumo) {
+        $('[data-campo-preco-venda-campo]').prop('hidden', !comercializavel);
+        $('#preco_venda')
+            .prop('required', comercializavel)
+            .prop('disabled', !comercializavel);
+        $('#label_preco_venda').text(comercializavel ? 'Valor de Venda *' : 'Preço comercial *');
+    } else {
+        $('[data-campo-preco-venda-campo]').prop('hidden', false);
+        $('#preco_venda').prop('required', true).prop('disabled', false);
+        $('#label_preco_venda').text('Preço comercial *');
+    }
 }
 window.aplicarModoInsumoCamposVenda = aplicarModoInsumoCamposVenda;
 
@@ -4744,7 +4846,7 @@ function sincronizarFormacaoPrecoProduto(origem = 'init') {
     $precoCompra.prop('readonly', false).removeClass('bg-light');
 
     if (cadastroEhInsumo()) {
-        // Sem preço de venda/markup: nunca derivar venda a partir do custo.
+        // Insumo comercializável: preço informado manualmente; sem markup automático.
         atualizarPreviewValorTotalEstoqueCadastro();
         return;
     }
@@ -4821,6 +4923,10 @@ function inicializarCalculoPreco(produto, isEdit) {
     atualizarVisibilidadeEmbalagemComercialCadastro();
     aplicarModoInsumoCamposVenda();
     $('#tipo_operacional').off('change.camposVenda').on('change.camposVenda', function () {
+        aplicarModoInsumoCamposVenda();
+        sincronizarFormacaoPrecoProduto('init');
+    });
+    $('#comercializavel').off('change.camposVenda').on('change.camposVenda', function () {
         aplicarModoInsumoCamposVenda();
         sincronizarFormacaoPrecoProduto('init');
     });
@@ -5028,12 +5134,31 @@ async function saveProduto() {
         permite_personalizacao_ingredientes: personalizacaoAtiva ? 1 : 0,
         utiliza_ficha_tecnica: utilizaFichaTecnica ? 1 : 0,
         preco_compra: parseFloat($('#preco_compra').val()) || 0,
-        preco_venda: cadastroEhInsumo() ? 0 : (parseFloat($('#preco_venda').val()) || 0),
-        lucro_percentual: cadastroEhInsumo() ? 0 : ($('#lucro_percentual').val() !== '' ? parseFloat($('#lucro_percentual').val()) : (
-            (parseFloat($('#preco_compra').val()) || 0) > 0 && (parseFloat($('#preco_venda').val()) || 0) > 0
-                ? parseFloat(((((parseFloat($('#preco_venda').val()) - parseFloat($('#preco_compra').val())) / parseFloat($('#preco_compra').val())) * 100).toFixed(2)))
-                : null
-        )),
+        comercializavel: cadastroEhInsumo() && $('#comercializavel').is(':checked') ? 1 : 0,
+        preco_venda: (() => {
+            if (!cadastroEhInsumo()) return parseFloat($('#preco_venda').val()) || 0;
+            if (!$('#comercializavel').is(':checked')) return undefined;
+            return parseFloat($('#preco_venda').val());
+        })(),
+        lucro_percentual: (() => {
+            const compra = parseFloat($('#preco_compra').val()) || 0;
+            const venda = parseFloat($('#preco_venda').val()) || 0;
+            const lucroCampo = $('#lucro_percentual').val() !== '' ? parseFloat($('#lucro_percentual').val()) : null;
+            if (cadastroEhInsumo()) {
+                // Comercializável: persiste margem real (compra→venda) para o lançamento de NF não zerar o preço.
+                if (!$('#comercializavel').is(':checked')) return 0;
+                if (Number.isFinite(lucroCampo)) return lucroCampo;
+                if (compra > 0 && venda > 0) {
+                    return Number((((venda - compra) / compra) * 100).toFixed(2));
+                }
+                return 0;
+            }
+            if (lucroCampo !== null && Number.isFinite(lucroCampo)) return lucroCampo;
+            if (compra > 0 && venda > 0) {
+                return Number((((venda - compra) / compra) * 100).toFixed(2));
+            }
+            return null;
+        })(),
         estoque_minimo: parseFloat($('#estoque_minimo').val()) || 0,
         fornecedor: ($('#fornecedor').val() || '').trim(),
         data_validade: ($('#data_validade').val() || '').trim() || null,
@@ -5164,10 +5289,23 @@ async function saveProduto() {
         return;
     }
 
-    if (data.tipo_operacional !== 'INSUMO' && data.preco_venda <= 0) {
+    if (data.tipo_operacional === 'INSUMO' && Number(data.comercializavel) === 1) {
+        const pv = Number(data.preco_venda);
+        if (!Number.isFinite(pv) || pv <= 0) {
+            showNotification('Para produto comercializável, informe o valor de venda maior que zero.', 'warning');
+            $('#comercializavel').prop('checked', true);
+            aplicarModoInsumoCamposVenda();
+            $('#preco_venda').focus();
+            return;
+        }
+    } else if (data.tipo_operacional !== 'INSUMO' && data.preco_venda <= 0) {
         showNotification('Informe um preço de venda válido.', 'warning');
         $('#preco_venda').focus();
         return;
+    }
+
+    if (data.preco_venda === undefined) {
+        delete data.preco_venda;
     }
 
     if (data.preco_compra < 0) {

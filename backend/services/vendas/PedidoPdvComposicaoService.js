@@ -271,7 +271,8 @@ async function carregarModelosBebidaVolume(
       calcularEstoqueProduto(produto),
       creditoPedido.por_produto[produtoId] || 0
     );
-    const quantidadeMaxima = produtoControlaEstoque(produto)
+    const { produtoExigeValidacaoSaldoProprio } = require('../estoque/produtoControlaEstoque');
+    const quantidadeMaxima = produtoExigeValidacaoSaldoProprio(produto)
       ? Math.floor(Math.max(0, Number(calc.disponivel_total || 0)) + 1e-9)
       : Number.MAX_SAFE_INTEGER;
 

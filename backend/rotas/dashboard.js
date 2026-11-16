@@ -11,6 +11,7 @@ const {
   getExprValorVendaNaoFiscal,
   getExprQuantidadeItem,
   getFiltroItensFiscal,
+  getFiltroVendaComValorNoModo,
   getExprLucroItem,
   sqlRankingProdutosDaEmpresa
 } = require('../services/reportFiscalHelpers');
@@ -106,6 +107,7 @@ router.get('/resumo', verificarPermissaoEspecifica('relatorios'), async (req, re
     const exprValorNaoFiscal = getExprValorVendaNaoFiscal();
     const exprQuantidade = getExprQuantidadeItem(modoFiscal);
     const filtroItensFiscal = getFiltroItensFiscal(modoFiscal);
+    const filtroVendaComValor = getFiltroVendaComValorNoModo(modoFiscal);
     const exprLucro = getExprLucroItem(modoFiscal);
     const filtroProdutoFiscal = filtroProdutoFiscalDashboard(modoFiscal);
     const exprEstoqueEe = exprEstoqueEmpresaDashboard(modoFiscal);
@@ -133,12 +135,13 @@ router.get('/resumo', verificarPermissaoEspecifica('relatorios'), async (req, re
       dbGet(`
         SELECT
           COALESCE(SUM(${exprValor}), 0) AS faturamento,
-          COUNT(id) AS total_vendas,
+          COUNT(v.id) AS total_vendas,
           COALESCE(AVG(${exprValor}), 0) AS ticket_medio
         FROM vendas v
         WHERE date(v.data_venda) BETWEEN date(?) AND date(?)
           AND ${FILTRO_VENDA_VALIDA}
           ${filtroVendaEmpresa}
+          ${filtroVendaComValor}
       `, [dataInicio, dataFim, empresaId]),
 
       dbGet(`
@@ -154,12 +157,13 @@ router.get('/resumo', verificarPermissaoEspecifica('relatorios'), async (req, re
       dbGet(`
         SELECT
           COALESCE(SUM(${exprValor}), 0) AS faturamento_hoje,
-          COUNT(id) AS vendas_hoje,
+          COUNT(v.id) AS vendas_hoje,
           COALESCE(AVG(${exprValor}), 0) AS ticket_medio_hoje
         FROM vendas v
         WHERE date(v.data_venda) = date(?)
           AND ${FILTRO_VENDA_VALIDA}
           ${filtroVendaEmpresa}
+          ${filtroVendaComValor}
       `, [dataHoje, empresaId]),
 
       dbGet(`

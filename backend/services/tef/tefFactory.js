@@ -19,13 +19,30 @@ function ambienteTesteSmartPos() {
     && process.env.CDS_BLOQUEAR_BANCO_OFICIAL === '1';
 }
 
+function tefRegistroHabilitado(registro) {
+  return tefConfigRepository.intToBool(registro && registro.habilitado);
+}
+
+function erroTefDesabilitado() {
+  const err = new Error('TEF está desabilitado na configuração.');
+  err.code = 'TEF_DESABILITADO';
+  err.statusCode = 409;
+  return err;
+}
+
 function criarAdapter(registro) {
   if (!registro) {
     throw new Error('TEF não configurado');
   }
 
-  const provedor = String(registro.provedor || '').toLowerCase();
+  const provedor = String(registro.provedor || '').toLowerCase().trim();
   const usarReal = ambienteUsaMiddlewareReal(registro.ambiente);
+
+  if (!provedor) {
+    const err = new Error('Provedor TEF não configurado.');
+    err.code = 'TEF_PROVEDOR_AUSENTE';
+    throw err;
+  }
 
   if (provedor === 'smart_pos_simulador') {
     if (!ambienteTesteSmartPos()) {
@@ -63,8 +80,19 @@ function criarAdapter(registro) {
   return new Gateway(registro);
 }
 
+/**
+ * Porta única de inicialização do adaptador TEF.
+ * Com TEF desabilitado (`tef_configuracao.habilitado`) não valida provedor,
+ * não instancia adaptador e não carrega DLL/SDK/middleware.
+ */
 async function obterAdapter() {
   const registro = await tefConfigRepository.buscarConfiguracaoPrincipal();
+  if (!registro) {
+    throw new Error('TEF não configurado');
+  }
+  if (!tefRegistroHabilitado(registro)) {
+    throw erroTefDesabilitado();
+  }
   return criarAdapter(registro);
 }
 
@@ -72,5 +100,7 @@ module.exports = {
   obterAdapter,
   criarAdapter,
   ambienteUsaMiddlewareReal,
-  ambienteTesteSmartPos
+  ambienteTesteSmartPos,
+  tefRegistroHabilitado,
+  erroTefDesabilitado
 };

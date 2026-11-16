@@ -34,6 +34,8 @@ class NfeParseadaDTO {
     this.valorSeguro = Number(dados.valorSeguro ?? dados.valor_seguro ?? 0);
     this.valorOutrasDespesas = Number(dados.valorOutrasDespesas ?? dados.valor_outras_despesas ?? 0);
     this.valorIpi = Number(dados.valorIpi ?? dados.valor_ipi ?? 0);
+    this.valorIcmsSt = Number(dados.valorIcmsSt ?? dados.valor_icms_st ?? 0);
+    this.valorFcpSt = Number(dados.valorFcpSt ?? dados.valor_fcp_st ?? 0);
     this.valorTotalNota = Number(dados.valorTotalNota ?? dados.valor_total_nota ?? 0);
     this.observacao = dados.observacao ?? '';
     // RC COMPRAS 5.4.1 — financeiro importado do XML
@@ -89,6 +91,8 @@ class NfeParseadaDTO {
       valor_seguro: this.valorSeguro,
       valor_outras_despesas: this.valorOutrasDespesas,
       valor_ipi: this.valorIpi,
+      valor_icms_st: this.valorIcmsSt,
+      valor_fcp_st: this.valorFcpSt,
       valor_total_nota: this.valorTotalNota,
       observacao: this.observacao,
       forma_pagamento: this.formaPagamento,

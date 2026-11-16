@@ -299,6 +299,85 @@ async function inativarVinculo(usuarioFonte, empresaFonte, opts = {}) {
   return buscarVinculo(uid, eid, { db });
 }
 
+/**
+ * Garante vínculos ativos com todas as empresas ativas (idempotente).
+ * Usado no cadastro/reativação de operador — sem isso o PDV fica sem X-Empresa-Id.
+ */
+async function assegurarVinculosEmpresasAtivas(usuarioFonte, opts = {}) {
+  const uid = exigirUsuarioId(usuarioFonte);
+  const db = getDb(opts.db);
+  const ativas = await EmpresaService.listarEmpresas({ ativo: 1 }, { db });
+  const vinculados = [];
+  for (const empresa of ativas) {
+    const eid = Number(empresa.id);
+    if (!Number.isInteger(eid) || eid <= 0) continue;
+    const existente = await buscarVinculo(uid, eid, { db });
+    if (existente && Number(existente.ativo) === 1) {
+      vinculados.push(existente);
+      continue;
+    }
+    if (existente) {
+      await dbRun(
+        db,
+        `UPDATE usuario_empresas SET ativo = 1, updated_at = CURRENT_TIMESTAMP
+         WHERE usuario_id = ? AND empresa_id = ?`,
+        [uid, eid]
+      );
+      vinculados.push(await buscarVinculo(uid, eid, { db }));
+      continue;
+    }
+    await dbRun(
+      db,
+      `INSERT INTO usuario_empresas (usuario_id, empresa_id, ativo, created_at, updated_at)
+       VALUES (?, ?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+      [uid, eid]
+    );
+    vinculados.push(await buscarVinculo(uid, eid, { db }));
+  }
+  return vinculados;
+}
+
+/**
+ * Garante que o usuário consiga operar com contexto empresarial.
+ * - Admin operacional: não grava vínculo (já vê todas).
+ * - Demais: se não houver nenhuma empresa disponível, vincula às ativas.
+ * Não sobrescreve vínculo seletivo existente (só age quando a lista está vazia).
+ */
+async function garantirAcessoEmpresarialMinimo(usuarioFonte, opts = {}) {
+  const uid = exigirUsuarioId(usuarioFonte);
+  const sujeito = sujeitoAutorizacao(usuarioFonte, opts) || { id: uid };
+  const db = getDb(opts.db);
+
+  if (administradorOperacional(sujeito)) {
+    const empresas = await listarEmpresasPermitidas(sujeito, { db, user: sujeito });
+    return {
+      usuario_id: uid,
+      admin_operacional: true,
+      healed: false,
+      empresas
+    };
+  }
+
+  let empresas = await listarEmpresasPermitidas(sujeito, { db, user: sujeito });
+  if (empresas.length > 0) {
+    return {
+      usuario_id: uid,
+      admin_operacional: false,
+      healed: false,
+      empresas
+    };
+  }
+
+  await assegurarVinculosEmpresasAtivas(uid, { db });
+  empresas = await listarEmpresasPermitidas(sujeito, { db, user: sujeito });
+  return {
+    usuario_id: uid,
+    admin_operacional: false,
+    healed: true,
+    empresas
+  };
+}
+
 module.exports = {
   resolverUsuarioId,
   exigirUsuarioId,
@@ -309,5 +388,7 @@ module.exports = {
   listarVinculosDoUsuario,
   vincularUsuarioEmpresa,
   inativarVinculo,
-  buscarVinculo
+  buscarVinculo,
+  assegurarVinculosEmpresasAtivas,
+  garantirAcessoEmpresarialMinimo
 };

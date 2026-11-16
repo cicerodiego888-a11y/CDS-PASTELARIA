@@ -18,6 +18,20 @@ const TIPOS_NOTIFICACAO = Object.freeze({
   ERRO: 'ERRO'
 });
 
+/** DistDFe de produção off — estado normal; não deve alarmar o operador. */
+function ehAvisoOperacaoFiscalRealDesabilitada(opcoes = {}) {
+  const codigo = String(opcoes.codigo || opcoes.code || '').toUpperCase();
+  if (
+    codigo === 'OPERACAO_REAL_DESABILITADA'
+    || codigo === 'DISTDFE_AUTOMATICO_DESABILITADO'
+  ) {
+    return true;
+  }
+  const texto = `${opcoes.mensagem || ''} ${opcoes.mensagemAmigavel || ''} ${opcoes.titulo || ''}`;
+  return /opera[cç][aã]o fiscal real desabilitada/i.test(texto)
+    || /DistDFe autom[aá]tico bloqueado/i.test(texto);
+}
+
 class CentralNotificacoesService {
   /**
    * @param {Object} [deps]
@@ -71,13 +85,15 @@ class CentralNotificacoesService {
   async notificarSyncConcluida(opcoes = {}) {
     const { notasNovas = 0, sucesso = true, mensagem, origem } = opcoes;
     const consultaNaoEnviada = opcoes.consultaExecutada === false || opcoes.ignorado === true;
+    // Estado esperado (sem DistDFe de produção): não gera toast/alarme ao abrir a Central.
+    if (ehAvisoOperacaoFiscalRealDesabilitada(opcoes)) {
+      return null;
+    }
 
+    // Cooldown / fila esgotada / Gate: estado operacional esperado — não gera toast.
+    // O operador confundia com erro do sistema (avisos amarelos na Central).
     if (!sucesso && consultaNaoEnviada) {
-      return this.criar({
-        tipo: TIPOS_NOTIFICACAO.SYNC_CONSULTA_NAO_ENVIADA,
-        titulo: 'Consulta DF-e não enviada',
-        mensagem: mensagem || 'A consulta DistDFe não foi enviada à SEFAZ.'
-      });
+      return null;
     }
 
     if (!sucesso) {

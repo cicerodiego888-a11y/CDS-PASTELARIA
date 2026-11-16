@@ -14,6 +14,7 @@ const tefContrato = require('./tef/tefContrato');
 const tefConfigService = require('./tef/tefConfigService');
 const tefFluxoPagamento = require('./tef/tefFluxoPagamento');
 const midp = require('./midp');
+const pixEvidenciaService = require('./pix/pixEvidenciaService');
 
 const FORMAS_PRAZO = new Set([
   'prazo',
@@ -34,7 +35,12 @@ function modoManualVigente(modoConfirmacaoFiscal) {
   return String(modoConfirmacaoFiscal || 'TEF').toUpperCase() === 'MANUAL';
 }
 
-function confirmacaoManualAceita(modoConfirmacaoFiscal, confirmacaoFiscalManual, tefHabilitado) {
+/**
+ * Confirmação operacional explícita:
+ * - TEF off: aceita flag para eletrônico (maquininha/app externos) e não eletrônico.
+ * - TEF on: só no modo MANUAL; eletrônico com TEF on ainda exige prova TEF/PIX no processarRecebimentoFiscal.
+ */
+function confirmacaoManualAceita(modoConfirmacaoFiscal, confirmacaoFiscalManual, tefHabilitado, recebimentos = null) {
   if (!confirmacaoFiscalManualExplicita(confirmacaoFiscalManual)) return false;
   if (!tefFluxoPagamento.parseTefHabilitado(tefHabilitado)) return true;
   return modoManualVigente(modoConfirmacaoFiscal);
@@ -539,29 +545,10 @@ async function processarFluxoPagamentoVenda({
     };
   }
   
-  if (Number(totalFiscal) <= 0) {
-    const pagamentosTef = listarPagamentosQueExigemTef(pagamentosEntrada);
-    const todosComId = pagamentosTef.length > 0 && pagamentosTef.every((pagamento) => pagamento.tef_transacao_id);
-    if (pagamentosTef.length > 0 && !todosComId) {
-      const aceita = confirmacaoManualAceita(
-        modoConfirmacaoFiscal,
-        confirmacaoFiscalManual,
-        tefHabilitado
-      );
-      const tefOn = tefFluxoPagamento.parseTefHabilitado(tefHabilitado);
-      if (!aceita && !tefOn) {
-        return {
-          sucesso: false,
-          erro: ERRO_AUTORIZACAO_PAGAMENTO,
-          distribuicao
-        };
-      }
-    }
-  }
-
-  // Processar recebimento fiscal (TEF ou Confirmação Manual)
+  // Processar recebimento fiscal (TEF / PIX comprovado / manual não eletrônico)
   const resultadoFiscal = await processarRecebimentoFiscal({
     recebimentosFiscal: distribuicao.recebimentosFiscal,
+    pagamentosEntrada,
     totalFiscal,
     tefHabilitado,
     modoConfirmacaoFiscal,
@@ -633,10 +620,14 @@ async function processarFluxoPagamentoVenda({
 }
 
 /**
- * Processa o recebimento fiscal (TEF ou Confirmação Manual)
+ * Processa o recebimento fiscal.
+ * TEF on: exige TEF/PIX comprovados.
+ * TEF off: aceita confirmação operacional explícita (confirmacao_fiscal_manual) sem chamar TEF.
+ * PIX com txid: sempre revalida na cobrança persistida.
  */
 async function processarRecebimentoFiscal({
   recebimentosFiscal,
+  pagamentosEntrada,
   totalFiscal,
   tefHabilitado,
   modoConfirmacaoFiscal,
@@ -645,45 +636,114 @@ async function processarRecebimentoFiscal({
   empresaId,
   operadorId
 }) {
-  // Se não há fiscal, não processa nada
-  if (totalFiscal <= 0 || !recebimentosFiscal || recebimentosFiscal.length === 0) {
-    return { sucesso: true, tipo: 'sem_fiscal' };
-  }
-
-  const recebimentosTef = listarPagamentosQueExigemTef(recebimentosFiscal);
-  if (recebimentosTef.length === 0) {
-    return await processarConfirmacaoManualFiscal(recebimentosFiscal);
-  }
-
-  const comId = recebimentosTef.filter((recebimento) =>
-    identificadorTefInformado(recebimento.tef_transacao_id)
-  );
-  const semId = recebimentosTef.filter((recebimento) =>
-    !identificadorTefInformado(recebimento.tef_transacao_id)
-  );
+  const tefOn = tefFluxoPagamento.parseTefHabilitado(tefHabilitado);
   const manualAceita = confirmacaoManualAceita(
     modoConfirmacaoFiscal,
     confirmacaoFiscalManual,
     tefHabilitado
   );
+  const baseEletronicos = listarPagamentosQueExigemTef(
+    (recebimentosFiscal && recebimentosFiscal.length)
+      ? recebimentosFiscal
+      : (pagamentosEntrada || [])
+  );
 
-  if (semId.length === 0) {
+  async function comprovarOuAceitarManual(lista) {
+    const comTef = lista.filter((p) => identificadorTefInformado(
+      p.tef_transacao_id || (p.tef && p.tef.transacao_id)
+    ));
+    const pixComTxid = lista.filter((p) => (
+      pixEvidenciaService.formaEhPix(p.forma_pagamento)
+      && !identificadorTefInformado(p.tef_transacao_id || (p.tef && p.tef.transacao_id))
+      && String(p.pix_txid || p.txid || '').trim() !== ''
+    ));
+    const semEvidencia = lista.filter((p) => (
+      !identificadorTefInformado(p.tef_transacao_id || (p.tef && p.tef.transacao_id))
+      && !(
+        pixEvidenciaService.formaEhPix(p.forma_pagamento)
+        && String(p.pix_txid || p.txid || '').trim() !== ''
+      )
+    ));
+
+    if (comTef.length > 0) {
+      const prova = await comprovarTransacoesTefAprovadas(comTef, empresaId, operadorId);
+      if (!prova.sucesso) return prova;
+    }
+    if (pixComTxid.length > 0) {
+      const provaPix = await pixEvidenciaService.comprovarPagamentosPix(pixComTxid, {
+        empresaId,
+        consultarProvedor: false
+      });
+      if (!provaPix.sucesso) return provaPix;
+    }
+    if (semEvidencia.length > 0) {
+      if (tefOn || !manualAceita) {
+        return { sucesso: false, erro: ERRO_AUTORIZACAO_PAGAMENTO };
+      }
+    }
+    return { sucesso: true };
+  }
+
+  if (Number(totalFiscal) <= 0 || !recebimentosFiscal || recebimentosFiscal.length === 0) {
+    if (baseEletronicos.length === 0) {
+      return { sucesso: true, tipo: 'sem_fiscal' };
+    }
+    const prova = await comprovarOuAceitarManual(baseEletronicos);
+    if (!prova.sucesso) return prova;
+    if (!tefOn && manualAceita) {
+      return processarConfirmacaoManualFiscal(baseEletronicos, { permitirEletronico: true });
+    }
     return {
       sucesso: true,
-      tipo: 'tef',
-      transacoes: [...new Set(comId.map((recebimento) => recebimento.tef_transacao_id))],
-      recebimentos: recebimentosFiscal
+      tipo: 'eletronico_comprovado',
+      recebimentos: baseEletronicos
     };
   }
 
-  if (comId.length > 0 && manualAceita) {
-    const prova = await comprovarTransacoesTefAprovadas(comId, empresaId, operadorId);
-    if (!prova.sucesso) return prova;
-    return await processarConfirmacaoManualFiscal(recebimentosFiscal);
+  const recebimentosTef = listarPagamentosQueExigemTef(recebimentosFiscal);
+  if (recebimentosTef.length === 0) {
+    return processarConfirmacaoManualFiscal(recebimentosFiscal, { permitirEletronico: !tefOn && manualAceita });
   }
 
-  if (manualAceita) {
-    return await processarConfirmacaoManualFiscal(recebimentosFiscal);
+  const prova = await comprovarOuAceitarManual(recebimentosTef);
+  if (!prova.sucesso) return prova;
+
+  const comId = recebimentosTef.filter((r) => identificadorTefInformado(r.tef_transacao_id));
+  const pixComTxid = recebimentosTef.filter((r) => (
+    pixEvidenciaService.formaEhPix(r.forma_pagamento)
+    && String(r.pix_txid || r.txid || '').trim() !== ''
+    && !identificadorTefInformado(r.tef_transacao_id)
+  ));
+  const semEvidencia = recebimentosTef.filter((r) => (
+    !identificadorTefInformado(r.tef_transacao_id)
+    && !(pixEvidenciaService.formaEhPix(r.forma_pagamento) && String(r.pix_txid || r.txid || '').trim())
+  ));
+
+  if (semEvidencia.length > 0 && !tefOn && manualAceita) {
+    return processarConfirmacaoManualFiscal(recebimentosFiscal, { permitirEletronico: true });
+  }
+
+  if (pixComTxid.length > 0 || comId.length > 0) {
+    let recebimentosComprovados = recebimentosFiscal.map((r) => ({ ...r }));
+    if (pixComTxid.length > 0) {
+      const provaPix = await pixEvidenciaService.comprovarPagamentosPix(pixComTxid, {
+        empresaId,
+        consultarProvedor: false
+      });
+      if (!provaPix.sucesso) return provaPix;
+      recebimentosComprovados = recebimentosComprovados.map((r) => {
+        const match = (provaPix.pagamentos || []).find((p) => (
+          String(p.pix_txid) === String(r.pix_txid || r.txid || '')
+        ));
+        return match || r;
+      });
+    }
+    return {
+      sucesso: true,
+      tipo: pixComTxid.length > 0 && comId.length === 0 ? 'pix' : 'tef',
+      transacoes: [...new Set(comId.map((r) => r.tef_transacao_id))],
+      recebimentos: recebimentosComprovados
+    };
   }
 
   const deveUsarTef = await deveUsarTEFParaFiscal({
@@ -695,6 +755,10 @@ async function processarRecebimentoFiscal({
 
   if (deveUsarTef) {
     return await processarTEFFiscal(recebimentosFiscal, empresaId, operadorId);
+  }
+
+  if (!tefOn && manualAceita) {
+    return processarConfirmacaoManualFiscal(recebimentosFiscal, { permitirEletronico: true });
   }
 
   return { sucesso: false, erro: ERRO_AUTORIZACAO_PAGAMENTO };
@@ -787,19 +851,35 @@ async function processarTEFFiscal(recebimentosFiscal, empresaId, operadorId) {
 }
 
 /**
- * Processa confirmação manual do recebimento fiscal
+ * Confirmação operacional explícita do operador.
+ * Com TEF off, permite eletrônico (maquininha/app externos).
+ * Com TEF on, eletrônico deve ter sido filtrado antes — aqui rejeita se ainda vier.
  */
-async function processarConfirmacaoManualFiscal(recebimentosFiscal) {
-  // Confirmação manual apenas marca como aprovado
-  const recebimentosConfirmados = recebimentosFiscal.map(r => ({
+async function processarConfirmacaoManualFiscal(recebimentosFiscal, opcoes = {}) {
+  const permitirEletronico = opcoes.permitirEletronico === true;
+  const eletronicos = listarPagamentosQueExigemTef(recebimentosFiscal);
+  if (eletronicos.length > 0 && !permitirEletronico) {
+    return {
+      sucesso: false,
+      codigo: 'CONFIRMACAO_MANUAL_INVALIDA_ELETRONICO',
+      erro: 'Com TEF habilitado, PIX/cartão exigem autorização comprovada.'
+    };
+  }
+
+  const recebimentosConfirmados = (recebimentosFiscal || []).map((r) => ({
     ...r,
-    status: 'aprovado'
+    status: 'aprovado',
+    confirmacao_manual: 1,
+    confirmacao_modalidade: listarPagamentosQueExigemTef([r]).length
+      ? 'manual'
+      : (r.confirmacao_modalidade || 'manual'),
+    confirmacao_operacional_externa: listarPagamentosQueExigemTef([r]).length > 0
   }));
-  
-  return { 
-    sucesso: true, 
-    tipo: 'manual', 
-    recebimentos: recebimentosConfirmados 
+
+  return {
+    sucesso: true,
+    tipo: 'manual',
+    recebimentos: recebimentosConfirmados
   };
 }
 
@@ -980,7 +1060,14 @@ function normalizarPagamentosEntrada(pagamentos, formaPagamentoPadrao, totalLiqu
     tef_transacao_id: p.tef_transacao_id || null,
     nsu: p.nsu || null,
     autorizacao: p.autorizacao || null,
-    // CONFIRMACAO-AUTORITATIVA-01: preserva carimbo backend (não vem do frontend).
+    // Evidência PIX própria (txid deve existir em pix_cobrancas; Orquestrador revalida).
+    pix_txid: p.pix_txid || p.txid || null,
+    pix_confirmado: p.pix_confirmado === true,
+    parcela_local_id: p.parcela_local_id != null ? p.parcela_local_id : p.local_id,
+    local_id: p.local_id != null ? p.local_id : null,
+    sessao_pagamento: p.sessao_pagamento || null,
+    chave_parcela: p.chave_parcela || null,
+    // CONFIRMACAO-AUTORITATIVA-01: carimbo eletrônico só após comprovação no backend.
     confirmacao_eletronica_comprovada: p.confirmacao_eletronica_comprovada === true,
     status: p.status || null,
     status_autorizacao: p.status_autorizacao || null,
@@ -1061,6 +1148,9 @@ module.exports = {
   comprovarPagamentosParaReferenciaFiscal,
   resolverIdTransacaoTefPersistida,
   processarPagamentoNaoFiscal,
+  processarConfirmacaoManualFiscal,
+  confirmacaoManualAceita,
+  processarRecebimentoFiscal,
   determinarStatusPagamento,
   montarRecebimentosParaGravar,
   isPagamentoIntegralConfirmado,

@@ -25,15 +25,12 @@ const FILAS = Object.freeze({
     label: 'Em Revisão',
     statusIn: Object.freeze([S.EM_REVISAO])
   },
+  // Prontas = liberadas para lançar compra (ainda não gravadas).
+  // Inclui EM_IMPORTACAO: compra aberta / “Importar Compra” ainda disponível.
   prontas: {
     codigo: 'prontas',
     label: 'Prontas',
-    statusIn: Object.freeze([S.PRONTA_IMPORTACAO])
-  },
-  em_importacao: {
-    codigo: 'em_importacao',
-    label: 'Em Importação',
-    statusIn: Object.freeze([S.EM_IMPORTACAO])
+    statusIn: Object.freeze([S.PRONTA_IMPORTACAO, S.EM_IMPORTACAO])
   },
   importadas: {
     codigo: 'importadas',
@@ -75,7 +72,9 @@ const ALIAS_FILA = Object.freeze({
   atencao: 'erro',
   xml: 'pendentes',
   aguardando_xml: 'pendentes',
-  gravadas: 'importadas'
+  gravadas: 'importadas',
+  // UX antiga tinha chip separado; agora cai em Prontas (compra ainda em aberto).
+  em_importacao: 'prontas'
 });
 
 /**
