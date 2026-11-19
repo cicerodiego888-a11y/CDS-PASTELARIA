@@ -150,9 +150,16 @@ async function avaliarSelecaoEmpresaPdv(entrada = {}, deps = {}) {
     };
   }
 
+  const usuario = entrada.usuario != null
+    ? entrada.usuario
+    : (entrada.user != null ? entrada.user : null);
   const capacidade = await avaliarCapacidadeCarrinho({
     itens,
-    usuarioId: entrada.usuarioId,
+    usuarioId: entrada.usuarioId != null
+      ? entrada.usuarioId
+      : (usuario && (usuario.id != null ? usuario.id : usuario.usuario_id)),
+    usuario,
+    user: usuario,
     modoOperacional: 'MULTIEMPRESA',
     tipoSaldo: saldo.tipoSaldo,
     exigirFiscalValido: saldo.exigirFiscalValido === true,
@@ -204,6 +211,7 @@ async function aplicarSelecaoEmpresaNaVendaPdv(req, context, contract, deps = {}
     body,
     itens,
     usuarioId,
+    usuario: req.user || null,
     empresaOperacionalId: deps.empresaOperacionalId
   }, deps);
 

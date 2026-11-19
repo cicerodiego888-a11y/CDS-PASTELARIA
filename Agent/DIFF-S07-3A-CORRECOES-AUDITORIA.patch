@@ -1,0 +1,1615 @@
+﻿diff --git a/backend/migrations/s07-3a-cozinha-roteamento.sql b/backend/migrations/s07-3a-cozinha-roteamento.sql
+new file mode 100644
+index 0000000..a8dbe8a
+--- /dev/null
++++ b/backend/migrations/s07-3a-cozinha-roteamento.sql
+@@ -0,0 +1,33 @@
++-- S07-3A — Configuração de roteamento de cozinhas (por empresa)
++-- Compatível com SQLite e FKs compostas de cozinha_unidades(id, empresa_id).
++-- NÃO executar automaticamente no banco oficial.
++-- Aplicar somente com autorização PO/TL (migration controlada).
++-- As APIs GET/PUT de roteamento NÃO executam este DDL; exigem schema já presente.
++-- Em testes: garantirSchemaCozinhaRoteamento (CREATE IF NOT EXISTS) em DB temporário.
++
++CREATE TABLE IF NOT EXISTS cozinha_roteamento_config (
++  empresa_id INTEGER PRIMARY KEY,
++  modo TEXT NOT NULL
++    CHECK (modo IN ('COZINHA_PADRAO', 'COZINHA_POR_SEGMENTO')),
++  unidade_padrao_id INTEGER,
++  updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
++  updated_by INTEGER,
++  FOREIGN KEY (empresa_id) REFERENCES empresas(id),
++  FOREIGN KEY (unidade_padrao_id, empresa_id)
++    REFERENCES cozinha_unidades(id, empresa_id)
++);
++
++CREATE TABLE IF NOT EXISTS cozinha_roteamento_segmentos (
++  id INTEGER PRIMARY KEY AUTOINCREMENT,
++  empresa_id INTEGER NOT NULL,
++  segmento TEXT NOT NULL,
++  unidade_id INTEGER NOT NULL,
++  updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
++  UNIQUE (empresa_id, segmento),
++  FOREIGN KEY (empresa_id) REFERENCES empresas(id),
++  FOREIGN KEY (unidade_id, empresa_id)
++    REFERENCES cozinha_unidades(id, empresa_id)
++);
++
++CREATE INDEX IF NOT EXISTS idx_cozinha_roteamento_seg_empresa
++ON cozinha_roteamento_segmentos(empresa_id);
+diff --git a/backend/services/cozinha/CozinhaRoteamentoConfigService.js b/backend/services/cozinha/CozinhaRoteamentoConfigService.js
+new file mode 100644
+index 0000000..f97ae71
+--- /dev/null
++++ b/backend/services/cozinha/CozinhaRoteamentoConfigService.js
+@@ -0,0 +1,404 @@
++/**
++ * S07-3A — Configuração administrativa de roteamento de cozinhas.
++ * MODO 1: COZINHA_PADRAO — uma unidade ativa da empresa.
++ * MODO 2: COZINHA_POR_SEGMENTO — mapa segmento → unidade ativa.
++ * Empresa somente do contexto. Sem despacho / sem alterar pedidos / sem KDS.
++ * APIs não executam DDL — exigem schema já aplicado (migration controlada).
++ */
++'use strict';
++
++const { isAdminOperacional, parsePositiveInteger } = require('./cozinhaAuthUnidade');
++const {
++  exigirSchemaCozinhaRoteamento,
++  garantirSchemaCozinhaRoteamento,
++  verificarSchemaCozinhaRoteamento
++} = require('./cozinhaRoteamentoSchema');
++const {
++  SEGMENTOS_BASE,
++  listarSegmentosPermitidos,
++  isSegmentoPermitido,
++  normalizarCodigoSegmento
++} = require('./cozinhaRoteamentoSegmentos');
++
++const MODO_PADRAO = 'COZINHA_PADRAO';
++const MODO_SEGMENTO = 'COZINHA_POR_SEGMENTO';
++const MODOS = Object.freeze([MODO_PADRAO, MODO_SEGMENTO]);
++
++/** Alias estável: base S07-3A (LOJA, IFOOD, PEDIDO_ONLINE). Preferir listarSegmentosPermitidos(). */
++const SEGMENTOS = SEGMENTOS_BASE;
++
++function erro(mensagem, statusCode, codigo, extras = {}) {
++  const err = new Error(mensagem);
++  err.statusCode = statusCode;
++  err.codigo = codigo;
++  Object.assign(err, extras);
++  return err;
++}
++
++function conn(opts) {
++  return (opts && opts.db) || require('../../database');
++}
++
++function dbAll(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
++  });
++}
++
++function dbGet(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
++  });
++}
++
++function dbRun(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.run(sql, params, function cb(err) {
++      if (err) return reject(err);
++      resolve(this);
++    });
++  });
++}
++
++function exigirEmpresa(empresaId) {
++  const n = Number(empresaId);
++  if (!Number.isInteger(n) || n <= 0) {
++    throw erro('Empresa do contexto é obrigatória.', 400, 'EMPRESA_CONTEXT_REQUIRED');
++  }
++  return n;
++}
++
++function exigirUsuario(user) {
++  if (!user || typeof user !== 'object') {
++    throw erro('Sessão inválida.', 401, 'SESSAO_INVALIDA');
++  }
++  const id = Number(user.id != null ? user.id : user.usuario_id);
++  if (!Number.isInteger(id) || id <= 0) {
++    throw erro('Sessão sem operador.', 401, 'SESSAO_INVALIDA');
++  }
++  return { ...user, id, usuario_id: id };
++}
++
++function exigirAdminOperacional(user) {
++  if (!isAdminOperacional(user)) {
++    throw erro(
++      'Somente administrador operacional pode gerenciar o roteamento de cozinhas.',
++      403,
++      'ADMIN_OPERACIONAL_OBRIGATORIO'
++    );
++  }
++}
++
++function normalizarModo(raw) {
++  const modo = String(raw == null ? '' : raw).trim().toUpperCase();
++  if (!MODOS.includes(modo)) {
++    throw erro(
++      'Modo de distribuição inválido. Use COZINHA_PADRAO ou COZINHA_POR_SEGMENTO.',
++      400,
++      'MODO_ROTEAMENTO_INVALIDO'
++    );
++  }
++  return modo;
++}
++
++function normalizarSegmento(raw) {
++  const seg = normalizarCodigoSegmento(raw);
++  const permitidos = listarSegmentosPermitidos();
++  if (!isSegmentoPermitido(seg)) {
++    throw erro(
++      `Segmento inválido. Use: ${permitidos.join(', ')}.`,
++      400,
++      'SEGMENTO_INVALIDO',
++      { segmentos_permitidos: permitidos.slice() }
++    );
++  }
++  return seg;
++}
++
++/**
++ * APIs: apenas verificação — nunca CREATE TABLE.
++ */
++async function exigirSchemaDisponivel(db) {
++  await exigirSchemaCozinhaRoteamento(db);
++}
++
++/**
++ * Valida unidade ativa pertencente à empresa do contexto.
++ */
++async function exigirUnidadeAtivaDaEmpresa(db, empresaId, unidadeIdRaw, codigoErro = 'UNIDADE_DESTINO_INVALIDA') {
++  void codigoErro;
++  const unidadeId = parsePositiveInteger(unidadeIdRaw);
++  if (unidadeId == null) {
++    throw erro('Identificador da unidade de cozinha inválido.', 400, 'UNIDADE_ID_INVALIDO');
++  }
++  const row = await dbGet(db, `
++    SELECT id, empresa_id, codigo, ativo
++    FROM cozinha_unidades
++    WHERE id = ?
++  `, [unidadeId]);
++  if (!row) {
++    throw erro('Unidade de cozinha inexistente.', 404, 'UNIDADE_INEXISTENTE');
++  }
++  if (Number(row.empresa_id) !== Number(empresaId)) {
++    throw erro(
++      'Unidade não pertence à empresa do contexto.',
++      403,
++      'UNIDADE_EMPRESA_ISOLAMENTO'
++    );
++  }
++  if (Number(row.ativo) !== 1) {
++    throw erro('Unidade de cozinha inativa.', 409, 'UNIDADE_INATIVA');
++  }
++  return {
++    id: Number(row.id),
++    empresa_id: Number(row.empresa_id),
++    codigo: row.codigo != null ? String(row.codigo) : null,
++    ativo: true
++  };
++}
++
++async function lerSegmentos(db, empresaId) {
++  const rows = await dbAll(db, `
++    SELECT s.segmento, s.unidade_id, s.updated_at, u.codigo AS unidade_codigo, u.ativo AS unidade_ativo
++    FROM cozinha_roteamento_segmentos s
++    LEFT JOIN cozinha_unidades u
++      ON u.id = s.unidade_id AND u.empresa_id = s.empresa_id
++    WHERE s.empresa_id = ?
++    ORDER BY s.segmento ASC
++  `, [empresaId]);
++  return (rows || []).map((r) => ({
++    segmento: String(r.segmento),
++    unidade_id: Number(r.unidade_id),
++    unidade_codigo: r.unidade_codigo != null ? String(r.unidade_codigo) : null,
++    unidade_ativa: Number(r.unidade_ativo) === 1,
++    updated_at: r.updated_at || null
++  }));
++}
++
++async function montarResposta(db, empresaId) {
++  const cfg = await dbGet(db, `
++    SELECT c.empresa_id, c.modo, c.unidade_padrao_id, c.updated_at, c.updated_by,
++           u.codigo AS unidade_padrao_codigo, u.ativo AS unidade_padrao_ativo
++    FROM cozinha_roteamento_config c
++    LEFT JOIN cozinha_unidades u
++      ON u.id = c.unidade_padrao_id AND u.empresa_id = c.empresa_id
++    WHERE c.empresa_id = ?
++  `, [empresaId]);
++  const segmentos = await lerSegmentos(db, empresaId);
++  const segmentosPermitidos = listarSegmentosPermitidos();
++
++  if (!cfg) {
++    return {
++      success: true,
++      configurado: false,
++      empresa_id: empresaId,
++      modo: null,
++      unidade_padrao_id: null,
++      unidade_padrao: null,
++      segmentos,
++      segmentos_permitidos: segmentosPermitidos,
++      segmentos_base: SEGMENTOS_BASE.slice(),
++      updated_at: null,
++      updated_by: null
++    };
++  }
++
++  const unidadePadrao = cfg.unidade_padrao_id != null
++    ? {
++      id: Number(cfg.unidade_padrao_id),
++      codigo: cfg.unidade_padrao_codigo != null ? String(cfg.unidade_padrao_codigo) : null,
++      ativo: Number(cfg.unidade_padrao_ativo) === 1
++    }
++    : null;
++
++  return {
++    success: true,
++    configurado: true,
++    empresa_id: empresaId,
++    modo: String(cfg.modo),
++    unidade_padrao_id: cfg.unidade_padrao_id != null ? Number(cfg.unidade_padrao_id) : null,
++    unidade_padrao: unidadePadrao,
++    segmentos,
++    segmentos_permitidos: segmentosPermitidos,
++    segmentos_base: SEGMENTOS_BASE.slice(),
++    updated_at: cfg.updated_at || null,
++    updated_by: cfg.updated_by != null ? Number(cfg.updated_by) : null
++  };
++}
++
++async function upsertConfigBase(db, empresaId, { modo, unidadePadraoId, updatedBy }) {
++  const existente = await dbGet(db, `
++    SELECT empresa_id, modo, unidade_padrao_id FROM cozinha_roteamento_config WHERE empresa_id = ?
++  `, [empresaId]);
++
++  if (!existente) {
++    await dbRun(db, `
++      INSERT INTO cozinha_roteamento_config (empresa_id, modo, unidade_padrao_id, updated_at, updated_by)
++      VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?)
++    `, [empresaId, modo, unidadePadraoId, updatedBy]);
++    return;
++  }
++
++  await dbRun(db, `
++    UPDATE cozinha_roteamento_config
++    SET modo = ?,
++        unidade_padrao_id = ?,
++        updated_at = CURRENT_TIMESTAMP,
++        updated_by = ?
++    WHERE empresa_id = ?
++  `, [modo, unidadePadraoId, updatedBy, empresaId]);
++}
++
++/**
++ * Consulta configuração da empresa do contexto.
++ */
++async function obterConfiguracao({ user, empresaId }, opts = {}) {
++  const db = conn(opts);
++  const usuario = exigirUsuario(user);
++  exigirAdminOperacional(usuario);
++  const empId = exigirEmpresa(empresaId);
++  await exigirSchemaDisponivel(db);
++  return montarResposta(db, empId);
++}
++
++/**
++ * Define o modo de distribuição.
++ * Body lógico: { modo }. empresa_id do corpo é ignorado.
++ */
++async function definirModo({ user, empresaId, modoRaw, bodyEmpresaIdIgnored }, opts = {}) {
++  const db = conn(opts);
++  const usuario = exigirUsuario(user);
++  exigirAdminOperacional(usuario);
++  const empId = exigirEmpresa(empresaId);
++  void bodyEmpresaIdIgnored;
++  const modo = normalizarModo(modoRaw);
++  await exigirSchemaDisponivel(db);
++
++  const atual = await dbGet(db, `
++    SELECT modo, unidade_padrao_id FROM cozinha_roteamento_config WHERE empresa_id = ?
++  `, [empId]);
++
++  let unidadePadraoId = atual && atual.unidade_padrao_id != null
++    ? Number(atual.unidade_padrao_id)
++    : null;
++
++  if (modo === MODO_PADRAO) {
++    if (unidadePadraoId == null) {
++      throw erro(
++        'Defina a cozinha padrão antes de ativar o modo COZINHA_PADRAO.',
++        409,
++        'COZINHA_PADRAO_OBRIGATORIA'
++      );
++    }
++    await exigirUnidadeAtivaDaEmpresa(db, empId, unidadePadraoId);
++  }
++
++  await upsertConfigBase(db, empId, {
++    modo,
++    unidadePadraoId: unidadePadraoId,
++    updatedBy: usuario.id
++  });
++
++  return montarResposta(db, empId);
++}
++
++/**
++ * Define a cozinha padrão (unidade ativa da empresa).
++ * Body: { unidade_id }. Ignora empresa_id do corpo.
++ */
++async function definirCozinhaPadrao({ user, empresaId, unidadeIdRaw, bodyEmpresaIdIgnored }, opts = {}) {
++  const db = conn(opts);
++  const usuario = exigirUsuario(user);
++  exigirAdminOperacional(usuario);
++  const empId = exigirEmpresa(empresaId);
++  void bodyEmpresaIdIgnored;
++  await exigirSchemaDisponivel(db);
++
++  const unidade = await exigirUnidadeAtivaDaEmpresa(db, empId, unidadeIdRaw);
++
++  const atual = await dbGet(db, `
++    SELECT modo, unidade_padrao_id FROM cozinha_roteamento_config WHERE empresa_id = ?
++  `, [empId]);
++  const modo = atual && atual.modo ? String(atual.modo) : MODO_PADRAO;
++
++  await upsertConfigBase(db, empId, {
++    modo,
++    unidadePadraoId: unidade.id,
++    updatedBy: usuario.id
++  });
++
++  return montarResposta(db, empId);
++}
++
++/**
++ * Associa um segmento a uma unidade ativa da empresa.
++ * Body: { segmento, unidade_id }. Sem destino → erro.
++ */
++async function associarSegmento({
++  user,
++  empresaId,
++  segmentoRaw,
++  unidadeIdRaw,
++  bodyEmpresaIdIgnored
++}, opts = {}) {
++  const db = conn(opts);
++  const usuario = exigirUsuario(user);
++  exigirAdminOperacional(usuario);
++  const empId = exigirEmpresa(empresaId);
++  void bodyEmpresaIdIgnored;
++
++  const segmento = normalizarSegmento(segmentoRaw);
++  if (unidadeIdRaw === undefined || unidadeIdRaw === null || unidadeIdRaw === '') {
++    throw erro(
++      'Destino (unidade_id) é obrigatório para o segmento.',
++      400,
++      'SEGMENTO_SEM_DESTINO'
++    );
++  }
++  await exigirSchemaDisponivel(db);
++  const unidade = await exigirUnidadeAtivaDaEmpresa(db, empId, unidadeIdRaw);
++
++  const atual = await dbGet(db, `
++    SELECT modo, unidade_padrao_id FROM cozinha_roteamento_config WHERE empresa_id = ?
++  `, [empId]);
++  if (!atual) {
++    await upsertConfigBase(db, empId, {
++      modo: MODO_SEGMENTO,
++      unidadePadraoId: null,
++      updatedBy: usuario.id
++    });
++  } else {
++    await dbRun(db, `
++      UPDATE cozinha_roteamento_config
++      SET updated_at = CURRENT_TIMESTAMP, updated_by = ?
++      WHERE empresa_id = ?
++    `, [usuario.id, empId]);
++  }
++
++  await dbRun(db, `
++    INSERT INTO cozinha_roteamento_segmentos (empresa_id, segmento, unidade_id, updated_at)
++    VALUES (?, ?, ?, CURRENT_TIMESTAMP)
++    ON CONFLICT(empresa_id, segmento) DO UPDATE SET
++      unidade_id = excluded.unidade_id,
++      updated_at = CURRENT_TIMESTAMP
++  `, [empId, segmento, unidade.id]);
++
++  return montarResposta(db, empId);
++}
++
++module.exports = {
++  MODO_PADRAO,
++  MODO_SEGMENTO,
++  MODOS,
++  SEGMENTOS,
++  SEGMENTOS_BASE,
++  listarSegmentosPermitidos,
++  obterConfiguracao,
++  definirModo,
++  definirCozinhaPadrao,
++  associarSegmento,
++  /** Somente testes / aplicação controlada — APIs não usam. */
++  garantirSchemaCozinhaRoteamento,
++  verificarSchemaCozinhaRoteamento,
++  exigirSchemaCozinhaRoteamento
++};
+diff --git a/backend/services/cozinha/cozinhaRoteamentoSchema.js b/backend/services/cozinha/cozinhaRoteamentoSchema.js
+new file mode 100644
+index 0000000..a418c5e
+--- /dev/null
++++ b/backend/services/cozinha/cozinhaRoteamentoSchema.js
+@@ -0,0 +1,107 @@
++/**
++ * S07-3A — Schema de configuração de roteamento de cozinhas (por empresa).
++ * DDL somente via migration controlada ou garantirSchema* em ambiente de teste.
++ * Serviços administrativos NÃO devem criar tabelas sob demanda.
++ */
++'use strict';
++
++function dbRun(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.run(sql, params, function cb(err) {
++      if (err) return reject(err);
++      resolve(this);
++    });
++  });
++}
++
++function dbGet(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
++  });
++}
++
++const TABELAS_ROTEAMENTO = Object.freeze([
++  'cozinha_roteamento_config',
++  'cozinha_roteamento_segmentos'
++]);
++
++/**
++ * Verifica se as tabelas de roteamento existem (sem DDL).
++ * @returns {{ disponivel: boolean, faltando: string[] }}
++ */
++async function verificarSchemaCozinhaRoteamento(db) {
++  if (!db) throw new Error('db obrigatório para verificar schema cozinha_roteamento');
++  const faltando = [];
++  for (const nome of TABELAS_ROTEAMENTO) {
++    const row = await dbGet(db, `
++      SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?
++    `, [nome]);
++    if (!row || !row.name) faltando.push(nome);
++  }
++  return { disponivel: faltando.length === 0, faltando };
++}
++
++/**
++ * Exige schema disponível. Sem CREATE — erro operacional se ausente.
++ */
++async function exigirSchemaCozinhaRoteamento(db) {
++  const st = await verificarSchemaCozinhaRoteamento(db);
++  if (st.disponivel) return st;
++  const err = new Error(
++    'Schema de roteamento de cozinhas indisponível. Aplique a migration S07-3A antes de usar esta API.'
++  );
++  err.statusCode = 503;
++  err.codigo = 'SCHEMA_ROTEAMENTO_INDISPONIVEL';
++  err.faltando = st.faltando.slice();
++  throw err;
++}
++
++/**
++ * CREATE IF NOT EXISTS — uso exclusivo em testes / aplicação controlada.
++ * NÃO chamar a partir das APIs GET/PUT de roteamento.
++ */
++async function garantirSchemaCozinhaRoteamento(db) {
++  if (!db) throw new Error('db obrigatório para schema cozinha_roteamento');
++
++  await dbRun(db, `
++    CREATE TABLE IF NOT EXISTS cozinha_roteamento_config (
++      empresa_id INTEGER PRIMARY KEY,
++      modo TEXT NOT NULL
++        CHECK (modo IN ('COZINHA_PADRAO', 'COZINHA_POR_SEGMENTO')),
++      unidade_padrao_id INTEGER,
++      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
++      updated_by INTEGER,
++      FOREIGN KEY (empresa_id) REFERENCES empresas(id),
++      FOREIGN KEY (unidade_padrao_id, empresa_id)
++        REFERENCES cozinha_unidades(id, empresa_id)
++    )
++  `);
++
++  await dbRun(db, `
++    CREATE TABLE IF NOT EXISTS cozinha_roteamento_segmentos (
++      id INTEGER PRIMARY KEY AUTOINCREMENT,
++      empresa_id INTEGER NOT NULL,
++      segmento TEXT NOT NULL,
++      unidade_id INTEGER NOT NULL,
++      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
++      UNIQUE (empresa_id, segmento),
++      FOREIGN KEY (empresa_id) REFERENCES empresas(id),
++      FOREIGN KEY (unidade_id, empresa_id)
++        REFERENCES cozinha_unidades(id, empresa_id)
++    )
++  `);
++
++  await dbRun(db, `
++    CREATE INDEX IF NOT EXISTS idx_cozinha_roteamento_seg_empresa
++    ON cozinha_roteamento_segmentos(empresa_id)
++  `);
++
++  return verificarSchemaCozinhaRoteamento(db);
++}
++
++module.exports = {
++  TABELAS_ROTEAMENTO,
++  verificarSchemaCozinhaRoteamento,
++  exigirSchemaCozinhaRoteamento,
++  garantirSchemaCozinhaRoteamento
++};
+diff --git a/backend/services/cozinha/cozinhaRoteamentoSegmentos.js b/backend/services/cozinha/cozinhaRoteamentoSegmentos.js
+new file mode 100644
+index 0000000..89dda4d
+--- /dev/null
++++ b/backend/services/cozinha/cozinhaRoteamentoSegmentos.js
+@@ -0,0 +1,93 @@
++/**
++ * S07-3A — Registro de segmentos de atendimento para roteamento.
++ *
++ * Segmentos base (obrigatórios / preservados): LOJA, IFOOD, PEDIDO_ONLINE.
++ *
++ * Extensão futura sem alterar a lógica central de roteamento:
++ * - Registrar via `registrarSegmentoExtra(codigo)` (somente em bootstrap/config),
++ *   ou
++ * - Definir `CDS_COZINHA_SEGMENTOS_EXTRA=UBER,RAPPI` (lista CSV, uppercase).
++ *
++ * A validação e o mapa segmento→unidade usam apenas `listarSegmentosPermitidos()`.
++ * Não há integração com plataformas externas neste módulo.
++ */
++'use strict';
++
++/** Segmentos oficiais S07-3A — não remover. */
++const SEGMENTOS_BASE = Object.freeze(['LOJA', 'IFOOD', 'PEDIDO_ONLINE']);
++
++/** Extensões em memória (processo) — limpas só via limparSegmentosExtra (testes). */
++const _extras = new Set();
++
++function normalizarCodigoSegmento(raw) {
++  return String(raw == null ? '' : raw).trim().toUpperCase();
++}
++
++function extrasDoAmbiente() {
++  const raw = process.env.CDS_COZINHA_SEGMENTOS_EXTRA;
++  if (raw == null || String(raw).trim() === '') return [];
++  return String(raw)
++    .split(/[,;]+/)
++    .map(normalizarCodigoSegmento)
++    .filter((s) => s.length > 0 && /^[A-Z][A-Z0-9_]{0,31}$/.test(s));
++}
++
++/**
++ * Lista completa (base + extras env + extras registrados), estável e sem duplicatas.
++ */
++function listarSegmentosPermitidos() {
++  const out = [];
++  const seen = new Set();
++  for (const s of SEGMENTOS_BASE) {
++    if (!seen.has(s)) {
++      seen.add(s);
++      out.push(s);
++    }
++  }
++  for (const s of extrasDoAmbiente()) {
++    if (!seen.has(s)) {
++      seen.add(s);
++      out.push(s);
++    }
++  }
++  for (const s of _extras) {
++    if (!seen.has(s)) {
++      seen.add(s);
++      out.push(s);
++    }
++  }
++  return out;
++}
++
++function isSegmentoPermitido(raw) {
++  const seg = normalizarCodigoSegmento(raw);
++  return seg.length > 0 && listarSegmentosPermitidos().includes(seg);
++}
++
++/**
++ * Amplia o allowlist em runtime (configuração / testes).
++ * Não altera a lógica de roteamento — só o conjunto validado.
++ */
++function registrarSegmentoExtra(codigo) {
++  const seg = normalizarCodigoSegmento(codigo);
++  if (!seg || !/^[A-Z][A-Z0-9_]{0,31}$/.test(seg)) {
++    throw new Error(`Código de segmento inválido para extensão: ${codigo}`);
++  }
++  if (SEGMENTOS_BASE.includes(seg)) return seg;
++  _extras.add(seg);
++  return seg;
++}
++
++/** Uso exclusivo em testes. */
++function limparSegmentosExtra() {
++  _extras.clear();
++}
++
++module.exports = {
++  SEGMENTOS_BASE,
++  listarSegmentosPermitidos,
++  isSegmentoPermitido,
++  normalizarCodigoSegmento,
++  registrarSegmentoExtra,
++  limparSegmentosExtra
++};
+diff --git a/tests/cozinha/sprint07-s07-3a-roteamento-cozinhas.test.js b/tests/cozinha/sprint07-s07-3a-roteamento-cozinhas.test.js
+new file mode 100644
+index 0000000..e9ccf38
+--- /dev/null
++++ b/tests/cozinha/sprint07-s07-3a-roteamento-cozinhas.test.js
+@@ -0,0 +1,665 @@
++/**
++ * Sprint 07 · S07-3A — Configuração de roteamento de cozinhas.
++ * Banco temporário. Sem banco oficial. Sem despacho / KDS / S07-3B+.
++ *
++ *   set CDS_BLOQUEAR_BANCO_OFICIAL=1
++ *   set CDS_TEST_ISOLATION=1
++ *   set CDS_FORCAR_LOCAL=1
++ *   node --test --test-concurrency=1 --test-force-exit tests/cozinha/sprint07-s07-3a-roteamento-cozinhas.test.js
++ */
++'use strict';
++
++const fs = require('fs');
++const os = require('os');
++const path = require('path');
++const http = require('http');
++const express = require('express');
++const jwt = require('jsonwebtoken');
++const { describe, it, before, after, beforeEach } = require('node:test');
++const assert = require('node:assert/strict');
++const sqlite3 = require('sqlite3').verbose();
++
++const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-cozinha-s07-3a-'));
++process.env.DB_DIR = dbDir;
++process.env.CDS_TEST_ISOLATION = '1';
++process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
++process.env.CDS_FORCAR_LOCAL = '1';
++process.env.JWT_SECRET = process.env.JWT_SECRET || 'cds-test-jwt-s07-3a-roteamento';
++delete process.env.CDS_ALLOW_OFFICIAL_DB;
++delete process.env.CDS_COZINHA_IMPRESSAO_FISICA_AUTORIZADA;
++
++const {
++  garantirSchemaCozinha,
++  marcarCozinhaOperacional,
++  isCozinhaOperacional,
++  getCozinhaSchemaStatus
++} = require('../../backend/utils/cozinhaSchema');
++const { garantirSchemaEmpresasAsync } = require('../../backend/services/empresas/empresasSchema');
++const { garantirSchemaUsuarioEmpresasAsync } = require('../../backend/services/empresas/usuarioEmpresasSchema');
++const Roteamento = require('../../backend/services/cozinha/CozinhaRoteamentoConfigService');
++const {
++  garantirSchemaCozinhaRoteamento,
++  verificarSchemaCozinhaRoteamento
++} = require('../../backend/services/cozinha/cozinhaRoteamentoSchema');
++const {
++  SEGMENTOS_BASE,
++  listarSegmentosPermitidos,
++  registrarSegmentoExtra,
++  limparSegmentosExtra
++} = require('../../backend/services/cozinha/cozinhaRoteamentoSegmentos');
++const { verificarToken } = require('../../backend/middleware/auth');
++const { exigirRecurso } = require('../../backend/middleware/validarRecursoImplantacao');
++const configService = require('../../backend/services/configuracaoService');
++
++function run(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.run(sql, params, function cb(err) {
++      if (err) reject(err);
++      else resolve(this);
++    });
++  });
++}
++function get(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
++  });
++}
++function openMem() {
++  return new Promise((resolve, reject) => {
++    const db = new sqlite3.Database(':memory:', (err) => {
++      if (err) return reject(err);
++      db.serialize(() => {
++        db.run('PRAGMA foreign_keys = ON');
++        db.run('PRAGMA busy_timeout = 10000', (e) => (e ? reject(e) : resolve(db)));
++      });
++    });
++  });
++}
++function close(db) {
++  return new Promise((resolve) => db.close(() => resolve()));
++}
++
++async function prepararBase(db) {
++  await run(db, `
++    CREATE TABLE IF NOT EXISTS usuarios (
++      id INTEGER PRIMARY KEY AUTOINCREMENT,
++      username TEXT UNIQUE NOT NULL,
++      password_hash TEXT NOT NULL,
++      role TEXT DEFAULT 'operador',
++      perfil TEXT DEFAULT 'USUARIO',
++      ativo INTEGER DEFAULT 1,
++      nome TEXT
++    )
++  `);
++  await garantirSchemaEmpresasAsync(db);
++  await garantirSchemaUsuarioEmpresasAsync(db);
++  await garantirSchemaCozinha(db);
++  // DDL só no setup de teste — APIs usam exigirSchema (sem CREATE).
++  await garantirSchemaCozinhaRoteamento(db);
++
++  const emp1 = await run(db, `
++    INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
++    VALUES ('11111111000111', 'Empresa 1', 'E1', 1)
++  `);
++  const emp2 = await run(db, `
++    INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
++    VALUES ('22222222000122', 'Empresa 2', 'E2', 1)
++  `);
++
++  const admin = await run(db, `
++    INSERT INTO usuarios (username, password_hash, role, perfil, ativo, nome)
++    VALUES ('admin_r3a', 'hash', 'admin', 'ADMIN', 1, 'Admin')
++  `);
++  const op = await run(db, `
++    INSERT INTO usuarios (username, password_hash, role, perfil, ativo, nome)
++    VALUES ('op_r3a', 'hash', 'operador', 'USUARIO', 1, 'Op')
++  `);
++
++  await run(db, `INSERT INTO usuario_empresas (usuario_id, empresa_id, ativo) VALUES (?, ?, 1)`, [admin.lastID, emp1.lastID]);
++  await run(db, `INSERT INTO usuario_empresas (usuario_id, empresa_id, ativo) VALUES (?, ?, 1)`, [op.lastID, emp1.lastID]);
++
++  const unA = await run(db, `
++    INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'COZ-01', 1)
++  `, [emp1.lastID]);
++  const unB = await run(db, `
++    INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'COZ-02', 1)
++  `, [emp1.lastID]);
++  const unInativa = await run(db, `
++    INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'COZ-OFF', 0)
++  `, [emp1.lastID]);
++  const unOutra = await run(db, `
++    INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'COZ-X', 1)
++  `, [emp2.lastID]);
++
++  return {
++    emp1: emp1.lastID,
++    emp2: emp2.lastID,
++    adminId: admin.lastID,
++    opId: op.lastID,
++    unA: unA.lastID,
++    unB: unB.lastID,
++    unInativa: unInativa.lastID,
++    unOutra: unOutra.lastID
++  };
++}
++
++function userAdmin(ctx) {
++  return { id: ctx.adminId, username: 'admin_r3a', role: 'admin', perfil: 'ADMIN', permissoes: [] };
++}
++function userOp(ctx) {
++  return { id: ctx.opId, username: 'op_r3a', role: 'operador', perfil: 'USUARIO', permissoes: [] };
++}
++
++describe('S07-3A — serviço roteamento (memória)', () => {
++  beforeEach(() => marcarCozinhaOperacional(false));
++
++  it('cria e lê configuração (cozinha padrão)', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    const padrao = await Roteamento.definirCozinhaPadrao({
++      user: userAdmin(ctx),
++      empresaId: ctx.emp1,
++      unidadeIdRaw: ctx.unA,
++      bodyEmpresaIdIgnored: ctx.emp2
++    }, { db });
++    assert.equal(padrao.configurado, true);
++    assert.equal(padrao.modo, 'COZINHA_PADRAO');
++    assert.equal(padrao.unidade_padrao_id, ctx.unA);
++    assert.equal(padrao.empresa_id, ctx.emp1);
++
++    const leitura = await Roteamento.obterConfiguracao({
++      user: userAdmin(ctx),
++      empresaId: ctx.emp1
++    }, { db });
++    assert.equal(leitura.unidade_padrao_id, ctx.unA);
++    assert.equal(leitura.unidade_padrao.codigo, 'COZ-01');
++    await close(db);
++  });
++
++  it('altera entre COZINHA_PADRAO e COZINHA_POR_SEGMENTO', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    await Roteamento.definirCozinhaPadrao({
++      user: userAdmin(ctx), empresaId: ctx.emp1, unidadeIdRaw: ctx.unA
++    }, { db });
++    const seg = await Roteamento.associarSegmento({
++      user: userAdmin(ctx),
++      empresaId: ctx.emp1,
++      segmentoRaw: 'IFOOD',
++      unidadeIdRaw: ctx.unB
++    }, { db });
++    assert.ok(seg.segmentos.some((s) => s.segmento === 'IFOOD' && s.unidade_id === ctx.unB));
++
++    const modoSeg = await Roteamento.definirModo({
++      user: userAdmin(ctx),
++      empresaId: ctx.emp1,
++      modoRaw: 'COZINHA_POR_SEGMENTO'
++    }, { db });
++    assert.equal(modoSeg.modo, 'COZINHA_POR_SEGMENTO');
++
++    const volta = await Roteamento.definirModo({
++      user: userAdmin(ctx),
++      empresaId: ctx.emp1,
++      modoRaw: 'COZINHA_PADRAO'
++    }, { db });
++    assert.equal(volta.modo, 'COZINHA_PADRAO');
++    assert.equal(volta.unidade_padrao_id, ctx.unA);
++    await close(db);
++  });
++
++  it('cozinha padrão inexistente é rejeitada', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    await assert.rejects(
++      () => Roteamento.definirCozinhaPadrao({
++        user: userAdmin(ctx), empresaId: ctx.emp1, unidadeIdRaw: 999999
++      }, { db }),
++      (err) => err.codigo === 'UNIDADE_INEXISTENTE'
++    );
++    await close(db);
++  });
++
++  it('cozinha inativa é rejeitada', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    await assert.rejects(
++      () => Roteamento.definirCozinhaPadrao({
++        user: userAdmin(ctx), empresaId: ctx.emp1, unidadeIdRaw: ctx.unInativa
++      }, { db }),
++      (err) => err.codigo === 'UNIDADE_INATIVA' && err.statusCode === 409
++    );
++    await assert.rejects(
++      () => Roteamento.associarSegmento({
++        user: userAdmin(ctx),
++        empresaId: ctx.emp1,
++        segmentoRaw: 'LOJA',
++        unidadeIdRaw: ctx.unInativa
++      }, { db }),
++      (err) => err.codigo === 'UNIDADE_INATIVA'
++    );
++    await close(db);
++  });
++
++  it('unidade de outra empresa é bloqueada', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    await assert.rejects(
++      () => Roteamento.definirCozinhaPadrao({
++        user: userAdmin(ctx), empresaId: ctx.emp1, unidadeIdRaw: ctx.unOutra
++      }, { db }),
++      (err) => err.codigo === 'UNIDADE_EMPRESA_ISOLAMENTO' && err.statusCode === 403
++    );
++    await assert.rejects(
++      () => Roteamento.associarSegmento({
++        user: userAdmin(ctx),
++        empresaId: ctx.emp1,
++        segmentoRaw: 'PEDIDO_ONLINE',
++        unidadeIdRaw: ctx.unOutra
++      }, { db }),
++      (err) => err.codigo === 'UNIDADE_EMPRESA_ISOLAMENTO'
++    );
++    await close(db);
++  });
++
++  it('segmento sem destino é rejeitado', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    await assert.rejects(
++      () => Roteamento.associarSegmento({
++        user: userAdmin(ctx),
++        empresaId: ctx.emp1,
++        segmentoRaw: 'LOJA',
++        unidadeIdRaw: null
++      }, { db }),
++      (err) => err.codigo === 'SEGMENTO_SEM_DESTINO' && err.statusCode === 400
++    );
++    await close(db);
++  });
++
++  it('operador sem autorização é bloqueado', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    await assert.rejects(
++      () => Roteamento.obterConfiguracao({ user: userOp(ctx), empresaId: ctx.emp1 }, { db }),
++      (err) => err.codigo === 'ADMIN_OPERACIONAL_OBRIGATORIO'
++    );
++    await assert.rejects(
++      () => Roteamento.definirCozinhaPadrao({
++        user: userOp(ctx), empresaId: ctx.emp1, unidadeIdRaw: ctx.unA
++      }, { db }),
++      (err) => err.codigo === 'ADMIN_OPERACIONAL_OBRIGATORIO'
++    );
++    await close(db);
++  });
++
++  it('isolamento: config da empresa 1 não vaza para empresa 2', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    await Roteamento.definirCozinhaPadrao({
++      user: userAdmin(ctx), empresaId: ctx.emp1, unidadeIdRaw: ctx.unA
++    }, { db });
++    await Roteamento.associarSegmento({
++      user: userAdmin(ctx),
++      empresaId: ctx.emp1,
++      segmentoRaw: 'IFOOD',
++      unidadeIdRaw: ctx.unB
++    }, { db });
++
++    const outra = await Roteamento.obterConfiguracao({
++      user: userAdmin(ctx),
++      empresaId: ctx.emp2
++    }, { db });
++    assert.equal(outra.configurado, false);
++    assert.equal(outra.unidade_padrao_id, null);
++    assert.equal(outra.segmentos.length, 0);
++    await close(db);
++  });
++
++  it('persistência: nova leitura mantém modo e associações', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    await Roteamento.definirCozinhaPadrao({
++      user: userAdmin(ctx), empresaId: ctx.emp1, unidadeIdRaw: ctx.unA
++    }, { db });
++    await Roteamento.associarSegmento({
++      user: userAdmin(ctx),
++      empresaId: ctx.emp1,
++      segmentoRaw: 'LOJA',
++      unidadeIdRaw: ctx.unA
++    }, { db });
++    await Roteamento.definirModo({
++      user: userAdmin(ctx),
++      empresaId: ctx.emp1,
++      modoRaw: 'COZINHA_POR_SEGMENTO'
++    }, { db });
++
++    const novamente = await Roteamento.obterConfiguracao({
++      user: userAdmin(ctx),
++      empresaId: ctx.emp1
++    }, { db });
++    assert.equal(novamente.modo, 'COZINHA_POR_SEGMENTO');
++    assert.equal(novamente.unidade_padrao_id, ctx.unA);
++    assert.deepEqual(
++      novamente.segmentos.map((s) => ({ segmento: s.segmento, unidade_id: s.unidade_id })),
++      [{ segmento: 'LOJA', unidade_id: ctx.unA }]
++    );
++    await close(db);
++  });
++
++  it('modo PADRAO sem cozinha padrão prévia é bloqueado', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    await assert.rejects(
++      () => Roteamento.definirModo({
++        user: userAdmin(ctx),
++        empresaId: ctx.emp1,
++        modoRaw: 'COZINHA_PADRAO'
++      }, { db }),
++      (err) => err.codigo === 'COZINHA_PADRAO_OBRIGATORIA'
++    );
++    await close(db);
++  });
++
++  it('schema ausente: API retorna SCHEMA_ROTEAMENTO_INDISPONIVEL sem DDL', async () => {
++    const db = await openMem();
++    await run(db, `
++      CREATE TABLE IF NOT EXISTS usuarios (
++        id INTEGER PRIMARY KEY AUTOINCREMENT,
++        username TEXT UNIQUE NOT NULL,
++        password_hash TEXT NOT NULL,
++        role TEXT DEFAULT 'operador',
++        perfil TEXT DEFAULT 'USUARIO',
++        ativo INTEGER DEFAULT 1,
++        nome TEXT
++      )
++    `);
++    await garantirSchemaEmpresasAsync(db);
++    await garantirSchemaUsuarioEmpresasAsync(db);
++    await garantirSchemaCozinha(db);
++
++    const antes = await verificarSchemaCozinhaRoteamento(db);
++    assert.equal(antes.disponivel, false);
++    assert.ok(antes.faltando.includes('cozinha_roteamento_config'));
++
++    const emp = await run(db, `
++      INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
++      VALUES ('55555555000155', 'Emp Schema', 'ES', 1)
++    `);
++    const adm = await run(db, `
++      INSERT INTO usuarios (username, password_hash, role, perfil, ativo, nome)
++      VALUES ('admin_schema', 'hash', 'admin', 'ADMIN', 1, 'Admin')
++    `);
++
++    await assert.rejects(
++      () => Roteamento.obterConfiguracao({
++        user: { id: adm.lastID, role: 'admin', perfil: 'ADMIN' },
++        empresaId: emp.lastID
++      }, { db }),
++      (err) => err.codigo === 'SCHEMA_ROTEAMENTO_INDISPONIVEL' && err.statusCode === 503
++    );
++    await assert.rejects(
++      () => Roteamento.definirCozinhaPadrao({
++        user: { id: adm.lastID, role: 'admin', perfil: 'ADMIN' },
++        empresaId: emp.lastID,
++        unidadeIdRaw: 1
++      }, { db }),
++      (err) => err.codigo === 'SCHEMA_ROTEAMENTO_INDISPONIVEL'
++    );
++
++    const depois = await verificarSchemaCozinhaRoteamento(db);
++    assert.equal(depois.disponivel, false, 'APIs não devem criar tabelas');
++    assert.deepEqual(depois.faltando, antes.faltando);
++    await close(db);
++  });
++
++  it('segmentos base preservados e extensão sem alterar lógica central', async () => {
++    limparSegmentosExtra();
++    assert.deepEqual(SEGMENTOS_BASE, ['LOJA', 'IFOOD', 'PEDIDO_ONLINE']);
++    assert.deepEqual(listarSegmentosPermitidos(), ['LOJA', 'IFOOD', 'PEDIDO_ONLINE']);
++
++    registrarSegmentoExtra('UBER_EATS');
++    assert.ok(listarSegmentosPermitidos().includes('UBER_EATS'));
++    assert.deepEqual(SEGMENTOS_BASE, ['LOJA', 'IFOOD', 'PEDIDO_ONLINE']);
++
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    const assoc = await Roteamento.associarSegmento({
++      user: userAdmin(ctx),
++      empresaId: ctx.emp1,
++      segmentoRaw: 'UBER_EATS',
++      unidadeIdRaw: ctx.unA
++    }, { db });
++    assert.ok(assoc.segmentos.some((s) => s.segmento === 'UBER_EATS' && s.unidade_id === ctx.unA));
++    assert.ok(assoc.segmentos_permitidos.includes('UBER_EATS'));
++    assert.deepEqual(assoc.segmentos_base, ['LOJA', 'IFOOD', 'PEDIDO_ONLINE']);
++
++    await assert.rejects(
++      () => Roteamento.associarSegmento({
++        user: userAdmin(ctx),
++        empresaId: ctx.emp1,
++        segmentoRaw: 'PLATAFORMA_DESCONHECIDA',
++        unidadeIdRaw: ctx.unA
++      }, { db }),
++      (err) => err.codigo === 'SEGMENTO_INVALIDO'
++    );
++
++    limparSegmentosExtra();
++    await close(db);
++  });
++});
++
++describe('S07-3A — HTTP roteamento', () => {
++  let server;
++  let baseUrl;
++  let recursoOriginal;
++  let dbHttp;
++  let empresaId;
++  let empresaOutraId;
++  let adminId;
++  let opId;
++  let unA;
++  let unOutra;
++  let unInativa;
++  let tokenAdmin;
++  let tokenOp;
++
++  function requestJson(method, urlPath, { token, body, empresaHeader } = {}) {
++    const u = new URL(urlPath, baseUrl);
++    const emp = empresaHeader != null ? empresaHeader : empresaId;
++    const payload = body != null ? JSON.stringify(body) : null;
++    return new Promise((resolve, reject) => {
++      const req = http.request({
++        hostname: u.hostname,
++        port: u.port,
++        path: u.pathname + u.search,
++        method,
++        headers: {
++          'Content-Type': 'application/json',
++          ...(emp != null ? { 'X-Empresa-Id': String(emp) } : {}),
++          ...(token ? { Authorization: `Bearer ${token}` } : {}),
++          ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {})
++        }
++      }, (res) => {
++        const chunks = [];
++        res.on('data', (c) => chunks.push(c));
++        res.on('end', () => {
++          const raw = Buffer.concat(chunks).toString('utf8');
++          let json = null;
++          try { json = raw ? JSON.parse(raw) : null; } catch (_e) { json = { raw }; }
++          resolve({ status: res.statusCode, body: json });
++        });
++      });
++      req.on('error', reject);
++      if (payload) req.write(payload);
++      req.end();
++    });
++  }
++
++  before(async () => {
++    dbHttp = require('../../backend/database');
++    await new Promise((resolve, reject) => {
++      const timer = setTimeout(() => reject(new Error('DB timeout')), 60000);
++      dbHttp.whenReady((err) => {
++        clearTimeout(timer);
++        if (err) reject(err);
++        else resolve();
++      });
++    });
++    for (let i = 0; i < 100; i += 1) {
++      const row = await get(dbHttp, `
++        SELECT name FROM sqlite_master WHERE type='table' AND name='cozinha_notificacoes'
++      `);
++      const st = getCozinhaSchemaStatus();
++      if (row && row.name === 'cozinha_notificacoes' && (st.operacional || st.erro)) break;
++      await new Promise((r) => setTimeout(r, 200));
++    }
++    let schemaOut = null;
++    let ultimoErro = null;
++    for (let t = 0; t < 8; t += 1) {
++      try {
++        schemaOut = await garantirSchemaCozinha(dbHttp);
++        ultimoErro = null;
++        break;
++      } catch (err) {
++        ultimoErro = err;
++        await new Promise((r) => setTimeout(r, 300));
++      }
++    }
++    if (!schemaOut || !schemaOut.operacional) {
++      throw ultimoErro || new Error('Schema Cozinha não operacional');
++    }
++    // DDL controlado no setup de teste — não via API.
++    await garantirSchemaCozinhaRoteamento(dbHttp);
++    assert.equal(isCozinhaOperacional(), true);
++
++    recursoOriginal = configService.recursoHabilitado;
++    configService.recursoHabilitado = (nome) => {
++      if (nome === 'pedidos') return true;
++      return recursoOriginal.call(configService, nome);
++    };
++
++    const emp = await run(dbHttp, `
++      INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
++      VALUES ('33445566000177', 'Emp R3A', 'R3A', 1)
++    `);
++    empresaId = emp.lastID;
++    const emp2 = await run(dbHttp, `
++      INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
++      VALUES ('33445566000258', 'Emp R3A B', 'R3AB', 1)
++    `);
++    empresaOutraId = emp2.lastID;
++
++    const adm = await run(dbHttp, `
++      INSERT INTO usuarios (username, password_hash, role, perfil, ativo, nome)
++      VALUES ('admin_r3a_http', 'hash', 'admin', 'ADMIN', 1, 'Admin')
++    `);
++    adminId = adm.lastID;
++    const op = await run(dbHttp, `
++      INSERT INTO usuarios (username, password_hash, role, perfil, ativo, nome)
++      VALUES ('op_r3a_http', 'hash', 'operador', 'USUARIO', 1, 'Op')
++    `);
++    opId = op.lastID;
++    await run(dbHttp, `INSERT INTO usuario_empresas (usuario_id, empresa_id, ativo) VALUES (?, ?, 1)`, [adminId, empresaId]);
++    await run(dbHttp, `INSERT INTO usuario_empresas (usuario_id, empresa_id, ativo) VALUES (?, ?, 1)`, [opId, empresaId]);
++
++    const u1 = await run(dbHttp, `
++      INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'R3A-01', 1)
++    `, [empresaId]);
++    unA = u1.lastID;
++    const uOff = await run(dbHttp, `
++      INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'R3A-OFF', 0)
++    `, [empresaId]);
++    unInativa = uOff.lastID;
++    const uX = await run(dbHttp, `
++      INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'R3A-X', 1)
++    `, [empresaOutraId]);
++    unOutra = uX.lastID;
++
++    tokenAdmin = jwt.sign({
++      id: adminId, username: 'admin_r3a_http', role: 'admin', perfil: 'ADMIN', permissoes: []
++    }, process.env.JWT_SECRET, { expiresIn: '1h' });
++    tokenOp = jwt.sign({
++      id: opId, username: 'op_r3a_http', role: 'operador', perfil: 'USUARIO', permissoes: []
++    }, process.env.JWT_SECRET, { expiresIn: '1h' });
++
++    const cozinhaRoutes = require('../../backend/rotas/cozinha');
++    const app = express();
++    app.use(express.json());
++    app.use('/api/cozinha', verificarToken, exigirRecurso('pedidos'), cozinhaRoutes);
++    server = http.createServer(app);
++    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
++    baseUrl = `http://127.0.0.1:${server.address().port}`;
++  });
++
++  after(async () => {
++    if (recursoOriginal) configService.recursoHabilitado = recursoOriginal;
++    if (server) await new Promise((resolve) => server.close(resolve));
++  });
++
++  it('GET/PUT padrao + segmentos + modo via HTTP', async () => {
++    const vazio = await requestJson('GET', '/api/cozinha/roteamento', { token: tokenAdmin });
++    assert.equal(vazio.status, 200);
++    assert.equal(vazio.body.configurado, false);
++
++    const padrao = await requestJson('PUT', '/api/cozinha/roteamento/padrao', {
++      token: tokenAdmin,
++      body: { unidade_id: unA, empresa_id: empresaOutraId }
++    });
++    assert.equal(padrao.status, 200);
++    assert.equal(padrao.body.unidade_padrao_id, unA);
++    assert.equal(padrao.body.empresa_id, empresaId);
++
++    const seg = await requestJson('PUT', '/api/cozinha/roteamento/segmentos', {
++      token: tokenAdmin,
++      body: { segmento: 'IFOOD', unidade_id: unA }
++    });
++    assert.equal(seg.status, 200);
++    assert.ok(seg.body.segmentos.some((s) => s.segmento === 'IFOOD'));
++
++    const modo = await requestJson('PUT', '/api/cozinha/roteamento/modo', {
++      token: tokenAdmin,
++      body: { modo: 'COZINHA_POR_SEGMENTO' }
++    });
++    assert.equal(modo.status, 200);
++    assert.equal(modo.body.modo, 'COZINHA_POR_SEGMENTO');
++
++    const leitura = await requestJson('GET', '/api/cozinha/roteamento', { token: tokenAdmin });
++    assert.equal(leitura.body.modo, 'COZINHA_POR_SEGMENTO');
++    assert.equal(leitura.body.unidade_padrao_id, unA);
++  });
++
++  it('HTTP: inativa / outra empresa / sem destino / operador', async () => {
++    const inativa = await requestJson('PUT', '/api/cozinha/roteamento/padrao', {
++      token: tokenAdmin,
++      body: { unidade_id: unInativa }
++    });
++    assert.equal(inativa.status, 409);
++    assert.equal(inativa.body.codigo, 'UNIDADE_INATIVA');
++
++    const outra = await requestJson('PUT', '/api/cozinha/roteamento/padrao', {
++      token: tokenAdmin,
++      body: { unidade_id: unOutra }
++    });
++    assert.equal(outra.status, 403);
++    assert.equal(outra.body.codigo, 'UNIDADE_EMPRESA_ISOLAMENTO');
++
++    const semDest = await requestJson('PUT', '/api/cozinha/roteamento/segmentos', {
++      token: tokenAdmin,
++      body: { segmento: 'LOJA' }
++    });
++    assert.equal(semDest.status, 400);
++    assert.equal(semDest.body.codigo, 'SEGMENTO_SEM_DESTINO');
++
++    const opGet = await requestJson('GET', '/api/cozinha/roteamento', { token: tokenOp });
++    assert.equal(opGet.status, 403);
++    assert.equal(opGet.body.codigo, 'ADMIN_OPERACIONAL_OBRIGATORIO');
++  });
++
++  it('flags de isolamento e DB_DIR temporário', () => {
++    assert.equal(process.env.CDS_BLOQUEAR_BANCO_OFICIAL, '1');
++    assert.equal(process.env.CDS_TEST_ISOLATION, '1');
++    assert.equal(process.env.CDS_FORCAR_LOCAL, '1');
++    assert.equal(process.env.CDS_ALLOW_OFFICIAL_DB == null, true);
++    assert.ok(String(dbDir).includes('cds-cozinha-s07-3a'));
++  });
++});
+diff --git a/tests/cozinha/sprint07-s07-3a-roteamento-recurso-real.test.js b/tests/cozinha/sprint07-s07-3a-roteamento-recurso-real.test.js
+new file mode 100644
+index 0000000..1cdcfd5
+--- /dev/null
++++ b/tests/cozinha/sprint07-s07-3a-roteamento-recurso-real.test.js
+@@ -0,0 +1,277 @@
++/**
++ * S07-3A — Homologação HTTP com configService.recursoHabilitado ORIGINAL.
++ * Sem monkeypatch. Banco temporário. Sem S07-3B / sem oficial / sem despacho.
++ *
++ *   set CDS_BLOQUEAR_BANCO_OFICIAL=1
++ *   set CDS_TEST_ISOLATION=1
++ *   set CDS_FORCAR_LOCAL=1
++ *   node --test --test-concurrency=1 --test-force-exit tests/cozinha/sprint07-s07-3a-roteamento-recurso-real.test.js
++ */
++'use strict';
++
++const fs = require('fs');
++const os = require('os');
++const path = require('path');
++const http = require('http');
++const express = require('express');
++const jwt = require('jsonwebtoken');
++const { describe, it, before, after } = require('node:test');
++const assert = require('node:assert/strict');
++
++const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-cozinha-s07-3a-recurso-'));
++process.env.DB_DIR = dbDir;
++process.env.CDS_TEST_ISOLATION = '1';
++process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
++process.env.CDS_FORCAR_LOCAL = '1';
++process.env.JWT_SECRET = process.env.JWT_SECRET || 'cds-test-jwt-s07-3a-recurso-real';
++delete process.env.CDS_ALLOW_OFFICIAL_DB;
++delete process.env.CDS_COZINHA_IMPRESSAO_FISICA_AUTORIZADA;
++
++const {
++  garantirSchemaCozinha,
++  isCozinhaOperacional,
++  getCozinhaSchemaStatus
++} = require('../../backend/utils/cozinhaSchema');
++const {
++  garantirSchemaCozinhaRoteamento,
++  verificarSchemaCozinhaRoteamento
++} = require('../../backend/services/cozinha/cozinhaRoteamentoSchema');
++const { verificarToken } = require('../../backend/middleware/auth');
++const { exigirRecurso } = require('../../backend/middleware/validarRecursoImplantacao');
++const configService = require('../../backend/services/configuracaoService');
++
++function run(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.run(sql, params, function cb(err) {
++      if (err) reject(err);
++      else resolve(this);
++    });
++  });
++}
++function get(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
++  });
++}
++
++describe('S07-3A — HTTP recursoHabilitado real (sem monkeypatch)', () => {
++  let server;
++  let baseUrl;
++  let dbHttp;
++  let empresaId;
++  let unA;
++  let adminId;
++  let opId;
++  let tokenAdmin;
++  let tokenOp;
++  let configAntes;
++  let recursoFnOriginal;
++
++  function requestJson(method, urlPath, { token, body, empresaHeader } = {}) {
++    const u = new URL(urlPath, baseUrl);
++    const emp = empresaHeader != null ? empresaHeader : empresaId;
++    const payload = body != null ? JSON.stringify(body) : null;
++    return new Promise((resolve, reject) => {
++      const req = http.request({
++        hostname: u.hostname,
++        port: u.port,
++        path: u.pathname + u.search,
++        method,
++        headers: {
++          'Content-Type': 'application/json',
++          ...(emp != null ? { 'X-Empresa-Id': String(emp) } : {}),
++          ...(token ? { Authorization: `Bearer ${token}` } : {}),
++          ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {})
++        }
++      }, (res) => {
++        const chunks = [];
++        res.on('data', (c) => chunks.push(c));
++        res.on('end', () => {
++          const raw = Buffer.concat(chunks).toString('utf8');
++          let json = null;
++          try { json = raw ? JSON.parse(raw) : null; } catch (_e) { json = { raw }; }
++          resolve({ status: res.statusCode, body: json });
++        });
++      });
++      req.on('error', reject);
++      if (payload) req.write(payload);
++      req.end();
++    });
++  }
++
++  before(async () => {
++    recursoFnOriginal = configService.recursoHabilitado;
++    assert.equal(typeof recursoFnOriginal, 'function');
++
++    dbHttp = require('../../backend/database');
++    await new Promise((resolve, reject) => {
++      const timer = setTimeout(() => reject(new Error('DB timeout')), 60000);
++      dbHttp.whenReady((err) => {
++        clearTimeout(timer);
++        if (err) reject(err);
++        else resolve();
++      });
++    });
++
++    for (let i = 0; i < 100; i += 1) {
++      const row = await get(dbHttp, `
++        SELECT name FROM sqlite_master WHERE type='table' AND name='cozinha_notificacoes'
++      `);
++      const st = getCozinhaSchemaStatus();
++      if (row && row.name === 'cozinha_notificacoes' && (st.operacional || st.erro)) break;
++      await new Promise((r) => setTimeout(r, 200));
++    }
++    let schemaOut = null;
++    let ultimoErro = null;
++    for (let t = 0; t < 8; t += 1) {
++      try {
++        schemaOut = await garantirSchemaCozinha(dbHttp);
++        ultimoErro = null;
++        break;
++      } catch (err) {
++        ultimoErro = err;
++        await new Promise((r) => setTimeout(r, 300));
++      }
++    }
++    if (!schemaOut || !schemaOut.operacional) {
++      throw ultimoErro || new Error('Schema Cozinha não operacional');
++    }
++    // Migration controlada no setup de teste (DB temp) — APIs não fazem DDL.
++    await garantirSchemaCozinhaRoteamento(dbHttp);
++    const stRot = await verificarSchemaCozinhaRoteamento(dbHttp);
++    assert.equal(stRot.disponivel, true);
++    assert.equal(isCozinhaOperacional(), true);
++
++    configAntes = configService.readConfig();
++    configService.saveConfig({
++      tipoImplantacao: 'ERP_SEM_FISCAL',
++      modoOperacao: 'LOCAL',
++      modulo_pedidos: true,
++      habilitar_expedicao: false,
++      habilitar_faturamento: false
++    });
++    assert.strictEqual(
++      configService.recursoHabilitado,
++      recursoFnOriginal,
++      'recursoHabilitado não deve ser substituído neste teste'
++    );
++    assert.equal(configService.recursoHabilitado('pedidos'), true);
++    assert.equal(configService.getRecursos().recursos.pedidos, true);
++
++    const emp = await run(dbHttp, `
++      INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
++      VALUES ('99887766000133', 'Emp R3A Recurso', 'R3AR', 1)
++    `);
++    empresaId = emp.lastID;
++
++    const adm = await run(dbHttp, `
++      INSERT INTO usuarios (username, password_hash, role, perfil, ativo, nome)
++      VALUES ('admin_r3a_recurso', 'hash', 'admin', 'ADMIN', 1, 'Admin')
++    `);
++    adminId = adm.lastID;
++    const op = await run(dbHttp, `
++      INSERT INTO usuarios (username, password_hash, role, perfil, ativo, nome)
++      VALUES ('op_r3a_recurso', 'hash', 'operador', 'USUARIO', 1, 'Op')
++    `);
++    opId = op.lastID;
++
++    await run(dbHttp, `
++      INSERT INTO usuario_empresas (usuario_id, empresa_id, ativo) VALUES (?, ?, 1)
++    `, [adminId, empresaId]);
++    await run(dbHttp, `
++      INSERT INTO usuario_empresas (usuario_id, empresa_id, ativo) VALUES (?, ?, 1)
++    `, [opId, empresaId]);
++
++    const u1 = await run(dbHttp, `
++      INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'R3A-R-01', 1)
++    `, [empresaId]);
++    unA = u1.lastID;
++
++    tokenAdmin = jwt.sign({
++      id: adminId, username: 'admin_r3a_recurso', role: 'admin', perfil: 'ADMIN', permissoes: []
++    }, process.env.JWT_SECRET, { expiresIn: '1h' });
++    tokenOp = jwt.sign({
++      id: opId, username: 'op_r3a_recurso', role: 'operador', perfil: 'USUARIO', permissoes: []
++    }, process.env.JWT_SECRET, { expiresIn: '1h' });
++
++    const cozinhaRoutes = require('../../backend/rotas/cozinha');
++    const app = express();
++    app.use(express.json());
++    app.use('/api/cozinha', verificarToken, exigirRecurso('pedidos'), cozinhaRoutes);
++    server = http.createServer(app);
++    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
++    baseUrl = `http://127.0.0.1:${server.address().port}`;
++  });
++
++  after(async () => {
++    assert.strictEqual(
++      configService.recursoHabilitado,
++      recursoFnOriginal,
++      'recursoHabilitado permanece a função original ao final'
++    );
++    if (configAntes) {
++      try {
++        configService.saveConfig({
++          modulo_pedidos: configAntes.modulo_pedidos,
++          habilitar_expedicao: configAntes.habilitar_expedicao,
++          habilitar_faturamento: configAntes.habilitar_faturamento,
++          tipoImplantacao: configAntes.tipoImplantacao,
++          modoOperacao: configAntes.modoOperacao
++        });
++      } catch (_e) { /* temp dir */ }
++    }
++    if (server) await new Promise((resolve) => server.close(resolve));
++  });
++
++  it('pedidos habilitado: admin autorizado opera GET/PUT roteamento', async () => {
++    assert.strictEqual(configService.recursoHabilitado, recursoFnOriginal);
++    assert.equal(configService.recursoHabilitado('pedidos'), true);
++
++    const padrao = await requestJson('PUT', '/api/cozinha/roteamento/padrao', {
++      token: tokenAdmin,
++      body: { unidade_id: unA }
++    });
++    assert.equal(padrao.status, 200, JSON.stringify(padrao.body));
++    assert.equal(padrao.body.unidade_padrao_id, unA);
++
++    const getCfg = await requestJson('GET', '/api/cozinha/roteamento', { token: tokenAdmin });
++    assert.equal(getCfg.status, 200);
++    assert.equal(getCfg.body.unidade_padrao_id, unA);
++  });
++
++  it('operador continua 403 ADMIN_OPERACIONAL_OBRIGATORIO com pedidos habilitado', async () => {
++    assert.equal(configService.recursoHabilitado('pedidos'), true);
++    const r = await requestJson('GET', '/api/cozinha/roteamento', { token: tokenOp });
++    assert.equal(r.status, 403);
++    assert.equal(r.body.codigo, 'ADMIN_OPERACIONAL_OBRIGATORIO');
++  });
++
++  it('pedidos desabilitado via saveConfig → 403 MODULO_NAO_LICENCIADO (sem monkeypatch)', async () => {
++    configService.saveConfig({ modulo_pedidos: false });
++    assert.strictEqual(configService.recursoHabilitado, recursoFnOriginal);
++    assert.equal(configService.recursoHabilitado('pedidos'), false);
++
++    const g = await requestJson('GET', '/api/cozinha/roteamento', { token: tokenAdmin });
++    assert.equal(g.status, 403);
++    assert.equal(g.body.erro, 'MODULO_NAO_LICENCIADO');
++    assert.equal(g.body.modulo, 'pedidos');
++
++    const p = await requestJson('PUT', '/api/cozinha/roteamento/padrao', {
++      token: tokenAdmin,
++      body: { unidade_id: unA }
++    });
++    assert.equal(p.status, 403);
++    assert.equal(p.body.erro, 'MODULO_NAO_LICENCIADO');
++
++    configService.saveConfig({ modulo_pedidos: true });
++    assert.equal(configService.recursoHabilitado('pedidos'), true);
++  });
++
++  it('flags de isolamento e DB temporário', () => {
++    assert.equal(process.env.CDS_BLOQUEAR_BANCO_OFICIAL, '1');
++    assert.equal(process.env.CDS_TEST_ISOLATION, '1');
++    assert.equal(process.env.CDS_FORCAR_LOCAL, '1');
++    assert.equal(process.env.CDS_ALLOW_OFFICIAL_DB == null, true);
++    assert.ok(String(dbDir).includes('cds-cozinha-s07-3a-recurso'));
++  });
++});

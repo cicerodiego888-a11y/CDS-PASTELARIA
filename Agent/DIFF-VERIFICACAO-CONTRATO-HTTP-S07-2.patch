@@ -1,0 +1,19 @@
+﻿--- a/tests/cozinha/sprint07-s07-2-sessao-unidade-kds.test.js
++++ b/tests/cozinha/sprint07-s07-2-sessao-unidade-kds.test.js
+@@ HTTP J/L seleção válida
++    // Contrato: user sempre presente em seleção válida (persistirSessao exige).
++    assert.ok(sel.body.user && typeof sel.body.user === 'object');
++    assert.equal(sel.body.user.id, operadorId);
++    assert.equal(sel.body.user.usuario_id, operadorId);
++    assert.equal(sel.body.user.unidade_cozinha_id, unidadeId);
++    assert.equal(sel.body.user.username, 'op_s07_2_http');
++    assert.equal(sel.body.user.role, 'operador');
++    assert.ok(Array.isArray(sel.body.user.permissoes));
++    assert.equal(decoded.unidade_cozinha_id, sel.body.user.unidade_cozinha_id);
+
+EVIDENCIA CONTRATO (backend/services/cozinha/CozinhaSessaoUnidadeService.js):
+  return { success: true, token, user: userOut, unidade_cozinha_id, empresa_id };
+ROTA (backend/rotas/cozinha.js):
+  return res.status(200).json(out);
+userOut campos: id, usuario_id, username, nome, role, perfil, permissoes,
+  terminal_id, caixa_sessao_id, unidade_cozinha_id (validada).

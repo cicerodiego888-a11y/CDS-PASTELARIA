@@ -151,7 +151,26 @@ async function listarEmpresasPermitidas(usuarioFonte, opts = {}) {
   const uid = exigirUsuarioId(usuarioFonte);
   const db = getDb(opts.db);
 
-  if (administradorOperacional(sujeitoAutorizacao(usuarioFonte, opts))) {
+  // Aceita objeto (req.user) ou, se só veio ID, hidrata perfil/role do banco
+  // para não tratar ADMIN/SUPER_ADMIN como operador restrito a vínculos.
+  let sujeito = sujeitoAutorizacao(usuarioFonte, opts);
+  if (!administradorOperacional(sujeito)) {
+    try {
+      const row = await dbGet(
+        db,
+        `SELECT id, role, COALESCE(perfil, 'USUARIO') AS perfil
+         FROM usuarios
+         WHERE id = ?
+         LIMIT 1`,
+        [uid]
+      );
+      if (row) sujeito = row;
+    } catch (_e) {
+      /* schema sem usuarios: segue com sujeito atual */
+    }
+  }
+
+  if (administradorOperacional(sujeito)) {
     const ativas = await EmpresaService.listarEmpresas({ ativo: 1 }, { db });
     return ativas.map((empresa) => EmpresaService.dtoContextoEmpresa(empresa));
   }

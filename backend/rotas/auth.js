@@ -8,6 +8,9 @@ const db = require('../database');
 const UsuarioEmpresaService = require('../services/empresas/UsuarioEmpresaService');
 const { criarMiddlewareContextoEmpresa, exigirEmpresaAlvoDoContexto } = require('../services/fiscalNaoFiscal/empresaContexto');
 const {
+  validarUnidadeCozinhaNoLogin
+} = require('../services/cozinha/cozinhaAuthUnidade');
+const {
   JWT_SECRET,
   PERMISSOES_DISPONIVEIS,
   verificarToken,
@@ -194,8 +197,14 @@ function finalizarLoginComUsuario(req, res, usuario) {
 
     const terminalId = parsePositiveInteger(req.body?.terminal_id);
     const caixaSessaoId = parsePositiveInteger(req.body?.caixa_sessao_id);
+    const unidadeCozinhaIdRaw = req.body?.unidade_cozinha_id != null
+      ? req.body.unidade_cozinha_id
+      : req.body?.unidadeCozinhaId;
+    const empresaIdSessaoRaw = req.body?.empresa_id != null
+      ? req.body.empresa_id
+      : req.body?.empresaId;
 
-    const emitirToken = (extraDetalhe = {}) => {
+    const emitirToken = (unidadeCozinhaId, extraDetalhe = {}) => {
       try {
         const token = jwt.sign(
           {
@@ -207,7 +216,8 @@ function finalizarLoginComUsuario(req, res, usuario) {
             perfil: usuario.perfil || 'USUARIO',
             permissoes,
             terminal_id: terminalId,
-            caixa_sessao_id: caixaSessaoId
+            caixa_sessao_id: caixaSessaoId,
+            unidade_cozinha_id: unidadeCozinhaId
           },
           JWT_SECRET,
           { expiresIn: '8h' }
@@ -225,6 +235,7 @@ function finalizarLoginComUsuario(req, res, usuario) {
             permissoes,
             terminal_id: terminalId,
             caixa_sessao_id: caixaSessaoId,
+            unidade_cozinha_id: unidadeCozinhaId,
             troca_senha_obrigatoria: Number(usuario.troca_senha_obrigatoria) === 1
           },
           troca_senha_obrigatoria: Number(usuario.troca_senha_obrigatoria) === 1
@@ -237,7 +248,12 @@ function finalizarLoginComUsuario(req, res, usuario) {
           acao: 'login',
           referencia_tipo: 'usuario',
           referencia_id: usuario.id,
-          detalhes: { ip: req.ip, username: usuario.username, ...extraDetalhe },
+          detalhes: {
+            ip: req.ip,
+            username: usuario.username,
+            unidade_cozinha_id: unidadeCozinhaId,
+            ...extraDetalhe
+          },
           ip_requisicao: req.ip || null
         }).catch((auditErr) => {
           console.error('Erro ao gravar auditoria de login:', auditErr);
@@ -247,10 +263,39 @@ function finalizarLoginComUsuario(req, res, usuario) {
       }
     };
 
+    const concluirLogin = (extraDetalhe = {}) => {
+      // Valida unidade no cadastro ANTES de assinar o JWT (não confia no body).
+      validarUnidadeCozinhaNoLogin({
+        db,
+        usuario,
+        unidadeCozinhaIdRaw,
+        empresaIdRaw: empresaIdSessaoRaw
+      })
+        .then((unidadeValidada) => {
+          emitirToken(unidadeValidada, {
+            ...extraDetalhe,
+            unidade_cozinha_validada: unidadeValidada != null
+          });
+        })
+        .catch((errUnidade) => {
+          const status = errUnidade.statusCode || 403;
+          const codigo = errUnidade.codigo || 'UNIDADE_NAO_AUTORIZADA';
+          if (status >= 500) {
+            return responderErroInternoLogin(res, 'ERRO UNIDADE COZINHA', errUnidade);
+          }
+          return res.status(status).json({
+            success: false,
+            error: errUnidade.message || 'Unidade de cozinha não autorizada.',
+            mensagem: errUnidade.message || 'Unidade de cozinha não autorizada.',
+            codigo
+          });
+        });
+    };
+
     // Garante vínculo empresarial mínimo antes de qualquer módulo (PDV/ERP/Caixa).
     UsuarioEmpresaService.garantirAcessoEmpresarialMinimo(usuario, { db, user: usuario })
       .then((acesso) => {
-        emitirToken({
+        concluirLogin({
           empresas_disponiveis: Array.isArray(acesso.empresas) ? acesso.empresas.length : 0,
           empresas_vinculo_auto: !!acesso.healed
         });
@@ -258,7 +303,8 @@ function finalizarLoginComUsuario(req, res, usuario) {
       .catch((errAcesso) => {
         console.error('Falha ao garantir acesso empresarial no login:', errAcesso);
         // Login não bloqueia por falha de vínculo; o seletor ainda tentará curar.
-        emitirToken({ empresas_vinculo_erro: errAcesso && errAcesso.message });
+        // Unidade, se solicitada, ainda é validada em concluirLogin.
+        concluirLogin({ empresas_vinculo_erro: errAcesso && errAcesso.message });
       });
   });
 }

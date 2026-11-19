@@ -1,0 +1,1130 @@
+﻿=== ÚLTIMA CORREÇÃO HOMOLOGAÇÃO S05 — login operador↔unidade ===
+Data: 2026-11-16T17:07:45.3244302-03:00
+Banco: temporário apenas
+
+
+======== tests/cozinha/sprint05-login-unidade-auth.test.js ========
+
+======================================
+BANCO DE TESTE EM USO:
+C:\Users\cicer\AppData\Local\Temp\cds-cozinha-s05-login-ytg8d2\mercadao.db
+======================================
+Conectado ao banco de dados SQLite
+Configurações padrão inseridas/verificadas
+Tabela empresas criada/verificada
+Tabela usuario_empresas criada/verificada
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+▶ Sprint 05 — Login autentica unidade no cadastro
+  ✔ 1) login autorizado na própria unidade (98.1592ms)
+Tabela empresas criada/verificada
+Tabela usuario_empresas criada/verificada
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ✔ 2) login em unidade não autorizada (mesma empresa, sem vínculo) (11.4565ms)
+Tabela empresas criada/verificada
+Tabela usuario_empresas criada/verificada
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+Tabela equipamentos_drivers criada/verificada
+Tabela equipamentos criada/verificada
+  ✔ 3) login em unidade de outra empresa (11.0723ms)
+Tabela empresas criada/verificada
+Tabela usuario_empresas criada/verificada
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ✔ 4) unidade inexistente ou inativa (11.0575ms)
+Tabela empresas criada/verificada
+Tabela usuario_empresas criada/verificada
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+Tabela equipamentos_configuracoes criada/verificada
+Tabela equipamentos_logs criada/verificada
+  ✔ 5) JWT emitido só com unidade validada (claim espelha cadastro) (14.1207ms)
+Tabela equipamentos_eventos criada/verificada
+Tabela equipamentos_fila criada/verificada
+Tabela produto_balanca_sync_log criada/verificada
+Tabela equipamentos_mgv6_exports criada/verificada
+Tabela pedidos criada/verificada
+Tabela pedidos_itens criada/verificada
+  ✔ 6) middleware rejeita token inválido; ops rejeitam JWT sem unidade (80.4735ms)
+✔ Sprint 05 — Login autentica unidade no cadastro (227.4817ms)
+Tabela nfe_notas criada/verificada
+Alteração aplicada em nfe_notas: ALTER TABLE nfe_notas ADD COLUMN fila_estado TEXT
+Alteração aplicada em nfe_notas: ALTER TABLE nfe_notas ADD COLUMN tentativas INTEGER DEFAULT 0
+Alteração aplicada em nfe_notas: ALTER TABLE nfe_notas ADD COLUMN ultima_tentativa_em DATETIME
+Alteração aplicada em nfe_notas: ALTER TABLE nfe_notas ADD COLUMN erro_codigo TEXT
+Alteração aplicada em nfe_notas: ALTER TABLE nfe_notas ADD COLUMN erro_mensagem TEXT
+Alteração aplicada em nfe_notas: ALTER TABLE nfe_notas ADD COLUMN erro_sugestao TEXT
+Alteração aplicada em nfe_notas: ALTER TABLE nfe_notas ADD COLUMN tempo_resposta_ms INTEGER
+Alteração aplicada em nfe_notas: ALTER TABLE nfe_notas ADD COLUMN consulta_auto_tentativas INTEGER DEFAULT 0
+Alteração aplicada em nfe_notas: ALTER TABLE nfe_notas ADD COLUMN proxima_consulta_em DATETIME
+Tabela nfe_operacional_logs criada/verificada
+Tabela licenca criada/verificada
+Tabela licenca_historico criada/verificada
+Tabela licenca_logs criada/verificada
+Tabela licenca_execucao criada/verificada
+Tabela promocoes_sugestoes criada/verificada
+Tabela promocoes criada/verificada
+Tabela produtos_lotes criada/verificada
+Tabela venda_lotes criada/verificada
+Tabela produtos_ajustes_estoque criada/verificada
+Tabela movimentos_transferencia_saldos criada/verificada
+Tabela pedido_estoque_reservas criada/verificada
+Tabela auditoria_pedido_estoque_fiscal criada/verificada
+Tabela configuracoes_validade criada/verificada
+Tabela categorias criada/verificada
+Tabela subcategorias criada/verificada
+Tabela fornecedores criada/verificada
+Tabela marcas criada/verificada
+Tabela produtos criada/verificada
+Tabela produto_atacado criada/verificada
+[MIP] Tabela produto_identificadores criada/verificada
+Tabela produto_imagens criada/verificada
+Tabela produto_embalagens criada/verificada
+Tabela clientes criada/verificada
+Tabela compras criada/verificada
+Tabela compras_itens criada/verificada
+Tabela compras_devolucoes criada/verificada
+Tabela vendas_devolucoes criada/verificada
+Tabela vendas criada/verificada
+Tabela auditoria_alertas criada/verificada
+Tabela vendas_itens criada/verificada
+Tabela venda_pagamentos criada/verificada
+Tabela financeiro criada/verificada
+Tabela contas_receber criada/verificada
+Tabela contas_receber_pagamentos criada/verificada
+Tabela produtos_preco_historico criada/verificada
+Tabela venda_recebimentos criada/verificada
+Tabela venda_estoque_reservas criada/verificada
+Tabela usuarios criada/verificada
+Tabela usuario_permissoes criada/verificada
+Tabela vendas_canceladas criada/verificada
+Tabela nfce_notas criada/verificada
+Tabela notas_recebidas criada/verificada
+Tabela notas_recebidas_dfe criada/verificada
+Tabela central_entradas_documentos criada/verificada
+Alteração aplicada em central_entradas_documentos: ALTER TABLE central_entradas_documentos ADD COLUMN tipo_documento TEXT
+Tabela central_entradas_historico criada/verificada
+Tabela central_entradas_nsu criada/verificada
+Tabela central_entradas_config criada/verificada
+Tabela central_entradas_eventos criada/verificada
+Tabela dfe_auditoria criada/verificada
+Tabela central_entradas_notificacoes criada/verificada
+Tabela configuracoes criada/verificada
+Tabela miip_decisoes criada/verificada
+Tabela miip_associacoes criada/verificada
+Tabela miip_sinonimos criada/verificada
+Tabela miip_estatisticas criada/verificada
+Tabela miip_configuracoes criada/verificada
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN terminal_id INTEGER REFERENCES terminais(id)
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN operador_id INTEGER REFERENCES usuarios(id)
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN status_pagamento TEXT DEFAULT 'pendente'
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN tef_transacao_id INTEGER
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN caixa_sessao_id INTEGER REFERENCES caixa_sessoes(id)
+Alteração aplicada em terminais: ALTER TABLE terminais ADD COLUMN usuario_id INTEGER REFERENCES usuarios(id)
+Alteração aplicada em terminais: ALTER TABLE terminais ADD COLUMN usuario_nome TEXT
+Alteração aplicada em vendas: CREATE INDEX IF NOT EXISTS idx_vendas_empresa_id ON vendas(empresa_id)
+Alteração aplicada em pedidos: CREATE INDEX IF NOT EXISTS idx_pedidos_empresa_id ON pedidos(empresa_id)
+Alteração aplicada em produtos_lotes: ALTER TABLE produtos_lotes ADD COLUMN empresa_id INTEGER REFERENCES empresas(id)
+Alteração aplicada em produtos_lotes: CREATE INDEX IF NOT EXISTS idx_produtos_lotes_empresa_produto ON produtos_lotes(empresa_id, produto_id, ativo)
+Alteração aplicada em pedido_estoque_reservas: ALTER TABLE pedido_estoque_reservas ADD COLUMN empresa_id INTEGER REFERENCES empresas(id)
+Alteração aplicada em pedido_estoque_reservas: CREATE INDEX IF NOT EXISTS idx_pedido_reservas_empresa ON pedido_estoque_reservas(empresa_id, produto_id, status)
+Alteração aplicada em venda_estoque_reservas: ALTER TABLE venda_estoque_reservas ADD COLUMN empresa_id INTEGER REFERENCES empresas(id)
+Alteração aplicada em venda_estoque_reservas: CREATE INDEX IF NOT EXISTS idx_venda_reservas_empresa ON venda_estoque_reservas(empresa_id, produto_id, status)
+Alteração aplicada em vendas_itens: ALTER TABLE vendas_itens ADD COLUMN item_fiscal INTEGER DEFAULT 0
+Alteração aplicada em vendas_itens: ALTER TABLE vendas_itens ADD COLUMN quantidade_fiscal REAL DEFAULT 0
+Alteração aplicada em vendas_itens: ALTER TABLE vendas_itens ADD COLUMN quantidade_nao_fiscal REAL DEFAULT 0
+Alteração aplicada em vendas_itens: ALTER TABLE vendas_itens ADD COLUMN valor_fiscal REAL DEFAULT 0
+Alteração aplicada em vendas_itens: ALTER TABLE vendas_itens ADD COLUMN valor_nao_fiscal REAL DEFAULT 0
+Alteração aplicada em vendas_itens: ALTER TABLE vendas_itens ADD COLUMN preco_unitario_interno REAL
+Alteração aplicada em vendas_itens: ALTER TABLE vendas_itens ADD COLUMN modo_venda TEXT DEFAULT 'peso'
+Alteração aplicada em vendas_itens: ALTER TABLE vendas_itens ADD COLUMN tipo_venda TEXT DEFAULT 'PESO'
+Alteração aplicada em configuracoes: ALTER TABLE configuracoes ADD COLUMN fiscal_emitente_logradouro TEXT DEFAULT ''
+Alteração aplicada em configuracoes: ALTER TABLE configuracoes ADD COLUMN fiscal_emitente_numero TEXT DEFAULT 'S/N'
+Alteração aplicada em configuracoes: ALTER TABLE configuracoes ADD COLUMN fiscal_emitente_bairro TEXT DEFAULT ''
+Alteração aplicada em caixa: ALTER TABLE caixa ADD COLUMN reoperturas_count INTEGER DEFAULT 0
+Alteração aplicada em usuarios: ALTER TABLE usuarios ADD COLUMN ativo INTEGER DEFAULT 1
+Alteração aplicada em usuarios: ALTER TABLE usuarios ADD COLUMN nome TEXT
+Alteração aplicada em usuarios: ALTER TABLE usuarios ADD COLUMN perfil TEXT DEFAULT 'USUARIO'
+Alteração aplicada em usuarios: ALTER TABLE usuarios ADD COLUMN pode_alterar_senhas INTEGER DEFAULT 0
+Alteração aplicada em usuarios: ALTER TABLE usuarios ADD COLUMN troca_senha_obrigatoria INTEGER DEFAULT 0
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN ncm TEXT
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN cfop TEXT
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN csosn TEXT
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN origem INTEGER DEFAULT 0
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN cest TEXT
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN codigo_barras TEXT
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN aliquota_icms REAL DEFAULT 0
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN aliquota_pis REAL DEFAULT 0
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN aliquota_cofins REAL DEFAULT 0
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN venda_atacado INTEGER DEFAULT 0
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN ativo INTEGER DEFAULT 1
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN item_fiscal INTEGER DEFAULT 0
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN saldo_fiscal REAL DEFAULT 0
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN saldo_nao_fiscal REAL DEFAULT 0
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN marca_id INTEGER
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN observacoes TEXT
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN imagem_principal TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN dias_entre_parcelas INTEGER DEFAULT 30
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN valor_ipi DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN valor_seguro DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN valor_icms_st DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN valor_fcp_st DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN cancelada_em DATETIME
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN motivo_cancelamento TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN nota_fiscal_avulsa INTEGER DEFAULT 0
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN total_xml DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN total_itens_calculado DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN diferenca_total DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN fornecedor_cnpj TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN tipo_entrada TEXT DEFAULT 'REVENDA'
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN tipo_entrada_sugerido TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN tipo_entrada_confianca INTEGER
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN tipo_entrada_motivo TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN tipo_entrada_alterado INTEGER DEFAULT 0
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN natureza_operacao TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN natureza_operacao_xml TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN cfop TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN cfop_xml TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN csosn_cst TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN csosn_cst_xml TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN cst_pis TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN cst_pis_xml TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN cst_cofins TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN cst_cofins_xml TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN cst_ipi TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN cst_ipi_xml TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN escrituracao_alterada INTEGER DEFAULT 0
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN escrituracao_motivo TEXT
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN status TEXT DEFAULT 'pago'
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN origem TEXT DEFAULT 'manual'
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN documento TEXT
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN vencimento DATE
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN numero_parcela INTEGER
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN total_parcelas INTEGER
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN compra_id INTEGER
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN venda_id INTEGER
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN pessoa_nome TEXT
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN observacao TEXT
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN baixado_em DATE
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN descricao_produto TEXT
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN codigo_barras TEXT
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN margem_lucro DECIMAL(10,2) DEFAULT 30
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN preco_venda_sugerido DECIMAL(10,2)
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN unidade TEXT
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN ncm TEXT
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN frete_rateado DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN desconto_rateado DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN outras_despesas_rateado DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN custo_unitario_final DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN vendido_por_peso INTEGER DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN peso_total_compra DECIMAL(10,3) DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN custo_por_kg DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN atualizar_preco_venda INTEGER DEFAULT 1
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN quantidade_fiscal REAL DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN quantidade_nao_fiscal REAL DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN compra_em TEXT
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN quantidade_embalagens DECIMAL(10,3) DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN quantidade_por_embalagem DECIMAL(10,3) DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN valor_total_embalagem DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN cfop TEXT
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN tipo_fiscal_item TEXT
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN bonificacao INTEGER DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN nfe_item_n INTEGER
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN tipo_operacional TEXT
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN nfe_item_original_json TEXT
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN dados_roteamento_json TEXT
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN valor_fiscal REAL DEFAULT 0
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN valor_nao_fiscal REAL DEFAULT 0
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN acrescimo REAL DEFAULT 0
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN tipo_venda TEXT DEFAULT 'BALCAO'
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN status_entrega TEXT
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN pagamento_previsto TEXT DEFAULT 'NAO_INFORMADO'
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN entregador TEXT
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN endereco_entrega TEXT
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN referencia_entrega TEXT
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN observacao_entrega TEXT
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN taxa_entrega DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN leva_maquineta INTEGER DEFAULT 0
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN troco_para DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN prestacao_realizada INTEGER DEFAULT 0
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN prestado_por INTEGER
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN prestado_em DATETIME
+Alteração aplicada em venda_pagamentos: ALTER TABLE venda_pagamentos ADD COLUMN confirmacao_modalidade TEXT
+Alteração aplicada em venda_pagamentos: ALTER TABLE venda_pagamentos ADD COLUMN confirmacao_manual INTEGER DEFAULT 0
+Alteração aplicada em venda_pagamentos: ALTER TABLE venda_pagamentos ADD COLUMN operador_id INTEGER
+Alteração aplicada em venda_pagamentos: ALTER TABLE venda_pagamentos ADD COLUMN confirmado_em DATETIME
+Alteração aplicada em contas_receber: ALTER TABLE contas_receber ADD COLUMN observacao TEXT
+Alteração aplicada em tef_transacoes: ALTER TABLE tef_transacoes ADD COLUMN reversao_executada INTEGER DEFAULT 0
+Alteração aplicada em tef_transacoes: ALTER TABLE tef_transacoes ADD COLUMN reversao_motivo TEXT
+Alteração aplicada em tef_transacoes: ALTER TABLE tef_transacoes ADD COLUMN reversao_data DATETIME
+Alteração aplicada em tef_transacoes: CREATE UNIQUE INDEX IF NOT EXISTS idx_tef_transacoes_idempotency_key ON tef_transacoes(idempotency_key) WHERE idempotency_key IS NOT NULL
+Alteração aplicada em equipamentos: ALTER TABLE equipamentos ADD COLUMN timeout_ms INTEGER DEFAULT 5000
+Alteração aplicada em equipamentos: ALTER TABLE equipamentos ADD COLUMN reconnect_auto INTEGER DEFAULT 1
+Alteração aplicada em equipamentos: ALTER TABLE equipamentos ADD COLUMN ultima_comunicacao DATETIME
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN utiliza_conversao INTEGER NOT NULL DEFAULT 0
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN unidade_estoque TEXT
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN reservado_fiscal REAL DEFAULT 0
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN reservado_nao_fiscal REAL DEFAULT 0
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN telefone_entrega TEXT
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN status_venda TEXT DEFAULT 'ABERTA'
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN origem TEXT DEFAULT 'PDV'
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN pedido_id INTEGER
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN mpfc_politica_snapshot TEXT
+Alteração aplicada em vendas: CREATE INDEX IF NOT EXISTS idx_vendas_pedido_id ON vendas(pedido_id)
+Alteração aplicada em vendas: CREATE INDEX IF NOT EXISTS idx_vendas_origem ON vendas(origem)
+Alteração aplicada em vendas: CREATE INDEX IF NOT EXISTS idx_vendas_data_venda ON vendas(data_venda)
+Alteração aplicada em pedidos: ALTER TABLE pedidos ADD COLUMN natureza_operacao TEXT
+Alteração aplicada em pedidos: ALTER TABLE pedidos ADD COLUMN cfop TEXT
+Alteração aplicada em pedidos: ALTER TABLE pedidos ADD COLUMN frete REAL DEFAULT 0
+Alteração aplicada em pedidos: ALTER TABLE pedidos ADD COLUMN acrescimo REAL DEFAULT 0
+Alteração aplicada em pedidos: ALTER TABLE pedidos ADD COLUMN transportadora TEXT
+Alteração aplicada em pedidos: ALTER TABLE pedidos ADD COLUMN volumes REAL DEFAULT 0
+Alteração aplicada em pedidos: ALTER TABLE pedidos ADD COLUMN peso REAL DEFAULT 0
+Alteração aplicada em pedidos: ALTER TABLE pedidos ADD COLUMN dados_adicionais TEXT
+Alteração aplicada em pedidos: ALTER TABLE pedidos ADD COLUMN mod_frete TEXT
+Alteração aplicada em pedidos: ALTER TABLE pedidos ADD COLUMN cliente_nome TEXT
+Alteração aplicada em vendas: CREATE INDEX IF NOT EXISTS idx_vendas_tipo_status_entrega ON vendas(tipo_venda, status_entrega)
+Alteração aplicada em vendas: CREATE INDEX IF NOT EXISTS idx_vendas_tipo_prestacao ON vendas(tipo_venda, prestacao_realizada, status_venda)
+Alteração aplicada em venda_estoque_reservas: CREATE INDEX IF NOT EXISTS idx_reservas_venda_status ON venda_estoque_reservas(venda_id, status)
+Alteração aplicada em venda_estoque_reservas: CREATE INDEX IF NOT EXISTS idx_reservas_produto_status ON venda_estoque_reservas(produto_id, status)
+Alteração aplicada em auditoria: CREATE INDEX IF NOT EXISTS idx_auditoria_modulo_ref ON auditoria(modulo, referencia_id)
+Alteração aplicada em equipamentos: ALTER TABLE equipamentos ADD COLUMN ultimo_erro TEXT
+Alteração aplicada em equipamentos: ALTER TABLE equipamentos ADD COLUMN firmware TEXT
+Alteração aplicada em equipamentos: ALTER TABLE equipamentos ADD COLUMN protocolo_versao TEXT
+Alteração aplicada em equipamentos: ALTER TABLE equipamentos ADD COLUMN ultimo_handshake DATETIME
+Alteração aplicada em equipamentos: ALTER TABLE equipamentos ADD COLUMN ultimo_sync DATETIME
+Alteração aplicada em equipamentos: ALTER TABLE equipamentos ADD COLUMN ultimo_ping DATETIME
+Alteração aplicada em central_entradas_nsu: ALTER TABLE central_entradas_nsu ADD COLUMN cooldown_ate DATETIME
+Alteração aplicada em central_entradas_nsu: ALTER TABLE central_entradas_nsu ADD COLUMN ultimo_cstat TEXT
+Alteração aplicada em central_entradas_eventos: CREATE UNIQUE INDEX IF NOT EXISTS idx_central_eventos_manif_aceita
+     ON central_entradas_eventos(documento_id)
+     WHERE tipo = 'MANIFESTACAO_ACEITA' AND documento_id IS NOT NULL
+Alteração aplicada em central_entradas_eventos: CREATE UNIQUE INDEX IF NOT EXISTS idx_central_eventos_manif_claim
+     ON central_entradas_eventos(documento_id)
+     WHERE tipo = 'MANIFESTACAO_CLAIM' AND documento_id IS NOT NULL
+Alteração aplicada em central_entradas_eventos: CREATE UNIQUE INDEX IF NOT EXISTS idx_central_eventos_parser_unico
+     ON central_entradas_eventos(documento_id)
+     WHERE tipo = 'PARSER_CONCLUIDO' AND documento_id IS NOT NULL
+Alteração aplicada em central_entradas_eventos: CREATE UNIQUE INDEX IF NOT EXISTS idx_central_eventos_miip_unico
+     ON central_entradas_eventos(documento_id)
+     WHERE tipo = 'MIIP_CONCLUIDO' AND documento_id IS NOT NULL
+Tabela usuario_empresas criada/verificada
+Tabela estoque_empresa criada/verificada
+Tabela empresas criada/verificada
+Schema MCF (contas_pagar) criado/verificado
+Tabela produto_embalagem_historico criada/verificada
+Alteração aplicada em venda_pagamentos: CREATE UNIQUE INDEX IF NOT EXISTS idx_venda_pagamentos_tef_transacao_unica
+         ON venda_pagamentos(tef_transacao_id)
+         WHERE tef_transacao_id IS NOT NULL
+Migração: modo_dashboard_fiscal definido como ativo (F12) por padrão
+Usuário administrador inicial criado (admin). Troca de senha obrigatória no primeiro acesso.
+[MUC RC2] Schema garantido (apresentações + compras + auditoria + aprendizado)
+Configuração migrada de C:\projetos\CDS-SISTEMAS PASTELARIA\config\configuracoes.json para C:\Users\cicer\AppData\Local\Temp\cds-cozinha-s05-login-ytg8d2\config\configuracoes.json
+Migração categorias UNIQUE(nome, tipo) concluída
+Banco de dados pronto para uso.
+Tabela empresas criada/verificada
+Tabela usuario_empresas criada/verificada
+Condições de pagamento: 15 modelo(s) padrão inserido(s).
+[MIB] schema nome_busca + índices OK
+[05.38.E] central_entradas_documentos.empresa_id: added=false fromCnpj=0 fromOperacional=0 ambiguos=0 empresaId=null
+[05.38.F.B] compras.empresa_id: added=false fromCentral=0 fromFinanceiro=0 fromOperacional=0 ambiguos=0 empresaId=null
+Tabelas atendimentos/operacoes/itens/reservas/pagamentos criadas/verificadas
+[MIB] schema nome_busca + índices OK
+[05.40] MIGRATION_VENDAS_EMPRESA_05_40 | TOTAL: 0 | CLASSIFICADAS_VIA_CAIXA: 0 | CLASSIFICADAS_VIA_MUV: 0 | NÃO_CLASSIFICADAS: 0
+[MIB][info] swap { tempoMs: 1.948, versao: 1, tamanho: 0 }
+[MIB] iniciado 0 produtos em memória
+[05.41] MIGRATION_FINANCEIRO_EMPRESA_05_41 | TOTAL_FINANCEIRO: 0 | CLASSIFICADO_VIA_VENDA: 0 | CLASSIFICADO_VIA_MUV: 0 | CLASSIFICADO_VIA_CAIXA: 0 | CLASSIFICADO_OUTRA_ORIGEM: 0 | LEGADO_SEM_OWNERSHIP: 0
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN pessoa_id INTEGER
+Recuperação quantidade_fiscal/nao_fiscal compras_itens concluída
+Correção quantidades fiscais legadas compras_itens concluída
+Recuperação item_fiscal compras_itens concluída
+(node:18888) Warning: Accessing non-existent property 'recalcularEstoqueConsolidado' of module exports inside circular dependency
+(Use `node --trace-warnings ...` to show where the warning was created)
+Recálculo saldos estoque concluído (0 produtos)
+[05.49] MIGRATION_PEDIDOS_EMPRESA_05_49 | TOTAL: 0 | CLASSIFICADOS: 0 | VIA_RESERVA: 0 | VIA_VENDA: 0 | AMBIGUOS: 0 | SEM_CLASSIFICACAO: 0
+[MESAS] schema garantido | mesa_id adicionada: true | mesa_atendimento_id adicionada: true
+[ENTRADA] origem_canal garantida | coluna adicionada: true
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+[COZINHA] schema V1.2.3 v3 operacional (recriado com FKs compostas empresa)
+▶ Sprint 05 — HTTP real: login validado + 3 operações
+  ✔ 7) HTTP: login autorizado emite JWT; login negado; 3 ops com token validado (54.1702ms)
+✔ Sprint 05 — HTTP real: login validado + 3 operações (3354.1176ms)
+ℹ tests 7
+ℹ suites 2
+ℹ pass 7
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 8117.0817
+
+
+======== tests/cozinha/sprint05-operacoes-itens.test.js ========
+
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+▶ Sprint 05 — Operações dos itens
+  ▶ Preparação — iniciar
+    ✔ início válido AGUARDANDO→EM_PREPARACAO + outbox + idempotência PREPARACAO_INICIADA (23.9798ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ início duplicado (mesma chave) não duplica evento nem estado (15.0227ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ item inexistente (10.2402ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ estado incompatível: item já PRONTO (15.2568ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ falha durante a transação — rollback integral (estado + idempotência + outbox) (13.8329ms)
+  ✔ Preparação — iniciar (79.3027ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ▶ Item pronto
+    ✔ conclusão válida EM_PREPARACAO→PRONTO + ITEM_PRONTO (15.6381ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ conclusão duplicada não reexecuta (15.1494ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ item inexistente (10.0117ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ estado incompatível AGUARDANDO→PRONTO (12.5474ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ falha durante a transação — rollback integral (15.0734ms)
+  ✔ Item pronto (68.909ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ▶ Bebidas
+    ✔ entrega total (14.5899ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ entrega parcial (12.8517ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ entregas parciais sucessivas até zerar (18.7887ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ quantidade acumulada igual à solicitada — histórico preservado (14.6382ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ tentativa de ultrapassar quantidade solicitada (14.0935ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ quantidade negativa ou inválida (11.9001ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ repetição idempotente BEBIDA_ENTREGUE (13.8455ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ bebida entrega sem exigir pastéis prontos (14.1392ms)
+  ✔ Bebidas (115.3707ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ▶ Segurança e integridade
+    ✔ isolamento entre empresas (17.3901ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ homologação unidade — autorizada / outra / ausente / vazia / divergente / rollback / idempotência (3 ops) (31.6189ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ reutilização de chave com hash diferente (17.0581ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ integridade item↔rodada↔comanda (13.8531ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ rollback integral em falha de bebida (simularFalha) (13.172ms)
+  ✔ Segurança e integridade (93.4423ms)
+✔ Sprint 05 — Operações dos itens (357.4427ms)
+ℹ tests 23
+ℹ suites 5
+ℹ pass 23
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 491.0176
+
+
+======== tests/cozinha/sprint01-fundacao-persistencia.test.js ========
+
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+▶ Sprint 01 — Cozinha fundação (banco temporário)
+  ✔ cria todas as tabelas e migração é idempotente (26.8116ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ✔ UNIQUE global de idempotency_key e isolamento por empresa (10.824ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ✔ FK entre domínio cozinha e rollback sem resíduos (9.3589ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ✔ idempotência: replay mesmo hash; conflito hash/operação (11.2938ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ✔ concorrência: duas inserções com mesma key → um registro (886.751ms)
+✔ Sprint 01 — Cozinha fundação (banco temporário) (946.4417ms)
+▶ Sprint 01 — Hash determinístico
+  ✔ mesmas propriedades em ordem diferente → mesmo hash (0.7525ms)
+  ✔ ordem diferente de itens do lote → hash diferente (0.658ms)
+  ✔ payload semanticamente diferente → hash diferente (0.6763ms)
+  ✔ timestamps de servidor não alteram o hash (0.5026ms)
+  ✔ quantidades equivalentes normalizadas → mesmo hash (0.7065ms)
+✔ Sprint 01 — Hash determinístico (4.1305ms)
+▶ Sprint 01 — Precisão em milésimos
+  ✔ converte inteiros e fracionários (0.3415ms)
+  ✔ soma e subtração sem float (0.3418ms)
+  ✔ rejeita mais de três casas (0.3613ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ✔ persistência de qty em INTEGER millis no banco temporário (17.0366ms)
+✔ Sprint 01 — Precisão em milésimos (18.613ms)
+ℹ tests 14
+ℹ suites 3
+ℹ pass 14
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1080.2298
+
+
+======== tests/cozinha/sprint01-correcao-isolamento-empresa.test.js ========
+
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+▶ Correção Sprint 01 — isolamento empresa (FK composta)
+  ✔ 1) impede rodada empresa A → unidade empresa B (17.4612ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ✔ 2) impede item empresa A → rodada empresa B (12.7066ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ✔ 3) impede item empresa A → comanda empresa B (9.3786ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ✔ 4) impede estação vinculada à unidade de outra empresa (8.6006ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ✔ 5) impede fila de impressão com relacionamentos cruzados (8.9388ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ✔ 6) relacionamentos válidos na mesma empresa funcionam (9.9825ms)
+✔ Correção Sprint 01 — isolamento empresa (FK composta) (68.2199ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+▶ Correção Sprint 01 — falha de inicialização
+  ✔ 7) migração falha → Cozinha não operacional + erro específico (888.4695ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ✔ 8) ERP/banco pode estar pronto enquanto Cozinha não é operacional (12.8664ms)
+✔ Correção Sprint 01 — falha de inicialização (901.6148ms)
+ℹ tests 8
+ℹ suites 2
+ℹ pass 8
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1107.3392
+
+
+======== tests/cozinha/sprint02-despacho-fifo.test.js ========
+
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+▶ Sprint 02 — Despacho / rodada / FIFO (banco temporário)
+  ▶ Despacho básico
+    ✔ 1) uma comanda gera uma rodada (21.6404ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 2) duas comandas do mesmo atendimento geram uma única rodada (13.7964ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 3) cada item permanece vinculado à sua comanda (12.2952ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 4) personalizações são preservadas em cozinha_item_ingredientes (11.5544ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 5) estados iniciais da rodada e dos itens estão corretos (10.9222ms)
+  ✔ Despacho básico (71.138ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ▶ FIFO
+    ✔ 6) sequências crescem na unidade a cada despacho (14.5021ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 7) despachos concorrentes não compartilham a mesma sequência (1198.3518ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 8) sequência não reinicia por atendimento; pertence à unidade (21.2512ms)
+  ✔ FIFO (1234.5034ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ▶ Idempotência
+    ✔ 9) replay com mesma chave e payload devolve resposta original (17.0323ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 10) mesma chave com payload diferente → 409 (14.4937ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 11) mesma chave associada a outro tipo de operação → 409 (9.6638ms)
+  ✔ Idempotência (41.4453ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ▶ Isolamento e validações
+    ✔ 12) rejeita pedido de outra empresa (12.1227ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 13) rejeita atendimento incompatível com a mesa (9.9868ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 14) rejeita unidade inativa (10.2702ms)
+  ✔ Isolamento e validações (32.6362ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ▶ Quantidades
+    ✔ 15) rejeita quantidade acima do saldo e não consome FIFO (12.6929ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 16) despacho parcial reduz o saldo; segundo despacho consome o restante (16.445ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 17) alteração silenciosa da qty do pedido não eleva o teto (14.5142ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 18) rejeita mais de três casas decimais (13.2319ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 19) armazena quantidades em milésimos inteiros (12.8454ms)
+  ✔ Quantidades (70.088ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ▶ Transação
+    ✔ 20) falha após claim de idempotência faz ROLLBACK sem rodada/FIFO (14.3384ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 21) registra operação CONCLUIDA na tabela central cozinha_idempotencia (11.7989ms)
+  ✔ Transação (26.3005ms)
+✔ Sprint 02 — Despacho / rodada / FIFO (banco temporário) (1476.6123ms)
+ℹ tests 21
+ℹ suites 7
+ℹ pass 21
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 1590.8973
+
+
+======== tests/cozinha/sprint02-correcoes-auditoria.test.js ========
+
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+▶ Correções auditoria Sprint 02
+  ▶ CORREÇÃO 01 — Mesa inativa
+    ✔ mesa ativa permite despacho (21.6683ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ mesa inativa é rejeitada sem rodada/FIFO/parciais (13.3868ms)
+  ✔ CORREÇÃO 01 — Mesa inativa (35.7836ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ▶ CORREÇÃO 02 — Item removido (cancelamento individual no ERP)
+    ✔ diagnóstico: ERP remove linha via DELETE; sem coluna de cancelamento em pedidos_itens (9.9741ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ pedido aberto: item deletado não despacha; item válido despacha (12.9333ms)
+  ✔ CORREÇÃO 02 — Item removido (cancelamento individual no ERP) (23.1753ms)
+  ▶ CORREÇÃO 03 — Classificação operacional
+    ✔ não classifica COMERCIAL como PASTEL; default OUTRO; respeita valor explícito (0.2259ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ persistência usa OUTRO quando snapshot é COMERCIAL (12.0212ms)
+  ✔ CORREÇÃO 03 — Classificação operacional (12.5034ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ▶ CORREÇÃO 06 — PRAGMA foreign_keys
+    ✔ FK habilitada antes do BEGIN e rejeita referência inválida (10.2514ms)
+  ✔ CORREÇÃO 06 — PRAGMA foreign_keys (10.4362ms)
+✔ Correções auditoria Sprint 02 (82.3475ms)
+ℹ tests 7
+ℹ suites 5
+ℹ pass 7
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 196.4346
+
+
+======== tests/cozinha/sprint02-http-seguranca.test.js ========
+
+======================================
+BANCO DE TESTE EM USO:
+C:\Users\cicer\AppData\Local\Temp\cds-cozinha-s02-http-tVKOyg\mercadao.db
+======================================
+Conectado ao banco de dados SQLite
+Configurações padrão inseridas/verificadas
+Tabela equipamentos_drivers criada/verificada
+Tabela equipamentos criada/verificada
+Tabela equipamentos_configuracoes criada/verificada
+Tabela equipamentos_logs criada/verificada
+Tabela equipamentos_eventos criada/verificada
+Tabela equipamentos_fila criada/verificada
+Tabela produto_balanca_sync_log criada/verificada
+Tabela equipamentos_mgv6_exports criada/verificada
+Tabela pedidos criada/verificada
+Tabela pedidos_itens criada/verificada
+Tabela nfe_notas criada/verificada
+Alteração aplicada em nfe_notas: ALTER TABLE nfe_notas ADD COLUMN fila_estado TEXT
+Alteração aplicada em nfe_notas: ALTER TABLE nfe_notas ADD COLUMN tentativas INTEGER DEFAULT 0
+Alteração aplicada em nfe_notas: ALTER TABLE nfe_notas ADD COLUMN ultima_tentativa_em DATETIME
+Alteração aplicada em nfe_notas: ALTER TABLE nfe_notas ADD COLUMN erro_codigo TEXT
+Alteração aplicada em nfe_notas: ALTER TABLE nfe_notas ADD COLUMN erro_mensagem TEXT
+Alteração aplicada em nfe_notas: ALTER TABLE nfe_notas ADD COLUMN erro_sugestao TEXT
+Alteração aplicada em nfe_notas: ALTER TABLE nfe_notas ADD COLUMN tempo_resposta_ms INTEGER
+Alteração aplicada em nfe_notas: ALTER TABLE nfe_notas ADD COLUMN consulta_auto_tentativas INTEGER DEFAULT 0
+Alteração aplicada em nfe_notas: ALTER TABLE nfe_notas ADD COLUMN proxima_consulta_em DATETIME
+Tabela nfe_operacional_logs criada/verificada
+Tabela licenca criada/verificada
+Tabela licenca_historico criada/verificada
+Tabela licenca_logs criada/verificada
+Tabela licenca_execucao criada/verificada
+Tabela promocoes_sugestoes criada/verificada
+Tabela promocoes criada/verificada
+Tabela produtos_lotes criada/verificada
+Tabela venda_lotes criada/verificada
+Tabela produtos_ajustes_estoque criada/verificada
+Tabela movimentos_transferencia_saldos criada/verificada
+Tabela pedido_estoque_reservas criada/verificada
+Tabela auditoria_pedido_estoque_fiscal criada/verificada
+Tabela configuracoes_validade criada/verificada
+Tabela categorias criada/verificada
+Tabela subcategorias criada/verificada
+Tabela fornecedores criada/verificada
+Tabela marcas criada/verificada
+Tabela produtos criada/verificada
+Tabela produto_atacado criada/verificada
+[MIP] Tabela produto_identificadores criada/verificada
+Tabela produto_imagens criada/verificada
+Tabela produto_embalagens criada/verificada
+Tabela clientes criada/verificada
+Tabela compras criada/verificada
+Tabela compras_itens criada/verificada
+Tabela compras_devolucoes criada/verificada
+Tabela vendas_devolucoes criada/verificada
+Tabela vendas criada/verificada
+Tabela auditoria_alertas criada/verificada
+Tabela vendas_itens criada/verificada
+Tabela venda_pagamentos criada/verificada
+Tabela financeiro criada/verificada
+Tabela contas_receber criada/verificada
+Tabela contas_receber_pagamentos criada/verificada
+Tabela produtos_preco_historico criada/verificada
+Tabela venda_recebimentos criada/verificada
+Tabela venda_estoque_reservas criada/verificada
+Tabela usuarios criada/verificada
+Tabela usuario_permissoes criada/verificada
+Tabela vendas_canceladas criada/verificada
+Tabela nfce_notas criada/verificada
+Tabela notas_recebidas criada/verificada
+Tabela notas_recebidas_dfe criada/verificada
+Tabela central_entradas_documentos criada/verificada
+Alteração aplicada em central_entradas_documentos: ALTER TABLE central_entradas_documentos ADD COLUMN tipo_documento TEXT
+Tabela central_entradas_historico criada/verificada
+Tabela central_entradas_nsu criada/verificada
+Tabela central_entradas_config criada/verificada
+Tabela central_entradas_eventos criada/verificada
+Tabela dfe_auditoria criada/verificada
+Tabela central_entradas_notificacoes criada/verificada
+Tabela configuracoes criada/verificada
+Tabela miip_decisoes criada/verificada
+Tabela miip_associacoes criada/verificada
+Tabela miip_sinonimos criada/verificada
+Tabela miip_estatisticas criada/verificada
+Tabela miip_configuracoes criada/verificada
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN terminal_id INTEGER REFERENCES terminais(id)
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN operador_id INTEGER REFERENCES usuarios(id)
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN status_pagamento TEXT DEFAULT 'pendente'
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN tef_transacao_id INTEGER
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN caixa_sessao_id INTEGER REFERENCES caixa_sessoes(id)
+Alteração aplicada em terminais: ALTER TABLE terminais ADD COLUMN usuario_id INTEGER REFERENCES usuarios(id)
+Alteração aplicada em terminais: ALTER TABLE terminais ADD COLUMN usuario_nome TEXT
+Alteração aplicada em vendas: CREATE INDEX IF NOT EXISTS idx_vendas_empresa_id ON vendas(empresa_id)
+Alteração aplicada em pedidos: CREATE INDEX IF NOT EXISTS idx_pedidos_empresa_id ON pedidos(empresa_id)
+Alteração aplicada em produtos_lotes: ALTER TABLE produtos_lotes ADD COLUMN empresa_id INTEGER REFERENCES empresas(id)
+Alteração aplicada em produtos_lotes: CREATE INDEX IF NOT EXISTS idx_produtos_lotes_empresa_produto ON produtos_lotes(empresa_id, produto_id, ativo)
+Alteração aplicada em pedido_estoque_reservas: ALTER TABLE pedido_estoque_reservas ADD COLUMN empresa_id INTEGER REFERENCES empresas(id)
+Alteração aplicada em pedido_estoque_reservas: CREATE INDEX IF NOT EXISTS idx_pedido_reservas_empresa ON pedido_estoque_reservas(empresa_id, produto_id, status)
+Alteração aplicada em venda_estoque_reservas: ALTER TABLE venda_estoque_reservas ADD COLUMN empresa_id INTEGER REFERENCES empresas(id)
+Alteração aplicada em venda_estoque_reservas: CREATE INDEX IF NOT EXISTS idx_venda_reservas_empresa ON venda_estoque_reservas(empresa_id, produto_id, status)
+Alteração aplicada em vendas_itens: ALTER TABLE vendas_itens ADD COLUMN item_fiscal INTEGER DEFAULT 0
+Alteração aplicada em vendas_itens: ALTER TABLE vendas_itens ADD COLUMN quantidade_fiscal REAL DEFAULT 0
+Alteração aplicada em vendas_itens: ALTER TABLE vendas_itens ADD COLUMN quantidade_nao_fiscal REAL DEFAULT 0
+Alteração aplicada em vendas_itens: ALTER TABLE vendas_itens ADD COLUMN valor_fiscal REAL DEFAULT 0
+Alteração aplicada em vendas_itens: ALTER TABLE vendas_itens ADD COLUMN valor_nao_fiscal REAL DEFAULT 0
+Alteração aplicada em vendas_itens: ALTER TABLE vendas_itens ADD COLUMN preco_unitario_interno REAL
+Alteração aplicada em vendas_itens: ALTER TABLE vendas_itens ADD COLUMN modo_venda TEXT DEFAULT 'peso'
+Alteração aplicada em vendas_itens: ALTER TABLE vendas_itens ADD COLUMN tipo_venda TEXT DEFAULT 'PESO'
+Alteração aplicada em configuracoes: ALTER TABLE configuracoes ADD COLUMN fiscal_emitente_logradouro TEXT DEFAULT ''
+Alteração aplicada em configuracoes: ALTER TABLE configuracoes ADD COLUMN fiscal_emitente_numero TEXT DEFAULT 'S/N'
+Alteração aplicada em configuracoes: ALTER TABLE configuracoes ADD COLUMN fiscal_emitente_bairro TEXT DEFAULT ''
+Alteração aplicada em caixa: ALTER TABLE caixa ADD COLUMN reoperturas_count INTEGER DEFAULT 0
+Alteração aplicada em usuarios: ALTER TABLE usuarios ADD COLUMN ativo INTEGER DEFAULT 1
+Alteração aplicada em usuarios: ALTER TABLE usuarios ADD COLUMN nome TEXT
+Alteração aplicada em usuarios: ALTER TABLE usuarios ADD COLUMN perfil TEXT DEFAULT 'USUARIO'
+Alteração aplicada em usuarios: ALTER TABLE usuarios ADD COLUMN pode_alterar_senhas INTEGER DEFAULT 0
+Alteração aplicada em usuarios: ALTER TABLE usuarios ADD COLUMN troca_senha_obrigatoria INTEGER DEFAULT 0
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN ncm TEXT
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN cfop TEXT
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN csosn TEXT
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN origem INTEGER DEFAULT 0
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN cest TEXT
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN codigo_barras TEXT
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN aliquota_icms REAL DEFAULT 0
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN aliquota_pis REAL DEFAULT 0
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN aliquota_cofins REAL DEFAULT 0
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN venda_atacado INTEGER DEFAULT 0
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN ativo INTEGER DEFAULT 1
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN item_fiscal INTEGER DEFAULT 0
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN saldo_fiscal REAL DEFAULT 0
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN saldo_nao_fiscal REAL DEFAULT 0
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN marca_id INTEGER
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN observacoes TEXT
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN imagem_principal TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN dias_entre_parcelas INTEGER DEFAULT 30
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN valor_ipi DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN valor_seguro DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN valor_icms_st DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN valor_fcp_st DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN cancelada_em DATETIME
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN motivo_cancelamento TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN nota_fiscal_avulsa INTEGER DEFAULT 0
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN total_xml DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN total_itens_calculado DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN diferenca_total DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN fornecedor_cnpj TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN tipo_entrada TEXT DEFAULT 'REVENDA'
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN tipo_entrada_sugerido TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN tipo_entrada_confianca INTEGER
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN tipo_entrada_motivo TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN tipo_entrada_alterado INTEGER DEFAULT 0
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN natureza_operacao TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN natureza_operacao_xml TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN cfop TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN cfop_xml TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN csosn_cst TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN csosn_cst_xml TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN cst_pis TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN cst_pis_xml TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN cst_cofins TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN cst_cofins_xml TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN cst_ipi TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN cst_ipi_xml TEXT
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN escrituracao_alterada INTEGER DEFAULT 0
+Alteração aplicada em compras: ALTER TABLE compras ADD COLUMN escrituracao_motivo TEXT
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN status TEXT DEFAULT 'pago'
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN origem TEXT DEFAULT 'manual'
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN documento TEXT
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN vencimento DATE
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN numero_parcela INTEGER
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN total_parcelas INTEGER
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN compra_id INTEGER
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN venda_id INTEGER
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN pessoa_nome TEXT
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN observacao TEXT
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN baixado_em DATE
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN descricao_produto TEXT
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN codigo_barras TEXT
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN margem_lucro DECIMAL(10,2) DEFAULT 30
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN preco_venda_sugerido DECIMAL(10,2)
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN unidade TEXT
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN ncm TEXT
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN frete_rateado DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN desconto_rateado DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN outras_despesas_rateado DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN custo_unitario_final DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN vendido_por_peso INTEGER DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN peso_total_compra DECIMAL(10,3) DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN custo_por_kg DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN atualizar_preco_venda INTEGER DEFAULT 1
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN quantidade_fiscal REAL DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN quantidade_nao_fiscal REAL DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN compra_em TEXT
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN quantidade_embalagens DECIMAL(10,3) DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN quantidade_por_embalagem DECIMAL(10,3) DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN valor_total_embalagem DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN cfop TEXT
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN tipo_fiscal_item TEXT
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN bonificacao INTEGER DEFAULT 0
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN nfe_item_n INTEGER
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN tipo_operacional TEXT
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN nfe_item_original_json TEXT
+Alteração aplicada em compras_itens: ALTER TABLE compras_itens ADD COLUMN dados_roteamento_json TEXT
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN valor_fiscal REAL DEFAULT 0
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN valor_nao_fiscal REAL DEFAULT 0
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN acrescimo REAL DEFAULT 0
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN tipo_venda TEXT DEFAULT 'BALCAO'
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN status_entrega TEXT
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN pagamento_previsto TEXT DEFAULT 'NAO_INFORMADO'
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN entregador TEXT
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN endereco_entrega TEXT
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN referencia_entrega TEXT
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN observacao_entrega TEXT
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN taxa_entrega DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN leva_maquineta INTEGER DEFAULT 0
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN troco_para DECIMAL(10,2) DEFAULT 0
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN prestacao_realizada INTEGER DEFAULT 0
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN prestado_por INTEGER
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN prestado_em DATETIME
+Alteração aplicada em venda_pagamentos: ALTER TABLE venda_pagamentos ADD COLUMN confirmacao_modalidade TEXT
+Alteração aplicada em venda_pagamentos: ALTER TABLE venda_pagamentos ADD COLUMN confirmacao_manual INTEGER DEFAULT 0
+Alteração aplicada em venda_pagamentos: ALTER TABLE venda_pagamentos ADD COLUMN operador_id INTEGER
+Alteração aplicada em venda_pagamentos: ALTER TABLE venda_pagamentos ADD COLUMN confirmado_em DATETIME
+Alteração aplicada em contas_receber: ALTER TABLE contas_receber ADD COLUMN observacao TEXT
+Alteração aplicada em tef_transacoes: ALTER TABLE tef_transacoes ADD COLUMN reversao_executada INTEGER DEFAULT 0
+Alteração aplicada em tef_transacoes: ALTER TABLE tef_transacoes ADD COLUMN reversao_motivo TEXT
+Alteração aplicada em tef_transacoes: ALTER TABLE tef_transacoes ADD COLUMN reversao_data DATETIME
+Alteração aplicada em tef_transacoes: CREATE UNIQUE INDEX IF NOT EXISTS idx_tef_transacoes_idempotency_key ON tef_transacoes(idempotency_key) WHERE idempotency_key IS NOT NULL
+Alteração aplicada em equipamentos: ALTER TABLE equipamentos ADD COLUMN timeout_ms INTEGER DEFAULT 5000
+Alteração aplicada em equipamentos: ALTER TABLE equipamentos ADD COLUMN reconnect_auto INTEGER DEFAULT 1
+Alteração aplicada em equipamentos: ALTER TABLE equipamentos ADD COLUMN ultima_comunicacao DATETIME
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN utiliza_conversao INTEGER NOT NULL DEFAULT 0
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN unidade_estoque TEXT
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN reservado_fiscal REAL DEFAULT 0
+Alteração aplicada em produtos: ALTER TABLE produtos ADD COLUMN reservado_nao_fiscal REAL DEFAULT 0
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN telefone_entrega TEXT
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN status_venda TEXT DEFAULT 'ABERTA'
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN origem TEXT DEFAULT 'PDV'
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN pedido_id INTEGER
+Alteração aplicada em vendas: ALTER TABLE vendas ADD COLUMN mpfc_politica_snapshot TEXT
+Alteração aplicada em vendas: CREATE INDEX IF NOT EXISTS idx_vendas_pedido_id ON vendas(pedido_id)
+Alteração aplicada em vendas: CREATE INDEX IF NOT EXISTS idx_vendas_origem ON vendas(origem)
+Alteração aplicada em vendas: CREATE INDEX IF NOT EXISTS idx_vendas_data_venda ON vendas(data_venda)
+Alteração aplicada em pedidos: ALTER TABLE pedidos ADD COLUMN natureza_operacao TEXT
+Alteração aplicada em pedidos: ALTER TABLE pedidos ADD COLUMN cfop TEXT
+Alteração aplicada em pedidos: ALTER TABLE pedidos ADD COLUMN frete REAL DEFAULT 0
+Alteração aplicada em pedidos: ALTER TABLE pedidos ADD COLUMN acrescimo REAL DEFAULT 0
+Alteração aplicada em pedidos: ALTER TABLE pedidos ADD COLUMN transportadora TEXT
+Alteração aplicada em pedidos: ALTER TABLE pedidos ADD COLUMN volumes REAL DEFAULT 0
+Alteração aplicada em pedidos: ALTER TABLE pedidos ADD COLUMN peso REAL DEFAULT 0
+Alteração aplicada em pedidos: ALTER TABLE pedidos ADD COLUMN dados_adicionais TEXT
+Alteração aplicada em pedidos: ALTER TABLE pedidos ADD COLUMN mod_frete TEXT
+Alteração aplicada em pedidos: ALTER TABLE pedidos ADD COLUMN cliente_nome TEXT
+Alteração aplicada em vendas: CREATE INDEX IF NOT EXISTS idx_vendas_tipo_status_entrega ON vendas(tipo_venda, status_entrega)
+Alteração aplicada em vendas: CREATE INDEX IF NOT EXISTS idx_vendas_tipo_prestacao ON vendas(tipo_venda, prestacao_realizada, status_venda)
+Alteração aplicada em venda_estoque_reservas: CREATE INDEX IF NOT EXISTS idx_reservas_venda_status ON venda_estoque_reservas(venda_id, status)
+Alteração aplicada em venda_estoque_reservas: CREATE INDEX IF NOT EXISTS idx_reservas_produto_status ON venda_estoque_reservas(produto_id, status)
+Alteração aplicada em auditoria: CREATE INDEX IF NOT EXISTS idx_auditoria_modulo_ref ON auditoria(modulo, referencia_id)
+Alteração aplicada em equipamentos: ALTER TABLE equipamentos ADD COLUMN ultimo_erro TEXT
+Alteração aplicada em equipamentos: ALTER TABLE equipamentos ADD COLUMN firmware TEXT
+Alteração aplicada em equipamentos: ALTER TABLE equipamentos ADD COLUMN protocolo_versao TEXT
+Alteração aplicada em equipamentos: ALTER TABLE equipamentos ADD COLUMN ultimo_handshake DATETIME
+Alteração aplicada em equipamentos: ALTER TABLE equipamentos ADD COLUMN ultimo_sync DATETIME
+Alteração aplicada em equipamentos: ALTER TABLE equipamentos ADD COLUMN ultimo_ping DATETIME
+Alteração aplicada em central_entradas_nsu: ALTER TABLE central_entradas_nsu ADD COLUMN cooldown_ate DATETIME
+Alteração aplicada em central_entradas_nsu: ALTER TABLE central_entradas_nsu ADD COLUMN ultimo_cstat TEXT
+Alteração aplicada em central_entradas_eventos: CREATE UNIQUE INDEX IF NOT EXISTS idx_central_eventos_manif_aceita
+     ON central_entradas_eventos(documento_id)
+     WHERE tipo = 'MANIFESTACAO_ACEITA' AND documento_id IS NOT NULL
+Alteração aplicada em central_entradas_eventos: CREATE UNIQUE INDEX IF NOT EXISTS idx_central_eventos_manif_claim
+     ON central_entradas_eventos(documento_id)
+     WHERE tipo = 'MANIFESTACAO_CLAIM' AND documento_id IS NOT NULL
+Alteração aplicada em central_entradas_eventos: CREATE UNIQUE INDEX IF NOT EXISTS idx_central_eventos_parser_unico
+     ON central_entradas_eventos(documento_id)
+     WHERE tipo = 'PARSER_CONCLUIDO' AND documento_id IS NOT NULL
+Alteração aplicada em central_entradas_eventos: CREATE UNIQUE INDEX IF NOT EXISTS idx_central_eventos_miip_unico
+     ON central_entradas_eventos(documento_id)
+     WHERE tipo = 'MIIP_CONCLUIDO' AND documento_id IS NOT NULL
+Tabela empresas criada/verificada
+Tabela usuario_empresas criada/verificada
+Tabela estoque_empresa criada/verificada
+Schema MCF (contas_pagar) criado/verificado
+Tabela produto_embalagem_historico criada/verificada
+Alteração aplicada em venda_pagamentos: CREATE UNIQUE INDEX IF NOT EXISTS idx_venda_pagamentos_tef_transacao_unica
+         ON venda_pagamentos(tef_transacao_id)
+         WHERE tef_transacao_id IS NOT NULL
+Migração: modo_dashboard_fiscal definido como ativo (F12) por padrão
+Usuário administrador inicial criado (admin). Troca de senha obrigatória no primeiro acesso.
+[MUC RC2] Schema garantido (apresentações + compras + auditoria + aprendizado)
+Migração categorias UNIQUE(nome, tipo) concluída
+Configuração migrada de C:\projetos\CDS-SISTEMAS PASTELARIA\config\configuracoes.json para C:\Users\cicer\AppData\Local\Temp\cds-cozinha-s02-http-tVKOyg\config\configuracoes.json
+Banco de dados pronto para uso.
+Condições de pagamento: 15 modelo(s) padrão inserido(s).
+[MIB] schema nome_busca + índices OK
+[05.38.E] central_entradas_documentos.empresa_id: added=false fromCnpj=0 fromOperacional=0 ambiguos=0 empresaId=null
+[05.38.F.B] compras.empresa_id: added=false fromCentral=0 fromFinanceiro=0 fromOperacional=0 ambiguos=0 empresaId=null
+Tabelas atendimentos/operacoes/itens/reservas/pagamentos criadas/verificadas
+[MIB] schema nome_busca + índices OK
+[05.40] MIGRATION_VENDAS_EMPRESA_05_40 | TOTAL: 0 | CLASSIFICADAS_VIA_CAIXA: 0 | CLASSIFICADAS_VIA_MUV: 0 | NÃO_CLASSIFICADAS: 0
+[MIB][info] swap { tempoMs: 3.364, versao: 1, tamanho: 0 }
+[MIB] iniciado 0 produtos em memória
+[05.41] MIGRATION_FINANCEIRO_EMPRESA_05_41 | TOTAL_FINANCEIRO: 0 | CLASSIFICADO_VIA_VENDA: 0 | CLASSIFICADO_VIA_MUV: 0 | CLASSIFICADO_VIA_CAIXA: 0 | CLASSIFICADO_OUTRA_ORIGEM: 0 | LEGADO_SEM_OWNERSHIP: 0
+Alteração aplicada em financeiro: ALTER TABLE financeiro ADD COLUMN pessoa_id INTEGER
+Recuperação quantidade_fiscal/nao_fiscal compras_itens concluída
+Correção quantidades fiscais legadas compras_itens concluída
+Recuperação item_fiscal compras_itens concluída
+(node:12844) Warning: Accessing non-existent property 'recalcularEstoqueConsolidado' of module exports inside circular dependency
+(Use `node --trace-warnings ...` to show where the warning was created)
+Recálculo saldos estoque concluído (0 produtos)
+[05.49] MIGRATION_PEDIDOS_EMPRESA_05_49 | TOTAL: 0 | CLASSIFICADOS: 0 | VIA_RESERVA: 0 | VIA_VENDA: 0 | AMBIGUOS: 0 | SEM_CLASSIFICACAO: 0
+[MESAS] schema garantido | mesa_id adicionada: true | mesa_atendimento_id adicionada: true
+[ENTRADA] origem_canal garantida | coluna adicionada: true
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+[COZINHA] schema V1.2.3 v3 operacional (recriado com FKs compostas empresa)
+▶ Sprint 02 — HTTP segurança /api/cozinha
+  ✔ 1) sem autenticação → 401 (14.7413ms)
+  ✔ 2) autenticado sem contexto de empresa → EMPRESA_CONTEXT_REQUIRED (2.9262ms)
+  ✔ 3) autenticado sem vínculo com a empresa → 403 (3.9883ms)
+  ✔ 4) usuário autorizado com empresa válida alcança o handler (2.7005ms)
+[COZINHA][status] módulo não operacional: SQL path C:\segredo\erp.sqlite falhou
+  ✔ 5) status não expõe erro interno de schema (2.1132ms)
+✔ Sprint 02 — HTTP segurança /api/cozinha (3786.0454ms)
+ℹ tests 5
+ℹ suites 1
+ℹ pass 5
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 8421.1801
+
+
+======== tests/cozinha/sprint03-preparacao.test.js ========
+
+▶ Sprint 03 — Preparação / conclusão de rodada
+  ▶ Classificação operacional
+    ✔ PASTEL por utiliza_ficha_tecnica; BEBIDA por categoria; OUTRO sem evidência (1.529ms)
+  ✔ Classificação operacional (2.0392ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ▶ Estados e transições
+    ✔ 1) item inicia em AGUARDANDO após despacho (19.1364ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 2) pastel passa para EM_PREPARACAO (15.2627ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 3) pastel passa para PRONTO (14.147ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 4) não permite transição inválida AGUARDANDO→PRONTO (12.2738ms)
+  ✔ Estados e transições (61.2566ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ▶ Controle independente e conclusão
+    ✔ 5-7) dois pastéis independentes; um pronto não conclui; todos concluem (18.3537ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 8-9) bebida entrega antes dos pastéis e não bloqueia rodada (17.3018ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 10-11) entrega parcial e bloqueio acima da quantidade (15.7652ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 12) OUTRO não bloqueia rodada com PASTEL (17.8842ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 13) OUTRO bloqueia rodada sem PASTEL até ficar pronto (17.0684ms)
+  ✔ Controle independente e conclusão (86.8271ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ▶ Personalização e separação item/ingrediente
+    ✔ 14-15) personalização vinculada ao pastel; ingrediente não é item independente (14.3799ms)
+  ✔ Personalização e separação item/ingrediente (14.5507ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ▶ Isolamento, autorização, transação e idempotência
+    ✔ 16) isolamento entre empresas (17.8031ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 17) usuário/sessão sem operador não altera preparação (16.1143ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 18) falha transacional não deixa estado parcial (15.8186ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 19) operação repetida não duplica entrega nem evento (18.3016ms)
+  ✔ Isolamento, autorização, transação e idempotência (68.3413ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ▶ Regressão Sprint 01 e Sprint 02
+    ✔ 20) regressão S01 — schema operacional e FK composta id+empresa (16.1189ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 21) regressão S02 — despacho FIFO, personalização e estados iniciais (14.8322ms)
+  ✔ Regressão Sprint 01 e Sprint 02 (31.1442ms)
+✔ Sprint 03 — Preparação / conclusão de rodada (264.6586ms)
+ℹ tests 17
+ℹ suites 7
+ℹ pass 17
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 379.7553
+
+
+======== tests/cozinha/sprint03-correcoes-auditoria.test.js ========
+
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+▶ Correções auditoria Sprint 03
+  ▶ Idempotência central
+    ✔ 1) mesma chave, mesmo iniciar e mesmo item: replay (22.2987ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 2) mesma chave, iniciar em itens diferentes: 409 (17.1359ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 3) mesma chave entre iniciar e marcar pronto: 409 (13.0702ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 4) mesma chave entre marcar pronto e entregar bebida: 409 (15.4753ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 5) mesma chave com payload diferente (qty): 409 (13.5332ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 6) repetição de entrega não duplica quantidade (13.9134ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 7) falha transacional não deixa registros parciais (12.0208ms)
+  ✔ Idempotência central (108.4758ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ▶ Classificação oficial
+    ✔ 8) COMERCIAL + utiliza_ficha_tecnica=1 → PASTEL (12.5298ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 9) COMERCIAL + utiliza_ficha_tecnica=0 → OUTRO (11.4081ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 10) PASTEL sem personalização continua PASTEL (12.92ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 11) PASTEL com personalização mantém ingredientes vinculados (12.1707ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 12) INSUMO comercializável Refrigerantes → BEBIDA (12.7409ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 13) INSUMO comercializável outra categoria → OUTRO (12.2329ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 14) ingrediente da ficha não vira item independente (13.8502ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 15) alteração posterior no cadastro não reclassifica item despachado (12.4693ms)
+  ✔ Classificação oficial (100.9246ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ▶ Rodada CANCELADA
+    ✔ 16) rodada cancelada não pode iniciar preparação (17.539ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 17) rodada cancelada não pode receber item pronto (13.8516ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 18) rodada cancelada não pode receber entrega de bebida (14.1072ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 19) sincronização não altera CANCELADA (12.3774ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 20) falha transacional preserva CANCELADA (14.1303ms)
+  ✔ Rodada CANCELADA (72.4192ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ▶ Consulta bebidas vs PRONTA
+    ✔ consulta separa saldos de bebida e nota sobre PRONTA (14.4876ms)
+  ✔ Consulta bebidas vs PRONTA (14.6599ms)
+✔ Correções auditoria Sprint 03 (296.9085ms)
+ℹ tests 21
+ℹ suites 5
+ℹ pass 21
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 413.8157
+
+
+======== tests/cozinha/sprint04a-upgrade-schema-v2-v3.test.js ========
+
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+[COZINHA] Migração schema v2 → v3 concluída (cozinha_idempotencia: 0 registro(s) preservado(s)).
+▶ Sprint 04A — Upgrade schema Cozinha v2 → v3
+  ▶ Cenário A — Migração normal (vazio)
+    ✔ 1-5) v2 vazio migra para v3 com CHECK atualizado (25.3959ms)
+  ✔ Cenário A — Migração normal (vazio) (26.0598ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+[COZINHA] Migração schema v2 → v3 concluída (cozinha_idempotencia: 3 registro(s) preservado(s)).
+  ▶ Cenário B — Migração com dados
+    ✔ preserva todos os registros, IDs e aceita novos tipos (1016.5275ms)
+  ✔ Cenário B — Migração com dados (1016.7774ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+[COZINHA] Migração schema v2 → v3 concluída (cozinha_idempotencia: 3 registro(s) preservado(s)).
+  ▶ Cenário C — Falha forçada
+    ✔ ROLLBACK preserva v2; Cozinha não operacional; ERP contrato mantido (1014.1946ms)
+  ✔ Cenário C — Falha forçada (1014.4436ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+[COZINHA] Migração schema v2 → v3 concluída (cozinha_idempotencia: 3 registro(s) preservado(s)).
+  ▶ Cenário D — Inicialização repetida
+    ✔ não remigra indevidamente nem altera registros (34.2808ms)
+  ✔ Cenário D — Inicialização repetida (34.4817ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ▶ Cenário E — Banco incompatível
+    ✔ versão futura não é corrigida silenciosamente (9.1524ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ v1 populado continua bloqueado (sem perda) (893.1833ms)
+  ✔ Cenário E — Banco incompatível (902.7862ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ▶ Correções auditoria 04A — FK e backup residual
+    ✔ 1-2) falha ao iniciar BEGIN restaura PRAGMA foreign_keys (24.9069ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 3) backup residual interrompe sem DROP nem perda (19.192ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 4) rejeição real de BEGIN IMMEDIATE restaura FKs (12.4089ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 5) falha ao desabilitar PRAGMA foreign_keys não altera estado (12.5477ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+[COZINHA] Migração schema v2 → v3 concluída (cozinha_idempotencia: 3 registro(s) preservado(s)).
+[COZINHA] Falha ao restaurar PRAGMA foreign_keys após migração: [COZINHA] Falha simulada ao restaurar PRAGMA foreign_keys (teste). 
+    ✔ 6) falha na restauração de FKs não é apresentada como sucesso (18.6546ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+[COZINHA] Falha ao restaurar PRAGMA foreign_keys após migração: [COZINHA] Falha simulada ao restaurar PRAGMA foreign_keys (teste). | erro_migracao=COZINHA_MIGRACAO_SIMULADA
+    ✔ 7) falha de restauração + falha de migração preservam ambos diagnósticos (14.0691ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+    ✔ 8) rejeição real de db.run(PRAGMA foreign_keys = OFF) (18.5463ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+[COZINHA] Migração schema v2 → v3 concluída (cozinha_idempotencia: 3 registro(s) preservado(s)).
+[COZINHA] Falha ao restaurar PRAGMA foreign_keys após migração: SQLITE_ERROR: rejeição real de db.run() para: PRAGMA foreign_keys = ON 
+    ✔ 9) rejeição real de db.run na restauração de foreign_keys (15.1268ms)
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+[COZINHA] Falha ao restaurar PRAGMA foreign_keys após migração: SQLITE_ERROR: rejeição real de db.run() para: PRAGMA foreign_keys = ON | erro_migracao=COZINHA_MIGRACAO_SIMULADA
+    ✔ 10) rejeição real na restauração + erro de migração: ambos diagnósticos (14.9299ms)
+  ✔ Correções auditoria 04A — FK e backup residual (151.0018ms)
+✔ Sprint 04A — Upgrade schema Cozinha v2 → v3 (3146.2183ms)
+ℹ tests 15
+ℹ suites 7
+ℹ pass 15
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 3254.3907
+
+
+TOTAL_FAIL=0
+
+======== RESUMO ENTREGA ========
+login-auth: 7/7 pass
+S05 ops: 23/23 pass
+regressão S01–S04A: 108/108 pass
+TOTAL_FAIL=0
+Banco oficial: não acessado
+Sprint 06: não iniciada

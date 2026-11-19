@@ -301,7 +301,8 @@ describe('navegação para Pedidos', () => {
     assert.match(pedidos, /mesa_id: \$\('#pedMesaId'\)/);
     assert.doesNotMatch(pedidos, /mesa_atendimento_id:/);
     assert.doesNotMatch(pedidos, /\/atendimento'/);
-    assert.doesNotMatch(fonte, /atendimento\/encerrar/);
+    assert.match(fonte, /atendimento\/encerrar/);
+    assert.match(fonte, /liberarAtendimento/);
     assert.doesNotMatch(fonte, /empresa_id:/);
     assert.doesNotMatch(fonte, /operador_id:/);
   });

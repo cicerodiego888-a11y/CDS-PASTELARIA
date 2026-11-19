@@ -72,6 +72,21 @@ function invalidarContextoEmpresaDaSessaoAnterior() {
   } catch (_) { /* sessão anterior não pode autorizar o próximo usuário */ }
 }
 
+function notificarSessaoCozinhaNoElectron(token) {
+  try {
+    if (!token) return Promise.resolve(null);
+    if (!window.electronAPI
+      || !window.electronAPI.cozinhaImpressao
+      || typeof window.electronAPI.cozinhaImpressao.estabelecerSessao !== 'function') {
+      return Promise.resolve(null);
+    }
+    return window.electronAPI.cozinhaImpressao.estabelecerSessao({ token })
+      .catch(() => null);
+  } catch (_e) {
+    return Promise.resolve(null);
+  }
+}
+
 function concluirPosLogin(data) {
   invalidarContextoEmpresaDaSessaoAnterior();
   localStorage.setItem('token', data.token);
@@ -81,12 +96,14 @@ function concluirPosLogin(data) {
     ? obterDestinoPosLogin(data.user)
     : '/erp';
 
-  if (window.LoginExperience && typeof LoginExperience.mostrarSplashEntrada === 'function') {
-    LoginExperience.mostrarSplashEntrada(destino);
-    return;
-  }
-
-  window.location.replace(destino);
+  // Retomada segura do Worker de impressão após nova autenticação (Electron).
+  Promise.resolve(notificarSessaoCozinhaNoElectron(data.token)).finally(() => {
+    if (window.LoginExperience && typeof LoginExperience.mostrarSplashEntrada === 'function') {
+      LoginExperience.mostrarSplashEntrada(destino);
+      return;
+    }
+    window.location.replace(destino);
+  });
 }
 
 function mostrarPainelPrimeiroAcesso() {

@@ -1,0 +1,114 @@
+diff --git a/backend/services/cozinha/CozinhaImpressaoWorkerService.js b/backend/services/cozinha/CozinhaImpressaoWorkerService.js
+--- a/backend/services/cozinha/CozinhaImpressaoWorkerService.js
++++ b/backend/services/cozinha/CozinhaImpressaoWorkerService.js
+@@ -48,30 +48,36 @@
+ function agoraIso() {
+   return new Date().toISOString();
+ }
+ 
+ /**
+- * Executa fn sob BEGIN IMMEDIATE.
+- * Se a conexão já estiver em transação, executa fn nela (sem nested BEGIN).
++ * Executa fn sob BEGIN IMMEDIATE obrigatório.
++ * Não adere a transação externa desconhecida: se a conexão já estiver
++ * em TX, propaga erro (COMMIT/ROLLBACK só da TX iniciada aqui).
+  */
+ async function comTransacaoImediata(db, fn) {
+-  let ownsTx = false;
+   try {
+     await dbExec(db, 'BEGIN IMMEDIATE');
+-    ownsTx = true;
+   } catch (err) {
+     const msg = String(err && err.message ? err.message : err);
+-    if (!/within a transaction/i.test(msg)) throw err;
+-  }
++    if (/within a transaction/i.test(msg)) {
++      throw erroImpressao(
++        'Claim exige BEGIN IMMEDIATE próprio; conexão já está em transação externa.',
++        409,
++        'IMPRESSAO_CLAIM_TX_EXTERNA',
++        { detalhes: { causa: msg } }
++      );
++    }
++    throw err;
++  }
++
+   try {
+     const out = await fn();
+-    if (ownsTx) await dbExec(db, 'COMMIT');
++    await dbExec(db, 'COMMIT');
+     return out;
+   } catch (err) {
+-    if (ownsTx) {
+-      try { await dbExec(db, 'ROLLBACK'); } catch (_e) { /* ignore */ }
+-    }
++    try { await dbExec(db, 'ROLLBACK'); } catch (_e) { /* ignore */ }
+     throw err;
+   }
+ }
+ 
+ function exigirEmpresa(empresaId) {
+diff --git a/tests/cozinha/sprint06-bloco-d-worker-falhas.test.js b/tests/cozinha/sprint06-bloco-d-worker-falhas.test.js
+--- a/tests/cozinha/sprint06-bloco-d-worker-falhas.test.js
++++ b/tests/cozinha/sprint06-bloco-d-worker-falhas.test.js
+@@ -807,6 +807,60 @@
+     assert.equal(j2.estado, ESTADOS_FILA.FALHA);
+     assert.match(String(j2.ultimo_erro), /falha no segundo claim/);
+     await close(db);
+   });
+ 
++  it('21) claim recusa aderir a transação externa da conexão', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    const { job } = await despacharComJob(db, ctx, 'd-21');
++
++    await run(db, 'BEGIN');
++    let claimErro = null;
++    try {
++      await WorkerService.reivindicarProximoJob({
++        db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-21'
++      }, { db });
++    } catch (err) {
++      claimErro = err;
++    }
++
++    assert.ok(claimErro, 'claim deveria falhar com TX externa aberta');
++    // Deve ser o erro encapsulado do worker — não o SQLITE_ERROR cru.
++    assert.equal(claimErro.codigo, 'IMPRESSAO_CLAIM_TX_EXTERNA');
++    assert.equal(claimErro.statusCode, 409);
++    assert.match(String(claimErro.message), /BEGIN IMMEDIATE|transação externa/i);
++    assert.ok(
++      claimErro.detalhes && /within a transaction/i.test(String(claimErro.detalhes.causa || '')),
++      'detalhes.causa deve preservar a mensagem SQLite original'
++    );
++
++    // Job permanece PENDENTE — claim não aderiu nem atualizou sob a TX externa.
++    const antes = await get(db, `
++      SELECT estado, worker_id FROM cozinha_impressao_fila WHERE id=?
++    `, [job.id]);
++    assert.equal(antes.estado, ESTADOS_FILA.PENDENTE);
++    assert.equal(antes.worker_id, null);
++
++    // Marcador sob controle exclusivo do chamador (TX externa intacta).
++    await run(db, `
++      UPDATE cozinha_impressao_fila SET ultimo_erro = 'marcador-tx-externa' WHERE id = ?
++    `, [job.id]);
++    await run(db, 'ROLLBACK');
++
++    const depois = await get(db, `
++      SELECT estado, worker_id, ultimo_erro FROM cozinha_impressao_fila WHERE id=?
++    `, [job.id]);
++    assert.equal(depois.estado, ESTADOS_FILA.PENDENTE);
++    assert.equal(depois.worker_id, null);
++    assert.equal(depois.ultimo_erro, null);
++
++    // Após o chamador encerrar a TX externa, o claim independente funciona.
++    const ok = await WorkerService.reivindicarProximoJob({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-21'
++    }, { db });
++    assert.equal(ok.reivindicado, true);
++    assert.equal(ok.job.id, job.id);
++    await close(db);
++  });
+ });

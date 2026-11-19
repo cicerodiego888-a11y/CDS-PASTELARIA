@@ -1,0 +1,56 @@
+{
+  "geradoEm": "2026-11-16T14:19:25.919Z",
+  "dbDir": "C:\\Users\\cicer\\AppData\\Local\\Temp\\cds-s02-audit-t6nTOW",
+  "resultados": [
+    {
+      "nome": "R1 concorrência chaves distintas",
+      "ok": true,
+      "detalhe": "seqs=1,2"
+    },
+    {
+      "nome": "R2 concorrência mesma chave",
+      "ok": true,
+      "detalhe": "rodadas=1 seq=1 fulfilled=2 rejected=0 rejCodes="
+    },
+    {
+      "nome": "R3 replay após alteração pedido",
+      "ok": true,
+      "detalhe": "rodada=1"
+    },
+    {
+      "nome": "R4 falha após incremento FIFO → rollback",
+      "ok": true,
+      "detalhe": "msg=SQLITE_CONSTRAINT: AUDIT_FORCE_FAIL_AFTER_FIFO"
+    },
+    {
+      "nome": "R5 falha após item parcial → rollback total",
+      "ok": true,
+      "detalhe": "msg=SQLITE_CONSTRAINT: AUDIT_FORCE_FAIL_PARTIAL_ITENS"
+    },
+    {
+      "nome": "R6 item duplicado no payload",
+      "ok": true,
+      "detalhe": "ITEM_DUPLICADO_NO_LOTE"
+    },
+    {
+      "nome": "R7 unidade diferente por item",
+      "ok": null,
+      "detalhe": "AUSÊNCIA DE COBERTURA NO SERVIÇO: unidade_id é única por requisição; não há campo unidade por item. Mistura de unidades no lote não é modelada no contrato atual."
+    },
+    {
+      "nome": "R8 comanda outro atendimento",
+      "ok": true,
+      "detalhe": "COMANDA_ATENDIMENTO_INCOMPATIVEL"
+    },
+    {
+      "nome": "R9 qty > teto",
+      "ok": true,
+      "detalhe": "QTY_EXCEDE_RESTANTE"
+    },
+    {
+      "nome": "R10 mesma chave payload diferente",
+      "ok": true,
+      "detalhe": "IDEMPOTENCY_PAYLOAD_DIVERGENTE"
+    }
+  ]
+}

@@ -4751,7 +4751,10 @@ function resumirMensagemSelecaoEmpresaPdv(estado = {}) {
     if (/MATRIZ_AUSENTE|MATRIZ_AMBIGUA/.test(code)) {
         return 'Cadastro de empresas incompleto para seleção automática.';
     }
-    if (/NENHUMA_EMPRESA|ESTOQUE_INSUFICIENTE|INSUMO_INSUFICIENTE|Gargalos:/i.test(code + bruto)) {
+    if (/NENHUMA_EMPRESA_ELEGIVEL|SEM_ACESSO/i.test(code + bruto)) {
+        return 'Nenhuma empresa autorizada para este usuário consegue atender à venda.';
+    }
+    if (/NENHUMA_EMPRESA_ATENDE|ESTOQUE_INSUFICIENTE|INSUMO_INSUFICIENTE|Gargalos:/i.test(code + bruto)) {
         return 'Estoque insuficiente para a venda nesta empresa. Ajuste quantidades ou o tipo fiscal.';
     }
     if (/SELECAO|EMPRESA|SELETOR/i.test(code)) {

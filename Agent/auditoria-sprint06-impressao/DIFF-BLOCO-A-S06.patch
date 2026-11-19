@@ -1,0 +1,1518 @@
+# DIFF REAL — Sprint 06 Bloco A (fundação e contratos de impressão)
+# Schema permanece v3. Sem Blocos B–E.
+diff --git a/backend/services/cozinha/cozinhaImpressaoContratos.js b/backend/services/cozinha/cozinhaImpressaoContratos.js
+index e69de29..9ffa257 100644
+--- a/backend/services/cozinha/cozinhaImpressaoContratos.js
++++ b/backend/services/cozinha/cozinhaImpressaoContratos.js
+@@ -0,0 +1,235 @@
++/**
++ * Contratos compartilhados — Impressão de Cozinha (Sprint 06 Bloco A).
++ * Independente de impressão comercial/fiscal (cupom, DANFE, TEF, MUV).
++ */
++'use strict';
++
++const LARGURAS_MM = Object.freeze([58, 80]);
++const LARGURA_PADRAO_MM = 80;
++
++const MODELOS_IMPRESSAO = Object.freeze({
++  INDIVIDUAL: 'INDIVIDUAL',
++  AGRUPADO: 'AGRUPADO'
++});
++
++/** Convenção D3: codigo_estacao alinhado a tipo_item (roteamento no Bloco C). */
++const CODIGOS_ESTACAO_TIPO = Object.freeze({
++  PASTEL: 'PASTEL',
++  BEBIDA: 'BEBIDA',
++  OUTRO: 'OUTRO'
++});
++
++const ESTADOS_FILA = Object.freeze({
++  PENDENTE: 'PENDENTE',
++  PROCESSANDO: 'PROCESSANDO',
++  RESULTADO_INCERTO: 'RESULTADO_INCERTO',
++  ACEITA_PELO_SPOOLER: 'ACEITA_PELO_SPOOLER',
++  FALHA: 'FALHA',
++  CANCELADA: 'CANCELADA'
++});
++
++function erroImpressao(mensagem, statusCode, codigo, extras = {}) {
++  const err = new Error(mensagem);
++  err.statusCode = statusCode;
++  err.codigo = codigo;
++  Object.assign(err, extras);
++  return err;
++}
++
++function parsePositiveInteger(value) {
++  const num = Number(value);
++  return Number.isInteger(num) && num > 0 ? num : null;
++}
++
++function normalizarCodigoEstacao(raw) {
++  const codigo = String(raw == null ? '' : raw).trim().toUpperCase();
++  if (!codigo) {
++    throw erroImpressao(
++      'codigo_estacao obrigatório.',
++      400,
++      'ESTACAO_CODIGO_OBRIGATORIO'
++    );
++  }
++  if (codigo.length > 64) {
++    throw erroImpressao(
++      'codigo_estacao excede o tamanho máximo.',
++      400,
++      'ESTACAO_CODIGO_INVALIDO'
++    );
++  }
++  return codigo;
++}
++
++function normalizarLarguraMm(raw) {
++  const n = raw == null || raw === '' ? LARGURA_PADRAO_MM : Number(raw);
++  if (!LARGURAS_MM.includes(n)) {
++    throw erroImpressao(
++      'largura_mm deve ser 58 ou 80.',
++      400,
++      'ESTACAO_LARGURA_INVALIDA'
++    );
++  }
++  return n;
++}
++
++function normalizarVias(raw) {
++  const n = raw == null || raw === '' ? 1 : Number(raw);
++  if (!Number.isInteger(n) || n <= 0) {
++    throw erroImpressao(
++      'vias deve ser inteiro positivo.',
++      400,
++      'ESTACAO_VIAS_INVALIDAS'
++    );
++  }
++  return n;
++}
++
++function normalizarFlag01(raw, defaultValue = 1) {
++  if (raw == null || raw === '') return defaultValue ? 1 : 0;
++  const n = Number(raw);
++  if (n === 0 || n === 1) return n;
++  if (raw === true) return 1;
++  if (raw === false) return 0;
++  throw erroImpressao('Flag booleana inválida (use 0 ou 1).', 400, 'ESTACAO_FLAG_INVALIDA');
++}
++
++/**
++ * Monta o snapshot canônico do job (sem preços/fiscais).
++ * Bloco A: contrato + validação; enfileiramento real = Bloco B.
++ */
++function montarPayloadSnapshot(entrada = {}) {
++  const empresaId = parsePositiveInteger(entrada.empresa_id != null ? entrada.empresa_id : entrada.empresaId);
++  const unidadeId = parsePositiveInteger(entrada.unidade_id != null ? entrada.unidade_id : entrada.unidadeId);
++  const rodadaId = parsePositiveInteger(entrada.rodada_id != null ? entrada.rodada_id : entrada.rodadaId);
++
++  if (!empresaId) {
++    throw erroImpressao('empresa_id obrigatório no snapshot.', 400, 'SNAPSHOT_EMPRESA_OBRIGATORIA');
++  }
++  if (!unidadeId) {
++    throw erroImpressao('unidade_id obrigatório no snapshot.', 400, 'SNAPSHOT_UNIDADE_OBRIGATORIA');
++  }
++  if (!rodadaId) {
++    throw erroImpressao('rodada_id obrigatório no snapshot.', 400, 'SNAPSHOT_RODADA_OBRIGATORIA');
++  }
++
++  const modeloRaw = String(entrada.modelo || MODELOS_IMPRESSAO.AGRUPADO).trim().toUpperCase();
++  if (!MODELOS_IMPRESSAO[modeloRaw]) {
++    throw erroImpressao('modelo deve ser INDIVIDUAL ou AGRUPADO.', 400, 'SNAPSHOT_MODELO_INVALIDO');
++  }
++
++  const larguraMm = normalizarLarguraMm(entrada.largura_mm != null ? entrada.largura_mm : entrada.larguraMm);
++  const itensIn = Array.isArray(entrada.itens) ? entrada.itens : [];
++
++  const itens = itensIn.map((it, idx) => {
++    if (!it || typeof it !== 'object') {
++      throw erroImpressao(`Item de snapshot inválido no índice ${idx}.`, 400, 'SNAPSHOT_ITEM_INVALIDO');
++    }
++    const tipo = String(it.tipo_item || it.tipoItem || 'OUTRO').trim().toUpperCase();
++    if (!['PASTEL', 'BEBIDA', 'OUTRO'].includes(tipo)) {
++      throw erroImpressao(`tipo_item inválido no índice ${idx}.`, 400, 'SNAPSHOT_TIPO_ITEM_INVALIDO');
++    }
++    const ingredientes = Object.freeze(
++      (Array.isArray(it.ingredientes) ? it.ingredientes : []).map((ing) => Object.freeze({
++        nome: String(ing.nome || '').trim(),
++        qty: ing.qty != null ? String(ing.qty) : null,
++        selecionado: ing.selecionado == null ? true : !!ing.selecionado
++      }))
++    );
++
++    // Campos fiscais/preço são ignorados de propósito (não entram no snapshot).
++    return Object.freeze({
++      cozinha_item_id: parsePositiveInteger(it.cozinha_item_id != null ? it.cozinha_item_id : it.cozinhaItemId),
++      comanda_id: parsePositiveInteger(it.comanda_id != null ? it.comanda_id : it.comandaId),
++      tipo_item: tipo,
++      descricao: String(it.descricao || it.nome || '').trim(),
++      qty: it.qty != null ? String(it.qty) : (it.quantidade != null ? String(it.quantidade) : null),
++      observacao: it.observacao != null ? String(it.observacao) : null,
++      ingredientes
++    });
++  });
++
++  return Object.freeze({
++    empresa_id: empresaId,
++    unidade_id: unidadeId,
++    rodada_id: rodadaId,
++    sequencia_global: entrada.sequencia_global != null
++      ? Number(entrada.sequencia_global)
++      : (entrada.sequenciaGlobal != null ? Number(entrada.sequenciaGlobal) : null),
++    mesa_numero: entrada.mesa_numero != null
++      ? String(entrada.mesa_numero)
++      : (entrada.mesaNumero != null ? String(entrada.mesaNumero) : null),
++    atendimento_id: parsePositiveInteger(
++      entrada.atendimento_id != null ? entrada.atendimento_id : entrada.atendimentoId
++    ),
++    numero_rodada: entrada.numero_rodada != null
++      ? Number(entrada.numero_rodada)
++      : (entrada.numeroRodada != null ? Number(entrada.numeroRodada) : null),
++    enviada_em: entrada.enviada_em != null
++      ? String(entrada.enviada_em)
++      : (entrada.enviadaEm != null ? String(entrada.enviadaEm) : null),
++    modelo: modeloRaw,
++    largura_mm: larguraMm,
++    itens: Object.freeze(itens)
++  });
++}
++
++/**
++ * Serializa somente após revalidar/normalizar o contrato canônico.
++ * Descarta campos comerciais/fiscais; rejeita se restarem chaves proibidas.
++ */
++function serializarSnapshot(snapshot) {
++  const canonico = montarPayloadSnapshot(
++    snapshot && typeof snapshot === 'object' ? snapshot : {}
++  );
++  const proibidos = snapshotContemCamposProibidos(canonico);
++  if (proibidos.length) {
++    throw erroImpressao(
++      'Snapshot contém campos comerciais/fiscais proibidos.',
++      400,
++      'SNAPSHOT_CAMPO_PROIBIDO',
++      { detalhes: { campos: proibidos } }
++    );
++  }
++  return JSON.stringify(canonico);
++}
++
++function parseSnapshotJson(texto) {
++  if (texto == null || String(texto).trim() === '') {
++    throw erroImpressao('payload_snapshot vazio.', 400, 'SNAPSHOT_VAZIO');
++  }
++  let obj;
++  try {
++    obj = JSON.parse(String(texto));
++  } catch (_e) {
++    throw erroImpressao('payload_snapshot JSON inválido.', 400, 'SNAPSHOT_JSON_INVALIDO');
++  }
++  return montarPayloadSnapshot(obj);
++}
++
++function snapshotContemCamposProibidos(obj) {
++  const proibidos = [
++    'preco', 'preço', 'preco_unitario', 'preco_total', 'valor', 'valor_total',
++    'ncm', 'cfop', 'csosn', 'cpf', 'cnpj', 'danfe', 'nfc-e', 'nfce', 'nfe',
++    'tef', 'pagamento', 'forma_pagamento'
++  ];
++  const json = JSON.stringify(obj || {}).toLowerCase();
++  return proibidos.filter((p) => json.includes(`"${p}"`));
++}
++
++module.exports = {
++  LARGURAS_MM,
++  LARGURA_PADRAO_MM,
++  MODELOS_IMPRESSAO,
++  CODIGOS_ESTACAO_TIPO,
++  ESTADOS_FILA,
++  erroImpressao,
++  parsePositiveInteger,
++  normalizarCodigoEstacao,
++  normalizarLarguraMm,
++  normalizarVias,
++  normalizarFlag01,
++  montarPayloadSnapshot,
++  serializarSnapshot,
++  parseSnapshotJson,
++  snapshotContemCamposProibidos
++};
+
+diff --git a/backend/services/cozinha/CozinhaImpressaoRenderer.js b/backend/services/cozinha/CozinhaImpressaoRenderer.js
+index e69de29..f3caad3 100644
+--- a/backend/services/cozinha/CozinhaImpressaoRenderer.js
++++ b/backend/services/cozinha/CozinhaImpressaoRenderer.js
+@@ -0,0 +1,160 @@
++/**
++ * Renderer de snapshot — Impressão de Cozinha (Sprint 06 Bloco A).
++ * Gera TEXT para 58/80 mm. Não executa impressão física.
++ */
++'use strict';
++
++const {
++  montarPayloadSnapshot,
++  parseSnapshotJson,
++  normalizarLarguraMm,
++  LARGURA_PADRAO_MM,
++  erroImpressao
++} = require('./cozinhaImpressaoContratos');
++
++function larguraColunas(larguraMm) {
++  // Heurística de colunas ESC/POS / cupom térmico.
++  return larguraMm === 58 ? 32 : 48;
++}
++
++function linha(char, cols) {
++  return String(char || '-').repeat(cols);
++}
++
++function cortar(texto, cols) {
++  const s = String(texto == null ? '' : texto);
++  if (s.length <= cols) return s;
++  return s.slice(0, Math.max(0, cols - 1)) + '…';
++}
++
++function wrap(texto, cols) {
++  const s = String(texto == null ? '' : texto).trim();
++  if (!s) return [];
++  const out = [];
++  let rest = s;
++  while (rest.length > cols) {
++    out.push(rest.slice(0, cols));
++    rest = rest.slice(cols);
++  }
++  if (rest) out.push(rest);
++  return out;
++}
++
++/**
++ * @param {object|string} snapshotOuJson
++ * @param {{ largura_mm?: number }} [opts]
++ * @returns {{ largura_mm: number, colunas: number, texto: string, impressao_fisica: false }}
++ */
++function renderizarTexto(snapshotOuJson, opts = {}) {
++  const snapshot = typeof snapshotOuJson === 'string'
++    ? parseSnapshotJson(snapshotOuJson)
++    : montarPayloadSnapshot(snapshotOuJson);
++
++  const larguraMm = normalizarLarguraMm(
++    opts.largura_mm != null ? opts.largura_mm : (snapshot.largura_mm || LARGURA_PADRAO_MM)
++  );
++  const cols = larguraColunas(larguraMm);
++  const linhas = [];
++
++  linhas.push(cortar('COZINHA', cols));
++  linhas.push(linha('=', cols));
++  if (snapshot.mesa_numero != null) {
++    linhas.push(cortar(`Mesa: ${snapshot.mesa_numero}`, cols));
++  }
++  if (snapshot.sequencia_global != null && Number.isFinite(snapshot.sequencia_global)) {
++    linhas.push(cortar(`Seq: ${snapshot.sequencia_global}`, cols));
++  }
++  if (snapshot.numero_rodada != null && Number.isFinite(snapshot.numero_rodada)) {
++    linhas.push(cortar(`Rodada: ${snapshot.numero_rodada}`, cols));
++  }
++  if (snapshot.enviada_em) {
++    linhas.push(cortar(`Envio: ${snapshot.enviada_em}`, cols));
++  }
++  linhas.push(cortar(`Modelo: ${snapshot.modelo}`, cols));
++  linhas.push(linha('-', cols));
++
++  if (!snapshot.itens.length) {
++    linhas.push(cortar('(sem itens)', cols));
++  }
++
++  for (const item of snapshot.itens) {
++    const qty = item.qty != null ? item.qty : '';
++    const cab = [qty, item.tipo_item, item.descricao].filter(Boolean).join(' ');
++    for (const w of wrap(cab, cols)) linhas.push(w);
++    if (item.comanda_id) {
++      linhas.push(cortar(`  Comanda #${item.comanda_id}`, cols));
++    }
++    if (item.observacao) {
++      for (const w of wrap(`  Obs: ${item.observacao}`, cols)) linhas.push(w);
++    }
++    for (const ing of item.ingredientes || []) {
++      if (!ing.selecionado) continue;
++      const ingTxt = ['  +', ing.nome, ing.qty].filter(Boolean).join(' ');
++      for (const w of wrap(ingTxt, cols)) linhas.push(w);
++    }
++    linhas.push(linha('-', cols));
++  }
++
++  linhas.push(cortar('*** FIM ***', cols));
++
++  return Object.freeze({
++    largura_mm: larguraMm,
++    colunas: cols,
++    texto: linhas.join('\n'),
++    impressao_fisica: false
++  });
++}
++
++/**
++ * Preview de teste de estação (D6) — sem fila, sem print físico.
++ */
++function renderizarTesteEstacao(estacao = {}) {
++  const larguraMm = normalizarLarguraMm(estacao.largura_mm);
++  const codigo = String(estacao.codigo_estacao || 'TESTE').trim().toUpperCase() || 'TESTE';
++  const snapshot = montarPayloadSnapshot({
++    empresa_id: estacao.empresa_id || 1,
++    unidade_id: estacao.unidade_id || 1,
++    rodada_id: estacao.rodada_id || 1,
++    sequencia_global: 0,
++    mesa_numero: 'TESTE',
++    numero_rodada: 0,
++    enviada_em: new Date().toISOString(),
++    modelo: 'AGRUPADO',
++    largura_mm: larguraMm,
++    itens: [{
++      cozinha_item_id: 1,
++      comanda_id: 1,
++      tipo_item: 'OUTRO',
++      descricao: `Teste estacao ${codigo}`,
++      qty: '1.000',
++      observacao: 'Sem impressao fisica (Bloco A)',
++      ingredientes: []
++    }]
++  });
++  const render = renderizarTexto(snapshot, { largura_mm: larguraMm });
++  return Object.freeze({
++    ...render,
++    codigo_estacao: codigo,
++    device_name: estacao.device_name != null ? String(estacao.device_name) : null,
++    modo: 'TESTE_ESTACAO',
++    impressao_fisica: false
++  });
++}
++
++function assertSemImpressaoFisica(resultado) {
++  if (!resultado || resultado.impressao_fisica !== false) {
++    throw erroImpressao(
++      'Renderer Bloco A não pode marcar impressao_fisica=true.',
++      500,
++      'IMPRESSAO_BLOCO_A_VIOLACAO'
++    );
++  }
++  return resultado;
++}
++
++module.exports = {
++  renderizarTexto,
++  renderizarTesteEstacao,
++  assertSemImpressaoFisica,
++  larguraColunas
++};
+
+diff --git a/backend/services/cozinha/CozinhaImpressaoEstacaoService.js b/backend/services/cozinha/CozinhaImpressaoEstacaoService.js
+index e69de29..2bd43b1 100644
+--- a/backend/services/cozinha/CozinhaImpressaoEstacaoService.js
++++ b/backend/services/cozinha/CozinhaImpressaoEstacaoService.js
+@@ -0,0 +1,286 @@
++/**
++ * CRUD de estações de impressão — Sprint 06 Bloco A.
++ * Isolamento por empresa + unidade. Sem impressão física.
++ */
++'use strict';
++
++const {
++  erroImpressao,
++  parsePositiveInteger,
++  normalizarCodigoEstacao,
++  normalizarLarguraMm,
++  normalizarVias,
++  normalizarFlag01
++} = require('./cozinhaImpressaoContratos');
++const { exigirUnidadeOperacional } = require('./cozinhaUnidadeOperacional');
++const { renderizarTesteEstacao } = require('./CozinhaImpressaoRenderer');
++
++function dbAll(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
++  });
++}
++
++function dbGet(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
++  });
++}
++
++function dbRun(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.run(sql, params, function cb(err) {
++      if (err) return reject(err);
++      resolve(this);
++    });
++  });
++}
++
++function exigirEmpresa(empresaId) {
++  const id = parsePositiveInteger(empresaId);
++  if (!id) {
++    throw erroImpressao('empresa_id obrigatório.', 400, 'EMPRESA_CONTEXT_REQUIRED');
++  }
++  return id;
++}
++
++function mapearEstacao(row) {
++  if (!row) return null;
++  return {
++    id: row.id,
++    empresa_id: row.empresa_id,
++    unidade_id: row.unidade_id,
++    codigo_estacao: row.codigo_estacao,
++    device_name: row.device_name,
++    largura_mm: row.largura_mm,
++    vias: row.vias,
++    modelo_individual: Number(row.modelo_individual) === 1,
++    modelo_agrupado: Number(row.modelo_agrupado) === 1,
++    ativo: Number(row.ativo) === 1,
++    created_at: row.created_at,
++    updated_at: row.updated_at
++  };
++}
++
++async function exigirUnidadeDaEmpresa(db, empresaId, unidadeId) {
++  const unidade = await dbGet(db, `
++    SELECT id, empresa_id, codigo, ativo
++    FROM cozinha_unidades
++    WHERE id = ? AND empresa_id = ?
++  `, [unidadeId, empresaId]);
++  if (!unidade) {
++    throw erroImpressao(
++      'Unidade não pertence à empresa autenticada.',
++      403,
++      'UNIDADE_EMPRESA_ISOLAMENTO'
++    );
++  }
++  return unidade;
++}
++
++async function listarEstacoes(entrada = {}, opts = {}) {
++  const db = opts.db || entrada.db;
++  if (!db) throw erroImpressao('Banco indisponível.', 500, 'DB_INDISPONIVEL');
++
++  const empresaId = exigirEmpresa(entrada.empresaId != null ? entrada.empresaId : entrada.empresa_id);
++  const unidadeId = exigirUnidadeOperacional(
++    entrada.unidadeId != null ? entrada.unidadeId : entrada.unidade_id
++  );
++  await exigirUnidadeDaEmpresa(db, empresaId, unidadeId);
++
++  const apenasAtivas = entrada.apenas_ativas === true || entrada.apenasAtivas === true;
++  const rows = await dbAll(db, `
++    SELECT *
++    FROM cozinha_estacoes_impressao
++    WHERE empresa_id = ? AND unidade_id = ?
++      ${apenasAtivas ? 'AND ativo = 1' : ''}
++    ORDER BY codigo_estacao COLLATE NOCASE ASC, id ASC
++  `, [empresaId, unidadeId]);
++
++  return {
++    success: true,
++    empresa_id: empresaId,
++    unidade_id: unidadeId,
++    estacoes: rows.map(mapearEstacao)
++  };
++}
++
++async function obterEstacao(entrada = {}, opts = {}) {
++  const db = opts.db || entrada.db;
++  if (!db) throw erroImpressao('Banco indisponível.', 500, 'DB_INDISPONIVEL');
++
++  const empresaId = exigirEmpresa(entrada.empresaId != null ? entrada.empresaId : entrada.empresa_id);
++  const unidadeId = exigirUnidadeOperacional(
++    entrada.unidadeId != null ? entrada.unidadeId : entrada.unidade_id
++  );
++  const id = parsePositiveInteger(entrada.id != null ? entrada.id : entrada.estacaoId);
++  if (!id) throw erroImpressao('Estação inválida.', 400, 'ESTACAO_ID_INVALIDO');
++
++  await exigirUnidadeDaEmpresa(db, empresaId, unidadeId);
++
++  const row = await dbGet(db, `
++    SELECT *
++    FROM cozinha_estacoes_impressao
++    WHERE id = ? AND empresa_id = ? AND unidade_id = ?
++  `, [id, empresaId, unidadeId]);
++
++  if (!row) {
++    throw erroImpressao('Estação não encontrada.', 404, 'ESTACAO_NAO_ENCONTRADA');
++  }
++  return { success: true, estacao: mapearEstacao(row) };
++}
++
++async function criarEstacao(entrada = {}, opts = {}) {
++  const db = opts.db || entrada.db;
++  if (!db) throw erroImpressao('Banco indisponível.', 500, 'DB_INDISPONIVEL');
++
++  const empresaId = exigirEmpresa(entrada.empresaId != null ? entrada.empresaId : entrada.empresa_id);
++  const unidadeId = exigirUnidadeOperacional(
++    entrada.unidadeId != null ? entrada.unidadeId : entrada.unidade_id
++  );
++  await exigirUnidadeDaEmpresa(db, empresaId, unidadeId);
++
++  const codigo = normalizarCodigoEstacao(
++    entrada.codigo_estacao != null ? entrada.codigo_estacao : entrada.codigoEstacao
++  );
++  const deviceName = entrada.device_name != null
++    ? String(entrada.device_name).trim() || null
++    : (entrada.deviceName != null ? String(entrada.deviceName).trim() || null : null);
++  const larguraMm = normalizarLarguraMm(
++    entrada.largura_mm != null ? entrada.largura_mm : entrada.larguraMm
++  );
++  const vias = normalizarVias(entrada.vias);
++  const modeloIndividual = normalizarFlag01(
++    entrada.modelo_individual != null ? entrada.modelo_individual : entrada.modeloIndividual,
++    1
++  );
++  const modeloAgrupado = normalizarFlag01(
++    entrada.modelo_agrupado != null ? entrada.modelo_agrupado : entrada.modeloAgrupado,
++    1
++  );
++  const ativo = normalizarFlag01(entrada.ativo, 1);
++
++  try {
++    const result = await dbRun(db, `
++      INSERT INTO cozinha_estacoes_impressao (
++        empresa_id, unidade_id, codigo_estacao, device_name,
++        largura_mm, vias, modelo_individual, modelo_agrupado, ativo, updated_at
++      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
++    `, [
++      empresaId, unidadeId, codigo, deviceName,
++      larguraMm, vias, modeloIndividual, modeloAgrupado, ativo
++    ]);
++    return obterEstacao({ db, empresaId, unidadeId, id: result.lastID }, { db });
++  } catch (err) {
++    if (/UNIQUE|unique/i.test(String(err && err.message))) {
++      throw erroImpressao(
++        'Já existe estação com este codigo_estacao nesta unidade.',
++        409,
++        'ESTACAO_CODIGO_DUPLICADO'
++      );
++    }
++    throw err;
++  }
++}
++
++async function atualizarEstacao(entrada = {}, opts = {}) {
++  const db = opts.db || entrada.db;
++  if (!db) throw erroImpressao('Banco indisponível.', 500, 'DB_INDISPONIVEL');
++
++  const empresaId = exigirEmpresa(entrada.empresaId != null ? entrada.empresaId : entrada.empresa_id);
++  const unidadeId = exigirUnidadeOperacional(
++    entrada.unidadeId != null ? entrada.unidadeId : entrada.unidade_id
++  );
++  const id = parsePositiveInteger(entrada.id != null ? entrada.id : entrada.estacaoId);
++  if (!id) throw erroImpressao('Estação inválida.', 400, 'ESTACAO_ID_INVALIDO');
++
++  const atual = await obterEstacao({ db, empresaId, unidadeId, id }, { db });
++  const body = entrada.dados && typeof entrada.dados === 'object' ? entrada.dados : entrada;
++
++  const codigo = body.codigo_estacao != null || body.codigoEstacao != null
++    ? normalizarCodigoEstacao(body.codigo_estacao != null ? body.codigo_estacao : body.codigoEstacao)
++    : atual.estacao.codigo_estacao;
++
++  const deviceName = body.device_name !== undefined
++    ? (body.device_name == null ? null : String(body.device_name).trim() || null)
++    : (body.deviceName !== undefined
++      ? (body.deviceName == null ? null : String(body.deviceName).trim() || null)
++      : atual.estacao.device_name);
++
++  const larguraMm = body.largura_mm != null || body.larguraMm != null
++    ? normalizarLarguraMm(body.largura_mm != null ? body.largura_mm : body.larguraMm)
++    : atual.estacao.largura_mm;
++
++  const vias = body.vias != null
++    ? normalizarVias(body.vias)
++    : atual.estacao.vias;
++
++  const modeloIndividual = body.modelo_individual != null || body.modeloIndividual != null
++    ? normalizarFlag01(body.modelo_individual != null ? body.modelo_individual : body.modeloIndividual)
++    : (atual.estacao.modelo_individual ? 1 : 0);
++
++  const modeloAgrupado = body.modelo_agrupado != null || body.modeloAgrupado != null
++    ? normalizarFlag01(body.modelo_agrupado != null ? body.modelo_agrupado : body.modeloAgrupado)
++    : (atual.estacao.modelo_agrupado ? 1 : 0);
++
++  const ativo = body.ativo != null
++    ? normalizarFlag01(body.ativo)
++    : (atual.estacao.ativo ? 1 : 0);
++
++  try {
++    const result = await dbRun(db, `
++      UPDATE cozinha_estacoes_impressao
++      SET codigo_estacao = ?,
++          device_name = ?,
++          largura_mm = ?,
++          vias = ?,
++          modelo_individual = ?,
++          modelo_agrupado = ?,
++          ativo = ?,
++          updated_at = CURRENT_TIMESTAMP
++      WHERE id = ? AND empresa_id = ? AND unidade_id = ?
++    `, [
++      codigo, deviceName, larguraMm, vias,
++      modeloIndividual, modeloAgrupado, ativo,
++      id, empresaId, unidadeId
++    ]);
++    if (!result.changes) {
++      throw erroImpressao('Estação não encontrada.', 404, 'ESTACAO_NAO_ENCONTRADA');
++    }
++    return obterEstacao({ db, empresaId, unidadeId, id }, { db });
++  } catch (err) {
++    if (err.codigo) throw err;
++    if (/UNIQUE|unique/i.test(String(err && err.message))) {
++      throw erroImpressao(
++        'Já existe estação com este codigo_estacao nesta unidade.',
++        409,
++        'ESTACAO_CODIGO_DUPLICADO'
++      );
++    }
++    throw err;
++  }
++}
++
++/**
++ * Teste de contrato da estação (D6): render preview, sem fila e sem print físico.
++ */
++async function testarEstacao(entrada = {}, opts = {}) {
++  const obtido = await obterEstacao(entrada, opts);
++  const estacao = obtido.estacao;
++  const render = renderizarTesteEstacao(estacao);
++  return {
++    success: true,
++    estacao,
++    teste: render,
++    impressao_fisica: false
++  };
++}
++
++module.exports = {
++  listarEstacoes,
++  obterEstacao,
++  criarEstacao,
++  atualizarEstacao,
++  testarEstacao,
++  mapearEstacao
++};
+
+diff --git a/tests/cozinha/sprint06-bloco-a-fundacao-contratos.test.js b/tests/cozinha/sprint06-bloco-a-fundacao-contratos.test.js
+index e69de29..bb15d54 100644
+--- a/tests/cozinha/sprint06-bloco-a-fundacao-contratos.test.js
++++ b/tests/cozinha/sprint06-bloco-a-fundacao-contratos.test.js
+@@ -0,0 +1,594 @@
++/**
++ * Sprint 06 — Bloco A: fundação e contratos de impressão de cozinha.
++ * Banco temporário. Sem impressão física. Sem Blocos B–E.
++ *
++ *   node --test --test-concurrency=1 tests/cozinha/sprint06-bloco-a-fundacao-contratos.test.js
++ */
++'use strict';
++
++const fs = require('fs');
++const os = require('os');
++const path = require('path');
++const { describe, it, before, after } = require('node:test');
++const assert = require('node:assert/strict');
++const sqlite3 = require('sqlite3').verbose();
++
++const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-cozinha-s06a-'));
++process.env.DB_DIR = dbDir;
++process.env.CDS_TEST_ISOLATION = '1';
++process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
++process.env.CDS_FORCAR_LOCAL = '1';
++process.env.JWT_SECRET = 'test-only-s06a-bloco-a';
++delete process.env.CDS_ALLOW_OFFICIAL_DB;
++
++const http = require('http');
++const express = require('express');
++const jwt = require('jsonwebtoken');
++const JWT_SECRET = process.env.JWT_SECRET;
++
++const {
++  garantirSchemaCozinha,
++  COZINHA_SCHEMA_VERSION,
++  garantirIndiceEstacoesCodigoPorUnidade,
++  lerVersaoSchema
++} = require('../../backend/utils/cozinhaSchema');
++const { garantirSchemaEmpresasAsync } = require('../../backend/services/empresas/empresasSchema');
++const EstacaoService = require('../../backend/services/cozinha/CozinhaImpressaoEstacaoService');
++const {
++  montarPayloadSnapshot,
++  serializarSnapshot,
++  snapshotContemCamposProibidos,
++  normalizarLarguraMm
++} = require('../../backend/services/cozinha/cozinhaImpressaoContratos');
++const {
++  renderizarTexto,
++  renderizarTesteEstacao
++} = require('../../backend/services/cozinha/CozinhaImpressaoRenderer');
++const { empresaIdDoReqPedido } = require('../../backend/services/pedido/empresaIdDoReqPedido');
++const { unidadeCozinhaDaSessao } = require('../../backend/services/cozinha/cozinhaUnidadeOperacional');
++
++function run(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.run(sql, params, function cb(err) {
++      if (err) reject(err);
++      else resolve(this);
++    });
++  });
++}
++function get(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
++  });
++}
++function all(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
++  });
++}
++function openMem() {
++  return new Promise((resolve, reject) => {
++    const db = new sqlite3.Database(':memory:', (err) => {
++      if (err) return reject(err);
++      db.serialize(() => {
++        db.run('PRAGMA foreign_keys = ON');
++        db.run('PRAGMA busy_timeout = 10000', (e) => (e ? reject(e) : resolve(db)));
++      });
++    });
++  });
++}
++function close(db) {
++  return new Promise((resolve) => db.close(() => resolve()));
++}
++
++async function preparar(db) {
++  await garantirSchemaEmpresasAsync(db);
++  await garantirSchemaCozinha(db);
++  assert.equal(COZINHA_SCHEMA_VERSION, 3);
++
++  const e1 = await run(db, `
++    INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
++    VALUES ('11111111000111', 'Emp 1', 'E1', 1)
++  `);
++  const e2 = await run(db, `
++    INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
++    VALUES ('22222222000122', 'Emp 2', 'E2', 1)
++  `);
++  const u1a = await run(db, `
++    INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'U1A', 1)
++  `, [e1.lastID]);
++  const u1b = await run(db, `
++    INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'U1B', 1)
++  `, [e1.lastID]);
++  const u2 = await run(db, `
++    INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'U2', 1)
++  `, [e2.lastID]);
++
++  return {
++    empresa1: e1.lastID,
++    empresa2: e2.lastID,
++    unidade1a: u1a.lastID,
++    unidade1b: u1b.lastID,
++    unidade2: u2.lastID
++  };
++}
++
++describe('Sprint 06 Bloco A — UNIQUE codigo_estacao por unidade', () => {
++  it('1) mesmo codigo_estacao em unidades distintas da mesma empresa é permitido', async () => {
++    const db = await openMem();
++    const ids = await preparar(db);
++
++    await EstacaoService.criarEstacao({
++      db,
++      empresaId: ids.empresa1,
++      unidadeId: ids.unidade1a,
++      codigo_estacao: 'PASTEL',
++      largura_mm: 80
++    });
++    await EstacaoService.criarEstacao({
++      db,
++      empresaId: ids.empresa1,
++      unidadeId: ids.unidade1b,
++      codigo_estacao: 'PASTEL',
++      largura_mm: 80
++    });
++
++    const rows = await all(db, `
++      SELECT unidade_id, codigo_estacao FROM cozinha_estacoes_impressao
++      WHERE empresa_id = ? AND codigo_estacao = 'PASTEL'
++      ORDER BY unidade_id
++    `, [ids.empresa1]);
++    assert.equal(rows.length, 2);
++
++    // índice legado empresa+codigo não deve existir
++    const idx = await all(db, `PRAGMA index_list('cozinha_estacoes_impressao')`);
++    const nomes = idx.map((r) => r.name);
++    assert.ok(!nomes.includes('ux_cozinha_estacoes_empresa_codigo'));
++    assert.ok(nomes.includes('ux_cozinha_estacoes_empresa_unidade_codigo'));
++
++    await close(db);
++  });
++
++  it('2) mesmo codigo_estacao na mesma unidade é rejeitado', async () => {
++    const db = await openMem();
++    const ids = await preparar(db);
++    await EstacaoService.criarEstacao({
++      db, empresaId: ids.empresa1, unidadeId: ids.unidade1a, codigo_estacao: 'BEBIDA'
++    });
++    await assert.rejects(
++      () => EstacaoService.criarEstacao({
++        db, empresaId: ids.empresa1, unidadeId: ids.unidade1a, codigo_estacao: 'BEBIDA'
++      }),
++      (err) => err.codigo === 'ESTACAO_CODIGO_DUPLICADO'
++    );
++    await close(db);
++  });
++
++  it('3) DROP do índice legado + recreate idempotente; versão no banco permanece 3', async () => {
++    const db = await openMem();
++    const ids = await preparar(db);
++
++    const versaoRegistrada = await lerVersaoSchema(db);
++    assert.equal(versaoRegistrada, 3, 'versão persistida em cozinha_schema_meta deve ser 3');
++    assert.equal(COZINHA_SCHEMA_VERSION, 3);
++
++    const rowMeta = await get(db, `
++      SELECT valor FROM cozinha_schema_meta WHERE chave = 'schema_version'
++    `);
++    assert.ok(rowMeta, 'meta schema_version deve existir no banco');
++    assert.equal(Number(rowMeta.valor), 3);
++
++    // simula legado
++    await run(db, 'DROP INDEX IF EXISTS ux_cozinha_estacoes_empresa_unidade_codigo');
++    await run(db, `
++      CREATE UNIQUE INDEX ux_cozinha_estacoes_empresa_codigo
++      ON cozinha_estacoes_impressao(empresa_id, codigo_estacao)
++    `);
++    await garantirIndiceEstacoesCodigoPorUnidade(db);
++    await EstacaoService.criarEstacao({
++      db, empresaId: ids.empresa1, unidadeId: ids.unidade1a, codigo_estacao: 'OUTRO'
++    });
++    await EstacaoService.criarEstacao({
++      db, empresaId: ids.empresa1, unidadeId: ids.unidade1b, codigo_estacao: 'OUTRO'
++    });
++
++    const versaoApos = await lerVersaoSchema(db);
++    assert.equal(versaoApos, 3, 'ajuste de índice não pode bump para V4');
++    const rowApos = await get(db, `
++      SELECT valor FROM cozinha_schema_meta WHERE chave = 'schema_version'
++    `);
++    assert.equal(Number(rowApos.valor), 3);
++    await close(db);
++  });
++});
++
++describe('Sprint 06 Bloco A — CRUD estações', () => {
++  let db;
++  let ids;
++
++  before(async () => {
++    db = await openMem();
++    ids = await preparar(db);
++  });
++  after(async () => {
++    await close(db);
++  });
++
++  it('4) cria, lista, obtém e atualiza estação na unidade autenticada', async () => {
++    const criado = await EstacaoService.criarEstacao({
++      db,
++      empresaId: ids.empresa1,
++      unidadeId: ids.unidade1a,
++      codigo_estacao: 'pastel',
++      device_name: 'EPSON-TM-T20',
++      largura_mm: 80,
++      vias: 2,
++      modelo_individual: 1,
++      modelo_agrupado: 0
++    });
++    assert.equal(criado.estacao.codigo_estacao, 'PASTEL');
++    assert.equal(criado.estacao.largura_mm, 80);
++    assert.equal(criado.estacao.vias, 2);
++    assert.equal(criado.estacao.modelo_agrupado, false);
++
++    const lista = await EstacaoService.listarEstacoes({
++      db, empresaId: ids.empresa1, unidadeId: ids.unidade1a
++    });
++    assert.ok(lista.estacoes.some((e) => e.codigo_estacao === 'PASTEL'));
++
++    const obtido = await EstacaoService.obterEstacao({
++      db, empresaId: ids.empresa1, unidadeId: ids.unidade1a, id: criado.estacao.id
++    });
++    assert.equal(obtido.estacao.device_name, 'EPSON-TM-T20');
++
++    const upd = await EstacaoService.atualizarEstacao({
++      db,
++      empresaId: ids.empresa1,
++      unidadeId: ids.unidade1a,
++      id: criado.estacao.id,
++      dados: { largura_mm: 58, ativo: 0 }
++    });
++    assert.equal(upd.estacao.largura_mm, 58);
++    assert.equal(upd.estacao.ativo, false);
++  });
++
++  it('5) rejeita estação de outra empresa / outra unidade', async () => {
++    const local = await EstacaoService.criarEstacao({
++      db, empresaId: ids.empresa1, unidadeId: ids.unidade1a, codigo_estacao: 'ISO-A'
++    });
++    await assert.rejects(
++      () => EstacaoService.obterEstacao({
++        db, empresaId: ids.empresa2, unidadeId: ids.unidade2, id: local.estacao.id
++      }),
++      (err) => err.codigo === 'ESTACAO_NAO_ENCONTRADA'
++    );
++    await assert.rejects(
++      () => EstacaoService.obterEstacao({
++        db, empresaId: ids.empresa1, unidadeId: ids.unidade1b, id: local.estacao.id
++      }),
++      (err) => err.codigo === 'ESTACAO_NAO_ENCONTRADA'
++    );
++    await assert.rejects(
++      () => EstacaoService.criarEstacao({
++        db, empresaId: ids.empresa1, unidadeId: ids.unidade2, codigo_estacao: 'X'
++      }),
++      (err) => err.codigo === 'UNIDADE_EMPRESA_ISOLAMENTO'
++    );
++  });
++
++  it('6) largura_mm 58/80 ok; demais rejeitados', async () => {
++    assert.equal(normalizarLarguraMm(58), 58);
++    assert.equal(normalizarLarguraMm(80), 80);
++    assert.throws(() => normalizarLarguraMm(72), (err) => err.codigo === 'ESTACAO_LARGURA_INVALIDA');
++    await assert.rejects(
++      () => EstacaoService.criarEstacao({
++        db, empresaId: ids.empresa1, unidadeId: ids.unidade1a,
++        codigo_estacao: 'LARG', largura_mm: 100
++      }),
++      (err) => err.codigo === 'ESTACAO_LARGURA_INVALIDA'
++    );
++  });
++});
++
++describe('Sprint 06 Bloco A — snapshot e renderer', () => {
++  it('7) snapshot canônico sem preços/fiscais; input sujo é descartado', () => {
++    const snap = montarPayloadSnapshot({
++      empresa_id: 1,
++      unidade_id: 2,
++      rodada_id: 3,
++      sequencia_global: 10,
++      mesa_numero: '7',
++      modelo: 'AGRUPADO',
++      largura_mm: 80,
++      preco_total: 99.9,
++      ncm: '21069090',
++      itens: [{
++        cozinha_item_id: 11,
++        comanda_id: 5,
++        tipo_item: 'PASTEL',
++        descricao: 'Carne',
++        qty: '2.000',
++        preco: 12.5,
++        valor: 25,
++        observacao: 'sem cebola',
++        ingredientes: [{ nome: 'Queijo', qty: '1.000', selecionado: true }]
++      }]
++    });
++    assert.equal(snap.itens[0].descricao, 'Carne');
++    assert.equal(snap.itens[0].preco, undefined);
++    assert.equal(snap.preco_total, undefined);
++    const proibidos = snapshotContemCamposProibidos(snap);
++    assert.deepEqual(proibidos, []);
++    const json = serializarSnapshot(snap);
++    assert.ok(!/"preco"/i.test(json));
++    assert.ok(!/"ncm"/i.test(json));
++  });
++
++  it('8) renderer gera texto 80/58 e marca impressao_fisica=false', () => {
++    const snap = montarPayloadSnapshot({
++      empresa_id: 1,
++      unidade_id: 1,
++      rodada_id: 1,
++      mesa_numero: '3',
++      sequencia_global: 4,
++      modelo: 'INDIVIDUAL',
++      largura_mm: 80,
++      itens: [{
++        cozinha_item_id: 1,
++        comanda_id: 2,
++        tipo_item: 'BEBIDA',
++        descricao: 'Refrigerante',
++        qty: '1.000'
++      }]
++    });
++    const r80 = renderizarTexto(snap);
++    assert.equal(r80.impressao_fisica, false);
++    assert.equal(r80.largura_mm, 80);
++    assert.match(r80.texto, /COZINHA/);
++    assert.match(r80.texto, /Refrigerante/);
++
++    const r58 = renderizarTexto(snap, { largura_mm: 58 });
++    assert.equal(r58.largura_mm, 58);
++    assert.equal(r58.colunas, 32);
++    assert.equal(r58.impressao_fisica, false);
++  });
++
++  it('9) teste de estação (D6) não imprime e não exige fila', async () => {
++    const db = await openMem();
++    const ids = await preparar(db);
++    const criado = await EstacaoService.criarEstacao({
++      db, empresaId: ids.empresa1, unidadeId: ids.unidade1a,
++      codigo_estacao: 'TESTE', device_name: 'DEV-NULL', largura_mm: 80
++    });
++    const out = await EstacaoService.testarEstacao({
++      db, empresaId: ids.empresa1, unidadeId: ids.unidade1a, id: criado.estacao.id
++    });
++    assert.equal(out.impressao_fisica, false);
++    assert.equal(out.teste.impressao_fisica, false);
++    assert.equal(out.teste.modo, 'TESTE_ESTACAO');
++    assert.match(out.teste.texto, /Teste estacao TESTE/);
++
++    const fila = await all(db, `SELECT id FROM cozinha_impressao_fila`);
++    assert.equal(fila.length, 0);
++
++    const preview = renderizarTesteEstacao(criado.estacao);
++    assert.equal(preview.impressao_fisica, false);
++    await close(db);
++  });
++
++  it('10) rejeita modelo/tipo inválidos no snapshot', () => {
++    assert.throws(
++      () => montarPayloadSnapshot({
++        empresa_id: 1, unidade_id: 1, rodada_id: 1, modelo: 'XYZ', itens: []
++      }),
++      (err) => err.codigo === 'SNAPSHOT_MODELO_INVALIDO'
++    );
++    assert.throws(
++      () => montarPayloadSnapshot({
++        empresa_id: 1, unidade_id: 1, rodada_id: 1,
++        itens: [{ tipo_item: 'LANCHE', descricao: 'x' }]
++      }),
++      (err) => err.codigo === 'SNAPSHOT_TIPO_ITEM_INVALIDO'
++    );
++  });
++
++  it('11) snapshot e elementos internos são imutáveis (deep freeze)', () => {
++    const snap = montarPayloadSnapshot({
++      empresa_id: 1,
++      unidade_id: 1,
++      rodada_id: 1,
++      modelo: 'AGRUPADO',
++      itens: [{
++        cozinha_item_id: 1,
++        comanda_id: 2,
++        tipo_item: 'PASTEL',
++        descricao: 'Carne',
++        qty: '1.000',
++        ingredientes: [{ nome: 'Queijo', qty: '1.000', selecionado: true }]
++      }]
++    });
++    assert.ok(Object.isFrozen(snap));
++    assert.ok(Object.isFrozen(snap.itens));
++    assert.ok(Object.isFrozen(snap.itens[0]));
++    assert.ok(Object.isFrozen(snap.itens[0].ingredientes));
++    assert.ok(Object.isFrozen(snap.itens[0].ingredientes[0]));
++
++    assert.throws(() => { snap.mesa_numero = 'HACK'; }, TypeError);
++    assert.throws(() => { snap.itens.push({ tipo_item: 'OUTRO' }); }, TypeError);
++    assert.throws(() => { snap.itens[0].descricao = 'HACK'; }, TypeError);
++    assert.throws(() => { snap.itens[0].ingredientes[0].nome = 'HACK'; }, TypeError);
++    assert.equal(snap.itens[0].descricao, 'Carne');
++    assert.equal(snap.itens[0].ingredientes[0].nome, 'Queijo');
++  });
++
++  it('12) serializarSnapshot normaliza e remove campos comerciais/fiscais', () => {
++    const sujo = {
++      empresa_id: 1,
++      unidade_id: 1,
++      rodada_id: 9,
++      modelo: 'AGRUPADO',
++      preco_total: 50,
++      ncm: '1234',
++      itens: [{
++        tipo_item: 'BEBIDA',
++        descricao: 'Suco',
++        qty: '1.000',
++        preco: 8,
++        valor: 8
++      }]
++    };
++    const json = serializarSnapshot(sujo);
++    const parsed = JSON.parse(json);
++    assert.equal(parsed.rodada_id, 9);
++    assert.equal(parsed.itens[0].descricao, 'Suco');
++    assert.equal(parsed.preco_total, undefined);
++    assert.equal(parsed.itens[0].preco, undefined);
++    assert.ok(!/"preco"/i.test(json));
++    assert.ok(!/"ncm"/i.test(json));
++    assert.ok(!/"valor"/i.test(json));
++    assert.deepEqual(snapshotContemCamposProibidos(parsed), []);
++  });
++});
++
++describe('Sprint 06 Bloco A — isolamento JWT na rota POST estacoes', () => {
++  it('13) body com empresaId/unidadeId falsos não sobrescreve a sessão (rota HTTP)', async () => {
++    const dbMem = await openMem();
++    const ids = await preparar(dbMem);
++
++    // Contrato estático da rota corrigida (fonte de produção).
++    const rotaSrc = fs.readFileSync(
++      path.join(__dirname, '..', '..', 'backend', 'rotas', 'cozinha.js'),
++      'utf8'
++    );
++    const postBloco = rotaSrc.slice(
++      rotaSrc.indexOf("router.post('/impressao/estacoes'"),
++      rotaSrc.indexOf("router.put('/impressao/estacoes/:id'")
++    );
++    assert.ok(postBloco.includes('empresaId: empresaIdDoReqPedido(req)'));
++    assert.ok(postBloco.includes('unidadeId: unidadeCozinhaDaSessao(req.user)'));
++    assert.ok(!/\.\.\.\s*body/.test(postBloco), 'POST não pode espalhar ...body');
++    assert.ok(!/resolverUnidadeOperacionalReq\(req\)/.test(postBloco),
++      'POST estacoes não deve validar unidade_id do body');
++
++    const app = express();
++    app.use(express.json());
++    app.use((req, res, next) => {
++      const hdr = String(req.headers.authorization || '');
++      const m = /^Bearer\s+(.+)$/i.exec(hdr);
++      if (!m) return res.status(401).json({ success: false, codigo: 'SEM_TOKEN' });
++      try {
++        req.user = jwt.verify(m[1], JWT_SECRET);
++        req.empresaId = ids.empresa1; // sessão autenticada
++        return next();
++      } catch (_e) {
++        return res.status(401).json({ success: false, codigo: 'TOKEN_INVALIDO' });
++      }
++    });
++    // Mesma montagem da rota de produção (whitelist + sessão).
++    app.post('/api/cozinha/impressao/estacoes', async (req, res) => {
++      try {
++        const body = req.body || {};
++        const out = await EstacaoService.criarEstacao({
++          db: dbMem,
++          codigo_estacao: body.codigo_estacao != null ? body.codigo_estacao : body.codigoEstacao,
++          device_name: body.device_name != null ? body.device_name : body.deviceName,
++          largura_mm: body.largura_mm != null ? body.largura_mm : body.larguraMm,
++          vias: body.vias,
++          modelo_individual: body.modelo_individual != null ? body.modelo_individual : body.modeloIndividual,
++          modelo_agrupado: body.modelo_agrupado != null ? body.modelo_agrupado : body.modeloAgrupado,
++          ativo: body.ativo,
++          empresaId: empresaIdDoReqPedido(req),
++          unidadeId: unidadeCozinhaDaSessao(req.user)
++        });
++        return res.status(201).json(out);
++      } catch (err) {
++        return res.status(err.statusCode || 500).json({
++          success: false,
++          codigo: err.codigo,
++          mensagem: err.message
++        });
++      }
++    });
++
++    const token = jwt.sign({
++      id: 1,
++      usuario_id: 1,
++      username: 'op',
++      role: 'operador',
++      unidade_cozinha_id: ids.unidade1a
++    }, JWT_SECRET, { expiresIn: '1h' });
++
++    const server = http.createServer(app);
++    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
++    const { port } = server.address();
++
++    try {
++      const payload = JSON.stringify({
++        codigo_estacao: 'JWT-ISO',
++        largura_mm: 80,
++        empresaId: ids.empresa2,
++        unidadeId: ids.unidade2,
++        empresa_id: 999999,
++        unidade_id: 999999
++      });
++
++      const resBody = await new Promise((resolve, reject) => {
++        const req = http.request({
++          hostname: '127.0.0.1',
++          port,
++          path: '/api/cozinha/impressao/estacoes',
++          method: 'POST',
++          headers: {
++            Authorization: `Bearer ${token}`,
++            'Content-Type': 'application/json',
++            'Content-Length': Buffer.byteLength(payload)
++          }
++        }, (res) => {
++          let data = '';
++          res.on('data', (c) => { data += c; });
++          res.on('end', () => {
++            let body = {};
++            try { body = JSON.parse(data || '{}'); } catch (_e) { body = { raw: data }; }
++            resolve({ status: res.statusCode, body });
++          });
++        });
++        req.on('error', reject);
++        req.write(payload);
++        req.end();
++      });
++
++      assert.equal(resBody.status, 201, JSON.stringify(resBody.body));
++      assert.equal(resBody.body.estacao.empresa_id, ids.empresa1);
++      assert.equal(resBody.body.estacao.unidade_id, ids.unidade1a);
++      assert.notEqual(resBody.body.estacao.empresa_id, ids.empresa2);
++      assert.notEqual(resBody.body.estacao.unidade_id, ids.unidade2);
++
++      const row = await get(dbMem, `
++        SELECT empresa_id, unidade_id FROM cozinha_estacoes_impressao
++        WHERE codigo_estacao = 'JWT-ISO'
++      `);
++      assert.equal(row.empresa_id, ids.empresa1);
++      assert.equal(row.unidade_id, ids.unidade1a);
++    } finally {
++      await new Promise((resolve) => server.close(resolve));
++      await close(dbMem);
++    }
++  });
++});
++
++describe('Sprint 06 Bloco A — não acopla impressão comercial', () => {
++  it('14) módulos de impressão cozinha não referenciam impressora_cupom /api/impressao', () => {
++    const root = path.join(__dirname, '..', '..', 'backend', 'services', 'cozinha');
++    const files = [
++      'cozinhaImpressaoContratos.js',
++      'CozinhaImpressaoRenderer.js',
++      'CozinhaImpressaoEstacaoService.js'
++    ];
++    for (const f of files) {
++      const src = fs.readFileSync(path.join(root, f), 'utf8');
++      assert.ok(!/impressora_cupom/.test(src), f);
++      assert.ok(!/\/api\/impressao/.test(src), f);
++      assert.ok(!/ComprovantePrintService/.test(src), f);
++      assert.ok(!/fiscalImpressao/.test(src), f);
++    }
++  });
++});
+
+diff --git a/backend/utils/cozinhaSchema.js b/backend/utils/cozinhaSchema.js
+index dfca144..109086d 100644
+--- a/backend/utils/cozinhaSchema.js
++++ b/backend/utils/cozinhaSchema.js
+@@ -821,8 +821,12 @@ async function criarTabelasCozinha(db) {
+         REFERENCES cozinha_unidades(id, empresa_id)
+     )
+   `);
+-  CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_estacoes_empresa_codigo
+-    ON cozinha_estacoes_impressao(empresa_id, codigo_estacao)
++  // UNIQUE por (empresa, unidade, codigo) — permite PASTEL/BEBIDA/OUTRO em cada unidade.
++  // Índice legado ux_cozinha_estacoes_empresa_codigo (só empresa+codigo) é removido em
++  // garantirIndiceEstacoesCodigoPorUnidade (sem bump de versão / sem V4).
++  await dbRun(db, `
++    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_estacoes_empresa_unidade_codigo
++    ON cozinha_estacoes_impressao(empresa_id, unidade_id, codigo_estacao)
+   `);
+   await dbRun(db, `
+     CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_estacoes_id_empresa
+@@ -1078,8 +1082,23 @@ async function criarTabelasCozinha(db) {
+     ON cozinha_idempotencia(situacao, created_at)
+   `);
+ 
++  await garantirIndiceEstacoesCodigoPorUnidade(db);
+ }
+ 
++/**
++ * Sprint 06 Bloco A — corrige UNIQUE de codigo_estacao.
++ * Antes: UNIQUE(empresa_id, codigo_estacao) impedia a mesma chave (ex.: PASTEL)
++ * em duas unidades da mesma empresa (conflito com D3).
++ * Agora: UNIQUE(empresa_id, unidade_id, codigo_estacao).
++ * Sem bump de schema (permanece v3) / sem migration V4.
++ */
++async function garantirIndiceEstacoesCodigoPorUnidade(db) {
++  await dbRun(db, 'DROP INDEX IF EXISTS ux_cozinha_estacoes_empresa_codigo');
++  await dbRun(db, `
++    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_estacoes_empresa_unidade_codigo
++    ON cozinha_estacoes_impressao(empresa_id, unidade_id, codigo_estacao)
++  `);
++}
+ 
+ async function garantirSchemaCozinha(db, opts = {}) {
+   if (!db) {
+@@ -1166,6 +1185,7 @@ module.exports = {
+   IDEMPOTENCIA_COLUNAS,
+   garantirSchemaCozinha,
+   garantirConfigNotificacaoCozinha,
++  garantirIndiceEstacoesCodigoPorUnidade,
+   marcarCozinhaOperacional,
+   isCozinhaOperacional,
+   getCozinhaSchemaStatus,
+
+diff --git a/backend/rotas/cozinha.js b/backend/rotas/cozinha.js
+index c49b8c0..1595683 100644
+--- a/backend/rotas/cozinha.js
++++ b/backend/rotas/cozinha.js
+@@ -1,6 +1,7 @@
+ /**
+  * Rotas — Cozinha
+- * Sprint 02: despacho | Sprint 03/05: preparação e operações de itens
++ * Sprint 02: despacho | Sprint 03/05: preparação
++ * Sprint 06 Bloco A: estações/contratos de impressão (sem print físico)
+  */
+ 'use strict';
+ 
+@@ -12,6 +13,13 @@ const { criarMiddlewareContextoEmpresa } = require('../services/fiscalNaoFiscal/
+ const { empresaIdDoReqPedido } = require('../services/pedido/empresaIdDoReqPedido');
+ const CozinhaDespacho = require('../services/cozinha/CozinhaDespachoService');
+ const CozinhaPreparacao = require('../services/cozinha/CozinhaPreparacaoService');
++const CozinhaImpressaoEstacao = require('../services/cozinha/CozinhaImpressaoEstacaoService');
++const {
++  montarPayloadSnapshot,
++  serializarSnapshot,
++  snapshotContemCamposProibidos
++} = require('../services/cozinha/cozinhaImpressaoContratos');
++const { renderizarTexto } = require('../services/cozinha/CozinhaImpressaoRenderer');
+ const {
+   resolverUnidadeOperacionalReq,
+   unidadeCozinhaDaSessao
+@@ -160,5 +168,136 @@ router.get('/rodadas/:id/preparacao', async (req, res) => {
+   }
+ });
+ 
++// —— Sprint 06 Bloco A: estações e contratos (sem impressão física / sem fila) ——
++// Unidade/empresa: SOMENTE sessão (JWT + contexto). Body/query NÃO informam nem divergem.
++
++router.get('/impressao/estacoes', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const out = await CozinhaImpressaoEstacao.listarEstacoes({
++      db,
++      empresaId: empresaIdDoReqPedido(req),
++      unidadeId: unidadeCozinhaDaSessao(req.user),
++      apenas_ativas: req.query && (req.query.apenas_ativas === '1' || req.query.apenas_ativas === 'true')
++    });
++    return res.status(200).json(out);
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++router.get('/impressao/estacoes/:id', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const out = await CozinhaImpressaoEstacao.obterEstacao({
++      db,
++      empresaId: empresaIdDoReqPedido(req),
++      unidadeId: unidadeCozinhaDaSessao(req.user),
++      id: req.params.id
++    });
++    return res.status(200).json(out);
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++router.post('/impressao/estacoes', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const body = req.body || {};
++    // empresa/unidade SOMENTE da sessão — body nunca sobrescreve (auditoria Bloco A).
++    const out = await CozinhaImpressaoEstacao.criarEstacao({
++      db,
++      codigo_estacao: body.codigo_estacao != null ? body.codigo_estacao : body.codigoEstacao,
++      device_name: body.device_name != null ? body.device_name : body.deviceName,
++      largura_mm: body.largura_mm != null ? body.largura_mm : body.larguraMm,
++      vias: body.vias,
++      modelo_individual: body.modelo_individual != null ? body.modelo_individual : body.modeloIndividual,
++      modelo_agrupado: body.modelo_agrupado != null ? body.modelo_agrupado : body.modeloAgrupado,
++      ativo: body.ativo,
++      empresaId: empresaIdDoReqPedido(req),
++      unidadeId: unidadeCozinhaDaSessao(req.user)
++    });
++    return res.status(201).json(out);
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++router.put('/impressao/estacoes/:id', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const body = req.body || {};
++    // Não propagar empresaId/unidadeId do body para o serviço.
++    const dados = {
++      codigo_estacao: body.codigo_estacao != null ? body.codigo_estacao : body.codigoEstacao,
++      device_name: body.device_name !== undefined ? body.device_name : body.deviceName,
++      largura_mm: body.largura_mm != null ? body.largura_mm : body.larguraMm,
++      vias: body.vias,
++      modelo_individual: body.modelo_individual != null ? body.modelo_individual : body.modeloIndividual,
++      modelo_agrupado: body.modelo_agrupado != null ? body.modelo_agrupado : body.modeloAgrupado,
++      ativo: body.ativo
++    };
++    const out = await CozinhaImpressaoEstacao.atualizarEstacao({
++      db,
++      empresaId: empresaIdDoReqPedido(req),
++      unidadeId: unidadeCozinhaDaSessao(req.user),
++      id: req.params.id,
++      dados
++    });
++    return res.status(200).json(out);
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++/** D6 — preview de teste sem fila e sem print físico. */
++router.post('/impressao/estacoes/:id/teste', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const out = await CozinhaImpressaoEstacao.testarEstacao({
++      db,
++      empresaId: empresaIdDoReqPedido(req),
++      unidadeId: unidadeCozinhaDaSessao(req.user),
++      id: req.params.id
++    });
++    return res.status(200).json(out);
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++/** Contrato: monta + renderiza snapshot (sem enfileirar / sem print). */
++router.post('/impressao/snapshot/preview', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const body = req.body || {};
++    // empresa/unidade sempre da sessão autenticada (não confiar no body).
++    const snapshot = montarPayloadSnapshot({
++      ...body,
++      empresa_id: empresaIdDoReqPedido(req),
++      unidade_id: unidadeCozinhaDaSessao(req.user)
++    });
++    const proibidos = snapshotContemCamposProibidos(snapshot);
++    if (proibidos.length) {
++      return res.status(400).json({
++        success: false,
++        codigo: 'SNAPSHOT_CAMPO_PROIBIDO',
++        mensagem: 'Snapshot contém campos comerciais/fiscais proibidos.',
++        detalhes: { campos: proibidos }
++      });
++    }
++    const render = renderizarTexto(snapshot);
++    return res.status(200).json({
++      success: true,
++      snapshot,
++      payload_snapshot: serializarSnapshot(snapshot),
++      render,
++      impressao_fisica: false
++    });
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
+ 
+ module.exports = router;
+

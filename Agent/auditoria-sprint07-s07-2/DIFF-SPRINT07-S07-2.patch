@@ -1,0 +1,3443 @@
+﻿diff --git a/backend/services/cozinha/CozinhaSessaoUnidadeService.js b/backend/services/cozinha/CozinhaSessaoUnidadeService.js
+new file mode 100644
+index 0000000..1924eff
+--- /dev/null
++++ b/backend/services/cozinha/CozinhaSessaoUnidadeService.js
+@@ -0,0 +1,213 @@
++/**
++ * Sprint 07 · S07-2 — Listagem e seleção de unidade operacional para KDS.
++ * Reutiliza validarUnidadeCozinhaNoLogin; emite JWT com o mesmo segredo oficial.
++ */
++'use strict';
++
++const jwt = require('jsonwebtoken');
++const { JWT_SECRET } = require('../../middleware/auth');
++const {
++  validarUnidadeCozinhaNoLogin,
++  garantirTabelaOperadorUnidades,
++  isAdminOperacional,
++  parsePositiveInteger
++} = require('./cozinhaAuthUnidade');
++
++function erro(mensagem, statusCode, codigo, extras = {}) {
++  const err = new Error(mensagem);
++  err.statusCode = statusCode;
++  err.codigo = codigo;
++  Object.assign(err, extras);
++  return err;
++}
++
++function conn(opts) {
++  return (opts && opts.db) || require('../../database');
++}
++
++function all(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
++  });
++}
++
++function exigirEmpresa(empresaId) {
++  const n = Number(empresaId);
++  if (!Number.isInteger(n) || n <= 0) {
++    throw erro('Empresa do contexto é obrigatória.', 400, 'EMPRESA_CONTEXT_REQUIRED');
++  }
++  return n;
++}
++
++function exigirUsuario(user) {
++  if (!user || typeof user !== 'object') {
++    throw erro('Sessão inválida.', 401, 'SESSAO_INVALIDA');
++  }
++  const id = Number(user.id != null ? user.id : user.usuario_id);
++  if (!Number.isInteger(id) || id <= 0) {
++    throw erro('Sessão sem operador.', 401, 'SESSAO_INVALIDA');
++  }
++  return { ...user, id, usuario_id: id };
++}
++
++/**
++ * Claims permitidas na reemissão (whitelist — não copia claims privilegiadas arbitrárias).
++ */
++function montarClaimsSessao(user, unidadeCozinhaId) {
++  const id = Number(user.id || user.usuario_id);
++  const terminal = parsePositiveInteger(user.terminal_id);
++  const caixa = parsePositiveInteger(user.caixa_sessao_id);
++  return {
++    id,
++    usuario_id: id,
++    username: user.username,
++    nome: user.nome || user.username,
++    role: user.role,
++    perfil: user.perfil || 'USUARIO',
++    permissoes: Array.isArray(user.permissoes) ? user.permissoes : [],
++    terminal_id: terminal,
++    caixa_sessao_id: caixa,
++    unidade_cozinha_id: unidadeCozinhaId
++  };
++}
++
++/**
++ * Preserva o `exp` original do token quando possível (não amplia nem reduz por conveniência).
++ * Fallback: mesma política do login (`8h`) se não houver exp legível.
++ */
++function emitirJwtComUnidade({ user, unidadeCozinhaId, tokenAtual }) {
++  if (!JWT_SECRET) {
++    throw erro(
++      'Autenticação indisponível: JWT_SECRET não configurado.',
++      503,
++      'JWT_SECRET_AUSENTE'
++    );
++  }
++  const claims = montarClaimsSessao(user, unidadeCozinhaId);
++  let expAbs = null;
++  if (tokenAtual) {
++    try {
++      const decoded = jwt.decode(tokenAtual);
++      if (decoded && Number.isFinite(Number(decoded.exp))) {
++        expAbs = Number(decoded.exp);
++      }
++    } catch (_e) { /* ignora */ }
++  }
++  const agora = Math.floor(Date.now() / 1000);
++  if (expAbs != null && expAbs > agora) {
++    return jwt.sign({ ...claims, exp: expAbs }, JWT_SECRET);
++  }
++  return jwt.sign(claims, JWT_SECRET, { expiresIn: '8h' });
++}
++
++/**
++ * Lista unidades ativas autorizadas na empresa do contexto.
++ */
++async function listarUnidadesDisponiveis({ user, empresaId }, opts = {}) {
++  const db = conn(opts);
++  const usuario = exigirUsuario(user);
++  const empId = exigirEmpresa(empresaId);
++  await garantirTabelaOperadorUnidades(db);
++
++  let rows;
++  if (isAdminOperacional(usuario)) {
++    rows = await all(db, `
++      SELECT u.id, u.codigo, u.empresa_id, u.ativo
++      FROM cozinha_unidades u
++      WHERE u.empresa_id = ?
++        AND u.ativo = 1
++      ORDER BY u.codigo ASC, u.id ASC
++    `, [empId]);
++  } else {
++    rows = await all(db, `
++      SELECT u.id, u.codigo, u.empresa_id, u.ativo
++      FROM cozinha_unidades u
++      INNER JOIN cozinha_operador_unidades v
++        ON v.unidade_id = u.id
++       AND v.empresa_id = u.empresa_id
++       AND v.operador_id = ?
++       AND v.ativo = 1
++      WHERE u.empresa_id = ?
++        AND u.ativo = 1
++      ORDER BY u.codigo ASC, u.id ASC
++    `, [usuario.id, empId]);
++  }
++
++  const unidades = (rows || []).map((r) => ({
++    id: Number(r.id),
++    codigo: r.codigo != null ? String(r.codigo) : null
++  }));
++
++  return {
++    success: true,
++    empresa_id: empId,
++    unidades,
++    codigo: unidades.length ? undefined : 'SEM_UNIDADES_DISPONIVEIS',
++    mensagem: unidades.length
++      ? undefined
++      : 'Nenhuma unidade de cozinha autorizada para este usuário nesta empresa.'
++  };
++}
++
++/**
++ * Valida unidade novamente e emite novo JWT contextualizado.
++ */
++async function selecionarUnidadeSessao({
++  user,
++  empresaId,
++  unidadeCozinhaIdRaw,
++  tokenAtual
++}, opts = {}) {
++  const db = conn(opts);
++  const usuario = exigirUsuario(user);
++  const empId = exigirEmpresa(empresaId);
++
++  const unidadeValidada = await validarUnidadeCozinhaNoLogin({
++    db,
++    usuario,
++    unidadeCozinhaIdRaw,
++    empresaIdRaw: empId
++  });
++
++  if (unidadeValidada == null) {
++    throw erro(
++      'unidade_cozinha_id é obrigatória.',
++      400,
++      'UNIDADE_OBRIGATORIA'
++    );
++  }
++
++  const token = emitirJwtComUnidade({
++    user: usuario,
++    unidadeCozinhaId: unidadeValidada,
++    tokenAtual
++  });
++
++  const userOut = {
++    id: usuario.id,
++    usuario_id: usuario.id,
++    username: usuario.username,
++    nome: usuario.nome || usuario.username,
++    role: usuario.role,
++    perfil: usuario.perfil || 'USUARIO',
++    permissoes: Array.isArray(usuario.permissoes) ? usuario.permissoes : [],
++    terminal_id: parsePositiveInteger(usuario.terminal_id),
++    caixa_sessao_id: parsePositiveInteger(usuario.caixa_sessao_id),
++    unidade_cozinha_id: unidadeValidada
++  };
++
++  return {
++    success: true,
++    token,
++    user: userOut,
++    unidade_cozinha_id: unidadeValidada,
++    empresa_id: empId
++  };
++}
++
++module.exports = {
++  listarUnidadesDisponiveis,
++  selecionarUnidadeSessao,
++  emitirJwtComUnidade,
++  montarClaimsSessao
++};
+diff --git a/backend/rotas/cozinha.js b/backend/rotas/cozinha.js
+new file mode 100644
+index 0000000..952efa5
+--- /dev/null
++++ b/backend/rotas/cozinha.js
+@@ -0,0 +1,460 @@
++/**
++ * Rotas — Cozinha
++ * Sprint 02: despacho | Sprint 03/05: preparação
++ * Sprint 06 Bloco A: estações/contratos de impressão (sem print físico)
++ * Sprint 06 Bloco B1: consulta da fila persistente
++ * Sprint 06 Bloco D: reenvio controlado (sem Electron / sem print físico)
++ */
++'use strict';
++
++const express = require('express');
++const router = express.Router();
++const db = require('../database');
++const { exigirRecurso } = require('../middleware/validarRecursoImplantacao');
++const { criarMiddlewareContextoEmpresa } = require('../services/fiscalNaoFiscal/empresaContexto');
++const { empresaIdDoReqPedido } = require('../services/pedido/empresaIdDoReqPedido');
++const CozinhaDespacho = require('../services/cozinha/CozinhaDespachoService');
++const CozinhaPreparacao = require('../services/cozinha/CozinhaPreparacaoService');
++const CozinhaKdsPainel = require('../services/cozinha/CozinhaKdsPainelService');
++const CozinhaSessaoUnidade = require('../services/cozinha/CozinhaSessaoUnidadeService');
++const CozinhaImpressaoEstacao = require('../services/cozinha/CozinhaImpressaoEstacaoService');
++const CozinhaImpressaoFila = require('../services/cozinha/CozinhaImpressaoFilaService');
++const {
++  montarPayloadSnapshot,
++  serializarSnapshot,
++  snapshotContemCamposProibidos
++} = require('../services/cozinha/cozinhaImpressaoContratos');
++const { renderizarTexto } = require('../services/cozinha/CozinhaImpressaoRenderer');
++const {
++  resolverUnidadeOperacionalReq,
++  unidadeCozinhaDaSessao
++} = require('../services/cozinha/cozinhaUnidadeOperacional');
++const { isCozinhaOperacional, getCozinhaSchemaStatus } = require('../utils/cozinhaSchema');
++
++router.use(exigirRecurso('pedidos'));
++router.use(criarMiddlewareContextoEmpresa(db));
++
++function responderErro(res, err) {
++  const status = err.statusCode || 500;
++  const payload = {
++    success: false,
++    error: err.message || 'Erro interno.',
++    mensagem: err.message || 'Erro interno.',
++    codigo: err.codigo || err.code || undefined
++  };
++  if (err.detalhes) payload.detalhes = err.detalhes;
++  return res.status(status).json(payload);
++}
++
++function operadorDaSessao(req) {
++  const id = Number(req.user && (req.user.id || req.user.usuario_id));
++  if (!Number.isInteger(id) || id <= 0) {
++    const err = new Error('Sessão sem operador.');
++    err.statusCode = 401;
++    err.codigo = 'SESSAO_INVALIDA';
++    throw err;
++  }
++  return id;
++}
++
++function chaveIdempotencia(req) {
++  const header = req.get('Idempotency-Key');
++  const corpo = req.body && (req.body.idempotency_key || req.body.chave_idempotencia);
++  if (header == null && (corpo == null || String(corpo).trim() === '')) return null;
++  return String(header || corpo).trim();
++}
++
++router.get('/status', (req, res) => {
++  const st = getCozinhaSchemaStatus();
++  if (!st.operacional && st.erro) {
++    console.error('[COZINHA][status] módulo não operacional:', st.erro.mensagem || st.erro);
++  }
++  return res.json({
++    success: true,
++    operacional: isCozinhaOperacional(),
++    versao_schema: st.versao != null ? st.versao : null
++  });
++});
++
++function exigirCozinhaOperacional(res) {
++  if (isCozinhaOperacional()) return true;
++  const st = getCozinhaSchemaStatus();
++  if (st.erro) {
++    console.error('[COZINHA] não operacional:', st.erro.mensagem || st.erro);
++  }
++  res.status(503).json({
++    success: false,
++    codigo: 'COZINHA_NAO_OPERACIONAL',
++    mensagem: 'Módulo Cozinha não operacional.'
++  });
++  return false;
++}
++
++router.post('/despacho', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const body = req.body || {};
++    const out = await CozinhaDespacho.despacharLote({
++      empresaId: empresaIdDoReqPedido(req),
++      operadorId: operadorDaSessao(req),
++      idempotencyKey: chaveIdempotencia(req),
++      unidade_id: body.unidade_id,
++      mesa_id: body.mesa_id,
++      atendimento_id: body.atendimento_id,
++      itens: body.itens
++    });
++    return res.status(out.repetida ? 200 : 201).json(out);
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++router.post('/itens/:id/iniciar', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const out = await CozinhaPreparacao.iniciarPreparacao({
++      empresaId: empresaIdDoReqPedido(req),
++      operadorId: operadorDaSessao(req),
++      idempotencyKey: chaveIdempotencia(req),
++      itemId: req.params.id,
++      // unidade autoritativa = JWT (body/query só podem coincidir)
++      unidade_id: resolverUnidadeOperacionalReq(req)
++    });
++    return res.status(200).json(out);
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++router.post('/itens/:id/pronto', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const out = await CozinhaPreparacao.marcarItemPronto({
++      empresaId: empresaIdDoReqPedido(req),
++      operadorId: operadorDaSessao(req),
++      idempotencyKey: chaveIdempotencia(req),
++      itemId: req.params.id,
++      unidade_id: resolverUnidadeOperacionalReq(req)
++    });
++    return res.status(200).json(out);
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++router.post('/itens/:id/bebida/entregar', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const body = req.body || {};
++    const out = await CozinhaPreparacao.entregarBebida({
++      empresaId: empresaIdDoReqPedido(req),
++      operadorId: operadorDaSessao(req),
++      idempotencyKey: chaveIdempotencia(req),
++      itemId: req.params.id,
++      unidade_id: resolverUnidadeOperacionalReq(req),
++      qty_entregue: body.qty_entregue != null ? body.qty_entregue : body.quantidade
++    });
++    return res.status(out.repetida ? 200 : 201).json(out);
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++router.get('/rodadas/:id/preparacao', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const out = await CozinhaPreparacao.consultarPreparacaoRodada({
++      empresaId: empresaIdDoReqPedido(req),
++      rodadaId: req.params.id
++    });
++    return res.status(200).json(out);
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++function bearerTokenDoReq(req) {
++  const h = req.get && req.get('Authorization');
++  if (!h || typeof h !== 'string') return null;
++  const m = h.match(/^Bearer\s+(.+)$/i);
++  return m ? m[1].trim() : null;
++}
++
++/**
++ * S07-2 — Unidades de cozinha autorizadas na empresa do contexto.
++ */
++router.get('/unidades-disponiveis', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const out = await CozinhaSessaoUnidade.listarUnidadesDisponiveis({
++      user: req.user,
++      empresaId: empresaIdDoReqPedido(req)
++    }, { db });
++    return res.status(200).json(out);
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++/**
++ * S07-2 — Seleciona unidade e emite novo JWT com claim unidade_cozinha_id.
++ * Body: { unidade_cozinha_id }. Identidade/empresa só da sessão autenticada.
++ */
++router.post('/sessao/unidade', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const body = req.body || {};
++    const raw = body.unidade_cozinha_id != null
++      ? body.unidade_cozinha_id
++      : body.unidadeCozinhaId;
++    const out = await CozinhaSessaoUnidade.selecionarUnidadeSessao({
++      user: req.user,
++      empresaId: empresaIdDoReqPedido(req),
++      unidadeCozinhaIdRaw: raw,
++      tokenAtual: bearerTokenDoReq(req)
++    }, { db });
++    return res.status(200).json(out);
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++/**
++ * S07-0 — Painel KDS (somente leitura).
++ * Empresa: contexto autenticado. Unidade: JWT unidade_cozinha_id.
++ * Query unidade_id/empresa_id do cliente, se presentes, não substituem a sessão
++ * (unidade divergente → 409 via resolverUnidadeOperacionalReq).
++ */
++router.get('/preparacao/painel', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const q = req.query || {};
++    // Recusa empresa_id do cliente como substituto do contexto.
++    if (Object.prototype.hasOwnProperty.call(q, 'empresa_id')
++      || Object.prototype.hasOwnProperty.call(q, 'empresaId')) {
++      const raw = q.empresa_id !== undefined ? q.empresa_id : q.empresaId;
++      const empresaSessao = empresaIdDoReqPedido(req);
++      if (raw != null && String(raw).trim() !== '') {
++        const cliente = Number(raw);
++        if (!Number.isInteger(cliente) || cliente <= 0 || cliente !== Number(empresaSessao)) {
++          return res.status(409).json({
++            success: false,
++            codigo: 'EMPRESA_ISOLAMENTO',
++            mensagem: 'empresa_id diverge da empresa autorizada na sessão.',
++            error: 'empresa_id diverge da empresa autorizada na sessão.'
++          });
++        }
++      }
++    }
++
++    const unidadeId = resolverUnidadeOperacionalReq(req);
++    const out = await CozinhaKdsPainel.listarPainelPreparacao({
++      empresaId: empresaIdDoReqPedido(req),
++      unidadeId,
++      estado_item: q.estado_item != null ? q.estado_item : q.estadoItem,
++      estado_rodada: q.estado_rodada != null ? q.estado_rodada : q.estadoRodada,
++      limite: q.limite != null ? q.limite : q.limit,
++      offset: q.offset,
++      incluir_cancelados: q.incluir_cancelados != null
++        ? q.incluir_cancelados
++        : q.incluirCancelados
++    }, { db });
++    return res.status(200).json(out);
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++// —— Sprint 06 Bloco A: estações e contratos (sem impressão física / sem fila) ——
++// Unidade/empresa: SOMENTE sessão (JWT + contexto). Body/query NÃO informam nem divergem.
++
++router.get('/impressao/estacoes', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const out = await CozinhaImpressaoEstacao.listarEstacoes({
++      db,
++      empresaId: empresaIdDoReqPedido(req),
++      unidadeId: unidadeCozinhaDaSessao(req.user),
++      apenas_ativas: req.query && (req.query.apenas_ativas === '1' || req.query.apenas_ativas === 'true')
++    });
++    return res.status(200).json(out);
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++router.get('/impressao/estacoes/:id', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const out = await CozinhaImpressaoEstacao.obterEstacao({
++      db,
++      empresaId: empresaIdDoReqPedido(req),
++      unidadeId: unidadeCozinhaDaSessao(req.user),
++      id: req.params.id
++    });
++    return res.status(200).json(out);
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++router.post('/impressao/estacoes', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const body = req.body || {};
++    // empresa/unidade SOMENTE da sessão — body nunca sobrescreve (auditoria Bloco A).
++    const out = await CozinhaImpressaoEstacao.criarEstacao({
++      db,
++      codigo_estacao: body.codigo_estacao != null ? body.codigo_estacao : body.codigoEstacao,
++      device_name: body.device_name != null ? body.device_name : body.deviceName,
++      largura_mm: body.largura_mm != null ? body.largura_mm : body.larguraMm,
++      vias: body.vias,
++      modelo_individual: body.modelo_individual != null ? body.modelo_individual : body.modeloIndividual,
++      modelo_agrupado: body.modelo_agrupado != null ? body.modelo_agrupado : body.modeloAgrupado,
++      ativo: body.ativo,
++      empresaId: empresaIdDoReqPedido(req),
++      unidadeId: unidadeCozinhaDaSessao(req.user)
++    });
++    return res.status(201).json(out);
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++router.put('/impressao/estacoes/:id', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const body = req.body || {};
++    // Não propagar empresaId/unidadeId do body para o serviço.
++    const dados = {
++      codigo_estacao: body.codigo_estacao != null ? body.codigo_estacao : body.codigoEstacao,
++      device_name: body.device_name !== undefined ? body.device_name : body.deviceName,
++      largura_mm: body.largura_mm != null ? body.largura_mm : body.larguraMm,
++      vias: body.vias,
++      modelo_individual: body.modelo_individual != null ? body.modelo_individual : body.modeloIndividual,
++      modelo_agrupado: body.modelo_agrupado != null ? body.modelo_agrupado : body.modeloAgrupado,
++      ativo: body.ativo
++    };
++    const out = await CozinhaImpressaoEstacao.atualizarEstacao({
++      db,
++      empresaId: empresaIdDoReqPedido(req),
++      unidadeId: unidadeCozinhaDaSessao(req.user),
++      id: req.params.id,
++      dados
++    });
++    return res.status(200).json(out);
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++/** D6 — preview de teste sem fila e sem print físico. */
++router.post('/impressao/estacoes/:id/teste', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const out = await CozinhaImpressaoEstacao.testarEstacao({
++      db,
++      empresaId: empresaIdDoReqPedido(req),
++      unidadeId: unidadeCozinhaDaSessao(req.user),
++      id: req.params.id
++    });
++    return res.status(200).json(out);
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++// —— Sprint 06 Bloco B1/D: consulta da fila (sem print físico / sem Electron) ——
++router.get('/impressao/fila', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const q = req.query || {};
++    const out = await CozinhaImpressaoFila.listarFila({
++      db,
++      empresaId: empresaIdDoReqPedido(req),
++      unidadeId: unidadeCozinhaDaSessao(req.user),
++      estado: q.estado,
++      rodada_id: q.rodada_id != null ? q.rodada_id : q.rodadaId,
++      estacao_impressao_id: q.estacao_impressao_id != null
++        ? q.estacao_impressao_id
++        : q.estacaoId,
++      incluir_snapshot: q.incluir_snapshot === '1' || q.incluir_snapshot === 'true'
++    });
++    return res.status(200).json(out);
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++router.get('/impressao/fila/:id', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const out = await CozinhaImpressaoFila.obterJob({
++      db,
++      empresaId: empresaIdDoReqPedido(req),
++      unidadeId: unidadeCozinhaDaSessao(req.user),
++      id: req.params.id
++    });
++    return res.status(200).json(out);
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++/**
++ * Reenvio controlado (Bloco D).
++ * RESULTADO_INCERTO exige confirmacao_humana=true no body.
++ * Não altera preparação / rodada. Sem print físico.
++ */
++router.post('/impressao/fila/:id/reenviar', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const body = req.body || {};
++    const out = await CozinhaImpressaoFila.reenviarJob({
++      db,
++      empresaId: empresaIdDoReqPedido(req),
++      unidadeId: unidadeCozinhaDaSessao(req.user),
++      id: req.params.id,
++      confirmacao_humana: body.confirmacao_humana === true
++        || body.confirmacaoHumana === true
++    });
++    return res.status(200).json(out);
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++/** Contrato: monta + renderiza snapshot (sem enfileirar / sem print). */
++router.post('/impressao/snapshot/preview', async (req, res) => {
++  try {
++    if (!exigirCozinhaOperacional(res)) return;
++    const body = req.body || {};
++    // empresa/unidade sempre da sessão autenticada (não confiar no body).
++    const snapshot = montarPayloadSnapshot({
++      ...body,
++      empresa_id: empresaIdDoReqPedido(req),
++      unidade_id: unidadeCozinhaDaSessao(req.user)
++    });
++    const proibidos = snapshotContemCamposProibidos(snapshot);
++    if (proibidos.length) {
++      return res.status(400).json({
++        success: false,
++        codigo: 'SNAPSHOT_CAMPO_PROIBIDO',
++        mensagem: 'Snapshot contém campos comerciais/fiscais proibidos.',
++        detalhes: { campos: proibidos }
++      });
++    }
++    const render = renderizarTexto(snapshot);
++    return res.status(200).json({
++      success: true,
++      snapshot,
++      payload_snapshot: serializarSnapshot(snapshot),
++      render,
++      impressao_fisica: false
++    });
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++module.exports = router;
+diff --git a/frontend/erp/js/cozinha-kds.js b/frontend/erp/js/cozinha-kds.js
+new file mode 100644
+index 0000000..ef972bf
+--- /dev/null
++++ b/frontend/erp/js/cozinha-kds.js
+@@ -0,0 +1,678 @@
++/**
++ * Sprint 07 · S07-1 — Painel KDS (somente consulta).
++ * Sprint 07 · S07-2 — Seleção segura de unidade operacional (JWT).
++ * Consome GET /api/cozinha/preparacao/painel (contrato S07-0).
++ * Sem mutação de estado de pedidos, sem dual-write, sem impressão.
++ */
++(function (root, factory) {
++  const api = factory();
++  if (typeof module !== 'undefined' && module.exports) module.exports = api;
++  if (root) {
++    root.CdsCozinhaKdsApi = api;
++    root.loadCozinhaKds = function loadCozinhaKds() {
++      if (root.CdsCozinhaKds && typeof root.CdsCozinhaKds.parar === 'function') {
++        root.CdsCozinhaKds.parar();
++      }
++      const painel = api.montarNoNavegador(root);
++      root.CdsCozinhaKds = painel;
++      const host = root.document && root.document.getElementById('page-content');
++      return painel.iniciar(host);
++    };
++  }
++}(typeof window !== 'undefined' ? window : globalThis, function factory() {
++  'use strict';
++
++  const INTERVALO_MS = 5000;
++  const LIMITE_PAINEL = 100;
++  const ESTADOS_COLUNA = Object.freeze(['AGUARDANDO', 'EM_PREPARACAO', 'PRONTO']);
++  const ROTULOS_COLUNA = Object.freeze({
++    AGUARDANDO: 'Aguardando',
++    EM_PREPARACAO: 'Em preparação',
++    PRONTO: 'Prontos'
++  });
++  const CLASSES_COLUNA = Object.freeze({
++    AGUARDANDO: 'kds-coluna--aguardando',
++    EM_PREPARACAO: 'kds-coluna--preparacao',
++    PRONTO: 'kds-coluna--prontos'
++  });
++
++  function escapar(valor) {
++    return String(valor == null ? '' : valor)
++      .replace(/&/g, '&amp;')
++      .replace(/</g, '&lt;')
++      .replace(/>/g, '&gt;')
++      .replace(/"/g, '&quot;');
++  }
++
++  function parseServidor(valor) {
++    if (!valor) return NaN;
++    const texto = String(valor).trim().replace(' ', 'T');
++    const iso = /Z|[+-]\d{2}:\d{2}$/.test(texto) ? texto : `${texto}Z`;
++    return Date.parse(iso);
++  }
++
++  function formatarHora(valor) {
++    const ms = parseServidor(valor);
++    if (!Number.isFinite(ms)) return '—';
++    const d = new Date(ms);
++    const hh = String(d.getHours()).padStart(2, '0');
++    const mm = String(d.getMinutes()).padStart(2, '0');
++    const ss = String(d.getSeconds()).padStart(2, '0');
++    return `${hh}:${mm}:${ss}`;
++  }
++
++  function formatarDataHoraLocal(date) {
++    if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '—';
++    const dd = String(date.getDate()).padStart(2, '0');
++    const mo = String(date.getMonth() + 1).padStart(2, '0');
++    const yyyy = date.getFullYear();
++    const hh = String(date.getHours()).padStart(2, '0');
++    const mm = String(date.getMinutes()).padStart(2, '0');
++    const ss = String(date.getSeconds()).padStart(2, '0');
++    return `${dd}/${mo}/${yyyy} ${hh}:${mm}:${ss}`;
++  }
++
++  function formatarQtd(valor) {
++    const n = Number(String(valor == null ? '' : valor).replace(',', '.'));
++    if (!Number.isFinite(n)) return String(valor == null ? '' : valor);
++    if (Number.isInteger(n)) return String(n);
++    return String(n).replace(/\.?0+$/, '');
++  }
++
++  function rotuloMesa(rodada) {
++    if (rodada && rodada.mesa_numero != null && String(rodada.mesa_numero).trim() !== '') {
++      return `Mesa ${String(rodada.mesa_numero).padStart(2, '0')}`;
++    }
++    if (rodada && rodada.mesa_id != null) return `Mesa #${rodada.mesa_id}`;
++    return 'Sem mesa';
++  }
++
++  function numeroComanda(itens) {
++    for (let i = 0; i < (itens || []).length; i += 1) {
++      const n = itens[i] && itens[i].numero_comanda;
++      if (n != null) return Number(n);
++    }
++    return null;
++  }
++
++  function compararFifo(a, b) {
++    const sa = Number(a && a.sequencia_global);
++    const sb = Number(b && b.sequencia_global);
++    if (sa !== sb) return (sa || 0) - (sb || 0);
++    const ta = parseServidor(a && a.enviada_em) || 0;
++    const tb = parseServidor(b && b.enviada_em) || 0;
++    if (ta !== tb) return ta - tb;
++    return Number(a && a.id || 0) - Number(b && b.id || 0);
++  }
++
++  function compararItensFifo(a, b) {
++    const sa = Number(a && a.sequencia_global);
++    const sb = Number(b && b.sequencia_global);
++    if (sa !== sb) return (sa || 0) - (sb || 0);
++    return Number(a && a.id || 0) - Number(b && b.id || 0);
++  }
++
++  /**
++   * Distribui cartões por estado do item (contrato S07-0).
++   * Cada cartão = rodada com apenas os itens daquele estado, FIFO.
++   */
++  function distribuirPorEstado(rodadas) {
++    const out = {
++      AGUARDANDO: [],
++      EM_PREPARACAO: [],
++      PRONTO: []
++    };
++    (rodadas || []).forEach((rodada) => {
++      if (!rodada) return;
++      ESTADOS_COLUNA.forEach((estado) => {
++        const itens = (rodada.itens || [])
++          .filter((it) => String(it.estado_preparacao || '').toUpperCase() === estado)
++          .slice()
++          .sort(compararItensFifo);
++        if (!itens.length) return;
++        out[estado].push({
++          id: rodada.id,
++          empresa_id: rodada.empresa_id,
++          unidade_id: rodada.unidade_id,
++          mesa_id: rodada.mesa_id,
++          mesa_numero: rodada.mesa_numero,
++          atendimento_id: rodada.atendimento_id,
++          numero_rodada: rodada.numero_rodada,
++          sequencia_global: rodada.sequencia_global,
++          estado_preparacao: rodada.estado_preparacao,
++          enviada_em: rodada.enviada_em,
++          created_at: rodada.created_at,
++          itens
++        });
++      });
++    });
++    ESTADOS_COLUNA.forEach((estado) => {
++      out[estado].sort(compararFifo);
++    });
++    return out;
++  }
++
++  function contadores(distribuicao) {
++    return {
++      AGUARDANDO: (distribuicao.AGUARDANDO || []).length,
++      EM_PREPARACAO: (distribuicao.EM_PREPARACAO || []).length,
++      PRONTO: (distribuicao.PRONTO || []).length
++    };
++  }
++
++  function mensagemDe(err) {
++    if (!err) return 'Falha de comunicação com o painel.';
++    const codigo = err.codigo || err.code;
++    const msg = err.mensagem || err.message || 'Falha de comunicação com o painel.';
++    return codigo ? `${msg} (${codigo})` : msg;
++  }
++
++  /** Lê unidade_cozinha_id do JWT armazenado (somente UI; autoridade é o backend). */
++  function lerUnidadeCozinhaDoToken(token) {
++    if (!token || typeof token !== 'string') return null;
++    const partes = token.split('.');
++    if (partes.length < 2) return null;
++    try {
++      const b64 = partes[1].replace(/-/g, '+').replace(/_/g, '/');
++      const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
++      const json = typeof atob === 'function'
++        ? atob(padded)
++        : Buffer.from(padded, 'base64').toString('utf8');
++      const payload = JSON.parse(json);
++      const id = Number(payload && payload.unidade_cozinha_id);
++      return Number.isInteger(id) && id > 0 ? id : null;
++    } catch (_e) {
++      return null;
++    }
++  }
++
++  function htmlSelecaoUnidade(estado) {
++    const empresa = estado.empresaRotulo
++      || (estado.empresaId != null ? `Empresa #${estado.empresaId}` : 'Empresa');
++    const aviso = estado.selecaoErro
++      ? `<div class="kds-aviso" role="alert">${escapar(estado.selecaoErro)}</div>`
++      : '';
++    let corpo = '';
++    if (estado.selecaoCarregando) {
++      corpo = '<div class="kds-selecao__msg">Carregando unidades autorizadas…</div>';
++    } else if (!(estado.unidadesDisponiveis || []).length) {
++      corpo = `<div class="kds-selecao__msg" data-kds-sem-unidades="1">
++        Nenhuma unidade de cozinha autorizada para este usuário nesta empresa.
++        Solicite o cadastro/vínculo ao administrador.
++      </div>`;
++    } else {
++      const opcoes = (estado.unidadesDisponiveis || []).map((u) => {
++        const sel = Number(estado.unidadeSelecionadaId) === Number(u.id) ? ' checked' : '';
++        const rotulo = u.codigo ? `Unidade ${u.codigo}` : `Unidade #${u.id}`;
++        return `<label class="kds-selecao__opcao">
++          <input type="radio" name="kds-unidade" value="${escapar(u.id)}"${sel}>
++          <span><strong>${escapar(rotulo)}</strong> <span class="kds-selecao__id">#${escapar(u.id)}</span></span>
++        </label>`;
++      }).join('');
++      corpo = `<div class="kds-selecao__lista" role="radiogroup" aria-label="Unidades de cozinha">${opcoes}</div>`;
++    }
++    const podeConfirmar = !estado.selecaoCarregando
++      && !estado.selecaoConfirmando
++      && Number.isInteger(Number(estado.unidadeSelecionadaId))
++      && Number(estado.unidadeSelecionadaId) > 0
++      && (estado.unidadesDisponiveis || []).some((u) => Number(u.id) === Number(estado.unidadeSelecionadaId));
++    return `
++      <div class="kds-painel kds-selecao" data-painel-kds-selecao="1">
++        <header class="kds-cabecalho">
++          <div>
++            <h1 class="kds-cabecalho__titulo">Cozinha <span>(KDS)</span></h1>
++            <div class="kds-cabecalho__meta">
++              <strong>${escapar(empresa)}</strong>
++              · Selecione a unidade operacional
++            </div>
++          </div>
++        </header>
++        <div class="kds-selecao__corpo">
++          <p class="kds-selecao__intro">
++            Escolha a unidade de cozinha autorizada para esta sessão.
++            A seleção é obrigatória e será validada pelo servidor.
++          </p>
++          ${aviso}
++          ${corpo}
++          <div class="kds-selecao__acoes">
++            <button type="button" class="kds-btn-atualizar" data-acao="confirmar-unidade"
++              ${podeConfirmar ? '' : 'disabled'}>
++              ${estado.selecaoConfirmando ? 'Confirmando…' : 'Confirmar unidade'}
++            </button>
++            <button type="button" class="kds-btn-secundario" data-acao="recarregar-unidades"
++              ${estado.selecaoCarregando || estado.selecaoConfirmando ? 'disabled' : ''}>
++              Atualizar lista
++            </button>
++          </div>
++        </div>
++      </div>`;
++  }
++
++  function htmlItem(item) {
++    const obs = item.observacoes_snapshot != null && String(item.observacoes_snapshot).trim() !== ''
++      ? `<div class="kds-item__obs">${escapar(item.observacoes_snapshot)}</div>`
++      : '';
++    return `
++      <div class="kds-item" data-item-id="${escapar(item.id)}">
++        <div class="kds-item__linha">
++          <span class="kds-item__qtd">${escapar(formatarQtd(item.qty_solicitada))}</span>
++          <span class="kds-item__nome">${escapar(item.produto_nome_snapshot || 'Produto')}</span>
++          <span class="kds-item__tipo">${escapar(item.tipo_item || '')}</span>
++        </div>
++        ${obs}
++      </div>`;
++  }
++
++  function htmlCard(card) {
++    const comanda = numeroComanda(card.itens);
++    const chips = [
++      comanda != null ? `Comanda ${comanda}` : null,
++      card.numero_rodada != null ? `Rodada ${card.numero_rodada}` : null,
++      card.sequencia_global != null ? `Seq. ${card.sequencia_global}` : null
++    ].filter(Boolean).map((t) => `<span class="kds-chip">${escapar(t)}</span>`).join('');
++    return `
++      <article class="kds-card" data-rodada-id="${escapar(card.id)}">
++        <div class="kds-card__topo">
++          <div class="kds-card__mesa">${escapar(rotuloMesa(card))}</div>
++          <div class="kds-card__hora">${escapar(formatarHora(card.enviada_em || card.created_at))}</div>
++        </div>
++        <div class="kds-card__meta">${chips}</div>
++        ${(card.itens || []).map(htmlItem).join('')}
++      </article>`;
++  }
++
++  function htmlColuna(estado, cards) {
++    const lista = !cards.length
++      ? `<div class="kds-vazio">Nenhum pedido</div>`
++      : cards.map(htmlCard).join('');
++    return `
++      <section class="kds-coluna ${CLASSES_COLUNA[estado]}" data-coluna="${estado}">
++        <header class="kds-coluna__cabeca">
++          <span>${escapar(ROTULOS_COLUNA[estado])}</span>
++          <span class="kds-contador" data-contador="${estado}">${cards.length}</span>
++        </header>
++        <div class="kds-coluna__lista">${lista}</div>
++      </section>`;
++  }
++
++  function htmlPainel(estado, instante) {
++    const dist = estado.distribuicao || distribuirPorEstado(estado.rodadas || []);
++    const counts = contadores(dist);
++    const ultima = estado.ultimaAtualizacao
++      ? formatarDataHoraLocal(estado.ultimaAtualizacao)
++      : '—';
++    let statusClasse = 'kds-status--ok';
++    let statusTexto = 'Atualizado';
++    if (estado.carregando && !(estado.rodadas && estado.rodadas.length)) {
++      statusClasse = 'kds-status--carregando';
++      statusTexto = 'Carregando…';
++    } else if (estado.carregando) {
++      statusClasse = 'kds-status--carregando';
++      statusTexto = 'Atualizando…';
++    } else if (estado.erro) {
++      statusClasse = 'kds-status--erro';
++      statusTexto = 'Falha na atualização';
++    }
++
++    const unidade = estado.unidadeId != null ? `Unidade #${estado.unidadeId}` : 'Unidade —';
++    const empresa = estado.empresaRotulo || (estado.empresaId != null ? `Empresa #${estado.empresaId}` : 'Empresa —');
++    const aviso = estado.erro
++      ? `<div class="kds-aviso" role="alert">${escapar(estado.erro)}</div>`
++      : '';
++
++    const corpoVazioInicial = estado.carregando && !(estado.rodadas && estado.rodadas.length) && !estado.erro
++      ? `<div class="kds-carregando-global">Carregando painel da cozinha…</div>`
++      : `<div class="kds-colunas">
++          ${htmlColuna('AGUARDANDO', dist.AGUARDANDO || [])}
++          ${htmlColuna('EM_PREPARACAO', dist.EM_PREPARACAO || [])}
++          ${htmlColuna('PRONTO', dist.PRONTO || [])}
++        </div>`;
++
++    return `
++      <div class="kds-painel" data-painel-kds="1">
++        <header class="kds-cabecalho">
++          <div>
++            <h1 class="kds-cabecalho__titulo">Cozinha <span>(KDS)</span></h1>
++            <div class="kds-cabecalho__meta">
++              <strong>${escapar(empresa)}</strong>
++              · ${escapar(unidade)}
++              · Última atualização: <strong data-kds-ultima>${escapar(ultima)}</strong>
++              <span class="visually-hidden">${escapar(formatarDataHoraLocal(instante))}</span>
++            </div>
++          </div>
++          <div class="kds-cabecalho__acoes">
++            <span class="kds-status ${statusClasse}" data-kds-status="${escapar(statusClasse)}">
++              <span class="kds-status__dot" aria-hidden="true"></span>
++              ${escapar(statusTexto)}
++            </span>
++            <button type="button" class="kds-btn-atualizar" data-acao="atualizar"
++              ${estado.carregando ? 'disabled' : ''}>
++              Atualizar agora
++            </button>
++          </div>
++        </header>
++        ${aviso}
++        ${corpoVazioInicial}
++        <div class="visually-hidden" data-kds-contadores>
++          Aguardando ${counts.AGUARDANDO}; Em preparação ${counts.EM_PREPARACAO}; Prontos ${counts.PRONTO}
++        </div>
++      </div>`;
++  }
++
++  function criarControlador(deps) {
++    const fetchJson = deps.fetchJson;
++    const agora = deps.agora || (() => new Date());
++    const intervaloMs = deps.intervaloMs != null ? deps.intervaloMs : INTERVALO_MS;
++    let timer = null;
++    let seq = 0;
++    const estado = {
++      ativo: false,
++      carregando: false,
++      emCurso: false,
++      modo: 'painel', // 'selecao' | 'painel'
++      empresaId: deps.empresaId != null ? deps.empresaId : null,
++      empresaRotulo: deps.empresaRotulo || '',
++      unidadeId: null,
++      rodadas: [],
++      distribuicao: distribuirPorEstado([]),
++      total: 0,
++      ordenacao: null,
++      ultimaAtualizacao: null,
++      erro: '',
++      teveSucesso: false,
++      unidadesDisponiveis: [],
++      unidadeSelecionadaId: null,
++      selecaoCarregando: false,
++      selecaoConfirmando: false,
++      selecaoErro: '',
++      selecaoFalhaLista: false
++    };
++
++    function publicar() {
++      if (deps.aoMudar && estado.ativo) deps.aoMudar();
++    }
++
++    function agendar() {
++      if (!estado.ativo || estado.modo !== 'painel' || !deps.agendar) return;
++      timer = deps.agendar(async () => {
++        timer = null;
++        if (!estado.ativo || estado.modo !== 'painel') return;
++        await atualizar({ silencioso: true });
++        agendar();
++      }, intervaloMs);
++    }
++
++    function parar() {
++      estado.ativo = false;
++      if (timer != null && deps.cancelar) deps.cancelar(timer);
++      timer = null;
++    }
++
++    async function atualizar(opts) {
++      const silencioso = !!(opts && opts.silencioso);
++      if (!estado.ativo || estado.modo !== 'painel') return { ignorada: true };
++      if (estado.emCurso) return { ignorada: true, sobreposta: true };
++      estado.emCurso = true;
++      estado.carregando = true;
++      publicar();
++      const ticket = ++seq;
++      try {
++        const data = await fetchJson('GET', `/cozinha/preparacao/painel?limite=${LIMITE_PAINEL}&offset=0`);
++        if (!estado.ativo || ticket !== seq) return { obsoleta: true };
++        estado.rodadas = Array.isArray(data && data.rodadas) ? data.rodadas : [];
++        estado.distribuicao = distribuirPorEstado(estado.rodadas);
++        estado.total = data && data.total != null ? Number(data.total) : estado.rodadas.length;
++        estado.ordenacao = data && data.ordenacao ? data.ordenacao : null;
++        if (data && data.unidade_id != null) estado.unidadeId = Number(data.unidade_id);
++        if (data && data.empresa_id != null) estado.empresaId = Number(data.empresa_id);
++        estado.ultimaAtualizacao = agora();
++        estado.erro = '';
++        estado.teveSucesso = true;
++        return { ok: true, data };
++      } catch (err) {
++        if (!estado.ativo || ticket !== seq) return { obsoleta: true };
++        estado.erro = mensagemDe(err);
++        return { erro: err, preservouDados: estado.teveSucesso };
++      } finally {
++        if (ticket === seq) {
++          estado.emCurso = false;
++          estado.carregando = false;
++          if (estado.ativo) publicar();
++        }
++      }
++    }
++
++    async function carregarUnidadesDisponiveis(opts) {
++      const forcar = !!(opts && opts.forcar);
++      // Não reexecuta automaticamente após falha de comunicação.
++      if (estado.selecaoFalhaLista && !forcar) return { ignorada: true };
++      if (estado.selecaoCarregando) return { ignorada: true };
++      estado.selecaoCarregando = true;
++      estado.selecaoErro = '';
++      publicar();
++      try {
++        const data = await fetchJson('GET', '/cozinha/unidades-disponiveis');
++        estado.unidadesDisponiveis = Array.isArray(data && data.unidades) ? data.unidades : [];
++        estado.selecaoFalhaLista = false;
++        // Não auto-seleciona nem auto-confirma a primeira unidade.
++        estado.unidadeSelecionadaId = null;
++        return { ok: true, data };
++      } catch (err) {
++        estado.selecaoFalhaLista = true;
++        estado.unidadesDisponiveis = [];
++        estado.selecaoErro = mensagemDe(err);
++        return { erro: err };
++      } finally {
++        estado.selecaoCarregando = false;
++        publicar();
++      }
++    }
++
++    function definirUnidadeSelecionada(id) {
++      const n = Number(id);
++      estado.unidadeSelecionadaId = Number.isInteger(n) && n > 0 ? n : null;
++      publicar();
++    }
++
++    async function confirmarUnidade() {
++      if (estado.selecaoConfirmando) return { ignorada: true };
++      const id = Number(estado.unidadeSelecionadaId);
++      if (!Number.isInteger(id) || id <= 0) {
++        estado.selecaoErro = 'Selecione uma unidade para continuar.';
++        publicar();
++        return { ok: false };
++      }
++      estado.selecaoConfirmando = true;
++      estado.selecaoErro = '';
++      publicar();
++      try {
++        const data = await fetchJson('POST', '/cozinha/sessao/unidade', {
++          unidade_cozinha_id: id
++        });
++        if (!data || !data.token) {
++          throw Object.assign(new Error('Falha na emissão do novo token.'), {
++            codigo: 'TOKEN_AUSENTE'
++          });
++        }
++        if (typeof deps.aoAtualizarSessao === 'function') {
++          deps.aoAtualizarSessao(data);
++        }
++        const unidadeToken = lerUnidadeCozinhaDoToken(data.token);
++        if (unidadeToken !== id && Number(data.unidade_cozinha_id) !== id) {
++          throw Object.assign(new Error('Token recebido sem a unidade selecionada.'), {
++            codigo: 'TOKEN_UNIDADE_DIVERGENTE'
++          });
++        }
++        estado.modo = 'painel';
++        estado.unidadeId = Number(data.unidade_cozinha_id) || id;
++        estado.selecaoConfirmando = false;
++        publicar();
++        await atualizar({ silencioso: false });
++        agendar();
++        return { ok: true, data };
++      } catch (err) {
++        estado.selecaoErro = mensagemDe(err);
++        estado.selecaoConfirmando = false;
++        publicar();
++        return { erro: err };
++      }
++    }
++
++    async function iniciar(opts) {
++      estado.ativo = true;
++      estado.erro = '';
++      const unidadeJwt = opts && opts.unidadeJwt != null
++        ? opts.unidadeJwt
++        : (typeof deps.lerUnidadeJwt === 'function' ? deps.lerUnidadeJwt() : null);
++      if (unidadeJwt) {
++        estado.modo = 'painel';
++        estado.unidadeId = unidadeJwt;
++        await atualizar({ silencioso: false });
++        agendar();
++        return estado;
++      }
++      estado.modo = 'selecao';
++      await carregarUnidadesDisponiveis();
++      return estado;
++    }
++
++    return {
++      estado,
++      iniciar,
++      parar,
++      atualizar,
++      carregarUnidadesDisponiveis,
++      definirUnidadeSelecionada,
++      confirmarUnidade,
++      html: () => (estado.modo === 'selecao'
++        ? htmlSelecaoUnidade(estado)
++        : htmlPainel(estado, agora()))
++    };
++  }
++
++  async function requisitar(global, method, path, corpo) {
++    const contexto = global.CdsEmpresaContexto;
++    const headers = contexto && contexto.headersJson
++      ? contexto.headersJson()
++      : (contexto && contexto.headersAuth ? contexto.headersAuth() : { 'Content-Type': 'application/json' });
++    const base = typeof global.API_URL === 'string' ? global.API_URL : '/api';
++    const resp = await global.fetch(base + path, {
++      method,
++      headers,
++      body: corpo && method !== 'GET' ? JSON.stringify(corpo) : undefined
++    });
++    const data = await resp.json().catch(() => ({}));
++    if (!resp.ok) {
++      const err = new Error((data && (data.mensagem || data.error)) || 'Falha na operação.');
++      err.codigo = (data && (data.codigo || data.code)) || null;
++      err.status = resp.status;
++      throw err;
++    }
++    return data;
++  }
++
++  function persistirSessao(global, data) {
++    try {
++      if (global.localStorage) {
++        global.localStorage.setItem('token', data.token);
++        if (data.user) {
++          global.localStorage.setItem('user', JSON.stringify(data.user));
++        }
++      }
++    } catch (_e) { /* ignore */ }
++    try {
++      if (global.electronAPI
++        && global.electronAPI.cozinhaImpressao
++        && typeof global.electronAPI.cozinhaImpressao.estabelecerSessao === 'function') {
++        global.electronAPI.cozinhaImpressao.estabelecerSessao({ token: data.token });
++      }
++    } catch (_e2) { /* ignore */ }
++  }
++
++  function montarNoNavegador(global) {
++    const contexto = global.CdsEmpresaContexto;
++    const empresa = contexto && contexto.lerEmpresa ? contexto.lerEmpresa() : null;
++    let control;
++    control = criarControlador({
++      empresaId: contexto && contexto.lerEmpresaId ? contexto.lerEmpresaId() : null,
++      empresaRotulo: empresa
++        ? (empresa.nome_fantasia || empresa.razao_social || (`Empresa #${empresa.id}`))
++        : '',
++      fetchJson: (method, path, corpo) => requisitar(global, method, path, corpo),
++      agendar: (fn, ms) => global.setTimeout(fn, ms),
++      cancelar: (id) => global.clearTimeout(id),
++      lerUnidadeJwt: () => {
++        try {
++          return lerUnidadeCozinhaDoToken(global.localStorage && global.localStorage.getItem('token'));
++        } catch (_e) {
++          return null;
++        }
++      },
++      aoAtualizarSessao: (data) => persistirSessao(global, data),
++      aoMudar: () => desenhar(global, control, global.document && global.document.getElementById('page-content'))
++    });
++
++    const originalIniciar = control.iniciar;
++    control.iniciar = async function iniciarNaTela(host) {
++      if (contexto && contexto.temEmpresaSelecionada && !contexto.temEmpresaSelecionada()) {
++        if (host) {
++          host.innerHTML = `<div class="alert alert-warning">${escapar(contexto.mensagemEmpresaObrigatoria())}</div>`;
++        }
++        return control.estado;
++      }
++      await originalIniciar();
++      desenhar(global, control, host);
++      return control.estado;
++    };
++    return control;
++  }
++
++  function desenhar(global, control, host) {
++    if (!host) return;
++    host.innerHTML = control.html();
++    const selecao = host.querySelector('[data-painel-kds-selecao]');
++    if (selecao) {
++      selecao.querySelectorAll('input[name="kds-unidade"]').forEach((input) => {
++        input.addEventListener('change', () => {
++          control.definirUnidadeSelecionada(input.value);
++        });
++      });
++      const conf = selecao.querySelector('[data-acao="confirmar-unidade"]');
++      if (conf) conf.addEventListener('click', () => control.confirmarUnidade());
++      const rec = selecao.querySelector('[data-acao="recarregar-unidades"]');
++      if (rec) {
++        rec.addEventListener('click', () => {
++          control.carregarUnidadesDisponiveis({ forcar: true });
++        });
++      }
++      return;
++    }
++    const raiz = host.querySelector('[data-painel-kds]');
++    if (!raiz) return;
++    const botao = raiz.querySelector('[data-acao="atualizar"]');
++    if (botao) {
++      botao.addEventListener('click', () => {
++        control.atualizar({ silencioso: false });
++      });
++    }
++  }
++
++  return {
++    INTERVALO_MS,
++    LIMITE_PAINEL,
++    ESTADOS_COLUNA,
++    ROTULOS_COLUNA,
++    escapar,
++    formatarHora,
++    formatarQtd,
++    rotuloMesa,
++    compararFifo,
++    distribuirPorEstado,
++    contadores,
++    lerUnidadeCozinhaDoToken,
++    htmlSelecaoUnidade,
++    htmlPainel,
++    criarControlador,
++    montarNoNavegador
++  };
++}));
+diff --git a/frontend/css/cozinha-kds.css b/frontend/css/cozinha-kds.css
+new file mode 100644
+index 0000000..67988b9
+--- /dev/null
++++ b/frontend/css/cozinha-kds.css
+@@ -0,0 +1,406 @@
++/* Sprint 07 · S07-1 — Painel KDS (somente consulta) */
++.kds-painel {
++  --kds-bg: #0d1117;
++  --kds-surface: #161b22;
++  --kds-surface-2: #1c2330;
++  --kds-border: #30363d;
++  --kds-text: #e6edf3;
++  --kds-muted: #9da7b3;
++  --kds-aguardando: #e6b422;
++  --kds-preparacao: #3b82f6;
++  --kds-prontos: #22c55e;
++  min-height: calc(100vh - 1rem);
++  background:
++    radial-gradient(1200px 480px at 10% -10%, rgba(230, 180, 34, 0.08), transparent 55%),
++    radial-gradient(900px 420px at 90% 0%, rgba(59, 130, 246, 0.1), transparent 50%),
++    var(--kds-bg);
++  color: var(--kds-text);
++  padding: 0 0 1.5rem;
++  font-family: "Segoe UI", "Trebuchet MS", sans-serif;
++}
++
++.kds-cabecalho {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: flex-start;
++  justify-content: space-between;
++  gap: 1rem;
++  padding: 1rem 1.25rem;
++  background: linear-gradient(180deg, #121821 0%, #0f141c 100%);
++  border-bottom: 1px solid var(--kds-border);
++}
++
++.kds-cabecalho__titulo {
++  margin: 0;
++  font-size: 1.65rem;
++  font-weight: 700;
++  letter-spacing: 0.02em;
++}
++
++.kds-cabecalho__titulo span {
++  color: var(--kds-aguardando);
++  font-weight: 600;
++  font-size: 0.95rem;
++  margin-left: 0.4rem;
++}
++
++.kds-cabecalho__meta {
++  margin-top: 0.35rem;
++  color: var(--kds-muted);
++  font-size: 0.95rem;
++}
++
++.kds-cabecalho__meta strong {
++  color: var(--kds-text);
++  font-weight: 600;
++}
++
++.kds-cabecalho__acoes {
++  display: flex;
++  flex-wrap: wrap;
++  align-items: center;
++  gap: 0.75rem;
++}
++
++.kds-status {
++  display: inline-flex;
++  align-items: center;
++  gap: 0.45rem;
++  padding: 0.35rem 0.75rem;
++  border-radius: 999px;
++  background: var(--kds-surface-2);
++  border: 1px solid var(--kds-border);
++  font-size: 0.85rem;
++  color: var(--kds-muted);
++}
++
++.kds-status__dot {
++  width: 0.55rem;
++  height: 0.55rem;
++  border-radius: 50%;
++  background: #6b7280;
++}
++
++.kds-status--ok .kds-status__dot { background: var(--kds-prontos); }
++.kds-status--carregando .kds-status__dot {
++  background: var(--kds-preparacao);
++  animation: kds-pulse 1s ease-in-out infinite;
++}
++.kds-status--erro .kds-status__dot { background: #ef4444; }
++
++@keyframes kds-pulse {
++  0%, 100% { opacity: 1; }
++  50% { opacity: 0.35; }
++}
++
++.kds-btn-atualizar {
++  border: 1px solid #3d4a5c;
++  background: #243044;
++  color: #fff;
++  border-radius: 10px;
++  padding: 0.55rem 1rem;
++  font-weight: 600;
++  font-size: 0.95rem;
++}
++
++.kds-btn-atualizar:hover {
++  background: #2d3c54;
++  color: #fff;
++}
++
++.kds-btn-atualizar:disabled {
++  opacity: 0.55;
++  cursor: wait;
++}
++
++.kds-aviso {
++  margin: 0.85rem 1.25rem 0;
++  padding: 0.75rem 1rem;
++  border-radius: 10px;
++  border: 1px solid #7f1d1d;
++  background: rgba(127, 29, 29, 0.28);
++  color: #fecaca;
++}
++
++.kds-colunas {
++  display: grid;
++  grid-template-columns: repeat(3, minmax(0, 1fr));
++  gap: 1rem;
++  padding: 1rem 1.25rem 0;
++}
++
++@media (max-width: 900px) {
++  .kds-colunas {
++    grid-template-columns: 1fr;
++  }
++}
++
++.kds-coluna {
++  min-height: 18rem;
++  background: rgba(22, 27, 34, 0.92);
++  border: 1px solid var(--kds-border);
++  border-radius: 14px;
++  overflow: hidden;
++  display: flex;
++  flex-direction: column;
++}
++
++.kds-coluna__cabeca {
++  display: flex;
++  align-items: center;
++  justify-content: space-between;
++  gap: 0.5rem;
++  padding: 0.85rem 1rem;
++  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
++  font-weight: 700;
++  text-transform: uppercase;
++  letter-spacing: 0.04em;
++  font-size: 0.95rem;
++}
++
++.kds-coluna--aguardando .kds-coluna__cabeca {
++  background: rgba(230, 180, 34, 0.16);
++  color: #f5d76e;
++  border-top: 3px solid var(--kds-aguardando);
++}
++
++.kds-coluna--preparacao .kds-coluna__cabeca {
++  background: rgba(59, 130, 246, 0.16);
++  color: #93c5fd;
++  border-top: 3px solid var(--kds-preparacao);
++}
++
++.kds-coluna--prontos .kds-coluna__cabeca {
++  background: rgba(34, 197, 94, 0.14);
++  color: #86efac;
++  border-top: 3px solid var(--kds-prontos);
++}
++
++.kds-contador {
++  min-width: 2rem;
++  height: 2rem;
++  padding: 0 0.55rem;
++  border-radius: 999px;
++  display: inline-flex;
++  align-items: center;
++  justify-content: center;
++  background: rgba(0, 0, 0, 0.35);
++  color: #fff;
++  font-size: 1rem;
++}
++
++.kds-coluna__lista {
++  padding: 0.85rem;
++  display: flex;
++  flex-direction: column;
++  gap: 0.85rem;
++  flex: 1;
++}
++
++.kds-vazio {
++  margin: 1.5rem 0.5rem;
++  text-align: center;
++  color: var(--kds-muted);
++  font-size: 1rem;
++}
++
++.kds-card {
++  background: var(--kds-surface-2);
++  border: 1px solid var(--kds-border);
++  border-radius: 12px;
++  padding: 0.9rem 1rem;
++  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.22);
++}
++
++.kds-coluna--aguardando .kds-card { border-left: 4px solid var(--kds-aguardando); }
++.kds-coluna--preparacao .kds-card { border-left: 4px solid var(--kds-preparacao); }
++.kds-coluna--prontos .kds-card { border-left: 4px solid var(--kds-prontos); }
++
++.kds-card__topo {
++  display: flex;
++  flex-wrap: wrap;
++  justify-content: space-between;
++  gap: 0.5rem;
++  margin-bottom: 0.65rem;
++}
++
++.kds-card__mesa {
++  font-size: 1.55rem;
++  font-weight: 800;
++  letter-spacing: 0.03em;
++  line-height: 1.1;
++}
++
++.kds-card__hora {
++  color: var(--kds-muted);
++  font-size: 0.95rem;
++  font-variant-numeric: tabular-nums;
++}
++
++.kds-card__meta {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 0.45rem;
++  margin-bottom: 0.75rem;
++}
++
++.kds-chip {
++  display: inline-flex;
++  align-items: center;
++  gap: 0.25rem;
++  padding: 0.18rem 0.55rem;
++  border-radius: 999px;
++  background: rgba(255, 255, 255, 0.06);
++  border: 1px solid rgba(255, 255, 255, 0.08);
++  color: var(--kds-muted);
++  font-size: 0.8rem;
++  font-weight: 600;
++}
++
++.kds-item {
++  padding: 0.55rem 0;
++  border-top: 1px solid rgba(255, 255, 255, 0.07);
++}
++
++.kds-item:first-of-type {
++  border-top: 0;
++  padding-top: 0;
++}
++
++.kds-item__linha {
++  display: flex;
++  gap: 0.65rem;
++  align-items: baseline;
++}
++
++.kds-item__qtd {
++  flex: 0 0 auto;
++  min-width: 2.4rem;
++  font-size: 1.15rem;
++  font-weight: 800;
++  color: #fff;
++}
++
++.kds-item__nome {
++  flex: 1;
++  font-size: 1.12rem;
++  font-weight: 650;
++  line-height: 1.25;
++}
++
++.kds-item__tipo {
++  flex: 0 0 auto;
++  font-size: 0.72rem;
++  font-weight: 700;
++  text-transform: uppercase;
++  letter-spacing: 0.04em;
++  color: var(--kds-muted);
++}
++
++.kds-item__obs {
++  margin: 0.35rem 0 0 3.05rem;
++  color: #fbbf24;
++  font-size: 0.92rem;
++  font-style: italic;
++}
++
++.kds-carregando-global {
++  padding: 3rem 1rem;
++  text-align: center;
++  color: var(--kds-muted);
++  font-size: 1.1rem;
++}
++
++/* S07-2 — Seleção de unidade operacional */
++.kds-selecao__corpo {
++  max-width: 36rem;
++  margin: 1.5rem auto 0;
++  padding: 0 1.25rem 1.5rem;
++}
++
++.kds-selecao__intro {
++  margin: 0 0 1rem;
++  color: var(--kds-muted);
++  font-size: 1rem;
++  line-height: 1.45;
++}
++
++.kds-selecao__msg {
++  padding: 1.25rem 1rem;
++  border: 1px dashed var(--kds-border);
++  border-radius: 8px;
++  background: var(--kds-surface);
++  color: var(--kds-muted);
++  text-align: center;
++  line-height: 1.45;
++}
++
++.kds-selecao__lista {
++  display: flex;
++  flex-direction: column;
++  gap: 0.65rem;
++}
++
++.kds-selecao__opcao {
++  display: flex;
++  align-items: center;
++  gap: 0.75rem;
++  padding: 0.9rem 1rem;
++  border: 1px solid var(--kds-border);
++  border-radius: 8px;
++  background: var(--kds-surface);
++  cursor: pointer;
++  transition: border-color 0.15s ease, background 0.15s ease;
++}
++
++.kds-selecao__opcao:hover {
++  border-color: #4b5563;
++  background: var(--kds-surface-2);
++}
++
++.kds-selecao__opcao:has(input:checked) {
++  border-color: var(--kds-aguardando);
++  background: rgba(230, 180, 34, 0.08);
++}
++
++.kds-selecao__opcao input {
++  width: 1.1rem;
++  height: 1.1rem;
++  accent-color: var(--kds-aguardando);
++}
++
++.kds-selecao__id {
++  color: var(--kds-muted);
++  font-size: 0.85rem;
++  margin-left: 0.35rem;
++}
++
++.kds-selecao__acoes {
++  display: flex;
++  flex-wrap: wrap;
++  gap: 0.75rem;
++  margin-top: 1.25rem;
++}
++
++.kds-btn-secundario {
++  appearance: none;
++  border: 1px solid var(--kds-border);
++  background: transparent;
++  color: var(--kds-text);
++  border-radius: 6px;
++  padding: 0.55rem 1rem;
++  font-size: 0.95rem;
++  font-weight: 600;
++  cursor: pointer;
++}
++
++.kds-btn-secundario:hover:not(:disabled) {
++  border-color: #6b7280;
++  background: rgba(255, 255, 255, 0.04);
++}
++
++.kds-btn-secundario:disabled,
++.kds-btn-atualizar:disabled {
++  opacity: 0.45;
++  cursor: not-allowed;
++}
+diff --git a/tests/cozinha/sprint07-s07-2-sessao-unidade-kds.test.js b/tests/cozinha/sprint07-s07-2-sessao-unidade-kds.test.js
+new file mode 100644
+index 0000000..680c0db
+--- /dev/null
++++ b/tests/cozinha/sprint07-s07-2-sessao-unidade-kds.test.js
+@@ -0,0 +1,879 @@
++/**
++ * Sprint 07 · S07-2 — Seleção segura de unidade operacional no KDS.
++ * Banco temporário. Sem banco oficial. Sem impressão / SEFAZ / pagamentos.
++ *
++ *   set CDS_BLOQUEAR_BANCO_OFICIAL=1
++ *   set CDS_TEST_ISOLATION=1
++ *   set CDS_FORCAR_LOCAL=1
++ *   node --test --test-concurrency=1 --test-force-exit tests/cozinha/sprint07-s07-2-sessao-unidade-kds.test.js
++ */
++'use strict';
++
++const fs = require('fs');
++const os = require('os');
++const path = require('path');
++const http = require('http');
++const express = require('express');
++const jwt = require('jsonwebtoken');
++const bcrypt = require('bcryptjs');
++const { describe, it, before, after, beforeEach } = require('node:test');
++const assert = require('node:assert/strict');
++const sqlite3 = require('sqlite3').verbose();
++
++const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-cozinha-s07-2-'));
++process.env.DB_DIR = dbDir;
++process.env.CDS_TEST_ISOLATION = '1';
++process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
++process.env.CDS_FORCAR_LOCAL = '1';
++process.env.JWT_SECRET = process.env.JWT_SECRET || 'cds-test-jwt-s07-2-sessao';
++delete process.env.CDS_ALLOW_OFFICIAL_DB;
++delete process.env.CDS_COZINHA_IMPRESSAO_FISICA_AUTORIZADA;
++
++const {
++  garantirSchemaCozinha,
++  marcarCozinhaOperacional,
++  isCozinhaOperacional
++} = require('../../backend/utils/cozinhaSchema');
++const { garantirTabelaOperadorUnidades } = require('../../backend/services/cozinha/cozinhaAuthUnidade');
++const { garantirSchemaUsuarioEmpresasAsync } = require('../../backend/services/empresas/usuarioEmpresasSchema');
++const { garantirSchemaEmpresasAsync } = require('../../backend/services/empresas/empresasSchema');
++const CozinhaSessaoUnidade = require('../../backend/services/cozinha/CozinhaSessaoUnidadeService');
++const CozinhaDespacho = require('../../backend/services/cozinha/CozinhaDespachoService');
++const { verificarToken } = require('../../backend/middleware/auth');
++const { exigirRecurso } = require('../../backend/middleware/validarRecursoImplantacao');
++const configService = require('../../backend/services/configuracaoService');
++const kds = require('../../frontend/erp/js/cozinha-kds.js');
++
++function run(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.run(sql, params, function cb(err) {
++      if (err) reject(err);
++      else resolve(this);
++    });
++  });
++}
++function get(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
++  });
++}
++function openMem() {
++  return new Promise((resolve, reject) => {
++    const db = new sqlite3.Database(':memory:', (err) => {
++      if (err) return reject(err);
++      db.serialize(() => {
++        db.run('PRAGMA foreign_keys = ON');
++        db.run('PRAGMA busy_timeout = 10000', (e) => (e ? reject(e) : resolve(db)));
++      });
++    });
++  });
++}
++function close(db) {
++  return new Promise((resolve) => db.close(() => resolve()));
++}
++
++async function prepararBase(db) {
++  await run(db, `
++    CREATE TABLE IF NOT EXISTS usuarios (
++      id INTEGER PRIMARY KEY AUTOINCREMENT,
++      username TEXT UNIQUE NOT NULL,
++      password_hash TEXT NOT NULL,
++      role TEXT DEFAULT 'operador',
++      perfil TEXT DEFAULT 'USUARIO',
++      ativo INTEGER DEFAULT 1,
++      nome TEXT
++    )
++  `);
++  await garantirSchemaEmpresasAsync(db);
++  await garantirSchemaUsuarioEmpresasAsync(db);
++  await garantirSchemaCozinha(db);
++  await garantirTabelaOperadorUnidades(db);
++
++  const emp1 = await run(db, `
++    INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
++    VALUES ('11111111000111', 'Empresa 1', 'E1', 1)
++  `);
++  const emp2 = await run(db, `
++    INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
++    VALUES ('22222222000122', 'Empresa 2', 'E2', 1)
++  `);
++
++  const op = await run(db, `
++    INSERT INTO usuarios (username, password_hash, role, perfil, ativo, nome)
++    VALUES ('op_s07_2', 'hash', 'operador', 'USUARIO', 1, 'Operador')
++  `);
++  const admin = await run(db, `
++    INSERT INTO usuarios (username, password_hash, role, perfil, ativo, nome)
++    VALUES ('admin_s07_2', 'hash', 'admin', 'ADMIN', 1, 'Admin')
++  `);
++  const opSemVinculo = await run(db, `
++    INSERT INTO usuarios (username, password_hash, role, perfil, ativo, nome)
++    VALUES ('op_sem_vinculo', 'hash', 'operador', 'USUARIO', 1, 'Sem vínculo')
++  `);
++
++  await run(db, `
++    INSERT INTO usuario_empresas (usuario_id, empresa_id, ativo) VALUES (?, ?, 1)
++  `, [op.lastID, emp1.lastID]);
++  await run(db, `
++    INSERT INTO usuario_empresas (usuario_id, empresa_id, ativo) VALUES (?, ?, 1)
++  `, [admin.lastID, emp1.lastID]);
++  await run(db, `
++    INSERT INTO usuario_empresas (usuario_id, empresa_id, ativo) VALUES (?, ?, 1)
++  `, [opSemVinculo.lastID, emp1.lastID]);
++
++  const unA = await run(db, `
++    INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'UA', 1)
++  `, [emp1.lastID]);
++  const unB = await run(db, `
++    INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'UB', 1)
++  `, [emp1.lastID]);
++  const unOutraEmp = await run(db, `
++    INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'UX', 1)
++  `, [emp2.lastID]);
++  const unInativa = await run(db, `
++    INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'UI', 0)
++  `, [emp1.lastID]);
++
++  await run(db, `
++    INSERT INTO cozinha_operador_unidades (empresa_id, operador_id, unidade_id, ativo)
++    VALUES (?, ?, ?, 1)
++  `, [emp1.lastID, op.lastID, unA.lastID]);
++
++  return {
++    emp1: emp1.lastID,
++    emp2: emp2.lastID,
++    opId: op.lastID,
++    adminId: admin.lastID,
++    opSemVinculoId: opSemVinculo.lastID,
++    unA: unA.lastID,
++    unB: unB.lastID,
++    unOutraEmp: unOutraEmp.lastID,
++    unInativa: unInativa.lastID
++  };
++}
++
++function userOp(ctx) {
++  return { id: ctx.opId, username: 'op_s07_2', role: 'operador', perfil: 'USUARIO', permissoes: [] };
++}
++function userAdmin(ctx) {
++  return { id: ctx.adminId, username: 'admin_s07_2', role: 'admin', perfil: 'ADMIN', permissoes: [] };
++}
++
++describe('S07-2 — serviço listagem/seleção (memória)', () => {
++  beforeEach(() => marcarCozinhaOperacional(false));
++
++  it('B) listagem retorna somente unidades ativas autorizadas do operador', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    const out = await CozinhaSessaoUnidade.listarUnidadesDisponiveis({
++      user: userOp(ctx),
++      empresaId: ctx.emp1
++    }, { db });
++    assert.equal(out.success, true);
++    assert.deepEqual(out.unidades.map((u) => u.codigo).sort(), ['UA']);
++    assert.ok(!out.unidades.some((u) => u.id === ctx.unB));
++    assert.ok(!out.unidades.some((u) => u.id === ctx.unOutraEmp));
++    assert.ok(!out.unidades.some((u) => u.id === ctx.unInativa));
++    await close(db);
++  });
++
++  it('C) administrador operacional recebe unidades ativas da empresa', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    const out = await CozinhaSessaoUnidade.listarUnidadesDisponiveis({
++      user: userAdmin(ctx),
++      empresaId: ctx.emp1
++    }, { db });
++    const codigos = out.unidades.map((u) => u.codigo).sort();
++    assert.deepEqual(codigos, ['UA', 'UB']);
++    assert.ok(!out.unidades.some((u) => u.id === ctx.unOutraEmp));
++    assert.ok(!out.unidades.some((u) => u.id === ctx.unInativa));
++    await close(db);
++  });
++
++  it('D) operador comum só vê vínculo ativo', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    const out = await CozinhaSessaoUnidade.listarUnidadesDisponiveis({
++      user: userOp(ctx),
++      empresaId: ctx.emp1
++    }, { db });
++    assert.equal(out.unidades.length, 1);
++    assert.equal(out.unidades[0].id, ctx.unA);
++    await close(db);
++  });
++
++  it('E) unidade de outra empresa não aparece na listagem', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    const out = await CozinhaSessaoUnidade.listarUnidadesDisponiveis({
++      user: userAdmin(ctx),
++      empresaId: ctx.emp1
++    }, { db });
++    assert.ok(!out.unidades.some((u) => Number(u.id) === ctx.unOutraEmp));
++    await close(db);
++  });
++
++  it('F) selecionar unidade de outra empresa é bloqueado', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    await assert.rejects(
++      () => CozinhaSessaoUnidade.selecionarUnidadeSessao({
++        user: userOp(ctx),
++        empresaId: ctx.emp1,
++        unidadeCozinhaIdRaw: ctx.unOutraEmp,
++        tokenAtual: jwt.sign(userOp(ctx), process.env.JWT_SECRET, { expiresIn: '1h' })
++      }, { db }),
++      (err) => err.codigo === 'UNIDADE_EMPRESA_ISOLAMENTO'
++        || err.codigo === 'UNIDADE_NAO_AUTORIZADA'
++        || err.codigo === 'EMPRESA_NAO_AUTORIZADA'
++    );
++    await close(db);
++  });
++
++  it('G) unidade inexistente é bloqueada', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    await assert.rejects(
++      () => CozinhaSessaoUnidade.selecionarUnidadeSessao({
++        user: userOp(ctx),
++        empresaId: ctx.emp1,
++        unidadeCozinhaIdRaw: 999999,
++        tokenAtual: jwt.sign(userOp(ctx), process.env.JWT_SECRET, { expiresIn: '1h' })
++      }, { db }),
++      (err) => err.codigo === 'UNIDADE_INEXISTENTE'
++    );
++    await close(db);
++  });
++
++  it('H) unidade inativa é bloqueada', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    await assert.rejects(
++      () => CozinhaSessaoUnidade.selecionarUnidadeSessao({
++        user: userAdmin(ctx),
++        empresaId: ctx.emp1,
++        unidadeCozinhaIdRaw: ctx.unInativa,
++        tokenAtual: jwt.sign(userAdmin(ctx), process.env.JWT_SECRET, { expiresIn: '1h' })
++      }, { db }),
++      (err) => err.codigo === 'UNIDADE_INATIVA'
++    );
++    await close(db);
++  });
++
++  it('I) operador sem vínculo ativo é bloqueado', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    await assert.rejects(
++      () => CozinhaSessaoUnidade.selecionarUnidadeSessao({
++        user: {
++          id: ctx.opSemVinculoId,
++          username: 'op_sem_vinculo',
++          role: 'operador',
++          perfil: 'USUARIO',
++          permissoes: []
++        },
++        empresaId: ctx.emp1,
++        unidadeCozinhaIdRaw: ctx.unA,
++        tokenAtual: jwt.sign({ id: ctx.opSemVinculoId, role: 'operador' }, process.env.JWT_SECRET, { expiresIn: '1h' })
++      }, { db }),
++      (err) => err.codigo === 'UNIDADE_NAO_AUTORIZADA'
++    );
++    await close(db);
++  });
++
++  it('J+K) seleção válida emite JWT com unidade; token anterior permanece sem claim', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    const tokenAnterior = jwt.sign(
++      { ...userOp(ctx), permissoes: ['vendas'] },
++      process.env.JWT_SECRET,
++      { expiresIn: '2h' }
++    );
++    const decodedAntes = jwt.verify(tokenAnterior, process.env.JWT_SECRET);
++    assert.equal(decodedAntes.unidade_cozinha_id, undefined);
++
++    const out = await CozinhaSessaoUnidade.selecionarUnidadeSessao({
++      user: { ...userOp(ctx), permissoes: ['vendas'] },
++      empresaId: ctx.emp1,
++      unidadeCozinhaIdRaw: ctx.unA,
++      tokenAtual: tokenAnterior
++    }, { db });
++
++    assert.equal(out.success, true);
++    assert.equal(out.unidade_cozinha_id, ctx.unA);
++    const novo = jwt.verify(out.token, process.env.JWT_SECRET);
++    assert.equal(novo.unidade_cozinha_id, ctx.unA);
++    assert.equal(novo.id, ctx.opId);
++    assert.equal(novo.exp, decodedAntes.exp);
++
++    const aindaAntigo = jwt.verify(tokenAnterior, process.env.JWT_SECRET);
++    assert.equal(aindaAntigo.unidade_cozinha_id, undefined);
++    await close(db);
++  });
++
++  it('ausência de unidades / vínculos retorna lista vazia controlada', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    const out = await CozinhaSessaoUnidade.listarUnidadesDisponiveis({
++      user: {
++        id: ctx.opSemVinculoId,
++        username: 'op_sem_vinculo',
++        role: 'operador',
++        perfil: 'USUARIO'
++      },
++      empresaId: ctx.emp1
++    }, { db });
++    assert.equal(out.success, true);
++    assert.equal(out.unidades.length, 0);
++    assert.equal(out.codigo, 'SEM_UNIDADES_DISPONIVEIS');
++    assert.match(out.mensagem || '', /Nenhuma unidade/i);
++    await close(db);
++  });
++});
++
++describe('S07-2 — UI seleção KDS', () => {
++  it('sem unidade no JWT abre seleção e não auto-escolhe', async () => {
++    const chamadas = [];
++    const control = kds.criarControlador({
++      empresaId: 1,
++      empresaRotulo: 'E1',
++      lerUnidadeJwt: () => null,
++      fetchJson: async (method, path) => {
++        chamadas.push({ method, path });
++        return {
++          success: true,
++          unidades: [
++            { id: 10, codigo: 'UA' },
++            { id: 11, codigo: 'UB' }
++          ]
++        };
++      },
++      agendar: () => null,
++      cancelar: () => {}
++    });
++    await control.iniciar();
++    assert.equal(control.estado.modo, 'selecao');
++    assert.equal(control.estado.unidadeSelecionadaId, null);
++    assert.equal(chamadas.length, 1);
++    assert.equal(chamadas[0].path, '/cozinha/unidades-disponiveis');
++    const html = control.html();
++    assert.match(html, /Selecione a unidade/);
++    assert.match(html, /Unidade UA/);
++    assert.match(html, /data-acao="confirmar-unidade"/);
++    assert.match(html, /disabled/);
++  });
++
++  it('com unidade no JWT abre painel normalmente', async () => {
++    const chamadas = [];
++    const control = kds.criarControlador({
++      empresaId: 1,
++      lerUnidadeJwt: () => 10,
++      fetchJson: async (method, path) => {
++        chamadas.push({ method, path });
++        return { success: true, empresa_id: 1, unidade_id: 10, rodadas: [] };
++      },
++      agendar: () => 1,
++      cancelar: () => {}
++    });
++    await control.iniciar();
++    assert.equal(control.estado.modo, 'painel');
++    assert.equal(chamadas[0].path.startsWith('/cozinha/preparacao/painel'), true);
++  });
++
++  it('confirmação atualiza sessão e carrega painel', async () => {
++    const sessoes = [];
++    const chamadas = [];
++    const fakeToken = jwt.sign(
++      { id: 1, unidade_cozinha_id: 10 },
++      process.env.JWT_SECRET,
++      { expiresIn: '1h' }
++    );
++    const control = kds.criarControlador({
++      empresaId: 1,
++      lerUnidadeJwt: () => null,
++      aoAtualizarSessao: (data) => sessoes.push(data),
++      fetchJson: async (method, path, corpo) => {
++        chamadas.push({ method, path, corpo });
++        if (path === '/cozinha/unidades-disponiveis') {
++          return { success: true, unidades: [{ id: 10, codigo: 'UA' }] };
++        }
++        if (path === '/cozinha/sessao/unidade') {
++          return {
++            success: true,
++            token: fakeToken,
++            unidade_cozinha_id: 10,
++            user: { id: 1, unidade_cozinha_id: 10 }
++          };
++        }
++        return { success: true, empresa_id: 1, unidade_id: 10, rodadas: [] };
++      },
++      agendar: () => 1,
++      cancelar: () => {}
++    });
++    await control.iniciar();
++    control.definirUnidadeSelecionada(10);
++    const r = await control.confirmarUnidade();
++    assert.equal(r.ok, true);
++    assert.equal(sessoes.length, 1);
++    assert.equal(control.estado.modo, 'painel');
++    assert.ok(chamadas.some((c) => c.path === '/cozinha/sessao/unidade' && c.method === 'POST'));
++    assert.ok(chamadas.some((c) => String(c.path).includes('/cozinha/preparacao/painel')));
++  });
++
++  it('falha de lista não dispara chamada repetitiva automática', async () => {
++    let n = 0;
++    const control = kds.criarControlador({
++      empresaId: 1,
++      lerUnidadeJwt: () => null,
++      fetchJson: async () => {
++        n += 1;
++        const err = new Error('Rede indisponível');
++        err.codigo = 'REDE';
++        throw err;
++      },
++      agendar: () => null,
++      cancelar: () => {}
++    });
++    await control.iniciar();
++    assert.equal(n, 1);
++    assert.equal(control.estado.selecaoFalhaLista, true);
++    const r2 = await control.carregarUnidadesDisponiveis();
++    assert.equal(r2.ignorada, true);
++    assert.equal(n, 1);
++    await control.carregarUnidadesDisponiveis({ forcar: true });
++    assert.equal(n, 2);
++  });
++
++  it('lerUnidadeCozinhaDoToken lê claim do JWT', () => {
++    const token = jwt.sign({ id: 1, unidade_cozinha_id: 42 }, process.env.JWT_SECRET);
++    assert.equal(kds.lerUnidadeCozinhaDoToken(token), 42);
++    assert.equal(kds.lerUnidadeCozinhaDoToken(jwt.sign({ id: 1 }, process.env.JWT_SECRET)), null);
++  });
++});
++
++describe('S07-2 — HTTP (listagem, seleção, painel, login)', () => {
++  let server;
++  let baseUrl;
++  let recursoOriginal;
++  let dbHttp;
++  let empresaId;
++  let empresaOutraId;
++  let unidadeId;
++  let unidadeB;
++  let unidadeOutraEmp;
++  let unidadeInativa;
++  let operadorId;
++  let adminId;
++  let opSemVinculoId;
++  let passwordPlain;
++  let tokenSemUnidade;
++  let tokenAdminSemUnidade;
++
++  function requestJson(method, urlPath, { token, headers = {}, body, empresaHeader } = {}) {
++    const u = new URL(urlPath, baseUrl);
++    const emp = empresaHeader != null ? empresaHeader : empresaId;
++    const payload = body != null ? JSON.stringify(body) : null;
++    return new Promise((resolve, reject) => {
++      const req = http.request({
++        hostname: u.hostname,
++        port: u.port,
++        path: u.pathname + u.search,
++        method,
++        headers: {
++          'Content-Type': 'application/json',
++          ...headers,
++          ...(emp != null ? { 'X-Empresa-Id': String(emp) } : {}),
++          ...(token ? { Authorization: `Bearer ${token}` } : {}),
++          ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {})
++        }
++      }, (res) => {
++        const chunks = [];
++        res.on('data', (c) => chunks.push(c));
++        res.on('end', () => {
++          const raw = Buffer.concat(chunks).toString('utf8');
++          let json = null;
++          try { json = raw ? JSON.parse(raw) : null; } catch (_e) { json = { raw }; }
++          resolve({ status: res.statusCode, body: json });
++        });
++      });
++      req.on('error', reject);
++      if (payload) req.write(payload);
++      req.end();
++    });
++  }
++
++  before(async () => {
++    dbHttp = require('../../backend/database');
++    await new Promise((resolve, reject) => {
++      const timer = setTimeout(() => reject(new Error('DB timeout')), 60000);
++      dbHttp.whenReady((err) => {
++        clearTimeout(timer);
++        if (err) reject(err);
++        else resolve();
++      });
++    });
++    for (let i = 0; i < 80; i += 1) {
++      const row = await get(dbHttp, `
++        SELECT name FROM sqlite_master WHERE type='table' AND name='cozinha_comandas'
++      `);
++      if (row && row.name === 'cozinha_comandas') break;
++      await new Promise((r) => setTimeout(r, 250));
++    }
++    await garantirSchemaCozinha(dbHttp);
++    await garantirTabelaOperadorUnidades(dbHttp);
++    marcarCozinhaOperacional(true);
++    assert.equal(isCozinhaOperacional(), true);
++
++    recursoOriginal = configService.recursoHabilitado;
++    configService.recursoHabilitado = (nome) => {
++      if (nome === 'pedidos') return true;
++      return recursoOriginal.call(configService, nome);
++    };
++
++    passwordPlain = 'senha-s07-2';
++    const hash = await bcrypt.hash(passwordPlain, 4);
++
++    const op = await run(dbHttp, `
++      INSERT INTO usuarios (username, password_hash, role, perfil, ativo, nome)
++      VALUES ('op_s07_2_http', ?, 'operador', 'USUARIO', 1, 'Op HTTP')
++    `, [hash]);
++    operadorId = op.lastID;
++    const adm = await run(dbHttp, `
++      INSERT INTO usuarios (username, password_hash, role, perfil, ativo, nome)
++      VALUES ('admin_s07_2_http', ?, 'admin', 'ADMIN', 1, 'Admin HTTP')
++    `, [hash]);
++    adminId = adm.lastID;
++    const opSv = await run(dbHttp, `
++      INSERT INTO usuarios (username, password_hash, role, perfil, ativo, nome)
++      VALUES ('op_s07_2_sv', ?, 'operador', 'USUARIO', 1, 'Sem vínculo')
++    `, [hash]);
++    opSemVinculoId = opSv.lastID;
++
++    const emp = await run(dbHttp, `
++      INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
++      VALUES ('55667788000199', 'Empresa S07-2', 'S07-2', 1)
++    `);
++    empresaId = emp.lastID;
++    const emp2 = await run(dbHttp, `
++      INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
++      VALUES ('55667788000270', 'Empresa S07-2 B', 'S07-2B', 1)
++    `);
++    empresaOutraId = emp2.lastID;
++
++    await run(dbHttp, `
++      INSERT INTO usuario_empresas (usuario_id, empresa_id, ativo) VALUES (?, ?, 1)
++    `, [operadorId, empresaId]);
++    await run(dbHttp, `
++      INSERT INTO usuario_empresas (usuario_id, empresa_id, ativo) VALUES (?, ?, 1)
++    `, [adminId, empresaId]);
++    await run(dbHttp, `
++      INSERT INTO usuario_empresas (usuario_id, empresa_id, ativo) VALUES (?, ?, 1)
++    `, [opSemVinculoId, empresaId]);
++
++    const un = await run(dbHttp, `
++      INSERT INTO cozinha_unidades (empresa_id, codigo, sequencia_atual, ativo)
++      VALUES (?, 'S072-A', 0, 1)
++    `, [empresaId]);
++    unidadeId = un.lastID;
++    const unB = await run(dbHttp, `
++      INSERT INTO cozinha_unidades (empresa_id, codigo, sequencia_atual, ativo)
++      VALUES (?, 'S072-B', 0, 1)
++    `, [empresaId]);
++    unidadeB = unB.lastID;
++    const unX = await run(dbHttp, `
++      INSERT INTO cozinha_unidades (empresa_id, codigo, sequencia_atual, ativo)
++      VALUES (?, 'S072-X', 0, 1)
++    `, [empresaOutraId]);
++    unidadeOutraEmp = unX.lastID;
++    const unI = await run(dbHttp, `
++      INSERT INTO cozinha_unidades (empresa_id, codigo, sequencia_atual, ativo)
++      VALUES (?, 'S072-I', 0, 0)
++    `, [empresaId]);
++    unidadeInativa = unI.lastID;
++
++    await run(dbHttp, `
++      INSERT INTO cozinha_operador_unidades (empresa_id, operador_id, unidade_id, ativo)
++      VALUES (?, ?, ?, 1)
++    `, [empresaId, operadorId, unidadeId]);
++
++    // Pedido mínimo para painel contextualizado.
++    await run(dbHttp, `
++      CREATE TABLE IF NOT EXISTS categorias (id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL)
++    `);
++    await run(dbHttp, `
++      CREATE TABLE IF NOT EXISTS produtos (
++        id INTEGER PRIMARY KEY AUTOINCREMENT,
++        nome TEXT NOT NULL,
++        tipo_operacional TEXT DEFAULT 'COMERCIAL',
++        comercializavel INTEGER DEFAULT 0,
++        categoria_id INTEGER,
++        utiliza_ficha_tecnica INTEGER DEFAULT 0,
++        permite_personalizacao_ingredientes INTEGER DEFAULT 0,
++        preco_venda REAL DEFAULT 0
++      )
++    `);
++    await run(dbHttp, `
++      CREATE TABLE IF NOT EXISTS ficha_tecnica (
++        id INTEGER PRIMARY KEY AUTOINCREMENT,
++        produto_id INTEGER NOT NULL,
++        ativo INTEGER DEFAULT 1
++      )
++    `);
++    await run(dbHttp, `
++      CREATE TABLE IF NOT EXISTS mesas (
++        id INTEGER PRIMARY KEY AUTOINCREMENT,
++        empresa_id INTEGER NOT NULL,
++        numero INTEGER NOT NULL,
++        ativo INTEGER NOT NULL DEFAULT 1
++      )
++    `);
++    await run(dbHttp, `
++      CREATE TABLE IF NOT EXISTS mesa_atendimentos (
++        id INTEGER PRIMARY KEY AUTOINCREMENT,
++        empresa_id INTEGER NOT NULL,
++        mesa_id INTEGER NOT NULL,
++        estado TEXT NOT NULL,
++        operador_abertura_id INTEGER NOT NULL DEFAULT 1,
++        aberto_em TEXT DEFAULT CURRENT_TIMESTAMP
++      )
++    `);
++    await run(dbHttp, `
++      CREATE TABLE IF NOT EXISTS pedidos (
++        id INTEGER PRIMARY KEY AUTOINCREMENT,
++        codigo TEXT,
++        status TEXT,
++        empresa_id INTEGER,
++        mesa_id INTEGER,
++        mesa_atendimento_id INTEGER,
++        total REAL,
++        data_pedido TEXT
++      )
++    `);
++    await run(dbHttp, `
++      CREATE TABLE IF NOT EXISTS pedidos_itens (
++        id INTEGER PRIMARY KEY AUTOINCREMENT,
++        pedido_id INTEGER,
++        produto_id INTEGER,
++        quantidade REAL,
++        preco_unitario REAL,
++        subtotal REAL,
++        classificacao_operacional_snapshot TEXT,
++        produto_nome_snapshot TEXT,
++        observacao TEXT
++      )
++    `);
++
++    const mesa = await run(dbHttp, `
++      INSERT INTO mesas (empresa_id, numero, ativo) VALUES (?, 7, 1)
++    `, [empresaId]);
++    const at = await run(dbHttp, `
++      INSERT INTO mesa_atendimentos (empresa_id, mesa_id, estado, operador_abertura_id)
++      VALUES (?, ?, 'OCUPADA', ?)
++    `, [empresaId, mesa.lastID, operadorId]);
++    const cat = await run(dbHttp, `INSERT INTO categorias (nome) VALUES ('S072')`);
++    const prod = await run(dbHttp, `
++      INSERT INTO produtos (
++        nome, tipo_operacional, comercializavel, categoria_id, utiliza_ficha_tecnica, preco_venda
++      ) VALUES ('Pastel S072', 'COMERCIAL', 0, ?, 1, 0)
++    `, [cat.lastID]);
++    await run(dbHttp, `INSERT INTO ficha_tecnica (produto_id, ativo) VALUES (?, 1)`, [prod.lastID]);
++    const ped = await run(dbHttp, `
++      INSERT INTO pedidos (
++        codigo, status, empresa_id, mesa_id, mesa_atendimento_id, total, data_pedido
++      ) VALUES ('PS072', 'PEDIDO', ?, ?, ?, 10, date('now'))
++    `, [empresaId, mesa.lastID, at.lastID]);
++    const pit = await run(dbHttp, `
++      INSERT INTO pedidos_itens (
++        pedido_id, produto_id, quantidade, preco_unitario, subtotal,
++        classificacao_operacional_snapshot, produto_nome_snapshot
++      ) VALUES (?, ?, 1, 9.99, 9.99, 'PASTEL', 'Pastel S072')
++    `, [ped.lastID, prod.lastID]);
++    const cmd = await run(dbHttp, `
++      INSERT INTO cozinha_comandas (
++        empresa_id, atendimento_id, numero_comanda, pedido_id, operador_lancamento_id
++      ) VALUES (?, ?, 1, ?, ?)
++    `, [empresaId, at.lastID, ped.lastID, operadorId]);
++    await CozinhaDespacho.despacharLote({
++      empresaId,
++      operadorId,
++      idempotencyKey: 'http-s07-2-despacho',
++      unidade_id: unidadeId,
++      mesa_id: mesa.lastID,
++      atendimento_id: at.lastID,
++      itens: [{
++        pedido_id: ped.lastID,
++        pedido_item_id: pit.lastID,
++        comanda_id: cmd.lastID,
++        qty_solicitada: 1
++      }]
++    }, { db: dbHttp });
++
++    tokenSemUnidade = jwt.sign(
++      { id: operadorId, username: 'op_s07_2_http', role: 'operador', perfil: 'USUARIO', permissoes: [] },
++      process.env.JWT_SECRET,
++      { expiresIn: '2h' }
++    );
++    tokenAdminSemUnidade = jwt.sign(
++      { id: adminId, username: 'admin_s07_2_http', role: 'admin', perfil: 'ADMIN', permissoes: [] },
++      process.env.JWT_SECRET,
++      { expiresIn: '2h' }
++    );
++
++    const authRouter = require('../../backend/rotas/auth').router;
++    const cozinhaRoutes = require('../../backend/rotas/cozinha');
++    const app = express();
++    app.use(express.json());
++    app.use('/api/auth', authRouter);
++    app.use('/api/cozinha', verificarToken, exigirRecurso('pedidos'), cozinhaRoutes);
++    server = await new Promise((resolve, reject) => {
++      const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
++      instance.once('error', reject);
++    });
++    baseUrl = `http://127.0.0.1:${server.address().port}`;
++  });
++
++  after(async () => {
++    if (recursoOriginal) configService.recursoHabilitado = recursoOriginal;
++    if (server) await new Promise((r) => server.close(() => r()));
++  });
++
++  it('A) login normal sem unidade continua funcionando', async () => {
++    const r = await requestJson('POST', '/api/auth/login', {
++      body: {
++        username: 'op_s07_2_http',
++        password: passwordPlain,
++        empresa_id: empresaId
++      },
++      empresaHeader: null
++    });
++    assert.equal(r.status, 200, JSON.stringify(r.body));
++    assert.ok(r.body.token);
++    const decoded = jwt.verify(r.body.token, process.env.JWT_SECRET);
++    assert.equal(decoded.unidade_cozinha_id, null);
++    assert.equal(decoded.id, operadorId);
++  });
++
++  it('HTTP B/D) listagem operador: só vínculo ativo', async () => {
++    const r = await requestJson('GET', '/api/cozinha/unidades-disponiveis', {
++      token: tokenSemUnidade
++    });
++    assert.equal(r.status, 200, JSON.stringify(r.body));
++    assert.equal(r.body.success, true);
++    assert.equal(r.body.unidades.length, 1);
++    assert.equal(r.body.unidades[0].id, unidadeId);
++    assert.ok(!r.body.unidades.some((u) => u.id === unidadeB));
++    assert.ok(!r.body.unidades.some((u) => u.id === unidadeOutraEmp));
++  });
++
++  it('HTTP C) listagem admin: unidades ativas da empresa', async () => {
++    const r = await requestJson('GET', '/api/cozinha/unidades-disponiveis', {
++      token: tokenAdminSemUnidade
++    });
++    assert.equal(r.status, 200);
++    const ids = r.body.unidades.map((u) => u.id).sort((a, b) => a - b);
++    assert.deepEqual(ids, [unidadeId, unidadeB].sort((a, b) => a - b));
++    assert.ok(!ids.includes(unidadeInativa));
++    assert.ok(!ids.includes(unidadeOutraEmp));
++  });
++
++  it('HTTP F) seleção de outra empresa bloqueada', async () => {
++    const r = await requestJson('POST', '/api/cozinha/sessao/unidade', {
++      token: tokenSemUnidade,
++      body: { unidade_cozinha_id: unidadeOutraEmp }
++    });
++    assert.ok(r.status >= 400);
++    assert.ok(r.body.codigo);
++    assert.ok(!r.body.token);
++  });
++
++  it('HTTP G) unidade inexistente bloqueada', async () => {
++    const r = await requestJson('POST', '/api/cozinha/sessao/unidade', {
++      token: tokenSemUnidade,
++      body: { unidade_cozinha_id: 999999 }
++    });
++    assert.equal(r.status, 403);
++    assert.equal(r.body.codigo, 'UNIDADE_INEXISTENTE');
++  });
++
++  it('HTTP H) unidade inativa bloqueada', async () => {
++    const r = await requestJson('POST', '/api/cozinha/sessao/unidade', {
++      token: tokenAdminSemUnidade,
++      body: { unidade_cozinha_id: unidadeInativa }
++    });
++    assert.equal(r.status, 403);
++    assert.equal(r.body.codigo, 'UNIDADE_INATIVA');
++  });
++
++  it('HTTP I) operador sem vínculo bloqueado', async () => {
++    const token = jwt.sign(
++      { id: opSemVinculoId, role: 'operador', perfil: 'USUARIO' },
++      process.env.JWT_SECRET,
++      { expiresIn: '1h' }
++    );
++    const r = await requestJson('POST', '/api/cozinha/sessao/unidade', {
++      token,
++      body: { unidade_cozinha_id: unidadeId }
++    });
++    assert.equal(r.status, 403);
++    assert.equal(r.body.codigo, 'UNIDADE_NAO_AUTORIZADA');
++  });
++
++  it('HTTP J/L) seleção válida → JWT → painel OK', async () => {
++    const sel = await requestJson('POST', '/api/cozinha/sessao/unidade', {
++      token: tokenSemUnidade,
++      body: { unidade_cozinha_id: unidadeId }
++    });
++    assert.equal(sel.status, 200, JSON.stringify(sel.body));
++    assert.ok(sel.body.token);
++    assert.equal(sel.body.unidade_cozinha_id, unidadeId);
++    const decoded = jwt.verify(sel.body.token, process.env.JWT_SECRET);
++    assert.equal(decoded.unidade_cozinha_id, unidadeId);
++
++    const painel = await requestJson('GET', '/api/cozinha/preparacao/painel', {
++      token: sel.body.token
++    });
++    assert.equal(painel.status, 200, JSON.stringify(painel.body));
++    assert.equal(painel.body.unidade_id, unidadeId);
++    assert.equal(painel.body.empresa_id, empresaId);
++    assert.ok(painel.body.rodadas.length >= 1);
++  });
++
++  it('HTTP K/M) JWT anterior sem unidade → UNIDADE_OBRIGATORIA', async () => {
++    const aindaAntigo = jwt.verify(tokenSemUnidade, process.env.JWT_SECRET);
++    assert.equal(aindaAntigo.unidade_cozinha_id, undefined);
++    const r = await requestJson('GET', '/api/cozinha/preparacao/painel', {
++      token: tokenSemUnidade
++    });
++    assert.equal(r.status, 400);
++    assert.equal(r.body.codigo, 'UNIDADE_OBRIGATORIA');
++  });
++
++  it('HTTP N) query manipulada não substitui unidade do JWT', async () => {
++    const token = jwt.sign(
++      {
++        id: operadorId,
++        role: 'operador',
++        perfil: 'USUARIO',
++        unidade_cozinha_id: unidadeId
++      },
++      process.env.JWT_SECRET,
++      { expiresIn: '1h' }
++    );
++    const r = await requestJson(
++      'GET',
++      `/api/cozinha/preparacao/painel?unidade_id=${unidadeB}`,
++      { token }
++    );
++    assert.equal(r.status, 409);
++    assert.equal(r.body.codigo, 'UNIDADE_ISOLAMENTO');
++  });
++
++  it('evidência isolamento: DB_DIR temporário e flags ativas', () => {
++    assert.equal(process.env.CDS_BLOQUEAR_BANCO_OFICIAL, '1');
++    assert.equal(process.env.CDS_TEST_ISOLATION, '1');
++    assert.equal(process.env.CDS_FORCAR_LOCAL, '1');
++    assert.ok(String(process.env.DB_DIR).includes('cds-cozinha-s07-2-'));
++    assert.equal(process.env.CDS_ALLOW_OFFICIAL_DB, undefined);
++  });
++});
+diff --git a/tests/cozinha/sprint07-s07-1-painel-kds-ui.test.js b/tests/cozinha/sprint07-s07-1-painel-kds-ui.test.js
+new file mode 100644
+index 0000000..e7b2cb1
+--- /dev/null
++++ b/tests/cozinha/sprint07-s07-1-painel-kds-ui.test.js
+@@ -0,0 +1,347 @@
++/**
++ * Sprint 07 · S07-1 — UI Painel KDS (somente consulta).
++ * Sem banco oficial. Sem impressão física. Sem mutações.
++ *
++ * Executar:
++ *   set CDS_BLOQUEAR_BANCO_OFICIAL=1
++ *   node --test --test-concurrency=1 tests/cozinha/sprint07-s07-1-painel-kds-ui.test.js
++ */
++'use strict';
++
++const fs = require('fs');
++const path = require('path');
++const { describe, it } = require('node:test');
++const assert = require('node:assert/strict');
++
++process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
++process.env.CDS_TEST_ISOLATION = '1';
++delete process.env.CDS_ALLOW_OFFICIAL_DB;
++delete process.env.CDS_COZINHA_IMPRESSAO_FISICA_AUTORIZADA;
++
++const kds = require('../../frontend/erp/js/cozinha-kds.js');
++
++const AGORA = new Date('2026-11-17T21:10:00-03:00');
++
++function fixtureRodadas() {
++  return [
++    {
++      id: 10,
++      empresa_id: 1,
++      unidade_id: 3,
++      mesa_id: 2,
++      mesa_numero: '5',
++      atendimento_id: 9,
++      numero_rodada: 1,
++      sequencia_global: 2,
++      estado_preparacao: 'EM_PREPARACAO',
++      enviada_em: '2026-11-17 20:58:00',
++      created_at: '2026-11-17 20:58:00',
++      itens: [
++        {
++          id: 101,
++          numero_comanda: 44,
++          tipo_item: 'PASTEL',
++          estado_preparacao: 'AGUARDANDO',
++          sequencia_global: 2,
++          qty_solicitada: '2',
++          produto_nome_snapshot: 'Pastel de carne',
++          observacoes_snapshot: 'Sem cebola'
++        },
++        {
++          id: 102,
++          numero_comanda: 44,
++          tipo_item: 'BEBIDA',
++          estado_preparacao: 'EM_PREPARACAO',
++          sequencia_global: 3,
++          qty_solicitada: '1',
++          produto_nome_snapshot: 'Refrigerante 200ml',
++          observacoes_snapshot: null
++        }
++      ]
++    },
++    {
++      id: 11,
++      empresa_id: 1,
++      unidade_id: 3,
++      mesa_id: 1,
++      mesa_numero: '1',
++      atendimento_id: 8,
++      numero_rodada: 2,
++      sequencia_global: 1,
++      estado_preparacao: 'AGUARDANDO',
++      enviada_em: '2026-11-17 20:55:00',
++      created_at: '2026-11-17 20:55:00',
++      itens: [
++        {
++          id: 201,
++          numero_comanda: 12,
++          tipo_item: 'PASTEL',
++          estado_preparacao: 'AGUARDANDO',
++          sequencia_global: 1,
++          qty_solicitada: '3',
++          produto_nome_snapshot: 'Pastel de queijo',
++          observacoes_snapshot: 'Bem passado'
++        }
++      ]
++    },
++    {
++      id: 12,
++      empresa_id: 1,
++      unidade_id: 3,
++      mesa_id: 7,
++      mesa_numero: '07',
++      atendimento_id: 15,
++      numero_rodada: 3,
++      sequencia_global: 3,
++      estado_preparacao: 'PRONTA',
++      enviada_em: '2026-11-17 20:50:00',
++      created_at: '2026-11-17 20:50:00',
++      itens: [
++        {
++          id: 301,
++          numero_comanda: 99,
++          tipo_item: 'OUTRO',
++          estado_preparacao: 'PRONTO',
++          sequencia_global: 4,
++          qty_solicitada: '1.5',
++          produto_nome_snapshot: 'Porção batata',
++          observacoes_snapshot: ''
++        }
++      ]
++    }
++  ];
++}
++
++function adiar() {
++  let resolver;
++  let rejeitar;
++  const promise = new Promise((resolve, reject) => {
++    resolver = resolve;
++    rejeitar = reject;
++  });
++  return { promise, resolver, rejeitar };
++}
++
++function montar(fetchJson, extra = {}) {
++  const fila = [];
++  const control = kds.criarControlador({
++    empresaId: 1,
++    empresaRotulo: 'Pastelaria Centro',
++    agora: () => AGORA,
++    intervaloMs: 5000,
++    // S07-2: painel só inicia com JWT contextualizado.
++    lerUnidadeJwt: () => 3,
++    fetchJson,
++    agendar(fn, ms) {
++      const item = { fn, ms, ativo: true };
++      fila.push(item);
++      return item;
++    },
++    cancelar(item) { if (item) item.ativo = false; },
++    ...extra
++  });
++  return { control, fila };
++}
++
++describe('S07-1 — distribuição e FIFO', () => {
++  it('distribui cartões por estado do item e ordena FIFO', () => {
++    const dist = kds.distribuirPorEstado(fixtureRodadas());
++    assert.equal(dist.AGUARDANDO.length, 2);
++    assert.equal(dist.EM_PREPARACAO.length, 1);
++    assert.equal(dist.PRONTO.length, 1);
++    // FIFO: sequencia_global 1 antes de 2
++    assert.equal(dist.AGUARDANDO[0].id, 11);
++    assert.equal(dist.AGUARDANDO[1].id, 10);
++    assert.equal(dist.AGUARDANDO[0].itens[0].produto_nome_snapshot, 'Pastel de queijo');
++    assert.equal(dist.EM_PREPARACAO[0].itens[0].produto_nome_snapshot, 'Refrigerante 200ml');
++    assert.deepEqual(kds.contadores(dist), {
++      AGUARDANDO: 2,
++      EM_PREPARACAO: 1,
++      PRONTO: 1
++    });
++  });
++
++  it('renderiza cabeçalho, colunas, itens e observações', () => {
++    const dist = kds.distribuirPorEstado(fixtureRodadas());
++    const html = kds.htmlPainel({
++      empresaId: 1,
++      empresaRotulo: 'Pastelaria Centro',
++      unidadeId: 3,
++      rodadas: fixtureRodadas(),
++      distribuicao: dist,
++      carregando: false,
++      erro: '',
++      ultimaAtualizacao: AGORA
++    }, AGORA);
++    assert.match(html, /Cozinha/);
++    assert.match(html, /\(KDS\)/);
++    assert.match(html, /Pastelaria Centro/);
++    assert.match(html, /Unidade #3/);
++    assert.match(html, /Aguardando/);
++    assert.match(html, /Em preparação/);
++    assert.match(html, /Prontos/);
++    assert.match(html, /Pastel de carne/);
++    assert.match(html, /Sem cebola/);
++    assert.match(html, /Bem passado/);
++    assert.match(html, /Mesa 05|Mesa 5/);
++    assert.match(html, /Comanda 44/);
++    assert.match(html, /data-acao="atualizar"/);
++    assert.doesNotMatch(html, /marcar como pronto|iniciar preparação|dual-write/i);
++  });
++
++  it('estado vazio exibe mensagem por coluna', () => {
++    const html = kds.htmlPainel({
++      empresaRotulo: 'X',
++      unidadeId: 1,
++      rodadas: [],
++      distribuicao: kds.distribuirPorEstado([]),
++      carregando: false,
++      erro: '',
++      ultimaAtualizacao: AGORA
++    }, AGORA);
++    assert.match(html, /Nenhum pedido/);
++  });
++});
++
++describe('S07-1 — consumo API e atualização', () => {
++  it('carrega painel via GET /cozinha/preparacao/painel', async () => {
++    const chamadas = [];
++    const { control, fila } = montar(async (method, path) => {
++      chamadas.push({ method, path });
++      return {
++        success: true,
++        empresa_id: 1,
++        unidade_id: 3,
++        total: 3,
++        limite: 100,
++        offset: 0,
++        ordenacao: 'FIFO_SEQUENCIA_GLOBAL',
++        rodadas: fixtureRodadas()
++      };
++    });
++    await control.iniciar();
++    assert.equal(chamadas.length, 1);
++    assert.equal(chamadas[0].method, 'GET');
++    assert.match(chamadas[0].path, /^\/cozinha\/preparacao\/painel\?/);
++    assert.match(chamadas[0].path, /limite=100/);
++    assert.equal(control.estado.unidadeId, 3);
++    assert.equal(control.estado.rodadas.length, 3);
++    assert.equal(control.estado.distribuicao.AGUARDANDO.length, 2);
++    assert.ok(fila.length >= 1);
++    assert.equal(fila[0].ms, 5000);
++  });
++
++  it('atualização manual dispara novo GET', async () => {
++    let n = 0;
++    const { control } = montar(async () => {
++      n += 1;
++      return {
++        success: true,
++        empresa_id: 1,
++        unidade_id: 3,
++        total: 0,
++        rodadas: n === 1 ? fixtureRodadas() : []
++      };
++    });
++    await control.iniciar();
++    await control.atualizar({ silencioso: false });
++    assert.equal(n, 2);
++    assert.equal(control.estado.rodadas.length, 0);
++  });
++
++  it('evita sobreposição de requisições', async () => {
++    const pendente = adiar();
++    let iniciadas = 0;
++    const { control } = montar(() => {
++      iniciadas += 1;
++      return pendente.promise;
++    });
++    control.estado.ativo = true;
++    const p1 = control.atualizar({ silencioso: false });
++    const p2 = control.atualizar({ silencioso: true });
++    const r2 = await p2;
++    assert.equal(r2.ignorada, true);
++    assert.equal(r2.sobreposta, true);
++    assert.equal(iniciadas, 1);
++    pendente.resolver({
++      success: true,
++      empresa_id: 1,
++      unidade_id: 3,
++      rodadas: []
++    });
++    await p1;
++  });
++
++  it('em erro preserva últimos dados válidos', async () => {
++    let n = 0;
++    const { control } = montar(async () => {
++      n += 1;
++      if (n === 1) {
++        return {
++          success: true,
++          empresa_id: 1,
++          unidade_id: 3,
++          rodadas: fixtureRodadas()
++        };
++      }
++      const err = new Error('Rede indisponível');
++      err.codigo = 'REDE';
++      throw err;
++    });
++    await control.iniciar();
++    assert.equal(control.estado.rodadas.length, 3);
++    const r = await control.atualizar({ silencioso: true });
++    assert.ok(r.erro);
++    assert.equal(r.preservouDados, true);
++    assert.equal(control.estado.rodadas.length, 3);
++    assert.match(control.estado.erro, /Rede indisponível/);
++    const html = control.html();
++    assert.match(html, /Pastel de carne/);
++    assert.match(html, /Falha na atualização|Rede indisponível/);
++  });
++
++  it('poll automático usa intervalo de 5s', async () => {
++    const { control, fila } = montar(async () => ({
++      success: true,
++      empresa_id: 1,
++      unidade_id: 3,
++      rodadas: []
++    }));
++    await control.iniciar();
++    assert.equal(fila[0].ms, kds.INTERVALO_MS);
++    assert.equal(kds.INTERVALO_MS, 5000);
++    control.parar();
++    assert.equal(fila[0].ativo, false);
++  });
++});
++
++describe('S07-1 — registro no ERP (sem tocar S06/PDV)', () => {
++  it('menu, scripts, ACL e catálogo apontam para cozinha-kds', () => {
++    const raiz = path.resolve(__dirname, '../..');
++    const indexHtml = fs.readFileSync(path.join(raiz, 'frontend/erp/index.html'), 'utf8');
++    const appJs = fs.readFileSync(path.join(raiz, 'frontend/erp/js/app.js'), 'utf8');
++    const acl = fs.readFileSync(path.join(raiz, 'frontend/shared/js/access-control.js'), 'utf8');
++    const core = fs.readFileSync(path.join(raiz, 'frontend/shared/js/core.js'), 'utf8');
++    assert.match(indexHtml, /data-page="cozinha-kds"/);
++    assert.match(indexHtml, /cozinha-kds\.css/);
++    assert.match(appJs, /'cozinha-kds':\s*\['\/erp\/js\/cozinha-kds\.js'\]/);
++    assert.match(appJs, /case 'cozinha-kds'/);
++    assert.match(appJs, /loadCozinhaKds/);
++    assert.match(acl, /'cozinha-kds':\s*'vendas'/);
++    assert.match(core, /page:\s*'cozinha-kds'/);
++    assert.match(core, /p === 'cozinha-kds'/);
++  });
++
++  it('módulo não referencia mutações de itens nem impressão S06', () => {
++    const src = fs.readFileSync(
++      path.join(__dirname, '../../frontend/erp/js/cozinha-kds.js'),
++      'utf8'
++    );
++    assert.doesNotMatch(src, /\/cozinha\/itens\//);
++    assert.doesNotMatch(src, /\/impressao\/fila/);
++    assert.match(src, /\/cozinha\/preparacao\/painel/);
++    // S07-2 permite POST apenas para /cozinha/sessao/unidade (contexto JWT).
++    assert.match(src, /\/cozinha\/sessao\/unidade/);
++    assert.doesNotMatch(src, /iniciarPreparacao|marcarPronto|\/itens\/.*\/iniciar/);
++  });
++});
+diff --git a/Agent/RELATORIO-SPRINT07-S07-2.md b/Agent/RELATORIO-SPRINT07-S07-2.md
+new file mode 100644
+index 0000000..39c92e6
+--- /dev/null
++++ b/Agent/RELATORIO-SPRINT07-S07-2.md
+@@ -0,0 +1,174 @@
++# RELATÓRIO — Sprint 07 · S07-2 — Seleção segura de unidade operacional no KDS
++
++**Data:** 2026-11-17  
++**Responsável implementação:** Cursor  
++**Status:** ENTREGUE PARA AUDITORIA DO TECH LEAD  
++**Escopo:** listagem + seleção de unidade + reemissão JWT + UI KDS de seleção
++
++---
++
++## 1. Arquivos criados e alterados
++
++### Criados
++| Arquivo | Função |
++|---------|--------|
++| `backend/services/cozinha/CozinhaSessaoUnidadeService.js` | Listagem autorizada + seleção + emissão JWT |
++| `tests/cozinha/sprint07-s07-2-sessao-unidade-kds.test.js` | Testes A–N + UI + isolamento |
++| `Agent/LOG-SPRINT07-S07-2.txt` | Log dos testes |
++| `Agent/RELATORIO-SPRINT07-S07-2.md` | Este relatório |
++
++### Alterados
++| Arquivo | Mudança |
++|---------|---------|
++| `backend/rotas/cozinha.js` | `GET /unidades-disponiveis` + `POST /sessao/unidade` |
++| `frontend/erp/js/cozinha-kds.js` | Fluxo de seleção → token → painel |
++| `frontend/css/cozinha-kds.css` | Estilos da tela de seleção |
++| `tests/cozinha/sprint07-s07-1-painel-kds-ui.test.js` | Compatível com JWT contextualizado (S07-2) |
++
++### Não alterados (confirmado)
++- Sprint 06 (worker/fila/Electron impressão)
++- Contrato S07-0 do painel (`GET /preparacao/painel`)
++- `frontend/shared/js/login.js`
++- PDV Universal / Express
++- Schema / migrations / banco oficial
++- Fiscal, financeiro, estoque
++
++---
++
++## 2. Diff resumido
++
++- **Backend:** serviço reutiliza `validarUnidadeCozinhaNoLogin` + `JWT_SECRET` oficial; whitelist de claims; preserva `exp` do token atual.
++- **Rotas:** dois endpoints autenticados sob `/api/cozinha`, com empresa do contexto (`X-Empresa-Id` / middleware), sem aceitar identidade/empresa no body.
++- **Frontend:** se JWT já tem `unidade_cozinha_id` → painel; senão → lista unidades, exige escolha explícita, POST de sessão, substitui `localStorage.token`, só então inicia polling do painel.
++- **Sem** auto-seleção da primeira unidade; **sem** `unidade_id` na query para contornar auth; **sem** reenvio de senha.
++
++---
++
++## 3. Endpoints e contratos
++
++### `GET /api/cozinha/unidades-disponiveis`
++**Auth:** JWT + contexto de empresa.  
++**Resposta 200:**
++```json
++{
++  "success": true,
++  "empresa_id": 1,
++  "unidades": [{ "id": 10, "codigo": "UA" }],
++  "codigo": "SEM_UNIDADES_DISPONIVEIS",
++  "mensagem": "Nenhuma unidade..."
++}
++```
++(`codigo`/`mensagem` somente quando lista vazia.)
++
++### `POST /api/cozinha/sessao/unidade`
++**Body:** `{ "unidade_cozinha_id": 123 }`  
++**Resposta 200:**
++```json
++{
++  "success": true,
++  "token": "<jwt>",
++  "user": { "...", "unidade_cozinha_id": 123 },
++  "unidade_cozinha_id": 123,
++  "empresa_id": 1
++}
++```
++Falhas: `UNIDADE_INEXISTENTE`, `UNIDADE_INATIVA`, `UNIDADE_EMPRESA_ISOLAMENTO`, `UNIDADE_NAO_AUTORIZADA`, `UNIDADE_OBRIGATORIA`, etc. — sem emitir token.
++
++### Painel (inalterado)
++`GET /api/cozinha/preparacao/painel` — unidade autoritativa = claim JWT.
++
++---
++
++## 4. Regras de autorização
++
++| Perfil | Listagem | Seleção |
++|--------|----------|---------|
++| Admin operacional (`role=admin` ou perfil ADMIN/SUPER_ADMIN) | Unidades **ativas** da empresa do contexto | Mesma validação (`validarUnidadeCozinhaNoLogin`) |
++| Operador | Somente com vínculo **ativo** em `cozinha_operador_unidades` | Exige vínculo ativo; revalida no POST |
++
++- Empresa sempre do contexto autenticado (não do body).
++- Unidade de outra empresa / inativa / inexistente / sem vínculo → bloqueio.
++- Listagem **não** concede autorização permanente; POST revalida.
++
++---
++
++## 5. Estratégia de emissão e atualização do JWT
++
++1. Reutiliza `JWT_SECRET` de `backend/middleware/auth.js` (mesmo emissor do login).
++2. Claims via whitelist (`id`, `usuario_id`, `username`, `nome`, `role`, `perfil`, `permissoes`, `terminal_id`, `caixa_sessao_id`, `unidade_cozinha_id`).
++3. Preserva `exp` absoluto do token atual quando ainda válido; senão `expiresIn: '8h'` (política do login).
++4. Frontend: `localStorage.setItem('token', ...)` + `user` + `electronAPI.cozinhaImpressao.estabelecerSessao` quando disponível.
++5. Token antigo permanece válido sem claim de unidade e **não** contextualiza o KDS (`UNIDADE_OBRIGATORIA` no painel).
++
++**Refatoração mínima:** nenhuma segunda assinatura; emissão encapsulada em `emitirJwtComUnidade` no serviço de sessão.
++
++---
++
++## 6. Resultados dos testes
++
++| ID | Cenário | Resultado |
++|----|---------|-----------|
++| A | Login normal sem unidade | PASS |
++| B | Listagem só ativas autorizadas | PASS |
++| C | Admin vê ativas da empresa | PASS |
++| D | Operador só vínculo ativo | PASS |
++| E | Outra empresa fora da listagem | PASS |
++| F | Seleção outra empresa bloqueada | PASS |
++| G | Inexistente bloqueada | PASS |
++| H | Inativa bloqueada | PASS |
++| I | Sem vínculo bloqueado | PASS |
++| J | JWT com `unidade_cozinha_id` correto | PASS |
++| K | Token anterior sem unidade | PASS |
++| L | Painel com JWT contextualizado | PASS |
++| M | Painel sem unidade → `UNIDADE_OBRIGATORIA` | PASS |
++| N | Query `unidade_id` não substitui JWT | PASS |
++| O | Regressão Sprint 05 login/unidade | PASS (7/7) |
++| P | Regressão S07-0 + S07-1 | PASS (12/12 + 10/10) |
++
++UI: seleção sem auto-escolha; confirmação atualiza sessão; falha de lista sem retry automático.
++
++Ausência de unidades/vínculos → `SEM_UNIDADES_DISPONIVEIS` (lista vazia controlada).
++
++---
++
++## 7. Evidência de isolamento do banco
++
++Flags obrigatórias nos testes:
++
++- `CDS_BLOQUEAR_BANCO_OFICIAL=1`
++- `CDS_TEST_ISOLATION=1`
++- `CDS_FORCAR_LOCAL=1`
++- `CDS_ALLOW_OFFICIAL_DB` ausente
++- `DB_DIR` = diretório temporário `cds-cozinha-s07-2-*` / `:memory:` nos testes de serviço
++
++Log: `Agent/LOG-SPRINT07-S07-2.txt` (inclui banner `BANCO DE TESTE EM USO` em temp).
++
++**Não** houve migrate/abertura/reinício do banco oficial.
++
++---
++
++## 8. Login normal
++
++Confirmado (teste A + regressão S05): login sem `unidade_cozinha_id` emite token e **não** exige unidade. PDV/ERP permanecem compatíveis.
++
++---
++
++## 9. Escopo preservado
++
++- Sprint 06: não alterada.
++- S07-0: contrato do painel intacto; apenas consumo após JWT contextualizado.
++- S07-1: UI de painel preservada; estendida com modo seleção.
++- Sem S07-3; sem homologação oficial.
++
++---
++
++## 10. Limitações / pendências
++
++- Homologação visual oficial do fluxo de seleção **não** executada (aguarda autorização PO/TL).
++- Em ambientes com schema Cozinha ainda não operacional (FK/schema), endpoints retornam `COZINHA_NAO_OPERACIONAL` (503) — comportamento já existente do módulo.
++- Dependência circular de estoque no boot de testes permanece (pré-existente; fora do escopo).
++
++---
++
++**Conclusão:** critérios da S07-2 atendidos. Parar e aguardar auditoria do Tech Lead.  
++Não iniciar S07-3. Não aplicar mudanças no banco oficial.
+diff --git a/Agent/LOG-SPRINT07-S07-2.txt b/Agent/LOG-SPRINT07-S07-2.txt
+new file mode 100644
+index 0000000..574ef35
+Binary files /dev/null and b/Agent/LOG-SPRINT07-S07-2.txt differ
+diff --git a/backend/middleware/auth.js b/backend/middleware/auth.js
+new file mode 100644
+index 0000000..e79450c
+--- /dev/null
++++ b/backend/middleware/auth.js
+@@ -0,0 +1,234 @@
++/**
++ * Middleware central de autenticação e permissões — CDS Sistemas
++ *
++ * Implementação única de verificarToken (substitui duplicatas em server.js e rotas/auth.js).
++ */
++
++const jwt = require('jsonwebtoken');
++const db = require('../database');
++const { getJwtSecret } = require('../config/secrets');
++
++// Origem única: backend/config/secrets.getJwtSecret().
++// Em produção sem JWT_SECRET, getJwtSecret() lança (impede boot/auth silencioso com chave de dev).
++const JWT_SECRET = getJwtSecret();
++
++const PERMISSOES_DISPONIVEIS = [
++  'pdv',
++  'vendas',
++  'produtos',
++  'clientes',
++  'compras',
++  'fornecedores',
++  'financeiro',
++  'caixa',
++  'abrir_caixa',
++  'sangria_caixa',
++  'suprimento_caixa',
++  'fechar_caixa',
++  'fiscal',
++  'configuracoes',
++  'usuarios',
++  'relatorios',
++  'auditoria',
++  'categorias',
++  'gerenciar_faixa_atacado',
++  // Sprint 1 — Vendas para Entrega
++  'entrega_visualizar',
++  'entrega_criar',
++  'entrega_prestacao',
++  'entrega_cancelar',
++  'entrega_reabrir',
++  'entrega_alterar_pagamento',
++  // RC4.1.0 — Arquitetura Comercial/Fiscal V4 (catálogo preparado para perfis)
++  'expedicao_expedir',
++  'nfe_emitir',
++  'nfe_cancelar',
++  'nfe_reenviar',
++  'nfe_consultar',
++  'nfe_exportar_xml',
++  'nfe_reimprimir_danfe',
++  'nfe_alterar_dados',
++  'nfe_acoes_lote'
++];
++
++function extrairToken(req) {
++  const authHeader = req.headers['authorization'];
++  return authHeader && authHeader.split(' ')[1];
++}
++
++function isApiRequest(req) {
++  return req.originalUrl.startsWith('/api');
++}
++
++/**
++ * Verifica JWT e popula req.user.
++ * Páginas HTML sem token redirecionam para /login; APIs retornam JSON.
++ */
++function verificarToken(req, res, next) {
++  const token = extrairToken(req);
++  const api = isApiRequest(req);
++
++  if (!token) {
++    if (!api && req.accepts('html')) {
++      const next = encodeURIComponent(req.originalUrl || '/');
++      return res.redirect(`/login?next=${next}`);
++    }
++    return res.status(401).json({ error: 'Acesso negado', code: 'SESSAO_INVALIDA' });
++  }
++
++  let secret;
++  try {
++    secret = getJwtSecret();
++  } catch (err) {
++    return res.status(503).json({
++      error: 'Autenticação indisponível: JWT_SECRET não configurado.',
++      code: err.codigo || 'JWT_SECRET_AUSENTE_PRODUCAO'
++    });
++  }
++
++  jwt.verify(token, secret, (err, user) => {
++    if (err) {
++      if (!api && req.accepts('html')) {
++        const next = encodeURIComponent(req.originalUrl || '/');
++        return res.redirect(`/login?next=${next}`);
++      }
++      return res.status(403).json({ error: 'Token inválido ou expirado', code: 'SESSAO_INVALIDA' });
++    }
++
++    req.user = user;
++    next();
++  });
++}
++
++function buscarPermissoesUsuario(usuarioId, callback) {
++  db.all(
++    `SELECT permissao FROM usuario_permissoes WHERE usuario_id = ? AND permitido = 1`,
++    [usuarioId],
++    (err, rows) => {
++      if (err) return callback(err);
++      callback(null, (rows || []).map((r) => r.permissao));
++    }
++  );
++}
++
++function exigirAdmin(req, res, next) {
++  verificarToken(req, res, () => {
++    db.get(
++      'SELECT id, username, role, COALESCE(perfil, \'USUARIO\') as perfil, pode_alterar_senhas FROM usuarios WHERE id = ?',
++      [req.user?.id],
++      (err, usuario) => {
++        if (err || !usuario) {
++          return res.status(403).json({ error: 'Erro ao verificar permissões.' });
++        }
++
++        req.user.perfil = usuario.perfil;
++        req.user.pode_alterar_senhas = usuario.pode_alterar_senhas;
++
++        const isAdmin =
++          req.user?.role === 'admin' ||
++          usuario.perfil === 'ADMIN' ||
++          usuario.perfil === 'SUPER_ADMIN';
++
++        if (!isAdmin) {
++          return res.status(403).json({ error: 'Apenas administradores podem executar esta ação.' });
++        }
++
++        next();
++      }
++    );
++  });
++}
++
++function exigirSuperAdmin(req, res, next) {
++  const perfilLogado = String(req.user?.perfil || '').toUpperCase();
++  if (perfilLogado !== 'SUPER_ADMIN') {
++    return res.status(403).json({
++      erro: 'Apenas SUPER_ADMIN pode gerenciar usuários.'
++    });
++  }
++  next();
++}
++
++function verificarPermissaoEspecifica(nomeDaPermissao) {
++  return (req, res, next) => {
++    verificarToken(req, res, () => {
++      const perfil = String(req.user?.perfil || '').trim().toUpperCase();
++      if (
++        req.user?.role === 'admin' ||
++        req.user?.role === 'supervisor' ||
++        ['SUPER_ADMIN', 'ADMIN'].includes(perfil)
++      ) {
++        return next();
++      }
++
++      buscarPermissoesUsuario(req.user?.id, (err, permissoes) => {
++        if (err) {
++          return res.status(500).json({ error: 'Erro ao verificar permissões' });
++        }
++
++        if (Array.isArray(permissoes) && permissoes.includes(nomeDaPermissao)) {
++          return next();
++        }
++
++        return res.status(403).json({
++          error: `Acesso restrito: permissão "${nomeDaPermissao}" necessária.`
++        });
++      });
++    });
++  };
++}
++
++function exigirDiagnosticoCentral(req, res, next) {
++  verificarToken(req, res, () => {
++    db.get(
++      'SELECT id, username, role, COALESCE(perfil, \'USUARIO\') as perfil FROM usuarios WHERE id = ?',
++      [req.user?.id],
++      (err, usuario) => {
++        if (err || !usuario) {
++          return res.status(403).json({ error: 'Erro ao verificar permissões.' });
++        }
++
++        req.user.perfil = usuario.perfil;
++        const perfil = String(usuario.perfil || '').toUpperCase();
++        const permitido = req.user?.role === 'admin'
++          || ['SUPER_ADMIN', 'ADMIN', 'SUPORTE'].includes(perfil);
++
++        if (!permitido) {
++          return res.status(403).json({
++            error: 'Acesso restrito: apenas ADMIN, SUPER_ADMIN ou SUPORTE.'
++          });
++        }
++
++        next();
++      }
++    );
++  });
++}
++
++function exigirPerfilAjusteEstoque() {
++  return (req, res, next) => {
++    verificarToken(req, res, () => {
++      const perfil = String(req.user?.perfil || '').trim().toUpperCase();
++      if (req.user?.role === 'admin' || ['SUPER_ADMIN', 'ADMIN'].includes(perfil)) {
++        return next();
++      }
++      return res.status(403).json({
++        error: 'Acesso restrito: apenas SUPER_ADMIN ou ADMIN podem ajustar estoque.',
++        code: 'AJUSTE_ESTOQUE_NAO_AUTORIZADO'
++      });
++    });
++  };
++}
++
++module.exports = {
++  JWT_SECRET,
++  PERMISSOES_DISPONIVEIS,
++  extrairToken,
++  verificarToken,
++  exigirAdmin,
++  exigirSuperAdmin,
++  verificarPermissaoEspecifica,
++  exigirPerfilAjusteEstoque,
++  exigirDiagnosticoCentral,
++  buscarPermissoesUsuario
++};

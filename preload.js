@@ -40,6 +40,25 @@ contextBridge.exposeInMainWorld('electronAPI', {
   imprimirDANFESilencioso: (html, deviceName) =>
     ipcRenderer.invoke('imprimir-danfe-silencioso', html, deviceName),
 
+  /**
+   * Sprint 06 Bloco E — cozinha.
+   * Renderer só lista impressoras. Print genérico bloqueado (E-02).
+   * Print físico: Worker + adapter ELECTRON de produção (in-process).
+   */
+  cozinhaImpressao: {
+    listarImpressoras: () => ipcRenderer.invoke('cozinha-impressao:listar-impressoras'),
+    /** @deprecated Sempre rejeitado — não use do renderer. */
+    imprimir: (payload) => ipcRenderer.invoke('cozinha-impressao:imprimir', payload || {}),
+    /** Estabelece sessão no main a partir do JWT (retomada pós-login). */
+    estabelecerSessao: (payload) =>
+      ipcRenderer.invoke('cozinha-impressao:sessao-autenticada', payload || {}),
+    /** Notifica contexto operacional (IDs só aceitos se coincidirem com a sessão). */
+    notificarContexto: (payload) =>
+      ipcRenderer.invoke('cozinha-impressao:contexto-operacional', payload || {}),
+    /** Logout operacional: invalida sessão/contexto e para o agendador no main. */
+    logout: () => ipcRenderer.invoke('cozinha-impressao:logout')
+  },
+
   fecharJanela: () => window.close(),
 
   obterModoEstacao: () => ipcRenderer.invoke('rede-obter-modo-estacao'),

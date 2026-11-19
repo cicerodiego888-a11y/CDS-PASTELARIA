@@ -1,0 +1,659 @@
+﻿# DIFF — Correções de Auditoria Sprint 02 Cozinha
+# Gerado: 2026-11-16 12:18:09 -03:00
+# Base de comparação dos fontes: cópias pré-correção em Agent/auditoria-sprint02-cozinha/codigo/
+# =============================================================================
+
+diff --git "a/Agent\\auditoria-sprint02-cozinha\\codigo\\CozinhaDespachoService.js" "b/backend\\services\\cozinha\\CozinhaDespachoService.js"
+index 5d63135..86cc935 100644
+--- "a/Agent\\auditoria-sprint02-cozinha\\codigo\\CozinhaDespachoService.js"
++++ "b/backend\\services\\cozinha\\CozinhaDespachoService.js"
+@@ -95,19 +95,33 @@ function exigirIdempotencyKey(chave) {
+   return texto;
+ }
+ 
++/**
++ * Classificação Cozinha (PASTEL|BEBIDA|OUTRO).
++ *
++ * Campos oficiais disponíveis hoje:
++ * - pedidos_itens.classificacao_operacional_snapshot ← espelho de produtos.tipo_operacional
++ *   no ERP (somente COMERCIAL | INSUMO).
++ * - Não existe coluna de domínio PASTEL/BEBIDA/OUTRO no cadastro nem no item.
++ *
++ * Regra determinística (sem inferência por nome):
++ * 1) Se o snapshot/campo já trouxer PASTEL|BEBIDA|OUTRO, respeitar.
++ * 2) Caso contrário → OUTRO.
++ *
++ * LIMITAÇÃO DOCUMENTADA: COMERCIAL≠PASTEL e INSUMO≠BEBIDA.
++ * Classificação fina de preparação exige regra/campo de domínio futuro;
++ * não inventamos PASTEL a partir de COMERCIAL nem BEBIDA a partir do nome.
++ */
+ function classificarTipoItem(item) {
+-  const classif = String(item.classificacao_operacional || item.classificacao_operacional_snapshot || '').toUpperCase();
+-  const nome = String(
+-    item.produto_nome_snapshot || item.produto_nome || item.produto_nome_pedido_snapshot || ''
+-  ).toUpperCase();
+-  if (
+-    classif === 'INSUMO'
+-    || /REFRIGERANTE|BEBIDA|SUCO|ÁGUA|AGUA|COCA|GUARAN/.test(nome)
+-  ) {
+-    return 'BEBIDA';
+-  }
+-  if (/PASTEL/.test(nome) || classif === 'COMERCIAL' || !classif) {
+-    return 'PASTEL';
++  const candidatos = [
++    item.tipo_item,
++    item.tipo_cozinha,
++    item.classificacao_operacional,
++    item.classificacao_operacional_snapshot
++  ];
++  for (const bruto of candidatos) {
++    if (bruto == null || bruto === '') continue;
++    const v = String(bruto).trim().toUpperCase();
++    if (v === 'PASTEL' || v === 'BEBIDA' || v === 'OUTRO') return v;
+   }
+   return 'OUTRO';
+ }
+@@ -234,10 +248,10 @@ async function despacharLote(entrada = {}, opts = {}) {
+   });
+ 
+   const db = conn(opts);
++  // FK deve estar ON antes de qualquer TX (SQLite ignora mudança no meio da transação).
++  await run(db, 'PRAGMA foreign_keys = ON');
+   await beginImmediate(db);
+   try {
+-    await run(db, 'PRAGMA foreign_keys = ON');
+-
+     // 1) Idempotência ANTES das validações de negócio
+     const existente = await get(db, `
+       SELECT * FROM cozinha_idempotencia WHERE idempotency_key = ?
+@@ -328,6 +342,9 @@ async function despacharLote(entrada = {}, opts = {}) {
+     if (!mesa) {
+       throw erro('Mesa não encontrada.', 404, 'MESA_NAO_ENCONTRADA');
+     }
++    if (Number(mesa.ativo) !== 1) {
++      throw erro('Mesa inativa.', 409, 'MESA_INATIVA');
++    }
+ 
+     const atendimento = await get(db, `
+       SELECT id, empresa_id, mesa_id, estado
+
+# ----- rotas/cozinha.js -----
+
+diff --git "a/Agent\\auditoria-sprint02-cozinha\\codigo\\cozinha.js" "b/backend\\rotas\\cozinha.js"
+index f9b6f30..f9c9005 100644
+--- "a/Agent\\auditoria-sprint02-cozinha\\codigo\\cozinha.js"
++++ "b/backend\\rotas\\cozinha.js"
+@@ -46,10 +46,14 @@ function chaveIdempotencia(req) {
+ }
+ 
+ router.get('/status', (req, res) => {
+-  res.json({
++  const st = getCozinhaSchemaStatus();
++  if (!st.operacional && st.erro) {
++    console.error('[COZINHA][status] módulo não operacional:', st.erro.mensagem || st.erro);
++  }
++  return res.json({
+     success: true,
+     operacional: isCozinhaOperacional(),
+-    schema: getCozinhaSchemaStatus()
++    versao_schema: st.versao != null ? st.versao : null
+   });
+ });
+ 
+@@ -57,11 +61,13 @@ router.post('/despacho', async (req, res) => {
+   try {
+     if (!isCozinhaOperacional()) {
+       const st = getCozinhaSchemaStatus();
++      if (st.erro) {
++        console.error('[COZINHA][despacho] não operacional:', st.erro.mensagem || st.erro);
++      }
+       return res.status(503).json({
+         success: false,
+         codigo: 'COZINHA_NAO_OPERACIONAL',
+-        mensagem: (st.erro && st.erro.mensagem) || 'Módulo Cozinha não operacional.',
+-        detalhes: st
++        mensagem: 'Módulo Cozinha não operacional.'
+       });
+     }
+ 
+
+# ----- NEW: tests/cozinha/sprint02-correcoes-auditoria.test.js -----
+
+diff --git "a/C:\\Users\\cicer\\AppData\\Local\\Temp\\cds-empty-null.txt" "b/tests\\cozinha\\sprint02-correcoes-auditoria.test.js"
+index e69de29..22e6c7d 100644
+--- "a/C:\\Users\\cicer\\AppData\\Local\\Temp\\cds-empty-null.txt"
++++ "b/tests\\cozinha\\sprint02-correcoes-auditoria.test.js"
+@@ -0,0 +1,298 @@
++/**
++ * Correções de auditoria — Sprint 02 Cozinha
++ * Banco temporário apenas.
++ *
++ *   node --test --test-concurrency=1 tests/cozinha/sprint02-correcoes-auditoria.test.js
++ */
++'use strict';
++
++const fs = require('fs');
++const os = require('os');
++const path = require('path');
++const { describe, it, beforeEach } = require('node:test');
++const assert = require('node:assert/strict');
++const sqlite3 = require('sqlite3').verbose();
++
++const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-cozinha-s02-fix-'));
++process.env.DB_DIR = dbDir;
++process.env.CDS_TEST_ISOLATION = '1';
++process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
++process.env.CDS_FORCAR_LOCAL = '1';
++delete process.env.CDS_ALLOW_OFFICIAL_DB;
++
++const {
++  garantirSchemaCozinha,
++  marcarCozinhaOperacional,
++  isCozinhaOperacional
++} = require('../../backend/utils/cozinhaSchema');
++const CozinhaDespacho = require('../../backend/services/cozinha/CozinhaDespachoService');
++
++function run(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.run(sql, params, function cb(err) {
++      if (err) reject(err);
++      else resolve(this);
++    });
++  });
++}
++function get(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
++  });
++}
++function all(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
++  });
++}
++function open(arquivo) {
++  return new Promise((resolve, reject) => {
++    const db = new sqlite3.Database(arquivo || ':memory:', (err) => {
++      if (err) return reject(err);
++      db.serialize(() => {
++        db.run('PRAGMA foreign_keys = ON');
++        db.run('PRAGMA busy_timeout = 10000', (e) => (e ? reject(e) : resolve(db)));
++      });
++    });
++  });
++}
++function close(db) {
++  return new Promise((resolve) => db.close(() => resolve()));
++}
++
++async function schemaErp(db) {
++  await run(db, `CREATE TABLE IF NOT EXISTS configuracoes (
++    id INTEGER PRIMARY KEY AUTOINCREMENT, chave VARCHAR(100) UNIQUE NOT NULL,
++    valor TEXT, tipo VARCHAR(50), descricao TEXT, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
++  await run(db, `CREATE TABLE IF NOT EXISTS mesas (
++    id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL, numero INTEGER NOT NULL, ativo INTEGER DEFAULT 1)`);
++  await run(db, `CREATE TABLE IF NOT EXISTS mesa_atendimentos (
++    id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL, mesa_id INTEGER NOT NULL,
++    estado TEXT NOT NULL, operador_abertura_id INTEGER NOT NULL DEFAULT 1, aberto_em TEXT DEFAULT CURRENT_TIMESTAMP)`);
++  await run(db, `CREATE TABLE IF NOT EXISTS produtos (
++    id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL, tipo_operacional TEXT DEFAULT 'COMERCIAL')`);
++  await run(db, `CREATE TABLE IF NOT EXISTS pedidos (
++    id INTEGER PRIMARY KEY AUTOINCREMENT, codigo VARCHAR(50), data_pedido DATE DEFAULT '2026-01-01',
++    total DECIMAL(10,2) DEFAULT 0, status TEXT DEFAULT 'PEDIDO', empresa_id INTEGER, mesa_id INTEGER, mesa_atendimento_id INTEGER)`);
++  await run(db, `CREATE TABLE IF NOT EXISTS pedidos_itens (
++    id INTEGER PRIMARY KEY AUTOINCREMENT, pedido_id INTEGER NOT NULL, produto_id INTEGER NOT NULL,
++    quantidade REAL NOT NULL, preco_unitario DECIMAL(10,2) DEFAULT 0, subtotal DECIMAL(10,2) DEFAULT 0,
++    classificacao_operacional_snapshot TEXT, produto_nome_snapshot TEXT)`);
++  await run(db, `CREATE TABLE IF NOT EXISTS pedido_item_ingredientes (
++    id INTEGER PRIMARY KEY AUTOINCREMENT, pedido_id INTEGER NOT NULL, pedido_item_id INTEGER NOT NULL,
++    empresa_id INTEGER NOT NULL, insumo_id INTEGER NOT NULL, insumo_nome_snapshot TEXT NOT NULL,
++    quantidade_snapshot REAL NOT NULL, unidade_snapshot TEXT NOT NULL,
++    classificacao_comercial_snapshot TEXT NOT NULL, selecionado INTEGER NOT NULL, preco_adicional_snapshot REAL DEFAULT 0)`);
++  const info = await garantirSchemaCozinha(db);
++  assert.equal(info.operacional, true);
++  assert.equal(isCozinhaOperacional(), true);
++}
++
++async function seedBase(db, { mesaAtiva = 1 } = {}) {
++  const mesa = await run(db, `INSERT INTO mesas (empresa_id, numero, ativo) VALUES (1, 5, ?)`, [mesaAtiva]);
++  const at = await run(db, `INSERT INTO mesa_atendimentos (empresa_id, mesa_id, estado) VALUES (1, ?, 'OCUPADA')`, [mesa.lastID]);
++  const un = await run(db, `INSERT INTO cozinha_unidades (empresa_id, codigo, sequencia_atual) VALUES (1, 'U1', 0)`);
++  const prod = await run(db, `INSERT INTO produtos (nome, tipo_operacional) VALUES ('Pastel de Carne', 'COMERCIAL')`);
++  const ped = await run(db, `
++    INSERT INTO pedidos (codigo, status, empresa_id, mesa_id, mesa_atendimento_id)
++    VALUES ('P1', 'PEDIDO', 1, ?, ?)
++  `, [mesa.lastID, at.lastID]);
++  const item = await run(db, `
++    INSERT INTO pedidos_itens (
++      pedido_id, produto_id, quantidade, classificacao_operacional_snapshot, produto_nome_snapshot
++    ) VALUES (?, ?, 2, 'COMERCIAL', 'Pastel de Carne')
++  `, [ped.lastID, prod.lastID]);
++  const cmd = await run(db, `
++    INSERT INTO cozinha_comandas (empresa_id, atendimento_id, numero_comanda, pedido_id)
++    VALUES (1, ?, 1, ?)
++  `, [at.lastID, ped.lastID]);
++  return {
++    empresaId: 1,
++    operadorId: 7,
++    mesaId: mesa.lastID,
++    atendimentoId: at.lastID,
++    unidadeId: un.lastID,
++    pedidoId: ped.lastID,
++    pedidoItemId: item.lastID,
++    comandaId: cmd.lastID,
++    produtoId: prod.lastID
++  };
++}
++
++function entrada(ctx, itens, key) {
++  return {
++    empresaId: ctx.empresaId,
++    operadorId: ctx.operadorId,
++    idempotencyKey: key,
++    unidade_id: ctx.unidadeId,
++    mesa_id: ctx.mesaId,
++    atendimento_id: ctx.atendimentoId,
++    itens
++  };
++}
++
++describe('Correções auditoria Sprint 02', () => {
++  beforeEach(() => marcarCozinhaOperacional(false));
++
++  describe('CORREÇÃO 01 — Mesa inativa', () => {
++    it('mesa ativa permite despacho', async () => {
++      const db = await open();
++      await schemaErp(db);
++      const ctx = await seedBase(db, { mesaAtiva: 1 });
++      const out = await CozinhaDespacho.despacharLote(entrada(ctx, [{
++        pedido_id: ctx.pedidoId,
++        pedido_item_id: ctx.pedidoItemId,
++        comanda_id: ctx.comandaId,
++        qty_solicitada: '1.000'
++      }], 'mesa-ativa'), { db });
++      assert.equal(out.success, true);
++      assert.equal(out.rodada.sequencia_global, 1);
++      await close(db);
++    });
++
++    it('mesa inativa é rejeitada sem rodada/FIFO/parciais', async () => {
++      const db = await open();
++      await schemaErp(db);
++      const ctx = await seedBase(db, { mesaAtiva: 0 });
++      await assert.rejects(
++        () => CozinhaDespacho.despacharLote(entrada(ctx, [{
++          pedido_id: ctx.pedidoId,
++          pedido_item_id: ctx.pedidoItemId,
++          comanda_id: ctx.comandaId,
++          qty_solicitada: '1.000'
++        }], 'mesa-inativa'), { db }),
++        (err) => {
++          assert.equal(err.statusCode, 409);
++          assert.equal(err.codigo, 'MESA_INATIVA');
++          return true;
++        }
++      );
++      assert.equal((await all(db, `SELECT id FROM cozinha_rodadas`)).length, 0);
++      assert.equal((await all(db, `SELECT id FROM cozinha_itens`)).length, 0);
++      const un = await get(db, `SELECT sequencia_atual FROM cozinha_unidades WHERE id=?`, [ctx.unidadeId]);
++      assert.equal(un.sequencia_atual, 0);
++      assert.equal(await get(db, `SELECT * FROM cozinha_idempotencia WHERE idempotency_key='mesa-inativa'`), null);
++      await close(db);
++    });
++  });
++
++  describe('CORREÇÃO 02 — Item removido (cancelamento individual no ERP)', () => {
++    it('diagnóstico: ERP remove linha via DELETE; sem coluna de cancelamento em pedidos_itens', async () => {
++      const db = await open();
++      await schemaErp(db);
++      const cols = await all(db, `PRAGMA table_info(pedidos_itens)`);
++      const nomes = cols.map((c) => c.name);
++      assert.ok(!nomes.includes('cancelado'));
++      assert.ok(!nomes.includes('cancelada'));
++      assert.ok(!nomes.includes('status'));
++      assert.ok(!nomes.includes('situacao'));
++      await close(db);
++    });
++
++    it('pedido aberto: item deletado não despacha; item válido despacha', async () => {
++      const db = await open();
++      await schemaErp(db);
++      const ctx = await seedBase(db);
++      const item2 = await run(db, `
++        INSERT INTO pedidos_itens (
++          pedido_id, produto_id, quantidade, classificacao_operacional_snapshot, produto_nome_snapshot
++        ) VALUES (?, ?, 1, 'COMERCIAL', 'Pastel de Queijo')
++      `, [ctx.pedidoId, ctx.produtoId]);
++
++      // Simula cancelamento individual oficial do ERP: DELETE da linha
++      await run(db, `DELETE FROM pedidos_itens WHERE id = ?`, [ctx.pedidoItemId]);
++
++      await assert.rejects(
++        () => CozinhaDespacho.despacharLote(entrada(ctx, [{
++          pedido_id: ctx.pedidoId,
++          pedido_item_id: ctx.pedidoItemId,
++          comanda_id: ctx.comandaId,
++          qty_solicitada: '1.000'
++        }], 'item-deletado'), { db }),
++        (err) => {
++          assert.equal(err.codigo, 'ITEM_PEDIDO_INCOMPATIVEL');
++          return true;
++        }
++      );
++
++      const ok = await CozinhaDespacho.despacharLote(entrada(ctx, [{
++        pedido_id: ctx.pedidoId,
++        pedido_item_id: item2.lastID,
++        comanda_id: ctx.comandaId,
++        qty_solicitada: '1.000'
++      }], 'item-valido'), { db });
++      assert.equal(ok.success, true);
++      assert.equal(ok.itens[0].pedido_item_id, item2.lastID);
++      await close(db);
++    });
++  });
++
++  describe('CORREÇÃO 03 — Classificação operacional', () => {
++    it('não classifica COMERCIAL como PASTEL; default OUTRO; respeita valor explícito', () => {
++      assert.equal(CozinhaDespacho.classificarTipoItem({
++        classificacao_operacional_snapshot: 'COMERCIAL',
++        produto_nome_snapshot: 'Pastel de Carne'
++      }), 'OUTRO');
++      assert.equal(CozinhaDespacho.classificarTipoItem({
++        classificacao_operacional: 'INSUMO',
++        produto_nome_snapshot: 'Refrigerante Coca'
++      }), 'OUTRO');
++      assert.equal(CozinhaDespacho.classificarTipoItem({
++        classificacao_operacional_snapshot: 'PASTEL'
++      }), 'PASTEL');
++      assert.equal(CozinhaDespacho.classificarTipoItem({
++        classificacao_operacional_snapshot: 'BEBIDA'
++      }), 'BEBIDA');
++      assert.equal(CozinhaDespacho.classificarTipoItem({
++        tipo_item: 'OUTRO'
++      }), 'OUTRO');
++    });
++
++    it('persistência usa OUTRO quando snapshot é COMERCIAL', async () => {
++      const db = await open();
++      await schemaErp(db);
++      const ctx = await seedBase(db);
++      const out = await CozinhaDespacho.despacharLote(entrada(ctx, [{
++        pedido_id: ctx.pedidoId,
++        pedido_item_id: ctx.pedidoItemId,
++        comanda_id: ctx.comandaId,
++        qty_solicitada: '1.000'
++      }], 'tipo-outro'), { db });
++      assert.equal(out.itens[0].tipo_item, 'OUTRO');
++      const row = await get(db, `SELECT tipo_item FROM cozinha_itens WHERE id=?`, [out.itens[0].id]);
++      assert.equal(row.tipo_item, 'OUTRO');
++      await close(db);
++    });
++  });
++
++  describe('CORREÇÃO 06 — PRAGMA foreign_keys', () => {
++    it('FK habilitada antes do BEGIN e rejeita referência inválida', async () => {
++      const db = await open();
++      await schemaErp(db);
++      const fk = await get(db, `PRAGMA foreign_keys`);
++      assert.equal(Number(fk.foreign_keys), 1);
++
++      const ctx = await seedBase(db);
++      // Confirma que a conexão usada pelo serviço mantém FK=ON e bloqueia cruzamento
++      await assert.rejects(
++        () => run(db, `
++          INSERT INTO cozinha_rodadas (
++            empresa_id, unidade_id, mesa_id, atendimento_id, numero_rodada, sequencia_global
++          ) VALUES (2, ?, 1, 1, 1, 1)
++        `, [ctx.unidadeId]),
++        (err) => /FOREIGN KEY|constraint/i.test(String(err && err.message))
++      );
++
++      // Garante ordem no fonte: PRAGMA antes de BEGIN IMMEDIATE
++      const fonte = fs.readFileSync(
++        path.join(__dirname, '../../backend/services/cozinha/CozinhaDespachoService.js'),
++        'utf8'
++      );
++      const idxPragma = fonte.indexOf("PRAGMA foreign_keys = ON");
++      const idxBegin = fonte.indexOf('await beginImmediate(db)');
++      assert.ok(idxPragma > 0 && idxBegin > 0 && idxPragma < idxBegin);
++
++      await close(db);
++    });
++  });
++});
+
+# ----- NEW: tests/cozinha/sprint02-http-seguranca.test.js -----
+
+diff --git "a/C:\\Users\\cicer\\AppData\\Local\\Temp\\cds-empty-null.txt" "b/tests\\cozinha\\sprint02-http-seguranca.test.js"
+index e69de29..6f0dc3d 100644
+--- "a/C:\\Users\\cicer\\AppData\\Local\\Temp\\cds-empty-null.txt"
++++ "b/tests\\cozinha\\sprint02-http-seguranca.test.js"
+@@ -0,0 +1,227 @@
++/**
++ * Correção 05 — Testes HTTP de segurança da rota real Cozinha.
++ * Banco temporário. Não altera middlewares globais.
++ *
++ *   node --test --test-concurrency=1 tests/cozinha/sprint02-http-seguranca.test.js
++ */
++'use strict';
++
++const assert = require('node:assert/strict');
++const fs = require('fs');
++const os = require('os');
++const path = require('path');
++const http = require('http');
++const express = require('express');
++const jwt = require('jsonwebtoken');
++const { describe, it, before, after } = require('node:test');
++
++const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-cozinha-s02-http-'));
++process.env.DB_DIR = dbDir;
++process.env.CDS_TEST_ISOLATION = '1';
++process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
++process.env.CDS_FORCAR_LOCAL = '1';
++process.env.JWT_SECRET = 'test-only-cozinha-http-secret';
++delete process.env.CDS_ALLOW_OFFICIAL_DB;
++
++const db = require('../../backend/database');
++const cozinhaRoutes = require('../../backend/rotas/cozinha');
++const { verificarToken } = require('../../backend/middleware/auth');
++const { exigirRecurso } = require('../../backend/middleware/validarRecursoImplantacao');
++const configService = require('../../backend/services/configuracaoService');
++const {
++  garantirSchemaCozinha,
++  marcarCozinhaOperacional,
++  getCozinhaSchemaStatus
++} = require('../../backend/utils/cozinhaSchema');
++
++function whenReady(database) {
++  return new Promise((resolve, reject) => {
++    const timer = setTimeout(() => reject(new Error('Banco isolado não ficou pronto a tempo.')), 60000);
++    database.whenReady((err) => {
++      clearTimeout(timer);
++      if (err) reject(err);
++      else resolve();
++    });
++  });
++}
++
++function run(database, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    database.run(sql, params, function onRun(err) {
++      if (err) reject(err);
++      else resolve(this);
++    });
++  });
++}
++
++function requestJson(baseUrl, method, urlPath, { token, headers = {}, body } = {}) {
++  const u = new URL(urlPath, baseUrl);
++  const payload = body == null ? null : JSON.stringify(body);
++  const hdrs = { ...headers };
++  if (token) hdrs.Authorization = `Bearer ${token}`;
++  if (payload) hdrs['Content-Type'] = 'application/json';
++  return new Promise((resolve, reject) => {
++    const req = http.request({
++      hostname: u.hostname,
++      port: u.port,
++      path: u.pathname + u.search,
++      method,
++      headers: {
++        ...hdrs,
++        ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {})
++      }
++    }, (res) => {
++      const chunks = [];
++      res.on('data', (c) => chunks.push(c));
++      res.on('end', () => {
++        const raw = Buffer.concat(chunks).toString('utf8');
++        let json = null;
++        try { json = raw ? JSON.parse(raw) : null; } catch (_e) { json = { raw }; }
++        resolve({ status: res.statusCode, body: json, raw });
++      });
++    });
++    req.on('error', reject);
++    if (payload) req.write(payload);
++    req.end();
++  });
++}
++
++describe('Sprint 02 — HTTP segurança /api/cozinha', () => {
++  let server;
++  let baseUrl;
++  let recursoOriginal;
++  let tokenAutorizado;
++  let tokenSemVinculo;
++  let empresaId;
++
++  before(async () => {
++    await whenReady(db);
++    await garantirSchemaCozinha(db);
++    marcarCozinhaOperacional(true);
++
++    // Habilita recurso pedidos sem alterar o middleware exigirRecurso
++    recursoOriginal = configService.recursoHabilitado;
++    configService.recursoHabilitado = (nome) => {
++      if (nome === 'pedidos') return true;
++      return recursoOriginal.call(configService, nome);
++    };
++
++    // usuários reais (FK de usuario_empresas → usuarios)
++    await run(db, `
++      INSERT OR IGNORE INTO usuarios (id, username, password_hash, role, perfil, ativo)
++      VALUES (50, 'op_cozinha_ok', 'hash-teste', 'operador', 'USUARIO', 1)
++    `);
++    await run(db, `
++      INSERT OR IGNORE INTO usuarios (id, username, password_hash, role, perfil, ativo)
++      VALUES (51, 'op_cozinha_no', 'hash-teste', 'operador', 'USUARIO', 1)
++    `);
++
++    const emp = await run(db, `
++      INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
++      VALUES ('12345678000199', 'Empresa Audit Cozinha', 'Audit Cozinha', 1)
++    `);
++    empresaId = emp.lastID;
++
++    await run(db, `
++      INSERT INTO usuario_empresas (usuario_id, empresa_id, ativo)
++      VALUES (50, ?, 1)
++    `, [empresaId]);
++
++    tokenAutorizado = jwt.sign(
++      { id: 50, role: 'operador', perfil: 'USUARIO' },
++      process.env.JWT_SECRET
++    );
++    tokenSemVinculo = jwt.sign(
++      { id: 51, role: 'operador', perfil: 'USUARIO' },
++      process.env.JWT_SECRET
++    );
++
++    const app = express();
++    app.use(express.json());
++    // Espelha o mount de backend/server.js
++    app.use('/api/cozinha', verificarToken, exigirRecurso('pedidos'), cozinhaRoutes);
++
++    server = await new Promise((resolve, reject) => {
++      const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
++      instance.once('error', reject);
++    });
++    baseUrl = `http://127.0.0.1:${server.address().port}`;
++  });
++
++  after(async () => {
++    if (recursoOriginal) configService.recursoHabilitado = recursoOriginal;
++    if (server) {
++      await new Promise((resolve) => server.close(() => resolve()));
++    }
++  });
++
++  it('1) sem autenticação → 401', async () => {
++    const status = await requestJson(baseUrl, 'GET', '/api/cozinha/status');
++    assert.equal(status.status, 401);
++    const despacho = await requestJson(baseUrl, 'POST', '/api/cozinha/despacho', {
++      body: { unidade_id: 1, mesa_id: 1, atendimento_id: 1, itens: [] }
++    });
++    assert.equal(despacho.status, 401);
++  });
++
++  it('2) autenticado sem contexto de empresa → EMPRESA_CONTEXT_REQUIRED', async () => {
++    const res = await requestJson(baseUrl, 'POST', '/api/cozinha/despacho', {
++      token: tokenAutorizado,
++      headers: { 'Idempotency-Key': 'http-sem-empresa' },
++      body: {
++        unidade_id: 1,
++        mesa_id: 1,
++        atendimento_id: 1,
++        itens: [{ pedido_id: 1, pedido_item_id: 1, comanda_id: 1, qty_solicitada: '1.000' }]
++      }
++    });
++    assert.equal(res.status, 400);
++    assert.equal(res.body.codigo, 'EMPRESA_CONTEXT_REQUIRED');
++  });
++
++  it('3) autenticado sem vínculo com a empresa → 403', async () => {
++    const res = await requestJson(baseUrl, 'POST', '/api/cozinha/despacho', {
++      token: tokenSemVinculo,
++      headers: {
++        'Idempotency-Key': 'http-sem-vinculo',
++        'X-Empresa-Id': String(empresaId)
++      },
++      body: {
++        unidade_id: 1,
++        mesa_id: 1,
++        atendimento_id: 1,
++        itens: [{ pedido_id: 1, pedido_item_id: 1, comanda_id: 1, qty_solicitada: '1.000' }]
++      }
++    });
++    assert.equal(res.status, 403);
++    assert.equal(res.body.code || res.body.codigo, 'EMPRESA_NAO_AUTORIZADA');
++  });
++
++  it('4) usuário autorizado com empresa válida alcança o handler', async () => {
++    const res = await requestJson(baseUrl, 'GET', '/api/cozinha/status', {
++      token: tokenAutorizado,
++      headers: { 'X-Empresa-Id': String(empresaId) }
++    });
++    assert.equal(res.status, 200);
++    assert.equal(res.body.success, true);
++    assert.equal(res.body.operacional, true);
++    assert.ok(!Object.prototype.hasOwnProperty.call(res.body, 'schema'));
++    assert.ok(!Object.prototype.hasOwnProperty.call(res.body, 'detalhes'));
++  });
++
++  it('5) status não expõe erro interno de schema', async () => {
++    marcarCozinhaOperacional(false, new Error('SQL path C:\\segredo\\erp.sqlite falhou'));
++    const res = await requestJson(baseUrl, 'GET', '/api/cozinha/status', {
++      token: tokenAutorizado,
++      headers: { 'X-Empresa-Id': String(empresaId) }
++    });
++    assert.equal(res.status, 200);
++    assert.equal(res.body.operacional, false);
++    const raw = JSON.stringify(res.body);
++    assert.ok(!/segredo|erp\.sqlite|SQL path/i.test(raw));
++    assert.ok(!Object.prototype.hasOwnProperty.call(res.body, 'schema'));
++    // restaura operacional para não contaminar
++    marcarCozinhaOperacional(true);
++    assert.equal(getCozinhaSchemaStatus().operacional, true);
++  });
++});

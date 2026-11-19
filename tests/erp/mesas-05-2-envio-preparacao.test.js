@@ -101,7 +101,7 @@ describe('conferência na tela', () => {
     assert.match(html, /sem cebola/);
     assert.match(html, /Total 30/);
     assert.equal(html.includes('Total 198'), false);
-    assert.match(html, /Enviar pedido para cozinha/);
+    assert.match(html, /Enviar ao KDS e iniciar preparação/);
     assert.match(html, /Corrigir lançamento/);
     assert.equal(html.includes('Enviado para preparação'), false);
   });
@@ -117,6 +117,12 @@ describe('conferência na tela', () => {
           classificacao: 'NORMAL',
           enviado_em: '2026-11-02 12:00:00',
           tempo_decorrido_segundos: 0
+        },
+        despacho: {
+          success: true,
+          status: 'CONCLUIDO',
+          unidade_id: 3,
+          rodada_id: 9
         }
       };
     });
@@ -129,17 +135,62 @@ describe('conferência na tela', () => {
     assert.equal(chamadas.length, 1);
     assert.equal(chamadas[0].path, '/pedidos/40/preparacao/enviar');
     assert.equal(chamadas[0].chave, 'chave-1');
-    assert.match(control.html(), /Enviado para preparação/);
+    assert.match(control.html(), /Pedido enviado ao KDS/);
     assert.match(control.html(), /2026-11-02 12:00:00/);
     assert.match(control.html(), /NORMAL/);
-    assert.match(control.html(), /Não confirma recebimento por cozinha/);
+    assert.match(control.html(), /KDS:<\/strong> Enviado ao KDS/);
     assert.equal(control.html().includes('data-acao="enviar"'), false);
     const repetido = await control.enviar();
-    assert.equal(repetido.codigo, 'PREPARACAO_JA_ENVIADA');
+    assert.equal(repetido.codigo, 'DESPACHO_JA_CONCLUIDO');
     assert.equal(chamadas.length, 1);
     assert.equal(control.estado.preparacao.enviado_em, '2026-11-02 12:00:00');
     const correcao = control.corrigir();
     assert.equal(correcao.ok, false);
+  });
+
+  it('mantém a preparação ERP e permite reprocessar KDS após bloqueio', async () => {
+    let tentativas = 0;
+    const control = criar(async () => {
+      tentativas += 1;
+      return {
+        success: true,
+        preparacao: {
+          estado: 'EM_PREPARACAO',
+          classificacao: 'NORMAL',
+          enviado_em: '2026-11-02 12:10:00'
+        },
+        despacho: tentativas === 1
+          ? {
+            success: false,
+            status: 'BLOQUEADO',
+            codigo: 'DESPACHO_REQUER_RESOLVIDO',
+            mensagem: 'Destino pendente.'
+          }
+          : {
+            success: true,
+            status: 'CONCLUIDO',
+            unidade_id: 3,
+            rodada_id: 10
+          }
+      };
+    });
+    control.finalizar(pedidoSalao());
+
+    const primeira = await control.enviar();
+    assert.equal(primeira.ok, true);
+    assert.equal(control.estado.preparacao.estado, 'EM_PREPARACAO');
+    assert.equal(control.podeEnviar().ok, true);
+    assert.match(control.html(), /Preparação ERP registrada/);
+    assert.match(control.html(), /KDS:<\/strong> Bloqueado/);
+    assert.match(control.html(), /DESPACHO_REQUER_RESOLVIDO/);
+    assert.match(control.html(), /Reprocessar envio ao KDS/);
+
+    const retry = await control.enviar();
+    assert.equal(retry.ok, true);
+    assert.equal(retry.despacho.status, 'CONCLUIDO');
+    assert.equal(tentativas, 2);
+    assert.match(control.html(), /Pedido enviado ao KDS/);
+    assert.equal(control.html().includes('data-acao="enviar"'), false);
   });
 
   it('permite corrigir antes do envio e trata falha, resposta inválida e troca de tela', async () => {
@@ -207,6 +258,7 @@ describe('conferência na tela', () => {
     const modulo = fs.readFileSync(path.join(__dirname, '../../frontend/erp/js/mesas-conferencia.js'), 'utf8');
     const mobile = fs.readFileSync(path.join(__dirname, '../../frontend/mobile-pedido/mobile-pedido.js'), 'utf8');
     assert.match(fonte, /A preparação ainda não foi acionada/);
+    assert.match(fonte, /if \(salao && conferencia\)/);
     assert.match(fonte, /btnPedFinalizar/);
     assert.match(fonte, /conferencia\.enviar/);
     assert.match(modulo, /preparacao\/enviar/);

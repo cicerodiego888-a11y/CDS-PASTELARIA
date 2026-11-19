@@ -33,6 +33,7 @@ const {
   exigirOperacaoDoPedido,
   statusDeErroEmpresaPedido
 } = require('../pedidos/PedidoEmpresaContextoService');
+const CozinhaResolucaoDestino = require('../cozinha/CozinhaResolucaoDestinoService');
 
 const { agoraLocalBrasil } = VendaFinanceiroService;
 const TOLERANCIA_MONETARIA = 0.01;
@@ -483,6 +484,39 @@ async function criar(body = {}, operadorId = null, opcoes = {}) {
           pedidoId,
           atendimentoId
         });
+      }
+
+      // S07-3D — resolução de destino (origem + roteamento). Sem despacho ao KDS.
+      // Destino/empresa arbitrários do body são ignorados. Falha de resolução não aborta o pedido.
+      if (origemCanal) {
+        try {
+          const resolucao = await CozinhaResolucaoDestino.resolverDestinoPedido({
+            empresaId,
+            canalCodigo: origemCanal,
+            bodyEmpresaIdIgnored: body.empresa_id != null ? body.empresa_id : body.empresaId,
+            unidadeDestinoArbitrariaIgnored: body.unidade_cozinha_destino_id != null
+              ? body.unidade_cozinha_destino_id
+              : (body.unidade_id != null ? body.unidade_id : body.destino),
+            destinoArbitrarioIgnored: body.destino
+          }, { db });
+          await repo.persistirResolucaoDestinoCozinha(pedidoId, empresaId, resolucao, { db });
+        } catch (errResolucao) {
+          // Observabilidade: não silenciar. Não cancela criação comercial. Não inventa destino.
+          const codigoFalha = errResolucao && (errResolucao.codigo || errResolucao.code)
+            ? String(errResolucao.codigo || errResolucao.code)
+            : 'COZINHA_RESOLUCAO_DESTINO_ERRO';
+          const mensagemFalha = errResolucao && errResolucao.message
+            ? String(errResolucao.message).slice(0, 240)
+            : 'falha desconhecida na resolução de destino';
+          console.warn(JSON.stringify({
+            evento: 'COZINHA_RESOLUCAO_DESTINO_FALHA',
+            codigo: codigoFalha,
+            pedido_id: pedidoId,
+            empresa_id: empresaId,
+            origem_canal: origemCanal != null ? String(origemCanal) : null,
+            mensagem: mensagemFalha
+          }));
+        }
       }
 
       await PedidoConsumoEstoqueService.registrarPedidoIdempotente(

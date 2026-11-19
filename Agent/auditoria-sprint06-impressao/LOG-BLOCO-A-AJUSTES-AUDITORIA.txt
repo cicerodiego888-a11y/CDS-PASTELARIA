@@ -1,0 +1,56 @@
+﻿Tabela empresas criada/verificada
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+▶ Sprint 06 Bloco A — UNIQUE codigo_estacao por unidade
+  ✔ 1) mesmo codigo_estacao em unidades distintas da mesma empresa é permitido (36.5021ms)
+Tabela empresas criada/verificada
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ✔ 2) mesmo codigo_estacao na mesma unidade é rejeitado (14.25ms)
+Tabela empresas criada/verificada
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ✔ 3) DROP do índice legado + recreate idempotente; versão no banco permanece 3 (12.0337ms)
+✔ Sprint 06 Bloco A — UNIQUE codigo_estacao por unidade (63.7606ms)
+Tabela empresas criada/verificada
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+▶ Sprint 06 Bloco A — CRUD estações
+  ✔ 4) cria, lista, obtém e atualiza estação na unidade autenticada (2.1396ms)
+  ✔ 5) rejeita estação de outra empresa / outra unidade (1.5616ms)
+  ✔ 6) largura_mm 58/80 ok; demais rejeitados (0.6058ms)
+✔ Sprint 06 Bloco A — CRUD estações (14.223ms)
+▶ Sprint 06 Bloco A — snapshot e renderer
+  ✔ 7) snapshot canônico sem preços/fiscais; input sujo é descartado (2.2425ms)
+  ✔ 8) renderer gera texto 80/58 e marca impressao_fisica=false (0.4189ms)
+Tabela empresas criada/verificada
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ✔ 9) teste de estação (D6) não imprime e não exige fila (11.1772ms)
+  ✔ 10) rejeita modelo/tipo inválidos no snapshot (0.31ms)
+  ✔ 11) snapshot e elementos internos são imutáveis (deep freeze) (0.2455ms)
+  ✔ 12) serializarSnapshot normaliza e remove campos comerciais/fiscais (0.2295ms)
+✔ Sprint 06 Bloco A — snapshot e renderer (14.9208ms)
+Tabela empresas criada/verificada
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+▶ Sprint 06 Bloco A — isolamento JWT na rota POST estacoes
+  ✔ 13) body com empresaId/unidadeId falsos não sobrescreve a sessão (rota HTTP) (83.64ms)
+✔ Sprint 06 Bloco A — isolamento JWT na rota POST estacoes (83.798ms)
+▶ Sprint 06 Bloco A — não acopla impressão comercial
+  ✔ 14) módulos de impressão cozinha não referenciam impressora_cupom /api/impressao (0.4902ms)
+✔ Sprint 06 Bloco A — não acopla impressão comercial (0.5694ms)
+ℹ tests 14
+ℹ suites 5
+ℹ pass 14
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 588.0726
+==== REGRESSAO S01+S05 ====
+
+✔ Correção Sprint 01 — isolamento empresa (FK composta) (103.3888ms)
+✔ Correção Sprint 01 — falha de inicialização (1091.8496ms)
+✔ Sprint 05 — Operações dos itens (585.1962ms)
+ℹ tests 31
+ℹ pass 31
+ℹ fail 0
+
+
+TOTAL_FAIL=0
+Bloco B: NAO INICIADO

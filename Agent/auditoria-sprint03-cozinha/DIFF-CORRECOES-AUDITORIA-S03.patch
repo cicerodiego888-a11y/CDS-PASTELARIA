@@ -1,0 +1,3598 @@
+# DIFF Correções Auditoria Sprint 03
+# 2026-11-16
+
+===== FILE: backend/services/cozinha/CozinhaPreparacaoService.js =====
+
+/**
+ * CozinhaPreparacaoService — Sprint 03 (+ correção auditoria)
+ * Motor de preparação: iniciar, pronto, entrega de bebida, estado derivado da rodada.
+ * Idempotência via tabela central cozinha_idempotencia (não só outbox).
+ */
+'use strict';
+
+const {
+  isCozinhaOperacional,
+  getCozinhaSchemaStatus
+} = require('../../utils/cozinhaSchema');
+const {
+  decimalParaMilessimos,
+  milessimosParaDecimalString,
+  subtrairMilessimos
+} = require('./cozinhaQuantidade');
+const {
+  TIPOS_OPERACAO,
+  calcularHashOperacao
+} = require('./cozinhaIdempotenciaHash');
+
+const EVENTOS = Object.freeze({
+  PREPARACAO_INICIADA: 'PREPARACAO_INICIADA',
+  ITEM_PRONTO: 'ITEM_PRONTO',
+  BEBIDA_ENTREGUE: 'BEBIDA_ENTREGUE',
+  RODADA_PRONTA: 'RODADA_PRONTA'
+});
+
+function erro(mensagem, statusCode, codigo, extras = {}) {
+  const err = new Error(mensagem);
+  err.statusCode = statusCode;
+  err.codigo = codigo;
+  Object.assign(err, extras);
+  return err;
+}
+
+function conn(opts) {
+  return (opts && opts.db) || require('../../database');
+}
+
+function run(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function cb(err) {
+      if (err) return reject(err);
+      resolve({ lastID: this.lastID, changes: this.changes });
+    });
+  });
+}
+
+function get(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
+  });
+}
+
+function all(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
+  });
+}
+
+async function beginImmediate(db) {
+  await run(db, 'BEGIN IMMEDIATE');
+}
+
+async function commit(db) {
+  await run(db, 'COMMIT');
+}
+
+async function rollback(db) {
+  try {
+    await run(db, 'ROLLBACK');
+  } catch (_e) { /* já desfeita */ }
+}
+
+function exigirEmpresa(empresaId) {
+  const n = Number(empresaId);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw erro('Empresa do contexto é obrigatória.', 400, 'EMPRESA_CONTEXT_REQUIRED');
+  }
+  return n;
+}
+
+function exigirOperador(operadorId) {
+  const n = Number(operadorId);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw erro('Sessão sem operador.', 401, 'SESSAO_INVALIDA');
+  }
+  return n;
+}
+
+function exigirId(valor, codigo, mensagem) {
+  const n = Number(valor);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw erro(mensagem, 400, codigo);
+  }
+  return n;
+}
+
+function exigirChave(chave) {
+  if (chave == null || String(chave).trim() === '') {
+    throw erro('Idempotency-Key é obrigatória.', 400, 'IDEMPOTENCY_REQUIRED');
+  }
+  const texto = String(chave).trim();
+  if (texto.length > 200) {
+    throw erro('Idempotency-Key inválida.', 400, 'CHAVE_IDEMPOTENCIA_INVALIDA');
+  }
+  return texto;
+}
+
+function garantirOperacional(opts) {
+  if (!isCozinhaOperacional() && !(opts && opts.db)) {
+    const st = getCozinhaSchemaStatus();
+    throw erro(
+      (st.erro && st.erro.mensagem) || 'Módulo Cozinha não operacional.',
+      503,
+      'COZINHA_NAO_OPERACIONAL',
+      { detalhes: st }
+    );
+  }
+}
+
+/**
+ * Claim na tabela central cozinha_idempotencia.
+ * @returns {{ replay: true, corpo: object } | { replay: false }}
+ */
+async function claimIdempotenciaCentral(db, {
+  idempotencyKey,
+  tipoOperacao,
+  hash,
+  contexto
+}) {
+  const existente = await get(db, `
+    SELECT * FROM cozinha_idempotencia WHERE idempotency_key = ?
+  `, [idempotencyKey]);
+
+  if (existente) {
+    if (String(existente.tipo_operacao) !== String(tipoOperacao)) {
+      throw erro(
+        'Idempotency-Key já utilizada em outra operação.',
+        409,
+        'IDEMPOTENCY_OPERACAO_DIVERGENTE'
+      );
+    }
+    if (String(existente.payload_hash) !== String(hash)) {
+      throw erro(
+        'Idempotency-Key reutilizada com payload diferente.',
+        409,
+        'IDEMPOTENCY_PAYLOAD_DIVERGENTE'
+      );
+    }
+    if (existente.situacao === 'CONCLUIDA' && existente.resultado_json) {
+      return { replay: true, corpo: JSON.parse(existente.resultado_json) };
+    }
+    if (existente.situacao === 'EM_ANDAMENTO') {
+      throw erro(
+        'Operação em andamento para esta chave.',
+        409,
+        'IDEMPOTENCY_EM_ANDAMENTO'
+      );
+    }
+  }
+
+  try {
+    await run(db, `
+      INSERT INTO cozinha_idempotencia (
+        idempotency_key, tipo_operacao, contexto, payload_hash, situacao
+      ) VALUES (?, ?, ?, ?, 'EM_ANDAMENTO')
+    `, [idempotencyKey, tipoOperacao, contexto || null, hash]);
+  } catch (e) {
+    if (/UNIQUE/i.test(String(e.message))) {
+      const novamente = await get(db, `
+        SELECT * FROM cozinha_idempotencia WHERE idempotency_key = ?
+      `, [idempotencyKey]);
+      if (
+        novamente
+        && novamente.situacao === 'CONCLUIDA'
+        && String(novamente.payload_hash) === String(hash)
+        && String(novamente.tipo_operacao) === String(tipoOperacao)
+        && novamente.resultado_json
+      ) {
+        return { replay: true, corpo: JSON.parse(novamente.resultado_json) };
+      }
+      throw erro(
+        'Conflito de idempotência sob concorrência.',
+        409,
+        'IDEMPOTENCY_CONCORRENTE'
+      );
+    }
+    throw e;
+  }
+
+  return { replay: false };
+}
+
+async function concluirIdempotencia(db, {
+  idempotencyKey,
+  resultado,
+  httpStatus,
+  recursoTipo,
+  recursoId
+}) {
+  await run(db, `
+    UPDATE cozinha_idempotencia
+    SET situacao = 'CONCLUIDA',
+        resultado_http_status = ?,
+        resultado_json = ?,
+        recurso_tipo = ?,
+        recurso_id = ?,
+        concluded_at = datetime('now')
+    WHERE idempotency_key = ?
+  `, [
+    httpStatus,
+    JSON.stringify(resultado),
+    recursoTipo || null,
+    recursoId != null ? Number(recursoId) : null,
+    idempotencyKey
+  ]);
+}
+
+async function registrarEventoOutbox(db, {
+  empresaId,
+  unidadeId,
+  tipo,
+  payload,
+  idempotencyKey
+}) {
+  try {
+    await run(db, `
+      INSERT INTO cozinha_eventos_outbox (
+        empresa_id, unidade_id, tipo, payload_json, idempotency_key
+      ) VALUES (?, ?, ?, ?, ?)
+    `, [
+      empresaId,
+      unidadeId || null,
+      tipo,
+      JSON.stringify(payload),
+      idempotencyKey
+    ]);
+    return { novo: true };
+  } catch (e) {
+    if (/UNIQUE/i.test(String(e.message))) {
+      return { novo: false };
+    }
+    throw e;
+  }
+}
+
+async function carregarItemEmpresa(db, itemId, empresaId) {
+  const item = await get(db, `
+    SELECT * FROM cozinha_itens WHERE id = ? AND empresa_id = ?
+  `, [itemId, empresaId]);
+  if (!item) {
+    throw erro('Item de cozinha não encontrado.', 404, 'ITEM_NAO_ENCONTRADO');
+  }
+  return item;
+}
+
+async function carregarRodadaEmpresa(db, rodadaId, empresaId) {
+  const rodada = await get(db, `
+    SELECT * FROM cozinha_rodadas WHERE id = ? AND empresa_id = ?
+  `, [rodadaId, empresaId]);
+  if (!rodada) {
+    throw erro('Rodada não encontrada.', 404, 'RODADA_NAO_ENCONTRADA');
+  }
+  return rodada;
+}
+
+function exigirRodadaNaoCancelada(rodada) {
+  if (rodada.estado_preparacao === 'CANCELADA') {
+    throw erro(
+      'Rodada cancelada — operação de preparação não permitida.',
+      409,
+      'RODADA_CANCELADA'
+    );
+  }
+  return rodada;
+}
+
+async function carregarItensRodada(db, rodadaId, empresaId) {
+  return all(db, `
+    SELECT * FROM cozinha_itens
+    WHERE rodada_id = ? AND empresa_id = ?
+    ORDER BY id
+  `, [rodadaId, empresaId]);
+}
+
+async function carregarIngredientesItem(db, cozinhaItemId) {
+  return all(db, `
+    SELECT id, cozinha_item_id, insumo_id, insumo_nome_snapshot,
+           quantidade_snapshot_millis, unidade_snapshot,
+           classificacao_comercial_snapshot, selecionado,
+           preco_adicional_snapshot_millis
+    FROM cozinha_item_ingredientes
+    WHERE cozinha_item_id = ?
+    ORDER BY id
+  `, [cozinhaItemId]);
+}
+
+async function qtyBebidaEntregue(db, cozinhaItemId, empresaId) {
+  const row = await get(db, `
+    SELECT COALESCE(SUM(qty_entregue_millis), 0) AS total
+    FROM cozinha_bebida_entregas
+    WHERE cozinha_item_id = ? AND empresa_id = ?
+  `, [cozinhaItemId, empresaId]);
+  return Number(row && row.total) || 0;
+}
+
+/**
+ * Bloqueadores da rodada:
+ * - Com PASTEL: só pastéis precisam estar PRONTO.
+ * - Sem PASTEL: OUTROs precisam estar PRONTO.
+ * - BEBIDA nunca bloqueia.
+ */
+function avaliarConclusaoRodada(itens) {
+  const lista = itens || [];
+  const pastels = lista.filter((i) => i.tipo_item === 'PASTEL' && i.estado_preparacao !== 'CANCELADO');
+  const outros = lista.filter((i) => i.tipo_item === 'OUTRO' && i.estado_preparacao !== 'CANCELADO');
+
+  if (pastels.length > 0) {
+    const pendentes = pastels.filter((i) => i.estado_preparacao !== 'PRONTO');
+    return {
+      pronta: pendentes.length === 0,
+      regra: 'PASTEIS_OBRIGATORIOS',
+      pendentes: pendentes.map((i) => i.id)
+    };
+  }
+
+  const pendentesOutro = outros.filter((i) => i.estado_preparacao !== 'PRONTO');
+  return {
+    pronta: pendentesOutro.length === 0,
+    regra: 'OUTROS_SEM_PASTEL',
+    pendentes: pendentesOutro.map((i) => i.id)
+  };
+}
+
+async function sincronizarEstadoRodada(db, rodada, itens, {
+  empresaId,
+  operadorId,
+  idempotencyKeyBase
+}) {
+  // Rodada cancelada: nunca reabrir / não alterar estado.
+  if (rodada.estado_preparacao === 'CANCELADA') {
+    return {
+      estado_preparacao: 'CANCELADA',
+      avaliacao: avaliarConclusaoRodada(itens),
+      eventoRodada: null,
+      bloqueada: true
+    };
+  }
+
+  const avaliacao = avaliarConclusaoRodada(itens);
+  let estado = rodada.estado_preparacao;
+  let eventoRodada = null;
+
+  if (avaliacao.pronta) {
+    if (estado !== 'PRONTA') {
+      await run(db, `
+        UPDATE cozinha_rodadas
+        SET estado_preparacao = 'PRONTA', updated_at = datetime('now')
+        WHERE id = ? AND empresa_id = ? AND estado_preparacao <> 'CANCELADA'
+      `, [rodada.id, empresaId]);
+      const conf = await get(db, `
+        SELECT estado_preparacao FROM cozinha_rodadas WHERE id = ? AND empresa_id = ?
+      `, [rodada.id, empresaId]);
+      if (conf && conf.estado_preparacao === 'CANCELADA') {
+        return {
+          estado_preparacao: 'CANCELADA',
+          avaliacao,
+          eventoRodada: null,
+          bloqueada: true
+        };
+      }
+      estado = 'PRONTA';
+      const ev = await registrarEventoOutbox(db, {
+        empresaId,
+        unidadeId: rodada.unidade_id,
+        tipo: EVENTOS.RODADA_PRONTA,
+        idempotencyKey: `${idempotencyKeyBase}:RODADA_PRONTA:${rodada.id}`,
+        payload: {
+          rodada_id: rodada.id,
+          empresa_id: empresaId,
+          operador_id: operadorId,
+          regra: avaliacao.regra,
+          em: new Date().toISOString(),
+          nota: 'PRONTA refere-se à preparação; não confirma entrega de bebidas ao cliente.'
+        }
+      });
+      eventoRodada = { tipo: EVENTOS.RODADA_PRONTA, novo: ev.novo };
+    }
+  } else if (estado === 'AGUARDANDO') {
+    const algumAndamento = itens.some((i) => (
+      i.estado_preparacao === 'EM_PREPARACAO' || i.estado_preparacao === 'PRONTO'
+    ));
+    if (algumAndamento) {
+      await run(db, `
+        UPDATE cozinha_rodadas
+        SET estado_preparacao = 'EM_PREPARACAO', updated_at = datetime('now')
+        WHERE id = ? AND empresa_id = ? AND estado_preparacao = 'AGUARDANDO'
+      `, [rodada.id, empresaId]);
+      const conf = await get(db, `
+        SELECT estado_preparacao FROM cozinha_rodadas WHERE id = ? AND empresa_id = ?
+      `, [rodada.id, empresaId]);
+      estado = conf ? conf.estado_preparacao : estado;
+    }
+  }
+
+  return { estado_preparacao: estado, avaliacao, eventoRodada, bloqueada: false };
+}
+
+function dtoItem(item, extras = {}) {
+  return {
+    id: item.id,
+    empresa_id: item.empresa_id,
+    rodada_id: item.rodada_id,
+    comanda_id: item.comanda_id,
+    pedido_id: item.pedido_id,
+    pedido_item_id: item.pedido_item_id,
+    tipo_item: item.tipo_item,
+    estado_preparacao: item.estado_preparacao,
+    qty_solicitada: milessimosParaDecimalString(item.qty_solicitada_millis),
+    qty_preparada: milessimosParaDecimalString(item.qty_preparada_millis || 0),
+    qty_cancelada: milessimosParaDecimalString(item.qty_cancelada_millis || 0),
+    produto_id: item.produto_id,
+    produto_nome_snapshot: item.produto_nome_snapshot,
+    ...extras
+  };
+}
+
+async function iniciarPreparacao(entrada = {}, opts = {}) {
+  garantirOperacional(opts);
+  const empresaId = exigirEmpresa(entrada.empresaId);
+  const operadorId = exigirOperador(entrada.operadorId);
+  const itemId = exigirId(entrada.itemId, 'ITEM_INVALIDO', 'item_id inválido.');
+  const idempotencyKey = exigirChave(entrada.idempotencyKey);
+  const db = conn(opts);
+
+  const hash = calcularHashOperacao(TIPOS_OPERACAO.PREPARACAO_INICIADA, {
+    empresa_id: empresaId,
+    item_id: itemId,
+    responsavel_operador_id: operadorId
+  });
+
+  await run(db, 'PRAGMA foreign_keys = ON');
+  await beginImmediate(db);
+  try {
+    const claim = await claimIdempotenciaCentral(db, {
+      idempotencyKey,
+      tipoOperacao: TIPOS_OPERACAO.PREPARACAO_INICIADA,
+      hash,
+      contexto: JSON.stringify({ empresa_id: empresaId, item_id: itemId })
+    });
+    if (claim.replay) {
+      await commit(db);
+      return { ...claim.corpo, repetida: true };
+    }
+
+    const item = await carregarItemEmpresa(db, itemId, empresaId);
+    const rodada = exigirRodadaNaoCancelada(
+      await carregarRodadaEmpresa(db, item.rodada_id, empresaId)
+    );
+
+    if (item.estado_preparacao === 'CANCELADO') {
+      throw erro('Item cancelado.', 409, 'ITEM_CANCELADO');
+    }
+    if (item.estado_preparacao === 'PRONTO') {
+      throw erro('Item já está pronto.', 409, 'TRANSICAO_INVALIDA');
+    }
+
+    let itemAtual = item;
+    if (item.estado_preparacao === 'AGUARDANDO') {
+      await run(db, `
+        UPDATE cozinha_itens
+        SET estado_preparacao = 'EM_PREPARACAO', updated_at = datetime('now')
+        WHERE id = ? AND empresa_id = ?
+      `, [itemId, empresaId]);
+      itemAtual = await carregarItemEmpresa(db, itemId, empresaId);
+    } else if (item.estado_preparacao !== 'EM_PREPARACAO') {
+      throw erro('Transição de preparação inválida.', 409, 'TRANSICAO_INVALIDA');
+    }
+
+    const itens = await carregarItensRodada(db, rodada.id, empresaId);
+    const sync = await sincronizarEstadoRodada(db, rodada, itens, {
+      empresaId,
+      operadorId,
+      idempotencyKeyBase: idempotencyKey
+    });
+
+    const resposta = {
+      success: true,
+      repetida: false,
+      ja_em_preparacao: item.estado_preparacao === 'EM_PREPARACAO',
+      item: dtoItem(itemAtual),
+      rodada: {
+        id: rodada.id,
+        estado_preparacao: sync.estado_preparacao
+      },
+      evento: EVENTOS.PREPARACAO_INICIADA
+    };
+
+    await registrarEventoOutbox(db, {
+      empresaId,
+      unidadeId: item.unidade_id,
+      tipo: EVENTOS.PREPARACAO_INICIADA,
+      idempotencyKey: `${idempotencyKey}:EVENTO`,
+      payload: resposta
+    });
+
+    await concluirIdempotencia(db, {
+      idempotencyKey,
+      resultado: resposta,
+      httpStatus: 200,
+      recursoTipo: 'cozinha_item',
+      recursoId: itemId
+    });
+
+    await commit(db);
+    return resposta;
+  } catch (err) {
+    await rollback(db);
+    throw err;
+  }
+}
+
+async function marcarItemPronto(entrada = {}, opts = {}) {
+  garantirOperacional(opts);
+  const empresaId = exigirEmpresa(entrada.empresaId);
+  const operadorId = exigirOperador(entrada.operadorId);
+  const itemId = exigirId(entrada.itemId, 'ITEM_INVALIDO', 'item_id inválido.');
+  const idempotencyKey = exigirChave(entrada.idempotencyKey);
+  const db = conn(opts);
+
+  const hash = calcularHashOperacao(TIPOS_OPERACAO.ITEM_PRONTO, {
+    empresa_id: empresaId,
+    item_id: itemId,
+    responsavel_operador_id: operadorId
+  });
+
+  await run(db, 'PRAGMA foreign_keys = ON');
+  await beginImmediate(db);
+  try {
+    const claim = await claimIdempotenciaCentral(db, {
+      idempotencyKey,
+      tipoOperacao: TIPOS_OPERACAO.ITEM_PRONTO,
+      hash,
+      contexto: JSON.stringify({ empresa_id: empresaId, item_id: itemId })
+    });
+    if (claim.replay) {
+      await commit(db);
+      return { ...claim.corpo, repetida: true };
+    }
+
+    const item = await carregarItemEmpresa(db, itemId, empresaId);
+    const rodada = exigirRodadaNaoCancelada(
+      await carregarRodadaEmpresa(db, item.rodada_id, empresaId)
+    );
+
+    if (item.estado_preparacao === 'CANCELADO') {
+      throw erro('Item cancelado.', 409, 'ITEM_CANCELADO');
+    }
+
+    let itemAtual = item;
+    let jaPronto = false;
+    if (item.estado_preparacao === 'PRONTO') {
+      jaPronto = true;
+    } else if (item.estado_preparacao === 'AGUARDANDO') {
+      throw erro(
+        'Inicie a preparação antes de marcar como pronto.',
+        409,
+        'TRANSICAO_INVALIDA'
+      );
+    } else if (item.estado_preparacao !== 'EM_PREPARACAO') {
+      throw erro('Transição para PRONTO inválida.', 409, 'TRANSICAO_INVALIDA');
+    } else {
+      const agora = await get(db, `SELECT datetime('now') AS agora`);
+      await run(db, `
+        UPDATE cozinha_itens
+        SET estado_preparacao = 'PRONTO',
+            qty_preparada_millis = qty_solicitada_millis - qty_cancelada_millis,
+            updated_at = datetime('now')
+        WHERE id = ? AND empresa_id = ?
+      `, [itemId, empresaId]);
+      itemAtual = await carregarItemEmpresa(db, itemId, empresaId);
+      itemAtual._pronto_em = agora && agora.agora;
+    }
+
+    const itens = await carregarItensRodada(db, rodada.id, empresaId);
+    const sync = await sincronizarEstadoRodada(db, rodada, itens, {
+      empresaId,
+      operadorId,
+      idempotencyKeyBase: idempotencyKey
+    });
+
+    const resposta = {
+      success: true,
+      repetida: false,
+      ja_pronto: jaPronto,
+      item: dtoItem(itemAtual, { pronto_em: itemAtual._pronto_em || null }),
+      rodada: {
+        id: rodada.id,
+        estado_preparacao: sync.estado_preparacao,
+        conclusao: sync.avaliacao
+      },
+      evento: EVENTOS.ITEM_PRONTO,
+      evento_rodada: sync.eventoRodada
+    };
+
+    await registrarEventoOutbox(db, {
+      empresaId,
+      unidadeId: item.unidade_id,
+      tipo: EVENTOS.ITEM_PRONTO,
+      idempotencyKey: `${idempotencyKey}:EVENTO`,
+      payload: resposta
+    });
+
+    await concluirIdempotencia(db, {
+      idempotencyKey,
+      resultado: resposta,
+      httpStatus: 200,
+      recursoTipo: 'cozinha_item',
+      recursoId: itemId
+    });
+
+    await commit(db);
+    return resposta;
+  } catch (err) {
+    await rollback(db);
+    throw err;
+  }
+}
+
+async function entregarBebida(entrada = {}, opts = {}) {
+  garantirOperacional(opts);
+  const empresaId = exigirEmpresa(entrada.empresaId);
+  const operadorId = exigirOperador(entrada.operadorId);
+  const itemId = exigirId(entrada.itemId, 'ITEM_INVALIDO', 'item_id inválido.');
+  const idempotencyKey = exigirChave(entrada.idempotencyKey);
+  const db = conn(opts);
+
+  let qtyMillis;
+  let qtyDecimal;
+  try {
+    qtyMillis = decimalParaMilessimos(
+      entrada.qty_entregue != null ? entrada.qty_entregue : entrada.quantidade
+    );
+    qtyDecimal = milessimosParaDecimalString(qtyMillis);
+  } catch (e) {
+    if (e && e.codigo === 'QTY_PRECISAO_INVALIDA') throw e;
+    throw erro('Quantidade inválida.', 400, 'QTY_INVALIDA');
+  }
+  if (qtyMillis <= 0) {
+    throw erro('Quantidade deve ser maior que zero.', 400, 'QTY_INVALIDA');
+  }
+
+  const hash = calcularHashOperacao(TIPOS_OPERACAO.BEBIDA_ENTREGUE, {
+    empresa_id: empresaId,
+    item_id: itemId,
+    qty_entregue: qtyDecimal,
+    responsavel_operador_id: operadorId
+  });
+
+  await run(db, 'PRAGMA foreign_keys = ON');
+  await beginImmediate(db);
+  try {
+    const claim = await claimIdempotenciaCentral(db, {
+      idempotencyKey,
+      tipoOperacao: TIPOS_OPERACAO.BEBIDA_ENTREGUE,
+      hash,
+      contexto: JSON.stringify({
+        empresa_id: empresaId,
+        item_id: itemId,
+        qty_entregue: qtyDecimal
+      })
+    });
+    if (claim.replay) {
+      await commit(db);
+      return { ...claim.corpo, repetida: true };
+    }
+
+    const item = await carregarItemEmpresa(db, itemId, empresaId);
+    const rodada = exigirRodadaNaoCancelada(
+      await carregarRodadaEmpresa(db, item.rodada_id, empresaId)
+    );
+
+    if (item.tipo_item !== 'BEBIDA') {
+      throw erro('Entrega de bebida só se aplica a itens BEBIDA.', 409, 'ITEM_NAO_BEBIDA');
+    }
+    if (item.estado_preparacao === 'CANCELADO') {
+      throw erro('Item cancelado.', 409, 'ITEM_CANCELADO');
+    }
+
+    const jaEntregue = await qtyBebidaEntregue(db, item.id, empresaId);
+    const capacidade = subtrairMilessimos(
+      subtrairMilessimos(item.qty_solicitada_millis, item.qty_cancelada_millis || 0),
+      jaEntregue
+    );
+    if (qtyMillis > capacidade) {
+      throw erro(
+        'Quantidade entregue excede o saldo da bebida.',
+        409,
+        'QTY_ENTREGA_EXCEDE',
+        {
+          detalhes: {
+            solicitado_restante: milessimosParaDecimalString(capacidade),
+            informado: milessimosParaDecimalString(qtyMillis)
+          }
+        }
+      );
+    }
+
+    const restanteApos = subtrairMilessimos(capacidade, qtyMillis);
+    const ins = await run(db, `
+      INSERT INTO cozinha_bebida_entregas (
+        empresa_id, cozinha_item_id, rodada_id,
+        qty_entregue_millis, qty_restante_millis,
+        operador_id, entregue_em, idempotency_key
+      ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)
+    `, [
+      empresaId, item.id, item.rodada_id,
+      qtyMillis, restanteApos,
+      operadorId, idempotencyKey
+    ]);
+
+    if (restanteApos === 0 && item.estado_preparacao !== 'PRONTO') {
+      await run(db, `
+        UPDATE cozinha_itens
+        SET estado_preparacao = 'PRONTO',
+            qty_preparada_millis = qty_solicitada_millis - qty_cancelada_millis,
+            updated_at = datetime('now')
+        WHERE id = ? AND empresa_id = ?
+      `, [item.id, empresaId]);
+    }
+
+    const itens = await carregarItensRodada(db, rodada.id, empresaId);
+    const sync = await sincronizarEstadoRodada(db, rodada, itens, {
+      empresaId,
+      operadorId,
+      idempotencyKeyBase: idempotencyKey
+    });
+
+    const itemAtual = await carregarItemEmpresa(db, item.id, empresaId);
+    const entregueTotal = await qtyBebidaEntregue(db, item.id, empresaId);
+
+    const resposta = {
+      success: true,
+      repetida: false,
+      entrega: {
+        id: ins.lastID,
+        qty_entregue: milessimosParaDecimalString(qtyMillis),
+        qty_restante: milessimosParaDecimalString(restanteApos)
+      },
+      item: dtoItem(itemAtual, {
+        qty_entregue_acumulada: milessimosParaDecimalString(entregueTotal),
+        qty_pendente_entrega: milessimosParaDecimalString(restanteApos)
+      }),
+      rodada: {
+        id: rodada.id,
+        estado_preparacao: sync.estado_preparacao,
+        conclusao: sync.avaliacao
+      },
+      evento: EVENTOS.BEBIDA_ENTREGUE
+    };
+
+    await registrarEventoOutbox(db, {
+      empresaId,
+      unidadeId: item.unidade_id,
+      tipo: EVENTOS.BEBIDA_ENTREGUE,
+      idempotencyKey: `${idempotencyKey}:EVENTO`,
+      payload: resposta
+    });
+
+    await concluirIdempotencia(db, {
+      idempotencyKey,
+      resultado: resposta,
+      httpStatus: 201,
+      recursoTipo: 'cozinha_item',
+      recursoId: itemId
+    });
+
+    await commit(db);
+    return resposta;
+  } catch (err) {
+    await rollback(db);
+    throw err;
+  }
+}
+
+async function consultarPreparacaoRodada(entrada = {}, opts = {}) {
+  garantirOperacional(opts);
+  const empresaId = exigirEmpresa(entrada.empresaId);
+  const rodadaId = exigirId(entrada.rodadaId, 'RODADA_INVALIDA', 'rodada_id inválido.');
+  const db = conn(opts);
+
+  const rodada = await carregarRodadaEmpresa(db, rodadaId, empresaId);
+  const itens = await carregarItensRodada(db, rodadaId, empresaId);
+  const avaliacao = avaliarConclusaoRodada(itens);
+
+  const detalhe = [];
+  let qtySolicBebida = 0;
+  let qtyEntregueBebida = 0;
+  let qtyPendenteBebida = 0;
+
+  for (const item of itens) {
+    const ings = await carregarIngredientesItem(db, item.id);
+    let entrega = null;
+    if (item.tipo_item === 'BEBIDA') {
+      const entregue = await qtyBebidaEntregue(db, item.id, empresaId);
+      const pendente = subtrairMilessimos(
+        subtrairMilessimos(item.qty_solicitada_millis, item.qty_cancelada_millis || 0),
+        entregue
+      );
+      qtySolicBebida += subtrairMilessimos(
+        item.qty_solicitada_millis,
+        item.qty_cancelada_millis || 0
+      );
+      qtyEntregueBebida += entregue;
+      qtyPendenteBebida += pendente;
+      entrega = {
+        qty_solicitada: milessimosParaDecimalString(
+          subtrairMilessimos(item.qty_solicitada_millis, item.qty_cancelada_millis || 0)
+        ),
+        qty_entregue: milessimosParaDecimalString(entregue),
+        qty_pendente: milessimosParaDecimalString(pendente)
+      };
+    }
+    detalhe.push({
+      ...dtoItem(item),
+      ingredientes: ings,
+      entrega_bebida: entrega
+    });
+  }
+
+  return {
+    success: true,
+    rodada: {
+      id: rodada.id,
+      empresa_id: rodada.empresa_id,
+      unidade_id: rodada.unidade_id,
+      mesa_id: rodada.mesa_id,
+      atendimento_id: rodada.atendimento_id,
+      numero_rodada: rodada.numero_rodada,
+      sequencia_global: rodada.sequencia_global,
+      estado_preparacao: rodada.estado_preparacao,
+      retirada_estado: rodada.retirada_estado,
+      entrega_estado: rodada.entrega_estado
+    },
+    conclusao: avaliacao,
+    bebidas: {
+      qty_solicitada: milessimosParaDecimalString(qtySolicBebida),
+      qty_entregue: milessimosParaDecimalString(qtyEntregueBebida),
+      qty_pendente: milessimosParaDecimalString(qtyPendenteBebida),
+      nota: 'estado_preparacao=PRONTA não confirma que as bebidas foram entregues.'
+    },
+    itens: detalhe
+  };
+}
+
+module.exports = {
+  EVENTOS,
+  iniciarPreparacao,
+  marcarItemPronto,
+  entregarBebida,
+  consultarPreparacaoRodada,
+  avaliarConclusaoRodada,
+  sincronizarEstadoRodada
+};
+
+
+===== FILE: backend/services/cozinha/cozinhaClassificacaoItem.js =====
+
+/**
+ * Classificação operacional Cozinha — PASTEL | BEBIDA | OUTRO.
+ * Domínio exclusivo da Cozinha. Não altera Pedido/PDV/cadastros.
+ *
+ * Regra oficial (correção auditoria Sprint 03):
+ * 1) Snapshot/campo explícito PASTEL|BEBIDA|OUTRO → respeitar.
+ * 2) INSUMO + comercializavel=1 + categoria Refrigerantes/Refrigerante → BEBIDA.
+ * 3) COMERCIAL + utiliza_ficha_tecnica=1 → PASTEL
+ *    (personalização NÃO é critério; utiliza_ficha_tecnica não muda de significado global).
+ * 4) Demais → OUTRO.
+ *
+ * Nunca: inferência por nome; todo INSUMO comercializável → BEBIDA;
+ * ingredientes de ficha como item independente.
+ */
+'use strict';
+
+const { CATEGORIAS_REFRIGERANTE, ehCategoriaRefrigerante } = require(
+  '../pedido/PedidoRefrigeranteInsumoConsultaService'
+);
+
+const TIPOS_COZINHA = Object.freeze({
+  PASTEL: 'PASTEL',
+  BEBIDA: 'BEBIDA',
+  OUTRO: 'OUTRO'
+});
+
+function textoUpper(v) {
+  if (v == null || v === '') return '';
+  return String(v).trim().toUpperCase();
+}
+
+function flagOn(v) {
+  return v === true || v === 1 || v === '1' || Number(v) === 1;
+}
+
+/**
+ * Apenas valores já no domínio Cozinha (não COMERCIAL/INSUMO do ERP).
+ */
+function extrairExplicitoCozinha(ctx = {}) {
+  const candidatos = [
+    ctx.tipo_item,
+    ctx.tipo_cozinha,
+    ctx.classificacao_cozinha_snapshot
+  ];
+  for (const bruto of candidatos) {
+    const v = textoUpper(bruto);
+    if (v === TIPOS_COZINHA.PASTEL || v === TIPOS_COZINHA.BEBIDA || v === TIPOS_COZINHA.OUTRO) {
+      return v;
+    }
+  }
+  // classificacao_operacional(_snapshot) só conta se já for PASTEL|BEBIDA|OUTRO
+  for (const bruto of [ctx.classificacao_operacional, ctx.classificacao_operacional_snapshot]) {
+    const v = textoUpper(bruto);
+    if (v === TIPOS_COZINHA.PASTEL || v === TIPOS_COZINHA.BEBIDA || v === TIPOS_COZINHA.OUTRO) {
+      return v;
+    }
+  }
+  return null;
+}
+
+function tipoOperacionalErp(ctx = {}) {
+  const v = textoUpper(
+    ctx.tipo_operacional
+    || (
+      ['COMERCIAL', 'INSUMO', 'PRODUTO', 'PRODUTO_COMERCIAL'].includes(
+        textoUpper(ctx.classificacao_operacional_snapshot)
+      )
+        ? ctx.classificacao_operacional_snapshot
+        : null
+    )
+    || (
+      ['COMERCIAL', 'INSUMO', 'PRODUTO', 'PRODUTO_COMERCIAL'].includes(
+        textoUpper(ctx.classificacao_operacional)
+      )
+        ? ctx.classificacao_operacional
+        : null
+    )
+  );
+  if (v === 'INSUMO') return 'INSUMO';
+  if (v === 'COMERCIAL' || v === 'PRODUTO' || v === 'PRODUTO_COMERCIAL') return 'COMERCIAL';
+  return v || '';
+}
+
+/** Critério oficial PASTEL: somente utiliza_ficha_tecnica do cadastro COMERCIAL. */
+function evidenciaPastelOficial(ctx = {}) {
+  return flagOn(ctx.utiliza_ficha_tecnica);
+}
+
+function evidenciaBebidaPorCategoria(ctx = {}) {
+  const cat = ctx.categoria_nome || ctx.categoria || '';
+  return ehCategoriaRefrigerante(cat);
+}
+
+/**
+ * @param {object} ctx dados do item de pedido + produto/categoria
+ * @returns {{ tipo: 'PASTEL'|'BEBIDA'|'OUTRO', motivo: string, confiavel: boolean }}
+ */
+function classificarItemCozinha(ctx = {}) {
+  const explicito = extrairExplicitoCozinha(ctx);
+  if (explicito) {
+    return { tipo: explicito, motivo: 'explicito_snapshot', confiavel: true };
+  }
+
+  const erp = tipoOperacionalErp(ctx);
+
+  if (erp === 'INSUMO' && flagOn(ctx.comercializavel)) {
+    if (evidenciaBebidaPorCategoria(ctx)) {
+      return {
+        tipo: TIPOS_COZINHA.BEBIDA,
+        motivo: 'insumo_comercializavel_categoria_refrigerante',
+        confiavel: true
+      };
+    }
+    return {
+      tipo: TIPOS_COZINHA.OUTRO,
+      motivo: 'insumo_comercializavel_sem_categoria_bebida',
+      confiavel: false
+    };
+  }
+
+  if (erp === 'COMERCIAL' && evidenciaPastelOficial(ctx)) {
+    return {
+      tipo: TIPOS_COZINHA.PASTEL,
+      motivo: 'comercial_utiliza_ficha_tecnica',
+      confiavel: true
+    };
+  }
+
+  if (erp === 'COMERCIAL') {
+    return {
+      tipo: TIPOS_COZINHA.OUTRO,
+      motivo: 'comercial_sem_utiliza_ficha_tecnica',
+      confiavel: false
+    };
+  }
+
+  return {
+    tipo: TIPOS_COZINHA.OUTRO,
+    motivo: 'sem_evidencia_operacional',
+    confiavel: false
+  };
+}
+
+function classificarTipoItem(item) {
+  return classificarItemCozinha(item || {}).tipo;
+}
+
+module.exports = {
+  TIPOS_COZINHA,
+  CATEGORIAS_REFRIGERANTE_COZINHA: CATEGORIAS_REFRIGERANTE,
+  ehCategoriaRefrigerante,
+  classificarItemCozinha,
+  classificarTipoItem,
+  evidenciaPastelOficial,
+  /** @deprecated alias — usa regra oficial */
+  evidenciaPastel: evidenciaPastelOficial,
+  evidenciaBebidaPorCategoria
+};
+
+
+===== FILE: backend/services/cozinha/cozinhaIdempotenciaHash.js =====
+
+/**
+ * Hash determinístico SHA-256 para idempotência da Cozinha (V1.2.3 adendo).
+ * JSON canônico: chaves lexicográficas; arrays preservam ordem; qty com 3 casas.
+ */
+'use strict';
+
+const crypto = require('crypto');
+const { serializarQtyParaHash } = require('./cozinhaQuantidade');
+
+const TIPOS_OPERACAO = Object.freeze({
+  AUTORIZAR_QTY: 'AUTORIZAR_QTY',
+  REDUZIR_TETO: 'REDUZIR_TETO',
+  DESPACHO_LOTE: 'DESPACHO_LOTE',
+  PREPARACAO_INICIADA: 'PREPARACAO_INICIADA',
+  ITEM_PRONTO: 'ITEM_PRONTO',
+  BEBIDA_ENTREGUE: 'BEBIDA_ENTREGUE'
+});
+
+/** Campos que nunca entram no hash (não determinísticos / gerados pelo servidor). */
+const CAMPOS_EXCLUIDOS = new Set([
+  'created_at',
+  'updated_at',
+  'autorizada_em',
+  'reduzida_em',
+  'enviada_em',
+  'concluded_at',
+  'publicado_em',
+  'processando_em',
+  'assumida_em',
+  'entregue_em',
+  'cancelado_em',
+  'registrado_em',
+  'sequencia_global',
+  'id',
+  'rodada_id',
+  'cozinha_item_id',
+  'job_id',
+  'spooler_job_token',
+  'timestamp',
+  'agora',
+  'server_now',
+  'Date.now',
+  'trace_id',
+  'request_id',
+  'ip',
+  'user_agent'
+]);
+
+const CAMPOS_QTY = new Set([
+  'qty_adicional',
+  'qty_solicitada',
+  'qty_entregue',
+  'nova_qty_referencia',
+  'quantidade',
+  'qty'
+]);
+
+function isPlainObject(v) {
+  return v != null && typeof v === 'object' && !Array.isArray(v) && !(v instanceof Date);
+}
+
+function normalizarValor(chave, valor) {
+  if (valor === undefined) return undefined;
+  if (valor === null) return null;
+  if (CAMPOS_EXCLUIDOS.has(chave)) return undefined;
+  if (CAMPOS_QTY.has(chave)) {
+    return serializarQtyParaHash(valor);
+  }
+  if (typeof valor === 'number' && Number.isFinite(valor)) {
+    // Números não-qty: inteiros sem .0; demais como string estável sem float drift no hash
+    if (Number.isInteger(valor)) return valor;
+    return String(valor);
+  }
+  if (typeof valor === 'string' || typeof valor === 'boolean') return valor;
+  if (Array.isArray(valor)) {
+    return valor.map((item, idx) => {
+      if (isPlainObject(item)) return normalizarObjeto(item);
+      if (typeof item === 'number' && !Number.isInteger(item)) return String(item);
+      return item;
+    });
+  }
+  if (isPlainObject(valor)) return normalizarObjeto(valor);
+  return String(valor);
+}
+
+function normalizarObjeto(obj) {
+  const out = {};
+  const chaves = Object.keys(obj).filter((k) => !CAMPOS_EXCLUIDOS.has(k)).sort();
+  for (const k of chaves) {
+    const v = normalizarValor(k, obj[k]);
+    if (v !== undefined) out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * Serializa payload para JSON canônico (sem espaços).
+ * @param {object} payload
+ * @returns {string}
+ */
+function canonicalJson(payload) {
+  const normalizado = isPlainObject(payload)
+    ? normalizarObjeto(payload)
+    : Array.isArray(payload)
+      ? payload.map((item) => (isPlainObject(item) ? normalizarObjeto(item) : item))
+      : payload;
+  return JSON.stringify(normalizado);
+}
+
+/**
+ * Calcula SHA-256 hex do payload normalizado.
+ * @param {object} payload
+ * @returns {string}
+ */
+function calcularPayloadHash(payload) {
+  const canon = canonicalJson(payload);
+  return crypto.createHash('sha256').update(canon, 'utf8').digest('hex');
+}
+
+/**
+ * Monta payload semântico mínimo por tipo (campos do adendo).
+ * Não inclui timestamps/ids de servidor.
+ */
+function montarPayloadSemantico(tipoOperacao, dados = {}) {
+  const tipo = String(tipoOperacao || '').toUpperCase();
+  if (tipo === TIPOS_OPERACAO.AUTORIZAR_QTY) {
+    return normalizarObjeto({
+      tipo_operacao: TIPOS_OPERACAO.AUTORIZAR_QTY,
+      pedido_item_id: dados.pedido_item_id,
+      empresa_id: dados.empresa_id,
+      qty_adicional: dados.qty_adicional,
+      motivo: dados.motivo == null ? dados.motivo : String(dados.motivo).trim(),
+      responsavel_operador_id: dados.responsavel_operador_id
+    });
+  }
+  if (tipo === TIPOS_OPERACAO.REDUZIR_TETO) {
+    return normalizarObjeto({
+      tipo_operacao: TIPOS_OPERACAO.REDUZIR_TETO,
+      pedido_item_id: dados.pedido_item_id,
+      nova_qty_referencia: dados.nova_qty_referencia,
+      motivo: dados.motivo == null ? dados.motivo : String(dados.motivo).trim(),
+      responsavel_operador_id: dados.responsavel_operador_id
+    });
+  }
+  if (tipo === TIPOS_OPERACAO.DESPACHO_LOTE) {
+    const itens = Array.isArray(dados.itens)
+      ? dados.itens.map((it) => ({
+        pedido_id: it.pedido_id,
+        pedido_item_id: it.pedido_item_id,
+        comanda_id: it.comanda_id,
+        qty_solicitada: it.qty_solicitada
+      }))
+      : [];
+    return normalizarObjeto({
+      tipo_operacao: TIPOS_OPERACAO.DESPACHO_LOTE,
+      empresa_id: dados.empresa_id,
+      unidade_id: dados.unidade_id,
+      atendimento_id: dados.atendimento_id,
+      mesa_id: dados.mesa_id,
+      pedido_id: dados.pedido_id,
+      itens,
+      responsavel_operador_id: dados.responsavel_operador_id
+    });
+  }
+  if (tipo === TIPOS_OPERACAO.PREPARACAO_INICIADA) {
+    return normalizarObjeto({
+      tipo_operacao: TIPOS_OPERACAO.PREPARACAO_INICIADA,
+      empresa_id: dados.empresa_id,
+      item_id: Number(dados.item_id),
+      responsavel_operador_id: dados.responsavel_operador_id
+    });
+  }
+  if (tipo === TIPOS_OPERACAO.ITEM_PRONTO) {
+    return normalizarObjeto({
+      tipo_operacao: TIPOS_OPERACAO.ITEM_PRONTO,
+      empresa_id: dados.empresa_id,
+      item_id: Number(dados.item_id),
+      responsavel_operador_id: dados.responsavel_operador_id
+    });
+  }
+  if (tipo === TIPOS_OPERACAO.BEBIDA_ENTREGUE) {
+    return normalizarObjeto({
+      tipo_operacao: TIPOS_OPERACAO.BEBIDA_ENTREGUE,
+      empresa_id: dados.empresa_id,
+      item_id: Number(dados.item_id),
+      qty_entregue: dados.qty_entregue,
+      responsavel_operador_id: dados.responsavel_operador_id
+    });
+  }
+  const err = new Error(`tipo_operacao inválido: ${tipoOperacao}`);
+  err.codigo = 'IDEMPOTENCY_TIPO_INVALIDO';
+  err.statusCode = 400;
+  throw err;
+}
+
+function calcularHashOperacao(tipoOperacao, dados) {
+  return calcularPayloadHash(montarPayloadSemantico(tipoOperacao, dados));
+}
+
+module.exports = {
+  TIPOS_OPERACAO,
+  CAMPOS_EXCLUIDOS,
+  canonicalJson,
+  calcularPayloadHash,
+  montarPayloadSemantico,
+  calcularHashOperacao,
+  normalizarObjeto
+};
+
+
+===== FILE: backend/utils/cozinhaSchema.js =====
+
+/**
+ * Schema aditivo da Cozinha V1.2.3 — fundação + correção P0 isolamento por empresa.
+ * Versão 2: FKs compostas (id, empresa_id) entre entidades da Cozinha.
+ * Migração idempotente. Sem endpoints operacionais.
+ */
+'use strict';
+
+/** v3: amplia CHECK de cozinha_idempotencia.tipo_operacao para preparação S03. */
+const COZINHA_SCHEMA_VERSION = 3;
+
+const TABELAS_COZINHA = Object.freeze([
+  'cozinha_item_ingredientes',
+  'cozinha_bebida_entregas',
+  'cozinha_impressao_fila',
+  'cozinha_notificacoes',
+  'cozinha_eventos_outbox',
+  'cozinha_itens',
+  'cozinha_rodadas',
+  'cozinha_estacoes_impressao',
+  'cozinha_comandas',
+  'cozinha_autorizacoes_qty',
+  'cozinha_reducoes_teto',
+  'cozinha_pedido_item_controle',
+  'cozinha_idempotencia',
+  'cozinha_unidades'
+]);
+
+let statusCozinha = {
+  operacional: false,
+  versao: null,
+  erro: null,
+  atualizadoEm: null
+};
+
+function dbRun(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function cb(err) {
+      if (err) return reject(err);
+      resolve(this);
+    });
+  });
+}
+
+function dbGet(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
+  });
+}
+
+function marcarCozinhaOperacional(ok, err = null) {
+  statusCozinha = {
+    operacional: !!ok,
+    versao: ok ? COZINHA_SCHEMA_VERSION : statusCozinha.versao,
+    erro: err
+      ? { mensagem: String(err.message || err), codigo: err.codigo || 'COZINHA_SCHEMA_FALHA' }
+      : null,
+    atualizadoEm: new Date().toISOString()
+  };
+  return statusCozinha;
+}
+
+function isCozinhaOperacional() {
+  return statusCozinha.operacional === true;
+}
+
+function getCozinhaSchemaStatus() {
+  return { ...statusCozinha, versaoAlvo: COZINHA_SCHEMA_VERSION };
+}
+
+async function garantirConfigNotificacaoCozinha(db) {
+  await dbRun(db, `
+    INSERT OR IGNORE INTO configuracoes (chave, valor, tipo, descricao)
+    VALUES (
+      'cozinha_notificacao_modo',
+      'INDIVIDUAL',
+      'text',
+      'Modo de notificação da cozinha (global): INDIVIDUAL ou SIMULTANEA'
+    )
+  `);
+}
+
+async function lerVersaoSchema(db) {
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_schema_meta (
+      chave TEXT PRIMARY KEY NOT NULL,
+      valor TEXT NOT NULL,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  const row = await dbGet(db, `
+    SELECT valor FROM cozinha_schema_meta WHERE chave = 'schema_version'
+  `);
+  return row ? Number(row.valor) : 0;
+}
+
+async function gravarVersaoSchema(db, versao) {
+  await dbRun(db, `
+    INSERT INTO cozinha_schema_meta (chave, valor, updated_at)
+    VALUES ('schema_version', ?, datetime('now'))
+    ON CONFLICT(chave) DO UPDATE SET
+      valor = excluded.valor,
+      updated_at = datetime('now')
+  `, [String(versao)]);
+}
+
+async function contarLinhas(db, tabela) {
+  const existe = await dbGet(db, `
+    SELECT name FROM sqlite_master WHERE type='table' AND name=?
+  `, [tabela]);
+  if (!existe) return 0;
+  const row = await dbGet(db, `SELECT COUNT(*) AS n FROM ${tabela}`);
+  return Number(row && row.n) || 0;
+}
+
+async function recriarSchemaSeNecessario(db, versaoAtual) {
+  if (versaoAtual >= COZINHA_SCHEMA_VERSION) return { recriado: false };
+
+  let total = 0;
+  for (const t of TABELAS_COZINHA) {
+    total += await contarLinhas(db, t);
+  }
+  if (total > 0) {
+    const err = new Error(
+      `[COZINHA] FALHA_SCHEMA: upgrade para v${COZINHA_SCHEMA_VERSION} exige recriação, ` +
+      `mas existem ${total} linha(s) em tabelas cozinha_*. Interrompido sem apagar dados.`
+    );
+    err.codigo = 'COZINHA_SCHEMA_UPGRADE_BLOQUEADO';
+    throw err;
+  }
+
+  console.warn(
+    `[COZINHA] Recriando schema v${versaoAtual || 0} → v${COZINHA_SCHEMA_VERSION} ` +
+    '(tabelas vazias; FKs compostas empresa_id)'
+  );
+
+  await dbRun(db, 'PRAGMA foreign_keys = OFF');
+  try {
+    for (const t of TABELAS_COZINHA) {
+      await dbRun(db, `DROP TABLE IF EXISTS ${t}`);
+    }
+  } finally {
+    await dbRun(db, 'PRAGMA foreign_keys = ON');
+  }
+  return { recriado: true };
+}
+
+async function criarTabelasCozinha(db) {
+  // —— Unidades ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_unidades (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      codigo TEXT NOT NULL,
+      ativo INTEGER NOT NULL DEFAULT 1,
+      sequencia_atual INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT,
+      CHECK (sequencia_atual >= 0),
+      UNIQUE (id, empresa_id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_unidades_empresa_codigo
+    ON cozinha_unidades(empresa_id, codigo)
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_unidades_id_empresa
+    ON cozinha_unidades(id, empresa_id)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_unidades_empresa_ativo
+    ON cozinha_unidades(empresa_id, ativo)
+  `);
+
+  // —— Comandas ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_comandas (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      atendimento_id INTEGER NOT NULL,
+      numero_comanda INTEGER NOT NULL,
+      rotulo TEXT,
+      pedido_id INTEGER,
+      operador_lancamento_id INTEGER,
+      registrado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT,
+      CHECK (numero_comanda > 0),
+      UNIQUE (id, empresa_id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_comandas_atendimento_numero
+    ON cozinha_comandas(atendimento_id, numero_comanda)
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_comandas_id_empresa
+    ON cozinha_comandas(id, empresa_id)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_comandas_empresa_atendimento
+    ON cozinha_comandas(empresa_id, atendimento_id)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_comandas_pedido
+    ON cozinha_comandas(pedido_id)
+  `);
+
+  // —— Rodadas ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_rodadas (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      unidade_id INTEGER NOT NULL,
+      mesa_id INTEGER NOT NULL,
+      atendimento_id INTEGER NOT NULL,
+      numero_rodada INTEGER NOT NULL,
+      sequencia_global INTEGER NOT NULL,
+      enviada_em TEXT,
+      operador_envio_id INTEGER,
+      estado_preparacao TEXT NOT NULL DEFAULT 'AGUARDANDO'
+        CHECK (estado_preparacao IN ('AGUARDANDO', 'EM_PREPARACAO', 'PRONTA', 'CANCELADA')),
+      retirada_estado TEXT NOT NULL DEFAULT 'PENDENTE'
+        CHECK (retirada_estado IN ('PENDENTE', 'ASSUMIDA_RETIRADA', 'RETIRADA')),
+      retirada_em TEXT,
+      retirada_por INTEGER,
+      entrega_estado TEXT NOT NULL DEFAULT 'PENDENTE'
+        CHECK (entrega_estado IN ('PENDENTE', 'ENTREGUE')),
+      entrega_em TEXT,
+      entrega_por INTEGER,
+      idempotency_key_despacho TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT,
+      CHECK (numero_rodada > 0),
+      CHECK (sequencia_global > 0),
+      UNIQUE (id, empresa_id),
+      FOREIGN KEY (unidade_id, empresa_id)
+        REFERENCES cozinha_unidades(id, empresa_id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_rodadas_atendimento_numero
+    ON cozinha_rodadas(atendimento_id, numero_rodada)
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_rodadas_unidade_sequencia
+    ON cozinha_rodadas(unidade_id, sequencia_global)
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_rodadas_idempotency
+    ON cozinha_rodadas(idempotency_key_despacho)
+    WHERE idempotency_key_despacho IS NOT NULL
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_rodadas_id_empresa
+    ON cozinha_rodadas(id, empresa_id)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_rodadas_empresa_unidade_estado
+    ON cozinha_rodadas(empresa_id, unidade_id, estado_preparacao, enviada_em)
+  `);
+
+  // —— Itens ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_itens (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      unidade_id INTEGER NOT NULL,
+      rodada_id INTEGER NOT NULL,
+      comanda_id INTEGER NOT NULL,
+      pedido_id INTEGER NOT NULL,
+      pedido_item_id INTEGER NOT NULL,
+      sequencia_global INTEGER NOT NULL,
+      tipo_item TEXT NOT NULL
+        CHECK (tipo_item IN ('PASTEL', 'BEBIDA', 'OUTRO')),
+      tipo_lancamento TEXT NOT NULL DEFAULT 'ORIGINAL'
+        CHECK (tipo_lancamento IN ('ORIGINAL', 'COMPLEMENTO')),
+      item_origem_id INTEGER,
+      qty_solicitada_millis INTEGER NOT NULL,
+      qty_preparada_millis INTEGER NOT NULL DEFAULT 0,
+      qty_cancelada_millis INTEGER NOT NULL DEFAULT 0,
+      estado_preparacao TEXT NOT NULL DEFAULT 'AGUARDANDO'
+        CHECK (estado_preparacao IN ('AGUARDANDO', 'EM_PREPARACAO', 'PRONTO', 'CANCELADO')),
+      produto_id INTEGER,
+      produto_nome_snapshot TEXT,
+      observacoes_snapshot TEXT,
+      motivo_complemento TEXT,
+      operador_complemento_id INTEGER,
+      motivo_cancelamento TEXT,
+      operador_cancelamento_id INTEGER,
+      cancelado_em TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT,
+      CHECK (qty_solicitada_millis > 0),
+      CHECK (qty_preparada_millis >= 0),
+      CHECK (qty_cancelada_millis >= 0),
+      CHECK (qty_preparada_millis + qty_cancelada_millis <= qty_solicitada_millis),
+      UNIQUE (id, empresa_id),
+      FOREIGN KEY (rodada_id, empresa_id)
+        REFERENCES cozinha_rodadas(id, empresa_id),
+      FOREIGN KEY (comanda_id, empresa_id)
+        REFERENCES cozinha_comandas(id, empresa_id),
+      FOREIGN KEY (unidade_id, empresa_id)
+        REFERENCES cozinha_unidades(id, empresa_id),
+      FOREIGN KEY (item_origem_id, empresa_id)
+        REFERENCES cozinha_itens(id, empresa_id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_itens_id_empresa
+    ON cozinha_itens(id, empresa_id)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_itens_rodada_estado
+    ON cozinha_itens(rodada_id, estado_preparacao)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_itens_unidade_sequencia
+    ON cozinha_itens(unidade_id, sequencia_global)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_itens_pedido_item_estado
+    ON cozinha_itens(pedido_item_id, estado_preparacao)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_itens_empresa
+    ON cozinha_itens(empresa_id, rodada_id)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_itens_item_origem
+    ON cozinha_itens(item_origem_id)
+  `);
+
+  // —— Ingredientes (sem empresa_id — isolamento via item) ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_item_ingredientes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      cozinha_item_id INTEGER NOT NULL,
+      insumo_id INTEGER,
+      insumo_nome_snapshot TEXT NOT NULL,
+      quantidade_snapshot_millis INTEGER,
+      unidade_snapshot TEXT,
+      classificacao_comercial_snapshot TEXT,
+      selecionado INTEGER NOT NULL DEFAULT 0,
+      preco_adicional_snapshot_millis INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (cozinha_item_id) REFERENCES cozinha_itens(id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_item_ingredientes_item
+    ON cozinha_item_ingredientes(cozinha_item_id)
+  `);
+
+  // —— Bebidas ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_bebida_entregas (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      cozinha_item_id INTEGER NOT NULL,
+      rodada_id INTEGER NOT NULL,
+      qty_entregue_millis INTEGER NOT NULL,
+      qty_restante_millis INTEGER NOT NULL,
+      operador_id INTEGER NOT NULL,
+      entregue_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      idempotency_key TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      CHECK (qty_entregue_millis > 0),
+      CHECK (qty_restante_millis >= 0),
+      FOREIGN KEY (cozinha_item_id, empresa_id)
+        REFERENCES cozinha_itens(id, empresa_id),
+      FOREIGN KEY (rodada_id, empresa_id)
+        REFERENCES cozinha_rodadas(id, empresa_id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_bebida_entregas_idempotency
+    ON cozinha_bebida_entregas(idempotency_key)
+    WHERE idempotency_key IS NOT NULL
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_bebida_entregas_item
+    ON cozinha_bebida_entregas(cozinha_item_id)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_bebida_entregas_rodada
+    ON cozinha_bebida_entregas(rodada_id)
+  `);
+
+  // —— Estações ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_estacoes_impressao (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      unidade_id INTEGER NOT NULL,
+      codigo_estacao TEXT NOT NULL,
+      device_name TEXT,
+      largura_mm INTEGER NOT NULL DEFAULT 80
+        CHECK (largura_mm IN (58, 80)),
+      vias INTEGER NOT NULL DEFAULT 1 CHECK (vias > 0),
+      modelo_individual INTEGER NOT NULL DEFAULT 1,
+      modelo_agrupado INTEGER NOT NULL DEFAULT 1,
+      ativo INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT,
+      UNIQUE (id, empresa_id),
+      FOREIGN KEY (unidade_id, empresa_id)
+        REFERENCES cozinha_unidades(id, empresa_id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_estacoes_empresa_codigo
+    ON cozinha_estacoes_impressao(empresa_id, codigo_estacao)
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_estacoes_id_empresa
+    ON cozinha_estacoes_impressao(id, empresa_id)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_estacoes_unidade
+    ON cozinha_estacoes_impressao(unidade_id)
+  `);
+
+  // —— Fila impressão ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_impressao_fila (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      unidade_id INTEGER NOT NULL,
+      estacao_impressao_id INTEGER,
+      rodada_id INTEGER NOT NULL,
+      payload_snapshot TEXT,
+      modelo TEXT NOT NULL DEFAULT 'AGRUPADO'
+        CHECK (modelo IN ('INDIVIDUAL', 'AGRUPADO')),
+      vias INTEGER NOT NULL DEFAULT 1,
+      estado TEXT NOT NULL DEFAULT 'PENDENTE'
+        CHECK (estado IN (
+          'PENDENTE', 'PROCESSANDO', 'RESULTADO_INCERTO',
+          'ACEITA_PELO_SPOOLER', 'FALHA', 'CANCELADA'
+        )),
+      tentativas INTEGER NOT NULL DEFAULT 0,
+      max_tentativas INTEGER NOT NULL DEFAULT 5,
+      ultimo_erro TEXT,
+      job_origem_id INTEGER,
+      spooler_job_token TEXT,
+      processando_em TEXT,
+      worker_id TEXT,
+      idempotency_key TEXT NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT,
+      UNIQUE (id, empresa_id),
+      FOREIGN KEY (rodada_id, empresa_id)
+        REFERENCES cozinha_rodadas(id, empresa_id),
+      FOREIGN KEY (unidade_id, empresa_id)
+        REFERENCES cozinha_unidades(id, empresa_id),
+      FOREIGN KEY (estacao_impressao_id, empresa_id)
+        REFERENCES cozinha_estacoes_impressao(id, empresa_id),
+      FOREIGN KEY (job_origem_id, empresa_id)
+        REFERENCES cozinha_impressao_fila(id, empresa_id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_impressao_idempotency
+    ON cozinha_impressao_fila(idempotency_key)
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_impressao_id_empresa
+    ON cozinha_impressao_fila(id, empresa_id)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_impressao_estado_criado
+    ON cozinha_impressao_fila(estado, created_at)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_impressao_rodada
+    ON cozinha_impressao_fila(rodada_id)
+  `);
+
+  // —— Notificações ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_notificacoes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      unidade_id INTEGER NOT NULL,
+      rodada_id INTEGER NOT NULL,
+      evento_chave TEXT NOT NULL,
+      modo TEXT NOT NULL
+        CHECK (modo IN ('INDIVIDUAL', 'SIMULTANEA')),
+      destinatario_usuario_id INTEGER,
+      broadcast INTEGER NOT NULL DEFAULT 0,
+      estado TEXT NOT NULL DEFAULT 'GERADA'
+        CHECK (estado IN (
+          'GERADA', 'DISPONIBILIZADA', 'RECEBIDA', 'ASSUMIDA', 'RETIRADA', 'ENTREGUE'
+        )),
+      assumida_por INTEGER,
+      assumida_em TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT,
+      FOREIGN KEY (rodada_id, empresa_id)
+        REFERENCES cozinha_rodadas(id, empresa_id),
+      FOREIGN KEY (unidade_id, empresa_id)
+        REFERENCES cozinha_unidades(id, empresa_id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_notificacoes_evento
+    ON cozinha_notificacoes(evento_chave)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_notificacoes_empresa_estado
+    ON cozinha_notificacoes(empresa_id, estado)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_notificacoes_rodada
+    ON cozinha_notificacoes(rodada_id)
+  `);
+
+  // —— Outbox (unidade opcional; FK composta só quando unidade_id NOT NULL via SQLite NULL=skip) ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_eventos_outbox (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      unidade_id INTEGER,
+      tipo TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      publicado_em TEXT,
+      FOREIGN KEY (unidade_id, empresa_id)
+        REFERENCES cozinha_unidades(id, empresa_id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_outbox_idempotency
+    ON cozinha_eventos_outbox(idempotency_key)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_outbox_publicado_criado
+    ON cozinha_eventos_outbox(publicado_em, created_at)
+  `);
+
+  // —— Controle teto ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_pedido_item_controle (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      pedido_id INTEGER NOT NULL,
+      pedido_item_id INTEGER NOT NULL,
+      qty_referencia_despacho_millis INTEGER NOT NULL,
+      qty_referencia_inicial_millis INTEGER NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT,
+      CHECK (qty_referencia_despacho_millis >= 0),
+      CHECK (qty_referencia_inicial_millis >= 0)
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_pedido_item_controle_item
+    ON cozinha_pedido_item_controle(pedido_item_id)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_pedido_item_controle_empresa
+    ON cozinha_pedido_item_controle(empresa_id, pedido_id)
+  `);
+
+  // —— Autorizações ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_autorizacoes_qty (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      pedido_id INTEGER NOT NULL,
+      pedido_item_id INTEGER NOT NULL,
+      qty_autorizada_millis INTEGER NOT NULL,
+      motivo TEXT NOT NULL,
+      responsavel_operador_id INTEGER NOT NULL,
+      autorizada_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      idempotency_key TEXT,
+      situacao TEXT NOT NULL DEFAULT 'ATIVA'
+        CHECK (situacao IN ('ATIVA', 'ESTORNADA')),
+      resposta_json TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT,
+      CHECK (qty_autorizada_millis > 0)
+    )
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_autorizacoes_item_situacao
+    ON cozinha_autorizacoes_qty(empresa_id, pedido_item_id, situacao)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_autorizacoes_pedido
+    ON cozinha_autorizacoes_qty(pedido_id)
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_autorizacoes_idempotency
+    ON cozinha_autorizacoes_qty(idempotency_key)
+    WHERE idempotency_key IS NOT NULL
+  `);
+
+  // —— Reduções ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_reducoes_teto (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      pedido_id INTEGER NOT NULL,
+      pedido_item_id INTEGER NOT NULL,
+      qty_anterior_millis INTEGER NOT NULL,
+      qty_nova_millis INTEGER NOT NULL,
+      qty_referencia_inicial_millis INTEGER,
+      motivo TEXT NOT NULL,
+      responsavel_operador_id INTEGER NOT NULL,
+      reduzida_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      idempotency_key TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      CHECK (qty_anterior_millis >= 0),
+      CHECK (qty_nova_millis >= 0),
+      CHECK (qty_nova_millis < qty_anterior_millis)
+    )
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_reducoes_item
+    ON cozinha_reducoes_teto(empresa_id, pedido_item_id, reduzida_em)
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_reducoes_idempotency
+    ON cozinha_reducoes_teto(idempotency_key)
+    WHERE idempotency_key IS NOT NULL
+  `);
+
+  // —— Idempotência central (sem empresa_id — contexto JSON; UNIQUE global da key) ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_idempotencia (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      idempotency_key TEXT NOT NULL,
+      tipo_operacao TEXT NOT NULL
+        CHECK (tipo_operacao IN (
+          'AUTORIZAR_QTY',
+          'REDUZIR_TETO',
+          'DESPACHO_LOTE',
+          'PREPARACAO_INICIADA',
+          'ITEM_PRONTO',
+          'BEBIDA_ENTREGUE'
+        )),
+      contexto TEXT,
+      payload_hash TEXT NOT NULL,
+      situacao TEXT NOT NULL DEFAULT 'EM_ANDAMENTO'
+        CHECK (situacao IN ('EM_ANDAMENTO', 'CONCLUIDA', 'FALHA_VALIDACAO')),
+      resultado_http_status INTEGER,
+      resultado_json TEXT,
+      recurso_tipo TEXT,
+      recurso_id INTEGER,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      concluded_at TEXT
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_idempotencia_key
+    ON cozinha_idempotencia(idempotency_key)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_idempotencia_tipo_recurso
+    ON cozinha_idempotencia(tipo_operacao, recurso_id)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_idempotencia_situacao_criado
+    ON cozinha_idempotencia(situacao, created_at)
+  `);
+}
+
+async function garantirSchemaCozinha(db) {
+  if (!db) {
+    marcarCozinhaOperacional(false, new Error('Conexão de banco ausente para schema Cozinha.'));
+    return { skipped: true, operacional: false };
+  }
+
+  try {
+    await dbRun(db, 'PRAGMA foreign_keys = ON');
+    const versaoAtual = await lerVersaoSchema(db);
+    const upgrade = await recriarSchemaSeNecessario(db, versaoAtual);
+    await criarTabelasCozinha(db);
+
+    try {
+      await garantirConfigNotificacaoCozinha(db);
+    } catch (err) {
+      if (!/no such table:\s*configuracoes/i.test(String(err && err.message))) {
+        throw err;
+      }
+    }
+
+    await gravarVersaoSchema(db, COZINHA_SCHEMA_VERSION);
+    marcarCozinhaOperacional(true);
+    return {
+      skipped: false,
+      operacional: true,
+      versao: COZINHA_SCHEMA_VERSION,
+      recriado: !!upgrade.recriado
+    };
+  } catch (err) {
+    marcarCozinhaOperacional(false, err);
+    if (!err.codigo) err.codigo = 'COZINHA_SCHEMA_FALHA';
+    throw err;
+  }
+}
+
+module.exports = {
+  COZINHA_SCHEMA_VERSION,
+  TABELAS_COZINHA,
+  garantirSchemaCozinha,
+  garantirConfigNotificacaoCozinha,
+  marcarCozinhaOperacional,
+  isCozinhaOperacional,
+  getCozinhaSchemaStatus
+};
+
+
+===== FILE: tests/cozinha/sprint03-correcoes-auditoria.test.js =====
+
+/**
+ * Correções de auditoria — Sprint 03 Cozinha
+ * Idempotência central · Classificação oficial · Rodada CANCELADA
+ *
+ *   node --test --test-concurrency=1 tests/cozinha/sprint03-correcoes-auditoria.test.js
+ */
+'use strict';
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { describe, it, beforeEach } = require('node:test');
+const assert = require('node:assert/strict');
+const sqlite3 = require('sqlite3').verbose();
+
+const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-cozinha-s03-fix-'));
+process.env.DB_DIR = dbDir;
+process.env.CDS_TEST_ISOLATION = '1';
+process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
+process.env.CDS_FORCAR_LOCAL = '1';
+delete process.env.CDS_ALLOW_OFFICIAL_DB;
+
+const {
+  garantirSchemaCozinha,
+  marcarCozinhaOperacional,
+  isCozinhaOperacional,
+  COZINHA_SCHEMA_VERSION
+} = require('../../backend/utils/cozinhaSchema');
+const CozinhaDespacho = require('../../backend/services/cozinha/CozinhaDespachoService');
+const CozinhaPreparacao = require('../../backend/services/cozinha/CozinhaPreparacaoService');
+const {
+  classificarItemCozinha
+} = require('../../backend/services/cozinha/cozinhaClassificacaoItem');
+const { TIPOS_OPERACAO } = require('../../backend/services/cozinha/cozinhaIdempotenciaHash');
+
+function run(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function cb(err) {
+      if (err) reject(err);
+      else resolve(this);
+    });
+  });
+}
+function get(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
+  });
+}
+function all(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
+  });
+}
+function open() {
+  return new Promise((resolve, reject) => {
+    const db = new sqlite3.Database(':memory:', (err) => {
+      if (err) return reject(err);
+      db.serialize(() => {
+        db.run('PRAGMA foreign_keys = ON');
+        db.run('PRAGMA busy_timeout = 10000', (e) => (e ? reject(e) : resolve(db)));
+      });
+    });
+  });
+}
+function close(db) {
+  return new Promise((resolve) => db.close(() => resolve()));
+}
+
+async function schemaErp(db) {
+  await run(db, `CREATE TABLE IF NOT EXISTS configuracoes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, chave VARCHAR(100) UNIQUE NOT NULL,
+    valor TEXT, tipo VARCHAR(50), descricao TEXT, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
+  await run(db, `CREATE TABLE IF NOT EXISTS categorias (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL)`);
+  await run(db, `CREATE TABLE IF NOT EXISTS mesas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL,
+    numero INTEGER NOT NULL, ativo INTEGER DEFAULT 1)`);
+  await run(db, `CREATE TABLE IF NOT EXISTS mesa_atendimentos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL, mesa_id INTEGER NOT NULL,
+    estado TEXT NOT NULL, operador_abertura_id INTEGER DEFAULT 1, aberto_em TEXT DEFAULT CURRENT_TIMESTAMP)`);
+  await run(db, `CREATE TABLE IF NOT EXISTS produtos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL,
+    tipo_operacional TEXT DEFAULT 'COMERCIAL', comercializavel INTEGER DEFAULT 0,
+    categoria_id INTEGER, utiliza_ficha_tecnica INTEGER DEFAULT 0,
+    permite_personalizacao_ingredientes INTEGER DEFAULT 0)`);
+  await run(db, `CREATE TABLE IF NOT EXISTS ficha_tecnica (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, produto_id INTEGER NOT NULL, ativo INTEGER DEFAULT 1)`);
+  await run(db, `CREATE TABLE IF NOT EXISTS pedidos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, codigo VARCHAR(50), data_pedido DATE DEFAULT '2026-01-01',
+    total DECIMAL(10,2) DEFAULT 0, status TEXT DEFAULT 'PEDIDO',
+    empresa_id INTEGER, mesa_id INTEGER, mesa_atendimento_id INTEGER)`);
+  await run(db, `CREATE TABLE IF NOT EXISTS pedidos_itens (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, pedido_id INTEGER NOT NULL, produto_id INTEGER NOT NULL,
+    quantidade REAL NOT NULL, preco_unitario DECIMAL(10,2) DEFAULT 0, subtotal DECIMAL(10,2) DEFAULT 0,
+    classificacao_operacional_snapshot TEXT, produto_nome_snapshot TEXT)`);
+  await run(db, `CREATE TABLE IF NOT EXISTS pedido_item_ingredientes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, pedido_id INTEGER NOT NULL, pedido_item_id INTEGER NOT NULL,
+    empresa_id INTEGER NOT NULL, insumo_id INTEGER NOT NULL, insumo_nome_snapshot TEXT NOT NULL,
+    quantidade_snapshot REAL NOT NULL, unidade_snapshot TEXT NOT NULL,
+    classificacao_comercial_snapshot TEXT NOT NULL, selecionado INTEGER NOT NULL,
+    preco_adicional_snapshot REAL DEFAULT 0)`);
+  const info = await garantirSchemaCozinha(db);
+  assert.equal(info.operacional, true);
+  assert.equal(isCozinhaOperacional(), true);
+  assert.equal(COZINHA_SCHEMA_VERSION, 3);
+}
+
+async function seed(db, empresaId = 1) {
+  const catRef = await run(db, `INSERT INTO categorias (nome) VALUES ('Refrigerantes')`);
+  const catOut = await run(db, `INSERT INTO categorias (nome) VALUES ('Embalagens')`);
+  const pastel = await run(db, `
+    INSERT INTO produtos (nome, tipo_operacional, utiliza_ficha_tecnica, permite_personalizacao_ingredientes, categoria_id)
+    VALUES ('Pastel do Cheff', 'COMERCIAL', 1, 1, ?)
+  `, [catOut.lastID]);
+  const pastelSemPers = await run(db, `
+    INSERT INTO produtos (nome, tipo_operacional, utiliza_ficha_tecnica, permite_personalizacao_ingredientes)
+    VALUES ('Pastel Simples', 'COMERCIAL', 1, 0)
+  `);
+  const semFicha = await run(db, `
+    INSERT INTO produtos (nome, tipo_operacional, utiliza_ficha_tecnica)
+    VALUES ('Produto Sem Ficha', 'COMERCIAL', 0)
+  `);
+  const carne = await run(db, `
+    INSERT INTO produtos (nome, tipo_operacional, comercializavel) VALUES ('Carne de Sol', 'INSUMO', 0)
+  `);
+  const fanta = await run(db, `
+    INSERT INTO produtos (nome, tipo_operacional, comercializavel, categoria_id)
+    VALUES ('Fanta Lata 350 ML', 'INSUMO', 1, ?)
+  `, [catRef.lastID]);
+  const emb = await run(db, `
+    INSERT INTO produtos (nome, tipo_operacional, comercializavel, categoria_id)
+    VALUES ('Copo Plastico', 'INSUMO', 1, ?)
+  `, [catOut.lastID]);
+  const mesa = await run(db, `INSERT INTO mesas (empresa_id, numero, ativo) VALUES (?, 7, 1)`, [empresaId]);
+  const at = await run(db, `
+    INSERT INTO mesa_atendimentos (empresa_id, mesa_id, estado) VALUES (?, ?, 'OCUPADA')
+  `, [empresaId, mesa.lastID]);
+  const un = await run(db, `
+    INSERT INTO cozinha_unidades (empresa_id, codigo, sequencia_atual) VALUES (?, ?, 0)
+  `, [empresaId, `U${empresaId}`]);
+  return {
+    empresaId,
+    mesaId: mesa.lastID,
+    atendimentoId: at.lastID,
+    unidadeId: un.lastID,
+    prodPastelId: pastel.lastID,
+    prodPastelSemPersId: pastelSemPers.lastID,
+    prodSemFichaId: semFicha.lastID,
+    prodCarneId: carne.lastID,
+    prodFantaId: fanta.lastID,
+    prodEmbId: emb.lastID
+  };
+}
+
+async function criarItem(db, infra, {
+  produtoId, nome, classif, qty = 1, personalizacao = null
+}) {
+  const ped = await run(db, `
+    INSERT INTO pedidos (codigo, status, empresa_id, mesa_id, mesa_atendimento_id, total)
+    VALUES (?, 'PEDIDO', ?, ?, ?, 10)
+  `, [`P-${Date.now()}-${Math.random()}`, infra.empresaId, infra.mesaId, infra.atendimentoId]);
+  const item = await run(db, `
+    INSERT INTO pedidos_itens (
+      pedido_id, produto_id, quantidade, preco_unitario, subtotal,
+      classificacao_operacional_snapshot, produto_nome_snapshot
+    ) VALUES (?, ?, ?, 10, 10, ?, ?)
+  `, [ped.lastID, produtoId, qty, classif, nome]);
+  if (personalizacao) {
+    await run(db, `
+      INSERT INTO pedido_item_ingredientes (
+        pedido_id, pedido_item_id, empresa_id, insumo_id,
+        insumo_nome_snapshot, quantidade_snapshot, unidade_snapshot,
+        classificacao_comercial_snapshot, selecionado, preco_adicional_snapshot
+      ) VALUES (?, ?, ?, ?, ?, 1, 'UN', 'ADICIONAL', 1, 0)
+    `, [ped.lastID, item.lastID, infra.empresaId, infra.prodCarneId, personalizacao]);
+  }
+  const cmd = await run(db, `
+    INSERT INTO cozinha_comandas (empresa_id, atendimento_id, numero_comanda, pedido_id)
+    VALUES (?, ?, ?, ?)
+  `, [infra.empresaId, infra.atendimentoId, Math.floor(Math.random() * 8000) + 1, ped.lastID]);
+  return { pedidoId: ped.lastID, pedidoItemId: item.lastID, comandaId: cmd.lastID, qty: String(Number(qty).toFixed(3)) };
+}
+
+function despachoEntrada(infra, linhas, key) {
+  return {
+    empresaId: infra.empresaId,
+    operadorId: 7,
+    idempotencyKey: key,
+    unidade_id: infra.unidadeId,
+    mesa_id: infra.mesaId,
+    atendimento_id: infra.atendimentoId,
+    itens: linhas.map((l) => ({
+      pedido_id: l.pedidoId,
+      pedido_item_id: l.pedidoItemId,
+      comanda_id: l.comandaId,
+      qty_solicitada: l.qty || '1.000'
+    }))
+  };
+}
+
+describe('Correções auditoria Sprint 03', () => {
+  beforeEach(() => marcarCozinhaOperacional(false));
+
+  describe('Idempotência central', () => {
+    it('1) mesma chave, mesmo iniciar e mesmo item: replay', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seed(db);
+      const pastel = await criarItem(db, infra, {
+        produtoId: infra.prodPastelId, nome: 'Pastel', classif: 'COMERCIAL'
+      });
+      const out = await CozinhaDespacho.despacharLote(
+        despachoEntrada(infra, [pastel], 'fix-desp-1'), { db }
+      );
+      const id = out.itens[0].id;
+      const a = await CozinhaPreparacao.iniciarPreparacao({
+        empresaId: 1, operadorId: 7, itemId: id, idempotencyKey: 'idem-ini-1'
+      }, { db });
+      const b = await CozinhaPreparacao.iniciarPreparacao({
+        empresaId: 1, operadorId: 7, itemId: id, idempotencyKey: 'idem-ini-1'
+      }, { db });
+      assert.equal(a.repetida, false);
+      assert.equal(b.repetida, true);
+      assert.equal(a.item.id, b.item.id);
+      const rows = await all(db, `
+        SELECT * FROM cozinha_idempotencia WHERE idempotency_key='idem-ini-1'
+      `);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].tipo_operacao, TIPOS_OPERACAO.PREPARACAO_INICIADA);
+      assert.equal(rows[0].situacao, 'CONCLUIDA');
+      await close(db);
+    });
+
+    it('2) mesma chave, iniciar em itens diferentes: 409', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seed(db);
+      const p1 = await criarItem(db, infra, {
+        produtoId: infra.prodPastelId, nome: 'P1', classif: 'COMERCIAL'
+      });
+      const p2 = await criarItem(db, infra, {
+        produtoId: infra.prodPastelId, nome: 'P2', classif: 'COMERCIAL'
+      });
+      const out = await CozinhaDespacho.despacharLote(
+        despachoEntrada(infra, [p1, p2], 'fix-desp-2'), { db }
+      );
+      await CozinhaPreparacao.iniciarPreparacao({
+        empresaId: 1, operadorId: 7, itemId: out.itens[0].id, idempotencyKey: 'idem-cross-item'
+      }, { db });
+      await assert.rejects(
+        () => CozinhaPreparacao.iniciarPreparacao({
+          empresaId: 1, operadorId: 7, itemId: out.itens[1].id, idempotencyKey: 'idem-cross-item'
+        }, { db }),
+        (err) => {
+          assert.equal(err.codigo, 'IDEMPOTENCY_PAYLOAD_DIVERGENTE');
+          assert.equal(err.statusCode, 409);
+          return true;
+        }
+      );
+      await close(db);
+    });
+
+    it('3) mesma chave entre iniciar e marcar pronto: 409', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seed(db);
+      const p = await criarItem(db, infra, {
+        produtoId: infra.prodPastelId, nome: 'P', classif: 'COMERCIAL'
+      });
+      const out = await CozinhaDespacho.despacharLote(
+        despachoEntrada(infra, [p], 'fix-desp-3'), { db }
+      );
+      const id = out.itens[0].id;
+      await CozinhaPreparacao.iniciarPreparacao({
+        empresaId: 1, operadorId: 7, itemId: id, idempotencyKey: 'idem-op-cross'
+      }, { db });
+      await assert.rejects(
+        () => CozinhaPreparacao.marcarItemPronto({
+          empresaId: 1, operadorId: 7, itemId: id, idempotencyKey: 'idem-op-cross'
+        }, { db }),
+        (err) => {
+          assert.equal(err.codigo, 'IDEMPOTENCY_OPERACAO_DIVERGENTE');
+          return true;
+        }
+      );
+      await close(db);
+    });
+
+    it('4) mesma chave entre marcar pronto e entregar bebida: 409', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seed(db);
+      const pastel = await criarItem(db, infra, {
+        produtoId: infra.prodPastelId, nome: 'P', classif: 'COMERCIAL'
+      });
+      const bebida = await criarItem(db, infra, {
+        produtoId: infra.prodFantaId, nome: 'Fanta', classif: 'INSUMO', qty: 1
+      });
+      const out = await CozinhaDespacho.despacharLote(
+        despachoEntrada(infra, [pastel, bebida], 'fix-desp-4'), { db }
+      );
+      const pastelItem = out.itens.find((i) => i.tipo_item === 'PASTEL');
+      const bebItem = out.itens.find((i) => i.tipo_item === 'BEBIDA');
+      await CozinhaPreparacao.iniciarPreparacao({
+        empresaId: 1, operadorId: 7, itemId: pastelItem.id, idempotencyKey: 'ini-4'
+      }, { db });
+      await CozinhaPreparacao.marcarItemPronto({
+        empresaId: 1, operadorId: 7, itemId: pastelItem.id, idempotencyKey: 'idem-pronto-beb'
+      }, { db });
+      await assert.rejects(
+        () => CozinhaPreparacao.entregarBebida({
+          empresaId: 1, operadorId: 7, itemId: bebItem.id,
+          qty_entregue: '1.000', idempotencyKey: 'idem-pronto-beb'
+        }, { db }),
+        (err) => err.codigo === 'IDEMPOTENCY_OPERACAO_DIVERGENTE'
+      );
+      await close(db);
+    });
+
+    it('5) mesma chave com payload diferente (qty): 409', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seed(db);
+      const bebida = await criarItem(db, infra, {
+        produtoId: infra.prodFantaId, nome: 'Fanta', classif: 'INSUMO', qty: 3
+      });
+      const out = await CozinhaDespacho.despacharLote(
+        despachoEntrada(infra, [{ ...bebida, qty: '3.000' }], 'fix-desp-5'), { db }
+      );
+      await CozinhaPreparacao.entregarBebida({
+        empresaId: 1, operadorId: 7, itemId: out.itens[0].id,
+        qty_entregue: '1.000', idempotencyKey: 'idem-qty'
+      }, { db });
+      await assert.rejects(
+        () => CozinhaPreparacao.entregarBebida({
+          empresaId: 1, operadorId: 7, itemId: out.itens[0].id,
+          qty_entregue: '2.000', idempotencyKey: 'idem-qty'
+        }, { db }),
+        (err) => {
+          assert.equal(err.codigo, 'IDEMPOTENCY_PAYLOAD_DIVERGENTE');
+          return true;
+        }
+      );
+      const entregas = await all(db, `SELECT * FROM cozinha_bebida_entregas`);
+      assert.equal(entregas.length, 1);
+      assert.equal(entregas[0].qty_entregue_millis, 1000);
+      await close(db);
+    });
+
+    it('6) repetição de entrega não duplica quantidade', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seed(db);
+      const bebida = await criarItem(db, infra, {
+        produtoId: infra.prodFantaId, nome: 'Fanta', classif: 'INSUMO', qty: 2
+      });
+      const out = await CozinhaDespacho.despacharLote(
+        despachoEntrada(infra, [{ ...bebida, qty: '2.000' }], 'fix-desp-6'), { db }
+      );
+      const a = await CozinhaPreparacao.entregarBebida({
+        empresaId: 1, operadorId: 7, itemId: out.itens[0].id,
+        qty_entregue: '1.000', idempotencyKey: 'idem-beb-rep'
+      }, { db });
+      const b = await CozinhaPreparacao.entregarBebida({
+        empresaId: 1, operadorId: 7, itemId: out.itens[0].id,
+        qty_entregue: '1.000', idempotencyKey: 'idem-beb-rep'
+      }, { db });
+      assert.equal(b.repetida, true);
+      assert.equal(a.entrega.id, b.entrega.id);
+      const sum = await get(db, `
+        SELECT COALESCE(SUM(qty_entregue_millis),0) AS t FROM cozinha_bebida_entregas
+        WHERE cozinha_item_id=?
+      `, [out.itens[0].id]);
+      assert.equal(Number(sum.t), 1000);
+      await close(db);
+    });
+
+    it('7) falha transacional não deixa registros parciais', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seed(db);
+      const p = await criarItem(db, infra, {
+        produtoId: infra.prodPastelId, nome: 'P', classif: 'COMERCIAL'
+      });
+      const out = await CozinhaDespacho.despacharLote(
+        despachoEntrada(infra, [p], 'fix-desp-7'), { db }
+      );
+      await assert.rejects(
+        () => CozinhaPreparacao.marcarItemPronto({
+          empresaId: 1, operadorId: 7, itemId: out.itens[0].id, idempotencyKey: 'idem-fail-7'
+        }, { db }),
+        (err) => err.codigo === 'TRANSICAO_INVALIDA'
+      );
+      assert.equal(await get(db, `
+        SELECT * FROM cozinha_idempotencia WHERE idempotency_key='idem-fail-7'
+      `), null);
+      assert.equal((await all(db, `
+        SELECT * FROM cozinha_eventos_outbox WHERE idempotency_key LIKE 'idem-fail-7%'
+      `)).length, 0);
+      const item = await get(db, `SELECT estado_preparacao FROM cozinha_itens WHERE id=?`, [out.itens[0].id]);
+      assert.equal(item.estado_preparacao, 'AGUARDANDO');
+      await close(db);
+    });
+  });
+
+  describe('Classificação oficial', () => {
+    it('8) COMERCIAL + utiliza_ficha_tecnica=1 → PASTEL', async () => {
+      assert.equal(classificarItemCozinha({
+        tipo_operacional: 'COMERCIAL', utiliza_ficha_tecnica: 1
+      }).tipo, 'PASTEL');
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seed(db);
+      const p = await criarItem(db, infra, {
+        produtoId: infra.prodPastelId, nome: 'Pastel', classif: 'COMERCIAL'
+      });
+      const out = await CozinhaDespacho.despacharLote(
+        despachoEntrada(infra, [p], 'cls-8'), { db }
+      );
+      assert.equal(out.itens[0].tipo_item, 'PASTEL');
+      await close(db);
+    });
+
+    it('9) COMERCIAL + utiliza_ficha_tecnica=0 → OUTRO', async () => {
+      assert.equal(classificarItemCozinha({
+        tipo_operacional: 'COMERCIAL', utiliza_ficha_tecnica: 0
+      }).tipo, 'OUTRO');
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seed(db);
+      const p = await criarItem(db, infra, {
+        produtoId: infra.prodSemFichaId, nome: 'Sem Ficha', classif: 'COMERCIAL'
+      });
+      const out = await CozinhaDespacho.despacharLote(
+        despachoEntrada(infra, [p], 'cls-9'), { db }
+      );
+      assert.equal(out.itens[0].tipo_item, 'OUTRO');
+      await close(db);
+    });
+
+    it('10) PASTEL sem personalização continua PASTEL', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seed(db);
+      const p = await criarItem(db, infra, {
+        produtoId: infra.prodPastelSemPersId, nome: 'Pastel Simples', classif: 'COMERCIAL'
+      });
+      const out = await CozinhaDespacho.despacharLote(
+        despachoEntrada(infra, [p], 'cls-10'), { db }
+      );
+      assert.equal(out.itens[0].tipo_item, 'PASTEL');
+      const ings = await all(db, `
+        SELECT * FROM cozinha_item_ingredientes WHERE cozinha_item_id=?
+      `, [out.itens[0].id]);
+      assert.equal(ings.length, 0);
+      await close(db);
+    });
+
+    it('11) PASTEL com personalização mantém ingredientes vinculados', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seed(db);
+      const p = await criarItem(db, infra, {
+        produtoId: infra.prodPastelId, nome: 'Pastel Cheff', classif: 'COMERCIAL',
+        personalizacao: 'Carne de Sol'
+      });
+      const out = await CozinhaDespacho.despacharLote(
+        despachoEntrada(infra, [p], 'cls-11'), { db }
+      );
+      assert.equal(out.itens[0].tipo_item, 'PASTEL');
+      const ings = await all(db, `
+        SELECT * FROM cozinha_item_ingredientes WHERE cozinha_item_id=?
+      `, [out.itens[0].id]);
+      assert.equal(ings.length, 1);
+      assert.equal(ings[0].insumo_nome_snapshot, 'Carne de Sol');
+      await close(db);
+    });
+
+    it('12) INSUMO comercializável Refrigerantes → BEBIDA', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seed(db);
+      const b = await criarItem(db, infra, {
+        produtoId: infra.prodFantaId, nome: 'Fanta', classif: 'INSUMO'
+      });
+      const out = await CozinhaDespacho.despacharLote(
+        despachoEntrada(infra, [b], 'cls-12'), { db }
+      );
+      assert.equal(out.itens[0].tipo_item, 'BEBIDA');
+      await close(db);
+    });
+
+    it('13) INSUMO comercializável outra categoria → OUTRO', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seed(db);
+      const b = await criarItem(db, infra, {
+        produtoId: infra.prodEmbId, nome: 'Copo', classif: 'INSUMO'
+      });
+      const out = await CozinhaDespacho.despacharLote(
+        despachoEntrada(infra, [b], 'cls-13'), { db }
+      );
+      assert.equal(out.itens[0].tipo_item, 'OUTRO');
+      await close(db);
+    });
+
+    it('14) ingrediente da ficha não vira item independente', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seed(db);
+      const p = await criarItem(db, infra, {
+        produtoId: infra.prodPastelId, nome: 'Pastel', classif: 'COMERCIAL',
+        personalizacao: 'Carne de Sol'
+      });
+      const b = await criarItem(db, infra, {
+        produtoId: infra.prodFantaId, nome: 'Fanta', classif: 'INSUMO'
+      });
+      const out = await CozinhaDespacho.despacharLote(
+        despachoEntrada(infra, [p, b], 'cls-14'), { db }
+      );
+      assert.equal(out.itens.length, 2);
+      assert.ok(!out.itens.some((i) => (i.produto_nome_snapshot || '').includes('Carne de Sol')));
+      await close(db);
+    });
+
+    it('15) alteração posterior no cadastro não reclassifica item despachado', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seed(db);
+      const p = await criarItem(db, infra, {
+        produtoId: infra.prodPastelId, nome: 'Pastel', classif: 'COMERCIAL'
+      });
+      const out = await CozinhaDespacho.despacharLote(
+        despachoEntrada(infra, [p], 'cls-15'), { db }
+      );
+      assert.equal(out.itens[0].tipo_item, 'PASTEL');
+      await run(db, `UPDATE produtos SET utiliza_ficha_tecnica=0 WHERE id=?`, [infra.prodPastelId]);
+      const row = await get(db, `SELECT tipo_item FROM cozinha_itens WHERE id=?`, [out.itens[0].id]);
+      assert.equal(row.tipo_item, 'PASTEL');
+      const consulta = await CozinhaPreparacao.consultarPreparacaoRodada({
+        empresaId: 1, rodadaId: out.rodada.id
+      }, { db });
+      assert.equal(consulta.itens[0].tipo_item, 'PASTEL');
+      await close(db);
+    });
+  });
+
+  describe('Rodada CANCELADA', () => {
+    async function despacharECancelar(db) {
+      const infra = await seed(db);
+      const pastel = await criarItem(db, infra, {
+        produtoId: infra.prodPastelId, nome: 'P', classif: 'COMERCIAL'
+      });
+      const bebida = await criarItem(db, infra, {
+        produtoId: infra.prodFantaId, nome: 'F', classif: 'INSUMO', qty: 2
+      });
+      const out = await CozinhaDespacho.despacharLote(
+        despachoEntrada(infra, [pastel, { ...bebida, qty: '2.000' }], `canc-desp-${Math.random()}`),
+        { db }
+      );
+      await run(db, `
+        UPDATE cozinha_rodadas SET estado_preparacao='CANCELADA' WHERE id=?
+      `, [out.rodada.id]);
+      return { infra, out };
+    }
+
+    it('16) rodada cancelada não pode iniciar preparação', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const { out } = await despacharECancelar(db);
+      const pastel = out.itens.find((i) => i.tipo_item === 'PASTEL');
+      await assert.rejects(
+        () => CozinhaPreparacao.iniciarPreparacao({
+          empresaId: 1, operadorId: 7, itemId: pastel.id, idempotencyKey: 'canc-16'
+        }, { db }),
+        (err) => {
+          assert.equal(err.codigo, 'RODADA_CANCELADA');
+          return true;
+        }
+      );
+      const item = await get(db, `SELECT estado_preparacao FROM cozinha_itens WHERE id=?`, [pastel.id]);
+      assert.equal(item.estado_preparacao, 'AGUARDANDO');
+      await close(db);
+    });
+
+    it('17) rodada cancelada não pode receber item pronto', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seed(db);
+      const p = await criarItem(db, infra, {
+        produtoId: infra.prodPastelId, nome: 'P', classif: 'COMERCIAL'
+      });
+      const out = await CozinhaDespacho.despacharLote(
+        despachoEntrada(infra, [p], 'canc-17-desp'), { db }
+      );
+      await CozinhaPreparacao.iniciarPreparacao({
+        empresaId: 1, operadorId: 7, itemId: out.itens[0].id, idempotencyKey: 'canc-17-ini'
+      }, { db });
+      await run(db, `UPDATE cozinha_rodadas SET estado_preparacao='CANCELADA' WHERE id=?`, [out.rodada.id]);
+      await assert.rejects(
+        () => CozinhaPreparacao.marcarItemPronto({
+          empresaId: 1, operadorId: 7, itemId: out.itens[0].id, idempotencyKey: 'canc-17-pronto'
+        }, { db }),
+        (err) => err.codigo === 'RODADA_CANCELADA'
+      );
+      const rod = await get(db, `SELECT estado_preparacao FROM cozinha_rodadas WHERE id=?`, [out.rodada.id]);
+      assert.equal(rod.estado_preparacao, 'CANCELADA');
+      await close(db);
+    });
+
+    it('18) rodada cancelada não pode receber entrega de bebida', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const { out } = await despacharECancelar(db);
+      const beb = out.itens.find((i) => i.tipo_item === 'BEBIDA');
+      await assert.rejects(
+        () => CozinhaPreparacao.entregarBebida({
+          empresaId: 1, operadorId: 7, itemId: beb.id,
+          qty_entregue: '1.000', idempotencyKey: 'canc-18'
+        }, { db }),
+        (err) => err.codigo === 'RODADA_CANCELADA'
+      );
+      assert.equal((await all(db, `SELECT id FROM cozinha_bebida_entregas`)).length, 0);
+      await close(db);
+    });
+
+    it('19) sincronização não altera CANCELADA', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seed(db);
+      const p = await criarItem(db, infra, {
+        produtoId: infra.prodPastelId, nome: 'P', classif: 'COMERCIAL'
+      });
+      const out = await CozinhaDespacho.despacharLote(
+        despachoEntrada(infra, [p], 'canc-19-desp'), { db }
+      );
+      await run(db, `UPDATE cozinha_itens SET estado_preparacao='PRONTO' WHERE id=?`, [out.itens[0].id]);
+      await run(db, `UPDATE cozinha_rodadas SET estado_preparacao='CANCELADA' WHERE id=?`, [out.rodada.id]);
+      const rodada = await get(db, `SELECT * FROM cozinha_rodadas WHERE id=?`, [out.rodada.id]);
+      const itens = await all(db, `SELECT * FROM cozinha_itens WHERE rodada_id=?`, [out.rodada.id]);
+      await run(db, 'BEGIN IMMEDIATE');
+      const sync = await CozinhaPreparacao.sincronizarEstadoRodada(db, rodada, itens, {
+        empresaId: 1, operadorId: 7, idempotencyKeyBase: 'canc-19-sync'
+      });
+      await run(db, 'COMMIT');
+      assert.equal(sync.estado_preparacao, 'CANCELADA');
+      assert.equal(sync.bloqueada, true);
+      const rod = await get(db, `SELECT estado_preparacao FROM cozinha_rodadas WHERE id=?`, [out.rodada.id]);
+      assert.equal(rod.estado_preparacao, 'CANCELADA');
+      await close(db);
+    });
+
+    it('20) falha transacional preserva CANCELADA', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const { out } = await despacharECancelar(db);
+      const pastel = out.itens.find((i) => i.tipo_item === 'PASTEL');
+      await assert.rejects(
+        () => CozinhaPreparacao.iniciarPreparacao({
+          empresaId: 1, operadorId: 7, itemId: pastel.id, idempotencyKey: 'canc-20'
+        }, { db }),
+        (err) => err.codigo === 'RODADA_CANCELADA'
+      );
+      const rod = await get(db, `SELECT estado_preparacao FROM cozinha_rodadas WHERE id=?`, [out.rodada.id]);
+      assert.equal(rod.estado_preparacao, 'CANCELADA');
+      assert.equal(await get(db, `
+        SELECT * FROM cozinha_idempotencia WHERE idempotency_key='canc-20'
+      `), null);
+      await close(db);
+    });
+  });
+
+  describe('Consulta bebidas vs PRONTA', () => {
+    it('consulta separa saldos de bebida e nota sobre PRONTA', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seed(db);
+      const bebida = await criarItem(db, infra, {
+        produtoId: infra.prodFantaId, nome: 'Fanta', classif: 'INSUMO', qty: 2
+      });
+      const out = await CozinhaDespacho.despacharLote(
+        despachoEntrada(infra, [{ ...bebida, qty: '2.000' }], 'beb-consulta'), { db }
+      );
+      await CozinhaPreparacao.entregarBebida({
+        empresaId: 1, operadorId: 7, itemId: out.itens[0].id,
+        qty_entregue: '1.000', idempotencyKey: 'beb-ent-parcial'
+      }, { db });
+      const c = await CozinhaPreparacao.consultarPreparacaoRodada({
+        empresaId: 1, rodadaId: out.rodada.id
+      }, { db });
+      assert.equal(c.bebidas.qty_solicitada, '2.000');
+      assert.equal(c.bebidas.qty_entregue, '1.000');
+      assert.equal(c.bebidas.qty_pendente, '1.000');
+      assert.ok(/não confirma/i.test(c.bebidas.nota));
+      await close(db);
+    });
+  });
+});
+
+
+===== FILE: tests/cozinha/sprint03-preparacao.test.js =====
+
+/**
+ * Sprint 03 — Motor de preparação e conclusão de rodada.
+ * Banco temporário apenas. Sem banco oficial.
+ *
+ * Executar:
+ *   node --test --test-concurrency=1 tests/cozinha/sprint03-preparacao.test.js
+ */
+'use strict';
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { describe, it, beforeEach } = require('node:test');
+const assert = require('node:assert/strict');
+const sqlite3 = require('sqlite3').verbose();
+
+const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-cozinha-s03-'));
+process.env.DB_DIR = dbDir;
+process.env.CDS_TEST_ISOLATION = '1';
+process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
+process.env.CDS_FORCAR_LOCAL = '1';
+delete process.env.CDS_ALLOW_OFFICIAL_DB;
+
+const {
+  garantirSchemaCozinha,
+  marcarCozinhaOperacional,
+  isCozinhaOperacional
+} = require('../../backend/utils/cozinhaSchema');
+const CozinhaDespacho = require('../../backend/services/cozinha/CozinhaDespachoService');
+const CozinhaPreparacao = require('../../backend/services/cozinha/CozinhaPreparacaoService');
+const {
+  classificarItemCozinha
+} = require('../../backend/services/cozinha/cozinhaClassificacaoItem');
+
+function run(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function cb(err) {
+      if (err) reject(err);
+      else resolve(this);
+    });
+  });
+}
+function get(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
+  });
+}
+function all(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
+  });
+}
+function open(arquivo) {
+  return new Promise((resolve, reject) => {
+    const db = new sqlite3.Database(arquivo || ':memory:', (err) => {
+      if (err) return reject(err);
+      db.serialize(() => {
+        db.run('PRAGMA foreign_keys = ON');
+        db.run('PRAGMA busy_timeout = 10000', (e) => (e ? reject(e) : resolve(db)));
+      });
+    });
+  });
+}
+function close(db) {
+  return new Promise((resolve) => db.close(() => resolve()));
+}
+
+async function schemaErp(db) {
+  await run(db, `
+    CREATE TABLE IF NOT EXISTS configuracoes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chave VARCHAR(100) UNIQUE NOT NULL,
+      valor TEXT, tipo VARCHAR(50), descricao TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await run(db, `
+    CREATE TABLE IF NOT EXISTS categorias (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      nome TEXT NOT NULL
+    )
+  `);
+  await run(db, `
+    CREATE TABLE IF NOT EXISTS mesas (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      numero INTEGER NOT NULL,
+      ativo INTEGER NOT NULL DEFAULT 1
+    )
+  `);
+  await run(db, `
+    CREATE TABLE IF NOT EXISTS mesa_atendimentos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      mesa_id INTEGER NOT NULL,
+      estado TEXT NOT NULL,
+      operador_abertura_id INTEGER NOT NULL DEFAULT 1,
+      aberto_em TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await run(db, `
+    CREATE TABLE IF NOT EXISTS produtos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      nome TEXT NOT NULL,
+      tipo_operacional TEXT DEFAULT 'COMERCIAL',
+      comercializavel INTEGER DEFAULT 0,
+      categoria_id INTEGER,
+      utiliza_ficha_tecnica INTEGER DEFAULT 0,
+      permite_personalizacao_ingredientes INTEGER DEFAULT 0
+    )
+  `);
+  await run(db, `
+    CREATE TABLE IF NOT EXISTS ficha_tecnica (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      produto_id INTEGER NOT NULL,
+      ativo INTEGER DEFAULT 1
+    )
+  `);
+  await run(db, `
+    CREATE TABLE IF NOT EXISTS pedidos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      codigo VARCHAR(50),
+      data_pedido DATE DEFAULT '2026-01-01',
+      total DECIMAL(10,2) DEFAULT 0,
+      status TEXT DEFAULT 'PEDIDO',
+      empresa_id INTEGER,
+      mesa_id INTEGER,
+      mesa_atendimento_id INTEGER
+    )
+  `);
+  await run(db, `
+    CREATE TABLE IF NOT EXISTS pedidos_itens (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pedido_id INTEGER NOT NULL,
+      produto_id INTEGER NOT NULL,
+      quantidade REAL NOT NULL,
+      preco_unitario DECIMAL(10,2) DEFAULT 0,
+      subtotal DECIMAL(10,2) DEFAULT 0,
+      classificacao_operacional_snapshot TEXT,
+      produto_nome_snapshot TEXT,
+      observacao TEXT
+    )
+  `);
+  await run(db, `
+    CREATE TABLE IF NOT EXISTS pedido_item_ingredientes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pedido_id INTEGER NOT NULL,
+      pedido_item_id INTEGER NOT NULL,
+      empresa_id INTEGER NOT NULL,
+      insumo_id INTEGER NOT NULL,
+      insumo_nome_snapshot TEXT NOT NULL,
+      quantidade_snapshot REAL NOT NULL,
+      unidade_snapshot TEXT NOT NULL,
+      classificacao_comercial_snapshot TEXT NOT NULL,
+      selecionado INTEGER NOT NULL,
+      preco_adicional_snapshot REAL DEFAULT 0
+    )
+  `);
+  const info = await garantirSchemaCozinha(db);
+  assert.equal(info.operacional, true);
+  assert.equal(isCozinhaOperacional(), true);
+}
+
+async function seedInfra(db, empresaId = 1) {
+  const catRef = await run(db, `INSERT INTO categorias (nome) VALUES ('Refrigerantes')`);
+  const catOut = await run(db, `INSERT INTO categorias (nome) VALUES ('Diversos')`);
+
+  const pastel = await run(db, `
+    INSERT INTO produtos (
+      nome, tipo_operacional, comercializavel, categoria_id,
+      utiliza_ficha_tecnica, permite_personalizacao_ingredientes
+    ) VALUES ('Pastel do Cheff', 'COMERCIAL', 0, ?, 1, 1)
+  `, [catOut.lastID]);
+  await run(db, `INSERT INTO ficha_tecnica (produto_id, ativo) VALUES (?, 1)`, [pastel.lastID]);
+
+  const carneSol = await run(db, `
+    INSERT INTO produtos (nome, tipo_operacional, comercializavel)
+    VALUES ('Carne de Sol', 'INSUMO', 0)
+  `);
+
+  const fanta = await run(db, `
+    INSERT INTO produtos (
+      nome, tipo_operacional, comercializavel, categoria_id
+    ) VALUES ('Fanta Lata 350 ML', 'INSUMO', 1, ?)
+  `, [catRef.lastID]);
+
+  const outro = await run(db, `
+    INSERT INTO produtos (nome, tipo_operacional, comercializavel, categoria_id)
+    VALUES ('Produto Generico', 'COMERCIAL', 0, ?)
+  `, [catOut.lastID]);
+
+  const mesa = await run(db, `
+    INSERT INTO mesas (empresa_id, numero, ativo) VALUES (?, 10, 1)
+  `, [empresaId]);
+  const at = await run(db, `
+    INSERT INTO mesa_atendimentos (empresa_id, mesa_id, estado)
+    VALUES (?, ?, 'OCUPADA')
+  `, [empresaId, mesa.lastID]);
+  const un = await run(db, `
+    INSERT INTO cozinha_unidades (empresa_id, codigo, sequencia_atual)
+    VALUES (?, ?, 0)
+  `, [empresaId, `U-${empresaId}`]);
+
+  return {
+    empresaId,
+    mesaId: mesa.lastID,
+    atendimentoId: at.lastID,
+    unidadeId: un.lastID,
+    prodPastelId: pastel.lastID,
+    prodCarneSolId: carneSol.lastID,
+    prodFantaId: fanta.lastID,
+    prodOutroId: outro.lastID,
+    catRefrigeranteId: catRef.lastID
+  };
+}
+
+async function criarPedidoItem(db, infra, {
+  produtoId,
+  nome,
+  classifSnapshot,
+  qty = 1,
+  comPersonalizacao = false,
+  personalizacaoNome = 'Carne de Sol'
+}) {
+  const ped = await run(db, `
+    INSERT INTO pedidos (
+      codigo, status, empresa_id, mesa_id, mesa_atendimento_id, total
+    ) VALUES (?, 'PEDIDO', ?, ?, ?, 10)
+  `, [
+    `P-${infra.empresaId}-${Date.now()}-${Math.random()}`,
+    infra.empresaId,
+    infra.mesaId,
+    infra.atendimentoId
+  ]);
+  const item = await run(db, `
+    INSERT INTO pedidos_itens (
+      pedido_id, produto_id, quantidade, preco_unitario, subtotal,
+      classificacao_operacional_snapshot, produto_nome_snapshot
+    ) VALUES (?, ?, ?, 10, 10, ?, ?)
+  `, [ped.lastID, produtoId, qty, classifSnapshot, nome]);
+
+  if (comPersonalizacao) {
+    await run(db, `
+      INSERT INTO pedido_item_ingredientes (
+        pedido_id, pedido_item_id, empresa_id, insumo_id,
+        insumo_nome_snapshot, quantidade_snapshot, unidade_snapshot,
+        classificacao_comercial_snapshot, selecionado, preco_adicional_snapshot
+      ) VALUES (?, ?, ?, ?, ?, 1.000, 'UN', 'ADICIONAL', 1, 0)
+    `, [
+      ped.lastID,
+      item.lastID,
+      infra.empresaId,
+      infra.prodCarneSolId,
+      personalizacaoNome
+    ]);
+  }
+
+  const cmd = await run(db, `
+    INSERT INTO cozinha_comandas (
+      empresa_id, atendimento_id, numero_comanda, pedido_id, operador_lancamento_id
+    ) VALUES (?, ?, ?, ?, 1)
+  `, [
+    infra.empresaId,
+    infra.atendimentoId,
+    Math.floor(Math.random() * 9000) + 1,
+    ped.lastID
+  ]);
+
+  return {
+    pedidoId: ped.lastID,
+    pedidoItemId: item.lastID,
+    comandaId: cmd.lastID
+  };
+}
+
+function entradaDespacho(infra, itens, chave) {
+  return {
+    empresaId: infra.empresaId,
+    operadorId: 7,
+    idempotencyKey: chave,
+    unidade_id: infra.unidadeId,
+    mesa_id: infra.mesaId,
+    atendimento_id: infra.atendimentoId,
+    itens
+  };
+}
+
+async function despacharItens(db, infra, linhas, chave) {
+  const itens = linhas.map((l) => ({
+    pedido_id: l.pedidoId,
+    pedido_item_id: l.pedidoItemId,
+    comanda_id: l.comandaId,
+    qty_solicitada: l.qty || '1.000'
+  }));
+  return CozinhaDespacho.despacharLote(entradaDespacho(infra, itens, chave), { db });
+}
+
+describe('Sprint 03 — Preparação / conclusão de rodada', () => {
+  beforeEach(() => marcarCozinhaOperacional(false));
+
+  describe('Classificação operacional', () => {
+    it('PASTEL por utiliza_ficha_tecnica; BEBIDA por categoria; OUTRO sem evidência', () => {
+      const pastel = classificarItemCozinha({
+        tipo_operacional: 'COMERCIAL',
+        classificacao_operacional_snapshot: 'COMERCIAL',
+        utiliza_ficha_tecnica: 1
+      });
+      assert.equal(pastel.tipo, 'PASTEL');
+      assert.equal(pastel.motivo, 'comercial_utiliza_ficha_tecnica');
+
+      const soPersonalizacao = classificarItemCozinha({
+        tipo_operacional: 'COMERCIAL',
+        classificacao_operacional_snapshot: 'COMERCIAL',
+        utiliza_ficha_tecnica: 0,
+        qtd_ingredientes_pedido: 2,
+        permite_personalizacao_ingredientes: 1
+      });
+      assert.equal(soPersonalizacao.tipo, 'OUTRO');
+
+      const bebida = classificarItemCozinha({
+        tipo_operacional: 'INSUMO',
+        classificacao_operacional_snapshot: 'INSUMO',
+        comercializavel: 1,
+        categoria_nome: 'Refrigerantes'
+      });
+      assert.equal(bebida.tipo, 'BEBIDA');
+
+      const outro = classificarItemCozinha({
+        tipo_operacional: 'COMERCIAL',
+        classificacao_operacional_snapshot: 'COMERCIAL',
+        utiliza_ficha_tecnica: 0
+      });
+      assert.equal(outro.tipo, 'OUTRO');
+
+      const insumoSemCat = classificarItemCozinha({
+        tipo_operacional: 'INSUMO',
+        classificacao_operacional_snapshot: 'INSUMO',
+        comercializavel: 1,
+        categoria_nome: 'Embalagens'
+      });
+      assert.equal(insumoSemCat.tipo, 'OUTRO');
+    });
+  });
+
+  describe('Estados e transições', () => {
+    it('1) item inicia em AGUARDANDO após despacho', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seedInfra(db);
+      const pastel = await criarPedidoItem(db, infra, {
+        produtoId: infra.prodPastelId,
+        nome: 'Pastel do Cheff',
+        classifSnapshot: 'COMERCIAL',
+        comPersonalizacao: true
+      });
+      const out = await despacharItens(db, infra, [pastel], 's03-1-aguardando');
+      assert.equal(out.itens[0].estado_preparacao, 'AGUARDANDO');
+      assert.equal(out.itens[0].tipo_item, 'PASTEL');
+      await close(db);
+    });
+
+    it('2) pastel passa para EM_PREPARACAO', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seedInfra(db);
+      const pastel = await criarPedidoItem(db, infra, {
+        produtoId: infra.prodPastelId,
+        nome: 'Pastel do Cheff',
+        classifSnapshot: 'COMERCIAL',
+        comPersonalizacao: true
+      });
+      const out = await despacharItens(db, infra, [pastel], 's03-2-desp');
+      const prep = await CozinhaPreparacao.iniciarPreparacao({
+        empresaId: infra.empresaId,
+        operadorId: 7,
+        itemId: out.itens[0].id,
+        idempotencyKey: 's03-2-iniciar'
+      }, { db });
+      assert.equal(prep.item.estado_preparacao, 'EM_PREPARACAO');
+      const row = await get(db, `SELECT estado_preparacao FROM cozinha_itens WHERE id=?`, [out.itens[0].id]);
+      assert.equal(row.estado_preparacao, 'EM_PREPARACAO');
+      await close(db);
+    });
+
+    it('3) pastel passa para PRONTO', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seedInfra(db);
+      const pastel = await criarPedidoItem(db, infra, {
+        produtoId: infra.prodPastelId,
+        nome: 'Pastel do Cheff',
+        classifSnapshot: 'COMERCIAL',
+        comPersonalizacao: true
+      });
+      const out = await despacharItens(db, infra, [pastel], 's03-3-desp');
+      await CozinhaPreparacao.iniciarPreparacao({
+        empresaId: infra.empresaId, operadorId: 7,
+        itemId: out.itens[0].id, idempotencyKey: 's03-3-ini'
+      }, { db });
+      const pronto = await CozinhaPreparacao.marcarItemPronto({
+        empresaId: infra.empresaId, operadorId: 7,
+        itemId: out.itens[0].id, idempotencyKey: 's03-3-pronto'
+      }, { db });
+      assert.equal(pronto.item.estado_preparacao, 'PRONTO');
+      assert.equal(pronto.rodada.estado_preparacao, 'PRONTA');
+      await close(db);
+    });
+
+    it('4) não permite transição inválida AGUARDANDO→PRONTO', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seedInfra(db);
+      const pastel = await criarPedidoItem(db, infra, {
+        produtoId: infra.prodPastelId,
+        nome: 'Pastel do Cheff',
+        classifSnapshot: 'COMERCIAL',
+        comPersonalizacao: true
+      });
+      const out = await despacharItens(db, infra, [pastel], 's03-4-desp');
+      await assert.rejects(
+        () => CozinhaPreparacao.marcarItemPronto({
+          empresaId: infra.empresaId, operadorId: 7,
+          itemId: out.itens[0].id, idempotencyKey: 's03-4-bad'
+        }, { db }),
+        (err) => {
+          assert.equal(err.codigo, 'TRANSICAO_INVALIDA');
+          return true;
+        }
+      );
+      const row = await get(db, `SELECT estado_preparacao FROM cozinha_itens WHERE id=?`, [out.itens[0].id]);
+      assert.equal(row.estado_preparacao, 'AGUARDANDO');
+      await close(db);
+    });
+  });
+
+  describe('Controle independente e conclusão', () => {
+    it('5-7) dois pastéis independentes; um pronto não conclui; todos concluem', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seedInfra(db);
+      const p1 = await criarPedidoItem(db, infra, {
+        produtoId: infra.prodPastelId, nome: 'Pastel 1',
+        classifSnapshot: 'COMERCIAL', comPersonalizacao: true
+      });
+      const p2 = await criarPedidoItem(db, infra, {
+        produtoId: infra.prodPastelId, nome: 'Pastel 2',
+        classifSnapshot: 'COMERCIAL', comPersonalizacao: true
+      });
+      const out = await despacharItens(db, infra, [p1, p2], 's03-5-desp');
+      assert.equal(out.itens.length, 2);
+      const idA = out.itens[0].id;
+      const idB = out.itens[1].id;
+
+      await CozinhaPreparacao.iniciarPreparacao({
+        empresaId: 1, operadorId: 7, itemId: idA, idempotencyKey: 's03-5-ini-a'
+      }, { db });
+      await CozinhaPreparacao.iniciarPreparacao({
+        empresaId: 1, operadorId: 7, itemId: idB, idempotencyKey: 's03-5-ini-b'
+      }, { db });
+
+      const r1 = await CozinhaPreparacao.marcarItemPronto({
+        empresaId: 1, operadorId: 7, itemId: idA, idempotencyKey: 's03-5-pronto-a'
+      }, { db });
+      assert.equal(r1.item.estado_preparacao, 'PRONTO');
+      assert.notEqual(r1.rodada.estado_preparacao, 'PRONTA');
+
+      const consulta = await CozinhaPreparacao.consultarPreparacaoRodada({
+        empresaId: 1, rodadaId: out.rodada.id
+      }, { db });
+      assert.equal(consulta.conclusao.pronta, false);
+      assert.ok(consulta.conclusao.pendentes.includes(idB));
+
+      const r2 = await CozinhaPreparacao.marcarItemPronto({
+        empresaId: 1, operadorId: 7, itemId: idB, idempotencyKey: 's03-5-pronto-b'
+      }, { db });
+      assert.equal(r2.rodada.estado_preparacao, 'PRONTA');
+
+      const rod = await get(db, `SELECT estado_preparacao FROM cozinha_rodadas WHERE id=?`, [out.rodada.id]);
+      assert.equal(rod.estado_preparacao, 'PRONTA');
+      const eventos = await all(db, `
+        SELECT tipo FROM cozinha_eventos_outbox WHERE tipo='RODADA_PRONTA'
+      `);
+      assert.equal(eventos.length, 1);
+      await close(db);
+    });
+
+    it('8-9) bebida entrega antes dos pastéis e não bloqueia rodada', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seedInfra(db);
+      const pastel = await criarPedidoItem(db, infra, {
+        produtoId: infra.prodPastelId, nome: 'Pastel do Cheff',
+        classifSnapshot: 'COMERCIAL', comPersonalizacao: true
+      });
+      const bebida = await criarPedidoItem(db, infra, {
+        produtoId: infra.prodFantaId, nome: 'Fanta Lata 350 ML',
+        classifSnapshot: 'INSUMO', qty: 2
+      });
+      const out = await despacharItens(db, infra, [
+        { ...pastel, qty: '1.000' },
+        { ...bebida, qty: '2.000' }
+      ], 's03-8-desp');
+
+      const itemPastel = out.itens.find((i) => i.tipo_item === 'PASTEL');
+      const itemBebida = out.itens.find((i) => i.tipo_item === 'BEBIDA');
+      assert.ok(itemPastel);
+      assert.ok(itemBebida);
+
+      const ent = await CozinhaPreparacao.entregarBebida({
+        empresaId: 1, operadorId: 7,
+        itemId: itemBebida.id, qty_entregue: '2.000',
+        idempotencyKey: 's03-8-bebida'
+      }, { db });
+      assert.equal(ent.success, true);
+      assert.equal(ent.entrega.qty_restante, '0.000');
+
+      let consulta = await CozinhaPreparacao.consultarPreparacaoRodada({
+        empresaId: 1, rodadaId: out.rodada.id
+      }, { db });
+      assert.equal(consulta.conclusao.pronta, false);
+
+      await CozinhaPreparacao.iniciarPreparacao({
+        empresaId: 1, operadorId: 7, itemId: itemPastel.id, idempotencyKey: 's03-8-ini'
+      }, { db });
+      const pronto = await CozinhaPreparacao.marcarItemPronto({
+        empresaId: 1, operadorId: 7, itemId: itemPastel.id, idempotencyKey: 's03-8-pronto'
+      }, { db });
+      assert.equal(pronto.rodada.estado_preparacao, 'PRONTA');
+      await close(db);
+    });
+
+    it('10-11) entrega parcial e bloqueio acima da quantidade', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seedInfra(db);
+      const bebida = await criarPedidoItem(db, infra, {
+        produtoId: infra.prodFantaId, nome: 'Fanta Lata 350 ML',
+        classifSnapshot: 'INSUMO', qty: 3
+      });
+      const out = await despacharItens(db, infra, [
+        { ...bebida, qty: '3.000' }
+      ], 's03-10-desp');
+      const item = out.itens[0];
+      assert.equal(item.tipo_item, 'BEBIDA');
+
+      const p1 = await CozinhaPreparacao.entregarBebida({
+        empresaId: 1, operadorId: 7, itemId: item.id,
+        qty_entregue: '1.000', idempotencyKey: 's03-10-p1'
+      }, { db });
+      assert.equal(p1.entrega.qty_entregue, '1.000');
+      assert.equal(p1.entrega.qty_restante, '2.000');
+
+      const p2 = await CozinhaPreparacao.entregarBebida({
+        empresaId: 1, operadorId: 7, itemId: item.id,
+        qty_entregue: '1.500', idempotencyKey: 's03-10-p2'
+      }, { db });
+      assert.equal(p2.entrega.qty_restante, '0.500');
+
+      await assert.rejects(
+        () => CozinhaPreparacao.entregarBebida({
+          empresaId: 1, operadorId: 7, itemId: item.id,
+          qty_entregue: '1.000', idempotencyKey: 's03-10-excede'
+        }, { db }),
+        (err) => {
+          assert.equal(err.codigo, 'QTY_ENTREGA_EXCEDE');
+          return true;
+        }
+      );
+
+      const total = await get(db, `
+        SELECT COALESCE(SUM(qty_entregue_millis),0) AS t FROM cozinha_bebida_entregas
+        WHERE cozinha_item_id=?
+      `, [item.id]);
+      assert.equal(Number(total.t), 2500);
+      await close(db);
+    });
+
+    it('12) OUTRO não bloqueia rodada com PASTEL', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seedInfra(db);
+      const pastel = await criarPedidoItem(db, infra, {
+        produtoId: infra.prodPastelId, nome: 'Pastel',
+        classifSnapshot: 'COMERCIAL', comPersonalizacao: true
+      });
+      const outro = await criarPedidoItem(db, infra, {
+        produtoId: infra.prodOutroId, nome: 'Produto Generico',
+        classifSnapshot: 'COMERCIAL'
+      });
+      const out = await despacharItens(db, infra, [pastel, outro], 's03-12-desp');
+      const itemPastel = out.itens.find((i) => i.tipo_item === 'PASTEL');
+      const itemOutro = out.itens.find((i) => i.tipo_item === 'OUTRO');
+      assert.ok(itemPastel && itemOutro);
+
+      await CozinhaPreparacao.iniciarPreparacao({
+        empresaId: 1, operadorId: 7, itemId: itemPastel.id, idempotencyKey: 's03-12-ini'
+      }, { db });
+      const pronto = await CozinhaPreparacao.marcarItemPronto({
+        empresaId: 1, operadorId: 7, itemId: itemPastel.id, idempotencyKey: 's03-12-pronto'
+      }, { db });
+      assert.equal(pronto.rodada.estado_preparacao, 'PRONTA');
+      const outroRow = await get(db, `SELECT estado_preparacao FROM cozinha_itens WHERE id=?`, [itemOutro.id]);
+      assert.equal(outroRow.estado_preparacao, 'AGUARDANDO');
+      await close(db);
+    });
+
+    it('13) OUTRO bloqueia rodada sem PASTEL até ficar pronto', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seedInfra(db);
+      const outro = await criarPedidoItem(db, infra, {
+        produtoId: infra.prodOutroId, nome: 'Produto Generico',
+        classifSnapshot: 'COMERCIAL'
+      });
+      const bebida = await criarPedidoItem(db, infra, {
+        produtoId: infra.prodFantaId, nome: 'Fanta',
+        classifSnapshot: 'INSUMO', qty: 1
+      });
+      const out = await despacharItens(db, infra, [outro, bebida], 's03-13-desp');
+      const itemOutro = out.itens.find((i) => i.tipo_item === 'OUTRO');
+      const itemBebida = out.itens.find((i) => i.tipo_item === 'BEBIDA');
+
+      await CozinhaPreparacao.entregarBebida({
+        empresaId: 1, operadorId: 7, itemId: itemBebida.id,
+        qty_entregue: '1.000', idempotencyKey: 's03-13-beb'
+      }, { db });
+
+      let consulta = await CozinhaPreparacao.consultarPreparacaoRodada({
+        empresaId: 1, rodadaId: out.rodada.id
+      }, { db });
+      assert.equal(consulta.conclusao.pronta, false);
+      assert.ok(consulta.conclusao.pendentes.includes(itemOutro.id));
+
+      await CozinhaPreparacao.iniciarPreparacao({
+        empresaId: 1, operadorId: 7, itemId: itemOutro.id, idempotencyKey: 's03-13-ini'
+      }, { db });
+      const pronto = await CozinhaPreparacao.marcarItemPronto({
+        empresaId: 1, operadorId: 7, itemId: itemOutro.id, idempotencyKey: 's03-13-pronto'
+      }, { db });
+      assert.equal(pronto.rodada.estado_preparacao, 'PRONTA');
+      await close(db);
+    });
+  });
+
+  describe('Personalização e separação item/ingrediente', () => {
+    it('14-15) personalização vinculada ao pastel; ingrediente não é item independente', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seedInfra(db);
+      const pastel = await criarPedidoItem(db, infra, {
+        produtoId: infra.prodPastelId,
+        nome: 'Pastel do Cheff',
+        classifSnapshot: 'COMERCIAL',
+        comPersonalizacao: true,
+        personalizacaoNome: 'Carne de Sol'
+      });
+      const bebida = await criarPedidoItem(db, infra, {
+        produtoId: infra.prodFantaId,
+        nome: 'Fanta Lata 350 ML',
+        classifSnapshot: 'INSUMO'
+      });
+      const out = await despacharItens(db, infra, [pastel, bebida], 's03-14-desp');
+      assert.equal(out.itens.length, 2);
+      assert.ok(out.itens.every((i) => i.tipo_item === 'PASTEL' || i.tipo_item === 'BEBIDA'));
+      assert.ok(!out.itens.some((i) => (i.produto_nome_snapshot || '').includes('Carne de Sol')));
+
+      const pastelItem = out.itens.find((i) => i.tipo_item === 'PASTEL');
+      const consulta = await CozinhaPreparacao.consultarPreparacaoRodada({
+        empresaId: 1, rodadaId: out.rodada.id
+      }, { db });
+      const det = consulta.itens.find((i) => i.id === pastelItem.id);
+      assert.equal(det.ingredientes.length, 1);
+      assert.equal(det.ingredientes[0].insumo_nome_snapshot, 'Carne de Sol');
+
+      const totalItens = await all(db, `SELECT id, produto_nome_snapshot FROM cozinha_itens`);
+      assert.equal(totalItens.length, 2);
+      await close(db);
+    });
+  });
+
+  describe('Isolamento, autorização, transação e idempotência', () => {
+    it('16) isolamento entre empresas', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const e1 = await seedInfra(db, 1);
+      const e2 = await seedInfra(db, 2);
+      const pastel1 = await criarPedidoItem(db, e1, {
+        produtoId: e1.prodPastelId, nome: 'Pastel E1',
+        classifSnapshot: 'COMERCIAL', comPersonalizacao: true
+      });
+      const out1 = await despacharItens(db, e1, [pastel1], 's03-16-e1');
+
+      await assert.rejects(
+        () => CozinhaPreparacao.iniciarPreparacao({
+          empresaId: 2, operadorId: 7,
+          itemId: out1.itens[0].id, idempotencyKey: 's03-16-cross'
+        }, { db }),
+        (err) => {
+          assert.equal(err.codigo, 'ITEM_NAO_ENCONTRADO');
+          return true;
+        }
+      );
+
+      const pastel2 = await criarPedidoItem(db, e2, {
+        produtoId: e2.prodPastelId, nome: 'Pastel E2',
+        classifSnapshot: 'COMERCIAL', comPersonalizacao: true
+      });
+      const out2 = await despacharItens(db, e2, [pastel2], 's03-16-e2');
+      const ok = await CozinhaPreparacao.iniciarPreparacao({
+        empresaId: 2, operadorId: 9,
+        itemId: out2.itens[0].id, idempotencyKey: 's03-16-ok'
+      }, { db });
+      assert.equal(ok.item.empresa_id, 2);
+
+      await assert.rejects(
+        () => CozinhaPreparacao.consultarPreparacaoRodada({
+          empresaId: 1, rodadaId: out2.rodada.id
+        }, { db }),
+        (err) => err.codigo === 'RODADA_NAO_ENCONTRADA'
+      );
+      await close(db);
+    });
+
+    it('17) usuário/sessão sem operador não altera preparação', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seedInfra(db);
+      const pastel = await criarPedidoItem(db, infra, {
+        produtoId: infra.prodPastelId, nome: 'Pastel',
+        classifSnapshot: 'COMERCIAL', comPersonalizacao: true
+      });
+      const out = await despacharItens(db, infra, [pastel], 's03-17-desp');
+      await assert.rejects(
+        () => CozinhaPreparacao.iniciarPreparacao({
+          empresaId: 1, operadorId: null,
+          itemId: out.itens[0].id, idempotencyKey: 's03-17-no-op'
+        }, { db }),
+        (err) => {
+          assert.equal(err.codigo, 'SESSAO_INVALIDA');
+          return true;
+        }
+      );
+      await close(db);
+    });
+
+    it('18) falha transacional não deixa estado parcial', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seedInfra(db);
+      const pastel = await criarPedidoItem(db, infra, {
+        produtoId: infra.prodPastelId, nome: 'Pastel',
+        classifSnapshot: 'COMERCIAL', comPersonalizacao: true
+      });
+      const out = await despacharItens(db, infra, [pastel], 's03-18-desp');
+      const itemId = out.itens[0].id;
+
+      await assert.rejects(
+        () => CozinhaPreparacao.marcarItemPronto({
+          empresaId: 1, operadorId: 7,
+          itemId, idempotencyKey: 's03-18-fail'
+        }, { db }),
+        (err) => err.codigo === 'TRANSICAO_INVALIDA'
+      );
+
+      const item = await get(db, `SELECT * FROM cozinha_itens WHERE id=?`, [itemId]);
+      assert.equal(item.estado_preparacao, 'AGUARDANDO');
+      const eventos = await all(db, `
+        SELECT * FROM cozinha_eventos_outbox WHERE idempotency_key='s03-18-fail'
+      `);
+      assert.equal(eventos.length, 0);
+
+      const bebida = await criarPedidoItem(db, infra, {
+        produtoId: infra.prodFantaId, nome: 'Fanta',
+        classifSnapshot: 'INSUMO', qty: 1
+      });
+      const outB = await despacharItens(db, infra, [{ ...bebida, qty: '1.000' }], 's03-18-beb');
+      await assert.rejects(
+        () => CozinhaPreparacao.entregarBebida({
+          empresaId: 1, operadorId: 7,
+          itemId: outB.itens[0].id, qty_entregue: '5.000',
+          idempotencyKey: 's03-18-excede'
+        }, { db }),
+        (err) => err.codigo === 'QTY_ENTREGA_EXCEDE'
+      );
+      const entregas = await all(db, `SELECT * FROM cozinha_bebida_entregas`);
+      assert.equal(entregas.length, 0);
+      await close(db);
+    });
+
+    it('19) operação repetida não duplica entrega nem evento', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seedInfra(db);
+      const bebida = await criarPedidoItem(db, infra, {
+        produtoId: infra.prodFantaId, nome: 'Fanta',
+        classifSnapshot: 'INSUMO', qty: 2
+      });
+      const out = await despacharItens(db, infra, [{ ...bebida, qty: '2.000' }], 's03-19-desp');
+      const itemId = out.itens[0].id;
+
+      const a = await CozinhaPreparacao.entregarBebida({
+        empresaId: 1, operadorId: 7, itemId,
+        qty_entregue: '1.000', idempotencyKey: 's03-19-idem'
+      }, { db });
+      const b = await CozinhaPreparacao.entregarBebida({
+        empresaId: 1, operadorId: 7, itemId,
+        qty_entregue: '1.000', idempotencyKey: 's03-19-idem'
+      }, { db });
+      assert.equal(b.repetida, true);
+      assert.equal(a.entrega.id, b.entrega.id);
+
+      const entregas = await all(db, `
+        SELECT * FROM cozinha_bebida_entregas WHERE cozinha_item_id=?
+      `, [itemId]);
+      assert.equal(entregas.length, 1);
+
+      const eventos = await all(db, `
+        SELECT * FROM cozinha_eventos_outbox
+        WHERE idempotency_key = 's03-19-idem:EVENTO'
+      `);
+      assert.equal(eventos.length, 1);
+      const idempBeb = await all(db, `
+        SELECT * FROM cozinha_idempotencia WHERE idempotency_key='s03-19-idem'
+      `);
+      assert.equal(idempBeb.length, 1);
+      assert.equal(idempBeb[0].situacao, 'CONCLUIDA');
+
+      const pastel = await criarPedidoItem(db, infra, {
+        produtoId: infra.prodPastelId, nome: 'Pastel Idem',
+        classifSnapshot: 'COMERCIAL', comPersonalizacao: true
+      });
+      const outP = await despacharItens(db, infra, [pastel], 's03-19-pastel');
+      const pastelId = outP.itens[0].id;
+      const ini1 = await CozinhaPreparacao.iniciarPreparacao({
+        empresaId: 1, operadorId: 7, itemId: pastelId, idempotencyKey: 's03-19-ini'
+      }, { db });
+      const ini2 = await CozinhaPreparacao.iniciarPreparacao({
+        empresaId: 1, operadorId: 7, itemId: pastelId, idempotencyKey: 's03-19-ini'
+      }, { db });
+      assert.equal(ini1.item.estado_preparacao, 'EM_PREPARACAO');
+      assert.equal(ini2.repetida, true);
+      const evIni = await all(db, `
+        SELECT * FROM cozinha_eventos_outbox WHERE idempotency_key='s03-19-ini:EVENTO'
+      `);
+      assert.equal(evIni.length, 1);
+      const idempIni = await all(db, `
+        SELECT * FROM cozinha_idempotencia WHERE idempotency_key='s03-19-ini'
+      `);
+      assert.equal(idempIni.length, 1);
+      await close(db);
+    });
+  });
+
+  describe('Regressão Sprint 01 e Sprint 02', () => {
+    it('20) regressão S01 — schema operacional e FK composta id+empresa', async () => {
+      const db = await open();
+      await schemaErp(db);
+      assert.equal(isCozinhaOperacional(), true);
+      const tabs = await all(db, `
+        SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cozinha_%'
+      `);
+      const nomes = new Set(tabs.map((t) => t.name));
+      for (const t of [
+        'cozinha_rodadas', 'cozinha_itens', 'cozinha_item_ingredientes',
+        'cozinha_bebida_entregas', 'cozinha_eventos_outbox', 'cozinha_idempotencia'
+      ]) {
+        assert.ok(nomes.has(t), `faltando ${t}`);
+      }
+
+      const infra1 = await seedInfra(db, 1);
+      const infra2 = await seedInfra(db, 2);
+      const pastel1 = await criarPedidoItem(db, infra1, {
+        produtoId: infra1.prodPastelId, nome: 'P1',
+        classifSnapshot: 'COMERCIAL', comPersonalizacao: true
+      });
+      const pastel2 = await criarPedidoItem(db, infra2, {
+        produtoId: infra2.prodPastelId, nome: 'P2',
+        classifSnapshot: 'COMERCIAL', comPersonalizacao: true
+      });
+      const o1 = await despacharItens(db, infra1, [pastel1], 's03-20-e1');
+      const o2 = await despacharItens(db, infra2, [pastel2], 's03-20-e2');
+      assert.equal(o1.rodada.empresa_id, 1);
+      assert.equal(o2.rodada.empresa_id, 2);
+      assert.notEqual(o1.rodada.id, o2.rodada.id);
+
+      await assert.rejects(
+        () => CozinhaPreparacao.iniciarPreparacao({
+          empresaId: infra2.empresaId, operadorId: 7,
+          itemId: o1.itens[0].id, idempotencyKey: 's03-20-cross'
+        }, { db }),
+        (err) => err.codigo === 'ITEM_NAO_ENCONTRADO'
+      );
+      await close(db);
+    });
+
+    it('21) regressão S02 — despacho FIFO, personalização e estados iniciais', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seedInfra(db);
+      const a = await criarPedidoItem(db, infra, {
+        produtoId: infra.prodPastelId, nome: 'Pastel A',
+        classifSnapshot: 'COMERCIAL', comPersonalizacao: true
+      });
+      const b = await criarPedidoItem(db, infra, {
+        produtoId: infra.prodPastelId, nome: 'Pastel B',
+        classifSnapshot: 'COMERCIAL', comPersonalizacao: true
+      });
+      const r1 = await despacharItens(db, infra, [a], 's03-21-a');
+      const r2 = await despacharItens(db, infra, [b], 's03-21-b');
+      assert.equal(r1.rodada.sequencia_global, 1);
+      assert.equal(r2.rodada.sequencia_global, 2);
+      assert.equal(r1.rodada.estado_preparacao, 'AGUARDANDO');
+      assert.equal(r1.itens[0].estado_preparacao, 'AGUARDANDO');
+
+      const ings = await all(db, `
+        SELECT * FROM cozinha_item_ingredientes WHERE cozinha_item_id=?
+      `, [r1.itens[0].id]);
+      assert.equal(ings.length, 1);
+
+      const replay = await despacharItens(db, infra, [a], 's03-21-a');
+      assert.equal(replay.repetida, true);
+      assert.equal(replay.rodada.id, r1.rodada.id);
+
+      const rods = await all(db, `SELECT id FROM cozinha_rodadas`);
+      assert.equal(rods.length, 2);
+      await close(db);
+    });
+  });
+});
+

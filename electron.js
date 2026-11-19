@@ -191,6 +191,32 @@ ipcMain.handle('listar-impressoras', async (event) => {
 const { registrarPortalNfeHandlers } = require('./electron-registrar-portal-nfe');
 registrarPortalNfeHandlers(ipcMain, () => mainWindow);
 
+// Sprint 06 Bloco E — IPC cozinha (isolado de cupom/DANFE; print real off por padrão)
+const { registrarCozinhaImpressaoHandlers } = require('./electron-cozinha-impressao');
+registrarCozinhaImpressaoHandlers(ipcMain);
+
+// Sprint 06 Bloco E (E-03) — ciclo de vida único Worker impressão cozinha
+const {
+  obterOuCriarIntegracaoPadrao,
+  anexarAoReadyToShowMainWindow,
+  obterIntegracaoAtiva
+} = require('./backend/services/cozinha/CozinhaImpressaoElectronCicloVida');
+
+function obterDbCozinhaImpressao() {
+  try {
+    return require('./backend/database');
+  } catch (_e) {
+    return null;
+  }
+}
+
+const integracaoCozinhaImpressao = obterOuCriarIntegracaoPadrao({
+  obterMainWindow: () => mainWindow,
+  obterDb: obterDbCozinhaImpressao
+  // Contexto empresa/unidade: somente via notificarContextoOperacional (IPC/login).
+  // Não inventar IDs fixos.
+});
+
 ipcMain.removeHandler('selecionar-pasta-backup');
 ipcMain.handle('selecionar-pasta-backup', async (event) => {
   const { selecionarPastaBackup: abrirSeletorPasta } = require('./backend/services/electronDialogoService');
@@ -568,10 +594,8 @@ function criarMainWindow(opcoes = {}) {
     childWindow.focus();
   });
 
-  mainWindow.once('ready-to-show', () => {
-    mainWindow.show();
-    mainWindow.focus();
-  });
+  // E-03: único ponto — listener real ready-to-show → instalador + espera de contexto.
+  anexarAoReadyToShowMainWindow(mainWindow, integracaoCozinhaImpressao);
 
   ipcMain.removeAllListeners('forcar-reflow');
   ipcMain.on('forcar-reflow', (event) => {
@@ -723,6 +747,9 @@ function criarMainWindow(opcoes = {}) {
     dispararImpressaoIsolada(html, deviceName);
     return { sucesso: true, isolado: true };
   });
+
+  // Diagnóstico E-03
+  global.obterIntegracaoCozinhaImpressao = obterIntegracaoAtiva;
 
   return mainWindow;
 }
@@ -942,6 +969,11 @@ app.on('window-all-closed', () => {
 });
 
 app.on('will-quit', () => {
+  // E-03: interrompe agendador e bloqueia novos ticks.
+  try {
+    const integ = obterIntegracaoAtiva();
+    if (integ && typeof integ.aoWillQuit === 'function') integ.aoWillQuit();
+  } catch (_) { /* ignore */ }
   try {
     const cm = require('./backend/motores/equipamentos/connection/ConnectionManager');
     if (cm && typeof cm.closeAll === 'function') {

@@ -1,0 +1,26 @@
+﻿# DIFF HOTFIX S07-2 SEM UNIDADES
+# Arquivos: CozinhaSessaoUnidadeService.js, cozinhaAuthUnidade.js, cozinha-kds.js, sprint07-s07-2 test
+
++ CozinhaSessaoUnidadeService.js:125: // Admin/perfil operacional: todas as ativas da empresa — sem vínculo individual.
++ CozinhaSessaoUnidadeService.js:158: codigo = 'SEM_UNIDADES_CADASTRADAS';
++ CozinhaSessaoUnidadeService.js:162: codigo = 'SEM_VINCULO_OPERADOR';
++ CozinhaSessaoUnidadeService.js:174: admin_operacional: adminOperacional,
++ CozinhaSessaoUnidadeService.js:175: unidades_ativas_empresa: unidadesAtivasEmpresa,
++ cozinhaAuthUnidade.js:75: const role = String(usuario.role || '').trim().toLowerCase();
++ cozinhaAuthUnidade.js:78: return role === 'admin'
++ cozinha-kds.js:219: const codigoVazio = estado.selecaoCodigo || '';
++ cozinha-kds.js:222: if (codigoVazio === 'SEM_UNIDADES_CADASTRADAS') {
++ cozinha-kds.js:225: } else if (codigoVazio === 'SEM_VINCULO_OPERADOR') {
++ cozinha-kds.js:420: selecaoCodigo: '',
++ cozinha-kds.js:491: estado.selecaoCodigo = (data && data.codigo) || '';
++ cozinha-kds.js:499: estado.selecaoCodigo = err && (err.codigo || err.code) ? String(err.codigo || err.code) : '';
++ sprint07-s07-2-sessao-unidade-kds.test.js:316: it('ausência de vínculos com unidades na empresa → SEM_VINCULO_OPERADOR', async () => {
++ sprint07-s07-2-sessao-unidade-kds.test.js:330: assert.equal(out.admin_operacional, false);
++ sprint07-s07-2-sessao-unidade-kds.test.js:331: assert.ok(out.unidades_ativas_empresa >= 1);
++ sprint07-s07-2-sessao-unidade-kds.test.js:332: assert.equal(out.codigo, 'SEM_VINCULO_OPERADOR');
++ sprint07-s07-2-sessao-unidade-kds.test.js:337: it('empresa sem unidades ativas → SEM_UNIDADES_CADASTRADAS (admin)', async () => {
++ sprint07-s07-2-sessao-unidade-kds.test.js:351: assert.equal(out.admin_operacional, true);
++ sprint07-s07-2-sessao-unidade-kds.test.js:352: assert.equal(out.unidades_ativas_empresa, 0);
++ sprint07-s07-2-sessao-unidade-kds.test.js:353: assert.equal(out.codigo, 'SEM_UNIDADES_CADASTRADAS');
++ sprint07-s07-2-sessao-unidade-kds.test.js:358: it('perfil operacional (perfil ADMIN) lista ativas sem vínculo', async () => {
++ sprint07-s07-2-sessao-unidade-kds.test.js:370: assert.equal(out.admin_operacional, true);

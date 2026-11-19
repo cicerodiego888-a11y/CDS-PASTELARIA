@@ -1,0 +1,13 @@
+{
+  "evidencia": "HTTP operador sem vinculo de empresa",
+  "db_tmp": "C:\\Users\\cicer\\AppData\\Local\\Temp\\cds-s07-0-evid-TsZsg3",
+  "banco_oficial_acessado": false,
+  "status": 403,
+  "codigo": "EMPRESA_NAO_AUTORIZADA",
+  "mensagem": "Usuário não está autorizado a usar esta empresa.",
+  "body": {
+    "error": "Usuário não está autorizado a usar esta empresa.",
+    "code": "EMPRESA_NAO_AUTORIZADA",
+    "empresa_id": 1
+  }
+}

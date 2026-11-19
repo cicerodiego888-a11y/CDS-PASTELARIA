@@ -29,6 +29,8 @@
     faturamento: { grupo: 'Comercial', titulo: 'Expedição', subtitulo: 'Pedido → Separação → Expedição · operação comercial' },
     caixa: { grupo: 'Comercial', titulo: 'Fechamento de Caixa', subtitulo: 'Sangria, reforço e fechamento' },
     configuracoes: { grupo: 'Administração', titulo: 'Configurações', subtitulo: 'Preferências operacionais da empresa' },
+    'cozinha-unidades': { grupo: 'Administração', titulo: 'Unidades de Cozinha', subtitulo: 'Cadastro de unidades operacionais' },
+    'cozinha-roteamento': { grupo: 'Administração', titulo: 'Roteamento de Cozinhas', subtitulo: 'Modo padrão ou por segmento de atendimento' },
     usuarios: { grupo: 'Administração', titulo: 'Usuários', subtitulo: 'Acessos e permissões' },
     licenca: { grupo: 'Administração', titulo: 'Assinatura', subtitulo: 'Status e ativação da assinatura CDS' },
     auditoria: { grupo: 'Administração', titulo: 'Auditoria', subtitulo: 'Trilha de eventos do sistema' },

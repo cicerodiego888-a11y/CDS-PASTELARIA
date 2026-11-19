@@ -1,0 +1,69 @@
+# DIFF restrito — B1 correcao final isolamento unidades mesma empresa
+# Arquivo alterado: somente tests/cozinha/sprint06-bloco-b1-fila-persistencia.test.js
+# Producao: NAO alterada (servicos/rotas/schema)
+
+diff --git a/tests/cozinha/sprint06-bloco-b1-fila-persistencia.test.js b/tests/cozinha/sprint06-bloco-b1-fila-persistencia.test.js
+--- a/tests/cozinha/sprint06-bloco-b1-fila-persistencia.test.js
++++ b/tests/cozinha/sprint06-bloco-b1-fila-persistencia.test.js
+@@ teste 10 + fixtures Unidade 2 mesma empresa @@
++  it('10) rota real: isolamento entre duas unidades da MESMA empresa', async () => {
++    // Pré-condição do cenário: U1 e U2 sob a mesma empresa; JWT só da U1.
++    assert.equal(
++      (await get(dbProd, `SELECT empresa_id FROM cozinha_unidades WHERE id = ?`, [unidadeAuth])).empresa_id,
++      empresaAuth
++    );
++    assert.equal(
++      (await get(dbProd, `SELECT empresa_id FROM cozinha_unidades WHERE id = ?`, [unidadeMesmaEmpresa2])).empresa_id,
++      empresaAuth
++    );
++    assert.notEqual(unidadeAuth, unidadeMesmaEmpresa2);
++
++    const decoded = jwt.verify(tokenAuth, JWT_SECRET);
++    assert.equal(decoded.unidade_cozinha_id, unidadeAuth);
++    assert.notEqual(decoded.unidade_cozinha_id, unidadeMesmaEmpresa2);
++
++    const lista = await requestJson('GET', '/api/cozinha/impressao/fila', {
++      token: tokenAuth,
++      headers: { 'X-Empresa-Id': String(empresaAuth) }
++    });
++    assert.equal(lista.status, 200, JSON.stringify(lista.body));
++    assert.equal(lista.body.empresa_id, empresaAuth);
++    assert.equal(lista.body.unidade_id, unidadeAuth);
++    assert.ok(lista.body.jobs.some((j) => j.id === jobAuthId), 'job da Unidade 1 deve aparecer');
++    assert.ok(
++      !lista.body.jobs.some((j) => j.id === jobMesmaEmpresaU2Id),
++      'job da Unidade 2 (mesma empresa) NÃO deve aparecer'
++    );
++    assert.ok(!lista.body.jobs.some((j) => j.unidade_id === unidadeMesmaEmpresa2));
++
++    const detalheU2 = await requestJson('GET', `/api/cozinha/impressao/fila/${jobMesmaEmpresaU2Id}`, {
++      token: tokenAuth,
++      headers: { 'X-Empresa-Id': String(empresaAuth) }
++    });
++    assert.equal(detalheU2.status, 404, JSON.stringify(detalheU2.body));
++    assert.equal(detalheU2.body.codigo, 'IMPRESSAO_JOB_NAO_ENCONTRADO');
++  });
++});
+
+@@ fixtures before(): unidadeMesmaEmpresa2 / jobMesmaEmpresaU2Id @@
++L428:   let unidadeMesmaEmpresa2;
++L433:   let jobMesmaEmpresaU2Id;
++L558:       INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'U-AUTH-B1-U2', 1)
++L560:     unidadeMesmaEmpresa2 = unMesmaEmp2.lastID;
++L571:     const rodMesmaEmp2 = await run(dbProd, `
++L575:     `, [empresaAuth, unidadeMesmaEmpresa2]);
++L589:     const estMesmaEmp2 = await EstacaoService.criarEstacao({
++L592:       unidadeId: unidadeMesmaEmpresa2,
++L621:       unidadeId: unidadeMesmaEmpresa2,
++L622:       rodadaId: rodMesmaEmp2.lastID,
++L623:       estacaoImpressaoId: estMesmaEmp2.estacao.id,
++L624:       idempotency_key: `b1-http-mesma-emp-u2:${empresaAuth}:${unidadeMesmaEmpresa2}`,
++L630:     jobMesmaEmpresaU2Id = jobMesmaEmpU2.job.id;
++L632:     assert.equal(jobMesmaEmpU2.job.unidade_id, unidadeMesmaEmpresa2);
++L633:     assert.notEqual(unidadeMesmaEmpresa2, unidadeAuth);
++L739:       (await get(dbProd, `SELECT empresa_id FROM cozinha_unidades WHERE id = ?`, [unidadeMesmaEmpresa2])).empresa_id,
++L742:     assert.notEqual(unidadeAuth, unidadeMesmaEmpresa2);
++L746:     assert.notEqual(decoded.unidade_cozinha_id, unidadeMesmaEmpresa2);
++L757:       !lista.body.jobs.some((j) => j.id === jobMesmaEmpresaU2Id),
++L760:     assert.ok(!lista.body.jobs.some((j) => j.unidade_id === unidadeMesmaEmpresa2));
++L762:     const detalheU2 = await requestJson('GET', `/api/cozinha/impressao/fila/${jobMesmaEmpresaU2Id}`, {

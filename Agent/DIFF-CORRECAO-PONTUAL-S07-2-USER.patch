@@ -1,0 +1,261 @@
+﻿diff --git a/Agent/auditoria-sprint07-s07-2/cozinha-kds.js b/frontend/erp/js/cozinha-kds.js
+index ef972bf..38bfe79 100644
+--- a/Agent/auditoria-sprint07-s07-2/cozinha-kds.js
++++ b/frontend/erp/js/cozinha-kds.js
+@@ -186,6 +186,26 @@
+     }
+   }
+ 
++  /**
++   * Exige claim unidade_cozinha_id no JWT exatamente igual à unidade selecionada.
++   * Não aceita corpo HTTP (data.unidade_cozinha_id) como substituto.
++   */
++  function exigirUnidadeNoJwt(token, unidadeSelecionadaId) {
++    const esperada = Number(unidadeSelecionadaId);
++    const claim = lerUnidadeCozinhaDoToken(token);
++    if (claim == null) {
++      throw Object.assign(new Error('Token recebido sem unidade_cozinha_id.'), {
++        codigo: 'TOKEN_UNIDADE_AUSENTE'
++      });
++    }
++    if (!Number.isInteger(esperada) || esperada <= 0 || claim !== esperada) {
++      throw Object.assign(new Error('Token recebido com unidade divergente da selecionada.'), {
++        codigo: 'TOKEN_UNIDADE_DIVERGENTE'
++      });
++    }
++    return claim;
++  }
++
+   function htmlSelecaoUnidade(estado) {
+     const empresa = estado.empresaRotulo
+       || (estado.empresaId != null ? `Empresa #${estado.empresaId}` : 'Empresa');
+@@ -494,17 +514,17 @@
+             codigo: 'TOKEN_AUSENTE'
+           });
+         }
+-        if (typeof deps.aoAtualizarSessao === 'function') {
+-          deps.aoAtualizarSessao(data);
+-        }
+-        const unidadeToken = lerUnidadeCozinhaDoToken(data.token);
+-        if (unidadeToken !== id && Number(data.unidade_cozinha_id) !== id) {
+-          throw Object.assign(new Error('Token recebido sem a unidade selecionada.'), {
+-            codigo: 'TOKEN_UNIDADE_DIVERGENTE'
+-          });
++        // Claim do JWT é a única fonte autoritativa — não usar data.unidade_cozinha_id.
++        const unidadeToken = exigirUnidadeNoJwt(data.token, id);
++        if (typeof deps.aoAtualizarSessao !== 'function') {
++          throw Object.assign(
++            new Error('Persistência de sessão obrigatória ausente.'),
++            { codigo: 'SESSAO_PERSISTENCIA_OBRIGATORIA' }
++          );
+         }
++        await deps.aoAtualizarSessao(data);
+         estado.modo = 'painel';
+-        estado.unidadeId = Number(data.unidade_cozinha_id) || id;
++        estado.unidadeId = unidadeToken;
+         estado.selecaoConfirmando = false;
+         publicar();
+         await atualizar({ silencioso: false });
+@@ -513,6 +533,8 @@
+       } catch (err) {
+         estado.selecaoErro = mensagemDe(err);
+         estado.selecaoConfirmando = false;
++        estado.modo = 'selecao';
++        // Permanece em modo seleção; painel/polling não iniciam.
+         publicar();
+         return { erro: err };
+       }
+@@ -571,22 +593,161 @@
+     return data;
+   }
+ 
+-  function persistirSessao(global, data) {
++  /**
++   * Contrato IPC de electronAPI.cozinhaImpressao.estabelecerSessao
++   * (electron-cozinha-impressao.js → canal cozinha-impressao:sessao-autenticada):
++   * - Sucesso: { success: true, sessao: { empresaId, unidadeId }, contexto }
++   * - Falha: Promise resolve com { success: false, codigo, erro }
++   *   (não rejeita — validar success explicitamente).
++   * - Também pode rejeitar em falha de bridge.
++   */
++  function interpretarRetornoEstabelecerSessao(retorno) {
++    if (retorno && retorno.success === true) {
++      return { ok: true, retorno };
++    }
++    const codigo = (retorno && (retorno.codigo || retorno.code))
++      || 'SESSAO_ELECTRON_FALHA';
++    const msg = (retorno && (retorno.erro || retorno.mensagem || retorno.error))
++      || 'Falha ao atualizar sessão Electron.';
++    const err = new Error(msg);
++    err.codigo = codigo;
++    err.retornoElectron = retorno || null;
++    throw err;
++  }
++
++  /**
++   * Persiste sessão somente após validação prévia do JWT pelo chamador.
++   * Aguarda e valida retorno de estabelecerSessao quando a API existir.
++   * Não altera o mecanismo de impressão do Sprint 06 — só notifica a sessão.
++   */
++  async function persistirSessao(global, data) {
++    if (!data || !data.token) {
++      throw Object.assign(new Error('Sessão sem token para persistir.'), {
++        codigo: 'TOKEN_AUSENTE'
++      });
++    }
++    // Contrato POST /cozinha/sessao/unidade sempre emite `user` com unidade_cozinha_id.
++    // Exigir o campo evita token novo associado a user antigo no localStorage.
++    if (!data.user || typeof data.user !== 'object' || Array.isArray(data.user)) {
++      throw Object.assign(
++        new Error('Resposta de sessão sem usuário contextualizado.'),
++        { codigo: 'SESSAO_USER_AUSENTE' }
++      );
++    }
++    if (!global || !global.localStorage
++      || typeof global.localStorage.setItem !== 'function'
++      || typeof global.localStorage.getItem !== 'function'
++      || typeof global.localStorage.removeItem !== 'function') {
++      throw Object.assign(new Error('localStorage indisponível para persistir a sessão.'), {
++        codigo: 'SESSAO_PERSISTENCIA_FALHA'
++      });
++    }
++
++    let tokenAnterior;
++    let userAnterior;
++    let snapshotOk = false;
+     try {
+-      if (global.localStorage) {
+-        global.localStorage.setItem('token', data.token);
+-        if (data.user) {
+-          global.localStorage.setItem('user', JSON.stringify(data.user));
+-        }
++      tokenAnterior = global.localStorage.getItem('token');
++      userAnterior = global.localStorage.getItem('user');
++      snapshotOk = true;
++    } catch (e) {
++      throw Object.assign(
++        new Error('Falha ao ler sessão anterior para rollback.'),
++        { codigo: 'SESSAO_PERSISTENCIA_FALHA', cause: e }
++      );
++    }
++
++    const restaurarAnterior = () => {
++      if (!snapshotOk) {
++        throw Object.assign(
++          new Error('Rollback impossível: snapshot anterior indisponível.'),
++          { codigo: 'SESSAO_ROLLBACK_FALHA' }
++        );
++      }
++      try {
++        if (tokenAnterior == null) global.localStorage.removeItem('token');
++        else global.localStorage.setItem('token', tokenAnterior);
++        if (userAnterior == null) global.localStorage.removeItem('user');
++        else global.localStorage.setItem('user', userAnterior);
++      } catch (e) {
++        throw Object.assign(
++          new Error('Falha ao restaurar sessão anterior no localStorage.'),
++          { codigo: 'SESSAO_ROLLBACK_FALHA', cause: e }
++        );
++      }
++    };
++
++    const falhaPersistencia = (mensagem, cause) => {
++      let rollbackErro = null;
++      try {
++        restaurarAnterior();
++      } catch (rb) {
++        rollbackErro = rb;
+       }
+-    } catch (_e) { /* ignore */ }
++      const err = Object.assign(new Error(mensagem), {
++        codigo: 'SESSAO_PERSISTENCIA_FALHA',
++        cause
++      });
++      if (rollbackErro) {
++        err.rollbackErro = rollbackErro;
++        err.codigo = 'SESSAO_ROLLBACK_FALHA';
++      }
++      return err;
++    };
++
+     try {
+-      if (global.electronAPI
+-        && global.electronAPI.cozinhaImpressao
+-        && typeof global.electronAPI.cozinhaImpressao.estabelecerSessao === 'function') {
+-        global.electronAPI.cozinhaImpressao.estabelecerSessao({ token: data.token });
++      global.localStorage.setItem('token', data.token);
++    } catch (e) {
++      throw falhaPersistencia('Falha ao gravar token no localStorage.', e);
++    }
++
++    try {
++      global.localStorage.setItem('user', JSON.stringify(data.user));
++    } catch (e) {
++      // Token novo sem user novo — rollback integral obrigatório.
++      throw falhaPersistencia(
++        'Falha ao gravar usuário no localStorage após gravar o token.',
++        e
++      );
++    }
++
++    const estabelecer = global.electronAPI
++      && global.electronAPI.cozinhaImpressao
++      && typeof global.electronAPI.cozinhaImpressao.estabelecerSessao === 'function'
++      ? global.electronAPI.cozinhaImpressao.estabelecerSessao.bind(global.electronAPI.cozinhaImpressao)
++      : null;
++
++    if (estabelecer) {
++      try {
++        const retorno = await estabelecer({ token: data.token });
++        interpretarRetornoEstabelecerSessao(retorno);
++      } catch (e) {
++        let rollbackErro = null;
++        try {
++          restaurarAnterior();
++        } catch (rb) {
++          rollbackErro = rb;
++        }
++        const err = Object.assign(
++          new Error(e && e.message ? e.message : 'Falha ao atualizar sessão Electron.'),
++          {
++            codigo: (e && e.codigo) || 'SESSAO_ELECTRON_FALHA',
++            cause: e,
++            retornoElectron: e && e.retornoElectron != null ? e.retornoElectron : null
++          }
++        );
++        if (rollbackErro) {
++          err.rollbackErro = rollbackErro;
++          err.codigo = 'SESSAO_ROLLBACK_FALHA';
++        }
++        throw err;
+       }
+-    } catch (_e2) { /* ignore */ }
++    }
++
++    return {
++      ok: true,
++      electronAtualizado: !!estabelecer
++    };
+   }
+ 
+   function montarNoNavegador(global) {
+@@ -670,8 +831,11 @@
+     distribuirPorEstado,
+     contadores,
+     lerUnidadeCozinhaDoToken,
++    exigirUnidadeNoJwt,
++    interpretarRetornoEstabelecerSessao,
+     htmlSelecaoUnidade,
+     htmlPainel,
++    persistirSessao,
+     criarControlador,
+     montarNoNavegador
+   };
+
+==== FOCO: persistirSessao exige data.user (SESSAO_USER_AUSENTE) ====
+C:\projetos\CDS-SISTEMAS PASTELARIA\frontend\erp\js\cozinha-kds.js:634:        { codigo: 'SESSAO_USER_AUSENTE' }
+C:\projetos\CDS-SISTEMAS PASTELARIA\tests\cozinha\sprint07-s07-2-sessao-unidade-kds.test.js:818:  it('resposta sem user: rejeitada, sem persistir token', async () => {
+C:\projetos\CDS-SISTEMAS PASTELARIA\tests\cozinha\sprint07-s07-2-sessao-unidade-kds.test.js:823:      (err) => err.codigo === 'SESSAO_USER_AUSENTE'
+C:\projetos\CDS-SISTEMAS PASTELARIA\tests\cozinha\sprint07-s07-2-sessao-unidade-kds.test.js:840:    assert.equal(r.erro.codigo, 'SESSAO_USER_AUSENTE');
+C:\projetos\CDS-SISTEMAS PASTELARIA\tests\cozinha\sprint07-s07-2-sessao-unidade-kds.test.js:850:      user: '{"id":99,"nome":"UsuarioAntigo","unidade_cozinha_id":null}'
+C:\projetos\CDS-SISTEMAS PASTELARIA\tests\cozinha\sprint07-s07-2-sessao-unidade-kds.test.js:856:    assert.doesNotMatch(store.getItem('user'), /UsuarioAntigo/);

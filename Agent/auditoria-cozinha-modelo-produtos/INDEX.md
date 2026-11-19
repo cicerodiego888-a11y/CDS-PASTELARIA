@@ -1,0 +1,17 @@
+# Índice — Auditoria modelo produtos / Pedido / Cozinha
+
+**Pasta:** `C:\projetos\CDS-SISTEMAS PASTELARIA\Agent\auditoria-cozinha-modelo-produtos`
+
+1. `RELATORIO-EXECUTIVO.md`
+2. `AUDITORIA-CADASTRO-COMERCIAL.md`
+3. `AUDITORIA-CADASTRO-INSUMOS.md`
+4. `AUDITORIA-REFRIGERANTES.md`
+5. `AUDITORIA-FICHA-TECNICA.md`
+6. `AUDITORIA-PEDIDO-FLUXO-COMPLETO.md`
+7. `AUDITORIA-PERSISTENCIA.md`
+8. `AUDITORIA-ESTOQUE.md`
+9. `MAPA-ARQUITETURA-ARQUIVOS.md`
+10. `MATRIZ-TESTES.md`
+11. `RECOMENDACAO-CLASSIFICACAO-COZINHA.md`
+
+Somente leitura. Sprint 03 não iniciada.

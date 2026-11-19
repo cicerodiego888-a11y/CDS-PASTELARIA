@@ -141,6 +141,7 @@ const CATALOGO_PESQUISA_PAGINAS = Object.freeze([
     { page: 'entregas', titulo: 'Entregas', keywords: 'entrega delivery', recurso: 'vendasEntrega' },
     { page: 'pedidos', titulo: 'Pedidos', keywords: 'pedido orçamento', recurso: 'pedidos' },
     { page: 'mesas', titulo: 'Controle de Mesas', keywords: 'mesas salão atendimento ocupação', recurso: 'pedidos' },
+    { page: 'cozinha-kds', titulo: 'Cozinha (KDS)', keywords: 'cozinha kds preparacao painel pedidos', recurso: 'pedidos' },
     { page: 'faturamento', titulo: 'Expedição', keywords: 'expedição expedir pedido liberação entrega comercial', recurso: 'expedicao' },
     { page: 'central-faturamento', titulo: 'Central de Faturamento', keywords: 'faturamento fiscal nf-e emitir checklist', fiscal: true, recurso: 'nfe' },
     { page: 'caixa', titulo: 'Fechamento de Caixa', keywords: 'caixa fechamento' },
@@ -164,6 +165,8 @@ const CATALOGO_PESQUISA_PAGINAS = Object.freeze([
     { page: 'central-diagnostico', titulo: 'Saúde da Central', keywords: 'diagnóstico central fiscal', fiscal: true },
     { page: 'dfe-auditoria', titulo: 'Auditoria DF-e', keywords: 'dfe auditoria nsu sync dist sefaz suporte', fiscal: true },
     { page: 'configuracoes', titulo: 'Configurações', keywords: 'empresa configuração' },
+    { page: 'cozinha-unidades', titulo: 'Unidades de Cozinha', keywords: 'cozinha unidade kds cadastro' },
+    { page: 'cozinha-roteamento', titulo: 'Roteamento de Cozinhas', keywords: 'roteamento cozinha padrão segmento ifood pedido online' },
     { page: 'usuarios', titulo: 'Usuários', keywords: 'usuário permissão' },
     { page: 'licenca', titulo: 'Assinatura CDS', keywords: 'licença assinatura' },
     { page: 'auditoria', titulo: 'Auditoria', keywords: 'auditoria log' },
@@ -353,7 +356,7 @@ function paginaPermitidaPorImplantacao(page) {
     if (p === 'caixas' && !implantacaoPermiteMultiCaixa()) return false;
     if (p === 'entregas') return possuiRecurso('vendasEntrega');
     if (p === 'faturamento') return expedicaoHabilitada();
-    if (p === 'pedidos' || p === 'mesas') return possuiRecurso('pedidos');
+    if (p === 'pedidos' || p === 'mesas' || p === 'cozinha-kds') return possuiRecurso('pedidos');
     return true;
 }
 
@@ -1106,18 +1109,40 @@ function fecharNotificacao(id) {
     setTimeout(() => el.remove(), 300);
 }
 
-function logout() {
-    if (confirm('Tem certeza que deseja sair?')) {
-        localStorage.removeItem('token');
-        localStorage.removeItem('user');
-        if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.limpar === 'function') {
-            CdsEmpresaContexto.limpar();
-        } else {
-            localStorage.removeItem('cds_empresa_id');
-            localStorage.removeItem('cds_empresa');
+async function logout() {
+    if (!confirm('Tem certeza que deseja sair?')) return;
+
+    // Electron: notifica o main para parar agendador e invalidar contexto de impressão.
+    try {
+        if (window.electronAPI
+            && window.electronAPI.cozinhaImpressao
+            && typeof window.electronAPI.cozinhaImpressao.logout === 'function') {
+            await window.electronAPI.cozinhaImpressao.logout();
         }
-        window.location.href = '/login';
+    } catch (_e) { /* logout local segue mesmo se IPC falhar */ }
+
+    try {
+        const token = localStorage.getItem('token');
+        if (token && typeof API_URL !== 'undefined') {
+            await fetch(`${API_URL}/auth/logout`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json'
+                }
+            }).catch(() => {});
+        }
+    } catch (_e) { /* auditoria de logout não bloqueia saída */ }
+
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    if (window.CdsEmpresaContexto && typeof CdsEmpresaContexto.limpar === 'function') {
+        CdsEmpresaContexto.limpar();
+    } else {
+        localStorage.removeItem('cds_empresa_id');
+        localStorage.removeItem('cds_empresa');
     }
+    window.location.href = '/login';
 }
 
 /** Aplica identidade visual oficial (Branding 1.0) nos elementos data-brand. */

@@ -59,6 +59,9 @@ const CDS_ERP_PAGE_SCRIPTS = Object.freeze({
     'central-faturamento': ['/erp/js/central-faturamento.js'],
     pedidos: ['/erp/js/mesas-lancamento.js', '/erp/js/mesas-conferencia.js', '/erp/js/mesas-venda-consolidada.js', '/erp/js/pedidos.js'],
     mesas: ['/erp/js/mesas-lancamento.js', '/erp/js/mesas-conferencia.js', '/erp/js/mesas-painel.js'],
+    'cozinha-kds': ['/erp/js/cozinha-kds.js'],
+    'cozinha-unidades': ['/erp/js/cozinha-unidades.js'],
+    'cozinha-roteamento': ['/erp/js/cozinha-roteamento.js'],
     financeiro: [
         '/erp/js/financeiro-dashboard.js',
         '/erp/js/financeiro-receber.js',
@@ -302,6 +305,11 @@ async function loadPage(page) {
         window.CdsPainelMesas.parar();
         window.CdsPainelMesas = null;
     }
+    // S07-2 — para poll do KDS ao sair da tela (evita sobrescrever Pedidos/#page-content).
+    if (window.CdsCozinhaKds && typeof window.CdsCozinhaKds.parar === 'function') {
+        window.CdsCozinhaKds.parar();
+        window.CdsCozinhaKds = null;
+    }
 
     if (!paginaPermitidaPorImplantacao(page)) {
         const msg = typeof mensagemModuloNaoContratado === 'function'
@@ -441,6 +449,18 @@ async function loadPage(page) {
             return typeof loadControleMesas === 'function'
                 ? loadControleMesas()
                 : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar o Controle de Mesas.</div>');
+        case 'cozinha-kds':
+            return typeof loadCozinhaKds === 'function'
+                ? loadCozinhaKds()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar o Painel KDS.</div>');
+        case 'cozinha-unidades':
+            return typeof loadCozinhaUnidades === 'function'
+                ? loadCozinhaUnidades()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar Unidades de Cozinha.</div>');
+        case 'cozinha-roteamento':
+            return typeof loadCozinhaRoteamento === 'function'
+                ? loadCozinhaRoteamento()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar Roteamento de Cozinhas.</div>');
         case 'financeiro':
             return carregarPaginaHtml('financeiro.html', function () {
                 if (typeof initFinanceiro === 'function') initFinanceiro();

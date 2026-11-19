@@ -1874,7 +1874,11 @@ function loadPedidos() {
       const lista = await requisitarMesas(`/${ctx.mesa_id}/atendimento/pedidos`);
       if (seq !== cdsConsultaPedidoSeq) return;
       const item = (lista.pedidos || []).find((row) => Number(row.id) === Number(data.pedido.id));
-      const pedido = { ...data.pedido, preparacao: item && item.preparacao };
+      const pedido = {
+        ...data.pedido,
+        preparacao: item && item.preparacao,
+        despacho: item && item.despacho
+      };
       pedido.mesa_atendimento_id = item ? item.mesa_atendimento_id : null;
       const decisao = api.decidirConsultaPedido(consulta, pedido, { geracao: seq, geracaoAtual: cdsConsultaPedidoSeq });
       if (!decisao.abrir) {
@@ -2220,7 +2224,7 @@ function loadPedidos() {
     }
   }
 
-  async function salvarPedido(acao) {
+  async function salvarPedido() {
     if (pedidoEdicaoBloqueada) {
       alertar($('#pedEditorBloqueioAviso').text() || 'A edição deste pedido está bloqueada.', 'warning');
       return;
@@ -2299,7 +2303,7 @@ function loadPedidos() {
         assinaturaCriacaoPendente = null;
       }
       const salao = window.CdsMesasConferencia && window.CdsMesasConferencia.fluxoDoPedido(pedido) === 'salao';
-      if (salao && acao === 'finalizar' && conferencia) {
+      if (salao && conferencia) {
         conferencia.finalizar(pedido, { numero: pedido.mesa_numero });
         pintarConferencia();
         bootstrap.Modal.getInstance(document.getElementById('modalPedidoEditor'))?.hide();
@@ -2879,8 +2883,8 @@ function loadPedidos() {
     salvarEdicaoMesa(Number($tr.data('id')), $tr.find('.ped-mesa-edit-num').val());
   });
   $('#btnPedPesquisar').on('click', carregarLista);
-  $('#btnPedSalvar').on('click', () => salvarPedido('salvar'));
-  $('#btnPedFinalizar').on('click', () => salvarPedido('finalizar'));
+  $('#btnPedSalvar').on('click', salvarPedido);
+  $('#btnPedFinalizar').on('click', salvarPedido);
   $('#btnPedImprimir').on('click', () => imprimirPedido(pedidoEditandoId));
   $('#btnPedAddItem').on('click', adicionarItem);
   $('#btnPedConfirmarPersonalizacao').on('click', confirmarPersonalizacaoPendente);

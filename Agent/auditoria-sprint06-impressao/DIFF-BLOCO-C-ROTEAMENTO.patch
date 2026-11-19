@@ -1,0 +1,1398 @@
+# DIFF Sprint 06 Bloco C — roteamento INDIVIDUAL/AGRUPADO + vias
+# Schema v3. Bloco D NAO iniciado.
+
+diff --git a/backend/services/cozinha/CozinhaImpressaoFilaService.js b/backend/services/cozinha/CozinhaImpressaoFilaService.js
+index 8b13789..b4821c5 100644
+--- /dev/null
++++ b/backend/services/cozinha/CozinhaImpressaoFilaService.js
+@@ -1 +1,743 @@
++/**
++ * Fila persistente de impressão — Sprint 06 Bloco B1 + B2.
++ * B1: inclusão/listagem/isolamento.
++ * B2: enfileirarDaRodada + idempotência A/B + gancho no despacho (mesma TX).
++ * Sem worker, sem print físico, sem reenvio, sem Bloco C.
++ */
++'use strict';
+ 
++const {
++  erroImpressao,
++  parsePositiveInteger,
++  normalizarVias,
++  MODELOS_IMPRESSAO,
++  CODIGOS_ESTACAO_TIPO,
++  ESTADOS_FILA,
++  montarPayloadSnapshot,
++  serializarSnapshot,
++  parseSnapshotJson,
++  snapshotContemCamposProibidos,
++  montarIdempotencyKeyFila
++} = require('./cozinhaImpressaoContratos');
++const { exigirUnidadeOperacional } = require('./cozinhaUnidadeOperacional');
++
++function dbAll(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
++  });
++}
++
++function dbGet(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
++  });
++}
++
++function dbRun(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.run(sql, params, function cb(err) {
++      if (err) return reject(err);
++      resolve(this);
++    });
++  });
++}
++
++function exigirEmpresa(empresaId) {
++  const id = parsePositiveInteger(empresaId);
++  if (!id) {
++    throw erroImpressao('empresa_id obrigatório.', 400, 'EMPRESA_CONTEXT_REQUIRED');
++  }
++  return id;
++}
++
++function normalizarModelo(raw) {
++  const modelo = String(raw == null ? MODELOS_IMPRESSAO.AGRUPADO : raw).trim().toUpperCase();
++  if (!MODELOS_IMPRESSAO[modelo]) {
++    throw erroImpressao(
++      'modelo deve ser INDIVIDUAL ou AGRUPADO.',
++      400,
++      'IMPRESSAO_MODELO_INVALIDO'
++    );
++  }
++  return modelo;
++}
++
++function normalizarIdempotencyKey(raw) {
++  const key = String(raw == null ? '' : raw).trim();
++  if (!key) {
++    throw erroImpressao(
++      'idempotency_key obrigatória para enfileirar.',
++      400,
++      'IMPRESSAO_IDEMPOTENCY_OBRIGATORIA'
++    );
++  }
++  if (key.length > 255) {
++    throw erroImpressao(
++      'idempotency_key excede o tamanho máximo.',
++      400,
++      'IMPRESSAO_IDEMPOTENCY_INVALIDA'
++    );
++  }
++  return key;
++}
++
++function normalizarEstadoFiltro(raw) {
++  if (raw == null || String(raw).trim() === '') return null;
++  const estado = String(raw).trim().toUpperCase();
++  if (!ESTADOS_FILA[estado]) {
++    throw erroImpressao(
++      'estado de fila inválido.',
++      400,
++      'IMPRESSAO_ESTADO_INVALIDO'
++    );
++  }
++  return estado;
++}
++
++async function exigirUnidadeDaEmpresa(db, empresaId, unidadeId) {
++  const unidade = await dbGet(db, `
++    SELECT id, empresa_id, codigo, ativo
++    FROM cozinha_unidades
++    WHERE id = ? AND empresa_id = ?
++  `, [unidadeId, empresaId]);
++  if (!unidade) {
++    throw erroImpressao(
++      'Unidade não pertence à empresa autenticada.',
++      403,
++      'UNIDADE_EMPRESA_ISOLAMENTO'
++    );
++  }
++  return unidade;
++}
++
++async function exigirRodadaDaEmpresaUnidade(db, empresaId, unidadeId, rodadaId) {
++  const rodada = await dbGet(db, `
++    SELECT id, empresa_id, unidade_id, mesa_id, atendimento_id,
++           numero_rodada, sequencia_global, enviada_em
++    FROM cozinha_rodadas
++    WHERE id = ? AND empresa_id = ?
++  `, [rodadaId, empresaId]);
++  if (!rodada) {
++    throw erroImpressao(
++      'Rodada não encontrada na empresa autenticada.',
++      404,
++      'IMPRESSAO_RODADA_NAO_ENCONTRADA'
++    );
++  }
++  if (Number(rodada.unidade_id) !== Number(unidadeId)) {
++    throw erroImpressao(
++      'Rodada não pertence à unidade autenticada.',
++      403,
++      'UNIDADE_ISOLAMENTO'
++    );
++  }
++  return rodada;
++}
++
++async function exigirEstacaoDaUnidade(db, empresaId, unidadeId, estacaoId) {
++  const estacao = await dbGet(db, `
++    SELECT id, empresa_id, unidade_id, codigo_estacao, device_name,
++           largura_mm, vias, modelo_individual, modelo_agrupado, ativo
++    FROM cozinha_estacoes_impressao
++    WHERE id = ? AND empresa_id = ?
++  `, [estacaoId, empresaId]);
++  if (!estacao) {
++    throw erroImpressao(
++      'Estação de impressão não encontrada.',
++      404,
++      'ESTACAO_NAO_ENCONTRADA'
++    );
++  }
++  if (Number(estacao.unidade_id) !== Number(unidadeId)) {
++    throw erroImpressao(
++      'Estação não pertence à unidade autenticada.',
++      403,
++      'UNIDADE_ISOLAMENTO'
++    );
++  }
++  return estacao;
++}
++
++function mapearJob(row, { incluirSnapshot = false } = {}) {
++  if (!row) return null;
++  const base = {
++    id: row.id,
++    empresa_id: row.empresa_id,
++    unidade_id: row.unidade_id,
++    estacao_impressao_id: row.estacao_impressao_id,
++    rodada_id: row.rodada_id,
++    modelo: row.modelo,
++    vias: row.vias,
++    estado: row.estado,
++    tentativas: row.tentativas,
++    max_tentativas: row.max_tentativas,
++    ultimo_erro: row.ultimo_erro,
++    job_origem_id: row.job_origem_id,
++    spooler_job_token: row.spooler_job_token,
++    processando_em: row.processando_em,
++    worker_id: row.worker_id,
++    idempotency_key: row.idempotency_key,
++    created_at: row.created_at,
++    updated_at: row.updated_at
++  };
++  if (incluirSnapshot) {
++    base.payload_snapshot = row.payload_snapshot;
++    try {
++      base.snapshot = parseSnapshotJson(row.payload_snapshot);
++    } catch (_e) {
++      base.snapshot = null;
++    }
++  }
++  return base;
++}
++
++/**
++ * Inclui um trabalho na fila (estado PENDENTE).
++ * Não inicia/commita TX — o chamador pode envolver em BEGIN/COMMIT (ex.: despacho).
++ * Sem worker / sem impressão física.
++ */
++async function enfileirarJob(entrada = {}, opts = {}) {
++  const db = opts.db || entrada.db;
++  if (!db) throw erroImpressao('Banco indisponível.', 500, 'DB_INDISPONIVEL');
++
++  const empresaId = exigirEmpresa(entrada.empresaId != null ? entrada.empresaId : entrada.empresa_id);
++  const unidadeId = exigirUnidadeOperacional(
++    entrada.unidadeId != null ? entrada.unidadeId : entrada.unidade_id
++  );
++  const rodadaId = parsePositiveInteger(
++    entrada.rodadaId != null ? entrada.rodadaId : entrada.rodada_id
++  );
++  const estacaoId = parsePositiveInteger(
++    entrada.estacaoImpressaoId != null
++      ? entrada.estacaoImpressaoId
++      : (entrada.estacao_impressao_id != null ? entrada.estacao_impressao_id : entrada.estacaoId)
++  );
++  const idempotencyKey = normalizarIdempotencyKey(
++    entrada.idempotencyKey != null ? entrada.idempotencyKey : entrada.idempotency_key
++  );
++
++  if (!rodadaId) {
++    throw erroImpressao('rodada_id obrigatório.', 400, 'IMPRESSAO_RODADA_OBRIGATORIA');
++  }
++  if (!estacaoId) {
++    throw erroImpressao(
++      'estacao_impressao_id obrigatório.',
++      400,
++      'IMPRESSAO_ESTACAO_OBRIGATORIA'
++    );
++  }
++
++  await exigirUnidadeDaEmpresa(db, empresaId, unidadeId);
++  const rodada = await exigirRodadaDaEmpresaUnidade(db, empresaId, unidadeId, rodadaId);
++  const estacao = await exigirEstacaoDaUnidade(db, empresaId, unidadeId, estacaoId);
++
++  const modelo = normalizarModelo(entrada.modelo);
++  const vias = entrada.vias != null ? normalizarVias(entrada.vias) : normalizarVias(estacao.vias);
++
++  const snapEntrada = Object.assign({}, entrada.snapshot || entrada.payload || {}, {
++    empresa_id: empresaId,
++    unidade_id: unidadeId,
++    rodada_id: rodadaId,
++    modelo,
++    largura_mm: entrada.largura_mm != null
++      ? entrada.largura_mm
++      : (entrada.larguraMm != null ? entrada.larguraMm : estacao.largura_mm),
++    sequencia_global: entrada.sequencia_global != null
++      ? entrada.sequencia_global
++      : (entrada.sequenciaGlobal != null ? entrada.sequenciaGlobal : rodada.sequencia_global),
++    numero_rodada: entrada.numero_rodada != null
++      ? entrada.numero_rodada
++      : (entrada.numeroRodada != null ? entrada.numeroRodada : rodada.numero_rodada),
++    atendimento_id: entrada.atendimento_id != null
++      ? entrada.atendimento_id
++      : (entrada.atendimentoId != null ? entrada.atendimentoId : rodada.atendimento_id),
++    enviada_em: entrada.enviada_em != null
++      ? entrada.enviada_em
++      : (entrada.enviadaEm != null ? entrada.enviadaEm : rodada.enviada_em),
++    mesa_numero: entrada.mesa_numero != null
++      ? entrada.mesa_numero
++      : entrada.mesaNumero
++  });
++
++  const snapshot = montarPayloadSnapshot(snapEntrada);
++  const proibidos = snapshotContemCamposProibidos(snapshot);
++  if (proibidos.length) {
++    throw erroImpressao(
++      'Snapshot contém campos comerciais/fiscais proibidos.',
++      400,
++      'SNAPSHOT_CAMPO_PROIBIDO',
++      { detalhes: { campos: proibidos } }
++    );
++  }
++  const payloadSnapshot = serializarSnapshot(snapshot);
++
++  // B2 — Cenário A/B: chave existente → replay ou conflito (não sobrescreve).
++  const existente = await dbGet(db, `
++    SELECT * FROM cozinha_impressao_fila WHERE idempotency_key = ?
++  `, [idempotencyKey]);
++  if (existente) {
++    if (String(existente.payload_snapshot) === String(payloadSnapshot)) {
++      return {
++        success: true,
++        repetida: true,
++        job: mapearJob(existente, { incluirSnapshot: true }),
++        impressao_fisica: false
++      };
++    }
++    throw erroImpressao(
++      'Idempotency-Key de impressão reutilizada com snapshot diferente.',
++      409,
++      'IMPRESSAO_IDEMPOTENCY_DIVERGENTE',
++      {
++        idempotency_key: idempotencyKey,
++        job_id: existente.id
++      }
++    );
++  }
++
++  let result;
++  try {
++    result = await dbRun(db, `
++      INSERT INTO cozinha_impressao_fila (
++        empresa_id, unidade_id, estacao_impressao_id, rodada_id,
++        payload_snapshot, modelo, vias, estado,
++        tentativas, max_tentativas, idempotency_key
++      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
++    `, [
++      empresaId,
++      unidadeId,
++      estacaoId,
++      rodadaId,
++      payloadSnapshot,
++      modelo,
++      vias,
++      ESTADOS_FILA.PENDENTE,
++      parsePositiveInteger(entrada.max_tentativas != null ? entrada.max_tentativas : entrada.maxTentativas) || 5,
++      idempotencyKey
++    ]);
++  } catch (err) {
++    if (/UNIQUE|unique/i.test(String(err && err.message))) {
++      // Corrida: reavalia A/B
++      const again = await dbGet(db, `
++        SELECT * FROM cozinha_impressao_fila WHERE idempotency_key = ?
++      `, [idempotencyKey]);
++      if (again && String(again.payload_snapshot) === String(payloadSnapshot)) {
++        return {
++          success: true,
++          repetida: true,
++          job: mapearJob(again, { incluirSnapshot: true }),
++          impressao_fisica: false
++        };
++      }
++      throw erroImpressao(
++        'Idempotency-Key de impressão reutilizada com snapshot diferente.',
++        409,
++        'IMPRESSAO_IDEMPOTENCY_DIVERGENTE',
++        { idempotency_key: idempotencyKey }
++      );
++    }
++    throw err;
++  }
++
++  const job = await obterJob({
++    db,
++    empresaId,
++    unidadeId,
++    id: result.lastID
++  }, { db, incluirSnapshot: true });
++
++  return {
++    success: true,
++    repetida: false,
++    job: job.job,
++    impressao_fisica: false
++  };
++}
++
++function millisParaQtyString(millis) {
++  const n = Number(millis);
++  if (!Number.isFinite(n)) return null;
++  return (n / 1000).toFixed(3);
++}
++
++async function registrarEventoFila(db, {
++  empresaId,
++  unidadeId,
++  tipo,
++  key,
++  payload
++}) {
++  try {
++    await dbRun(db, `
++      INSERT INTO cozinha_eventos_outbox (
++        empresa_id, unidade_id, tipo, payload_json, idempotency_key
++      ) VALUES (?, ?, ?, ?, ?)
++    `, [empresaId, unidadeId, tipo, JSON.stringify(payload), key]);
++  } catch (err) {
++    if (!/UNIQUE|unique/i.test(String(err && err.message))) throw err;
++  }
++  console.warn(
++    `[COZINHA][${tipo}] empresa=${empresaId} unidade=${unidadeId} ` +
++    `${JSON.stringify(payload)}`
++  );
++  return payload;
++}
++
++async function registrarSemEstacao(db, {
++  empresaId,
++  unidadeId,
++  rodadaId,
++  tipoItem
++}) {
++  return registrarEventoFila(db, {
++    empresaId,
++    unidadeId,
++    tipo: 'IMPRESSAO_SEM_ESTACAO',
++    key: `imp:sem-estacao:${empresaId}:${unidadeId}:${rodadaId}:${tipoItem}`,
++    payload: {
++      evento: 'IMPRESSAO_SEM_ESTACAO',
++      empresa_id: empresaId,
++      unidade_id: unidadeId,
++      rodada_id: rodadaId,
++      tipo_item: tipoItem,
++      codigo_estacao_esperado: tipoItem
++    }
++  });
++}
++
++async function registrarSemModeloElegivel(db, {
++  empresaId,
++  unidadeId,
++  rodadaId,
++  tipoItem,
++  estacaoId
++}) {
++  return registrarEventoFila(db, {
++    empresaId,
++    unidadeId,
++    tipo: 'IMPRESSAO_SEM_MODELO_ELEGIVEL',
++    key: `imp:sem-modelo:${empresaId}:${unidadeId}:${rodadaId}:${estacaoId}:${tipoItem}`,
++    payload: {
++      evento: 'IMPRESSAO_SEM_MODELO_ELEGIVEL',
++      empresa_id: empresaId,
++      unidade_id: unidadeId,
++      rodada_id: rodadaId,
++      tipo_item: tipoItem,
++      estacao_impressao_id: estacaoId
++    }
++  });
++}
++
++async function montarItensSnapshot(db, itensLinha, tipoItem) {
++  const snapItens = [];
++  for (const it of itensLinha) {
++    const ings = await dbAll(db, `
++      SELECT insumo_nome_snapshot, quantidade_snapshot_millis, selecionado
++      FROM cozinha_item_ingredientes
++      WHERE cozinha_item_id = ?
++      ORDER BY id ASC
++    `, [it.id]);
++    snapItens.push({
++      cozinha_item_id: it.id,
++      comanda_id: it.comanda_id,
++      tipo_item: tipoItem,
++      descricao: it.produto_nome_snapshot || '',
++      qty: millisParaQtyString(it.qty_solicitada_millis),
++      observacao: it.observacoes_snapshot || null,
++      ingredientes: ings.map((ing) => ({
++        nome: ing.insumo_nome_snapshot || '',
++        qty: millisParaQtyString(ing.quantidade_snapshot_millis),
++        selecionado: Number(ing.selecionado) === 1
++      }))
++    });
++  }
++  return snapItens;
++}
++
++/**
++ * Enfileira jobs da rodada (Bloco C).
++ * D3: codigo_estacao = tipo_item.
++ * INDIVIDUAL → 1 job/comanda; AGRUPADO → 1 job/estação+rodada.
++ * Respeita flags da estação; vias no campo do job (não multiplica jobs).
++ * Usa a conexão/transação do chamador — não abre BEGIN/COMMIT próprio.
++ */
++async function enfileirarDaRodada(entrada = {}, opts = {}) {
++  const db = opts.db || entrada.db;
++  if (!db) throw erroImpressao('Banco indisponível.', 500, 'DB_INDISPONIVEL');
++
++  const empresaId = exigirEmpresa(entrada.empresaId != null ? entrada.empresaId : entrada.empresa_id);
++  const unidadeId = exigirUnidadeOperacional(
++    entrada.unidadeId != null ? entrada.unidadeId : entrada.unidade_id
++  );
++  const rodadaId = parsePositiveInteger(
++    entrada.rodadaId != null ? entrada.rodadaId : entrada.rodada_id
++  );
++  if (!rodadaId) {
++    throw erroImpressao('rodada_id obrigatório.', 400, 'IMPRESSAO_RODADA_OBRIGATORIA');
++  }
++
++  await exigirUnidadeDaEmpresa(db, empresaId, unidadeId);
++  const rodada = await exigirRodadaDaEmpresaUnidade(db, empresaId, unidadeId, rodadaId);
++
++  let mesaNumero = entrada.mesa_numero != null
++    ? entrada.mesa_numero
++    : entrada.mesaNumero;
++  if (mesaNumero == null || String(mesaNumero).trim() === '') {
++    const mesaRow = await dbGet(db, `
++      SELECT numero FROM mesas
++      WHERE id = ? AND empresa_id = ?
++    `, [rodada.mesa_id, empresaId]);
++    if (!mesaRow || mesaRow.numero == null) {
++      throw erroImpressao(
++        'Número da mesa não encontrado para o snapshot de impressão.',
++        404,
++        'MESA_NAO_ENCONTRADA'
++      );
++    }
++    mesaNumero = mesaRow.numero;
++  }
++  mesaNumero = String(mesaNumero);
++
++  const itens = await dbAll(db, `
++    SELECT id, comanda_id, tipo_item, qty_solicitada_millis,
++           produto_nome_snapshot, observacoes_snapshot
++    FROM cozinha_itens
++    WHERE rodada_id = ? AND empresa_id = ? AND unidade_id = ?
++    ORDER BY id ASC
++  `, [rodadaId, empresaId, unidadeId]);
++
++  const grupos = new Map();
++  for (const it of itens) {
++    const tipo = String(it.tipo_item || 'OUTRO').trim().toUpperCase();
++    if (!CODIGOS_ESTACAO_TIPO[tipo]) continue;
++    if (!grupos.has(tipo)) grupos.set(tipo, []);
++    grupos.get(tipo).push(it);
++  }
++
++  const jobs = [];
++  const avisos = [];
++  const resultados = [];
++
++  async function criarJobModelo({ estacao, modelo, escopo, itensLinha, tipoItem }) {
++    const snapItens = await montarItensSnapshot(db, itensLinha, tipoItem);
++    const idempotencyKey = montarIdempotencyKeyFila({
++      empresaId,
++      unidadeId,
++      rodadaId,
++      estacaoId: estacao.id,
++      modelo,
++      escopo
++    });
++    const out = await enfileirarJob({
++      db,
++      empresaId,
++      unidadeId,
++      rodadaId,
++      estacaoImpressaoId: estacao.id,
++      modelo,
++      vias: estacao.vias,
++      largura_mm: estacao.largura_mm,
++      idempotency_key: idempotencyKey,
++      mesa_numero: mesaNumero,
++      snapshot: {
++        itens: snapItens,
++        sequencia_global: rodada.sequencia_global,
++        numero_rodada: rodada.numero_rodada,
++        atendimento_id: rodada.atendimento_id,
++        enviada_em: rodada.enviada_em
++      }
++    }, { db });
++    resultados.push(out);
++    jobs.push(out.job);
++    return out;
++  }
++
++  for (const [tipoItem, itensGrupo] of grupos.entries()) {
++    const estacao = await dbGet(db, `
++      SELECT *
++      FROM cozinha_estacoes_impressao
++      WHERE empresa_id = ?
++        AND unidade_id = ?
++        AND codigo_estacao = ?
++        AND ativo = 1
++      ORDER BY id ASC
++      LIMIT 1
++    `, [empresaId, unidadeId, tipoItem]);
++
++    if (!estacao) {
++      avisos.push(await registrarSemEstacao(db, {
++        empresaId, unidadeId, rodadaId, tipoItem
++      }));
++      continue;
++    }
++
++    if (Number(estacao.empresa_id) !== empresaId || Number(estacao.unidade_id) !== unidadeId) {
++      throw erroImpressao(
++        'Estação fora do contexto empresa/unidade.',
++        403,
++        'UNIDADE_ISOLAMENTO'
++      );
++    }
++
++    const aceitaIndividual = Number(estacao.modelo_individual) === 1;
++    const aceitaAgrupado = Number(estacao.modelo_agrupado) === 1;
++
++    if (!aceitaIndividual && !aceitaAgrupado) {
++      avisos.push(await registrarSemModeloElegivel(db, {
++        empresaId,
++        unidadeId,
++        rodadaId,
++        tipoItem,
++        estacaoId: estacao.id
++      }));
++      continue;
++    }
++
++    if (aceitaAgrupado) {
++      await criarJobModelo({
++        estacao,
++        modelo: MODELOS_IMPRESSAO.AGRUPADO,
++        escopo: 'all',
++        itensLinha: itensGrupo,
++        tipoItem
++      });
++    }
++
++    if (aceitaIndividual) {
++      const porComanda = new Map();
++      for (const it of itensGrupo) {
++        const cid = Number(it.comanda_id);
++        if (!Number.isInteger(cid) || cid <= 0) continue;
++        if (!porComanda.has(cid)) porComanda.set(cid, []);
++        porComanda.get(cid).push(it);
++      }
++      const comandasOrdenadas = [...porComanda.keys()].sort((a, b) => a - b);
++      for (const comandaId of comandasOrdenadas) {
++        await criarJobModelo({
++          estacao,
++          modelo: MODELOS_IMPRESSAO.INDIVIDUAL,
++          escopo: `comanda:${comandaId}`,
++          itensLinha: porComanda.get(comandaId),
++          tipoItem
++        });
++      }
++    }
++  }
++
++  return {
++    success: true,
++    repetida: resultados.length > 0 && resultados.every((r) => r.repetida === true),
++    empresa_id: empresaId,
++    unidade_id: unidadeId,
++    rodada_id: rodadaId,
++    jobs,
++    avisos_sem_estacao: avisos.filter((a) => a && a.evento === 'IMPRESSAO_SEM_ESTACAO'),
++    avisos_sem_modelo: avisos.filter((a) => a && a.evento === 'IMPRESSAO_SEM_MODELO_ELEGIVEL'),
++    avisos,
++    impressao_fisica: false
++  };
++}
++
++async function listarFila(entrada = {}, opts = {}) {
++  const db = opts.db || entrada.db;
++  if (!db) throw erroImpressao('Banco indisponível.', 500, 'DB_INDISPONIVEL');
++
++  const empresaId = exigirEmpresa(entrada.empresaId != null ? entrada.empresaId : entrada.empresa_id);
++  const unidadeId = exigirUnidadeOperacional(
++    entrada.unidadeId != null ? entrada.unidadeId : entrada.unidade_id
++  );
++  await exigirUnidadeDaEmpresa(db, empresaId, unidadeId);
++
++  const estado = normalizarEstadoFiltro(entrada.estado);
++  const rodadaId = parsePositiveInteger(
++    entrada.rodadaId != null ? entrada.rodadaId : entrada.rodada_id
++  );
++  const estacaoId = parsePositiveInteger(
++    entrada.estacaoImpressaoId != null
++      ? entrada.estacaoImpressaoId
++      : (entrada.estacao_impressao_id != null ? entrada.estacao_impressao_id : entrada.estacaoId)
++  );
++
++  const params = [empresaId, unidadeId];
++  let sql = `
++    SELECT id, empresa_id, unidade_id, estacao_impressao_id, rodada_id,
++           modelo, vias, estado, tentativas, max_tentativas, ultimo_erro,
++           job_origem_id, spooler_job_token, processando_em, worker_id,
++           idempotency_key, created_at, updated_at, payload_snapshot
++    FROM cozinha_impressao_fila
++    WHERE empresa_id = ? AND unidade_id = ?
++  `;
++  if (estado) {
++    sql += ' AND estado = ?';
++    params.push(estado);
++  }
++  if (rodadaId) {
++    sql += ' AND rodada_id = ?';
++    params.push(rodadaId);
++  }
++  if (estacaoId) {
++    sql += ' AND estacao_impressao_id = ?';
++    params.push(estacaoId);
++  }
++  sql += ' ORDER BY created_at ASC, id ASC';
++
++  const rows = await dbAll(db, sql, params);
++  const incluirSnapshot = entrada.incluir_snapshot === true || entrada.incluirSnapshot === true;
++
++  return {
++    success: true,
++    empresa_id: empresaId,
++    unidade_id: unidadeId,
++    total: rows.length,
++    jobs: rows.map((row) => mapearJob(row, { incluirSnapshot }))
++  };
++}
++
++async function obterJob(entrada = {}, opts = {}) {
++  const db = opts.db || entrada.db;
++  if (!db) throw erroImpressao('Banco indisponível.', 500, 'DB_INDISPONIVEL');
++
++  const empresaId = exigirEmpresa(entrada.empresaId != null ? entrada.empresaId : entrada.empresa_id);
++  const unidadeId = exigirUnidadeOperacional(
++    entrada.unidadeId != null ? entrada.unidadeId : entrada.unidade_id
++  );
++  const id = parsePositiveInteger(entrada.id != null ? entrada.id : entrada.jobId);
++  if (!id) {
++    throw erroImpressao('id do job obrigatório.', 400, 'IMPRESSAO_JOB_ID_OBRIGATORIO');
++  }
++
++  await exigirUnidadeDaEmpresa(db, empresaId, unidadeId);
++
++  const row = await dbGet(db, `
++    SELECT *
++    FROM cozinha_impressao_fila
++    WHERE id = ? AND empresa_id = ? AND unidade_id = ?
++  `, [id, empresaId, unidadeId]);
++
++  if (!row) {
++    throw erroImpressao(
++      'Trabalho de impressão não encontrado.',
++      404,
++      'IMPRESSAO_JOB_NAO_ENCONTRADO'
++    );
++  }
++
++  const incluirSnapshot = opts.incluirSnapshot !== false
++    && entrada.incluir_snapshot !== false
++    && entrada.incluirSnapshot !== false;
++
++  return {
++    success: true,
++    job: mapearJob(row, { incluirSnapshot })
++  };
++}
++
++module.exports = {
++  enfileirarJob,
++  enfileirarDaRodada,
++  listarFila,
++  obterJob,
++  mapearJob,
++  normalizarIdempotencyKey,
++  montarIdempotencyKeyFila
++};
+
+diff --git a/tests/cozinha/sprint06-bloco-c-roteamento-estacoes.test.js b/tests/cozinha/sprint06-bloco-c-roteamento-estacoes.test.js
+index 8b13789..5e1a310 100644
+--- /dev/null
++++ b/tests/cozinha/sprint06-bloco-c-roteamento-estacoes.test.js
+@@ -1 +1,634 @@
++/**
++ * Sprint 06 — Bloco C: roteamento e comportamento das estações.
++ * Sem worker / print físico / Electron / reenvio / Bloco D.
++ *
++ *   node --test --test-concurrency=1 tests/cozinha/sprint06-bloco-c-roteamento-estacoes.test.js
++ */
++'use strict';
+ 
++const fs = require('fs');
++const os = require('os');
++const path = require('path');
++const { describe, it, beforeEach } = require('node:test');
++const assert = require('node:assert/strict');
++const sqlite3 = require('sqlite3').verbose();
++
++const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-cozinha-s06c-'));
++process.env.DB_DIR = dbDir;
++process.env.CDS_TEST_ISOLATION = '1';
++process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
++process.env.CDS_FORCAR_LOCAL = '1';
++delete process.env.CDS_ALLOW_OFFICIAL_DB;
++
++const {
++  garantirSchemaCozinha,
++  marcarCozinhaOperacional,
++  isCozinhaOperacional,
++  COZINHA_SCHEMA_VERSION
++} = require('../../backend/utils/cozinhaSchema');
++const { garantirSchemaEmpresasAsync } = require('../../backend/services/empresas/empresasSchema');
++const CozinhaDespacho = require('../../backend/services/cozinha/CozinhaDespachoService');
++const EstacaoService = require('../../backend/services/cozinha/CozinhaImpressaoEstacaoService');
++const FilaService = require('../../backend/services/cozinha/CozinhaImpressaoFilaService');
++const {
++  snapshotContemCamposProibidos,
++  ESTADOS_FILA
++} = require('../../backend/services/cozinha/cozinhaImpressaoContratos');
++
++function run(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.run(sql, params, function cb(err) {
++      if (err) reject(err);
++      else resolve(this);
++    });
++  });
++}
++function get(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
++  });
++}
++function all(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
++  });
++}
++function open() {
++  return new Promise((resolve, reject) => {
++    const db = new sqlite3.Database(':memory:', (err) => {
++      if (err) return reject(err);
++      db.serialize(() => {
++        db.run('PRAGMA foreign_keys = ON');
++        db.run('PRAGMA busy_timeout = 10000', (e) => (e ? reject(e) : resolve(db)));
++      });
++    });
++  });
++}
++function close(db) {
++  return new Promise((resolve) => db.close(() => resolve()));
++}
++
++async function schemaErpMinimo(db) {
++  await garantirSchemaEmpresasAsync(db);
++  await run(db, `
++    CREATE TABLE IF NOT EXISTS configuracoes (
++      id INTEGER PRIMARY KEY AUTOINCREMENT,
++      chave VARCHAR(100) UNIQUE NOT NULL,
++      valor TEXT, tipo VARCHAR(50), descricao TEXT,
++      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
++    )
++  `);
++  await run(db, `
++    CREATE TABLE IF NOT EXISTS mesas (
++      id INTEGER PRIMARY KEY AUTOINCREMENT,
++      empresa_id INTEGER NOT NULL,
++      numero INTEGER NOT NULL,
++      ativo INTEGER NOT NULL DEFAULT 1
++    )
++  `);
++  await run(db, `
++    CREATE TABLE IF NOT EXISTS mesa_atendimentos (
++      id INTEGER PRIMARY KEY AUTOINCREMENT,
++      empresa_id INTEGER NOT NULL,
++      mesa_id INTEGER NOT NULL,
++      estado TEXT NOT NULL,
++      operador_abertura_id INTEGER NOT NULL DEFAULT 1,
++      aberto_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
++    )
++  `);
++  await run(db, `
++    CREATE TABLE IF NOT EXISTS produtos (
++      id INTEGER PRIMARY KEY AUTOINCREMENT,
++      nome TEXT NOT NULL,
++      tipo_operacional TEXT DEFAULT 'COMERCIAL',
++      utiliza_ficha_tecnica INTEGER DEFAULT 0
++    )
++  `);
++  await run(db, `
++    CREATE TABLE IF NOT EXISTS pedidos (
++      id INTEGER PRIMARY KEY AUTOINCREMENT,
++      codigo VARCHAR(50),
++      data_pedido DATE NOT NULL DEFAULT '2026-01-01',
++      total DECIMAL(10,2) NOT NULL DEFAULT 0,
++      status TEXT NOT NULL DEFAULT 'PEDIDO',
++      empresa_id INTEGER,
++      mesa_id INTEGER,
++      mesa_atendimento_id INTEGER
++    )
++  `);
++  await run(db, `
++    CREATE TABLE IF NOT EXISTS pedidos_itens (
++      id INTEGER PRIMARY KEY AUTOINCREMENT,
++      pedido_id INTEGER NOT NULL,
++      produto_id INTEGER NOT NULL,
++      quantidade REAL NOT NULL,
++      preco_unitario DECIMAL(10,2) NOT NULL DEFAULT 0,
++      subtotal DECIMAL(10,2) NOT NULL DEFAULT 0,
++      classificacao_operacional_snapshot TEXT,
++      produto_nome_snapshot TEXT,
++      observacao TEXT
++    )
++  `);
++  await run(db, `
++    CREATE TABLE IF NOT EXISTS pedido_item_ingredientes (
++      id INTEGER PRIMARY KEY AUTOINCREMENT,
++      pedido_id INTEGER NOT NULL,
++      pedido_item_id INTEGER NOT NULL,
++      empresa_id INTEGER NOT NULL,
++      insumo_id INTEGER NOT NULL,
++      insumo_nome_snapshot TEXT NOT NULL,
++      quantidade_snapshot REAL NOT NULL,
++      unidade_snapshot TEXT NOT NULL,
++      classificacao_comercial_snapshot TEXT NOT NULL,
++      selecionado INTEGER NOT NULL,
++      preco_adicional_snapshot REAL NOT NULL DEFAULT 0
++    )
++  `);
++  const info = await garantirSchemaCozinha(db);
++  assert.equal(info.operacional, true);
++  assert.equal(COZINHA_SCHEMA_VERSION, 3);
++  assert.equal(isCozinhaOperacional(), true);
++}
++
++async function criarEmpresa(db, cnpj, nome) {
++  const r = await run(db, `
++    INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
++    VALUES (?, ?, ?, 1)
++  `, [cnpj, nome, nome]);
++  return r.lastID;
++}
++
++async function prepararBase(db, opts = {}) {
++  const empresaId = opts.empresaId || await criarEmpresa(db, opts.cnpj || `${Date.now()}000111`, 'Emp C');
++  const mesa = await run(db, `
++    INSERT INTO mesas (empresa_id, numero, ativo) VALUES (?, ?, 1)
++  `, [empresaId, opts.mesaNumero || 7]);
++  const mesaId = mesa.lastID;
++  const at = await run(db, `
++    INSERT INTO mesa_atendimentos (empresa_id, mesa_id, estado, operador_abertura_id)
++    VALUES (?, ?, 'OCUPADA', 1)
++  `, [empresaId, mesaId]);
++  const atendimentoId = at.lastID;
++  const un = await run(db, `
++    INSERT INTO cozinha_unidades (empresa_id, codigo, ativo, sequencia_atual)
++    VALUES (?, ?, 1, 0)
++  `, [empresaId, opts.codigoUnidade || `UC-${empresaId}`]);
++  const unidadeId = un.lastID;
++
++  const prodPastel = await run(db, `
++    INSERT INTO produtos (nome, tipo_operacional, utiliza_ficha_tecnica)
++    VALUES ('Pastel', 'COMERCIAL', 1)
++  `);
++  const prodBebida = await run(db, `
++    INSERT INTO produtos (nome, tipo_operacional) VALUES ('Refri', 'COMERCIAL')
++  `);
++  const prodOutro = await run(db, `
++    INSERT INTO produtos (nome, tipo_operacional) VALUES ('Talher', 'COMERCIAL')
++  `);
++
++  async function criarItem(numeroComanda, tipo, nome, qty = 1) {
++    const prodId = tipo === 'PASTEL' ? prodPastel.lastID
++      : (tipo === 'BEBIDA' ? prodBebida.lastID : prodOutro.lastID);
++    const ped = await run(db, `
++      INSERT INTO pedidos (
++        codigo, data_pedido, total, status, empresa_id, mesa_id, mesa_atendimento_id
++      ) VALUES (?, '2026-01-01', 10, 'PEDIDO', ?, ?, ?)
++    `, [`PC-${empresaId}-${numeroComanda}-${Math.random()}`, empresaId, mesaId, atendimentoId]);
++    const item = await run(db, `
++      INSERT INTO pedidos_itens (
++        pedido_id, produto_id, quantidade, preco_unitario, subtotal,
++        classificacao_operacional_snapshot, produto_nome_snapshot, observacao
++      ) VALUES (?, ?, ?, 9.90, 9.90, ?, ?, 'obs')
++    `, [ped.lastID, prodId, qty, tipo, nome]);
++    const cmd = await run(db, `
++      INSERT INTO cozinha_comandas (
++        empresa_id, atendimento_id, numero_comanda, rotulo, pedido_id, operador_lancamento_id
++      ) VALUES (?, ?, ?, ?, ?, 1)
++    `, [empresaId, atendimentoId, numeroComanda, `C${numeroComanda}`, ped.lastID]);
++    return {
++      pedidoId: ped.lastID,
++      pedidoItemId: item.lastID,
++      comandaId: cmd.lastID,
++      tipo,
++      qty
++    };
++  }
++
++  return { empresaId, mesaId, atendimentoId, unidadeId, criarItem };
++}
++
++function entrada(ctx, itens, chave) {
++  return {
++    empresaId: ctx.empresaId,
++    operadorId: 7,
++    idempotencyKey: chave,
++    unidade_id: ctx.unidadeId,
++    mesa_id: ctx.mesaId,
++    atendimento_id: ctx.atendimentoId,
++    itens: itens.map((c) => ({
++      pedido_id: c.pedidoId,
++      pedido_item_id: c.pedidoItemId,
++      comanda_id: c.comandaId,
++      qty_solicitada: Number(c.qty || 1).toFixed(3)
++    }))
++  };
++}
++
++async function criarEstacao(db, ctx, codigo, flags = {}) {
++  return EstacaoService.criarEstacao({
++    db,
++    empresaId: ctx.empresaId,
++    unidadeId: ctx.unidadeId,
++    codigo_estacao: codigo,
++    largura_mm: 80,
++    vias: flags.vias != null ? flags.vias : 1,
++    modelo_individual: flags.modelo_individual != null ? flags.modelo_individual : 0,
++    modelo_agrupado: flags.modelo_agrupado != null ? flags.modelo_agrupado : 1,
++    ativo: flags.ativo != null ? flags.ativo : 1
++  });
++}
++
++describe('Sprint 06 Bloco C — roteamento e estações', () => {
++  beforeEach(() => marcarCozinhaOperacional(false));
++
++  it('1) roteamento PASTEL → estação PASTEL', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    const est = await criarEstacao(db, ctx, 'PASTEL', { modelo_agrupado: 1, modelo_individual: 0 });
++    const item = await ctx.criarItem(1, 'PASTEL', 'Pastel Carne');
++    const out = await CozinhaDespacho.despacharLote(entrada(ctx, [item], 'c-1'), { db });
++    const job = await get(db, `SELECT * FROM cozinha_impressao_fila WHERE rodada_id=?`, [out.rodada.id]);
++    assert.equal(job.estacao_impressao_id, est.estacao.id);
++    await close(db);
++  });
++
++  it('2) roteamento BEBIDA → estação BEBIDA', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    const est = await criarEstacao(db, ctx, 'BEBIDA', { modelo_agrupado: 1, modelo_individual: 0 });
++    const item = await ctx.criarItem(1, 'BEBIDA', 'Refri');
++    const out = await CozinhaDespacho.despacharLote(entrada(ctx, [item], 'c-2'), { db });
++    const job = await get(db, `SELECT * FROM cozinha_impressao_fila WHERE rodada_id=?`, [out.rodada.id]);
++    assert.equal(job.estacao_impressao_id, est.estacao.id);
++    await close(db);
++  });
++
++  it('3) roteamento OUTRO → estação OUTRO', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    const est = await criarEstacao(db, ctx, 'OUTRO', { modelo_agrupado: 1, modelo_individual: 0 });
++    const item = await ctx.criarItem(1, 'OUTRO', 'Talher');
++    const out = await CozinhaDespacho.despacharLote(entrada(ctx, [item], 'c-3'), { db });
++    const job = await get(db, `SELECT * FROM cozinha_impressao_fila WHERE rodada_id=?`, [out.rodada.id]);
++    assert.equal(job.estacao_impressao_id, est.estacao.id);
++    await close(db);
++  });
++
++  it('4) INDIVIDUAL gera um job por comanda', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    await criarEstacao(db, ctx, 'PASTEL', { modelo_individual: 1, modelo_agrupado: 0 });
++    const a = await ctx.criarItem(1, 'PASTEL', 'P1');
++    const b = await ctx.criarItem(2, 'PASTEL', 'P2');
++    const c = await ctx.criarItem(3, 'PASTEL', 'P3');
++    const out = await CozinhaDespacho.despacharLote(entrada(ctx, [a, b, c], 'c-4'), { db });
++    const jobs = await all(db, `
++      SELECT * FROM cozinha_impressao_fila WHERE rodada_id=? AND modelo='INDIVIDUAL' ORDER BY id
++    `, [out.rodada.id]);
++    assert.equal(jobs.length, 3);
++    await close(db);
++  });
++
++  it('5) INDIVIDUAL não mistura itens de comandas diferentes', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    await criarEstacao(db, ctx, 'PASTEL', { modelo_individual: 1, modelo_agrupado: 0 });
++    const a = await ctx.criarItem(1, 'PASTEL', 'P1');
++    const b = await ctx.criarItem(2, 'PASTEL', 'P2');
++    const out = await CozinhaDespacho.despacharLote(entrada(ctx, [a, b], 'c-5'), { db });
++    const jobs = await all(db, `
++      SELECT payload_snapshot, idempotency_key FROM cozinha_impressao_fila
++      WHERE rodada_id=? AND modelo='INDIVIDUAL'
++    `, [out.rodada.id]);
++    assert.equal(jobs.length, 2);
++    for (const j of jobs) {
++      const snap = JSON.parse(j.payload_snapshot);
++      const comandas = new Set(snap.itens.map((i) => i.comanda_id));
++      assert.equal(comandas.size, 1);
++      assert.match(j.idempotency_key, /:INDIVIDUAL:comanda:\d+$/);
++    }
++    await close(db);
++  });
++
++  it('6) AGRUPADO gera um job por estação e rodada', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    await criarEstacao(db, ctx, 'PASTEL', { modelo_agrupado: 1, modelo_individual: 0 });
++    const a = await ctx.criarItem(1, 'PASTEL', 'P1');
++    const b = await ctx.criarItem(2, 'PASTEL', 'P2');
++    const out = await CozinhaDespacho.despacharLote(entrada(ctx, [a, b], 'c-6'), { db });
++    const jobs = await all(db, `
++      SELECT * FROM cozinha_impressao_fila WHERE rodada_id=? AND modelo='AGRUPADO'
++    `, [out.rodada.id]);
++    assert.equal(jobs.length, 1);
++    assert.match(jobs[0].idempotency_key, /:AGRUPADO:all$/);
++    await close(db);
++  });
++
++  it('7) AGRUPADO reúne itens de comandas diferentes', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    await criarEstacao(db, ctx, 'PASTEL', { modelo_agrupado: 1, modelo_individual: 0 });
++    const a = await ctx.criarItem(1, 'PASTEL', 'P1');
++    const b = await ctx.criarItem(2, 'PASTEL', 'P2');
++    const out = await CozinhaDespacho.despacharLote(entrada(ctx, [a, b], 'c-7'), { db });
++    const job = await get(db, `SELECT payload_snapshot FROM cozinha_impressao_fila WHERE rodada_id=?`, [out.rodada.id]);
++    const snap = JSON.parse(job.payload_snapshot);
++    assert.equal(snap.itens.length, 2);
++    assert.deepEqual(
++      [...new Set(snap.itens.map((i) => i.comanda_id))].sort(),
++      [a.comandaId, b.comandaId].sort()
++    );
++    await close(db);
++  });
++
++  it('8) INDIVIDUAL desabilitado impede job nesse modelo', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    await criarEstacao(db, ctx, 'PASTEL', { modelo_individual: 0, modelo_agrupado: 1 });
++    const a = await ctx.criarItem(1, 'PASTEL', 'P1');
++    const b = await ctx.criarItem(2, 'PASTEL', 'P2');
++    const out = await CozinhaDespacho.despacharLote(entrada(ctx, [a, b], 'c-8'), { db });
++    const ind = await get(db, `
++      SELECT COUNT(*) AS n FROM cozinha_impressao_fila WHERE rodada_id=? AND modelo='INDIVIDUAL'
++    `, [out.rodada.id]);
++    assert.equal(ind.n, 0);
++    const agr = await get(db, `
++      SELECT COUNT(*) AS n FROM cozinha_impressao_fila WHERE rodada_id=? AND modelo='AGRUPADO'
++    `, [out.rodada.id]);
++    assert.equal(agr.n, 1);
++    await close(db);
++  });
++
++  it('9) AGRUPADO desabilitado impede job nesse modelo', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    await criarEstacao(db, ctx, 'PASTEL', { modelo_individual: 1, modelo_agrupado: 0 });
++    const a = await ctx.criarItem(1, 'PASTEL', 'P1');
++    const out = await CozinhaDespacho.despacharLote(entrada(ctx, [a], 'c-9'), { db });
++    assert.equal((await get(db, `
++      SELECT COUNT(*) AS n FROM cozinha_impressao_fila WHERE rodada_id=? AND modelo='AGRUPADO'
++    `, [out.rodada.id])).n, 0);
++    assert.equal((await get(db, `
++      SELECT COUNT(*) AS n FROM cozinha_impressao_fila WHERE rodada_id=? AND modelo='INDIVIDUAL'
++    `, [out.rodada.id])).n, 1);
++    await close(db);
++  });
++
++  it('10) estação com duas vias persiste vias=2', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    await criarEstacao(db, ctx, 'PASTEL', { vias: 2, modelo_agrupado: 1, modelo_individual: 0 });
++    const a = await ctx.criarItem(1, 'PASTEL', 'P1');
++    await CozinhaDespacho.despacharLote(entrada(ctx, [a], 'c-10'), { db });
++    assert.equal((await get(db, `SELECT vias FROM cozinha_impressao_fila`)).vias, 2);
++    assert.equal((await get(db, `SELECT COUNT(*) AS n FROM cozinha_impressao_fila`)).n, 1);
++    await close(db);
++  });
++
++  it('11) estação com três vias persiste vias=3', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    await criarEstacao(db, ctx, 'PASTEL', { vias: 3, modelo_agrupado: 1, modelo_individual: 0 });
++    const a = await ctx.criarItem(1, 'PASTEL', 'P1');
++    await CozinhaDespacho.despacharLote(entrada(ctx, [a], 'c-11'), { db });
++    assert.equal((await get(db, `SELECT vias FROM cozinha_impressao_fila`)).vias, 3);
++    assert.equal((await get(db, `SELECT COUNT(*) AS n FROM cozinha_impressao_fila`)).n, 1);
++    await close(db);
++  });
++
++  it('12) estação de outra unidade nunca é utilizada', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    const un2 = await run(db, `
++      INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'U-X', 1)
++    `, [ctx.empresaId]);
++    await EstacaoService.criarEstacao({
++      db, empresaId: ctx.empresaId, unidadeId: un2.lastID,
++      codigo_estacao: 'PASTEL', largura_mm: 80,
++      modelo_agrupado: 1, modelo_individual: 0
++    });
++    const a = await ctx.criarItem(1, 'PASTEL', 'P1');
++    const out = await CozinhaDespacho.despacharLote(entrada(ctx, [a], 'c-12'), { db });
++    assert.equal(out.success, true);
++    assert.equal((await get(db, `SELECT COUNT(*) AS n FROM cozinha_impressao_fila`)).n, 0);
++    await close(db);
++  });
++
++  it('13) estação de outra empresa nunca é utilizada', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    const emp2 = await criarEmpresa(db, '99999999000199', 'Outra');
++    const un2 = await run(db, `
++      INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'UE2', 1)
++    `, [emp2]);
++    await EstacaoService.criarEstacao({
++      db, empresaId: emp2, unidadeId: un2.lastID,
++      codigo_estacao: 'PASTEL', largura_mm: 80,
++      modelo_agrupado: 1, modelo_individual: 0
++    });
++    const a = await ctx.criarItem(1, 'PASTEL', 'P1');
++    const out = await CozinhaDespacho.despacharLote(entrada(ctx, [a], 'c-13'), { db });
++    assert.equal(out.success, true);
++    assert.equal((await get(db, `SELECT COUNT(*) AS n FROM cozinha_impressao_fila`)).n, 0);
++    await close(db);
++  });
++
++  it('14) ausência de estação não bloqueia expedição', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    const a = await ctx.criarItem(1, 'PASTEL', 'P1');
++    const out = await CozinhaDespacho.despacharLote(entrada(ctx, [a], 'c-14'), { db });
++    assert.equal(out.success, true);
++    assert.ok(out.rodada.id > 0);
++    assert.equal((await get(db, `SELECT COUNT(*) AS n FROM cozinha_impressao_fila`)).n, 0);
++    assert.ok(await get(db, `SELECT id FROM cozinha_eventos_outbox WHERE tipo='IMPRESSAO_SEM_ESTACAO'`));
++    await close(db);
++  });
++
++  it('15) ausência de modelo elegível não bloqueia expedição', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    await criarEstacao(db, ctx, 'PASTEL', { modelo_individual: 0, modelo_agrupado: 0 });
++    const a = await ctx.criarItem(1, 'PASTEL', 'P1');
++    const out = await CozinhaDespacho.despacharLote(entrada(ctx, [a], 'c-15'), { db });
++    assert.equal(out.success, true);
++    assert.equal((await get(db, `SELECT COUNT(*) AS n FROM cozinha_impressao_fila`)).n, 0);
++    assert.ok(await get(db, `
++      SELECT id FROM cozinha_eventos_outbox WHERE tipo='IMPRESSAO_SEM_MODELO_ELEGIVEL'
++    `));
++    await close(db);
++  });
++
++  it('16) replay idêntico não duplica jobs INDIVIDUAIS', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    await criarEstacao(db, ctx, 'PASTEL', { modelo_individual: 1, modelo_agrupado: 0 });
++    const a = await ctx.criarItem(1, 'PASTEL', 'P1');
++    const b = await ctx.criarItem(2, 'PASTEL', 'P2');
++    const itens = [a, b];
++    const out = await CozinhaDespacho.despacharLote(entrada(ctx, itens, 'c-16'), { db });
++    const before = await get(db, `SELECT COUNT(*) AS n FROM cozinha_impressao_fila`);
++    const replay = await FilaService.enfileirarDaRodada({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, rodadaId: out.rodada.id
++    }, { db });
++    assert.equal(replay.repetida, true);
++    assert.equal((await get(db, `SELECT COUNT(*) AS n FROM cozinha_impressao_fila`)).n, before.n);
++    await close(db);
++  });
++
++  it('17) replay idêntico não duplica jobs AGRUPADOS', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    await criarEstacao(db, ctx, 'PASTEL', { modelo_agrupado: 1, modelo_individual: 0 });
++    const a = await ctx.criarItem(1, 'PASTEL', 'P1');
++    const out = await CozinhaDespacho.despacharLote(entrada(ctx, [a], 'c-17'), { db });
++    await FilaService.enfileirarDaRodada({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, rodadaId: out.rodada.id
++    }, { db });
++    assert.equal((await get(db, `SELECT COUNT(*) AS n FROM cozinha_impressao_fila`)).n, 1);
++    await close(db);
++  });
++
++  it('18) snapshot INDIVIDUAL contém somente itens da comanda', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    await criarEstacao(db, ctx, 'PASTEL', { modelo_individual: 1, modelo_agrupado: 0 });
++    const a = await ctx.criarItem(1, 'PASTEL', 'SoA');
++    const b = await ctx.criarItem(2, 'PASTEL', 'SoB');
++    const out = await CozinhaDespacho.despacharLote(entrada(ctx, [a, b], 'c-18'), { db });
++    const jobs = await all(db, `
++      SELECT payload_snapshot FROM cozinha_impressao_fila WHERE rodada_id=? AND modelo='INDIVIDUAL'
++    `, [out.rodada.id]);
++    for (const j of jobs) {
++      const snap = JSON.parse(j.payload_snapshot);
++      assert.equal(snap.itens.length, 1);
++      assert.equal(new Set(snap.itens.map((i) => i.comanda_id)).size, 1);
++    }
++    await close(db);
++  });
++
++  it('19) snapshot AGRUPADO contém todos os itens da estação', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    await criarEstacao(db, ctx, 'PASTEL', { modelo_agrupado: 1, modelo_individual: 0 });
++    const a = await ctx.criarItem(1, 'PASTEL', 'A');
++    const b = await ctx.criarItem(2, 'PASTEL', 'B');
++    const out = await CozinhaDespacho.despacharLote(entrada(ctx, [a, b], 'c-19'), { db });
++    const snap = JSON.parse((await get(db, `
++      SELECT payload_snapshot FROM cozinha_impressao_fila WHERE rodada_id=?
++    `, [out.rodada.id])).payload_snapshot);
++    assert.equal(snap.itens.length, 2);
++    await close(db);
++  });
++
++  it('20) snapshot sem preço/pagamento/fiscal', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    await criarEstacao(db, ctx, 'PASTEL', { modelo_agrupado: 1, modelo_individual: 0 });
++    const a = await ctx.criarItem(1, 'PASTEL', 'P');
++    await CozinhaDespacho.despacharLote(entrada(ctx, [a], 'c-20'), { db });
++    const raw = (await get(db, `SELECT payload_snapshot FROM cozinha_impressao_fila`)).payload_snapshot;
++    assert.ok(!/"preco"/i.test(raw));
++    assert.ok(!/"pagamento"/i.test(raw));
++    assert.ok(!/"ncm"/i.test(raw));
++    assert.deepEqual(snapshotContemCamposProibidos(JSON.parse(raw)), []);
++    await close(db);
++  });
++
++  it('21) número visível da mesa continua correto', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const empresaId = await criarEmpresa(db, '55555555000155', 'MesaVis');
++    await run(db, `INSERT INTO mesas (empresa_id, numero, ativo) VALUES (?, 90, 1)`, [empresaId]);
++    await run(db, `INSERT INTO mesas (empresa_id, numero, ativo) VALUES (?, 91, 1)`, [empresaId]);
++    const ctx = await prepararBase(db, { empresaId, mesaNumero: 12 });
++    assert.notEqual(ctx.mesaId, 12);
++    await criarEstacao(db, ctx, 'PASTEL', { modelo_agrupado: 1, modelo_individual: 0 });
++    const a = await ctx.criarItem(1, 'PASTEL', 'P');
++    await CozinhaDespacho.despacharLote(entrada(ctx, [a], 'c-21'), { db });
++    const snap = JSON.parse((await get(db, `SELECT payload_snapshot FROM cozinha_impressao_fila`)).payload_snapshot);
++    assert.equal(String(snap.mesa_numero), '12');
++    assert.notEqual(String(snap.mesa_numero), String(ctx.mesaId));
++    await close(db);
++  });
++
++  it('22) nenhuma impressão física é executada', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    await criarEstacao(db, ctx, 'PASTEL', { modelo_agrupado: 1, modelo_individual: 0 });
++    const a = await ctx.criarItem(1, 'PASTEL', 'P');
++    await CozinhaDespacho.despacharLote(entrada(ctx, [a], 'c-22'), { db });
++    const job = await get(db, `SELECT estado, worker_id, spooler_job_token FROM cozinha_impressao_fila`);
++    assert.equal(job.estado, ESTADOS_FILA.PENDENTE);
++    assert.equal(job.worker_id, null);
++    const src = fs.readFileSync(
++      path.join(__dirname, '..', '..', 'backend', 'services', 'cozinha', 'CozinhaImpressaoFilaService.js'),
++      'utf8'
++    );
++    assert.ok(!/webContents\.print/.test(src));
++    assert.ok(!/impressora_cupom/.test(src));
++    await close(db);
++  });
++
++  it('23) roteamento não altera estado de preparação', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    await criarEstacao(db, ctx, 'PASTEL', { modelo_agrupado: 1, modelo_individual: 0 });
++    const a = await ctx.criarItem(1, 'PASTEL', 'P');
++    const out = await CozinhaDespacho.despacharLote(entrada(ctx, [a], 'c-23'), { db });
++    assert.equal(out.rodada.estado_preparacao, 'AGUARDANDO');
++    const item = await get(db, `SELECT estado_preparacao FROM cozinha_itens WHERE rodada_id=?`, [out.rodada.id]);
++    assert.equal(item.estado_preparacao, 'AGUARDANDO');
++    await close(db);
++  });
++
++  it('24) rollback da expedição remove os jobs criados', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    await criarEstacao(db, ctx, 'PASTEL', { modelo_agrupado: 1, modelo_individual: 0 });
++    const a = await ctx.criarItem(1, 'PASTEL', 'P');
++    await assert.rejects(
++      () => CozinhaDespacho.despacharLote(
++        entrada(ctx, [a], 'c-24'),
++        { db, simularFalhaAposEnfileirarImpressao: true }
++      )
++    );
++    assert.equal((await get(db, `SELECT COUNT(*) AS n FROM cozinha_impressao_fila`)).n, 0);
++    assert.equal((await get(db, `SELECT COUNT(*) AS n FROM cozinha_rodadas`)).n, 0);
++    await close(db);
++  });
++});
+
+
+diff --git a/tests/cozinha/sprint06-bloco-b2-idempotencia-despacho.test.js b/tests/cozinha/sprint06-bloco-b2-idempotencia-despacho.test.js
+--- a/tests/cozinha/sprint06-bloco-b2-idempotencia-despacho.test.js
++++ b/tests/cozinha/sprint06-bloco-b2-idempotencia-despacho.test.js
+@@
++ modelo_individual: 0, modelo_agrupado: 1  // estações B2 só AGRUPADO (compat Bloco C)

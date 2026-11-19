@@ -159,6 +159,7 @@ const faturamentoRoutes = require('./rotas/faturamento');
 const centralFaturamentoRoutes = require('./rotas/centralFaturamento');
 const pedidosRoutes = require('./rotas/pedidos');
 const mesasRoutes = require('./rotas/mesas');
+const cozinhaRoutes = require('./rotas/cozinha');
 const financeiroRoutes = require('./rotas/financeiro');
 const condicoesPagamentoRoutes = require('./rotas/condicoes-pagamento');
 const configuracoesRoutes = require('./rotas/configuracoes');
@@ -241,6 +242,7 @@ app.use('/api/faturamento', verificarToken, exigirRecurso('faturamento'), fatura
 app.use('/api/central-faturamento', verificarToken, exigirRecurso('nfe'), centralFaturamentoRoutes);
 app.use('/api/pedidos', verificarToken, exigirRecurso('pedidos'), pedidosRoutes);
 app.use('/api/mesas', verificarToken, exigirRecurso('pedidos'), mesasRoutes);
+app.use('/api/cozinha', verificarToken, exigirRecurso('pedidos'), cozinhaRoutes);
 
 // Sprint 3.9 — PDV só existe se módulo licenciado (princípio da invisibilidade)
 const { responderModuloNaoLicenciado } = require('./middleware/errosLicenciamento');

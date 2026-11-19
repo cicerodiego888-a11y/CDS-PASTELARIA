@@ -22,11 +22,17 @@ function getJwtSecret() {
   const secret = process.env.JWT_SECRET;
   if (secret) return secret;
 
+  // Produção: nunca cair silenciosamente na chave de desenvolvimento.
   if (process.env.NODE_ENV === 'production') {
-    console.error('[SEGURANÇA] JWT_SECRET não definido em produção. Defina a variável de ambiente.');
-  } else {
-    warnOnce(jwtWarnFlag, '[SEGURANÇA] JWT_SECRET não definido — usando chave de desenvolvimento.');
+    const err = new Error(
+      '[SEGURANÇA] JWT_SECRET obrigatório em produção. Inicialização/autenticação bloqueada.'
+    );
+    err.codigo = 'JWT_SECRET_AUSENTE_PRODUCAO';
+    throw err;
   }
+
+  // Desenvolvimento / isolamento: fallback explícito (aviso único; valor não é logado).
+  warnOnce(jwtWarnFlag, '[SEGURANÇA] JWT_SECRET não definido — usando chave de desenvolvimento.');
   return DEV_JWT_FALLBACK;
 }
 

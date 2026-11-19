@@ -1,0 +1,11 @@
+=== HOMOLOGAÇÃO INTEGRADA (banco temporário) — cadastro + KDS ===
+DB_DIR=C:\Users\cicer\AppData\Local\Temp\cds-homolog-s07-2-cad-2nZGDl
+NOTA: banco oficial NÃO alterado; simula primeira unidade após cadastro autorizado.
+PASS: antes do cadastro → SEM_UNIDADES_CADASTRADAS
+PASS: unidade cadastrada id=1 codigo=COZ-01 empresa=1
+PASS: administrador visualiza a unidade
+PASS: JWT recebe unidade_cozinha_id=1
+PASS: sessão persistida (token+user)
+PASS: painel KDS abre normalmente (unidade_id=1, rodadas=1)
+=== RESULTADO: HOMOLOGAÇÃO TEMPORÁRIA OK ===
+Oficial: aguarda autorização PO/TL para cadastro da primeira unidade.

@@ -7,6 +7,11 @@
  *
  * O canal NUNCA é lido do corpo da requisição: quem define a origem é o adaptador (código servidor)
  * que chama `receber`. Isso evita que um cliente declare livremente um canal.
+ *
+ * S07-3D: o adaptador EQUIPE (garçom / operação da loja) permanece o contrato de entrada;
+ * a resolução de cozinha mapeia EQUIPE → canal LOJA (ver CozinhaResolucaoDestinoService).
+ * Integrações futuras (IFOOD, WHATSAPP, etc.) devem chamar `receber` com o código do canal
+ * correspondente — sem inventar fluxos paralelos nesta sprint.
  */
 'use strict';
 

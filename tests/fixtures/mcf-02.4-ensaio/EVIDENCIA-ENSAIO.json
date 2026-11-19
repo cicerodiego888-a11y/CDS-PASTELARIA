@@ -1,6 +1,6 @@
 {
   "pre_validacao": {
-    "lote_id": "lote-MCF-02.4-ENSAIO-CONTROLADO-1-1794626396242",
+    "lote_id": "lote-MCF-02.4-ENSAIO-CONTROLADO-1-1794933447144",
     "fingerprint": "2:vincular:alta:1:100|3:criar_titulo:nenhuma::200|4:ignorar:nenhuma::20|6:revisao_manual:media:2:99|8:revisao_manual:nenhuma::40",
     "automaticos": 3,
     "revisao_manual": 2,
@@ -139,7 +139,7 @@
     }
   },
   "interrupcao": {
-    "lote_id": "lote-MCF-02.4-ENSAIO-CONTROLADO-1-1794626396242",
+    "lote_id": "lote-MCF-02.4-ENSAIO-CONTROLADO-1-1794933447144",
     "status": "interrupido",
     "processados_nesta_execucao": 1,
     "pendentes_restantes": 2,
@@ -152,7 +152,7 @@
     ]
   },
   "retomada": {
-    "lote_id": "lote-MCF-02.4-ENSAIO-CONTROLADO-1-1794626396242",
+    "lote_id": "lote-MCF-02.4-ENSAIO-CONTROLADO-1-1794933447144",
     "status": "concluido",
     "processados_nesta_execucao": 2,
     "pendentes_restantes": 0,

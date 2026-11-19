@@ -255,7 +255,8 @@ function criarAppHttp() {
       const out = await avaliarSelecaoEmpresaPdv({
         body: req.body || {},
         itens: (req.body && req.body.itens) || [],
-        usuarioId: req.user.id
+        usuarioId: req.user.id,
+        usuario: req.user
       }, { db, usarAutorizacaoUsuario: false, verificarFiscalValido: async () => true });
       if (out.bloqueio) {
         return res.status(409).json({

@@ -1150,6 +1150,78 @@ async function desvincularAtendimentoDaMesa(pedidoId, empresaId, opts = {}) {
   );
 }
 
+/**
+ * S07-3D — grava snapshot da resolução de destino (sem despacho).
+ * No-op se as colunas ainda não existirem (migration pendente).
+ * Não sobrescreve destino já RESOLVIDO (estabilidade após alteração de roteamento).
+ */
+async function persistirResolucaoDestinoCozinha(pedidoId, empresaId, resolucao, opts = {}) {
+  const db = conn(opts.db);
+  const colunas = await obterColunasTabela('pedidos', db);
+  const temCanal = colunas.has('cozinha_canal_codigo');
+  const temUnidade = colunas.has('unidade_cozinha_destino_id');
+  const temStatus = colunas.has('cozinha_resolucao_status');
+  if (!temCanal && !temUnidade && !temStatus) {
+    return { skipped: true, motivo: 'SCHEMA_DESTINO_AUSENTE' };
+  }
+
+  const id = Number(pedidoId);
+  const emp = Number(empresaId);
+  if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(emp) || emp <= 0) {
+    return { skipped: true, motivo: 'IDENTIFICADORES_INVALIDOS' };
+  }
+
+  const atual = await get(
+    `SELECT ${temStatus ? 'cozinha_resolucao_status' : 'NULL AS cozinha_resolucao_status'},
+            ${temUnidade ? 'unidade_cozinha_destino_id' : 'NULL AS unidade_cozinha_destino_id'}
+       FROM pedidos WHERE id = ? AND empresa_id = ?`,
+    [id, emp],
+    db
+  );
+  if (!atual) return { skipped: true, motivo: 'PEDIDO_NAO_ENCONTRADO' };
+
+  if (
+    String(atual.cozinha_resolucao_status || '') === 'RESOLVIDO'
+    && atual.unidade_cozinha_destino_id != null
+  ) {
+    return { skipped: true, motivo: 'DESTINO_JA_RESOLVIDO' };
+  }
+
+  const canalCodigo = resolucao && resolucao.canal_codigo != null
+    ? String(resolucao.canal_codigo)
+    : null;
+  const unidadeId = resolucao
+    && resolucao.destino
+    && resolucao.destino.unidade_id != null
+    ? Number(resolucao.destino.unidade_id)
+    : null;
+  const status = resolucao && resolucao.status != null ? String(resolucao.status) : null;
+
+  const sets = [];
+  const params = [];
+  if (temCanal) {
+    sets.push('cozinha_canal_codigo = ?');
+    params.push(canalCodigo);
+  }
+  if (temUnidade) {
+    sets.push('unidade_cozinha_destino_id = ?');
+    params.push(Number.isInteger(unidadeId) && unidadeId > 0 ? unidadeId : null);
+  }
+  if (temStatus) {
+    sets.push('cozinha_resolucao_status = ?');
+    params.push(status);
+  }
+  if (!sets.length) return { skipped: true, motivo: 'SCHEMA_DESTINO_AUSENTE' };
+
+  params.push(id, emp);
+  await run(
+    `UPDATE pedidos SET ${sets.join(', ')} WHERE id = ? AND empresa_id = ?`,
+    params,
+    db
+  );
+  return { skipped: false, status, unidade_cozinha_destino_id: unidadeId, canal_codigo: canalCodigo };
+}
+
 module.exports = {
   listarAguardandoFaturamento,
   listarPedidos,
@@ -1157,6 +1229,7 @@ module.exports = {
   obterEstadoEdicao,
   criarErroPedidoImutavel,
   criarPedido,
+  persistirResolucaoDestinoCozinha,
   vincularAtendimentoDaMesa,
   reatribuirAtendimentoDaMesa,
   desvincularAtendimentoDaMesa,

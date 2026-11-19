@@ -1,0 +1,1694 @@
+# DIFF Correções Auditoria Sprint 04A
+# 2026-11-16
+
+===== FILE: backend/utils/cozinhaSchema.js =====
+
+/**
+ * Schema aditivo da Cozinha V1.2.3 — fundação + isolamento por empresa + upgrade v2→v3.
+ * Versão 2: FKs compostas (id, empresa_id) entre entidades da Cozinha.
+ * Versão 3: amplia CHECK de cozinha_idempotencia.tipo_operacao (preparação S03).
+ * Migração v2→v3: reconstrói somente cozinha_idempotencia com cópia integral (sem perda).
+ */
+'use strict';
+
+/** v3: amplia CHECK de cozinha_idempotencia.tipo_operacao para preparação S03. */
+const COZINHA_SCHEMA_VERSION = 3;
+
+const IDEMPOTENCIA_COLUNAS = Object.freeze([
+  'id',
+  'idempotency_key',
+  'tipo_operacao',
+  'contexto',
+  'payload_hash',
+  'situacao',
+  'resultado_http_status',
+  'resultado_json',
+  'recurso_tipo',
+  'recurso_id',
+  'created_at',
+  'concluded_at'
+]);
+
+const SQL_CREATE_COZINHA_IDEMPOTENCIA_V3 = `
+  CREATE TABLE cozinha_idempotencia (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    idempotency_key TEXT NOT NULL,
+    tipo_operacao TEXT NOT NULL
+      CHECK (tipo_operacao IN (
+        'AUTORIZAR_QTY',
+        'REDUZIR_TETO',
+        'DESPACHO_LOTE',
+        'PREPARACAO_INICIADA',
+        'ITEM_PRONTO',
+        'BEBIDA_ENTREGUE'
+      )),
+    contexto TEXT,
+    payload_hash TEXT NOT NULL,
+    situacao TEXT NOT NULL DEFAULT 'EM_ANDAMENTO'
+      CHECK (situacao IN ('EM_ANDAMENTO', 'CONCLUIDA', 'FALHA_VALIDACAO')),
+    resultado_http_status INTEGER,
+    resultado_json TEXT,
+    recurso_tipo TEXT,
+    recurso_id INTEGER,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    concluded_at TEXT
+  )
+`;
+
+const TABELAS_COZINHA = Object.freeze([
+  'cozinha_item_ingredientes',
+  'cozinha_bebida_entregas',
+  'cozinha_impressao_fila',
+  'cozinha_notificacoes',
+  'cozinha_eventos_outbox',
+  'cozinha_itens',
+  'cozinha_rodadas',
+  'cozinha_estacoes_impressao',
+  'cozinha_comandas',
+  'cozinha_autorizacoes_qty',
+  'cozinha_reducoes_teto',
+  'cozinha_pedido_item_controle',
+  'cozinha_idempotencia',
+  'cozinha_unidades'
+]);
+
+let statusCozinha = {
+  operacional: false,
+  versao: null,
+  erro: null,
+  atualizadoEm: null
+};
+
+function dbRun(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function cb(err) {
+      if (err) return reject(err);
+      resolve(this);
+    });
+  });
+}
+
+function dbGet(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
+  });
+}
+
+function marcarCozinhaOperacional(ok, err = null) {
+  statusCozinha = {
+    operacional: !!ok,
+    versao: ok ? COZINHA_SCHEMA_VERSION : statusCozinha.versao,
+    erro: err
+      ? { mensagem: String(err.message || err), codigo: err.codigo || 'COZINHA_SCHEMA_FALHA' }
+      : null,
+    atualizadoEm: new Date().toISOString()
+  };
+  return statusCozinha;
+}
+
+function isCozinhaOperacional() {
+  return statusCozinha.operacional === true;
+}
+
+function getCozinhaSchemaStatus() {
+  return { ...statusCozinha, versaoAlvo: COZINHA_SCHEMA_VERSION };
+}
+
+async function garantirConfigNotificacaoCozinha(db) {
+  await dbRun(db, `
+    INSERT OR IGNORE INTO configuracoes (chave, valor, tipo, descricao)
+    VALUES (
+      'cozinha_notificacao_modo',
+      'INDIVIDUAL',
+      'text',
+      'Modo de notificação da cozinha (global): INDIVIDUAL ou SIMULTANEA'
+    )
+  `);
+}
+
+async function lerVersaoSchema(db) {
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_schema_meta (
+      chave TEXT PRIMARY KEY NOT NULL,
+      valor TEXT NOT NULL,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  const row = await dbGet(db, `
+    SELECT valor FROM cozinha_schema_meta WHERE chave = 'schema_version'
+  `);
+  return row ? Number(row.valor) : 0;
+}
+
+async function gravarVersaoSchema(db, versao) {
+  await dbRun(db, `
+    INSERT INTO cozinha_schema_meta (chave, valor, updated_at)
+    VALUES ('schema_version', ?, datetime('now'))
+    ON CONFLICT(chave) DO UPDATE SET
+      valor = excluded.valor,
+      updated_at = datetime('now')
+  `, [String(versao)]);
+}
+
+function dbAll(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
+  });
+}
+
+async function contarLinhas(db, tabela) {
+  const existe = await dbGet(db, `
+    SELECT name FROM sqlite_master WHERE type='table' AND name=?
+  `, [tabela]);
+  if (!existe) return 0;
+  const row = await dbGet(db, `SELECT COUNT(*) AS n FROM ${tabela}`);
+  return Number(row && row.n) || 0;
+}
+
+async function obterSqlTabela(db, nome) {
+  const row = await dbGet(db, `
+    SELECT sql FROM sqlite_master WHERE type='table' AND name=?
+  `, [nome]);
+  return row && row.sql ? String(row.sql) : null;
+}
+
+function checkIdempotenciaAceitaPreparacao(sqlCreate) {
+  if (!sqlCreate) return false;
+  const s = String(sqlCreate).toUpperCase();
+  return s.includes('PREPARACAO_INICIADA')
+    && s.includes('ITEM_PRONTO')
+    && s.includes('BEBIDA_ENTREGUE');
+}
+
+async function validarColunasIdempotencia(db, tabela = 'cozinha_idempotencia') {
+  const cols = await dbAll(db, `PRAGMA table_info(${tabela})`);
+  const nomes = new Set((cols || []).map((c) => String(c.name)));
+  for (const col of IDEMPOTENCIA_COLUNAS) {
+    if (!nomes.has(col)) {
+      const err = new Error(
+        `[COZINHA] Estrutura inesperada em ${tabela}: coluna ausente '${col}'.`
+      );
+      err.codigo = 'COZINHA_SCHEMA_INCOMPATIVEL';
+      throw err;
+    }
+  }
+  return cols;
+}
+
+async function pragmaIntegrityOk(db) {
+  const row = await dbGet(db, `PRAGMA integrity_check`);
+  const ok = row && String(row.integrity_check || Object.values(row)[0] || '').toLowerCase() === 'ok';
+  if (!ok) {
+    const err = new Error(
+      `[COZINHA] integrity_check falhou: ${JSON.stringify(row)}`
+    );
+    err.codigo = 'COZINHA_INTEGRITY_CHECK_FALHOU';
+    throw err;
+  }
+}
+
+async function pragmaForeignKeyCheckOk(db) {
+  const rows = await dbAll(db, `PRAGMA foreign_key_check`);
+  if (rows && rows.length > 0) {
+    const err = new Error(
+      `[COZINHA] foreign_key_check encontrou ${rows.length} violação(ões).`
+    );
+    err.codigo = 'COZINHA_FK_CHECK_FALHOU';
+    err.detalhes = rows.slice(0, 20);
+    throw err;
+  }
+}
+
+/**
+ * Recria schema completo somente quando não há dados (v0/v1 → v3).
+ * Populado com versão < 2 continua bloqueado (sem perda silenciosa).
+ */
+async function recriarSchemaVazioSeNecessario(db, versaoAtual) {
+  if (versaoAtual >= 2) return { recriado: false };
+
+  let total = 0;
+  for (const t of TABELAS_COZINHA) {
+    total += await contarLinhas(db, t);
+  }
+  if (total > 0) {
+    const err = new Error(
+      `[COZINHA] FALHA_SCHEMA: upgrade de v${versaoAtual || 0} para v${COZINHA_SCHEMA_VERSION} ` +
+      `exige recriação completa, mas existem ${total} linha(s) em tabelas cozinha_*. ` +
+      `Interrompido sem apagar dados.`
+    );
+    err.codigo = 'COZINHA_SCHEMA_UPGRADE_BLOQUEADO';
+    throw err;
+  }
+
+  console.warn(
+    `[COZINHA] Recriando schema vazio v${versaoAtual || 0} → v${COZINHA_SCHEMA_VERSION} ` +
+    '(tabelas vazias; FKs compostas empresa_id)'
+  );
+
+  await dbRun(db, 'PRAGMA foreign_keys = OFF');
+  try {
+    for (const t of TABELAS_COZINHA) {
+      await dbRun(db, `DROP TABLE IF EXISTS ${t}`);
+    }
+  } finally {
+    await dbRun(db, 'PRAGMA foreign_keys = ON');
+  }
+  return { recriado: true };
+}
+
+function lerEstadoForeignKeys(pragmaRow) {
+  if (!pragmaRow) return false;
+  const v = pragmaRow.foreign_keys != null
+    ? pragmaRow.foreign_keys
+    : Object.values(pragmaRow)[0];
+  return Number(v) === 1;
+}
+
+async function restaurarForeignKeys(db, fkWasOn) {
+  await dbRun(db, fkWasOn ? 'PRAGMA foreign_keys = ON' : 'PRAGMA foreign_keys = OFF');
+}
+
+/**
+ * Migração segura v2 → v3: reconstrói cozinha_idempotencia ampliando o CHECK,
+ * com cópia integral dos registros. Demais tabelas permanecem intactas.
+ *
+ * @param {object} db
+ * @param {object} [opts]
+ * @param {string} [opts.simularFalha] - 'falha_begin' | 'apos_copia' | 'antes_meta'
+ */
+async function migrarCozinhaV2paraV3(db, opts = {}) {
+  const existe = await dbGet(db, `
+    SELECT name FROM sqlite_master WHERE type='table' AND name='cozinha_idempotencia'
+  `);
+  if (!existe) {
+    const err = new Error(
+      '[COZINHA] Migração v2→v3: tabela cozinha_idempotencia ausente.'
+    );
+    err.codigo = 'COZINHA_SCHEMA_INCOMPATIVEL';
+    throw err;
+  }
+
+  const sqlAntes = await obterSqlTabela(db, 'cozinha_idempotencia');
+  await validarColunasIdempotencia(db, 'cozinha_idempotencia');
+
+  if (checkIdempotenciaAceitaPreparacao(sqlAntes)) {
+    await gravarVersaoSchema(db, COZINHA_SCHEMA_VERSION);
+    return {
+      migrado: true,
+      jaCompativel: true,
+      registros: await contarLinhas(db, 'cozinha_idempotencia')
+    };
+  }
+
+  // CORREÇÃO 02: backup residual — não DROP, não sobrescrever, não renomear.
+  const bakResidual = await dbGet(db, `
+    SELECT name FROM sqlite_master
+    WHERE type='table' AND name='cozinha_idempotencia__v2_bak'
+  `);
+  if (bakResidual) {
+    const nBak = await contarLinhas(db, 'cozinha_idempotencia__v2_bak');
+    const err = new Error(
+      '[COZINHA] Migração v2→v3 interrompida: existe backup residual ' +
+      `cozinha_idempotencia__v2_bak (${nBak} registro(s)). ` +
+      'Tabela original e backup preservados — intervenção manual necessária.'
+    );
+    err.codigo = 'COZINHA_MIGRACAO_BACKUP_RESIDUAL';
+    err.detalhes = { tabela: 'cozinha_idempotencia__v2_bak', registros: nBak };
+    throw err;
+  }
+
+  const contagemAntes = await contarLinhas(db, 'cozinha_idempotencia');
+  const snapshotAntes = await dbAll(db, `
+    SELECT ${IDEMPOTENCIA_COLUNAS.join(', ')}
+    FROM cozinha_idempotencia
+    ORDER BY id
+  `);
+
+  const fkAntes = await dbGet(db, `PRAGMA foreign_keys`);
+  const fkWasOn = lerEstadoForeignKeys(fkAntes);
+  let fkAlteradas = false;
+  let transacaoAberta = false;
+
+  try {
+    // SQLite: PRAGMA foreign_keys só muda fora de transação.
+    await dbRun(db, 'PRAGMA foreign_keys = OFF');
+    fkAlteradas = true;
+
+    if (opts.simularFalha === 'falha_begin') {
+      const err = new Error('[COZINHA] Falha simulada ao iniciar BEGIN IMMEDIATE (teste).');
+      err.codigo = 'COZINHA_MIGRACAO_BEGIN_FALHOU';
+      throw err;
+    }
+
+    try {
+      await dbRun(db, 'BEGIN IMMEDIATE');
+      transacaoAberta = true;
+    } catch (beginErr) {
+      const err = beginErr && beginErr.codigo
+        ? beginErr
+        : Object.assign(
+          beginErr || new Error('[COZINHA] BEGIN IMMEDIATE falhou na migração v2→v3.'),
+          { codigo: 'COZINHA_MIGRACAO_BEGIN_FALHOU' }
+        );
+      if (!err.codigo) err.codigo = 'COZINHA_MIGRACAO_BEGIN_FALHOU';
+      throw err;
+    }
+
+    try {
+      await dbRun(db, `
+        ALTER TABLE cozinha_idempotencia RENAME TO cozinha_idempotencia__v2_bak
+      `);
+
+      await dbRun(db, SQL_CREATE_COZINHA_IDEMPOTENCIA_V3);
+
+      const cols = IDEMPOTENCIA_COLUNAS.join(', ');
+      await dbRun(db, `
+        INSERT INTO cozinha_idempotencia (${cols})
+        SELECT ${cols} FROM cozinha_idempotencia__v2_bak
+      `);
+
+      const contagemDepoisCopia = await contarLinhas(db, 'cozinha_idempotencia');
+      if (contagemDepoisCopia !== contagemAntes) {
+        const err = new Error(
+          `[COZINHA] Migração v2→v3: contagem divergente ` +
+          `(antes=${contagemAntes}, depois=${contagemDepoisCopia}).`
+        );
+        err.codigo = 'COZINHA_MIGRACAO_CONTAGEM';
+        throw err;
+      }
+
+      const snapshotDepois = await dbAll(db, `
+        SELECT ${cols} FROM cozinha_idempotencia ORDER BY id
+      `);
+      if (JSON.stringify(snapshotAntes) !== JSON.stringify(snapshotDepois)) {
+        const err = new Error(
+          '[COZINHA] Migração v2→v3: conteúdo de cozinha_idempotencia divergiu após cópia.'
+        );
+        err.codigo = 'COZINHA_MIGRACAO_CONTEUDO';
+        throw err;
+      }
+
+      if (opts.simularFalha === 'apos_copia') {
+        const err = new Error('[COZINHA] Falha simulada após cópia (teste Sprint 04A).');
+        err.codigo = 'COZINHA_MIGRACAO_SIMULADA';
+        throw err;
+      }
+
+      await dbRun(db, `DROP TABLE cozinha_idempotencia__v2_bak`);
+
+      await dbRun(db, `
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_idempotencia_key
+        ON cozinha_idempotencia(idempotency_key)
+      `);
+      await dbRun(db, `
+        CREATE INDEX IF NOT EXISTS idx_cozinha_idempotencia_tipo_recurso
+        ON cozinha_idempotencia(tipo_operacao, recurso_id)
+      `);
+      await dbRun(db, `
+        CREATE INDEX IF NOT EXISTS idx_cozinha_idempotencia_situacao_criado
+        ON cozinha_idempotencia(situacao, created_at)
+      `);
+
+      const maxId = await dbGet(db, `
+        SELECT COALESCE(MAX(id), 0) AS m FROM cozinha_idempotencia
+      `);
+      const seqExiste = await dbGet(db, `
+        SELECT name FROM sqlite_master WHERE type='table' AND name='sqlite_sequence'
+      `);
+      if (seqExiste && Number(maxId.m) > 0) {
+        const seqRow = await dbGet(db, `
+          SELECT seq FROM sqlite_sequence WHERE name = 'cozinha_idempotencia'
+        `);
+        if (seqRow) {
+          await dbRun(db, `
+            UPDATE sqlite_sequence SET seq = ? WHERE name = 'cozinha_idempotencia'
+          `, [Number(maxId.m)]);
+        } else {
+          await dbRun(db, `
+            INSERT INTO sqlite_sequence(name, seq) VALUES ('cozinha_idempotencia', ?)
+          `, [Number(maxId.m)]);
+        }
+      }
+
+      const sqlNovo = await obterSqlTabela(db, 'cozinha_idempotencia');
+      if (!checkIdempotenciaAceitaPreparacao(sqlNovo)) {
+        const err = new Error(
+          '[COZINHA] Migração v2→v3: CHECK de tipo_operacao não aceita preparação após rebuild.'
+        );
+        err.codigo = 'COZINHA_MIGRACAO_CHECK';
+        throw err;
+      }
+
+      await dbRun(db, `
+        INSERT INTO cozinha_idempotencia (
+          idempotency_key, tipo_operacao, payload_hash, situacao
+        ) VALUES (
+          '__cozinha_v3_smoke_prep__', 'PREPARACAO_INICIADA', 'smoke', 'FALHA_VALIDACAO'
+        )
+      `);
+      await dbRun(db, `
+        DELETE FROM cozinha_idempotencia WHERE idempotency_key = '__cozinha_v3_smoke_prep__'
+      `);
+
+      if (opts.simularFalha === 'antes_meta') {
+        const err = new Error('[COZINHA] Falha simulada antes de gravar meta (teste Sprint 04A).');
+        err.codigo = 'COZINHA_MIGRACAO_SIMULADA';
+        throw err;
+      }
+
+      await pragmaIntegrityOk(db);
+      await pragmaForeignKeyCheckOk(db);
+
+      await gravarVersaoSchema(db, COZINHA_SCHEMA_VERSION);
+      await dbRun(db, 'COMMIT');
+      transacaoAberta = false;
+
+      console.warn(
+        `[COZINHA] Migração schema v2 → v3 concluída ` +
+        `(cozinha_idempotencia: ${contagemAntes} registro(s) preservado(s)).`
+      );
+
+      return {
+        migrado: true,
+        jaCompativel: false,
+        registros: contagemAntes,
+        de: 2,
+        para: 3
+      };
+    } catch (errTx) {
+      if (transacaoAberta) {
+        try {
+          await dbRun(db, 'ROLLBACK');
+        } catch (_e) { /* já desfeita */ }
+        transacaoAberta = false;
+      }
+      if (!errTx.codigo) errTx.codigo = 'COZINHA_MIGRACAO_V2_V3_FALHOU';
+      throw errTx;
+    }
+  } finally {
+    // CORREÇÃO 01: restaura FKs em todos os caminhos, inclusive falha no BEGIN.
+    if (fkAlteradas) {
+      try {
+        await restaurarForeignKeys(db, fkWasOn);
+      } catch (fkErr) {
+        console.error(
+          '[COZINHA] Falha ao restaurar PRAGMA foreign_keys após migração:',
+          fkErr && fkErr.message
+        );
+      }
+    }
+  }
+}
+
+async function criarTabelasCozinha(db) {
+  // —— Unidades ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_unidades (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      codigo TEXT NOT NULL,
+      ativo INTEGER NOT NULL DEFAULT 1,
+      sequencia_atual INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT,
+      CHECK (sequencia_atual >= 0),
+      UNIQUE (id, empresa_id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_unidades_empresa_codigo
+    ON cozinha_unidades(empresa_id, codigo)
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_unidades_id_empresa
+    ON cozinha_unidades(id, empresa_id)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_unidades_empresa_ativo
+    ON cozinha_unidades(empresa_id, ativo)
+  `);
+
+  // —— Comandas ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_comandas (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      atendimento_id INTEGER NOT NULL,
+      numero_comanda INTEGER NOT NULL,
+      rotulo TEXT,
+      pedido_id INTEGER,
+      operador_lancamento_id INTEGER,
+      registrado_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT,
+      CHECK (numero_comanda > 0),
+      UNIQUE (id, empresa_id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_comandas_atendimento_numero
+    ON cozinha_comandas(atendimento_id, numero_comanda)
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_comandas_id_empresa
+    ON cozinha_comandas(id, empresa_id)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_comandas_empresa_atendimento
+    ON cozinha_comandas(empresa_id, atendimento_id)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_comandas_pedido
+    ON cozinha_comandas(pedido_id)
+  `);
+
+  // —— Rodadas ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_rodadas (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      unidade_id INTEGER NOT NULL,
+      mesa_id INTEGER NOT NULL,
+      atendimento_id INTEGER NOT NULL,
+      numero_rodada INTEGER NOT NULL,
+      sequencia_global INTEGER NOT NULL,
+      enviada_em TEXT,
+      operador_envio_id INTEGER,
+      estado_preparacao TEXT NOT NULL DEFAULT 'AGUARDANDO'
+        CHECK (estado_preparacao IN ('AGUARDANDO', 'EM_PREPARACAO', 'PRONTA', 'CANCELADA')),
+      retirada_estado TEXT NOT NULL DEFAULT 'PENDENTE'
+        CHECK (retirada_estado IN ('PENDENTE', 'ASSUMIDA_RETIRADA', 'RETIRADA')),
+      retirada_em TEXT,
+      retirada_por INTEGER,
+      entrega_estado TEXT NOT NULL DEFAULT 'PENDENTE'
+        CHECK (entrega_estado IN ('PENDENTE', 'ENTREGUE')),
+      entrega_em TEXT,
+      entrega_por INTEGER,
+      idempotency_key_despacho TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT,
+      CHECK (numero_rodada > 0),
+      CHECK (sequencia_global > 0),
+      UNIQUE (id, empresa_id),
+      FOREIGN KEY (unidade_id, empresa_id)
+        REFERENCES cozinha_unidades(id, empresa_id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_rodadas_atendimento_numero
+    ON cozinha_rodadas(atendimento_id, numero_rodada)
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_rodadas_unidade_sequencia
+    ON cozinha_rodadas(unidade_id, sequencia_global)
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_rodadas_idempotency
+    ON cozinha_rodadas(idempotency_key_despacho)
+    WHERE idempotency_key_despacho IS NOT NULL
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_rodadas_id_empresa
+    ON cozinha_rodadas(id, empresa_id)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_rodadas_empresa_unidade_estado
+    ON cozinha_rodadas(empresa_id, unidade_id, estado_preparacao, enviada_em)
+  `);
+
+  // —— Itens ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_itens (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      unidade_id INTEGER NOT NULL,
+      rodada_id INTEGER NOT NULL,
+      comanda_id INTEGER NOT NULL,
+      pedido_id INTEGER NOT NULL,
+      pedido_item_id INTEGER NOT NULL,
+      sequencia_global INTEGER NOT NULL,
+      tipo_item TEXT NOT NULL
+        CHECK (tipo_item IN ('PASTEL', 'BEBIDA', 'OUTRO')),
+      tipo_lancamento TEXT NOT NULL DEFAULT 'ORIGINAL'
+        CHECK (tipo_lancamento IN ('ORIGINAL', 'COMPLEMENTO')),
+      item_origem_id INTEGER,
+      qty_solicitada_millis INTEGER NOT NULL,
+      qty_preparada_millis INTEGER NOT NULL DEFAULT 0,
+      qty_cancelada_millis INTEGER NOT NULL DEFAULT 0,
+      estado_preparacao TEXT NOT NULL DEFAULT 'AGUARDANDO'
+        CHECK (estado_preparacao IN ('AGUARDANDO', 'EM_PREPARACAO', 'PRONTO', 'CANCELADO')),
+      produto_id INTEGER,
+      produto_nome_snapshot TEXT,
+      observacoes_snapshot TEXT,
+      motivo_complemento TEXT,
+      operador_complemento_id INTEGER,
+      motivo_cancelamento TEXT,
+      operador_cancelamento_id INTEGER,
+      cancelado_em TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT,
+      CHECK (qty_solicitada_millis > 0),
+      CHECK (qty_preparada_millis >= 0),
+      CHECK (qty_cancelada_millis >= 0),
+      CHECK (qty_preparada_millis + qty_cancelada_millis <= qty_solicitada_millis),
+      UNIQUE (id, empresa_id),
+      FOREIGN KEY (rodada_id, empresa_id)
+        REFERENCES cozinha_rodadas(id, empresa_id),
+      FOREIGN KEY (comanda_id, empresa_id)
+        REFERENCES cozinha_comandas(id, empresa_id),
+      FOREIGN KEY (unidade_id, empresa_id)
+        REFERENCES cozinha_unidades(id, empresa_id),
+      FOREIGN KEY (item_origem_id, empresa_id)
+        REFERENCES cozinha_itens(id, empresa_id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_itens_id_empresa
+    ON cozinha_itens(id, empresa_id)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_itens_rodada_estado
+    ON cozinha_itens(rodada_id, estado_preparacao)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_itens_unidade_sequencia
+    ON cozinha_itens(unidade_id, sequencia_global)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_itens_pedido_item_estado
+    ON cozinha_itens(pedido_item_id, estado_preparacao)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_itens_empresa
+    ON cozinha_itens(empresa_id, rodada_id)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_itens_item_origem
+    ON cozinha_itens(item_origem_id)
+  `);
+
+  // —— Ingredientes (sem empresa_id — isolamento via item) ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_item_ingredientes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      cozinha_item_id INTEGER NOT NULL,
+      insumo_id INTEGER,
+      insumo_nome_snapshot TEXT NOT NULL,
+      quantidade_snapshot_millis INTEGER,
+      unidade_snapshot TEXT,
+      classificacao_comercial_snapshot TEXT,
+      selecionado INTEGER NOT NULL DEFAULT 0,
+      preco_adicional_snapshot_millis INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (cozinha_item_id) REFERENCES cozinha_itens(id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_item_ingredientes_item
+    ON cozinha_item_ingredientes(cozinha_item_id)
+  `);
+
+  // —— Bebidas ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_bebida_entregas (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      cozinha_item_id INTEGER NOT NULL,
+      rodada_id INTEGER NOT NULL,
+      qty_entregue_millis INTEGER NOT NULL,
+      qty_restante_millis INTEGER NOT NULL,
+      operador_id INTEGER NOT NULL,
+      entregue_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      idempotency_key TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      CHECK (qty_entregue_millis > 0),
+      CHECK (qty_restante_millis >= 0),
+      FOREIGN KEY (cozinha_item_id, empresa_id)
+        REFERENCES cozinha_itens(id, empresa_id),
+      FOREIGN KEY (rodada_id, empresa_id)
+        REFERENCES cozinha_rodadas(id, empresa_id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_bebida_entregas_idempotency
+    ON cozinha_bebida_entregas(idempotency_key)
+    WHERE idempotency_key IS NOT NULL
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_bebida_entregas_item
+    ON cozinha_bebida_entregas(cozinha_item_id)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_bebida_entregas_rodada
+    ON cozinha_bebida_entregas(rodada_id)
+  `);
+
+  // —— Estações ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_estacoes_impressao (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      unidade_id INTEGER NOT NULL,
+      codigo_estacao TEXT NOT NULL,
+      device_name TEXT,
+      largura_mm INTEGER NOT NULL DEFAULT 80
+        CHECK (largura_mm IN (58, 80)),
+      vias INTEGER NOT NULL DEFAULT 1 CHECK (vias > 0),
+      modelo_individual INTEGER NOT NULL DEFAULT 1,
+      modelo_agrupado INTEGER NOT NULL DEFAULT 1,
+      ativo INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT,
+      UNIQUE (id, empresa_id),
+      FOREIGN KEY (unidade_id, empresa_id)
+        REFERENCES cozinha_unidades(id, empresa_id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_estacoes_empresa_codigo
+    ON cozinha_estacoes_impressao(empresa_id, codigo_estacao)
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_estacoes_id_empresa
+    ON cozinha_estacoes_impressao(id, empresa_id)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_estacoes_unidade
+    ON cozinha_estacoes_impressao(unidade_id)
+  `);
+
+  // —— Fila impressão ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_impressao_fila (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      unidade_id INTEGER NOT NULL,
+      estacao_impressao_id INTEGER,
+      rodada_id INTEGER NOT NULL,
+      payload_snapshot TEXT,
+      modelo TEXT NOT NULL DEFAULT 'AGRUPADO'
+        CHECK (modelo IN ('INDIVIDUAL', 'AGRUPADO')),
+      vias INTEGER NOT NULL DEFAULT 1,
+      estado TEXT NOT NULL DEFAULT 'PENDENTE'
+        CHECK (estado IN (
+          'PENDENTE', 'PROCESSANDO', 'RESULTADO_INCERTO',
+          'ACEITA_PELO_SPOOLER', 'FALHA', 'CANCELADA'
+        )),
+      tentativas INTEGER NOT NULL DEFAULT 0,
+      max_tentativas INTEGER NOT NULL DEFAULT 5,
+      ultimo_erro TEXT,
+      job_origem_id INTEGER,
+      spooler_job_token TEXT,
+      processando_em TEXT,
+      worker_id TEXT,
+      idempotency_key TEXT NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT,
+      UNIQUE (id, empresa_id),
+      FOREIGN KEY (rodada_id, empresa_id)
+        REFERENCES cozinha_rodadas(id, empresa_id),
+      FOREIGN KEY (unidade_id, empresa_id)
+        REFERENCES cozinha_unidades(id, empresa_id),
+      FOREIGN KEY (estacao_impressao_id, empresa_id)
+        REFERENCES cozinha_estacoes_impressao(id, empresa_id),
+      FOREIGN KEY (job_origem_id, empresa_id)
+        REFERENCES cozinha_impressao_fila(id, empresa_id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_impressao_idempotency
+    ON cozinha_impressao_fila(idempotency_key)
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_impressao_id_empresa
+    ON cozinha_impressao_fila(id, empresa_id)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_impressao_estado_criado
+    ON cozinha_impressao_fila(estado, created_at)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_impressao_rodada
+    ON cozinha_impressao_fila(rodada_id)
+  `);
+
+  // —— Notificações ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_notificacoes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      unidade_id INTEGER NOT NULL,
+      rodada_id INTEGER NOT NULL,
+      evento_chave TEXT NOT NULL,
+      modo TEXT NOT NULL
+        CHECK (modo IN ('INDIVIDUAL', 'SIMULTANEA')),
+      destinatario_usuario_id INTEGER,
+      broadcast INTEGER NOT NULL DEFAULT 0,
+      estado TEXT NOT NULL DEFAULT 'GERADA'
+        CHECK (estado IN (
+          'GERADA', 'DISPONIBILIZADA', 'RECEBIDA', 'ASSUMIDA', 'RETIRADA', 'ENTREGUE'
+        )),
+      assumida_por INTEGER,
+      assumida_em TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT,
+      FOREIGN KEY (rodada_id, empresa_id)
+        REFERENCES cozinha_rodadas(id, empresa_id),
+      FOREIGN KEY (unidade_id, empresa_id)
+        REFERENCES cozinha_unidades(id, empresa_id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_notificacoes_evento
+    ON cozinha_notificacoes(evento_chave)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_notificacoes_empresa_estado
+    ON cozinha_notificacoes(empresa_id, estado)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_notificacoes_rodada
+    ON cozinha_notificacoes(rodada_id)
+  `);
+
+  // —— Outbox (unidade opcional; FK composta só quando unidade_id NOT NULL via SQLite NULL=skip) ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_eventos_outbox (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      unidade_id INTEGER,
+      tipo TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      publicado_em TEXT,
+      FOREIGN KEY (unidade_id, empresa_id)
+        REFERENCES cozinha_unidades(id, empresa_id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_outbox_idempotency
+    ON cozinha_eventos_outbox(idempotency_key)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_outbox_publicado_criado
+    ON cozinha_eventos_outbox(publicado_em, created_at)
+  `);
+
+  // —— Controle teto ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_pedido_item_controle (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      pedido_id INTEGER NOT NULL,
+      pedido_item_id INTEGER NOT NULL,
+      qty_referencia_despacho_millis INTEGER NOT NULL,
+      qty_referencia_inicial_millis INTEGER NOT NULL,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT,
+      CHECK (qty_referencia_despacho_millis >= 0),
+      CHECK (qty_referencia_inicial_millis >= 0)
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_pedido_item_controle_item
+    ON cozinha_pedido_item_controle(pedido_item_id)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_pedido_item_controle_empresa
+    ON cozinha_pedido_item_controle(empresa_id, pedido_id)
+  `);
+
+  // —— Autorizações ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_autorizacoes_qty (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      pedido_id INTEGER NOT NULL,
+      pedido_item_id INTEGER NOT NULL,
+      qty_autorizada_millis INTEGER NOT NULL,
+      motivo TEXT NOT NULL,
+      responsavel_operador_id INTEGER NOT NULL,
+      autorizada_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      idempotency_key TEXT,
+      situacao TEXT NOT NULL DEFAULT 'ATIVA'
+        CHECK (situacao IN ('ATIVA', 'ESTORNADA')),
+      resposta_json TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT,
+      CHECK (qty_autorizada_millis > 0)
+    )
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_autorizacoes_item_situacao
+    ON cozinha_autorizacoes_qty(empresa_id, pedido_item_id, situacao)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_autorizacoes_pedido
+    ON cozinha_autorizacoes_qty(pedido_id)
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_autorizacoes_idempotency
+    ON cozinha_autorizacoes_qty(idempotency_key)
+    WHERE idempotency_key IS NOT NULL
+  `);
+
+  // —— Reduções ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_reducoes_teto (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      pedido_id INTEGER NOT NULL,
+      pedido_item_id INTEGER NOT NULL,
+      qty_anterior_millis INTEGER NOT NULL,
+      qty_nova_millis INTEGER NOT NULL,
+      qty_referencia_inicial_millis INTEGER,
+      motivo TEXT NOT NULL,
+      responsavel_operador_id INTEGER NOT NULL,
+      reduzida_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      idempotency_key TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      CHECK (qty_anterior_millis >= 0),
+      CHECK (qty_nova_millis >= 0),
+      CHECK (qty_nova_millis < qty_anterior_millis)
+    )
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_reducoes_item
+    ON cozinha_reducoes_teto(empresa_id, pedido_item_id, reduzida_em)
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_reducoes_idempotency
+    ON cozinha_reducoes_teto(idempotency_key)
+    WHERE idempotency_key IS NOT NULL
+  `);
+
+  // —— Idempotência central (sem empresa_id — contexto JSON; UNIQUE global da key) ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_idempotencia (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      idempotency_key TEXT NOT NULL,
+      tipo_operacao TEXT NOT NULL
+        CHECK (tipo_operacao IN (
+          'AUTORIZAR_QTY',
+          'REDUZIR_TETO',
+          'DESPACHO_LOTE',
+          'PREPARACAO_INICIADA',
+          'ITEM_PRONTO',
+          'BEBIDA_ENTREGUE'
+        )),
+      contexto TEXT,
+      payload_hash TEXT NOT NULL,
+      situacao TEXT NOT NULL DEFAULT 'EM_ANDAMENTO'
+        CHECK (situacao IN ('EM_ANDAMENTO', 'CONCLUIDA', 'FALHA_VALIDACAO')),
+      resultado_http_status INTEGER,
+      resultado_json TEXT,
+      recurso_tipo TEXT,
+      recurso_id INTEGER,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      concluded_at TEXT
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_idempotencia_key
+    ON cozinha_idempotencia(idempotency_key)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_idempotencia_tipo_recurso
+    ON cozinha_idempotencia(tipo_operacao, recurso_id)
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_idempotencia_situacao_criado
+    ON cozinha_idempotencia(situacao, created_at)
+  `);
+}
+
+async function garantirSchemaCozinha(db, opts = {}) {
+  if (!db) {
+    marcarCozinhaOperacional(false, new Error('Conexão de banco ausente para schema Cozinha.'));
+    return { skipped: true, operacional: false };
+  }
+
+  try {
+    await dbRun(db, 'PRAGMA foreign_keys = ON');
+    const versaoAtual = await lerVersaoSchema(db);
+
+    if (versaoAtual > COZINHA_SCHEMA_VERSION) {
+      const err = new Error(
+        `[COZINHA] Schema incompatível: versão persistida ${versaoAtual} ` +
+        `é maior que a suportada ${COZINHA_SCHEMA_VERSION}.`
+      );
+      err.codigo = 'COZINHA_SCHEMA_INCOMPATIVEL';
+      throw err;
+    }
+
+    let recriado = false;
+    let migradoV2V3 = false;
+    let detalheMigracao = null;
+
+    if (versaoAtual === 2) {
+      detalheMigracao = await migrarCozinhaV2paraV3(db, opts);
+      migradoV2V3 = !!detalheMigracao.migrado;
+      await criarTabelasCozinha(db);
+    } else if (versaoAtual < 2) {
+      const upgrade = await recriarSchemaVazioSeNecessario(db, versaoAtual);
+      recriado = !!upgrade.recriado;
+      await criarTabelasCozinha(db);
+      await gravarVersaoSchema(db, COZINHA_SCHEMA_VERSION);
+    } else {
+      // já v3
+      await criarTabelasCozinha(db);
+      const sqlIdem = await obterSqlTabela(db, 'cozinha_idempotencia');
+      if (sqlIdem && !checkIdempotenciaAceitaPreparacao(sqlIdem)) {
+        const err = new Error(
+          '[COZINHA] Meta=v3 mas CHECK de cozinha_idempotencia não aceita preparação. ' +
+          'Estrutura inconsistente — não corrige silenciosamente.'
+        );
+        err.codigo = 'COZINHA_SCHEMA_INCOMPATIVEL';
+        throw err;
+      }
+    }
+
+    try {
+      await garantirConfigNotificacaoCozinha(db);
+    } catch (err) {
+      if (!/no such table:\s*configuracoes/i.test(String(err && err.message))) {
+        throw err;
+      }
+    }
+
+    const versaoFinal = await lerVersaoSchema(db);
+    if (versaoFinal !== COZINHA_SCHEMA_VERSION) {
+      const err = new Error(
+        `[COZINHA] Versão final inesperada após garantir schema: ${versaoFinal}.`
+      );
+      err.codigo = 'COZINHA_SCHEMA_FALHA';
+      throw err;
+    }
+
+    marcarCozinhaOperacional(true);
+    return {
+      skipped: false,
+      operacional: true,
+      versao: COZINHA_SCHEMA_VERSION,
+      recriado,
+      migrado_v2_v3: migradoV2V3,
+      migracao: detalheMigracao
+    };
+  } catch (err) {
+    marcarCozinhaOperacional(false, err);
+    if (!err.codigo) err.codigo = 'COZINHA_SCHEMA_FALHA';
+    throw err;
+  }
+}
+
+module.exports = {
+  COZINHA_SCHEMA_VERSION,
+  TABELAS_COZINHA,
+  IDEMPOTENCIA_COLUNAS,
+  garantirSchemaCozinha,
+  garantirConfigNotificacaoCozinha,
+  marcarCozinhaOperacional,
+  isCozinhaOperacional,
+  getCozinhaSchemaStatus,
+  lerVersaoSchema,
+  migrarCozinhaV2paraV3,
+  checkIdempotenciaAceitaPreparacao,
+  obterSqlTabela
+};
+
+
+===== FILE: tests/cozinha/sprint04a-upgrade-schema-v2-v3.test.js =====
+
+/**
+ * Sprint 04A — Upgrade seguro schema Cozinha v2 → v3.
+ * Somente banco temporário.
+ *
+ *   node --test --test-concurrency=1 tests/cozinha/sprint04a-upgrade-schema-v2-v3.test.js
+ */
+'use strict';
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { describe, it, beforeEach } = require('node:test');
+const assert = require('node:assert/strict');
+const sqlite3 = require('sqlite3').verbose();
+
+const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-cozinha-s04a-'));
+process.env.DB_DIR = dbDir;
+process.env.CDS_TEST_ISOLATION = '1';
+process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
+process.env.CDS_FORCAR_LOCAL = '1';
+delete process.env.CDS_ALLOW_OFFICIAL_DB;
+
+const {
+  garantirSchemaCozinha,
+  marcarCozinhaOperacional,
+  isCozinhaOperacional,
+  getCozinhaSchemaStatus,
+  lerVersaoSchema,
+  obterSqlTabela,
+  checkIdempotenciaAceitaPreparacao,
+  migrarCozinhaV2paraV3,
+  COZINHA_SCHEMA_VERSION,
+  TABELAS_COZINHA,
+  IDEMPOTENCIA_COLUNAS
+} = require('../../backend/utils/cozinhaSchema');
+
+function run(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.run(sql, params, function cb(err) {
+      if (err) reject(err);
+      else resolve(this);
+    });
+  });
+}
+function get(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
+  });
+}
+function all(db, sql, params = []) {
+  return new Promise((resolve, reject) => {
+    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
+  });
+}
+function open(arquivo) {
+  return new Promise((resolve, reject) => {
+    const db = new sqlite3.Database(arquivo || ':memory:', (err) => {
+      if (err) return reject(err);
+      db.serialize(() => {
+        db.run('PRAGMA foreign_keys = ON');
+        db.run('PRAGMA busy_timeout = 10000', (e) => (e ? reject(e) : resolve(db)));
+      });
+    });
+  });
+}
+function close(db) {
+  return new Promise((resolve) => db.close(() => resolve()));
+}
+
+async function schemaErpMinimo(db) {
+  await run(db, `CREATE TABLE IF NOT EXISTS configuracoes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, chave VARCHAR(100) UNIQUE NOT NULL,
+    valor TEXT, tipo VARCHAR(50), descricao TEXT, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
+}
+
+/** Contagens de todas as tabelas cozinha_*. */
+async function snapshotContagens(db) {
+  const out = {};
+  for (const t of TABELAS_COZINHA) {
+    out[t] = await get(db, `
+      SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name=?
+    `, [t]).then(async (ex) => {
+      if (!ex) return 0;
+      const r = await get(db, `SELECT COUNT(*) AS n FROM ${t}`);
+      return Number(r.n) || 0;
+    });
+  }
+  return out;
+}
+
+async function snapshotIdempotencia(db) {
+  return all(db, `
+    SELECT ${IDEMPOTENCIA_COLUNAS.join(', ')}
+    FROM cozinha_idempotencia ORDER BY id
+  `);
+}
+
+/**
+ * Degrada schema v3 → v2 (somente CHECK de idempotência + meta),
+ * para simular banco legado populado.
+ */
+async function forcarSchemaV2ComCheckAntigo(db) {
+  await run(db, 'PRAGMA foreign_keys = OFF');
+  await run(db, 'BEGIN IMMEDIATE');
+  try {
+    await run(db, `DROP TABLE IF EXISTS cozinha_idempotencia__tmp`);
+    await run(db, `ALTER TABLE cozinha_idempotencia RENAME TO cozinha_idempotencia__tmp`);
+    await run(db, `
+      CREATE TABLE cozinha_idempotencia (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        idempotency_key TEXT NOT NULL,
+        tipo_operacao TEXT NOT NULL
+          CHECK (tipo_operacao IN ('AUTORIZAR_QTY', 'REDUZIR_TETO', 'DESPACHO_LOTE')),
+        contexto TEXT,
+        payload_hash TEXT NOT NULL,
+        situacao TEXT NOT NULL DEFAULT 'EM_ANDAMENTO'
+          CHECK (situacao IN ('EM_ANDAMENTO', 'CONCLUIDA', 'FALHA_VALIDACAO')),
+        resultado_http_status INTEGER,
+        resultado_json TEXT,
+        recurso_tipo TEXT,
+        recurso_id INTEGER,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        concluded_at TEXT
+      )
+    `);
+    const cols = IDEMPOTENCIA_COLUNAS.join(', ');
+    await run(db, `
+      INSERT INTO cozinha_idempotencia (${cols})
+      SELECT ${cols} FROM cozinha_idempotencia__tmp
+    `);
+    await run(db, `DROP TABLE cozinha_idempotencia__tmp`);
+    await run(db, `
+      CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_idempotencia_key
+      ON cozinha_idempotencia(idempotency_key)
+    `);
+    await run(db, `
+      CREATE INDEX IF NOT EXISTS idx_cozinha_idempotencia_tipo_recurso
+      ON cozinha_idempotencia(tipo_operacao, recurso_id)
+    `);
+    await run(db, `
+      CREATE INDEX IF NOT EXISTS idx_cozinha_idempotencia_situacao_criado
+      ON cozinha_idempotencia(situacao, created_at)
+    `);
+    await run(db, `
+      INSERT INTO cozinha_schema_meta (chave, valor, updated_at)
+      VALUES ('schema_version', '2', datetime('now'))
+      ON CONFLICT(chave) DO UPDATE SET valor='2', updated_at=datetime('now')
+    `);
+    await run(db, 'COMMIT');
+  } catch (e) {
+    try { await run(db, 'ROLLBACK'); } catch (_e) { /* */ }
+    throw e;
+  } finally {
+    await run(db, 'PRAGMA foreign_keys = ON');
+  }
+}
+
+/** Popula um grafo representativo v2 (todas as tabelas relevantes). */
+async function popularV2Completo(db) {
+  const un = await run(db, `
+    INSERT INTO cozinha_unidades (empresa_id, codigo, sequencia_atual)
+    VALUES (1, 'U-MAIN', 3)
+  `);
+  const cmd = await run(db, `
+    INSERT INTO cozinha_comandas (empresa_id, atendimento_id, numero_comanda, pedido_id)
+    VALUES (1, 10, 1, 100)
+  `);
+  const rod = await run(db, `
+    INSERT INTO cozinha_rodadas (
+      empresa_id, unidade_id, mesa_id, atendimento_id,
+      numero_rodada, sequencia_global, estado_preparacao
+    ) VALUES (1, ?, 5, 10, 1, 1, 'AGUARDANDO')
+  `, [un.lastID]);
+  const item = await run(db, `
+    INSERT INTO cozinha_itens (
+      empresa_id, unidade_id, rodada_id, comanda_id, pedido_id, pedido_item_id,
+      sequencia_global, tipo_item, qty_solicitada_millis, produto_nome_snapshot
+    ) VALUES (1, ?, ?, ?, 100, 200, 1, 'PASTEL', 1000, 'Pastel Teste')
+  `, [un.lastID, rod.lastID, cmd.lastID]);
+  await run(db, `
+    INSERT INTO cozinha_item_ingredientes (
+      cozinha_item_id, insumo_nome_snapshot, quantidade_snapshot_millis,
+      unidade_snapshot, selecionado
+    ) VALUES (?, 'Queijo', 1000, 'UN', 1)
+  `, [item.lastID]);
+  await run(db, `
+    INSERT INTO cozinha_bebida_entregas (
+      empresa_id, cozinha_item_id, rodada_id,
+      qty_entregue_millis, qty_restante_millis, operador_id, idempotency_key
+    ) VALUES (1, ?, ?, 500, 500, 7, 'beb-ent-1')
+  `, [item.lastID, rod.lastID]);
+  const est = await run(db, `
+    INSERT INTO cozinha_estacoes_impressao (empresa_id, unidade_id, codigo_estacao)
+    VALUES (1, ?, 'E1')
+  `, [un.lastID]);
+  await run(db, `
+    INSERT INTO cozinha_impressao_fila (
+      empresa_id, unidade_id, estacao_impressao_id, rodada_id, idempotency_key
+    ) VALUES (1, ?, ?, ?, 'job-1')
+  `, [un.lastID, est.lastID, rod.lastID]);
+  await run(db, `
+    INSERT INTO cozinha_notificacoes (
+      empresa_id, unidade_id, rodada_id, evento_chave, modo
+    ) VALUES (1, ?, ?, 'evt-1', 'INDIVIDUAL')
+  `, [un.lastID, rod.lastID]);
+  await run(db, `
+    INSERT INTO cozinha_eventos_outbox (
+      empresa_id, unidade_id, tipo, payload_json, idempotency_key
+    ) VALUES (1, ?, 'DESPACHO', '{}', 'out-1')
+  `, [un.lastID]);
+  await run(db, `
+    INSERT INTO cozinha_pedido_item_controle (
+      empresa_id, pedido_id, pedido_item_id,
+      qty_referencia_despacho_millis, qty_referencia_inicial_millis
+    ) VALUES (1, 100, 200, 1000, 1000)
+  `);
+  await run(db, `
+    INSERT INTO cozinha_autorizacoes_qty (
+      empresa_id, pedido_id, pedido_item_id, qty_autorizada_millis,
+      motivo, responsavel_operador_id, idempotency_key
+    ) VALUES (1, 100, 200, 500, 'teste', 7, 'aut-1')
+  `);
+  await run(db, `
+    INSERT INTO cozinha_reducoes_teto (
+      empresa_id, pedido_id, pedido_item_id,
+      qty_anterior_millis, qty_nova_millis, motivo, responsavel_operador_id, idempotency_key
+    ) VALUES (1, 100, 200, 1000, 800, 'ajuste', 7, 'red-1')
+  `);
+  await run(db, `
+    INSERT INTO cozinha_idempotencia (
+      idempotency_key, tipo_operacao, contexto, payload_hash, situacao,
+      resultado_http_status, resultado_json, recurso_tipo, recurso_id
+    ) VALUES
+      ('idem-desp-1', 'DESPACHO_LOTE', '{"empresa_id":1}', 'hash-desp', 'CONCLUIDA',
+       201, '{"success":true}', 'rodada', ?),
+      ('idem-aut-1', 'AUTORIZAR_QTY', '{"empresa_id":1}', 'hash-aut', 'CONCLUIDA',
+       200, '{"ok":true}', 'pedido_item', 200),
+      ('idem-red-1', 'REDUZIR_TETO', '{"empresa_id":1}', 'hash-red', 'CONCLUIDA',
+       200, '{"ok":true}', 'pedido_item', 200)
+  `, [rod.lastID]);
+
+  return {
+    unidadeId: un.lastID,
+    comandaId: cmd.lastID,
+    rodadaId: rod.lastID,
+    itemId: item.lastID,
+    estacaoId: est.lastID
+  };
+}
+
+describe('Sprint 04A — Upgrade schema Cozinha v2 → v3', () => {
+  beforeEach(() => marcarCozinhaOperacional(false));
+
+  describe('Cenário A — Migração normal (vazio)', () => {
+    it('1-5) v2 vazio migra para v3 com CHECK atualizado', async () => {
+      const db = await open();
+      await schemaErpMinimo(db);
+      await garantirSchemaCozinha(db);
+      await forcarSchemaV2ComCheckAntigo(db);
+      assert.equal(await lerVersaoSchema(db), 2);
+      assert.equal(
+        checkIdempotenciaAceitaPreparacao(await obterSqlTabela(db, 'cozinha_idempotencia')),
+        false
+      );
+
+      marcarCozinhaOperacional(false);
+      const info = await garantirSchemaCozinha(db);
+      assert.equal(info.operacional, true);
+      assert.equal(info.versao, 3);
+      assert.equal(info.migrado_v2_v3, true);
+      assert.equal(await lerVersaoSchema(db), 3);
+      assert.equal(
+        checkIdempotenciaAceitaPreparacao(await obterSqlTabela(db, 'cozinha_idempotencia')),
+        true
+      );
+      assert.equal(isCozinhaOperacional(), true);
+      await close(db);
+    });
+  });
+
+  describe('Cenário B — Migração com dados', () => {
+    it('preserva todos os registros, IDs e aceita novos tipos', async () => {
+      const arquivo = path.join(dbDir, `populado-${Date.now()}.sqlite`);
+      const db = await open(arquivo);
+      await schemaErpMinimo(db);
+      await garantirSchemaCozinha(db);
+      await forcarSchemaV2ComCheckAntigo(db);
+      const ids = await popularV2Completo(db);
+
+      const contAntes = await snapshotContagens(db);
+      const idemAntes = await snapshotIdempotencia(db);
+      assert.ok(idemAntes.length >= 3);
+      assert.equal(contAntes.cozinha_unidades, 1);
+      assert.equal(contAntes.cozinha_itens, 1);
+      assert.equal(contAntes.cozinha_idempotencia, 3);
+
+      // v2 rejeita PREPARACAO_INICIADA
+      await assert.rejects(
+        () => run(db, `
+          INSERT INTO cozinha_idempotencia (idempotency_key, tipo_operacao, payload_hash)
+          VALUES ('x', 'PREPARACAO_INICIADA', 'h')
+        `),
+        (err) => /CHECK|constraint/i.test(String(err.message))
+      );
+
+      marcarCozinhaOperacional(false);
+      const info = await garantirSchemaCozinha(db);
+      assert.equal(info.migrado_v2_v3, true);
+      assert.equal(await lerVersaoSchema(db), 3);
+
+      const contDepois = await snapshotContagens(db);
+      assert.deepEqual(contDepois, contAntes);
+
+      const idemDepois = await snapshotIdempotencia(db);
+      assert.deepEqual(idemDepois, idemAntes);
+
+      // IDs preservados
+      assert.equal(
+        (await get(db, `SELECT id FROM cozinha_rodadas`)).id,
+        ids.rodadaId
+      );
+      assert.equal(
+        (await get(db, `SELECT id FROM cozinha_itens`)).id,
+        ids.itemId
+      );
+
+      // Novos tipos aceitos
+      await run(db, `
+        INSERT INTO cozinha_idempotencia (idempotency_key, tipo_operacao, payload_hash, situacao)
+        VALUES ('prep-ok', 'PREPARACAO_INICIADA', 'h1', 'CONCLUIDA')
+      `);
+      await run(db, `
+        INSERT INTO cozinha_idempotencia (idempotency_key, tipo_operacao, payload_hash, situacao)
+        VALUES ('pronto-ok', 'ITEM_PRONTO', 'h2', 'CONCLUIDA')
+      `);
+      await run(db, `
+        INSERT INTO cozinha_idempotencia (idempotency_key, tipo_operacao, payload_hash, situacao)
+        VALUES ('beb-ok', 'BEBIDA_ENTREGUE', 'h3', 'CONCLUIDA')
+      `);
+
+      const fk = await all(db, `PRAGMA foreign_key_check`);
+      assert.equal(fk.length, 0);
+      const integ = await get(db, `PRAGMA integrity_check`);
+      assert.equal(String(integ.integrity_check || Object.values(integ)[0]).toLowerCase(), 'ok');
+
+      const fkPragma = await get(db, `PRAGMA foreign_keys`);
+      assert.equal(Number(fkPragma.foreign_keys != null ? fkPragma.foreign_keys : Object.values(fkPragma)[0]), 1);
+
+      await close(db);
+    });
+  });
+
+  describe('Cenário C — Falha forçada', () => {
+    it('ROLLBACK preserva v2; Cozinha não operacional; ERP contrato mantido', async () => {
+      const arquivo = path.join(dbDir, `falha-${Date.now()}.sqlite`);
+      const db = await open(arquivo);
+      await schemaErpMinimo(db);
+      await garantirSchemaCozinha(db);
+      await forcarSchemaV2ComCheckAntigo(db);
+      await popularV2Completo(db);
+      const contAntes = await snapshotContagens(db);
+      const idemAntes = await snapshotIdempotencia(db);
+
+      marcarCozinhaOperacional(false);
+      await assert.rejects(
+        () => garantirSchemaCozinha(db, { simularFalha: 'apos_copia' }),
+        (err) => {
+          assert.equal(err.codigo, 'COZINHA_MIGRACAO_SIMULADA');
+          return true;
+        }
+      );
+
+      assert.equal(isCozinhaOperacional(), false);
+      const st = getCozinhaSchemaStatus();
+      assert.equal(st.operacional, false);
+      assert.equal(st.erro.codigo, 'COZINHA_MIGRACAO_SIMULADA');
+
+      assert.equal(await lerVersaoSchema(db), 2);
+      assert.equal(
+        checkIdempotenciaAceitaPreparacao(await obterSqlTabela(db, 'cozinha_idempotencia')),
+        false
+      );
+      assert.deepEqual(await snapshotContagens(db), contAntes);
+      assert.deepEqual(await snapshotIdempotencia(db), idemAntes);
+
+      // Contrato ERP: isReady é independente — aqui validamos o contrato Cozinha
+      // (database.js captura falha e não derruba o ERP).
+      assert.equal(typeof getCozinhaSchemaStatus, 'function');
+
+      // Recuperação posterior funciona
+      marcarCozinhaOperacional(false);
+      const ok = await garantirSchemaCozinha(db);
+      assert.equal(ok.operacional, true);
+      assert.equal(await lerVersaoSchema(db), 3);
+      assert.deepEqual(await snapshotIdempotencia(db), idemAntes);
+      await close(db);
+    });
+  });
+
+  describe('Cenário D — Inicialização repetida', () => {
+    it('não remigra indevidamente nem altera registros', async () => {
+      const db = await open();
+      await schemaErpMinimo(db);
+      await garantirSchemaCozinha(db);
+      await forcarSchemaV2ComCheckAntigo(db);
+      await popularV2Completo(db);
+
+      await garantirSchemaCozinha(db);
+      const idem1 = await snapshotIdempotencia(db);
+      const cont1 = await snapshotContagens(db);
+
+      const info2 = await garantirSchemaCozinha(db);
+      assert.equal(info2.versao, 3);
+      assert.equal(info2.migrado_v2_v3, false);
+      assert.deepEqual(await snapshotIdempotencia(db), idem1);
+      assert.deepEqual(await snapshotContagens(db), cont1);
+
+      const info3 = await garantirSchemaCozinha(db);
+      assert.equal(info3.versao, COZINHA_SCHEMA_VERSION);
+      assert.deepEqual(await snapshotContagens(db), cont1);
+      await close(db);
+    });
+  });
+
+  describe('Cenário E — Banco incompatível', () => {
+    it('versão futura não é corrigida silenciosamente', async () => {
+      const db = await open();
+      await schemaErpMinimo(db);
+      await garantirSchemaCozinha(db);
+      await run(db, `
+        UPDATE cozinha_schema_meta SET valor='99' WHERE chave='schema_version'
+      `);
+      marcarCozinhaOperacional(false);
+      await assert.rejects(
+        () => garantirSchemaCozinha(db),
+        (err) => {
+          assert.equal(err.codigo, 'COZINHA_SCHEMA_INCOMPATIVEL');
+          return true;
+        }
+      );
+      assert.equal(isCozinhaOperacional(), false);
+      assert.equal(await lerVersaoSchema(db), 99);
+      await close(db);
+    });
+
+    it('v1 populado continua bloqueado (sem perda)', async () => {
+      const arquivo = path.join(dbDir, `v1block-${Date.now()}.sqlite`);
+      const db = await open(arquivo);
+      await schemaErpMinimo(db);
+      await garantirSchemaCozinha(db);
+      await run(db, `
+        INSERT INTO cozinha_unidades (empresa_id, codigo) VALUES (1, 'UX')
+      `);
+      await run(db, `
+        UPDATE cozinha_schema_meta SET valor='1' WHERE chave='schema_version'
+      `);
+      await close(db);
+
+      marcarCozinhaOperacional(false);
+      const db2 = await open(arquivo);
+      await assert.rejects(
+        () => garantirSchemaCozinha(db2),
+        (err) => err.codigo === 'COZINHA_SCHEMA_UPGRADE_BLOQUEADO'
+      );
+      assert.equal(isCozinhaOperacional(), false);
+      assert.equal(
+        (await get(db2, `SELECT COUNT(*) AS n FROM cozinha_unidades`)).n,
+        1
+      );
+      assert.equal(await lerVersaoSchema(db2), 1);
+      await close(db2);
+    });
+  });
+
+  describe('Correções auditoria 04A — FK e backup residual', () => {
+    async function prepararV2(db) {
+      await schemaErpMinimo(db);
+      await garantirSchemaCozinha(db);
+      await forcarSchemaV2ComCheckAntigo(db);
+      await popularV2Completo(db);
+    }
+
+    function fkOn(row) {
+      const v = row.foreign_keys != null ? row.foreign_keys : Object.values(row)[0];
+      return Number(v) === 1;
+    }
+
+    it('1-2) falha ao iniciar BEGIN restaura PRAGMA foreign_keys', async () => {
+      const db = await open();
+      await prepararV2(db);
+      assert.equal(fkOn(await get(db, 'PRAGMA foreign_keys')), true);
+
+      await assert.rejects(
+        () => migrarCozinhaV2paraV3(db, { simularFalha: 'falha_begin' }),
+        (err) => {
+          assert.equal(err.codigo, 'COZINHA_MIGRACAO_BEGIN_FALHOU');
+          return true;
+        }
+      );
+
+      assert.equal(fkOn(await get(db, 'PRAGMA foreign_keys')), true);
+      assert.equal(await lerVersaoSchema(db), 2);
+      assert.equal(
+        checkIdempotenciaAceitaPreparacao(await obterSqlTabela(db, 'cozinha_idempotencia')),
+        false
+      );
+      await close(db);
+    });
+
+    it('3) backup residual interrompe sem DROP nem perda', async () => {
+      const db = await open();
+      await prepararV2(db);
+      const idemOriginal = await snapshotIdempotencia(db);
+      const contOriginal = await snapshotContagens(db);
+
+      await run(db, `
+        CREATE TABLE cozinha_idempotencia__v2_bak (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          idempotency_key TEXT NOT NULL,
+          tipo_operacao TEXT NOT NULL,
+          contexto TEXT,
+          payload_hash TEXT NOT NULL,
+          situacao TEXT NOT NULL DEFAULT 'EM_ANDAMENTO',
+          resultado_http_status INTEGER,
+          resultado_json TEXT,
+          recurso_tipo TEXT,
+          recurso_id INTEGER,
+          created_at TEXT,
+          concluded_at TEXT
+        )
+      `);
+      await run(db, `
+        INSERT INTO cozinha_idempotencia__v2_bak (
+          idempotency_key, tipo_operacao, payload_hash, situacao
+        ) VALUES
+          ('bak-resid-1', 'DESPACHO_LOTE', 'hash-bak-1', 'CONCLUIDA'),
+          ('bak-resid-2', 'AUTORIZAR_QTY', 'hash-bak-2', 'CONCLUIDA')
+      `);
+      const bakAntes = await all(db, `
+        SELECT idempotency_key, tipo_operacao, payload_hash, situacao
+        FROM cozinha_idempotencia__v2_bak ORDER BY id
+      `);
+      assert.equal(bakAntes.length, 2);
+
+      await assert.rejects(
+        () => migrarCozinhaV2paraV3(db),
+        (err) => {
+          assert.equal(err.codigo, 'COZINHA_MIGRACAO_BACKUP_RESIDUAL');
+          return true;
+        }
+      );
+
+      assert.deepEqual(await snapshotIdempotencia(db), idemOriginal);
+      assert.deepEqual(await snapshotContagens(db), contOriginal);
+      const bakDepois = await all(db, `
+        SELECT idempotency_key, tipo_operacao, payload_hash, situacao
+        FROM cozinha_idempotencia__v2_bak ORDER BY id
+      `);
+      assert.deepEqual(bakDepois, bakAntes);
+      assert.equal(await lerVersaoSchema(db), 2);
+      assert.equal(fkOn(await get(db, 'PRAGMA foreign_keys')), true);
+
+      // Tabela original ainda existe e não foi renomeada
+      const nomeOk = await get(db, `
+        SELECT name FROM sqlite_master WHERE type='table' AND name='cozinha_idempotencia'
+      `);
+      assert.ok(nomeOk);
+      await close(db);
+    });
+  });
+});
+

@@ -1,0 +1,192 @@
+# DIFF REAL — código de produção Sprint 05
+# Baseline reconstruída = S03 homologada (sem validarIntegridadeOperacional, sem unidade_id nas rotas de item, sem simularFalha).
+# Arquivos: CozinhaPreparacaoService.js | rotas/cozinha.js
+
+diff --git a/backend/services/cozinha/CozinhaPreparacaoService.js b/backend/services/cozinha/CozinhaPreparacaoService.js
+index 6b55323..4717728 100644
+--- a/backend/services/cozinha/CozinhaPreparacaoService.js
++++ b/backend/services/cozinha/CozinhaPreparacaoService.js
+@@ -1,7 +1,8 @@
+ /**
+- * CozinhaPreparacaoService — Sprint 03 (+ auditoria)
++ * CozinhaPreparacaoService — Sprint 03 (+ auditoria) / Sprint 05 (operações homologadas)
+  * Motor de preparação: iniciar, pronto, entrega de bebida, estado derivado da rodada.
+  * Idempotência via tabela central cozinha_idempotencia (não só outbox).
++ * Sprint 05: reforço de integridade item↔rodada↔comanda↔unidade sem duplicar o motor.
+  */
+ 'use strict';
+ 
+@@ -277,6 +278,61 @@ function exigirRodadaNaoCancelada(rodada) {
+   return rodada;
+ }
+ 
++/**
++ * Garante vínculo item ↔ rodada ↔ unidade ↔ comanda na mesma empresa.
++ * Se unidade_id for informado na entrada, deve coincidir com a do item/rodada.
++ */
++async function validarIntegridadeOperacional(db, item, rodada, {
++  empresaId,
++  unidadeIdOpcional
++}) {
++  if (Number(item.rodada_id) !== Number(rodada.id)) {
++    throw erro('Item não pertence à rodada informada.', 409, 'ITEM_RODADA_INCOMPATIVEL');
++  }
++  if (Number(item.empresa_id) !== Number(empresaId)
++    || Number(rodada.empresa_id) !== Number(empresaId)) {
++    throw erro('Isolamento empresarial violado.', 403, 'EMPRESA_ISOLAMENTO');
++  }
++  if (Number(item.unidade_id) !== Number(rodada.unidade_id)) {
++    throw erro(
++      'Item e rodada com unidades divergentes.',
++      409,
++      'ITEM_UNIDADE_INCOMPATIVEL'
++    );
++  }
++
++  if (unidadeIdOpcional != null && unidadeIdOpcional !== '') {
++    const unidadeId = Number(unidadeIdOpcional);
++    if (!Number.isInteger(unidadeId) || unidadeId <= 0) {
++      throw erro('unidade_id inválida.', 400, 'UNIDADE_INVALIDA');
++    }
++    if (unidadeId !== Number(item.unidade_id)) {
++      throw erro(
++        'Item não pertence à unidade operacional informada.',
++        409,
++        'UNIDADE_ISOLAMENTO'
++      );
++    }
++  }
++
++  const comanda = await get(db, `
++    SELECT id, empresa_id, atendimento_id, pedido_id
++    FROM cozinha_comandas
++    WHERE id = ? AND empresa_id = ?
++  `, [item.comanda_id, empresaId]);
++  if (!comanda) {
++    throw erro('Comanda do item não encontrada.', 409, 'COMANDA_ITEM_INEXISTENTE');
++  }
++  if (Number(rodada.atendimento_id) !== Number(comanda.atendimento_id)) {
++    throw erro(
++      'Comanda e rodada com atendimentos divergentes.',
++      409,
++      'COMANDA_RODADA_INCOMPATIVEL'
++    );
++  }
++
++  return { comanda };
++}
+ 
+ async function carregarItensRodada(db, rodadaId, empresaId) {
+   return all(db, `
+@@ -460,6 +516,10 @@ async function iniciarPreparacao(entrada = {}, opts = {}) {
+     const rodada = exigirRodadaNaoCancelada(
+       await carregarRodadaEmpresa(db, item.rodada_id, empresaId)
+     );
++    await validarIntegridadeOperacional(db, item, rodada, {
++      empresaId,
++      unidadeIdOpcional: entrada.unidade_id != null ? entrada.unidade_id : entrada.unidadeId
++    });
+ 
+     if (item.estado_preparacao === 'CANCELADO') {
+       throw erro('Item cancelado.', 409, 'ITEM_CANCELADO');
+@@ -515,6 +575,9 @@ async function iniciarPreparacao(entrada = {}, opts = {}) {
+       recursoId: itemId
+     });
+ 
++    if (opts.simularFalha === 'antes_commit') {
++      throw erro('Falha simulada antes do commit.', 500, 'FALHA_SIMULADA');
++    }
+ 
+     await commit(db);
+     return resposta;
+@@ -556,6 +619,10 @@ async function marcarItemPronto(entrada = {}, opts = {}) {
+     const rodada = exigirRodadaNaoCancelada(
+       await carregarRodadaEmpresa(db, item.rodada_id, empresaId)
+     );
++    await validarIntegridadeOperacional(db, item, rodada, {
++      empresaId,
++      unidadeIdOpcional: entrada.unidade_id != null ? entrada.unidade_id : entrada.unidadeId
++    });
+ 
+     if (item.estado_preparacao === 'CANCELADO') {
+       throw erro('Item cancelado.', 409, 'ITEM_CANCELADO');
+@@ -623,6 +690,9 @@ async function marcarItemPronto(entrada = {}, opts = {}) {
+       recursoId: itemId
+     });
+ 
++    if (opts.simularFalha === 'antes_commit') {
++      throw erro('Falha simulada antes do commit.', 500, 'FALHA_SIMULADA');
++    }
+ 
+     await commit(db);
+     return resposta;
+@@ -684,6 +754,10 @@ async function entregarBebida(entrada = {}, opts = {}) {
+     const rodada = exigirRodadaNaoCancelada(
+       await carregarRodadaEmpresa(db, item.rodada_id, empresaId)
+     );
++    await validarIntegridadeOperacional(db, item, rodada, {
++      empresaId,
++      unidadeIdOpcional: entrada.unidade_id != null ? entrada.unidade_id : entrada.unidadeId
++    });
+ 
+     if (item.tipo_item !== 'BEBIDA') {
+       throw erro('Entrega de bebida só se aplica a itens BEBIDA.', 409, 'ITEM_NAO_BEBIDA');
+@@ -780,6 +854,9 @@ async function entregarBebida(entrada = {}, opts = {}) {
+       recursoId: itemId
+     });
+ 
++    if (opts.simularFalha === 'antes_commit') {
++      throw erro('Falha simulada antes do commit.', 500, 'FALHA_SIMULADA');
++    }
+ 
+     await commit(db);
+     return resposta;
+
+diff --git a/backend/rotas/cozinha.js b/backend/rotas/cozinha.js
+index 8cbea0f..4583ad3 100644
+--- a/backend/rotas/cozinha.js
++++ b/backend/rotas/cozinha.js
+@@ -1,5 +1,5 @@
+ /**
+- * Rotas — Cozinha (Sprint 02: despacho | Sprint 03: preparação)
++ * Rotas — Cozinha (Sprint 02: despacho | Sprint 03/05: preparação e operações de itens)
+  */
+ 'use strict';
+ 
+@@ -94,11 +94,13 @@ router.post('/despacho', async (req, res) => {
+ router.post('/itens/:id/iniciar', async (req, res) => {
+   try {
+     if (!exigirCozinhaOperacional(res)) return;
++    const body = req.body || {};
+     const out = await CozinhaPreparacao.iniciarPreparacao({
+       empresaId: empresaIdDoReqPedido(req),
+       operadorId: operadorDaSessao(req),
+       idempotencyKey: chaveIdempotencia(req),
+       itemId: req.params.id,
++      unidade_id: body.unidade_id != null ? body.unidade_id : req.query.unidade_id
+     });
+     return res.status(200).json(out);
+   } catch (err) {
+@@ -109,11 +111,13 @@ router.post('/itens/:id/iniciar', async (req, res) => {
+ router.post('/itens/:id/pronto', async (req, res) => {
+   try {
+     if (!exigirCozinhaOperacional(res)) return;
++    const body = req.body || {};
+     const out = await CozinhaPreparacao.marcarItemPronto({
+       empresaId: empresaIdDoReqPedido(req),
+       operadorId: operadorDaSessao(req),
+       idempotencyKey: chaveIdempotencia(req),
+       itemId: req.params.id,
++      unidade_id: body.unidade_id != null ? body.unidade_id : req.query.unidade_id
+     });
+     return res.status(200).json(out);
+   } catch (err) {
+@@ -130,6 +134,7 @@ router.post('/itens/:id/bebida/entregar', async (req, res) => {
+       operadorId: operadorDaSessao(req),
+       idempotencyKey: chaveIdempotencia(req),
+       itemId: req.params.id,
++      unidade_id: body.unidade_id != null ? body.unidade_id : req.query.unidade_id,
+       qty_entregue: body.qty_entregue != null ? body.qty_entregue : body.quantidade
+     });
+     return res.status(out.repetida ? 200 : 201).json(out);
+

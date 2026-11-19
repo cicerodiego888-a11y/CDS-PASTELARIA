@@ -1,0 +1,1355 @@
+﻿diff --git a/frontend/erp/js/cds-centro-configuracoes.js b/frontend/erp/js/cds-centro-configuracoes.js
+index 4294dba..74264db 100644
+--- a/frontend/erp/js/cds-centro-configuracoes.js
++++ b/frontend/erp/js/cds-centro-configuracoes.js
+@@ -19,6 +19,7 @@
+     { id: 'performance', icon: 'fa-tachometer-alt', label: 'Performance', keywords: 'timeout retry sync performance' },
+     { id: 'backup', icon: 'fa-hdd', label: 'Backup', keywords: 'backup restauração' },
+     { id: 'implantacao', icon: 'fa-file-import', label: 'Implantação', keywords: 'importação inicial produtos xlsx migração implantação cliente base avançadas ferramentas' },
++    { id: 'cozinhas', icon: 'fa-utensils', label: 'Cozinhas', keywords: 'cozinha roteamento kds unidade segmento ifood pedido online padrão gestão avançadas' },
+     { id: 'diagnostico', icon: 'fa-stethoscope', label: 'Diagnóstico', keywords: 'central sync nsu scheduler logs debug sefaz saúde mib busca', fiscal: true }
+   ]);
+ 
+@@ -571,6 +572,28 @@
+         `, 'migração banco antigo csv xml futuro')}
+       </div>
+ 
++      <div class="cds-cfg-pane" data-cfg-pane="cozinhas">
++        <h2 class="cds-cfg-pane__title">Cozinhas</h2>
++        <p class="cds-cfg-pane__sub">Configurações avançadas de unidades e roteamento de pedidos entre cozinhas.</p>
++        ${card('<i class="fas fa-route text-primary"></i> Gestão de Roteamento de Cozinhas', `
++          <p class="cds-cfg-hint mb-3">
++            Escolha o modo <strong>Cozinha padrão</strong> ou <strong>Cozinha por segmento</strong>
++            (loja, iFood, pedido online) e associe as unidades ativas da empresa.
++          </p>
++          <button type="button" class="btn btn-primary btn-sm" id="btnAbrirCozinhaRoteamento"
++            onclick="typeof loadPage==='function'&&loadPage('cozinha-roteamento')">
++            <i class="fas fa-route"></i> Abrir Gestão de Roteamento
++          </button>
++        `, 'roteamento cozinha padrão segmento ifood pedido online')}
++        ${card('<i class="fas fa-store"></i> Unidades de Cozinha', `
++          <p class="cds-cfg-hint mb-3">Cadastre e ative/inative unidades operacionais da empresa.</p>
++          <button type="button" class="btn btn-outline-primary btn-sm" id="btnAbrirCozinhaUnidades"
++            onclick="typeof loadPage==='function'&&loadPage('cozinha-unidades')">
++            <i class="fas fa-store"></i> Abrir Unidades
++          </button>
++        `, 'unidades cozinha cadastro ativo inativo')}
++      </div>
++
+       <div class="cds-cfg-pane" data-cfg-pane="empresasCanalVenda">
+         <h2 class="cds-cfg-pane__title">Empresas por Canal de Venda</h2>
+         <p class="cds-cfg-pane__sub">Selecione a empresa de cada canal. O cadastro do CNPJ continua em Empresas. A resolução da venda não muda.</p>
+diff --git a/frontend/erp/js/cozinha-roteamento.js b/frontend/erp/js/cozinha-roteamento.js
+new file mode 100644
+index 0000000..5f7207a
+--- /dev/null
++++ b/frontend/erp/js/cozinha-roteamento.js
+@@ -0,0 +1,626 @@
++/**
++ * S07-3B — Gestão de Roteamento de Cozinhas (UI).
++ * Configurações Avançadas / Gestão de Cozinhas → Roteamento.
++ * Consome S07-3A: GET/PUT /api/cozinha/roteamento*. Lista unidades via GET /api/cozinha/unidades.
++ * Sem DDL, sem despacho, sem Pedidos→KDS, sem S07-3C.
++ */
++(function (root, factory) {
++  const api = factory();
++  if (typeof module !== 'undefined' && module.exports) module.exports = api;
++  if (root) {
++    root.CdsCozinhaRoteamentoApi = api;
++    root.loadCozinhaRoteamento = function loadCozinhaRoteamento() {
++      return api.montarNoNavegador(root).iniciar(
++        root.document && root.document.getElementById('page-content')
++      );
++    };
++  }
++}(typeof window !== 'undefined' ? window : globalThis, function factory() {
++  'use strict';
++
++  const MODO_PADRAO = 'COZINHA_PADRAO';
++  const MODO_SEGMENTO = 'COZINHA_POR_SEGMENTO';
++  const SEGMENTOS_FALLBACK = Object.freeze(['LOJA', 'IFOOD', 'PEDIDO_ONLINE']);
++
++  function escapar(valor) {
++    return String(valor == null ? '' : valor)
++      .replace(/&/g, '&amp;')
++      .replace(/</g, '&lt;')
++      .replace(/>/g, '&gt;')
++      .replace(/"/g, '&quot;');
++  }
++
++  function apiBase(global) {
++    if (global && typeof global.API_URL === 'string' && global.API_URL.trim()) {
++      return global.API_URL.replace(/\/$/, '');
++    }
++    return '/api';
++  }
++
++  function headersJson(global, extra) {
++    if (global && global.CdsEmpresaContexto && typeof global.CdsEmpresaContexto.headersJson === 'function') {
++      return global.CdsEmpresaContexto.headersJson(extra || {});
++    }
++    const h = { Accept: 'application/json', 'Content-Type': 'application/json' };
++    try {
++      const t = global.localStorage && global.localStorage.getItem('token');
++      if (t) h.Authorization = 'Bearer ' + t;
++    } catch (_e) { /* ignore */ }
++    return Object.assign(h, extra || {});
++  }
++
++  function temEmpresa(global) {
++    if (global && global.CdsEmpresaContexto && typeof global.CdsEmpresaContexto.temEmpresaSelecionada === 'function') {
++      return global.CdsEmpresaContexto.temEmpresaSelecionada();
++    }
++    return true;
++  }
++
++  function mensagemEmpresa(global) {
++    if (global && global.CdsEmpresaContexto && typeof global.CdsEmpresaContexto.mensagemEmpresaObrigatoria === 'function') {
++      return global.CdsEmpresaContexto.mensagemEmpresaObrigatoria();
++    }
++    return 'Selecione a empresa no seletor da barra lateral para continuar.';
++  }
++
++  function labelModo(modo) {
++    if (modo === MODO_PADRAO) return 'Cozinha padrão';
++    if (modo === MODO_SEGMENTO) return 'Cozinha por segmento';
++    return modo || '—';
++  }
++
++  function labelSegmento(seg) {
++    const map = {
++      LOJA: 'Loja (balcão / mesas)',
++      IFOOD: 'iFood',
++      PEDIDO_ONLINE: 'Pedido online'
++    };
++    return map[seg] || seg;
++  }
++
++  function montarMarkup() {
++    return `
++<div class="page-container mt-3 cds-cozinha-roteamento" id="cds-cozinha-roteamento-root">
++  <nav aria-label="breadcrumb" class="mb-2">
++    <ol class="breadcrumb mb-1">
++      <li class="breadcrumb-item">Configurações Avançadas</li>
++      <li class="breadcrumb-item">Gestão de Cozinhas</li>
++      <li class="breadcrumb-item active" aria-current="page">Roteamento</li>
++    </ol>
++  </nav>
++  <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
++    <div>
++      <h3 class="mb-1"><i class="fas fa-route" aria-hidden="true"></i> Gestão de Roteamento de Cozinhas</h3>
++      <p class="text-muted mb-0 small">
++        Defina se os pedidos vão para uma cozinha padrão ou para destinos por segmento de atendimento.
++        Esta tela não despacha pedidos nem altera o KDS.
++      </p>
++    </div>
++    <button type="button" class="btn btn-outline-secondary btn-sm" id="coz-rot-btn-recarregar">
++      <i class="fas fa-sync-alt" aria-hidden="true"></i> Recarregar
++    </button>
++  </div>
++
++  <div id="coz-rot-schema-alerta" class="alert alert-warning d-none" role="alert"></div>
++  <div id="coz-rot-feedback" class="alert d-none" role="alert"></div>
++  <div id="coz-rot-bloqueio" class="alert alert-danger d-none" role="alert"></div>
++
++  <div id="coz-rot-conteudo" class="d-none">
++    <div class="card mb-3">
++      <div class="card-body">
++        <h5 class="card-title mb-3">Modo de distribuição</h5>
++        <div class="form-check mb-2">
++          <input class="form-check-input" type="radio" name="coz-rot-modo" id="coz-rot-modo-padrao" value="${MODO_PADRAO}">
++          <label class="form-check-label" for="coz-rot-modo-padrao">
++            <strong>Cozinha padrão</strong>
++            <span class="d-block small text-muted">Todos os pedidos vão para uma única unidade ativa.</span>
++          </label>
++        </div>
++        <div class="form-check mb-3">
++          <input class="form-check-input" type="radio" name="coz-rot-modo" id="coz-rot-modo-segmento" value="${MODO_SEGMENTO}">
++          <label class="form-check-label" for="coz-rot-modo-segmento">
++            <strong>Cozinha por segmento</strong>
++            <span class="d-block small text-muted">Cada segmento (loja, iFood, pedido online…) tem um destino.</span>
++          </label>
++        </div>
++        <button type="button" class="btn btn-primary btn-sm" id="coz-rot-btn-salvar-modo">
++          Salvar modo
++        </button>
++      </div>
++    </div>
++
++    <div class="card mb-3" id="coz-rot-card-padrao">
++      <div class="card-body">
++        <h5 class="card-title mb-3">Cozinha padrão</h5>
++        <div class="row g-3 align-items-end">
++          <div class="col-md-6">
++            <label class="form-label" for="coz-rot-unidade-padrao">Unidade de destino</label>
++            <select class="form-select" id="coz-rot-unidade-padrao">
++              <option value="">Selecione uma unidade ativa…</option>
++            </select>
++          </div>
++          <div class="col-md-6">
++            <button type="button" class="btn btn-primary btn-sm" id="coz-rot-btn-salvar-padrao">
++              Salvar cozinha padrão
++            </button>
++          </div>
++        </div>
++      </div>
++    </div>
++
++    <div class="card mb-3" id="coz-rot-card-segmentos">
++      <div class="card-body">
++        <h5 class="card-title mb-2">Destinos por segmento</h5>
++        <p class="small text-muted mb-3">Associe cada segmento permitido a uma unidade ativa da empresa.</p>
++        <div class="table-responsive">
++          <table class="table table-sm align-middle mb-0" id="coz-rot-tabela-segmentos">
++            <thead class="table-light">
++              <tr>
++                <th scope="col">Segmento</th>
++                <th scope="col">Unidade de cozinha</th>
++                <th scope="col" style="width:8rem">Ação</th>
++              </tr>
++            </thead>
++            <tbody id="coz-rot-tbody-segmentos">
++              <tr><td colspan="3" class="text-muted text-center py-3">Carregando…</td></tr>
++            </tbody>
++          </table>
++        </div>
++      </div>
++    </div>
++
++    <div class="small text-muted" id="coz-rot-meta"></div>
++  </div>
++</div>`;
++  }
++
++  function opcoesUnidadesHtml(unidades, selecionadaId) {
++    const ativas = (unidades || []).filter((u) => u.ativo === true || Number(u.ativo) === 1);
++    const opts = ['<option value="">Selecione uma unidade ativa…</option>'];
++    ativas.forEach((u) => {
++      const id = Number(u.id);
++      const sel = selecionadaId != null && Number(selecionadaId) === id ? ' selected' : '';
++      opts.push(`<option value="${id}"${sel}>${escapar(u.codigo)} (#${id})</option>`);
++    });
++    if (!ativas.length) {
++      opts.push('<option value="" disabled>Nenhuma unidade ativa cadastrada</option>');
++    }
++    return opts.join('');
++  }
++
++  function renderLinhasSegmentos(segmentosPermitidos, mapaAtual, unidades) {
++    const segs = (segmentosPermitidos && segmentosPermitidos.length)
++      ? segmentosPermitidos
++      : SEGMENTOS_FALLBACK.slice();
++    if (!segs.length) {
++      return '<tr><td colspan="3" class="text-muted text-center py-3">Nenhum segmento permitido.</td></tr>';
++    }
++    return segs.map((seg) => {
++      const atual = (mapaAtual || []).find((s) => String(s.segmento) === String(seg));
++      const unidadeId = atual && atual.unidade_id != null ? Number(atual.unidade_id) : null;
++      return `<tr data-segmento="${escapar(seg)}">
++        <td>
++          <strong>${escapar(labelSegmento(seg))}</strong>
++          <div class="small text-muted"><code>${escapar(seg)}</code></div>
++        </td>
++        <td>
++          <select class="form-select form-select-sm coz-rot-seg-unidade" data-segmento="${escapar(seg)}" aria-label="Unidade para ${escapar(seg)}">
++            ${opcoesUnidadesHtml(unidades, unidadeId)}
++          </select>
++        </td>
++        <td>
++          <button type="button" class="btn btn-sm btn-outline-primary" data-acao="salvar-segmento" data-segmento="${escapar(seg)}">
++            Salvar
++          </button>
++        </td>
++      </tr>`;
++    }).join('');
++  }
++
++  function mensagemSchemaIndisponivel(body) {
++    const base = 'A configuração persistente de roteamento ainda depende da aplicação controlada do schema (migration S07-3A).';
++    const extra = body && body.mensagem ? String(body.mensagem) : '';
++    return extra ? `${base} ${extra}` : `${base} Contate o administrador técnico antes de usar esta tela em produção.`;
++  }
++
++  async function parseResposta(resp) {
++    let body = null;
++    try { body = await resp.json(); } catch (_e) { body = null; }
++    return { ok: resp.ok, status: resp.status, body };
++  }
++
++  function montarNoNavegador(global) {
++    let host = null;
++    let onEmpresa = null;
++    let estado = {
++      unidades: [],
++      config: null,
++      schemaIndisponivel: false,
++      bloqueado: false
++    };
++
++    function el(sel) {
++      return host && host.querySelector(sel);
++    }
++
++    function feedback(tipo, mensagem) {
++      const box = el('#coz-rot-feedback');
++      if (!box) return;
++      box.className = 'alert alert-' + (tipo === 'sucesso' ? 'success' : tipo === 'aviso' ? 'warning' : 'danger');
++      box.textContent = mensagem || '';
++      box.classList.remove('d-none');
++    }
++
++    function limparFeedback() {
++      const box = el('#coz-rot-feedback');
++      if (!box) return;
++      box.className = 'alert d-none';
++      box.textContent = '';
++    }
++
++    function mostrarSchemaAlerta(visivel, mensagem) {
++      const box = el('#coz-rot-schema-alerta');
++      if (!box) return;
++      if (!visivel) {
++        box.classList.add('d-none');
++        box.textContent = '';
++        return;
++      }
++      box.className = 'alert alert-warning';
++      box.innerHTML = `<strong>Schema indisponível.</strong> ${escapar(mensagem || mensagemSchemaIndisponivel(null))}`;
++      box.classList.remove('d-none');
++    }
++
++    function mostrarBloqueio(mensagem) {
++      estado.bloqueado = true;
++      const box = el('#coz-rot-bloqueio');
++      const conteudo = el('#coz-rot-conteudo');
++      if (box) {
++        box.className = 'alert alert-danger';
++        box.textContent = mensagem || 'Você não tem permissão para gerenciar o roteamento de cozinhas.';
++        box.classList.remove('d-none');
++      }
++      if (conteudo) conteudo.classList.add('d-none');
++    }
++
++    function aplicarVisibilidadeModo() {
++      const modo = modoSelecionado();
++      const cardPadrao = el('#coz-rot-card-padrao');
++      const cardSeg = el('#coz-rot-card-segmentos');
++      if (cardPadrao) cardPadrao.classList.toggle('opacity-50', modo === MODO_SEGMENTO);
++      if (cardSeg) cardSeg.classList.toggle('opacity-50', modo === MODO_PADRAO);
++    }
++
++    function modoSelecionado() {
++      const marcado = host && host.querySelector('input[name="coz-rot-modo"]:checked');
++      return marcado ? String(marcado.value) : null;
++    }
++
++    function preencherModo(modo) {
++      const p = el('#coz-rot-modo-padrao');
++      const s = el('#coz-rot-modo-segmento');
++      if (p) p.checked = modo === MODO_PADRAO;
++      if (s) s.checked = modo === MODO_SEGMENTO;
++      if (!modo) {
++        if (p) p.checked = true;
++      }
++      aplicarVisibilidadeModo();
++    }
++
++    function preencherSelectPadrao(unidadeId) {
++      const sel = el('#coz-rot-unidade-padrao');
++      if (!sel) return;
++      sel.innerHTML = opcoesUnidadesHtml(estado.unidades, unidadeId);
++    }
++
++    function preencherSegmentos(config) {
++      const tbody = el('#coz-rot-tbody-segmentos');
++      if (!tbody) return;
++      const permitidos = (config && config.segmentos_permitidos) || SEGMENTOS_FALLBACK.slice();
++      const mapa = (config && config.segmentos) || [];
++      tbody.innerHTML = renderLinhasSegmentos(permitidos, mapa, estado.unidades);
++    }
++
++    function preencherMeta(config) {
++      const meta = el('#coz-rot-meta');
++      if (!meta) return;
++      if (!config || !config.configurado) {
++        meta.textContent = 'Nenhuma configuração salva ainda para esta empresa.';
++        return;
++      }
++      const partes = [
++        `Modo atual: ${labelModo(config.modo)}`,
++        config.updated_at ? `Atualizado em: ${config.updated_at}` : null,
++        config.updated_by != null ? `Por usuário #${config.updated_by}` : null
++      ].filter(Boolean);
++      meta.textContent = partes.join(' · ');
++    }
++
++    function habilitarFormulario(habilitado) {
++      const conteudo = el('#coz-rot-conteudo');
++      if (!conteudo) return;
++      conteudo.classList.toggle('d-none', !habilitado);
++      conteudo.querySelectorAll('button, input, select').forEach((node) => {
++        node.disabled = !habilitado;
++      });
++    }
++
++    async function carregarUnidades() {
++      const resp = await global.fetch(apiBase(global) + '/cozinha/unidades', {
++        method: 'GET',
++        headers: headersJson(global)
++      });
++      const { ok, status, body } = await parseResposta(resp);
++      if (status === 403 && body && (body.codigo === 'ADMIN_OPERACIONAL_OBRIGATORIO' || body.erro === 'MODULO_NAO_LICENCIADO')) {
++        const msg = body.codigo === 'ADMIN_OPERACIONAL_OBRIGATORIO'
++          ? 'Somente administrador operacional pode gerenciar o roteamento de cozinhas.'
++          : (body.mensagem || 'Módulo Pedidos não licenciado para esta instalação.');
++        mostrarBloqueio(msg);
++        return null;
++      }
++      if (!ok || !body || body.success === false) {
++        throw new Error((body && (body.mensagem || body.error)) || 'Falha ao carregar unidades de cozinha.');
++      }
++      estado.unidades = body.unidades || [];
++      return estado.unidades;
++    }
++
++    async function carregarConfig() {
++      const resp = await global.fetch(apiBase(global) + '/cozinha/roteamento', {
++        method: 'GET',
++        headers: headersJson(global)
++      });
++      const { ok, status, body } = await parseResposta(resp);
++
++      if (status === 503 && body && body.codigo === 'SCHEMA_ROTEAMENTO_INDISPONIVEL') {
++        estado.schemaIndisponivel = true;
++        mostrarSchemaAlerta(true, mensagemSchemaIndisponivel(body));
++        habilitarFormulario(false);
++        return null;
++      }
++      if (status === 403 && body && body.codigo === 'ADMIN_OPERACIONAL_OBRIGATORIO') {
++        mostrarBloqueio('Somente administrador operacional pode gerenciar o roteamento de cozinhas.');
++        return null;
++      }
++      if (status === 403 && body && body.erro === 'MODULO_NAO_LICENCIADO') {
++        mostrarBloqueio(body.mensagem || 'Módulo Pedidos não licenciado.');
++        return null;
++      }
++      if (!ok || !body || body.success === false) {
++        throw new Error((body && (body.mensagem || body.error || body.codigo)) || 'Falha ao carregar roteamento.');
++      }
++
++      estado.schemaIndisponivel = false;
++      mostrarSchemaAlerta(false);
++      estado.config = body;
++      return body;
++    }
++
++    function aplicarConfigNaTela(config) {
++      const conteudo = el('#coz-rot-conteudo');
++      if (conteudo) conteudo.classList.remove('d-none');
++      preencherModo(config && config.modo);
++      preencherSelectPadrao(config && config.unidade_padrao_id);
++      preencherSegmentos(config || {});
++      preencherMeta(config);
++      habilitarFormulario(true);
++    }
++
++    async function recarregar() {
++      limparFeedback();
++      estado.bloqueado = false;
++      estado.schemaIndisponivel = false;
++      const bloqueio = el('#coz-rot-bloqueio');
++      if (bloqueio) {
++        bloqueio.className = 'alert d-none';
++        bloqueio.textContent = '';
++      }
++      mostrarSchemaAlerta(false);
++
++      if (!temEmpresa(global)) {
++        habilitarFormulario(false);
++        feedback('aviso', mensagemEmpresa(global));
++        return;
++      }
++
++      try {
++        await carregarUnidades();
++        if (estado.bloqueado) return;
++        const config = await carregarConfig();
++        if (estado.bloqueado || estado.schemaIndisponivel) return;
++        aplicarConfigNaTela(config || { configurado: false, segmentos: [], segmentos_permitidos: SEGMENTOS_FALLBACK.slice() });
++      } catch (err) {
++        habilitarFormulario(false);
++        feedback('erro', (err && err.message) || 'Erro ao carregar a tela de roteamento.');
++      }
++    }
++
++    async function salvarModo() {
++      limparFeedback();
++      if (estado.schemaIndisponivel) {
++        feedback('aviso', mensagemSchemaIndisponivel(null));
++        return;
++      }
++      const modo = modoSelecionado();
++      if (!modo) {
++        feedback('erro', 'Selecione o modo de distribuição.');
++        return;
++      }
++      const btn = el('#coz-rot-btn-salvar-modo');
++      if (btn) btn.disabled = true;
++      try {
++        const resp = await global.fetch(apiBase(global) + '/cozinha/roteamento/modo', {
++          method: 'PUT',
++          headers: headersJson(global),
++          body: JSON.stringify({ modo })
++        });
++        const { ok, status, body } = await parseResposta(resp);
++        if (status === 503 && body && body.codigo === 'SCHEMA_ROTEAMENTO_INDISPONIVEL') {
++          estado.schemaIndisponivel = true;
++          mostrarSchemaAlerta(true, mensagemSchemaIndisponivel(body));
++          habilitarFormulario(false);
++          return;
++        }
++        if (!ok || !body || body.success === false) {
++          feedback('erro', (body && (body.mensagem || body.error || body.codigo)) || 'Não foi possível salvar o modo.');
++          return;
++        }
++        estado.config = body;
++        aplicarConfigNaTela(body);
++        feedback('sucesso', `Modo salvo: ${labelModo(body.modo)}.`);
++      } catch (err) {
++        feedback('erro', (err && err.message) || 'Erro de rede ao salvar modo.');
++      } finally {
++        if (btn) btn.disabled = false;
++      }
++    }
++
++    async function salvarPadrao() {
++      limparFeedback();
++      if (estado.schemaIndisponivel) {
++        feedback('aviso', mensagemSchemaIndisponivel(null));
++        return;
++      }
++      const sel = el('#coz-rot-unidade-padrao');
++      const unidadeId = sel ? Number(sel.value) : NaN;
++      if (!Number.isInteger(unidadeId) || unidadeId <= 0) {
++        feedback('erro', 'Selecione a cozinha padrão.');
++        return;
++      }
++      const btn = el('#coz-rot-btn-salvar-padrao');
++      if (btn) btn.disabled = true;
++      try {
++        const resp = await global.fetch(apiBase(global) + '/cozinha/roteamento/padrao', {
++          method: 'PUT',
++          headers: headersJson(global),
++          body: JSON.stringify({ unidade_id: unidadeId })
++        });
++        const { ok, status, body } = await parseResposta(resp);
++        if (status === 503 && body && body.codigo === 'SCHEMA_ROTEAMENTO_INDISPONIVEL') {
++          estado.schemaIndisponivel = true;
++          mostrarSchemaAlerta(true, mensagemSchemaIndisponivel(body));
++          habilitarFormulario(false);
++          return;
++        }
++        if (!ok || !body || body.success === false) {
++          feedback('erro', (body && (body.mensagem || body.error || body.codigo)) || 'Não foi possível salvar a cozinha padrão.');
++          return;
++        }
++        estado.config = body;
++        aplicarConfigNaTela(body);
++        feedback('sucesso', 'Cozinha padrão atualizada.');
++      } catch (err) {
++        feedback('erro', (err && err.message) || 'Erro de rede ao salvar cozinha padrão.');
++      } finally {
++        if (btn) btn.disabled = false;
++      }
++    }
++
++    async function salvarSegmento(segmento) {
++      limparFeedback();
++      if (estado.schemaIndisponivel) {
++        feedback('aviso', mensagemSchemaIndisponivel(null));
++        return;
++      }
++      const sel = host && host.querySelector(`select.coz-rot-seg-unidade[data-segmento="${segmento}"]`);
++      const unidadeId = sel ? Number(sel.value) : NaN;
++      if (!Number.isInteger(unidadeId) || unidadeId <= 0) {
++        feedback('erro', `Selecione a unidade de destino para ${labelSegmento(segmento)}.`);
++        return;
++      }
++      const btn = host && host.querySelector(`button[data-acao="salvar-segmento"][data-segmento="${segmento}"]`);
++      if (btn) btn.disabled = true;
++      try {
++        const resp = await global.fetch(apiBase(global) + '/cozinha/roteamento/segmentos', {
++          method: 'PUT',
++          headers: headersJson(global),
++          body: JSON.stringify({ segmento, unidade_id: unidadeId })
++        });
++        const { ok, status, body } = await parseResposta(resp);
++        if (status === 503 && body && body.codigo === 'SCHEMA_ROTEAMENTO_INDISPONIVEL') {
++          estado.schemaIndisponivel = true;
++          mostrarSchemaAlerta(true, mensagemSchemaIndisponivel(body));
++          habilitarFormulario(false);
++          return;
++        }
++        if (!ok || !body || body.success === false) {
++          feedback('erro', (body && (body.mensagem || body.error || body.codigo)) || `Falha ao associar ${segmento}.`);
++          return;
++        }
++        estado.config = body;
++        aplicarConfigNaTela(body);
++        feedback('sucesso', `Segmento ${labelSegmento(segmento)} associado.`);
++      } catch (err) {
++        feedback('erro', (err && err.message) || 'Erro de rede ao salvar segmento.');
++      } finally {
++        if (btn) btn.disabled = false;
++      }
++    }
++
++    function ligarEventos() {
++      const btnRecarregar = el('#coz-rot-btn-recarregar');
++      const btnModo = el('#coz-rot-btn-salvar-modo');
++      const btnPadrao = el('#coz-rot-btn-salvar-padrao');
++      const tbody = el('#coz-rot-tbody-segmentos');
++      if (btnRecarregar) btnRecarregar.addEventListener('click', () => recarregar());
++      if (btnModo) btnModo.addEventListener('click', () => salvarModo());
++      if (btnPadrao) btnPadrao.addEventListener('click', () => salvarPadrao());
++      host.querySelectorAll('input[name="coz-rot-modo"]').forEach((radio) => {
++        radio.addEventListener('change', () => aplicarVisibilidadeModo());
++      });
++      if (tbody) {
++        tbody.addEventListener('click', (ev) => {
++          const btn = ev.target && ev.target.closest ? ev.target.closest('button[data-acao="salvar-segmento"]') : null;
++          if (!btn) return;
++          const seg = btn.getAttribute('data-segmento');
++          if (seg) salvarSegmento(seg);
++        });
++      }
++      onEmpresa = () => recarregar();
++      if (global.document && global.document.addEventListener) {
++        global.document.addEventListener('cds-empresa-contexto-alterado', onEmpresa);
++      }
++    }
++
++    function iniciar(container) {
++      host = container;
++      if (!host) return Promise.resolve();
++      host.innerHTML = montarMarkup();
++      ligarEventos();
++      return recarregar();
++    }
++
++    function destruir() {
++      if (onEmpresa && global.document && global.document.removeEventListener) {
++        global.document.removeEventListener('cds-empresa-contexto-alterado', onEmpresa);
++      }
++      onEmpresa = null;
++      host = null;
++    }
++
++    return {
++      iniciar,
++      destruir,
++      recarregar,
++      montarMarkup,
++      renderLinhasSegmentos,
++      opcoesUnidadesHtml,
++      mensagemSchemaIndisponivel,
++      getEstado: () => ({ ...estado })
++    };
++  }
++
++  return {
++    MODO_PADRAO,
++    MODO_SEGMENTO,
++    SEGMENTOS_FALLBACK,
++    montarNoNavegador,
++    montarMarkup,
++    renderLinhasSegmentos,
++    opcoesUnidadesHtml,
++    mensagemSchemaIndisponivel,
++    labelModo,
++    labelSegmento,
++    escapar
++  };
++}));
+diff --git a/frontend/shared/js/access-control.js b/frontend/shared/js/access-control.js
+index cb8ce13..785d09a 100644
+--- a/frontend/shared/js/access-control.js
++++ b/frontend/shared/js/access-control.js
+@@ -22,6 +22,9 @@ const PERMISSOES_PAGINAS = {
+     faturamento: 'vendas',
+     pedidos: 'vendas',
+     mesas: 'vendas',
++    'cozinha-kds': 'vendas',
++    'cozinha-unidades': 'configuracoes',
++    'cozinha-roteamento': 'configuracoes',
+     'nfe-central': 'fiscal',
+     'nfe-avulsa': 'fiscal',
+     'nfe-monitor': 'fiscal',
+@@ -80,7 +83,7 @@ function obterPermissoesUsuario() {
+     const user = obterUsuarioLogado();
+     return {
+         role: user.role || 'operador',
+-        perfil: String(user.perfil || 'USUARIO').toUpperCase(),
++        perfil: String(user.perfil || 'USUARIO').trim().toUpperCase(),
+         permissoes: normalizarPermissoes(user.permissoes)
+     };
+ }
+@@ -232,7 +235,7 @@ function usuarioPodeAcessarDiagnosticoCentral(user) {
+ }
+ 
+ function usuarioTemPermissao(page) {
+-    const { role, permissoes } = obterPermissoesUsuario();
++    const { role, perfil, permissoes } = obterPermissoesUsuario();
+ 
+     // Assinatura sempre liberada para qualquer usuário autenticado poder renovar a licença.
+     if (page === 'licenca') {
+@@ -247,6 +250,15 @@ function usuarioTemPermissao(page) {
+         return podeGerenciarUsuariosSistema();
+     }
+ 
++    // S07-2 / S07-3B — Gestão de unidades e roteamento: admin operacional (role admin OU perfil ADMIN/SUPER_ADMIN).
++    // ACL de página mapeia para 'configuracoes'; API /api/cozinha exige recurso 'pedidos' (implantação).
++    // Não liberar pedidos aqui — menu só para admin operacional; API continua sob exigirRecurso('pedidos').
++    if (page === 'cozinha-unidades' || page === 'cozinha-roteamento') {
++        const roleNorm = String(role || '').trim().toLowerCase();
++        const perfilNorm = String(perfil || '').trim().toUpperCase();
++        return roleNorm === 'admin' || perfilNorm === 'ADMIN' || perfilNorm === 'SUPER_ADMIN';
++    }
++
+     // Contagem física / ajuste de estoque — mesmo gate do backend (exigirPerfilAjusteEstoque).
+     if (page === 'contagem-estoque') {
+         return podeAjustarEstoque();
+diff --git a/frontend/shared/js/cds-page-shell.js b/frontend/shared/js/cds-page-shell.js
+index 76726c6..a498083 100644
+--- a/frontend/shared/js/cds-page-shell.js
++++ b/frontend/shared/js/cds-page-shell.js
+@@ -29,6 +29,8 @@
+     faturamento: { grupo: 'Comercial', titulo: 'Expedição', subtitulo: 'Pedido → Separação → Expedição · operação comercial' },
+     caixa: { grupo: 'Comercial', titulo: 'Fechamento de Caixa', subtitulo: 'Sangria, reforço e fechamento' },
+     configuracoes: { grupo: 'Administração', titulo: 'Configurações', subtitulo: 'Preferências operacionais da empresa' },
++    'cozinha-unidades': { grupo: 'Administração', titulo: 'Unidades de Cozinha', subtitulo: 'Cadastro de unidades operacionais' },
++    'cozinha-roteamento': { grupo: 'Administração', titulo: 'Roteamento de Cozinhas', subtitulo: 'Modo padrão ou por segmento de atendimento' },
+     usuarios: { grupo: 'Administração', titulo: 'Usuários', subtitulo: 'Acessos e permissões' },
+     licenca: { grupo: 'Administração', titulo: 'Assinatura', subtitulo: 'Status e ativação da assinatura CDS' },
+     auditoria: { grupo: 'Administração', titulo: 'Auditoria', subtitulo: 'Trilha de eventos do sistema' },
+diff --git a/tests/cozinha/sprint07-s07-3b-roteamento-ui.test.js b/tests/cozinha/sprint07-s07-3b-roteamento-ui.test.js
+new file mode 100644
+index 0000000..a38e1a1
+--- /dev/null
++++ b/tests/cozinha/sprint07-s07-3b-roteamento-ui.test.js
+@@ -0,0 +1,555 @@
++/**
++ * Sprint 07 · S07-3B — Interface de gestão de roteamento de cozinhas.
++ * Banco temporário. Sem migration no oficial. Sem S07-3C / despacho / Pedidos→KDS.
++ *
++ *   set CDS_BLOQUEAR_BANCO_OFICIAL=1
++ *   set CDS_TEST_ISOLATION=1
++ *   set CDS_FORCAR_LOCAL=1
++ *   node --test --test-concurrency=1 --test-force-exit tests/cozinha/sprint07-s07-3b-roteamento-ui.test.js
++ */
++'use strict';
++
++const fs = require('fs');
++const os = require('os');
++const path = require('path');
++const http = require('http');
++const express = require('express');
++const jwt = require('jsonwebtoken');
++const { describe, it, before, after } = require('node:test');
++const assert = require('node:assert/strict');
++
++const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-cozinha-s07-3b-'));
++process.env.DB_DIR = dbDir;
++process.env.CDS_TEST_ISOLATION = '1';
++process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
++process.env.CDS_FORCAR_LOCAL = '1';
++process.env.JWT_SECRET = process.env.JWT_SECRET || 'cds-test-jwt-s07-3b-ui';
++delete process.env.CDS_ALLOW_OFFICIAL_DB;
++delete process.env.CDS_COZINHA_IMPRESSAO_FISICA_AUTORIZADA;
++
++const {
++  garantirSchemaCozinha,
++  isCozinhaOperacional,
++  getCozinhaSchemaStatus
++} = require('../../backend/utils/cozinhaSchema');
++const {
++  garantirSchemaCozinhaRoteamento,
++  verificarSchemaCozinhaRoteamento
++} = require('../../backend/services/cozinha/cozinhaRoteamentoSchema');
++const { verificarToken } = require('../../backend/middleware/auth');
++const { exigirRecurso } = require('../../backend/middleware/validarRecursoImplantacao');
++const configService = require('../../backend/services/configuracaoService');
++const ui = require('../../frontend/erp/js/cozinha-roteamento.js');
++
++function run(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.run(sql, params, function cb(err) {
++      if (err) reject(err);
++      else resolve(this);
++    });
++  });
++}
++function get(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
++  });
++}
++
++describe('S07-3B — UI markup e helpers', () => {
++  it('renderiza tela com modos, padrão e segmentos', () => {
++    const html = ui.montarMarkup();
++    assert.match(html, /Configurações Avançadas/);
++    assert.match(html, /Gestão de Cozinhas/);
++    assert.match(html, /Gestão de Roteamento de Cozinhas/);
++    assert.match(html, /COZINHA_PADRAO/);
++    assert.match(html, /COZINHA_POR_SEGMENTO/);
++    assert.match(html, /coz-rot-unidade-padrao/);
++    assert.match(html, /coz-rot-tbody-segmentos/);
++    assert.match(html, /coz-rot-schema-alerta/);
++    assert.match(html, /Salvar modo/);
++    assert.match(html, /Salvar cozinha padrão/);
++  });
++
++  it('renderLinhasSegmentos associa selects por segmento permitido', () => {
++    const html = ui.renderLinhasSegmentos(
++      ['LOJA', 'IFOOD', 'PEDIDO_ONLINE'],
++      [{ segmento: 'IFOOD', unidade_id: 2 }],
++      [
++        { id: 1, codigo: 'COZ-01', ativo: 1 },
++        { id: 2, codigo: 'COZ-02', ativo: 1 },
++        { id: 3, codigo: 'OFF', ativo: 0 }
++      ]
++    );
++    assert.match(html, /data-segmento="LOJA"/);
++    assert.match(html, /data-segmento="IFOOD"/);
++    assert.match(html, /data-segmento="PEDIDO_ONLINE"/);
++    assert.match(html, /COZ-01/);
++    assert.match(html, /value="2" selected/);
++    assert.doesNotMatch(html, />OFF \(#3\)</);
++  });
++
++  it('mensagem 503 explica dependência de schema controlado', () => {
++    const msg = ui.mensagemSchemaIndisponivel({
++      codigo: 'SCHEMA_ROTEAMENTO_INDISPONIVEL',
++      mensagem: 'Schema ausente.'
++    });
++    assert.match(msg, /migration S07-3A|aplicação controlada do schema/i);
++    assert.match(msg, /Schema ausente/);
++  });
++
++  it('ACL e navegação registram cozinha-roteamento em Configurações Avançadas', () => {
++    const raiz = path.resolve(__dirname, '../..');
++    const indexHtml = fs.readFileSync(path.join(raiz, 'frontend/erp/index.html'), 'utf8');
++    const appJs = fs.readFileSync(path.join(raiz, 'frontend/erp/js/app.js'), 'utf8');
++    const acl = fs.readFileSync(path.join(raiz, 'frontend/shared/js/access-control.js'), 'utf8');
++    const centro = fs.readFileSync(path.join(raiz, 'frontend/erp/js/cds-centro-configuracoes.js'), 'utf8');
++
++    assert.match(indexHtml, /data-page="cozinha-roteamento"/);
++    assert.match(indexHtml, /id="nav-cozinha-roteamento"/);
++    assert.match(appJs, /'cozinha-roteamento':\s*\['\/erp\/js\/cozinha-roteamento\.js'\]/);
++    assert.match(appJs, /case 'cozinha-roteamento'/);
++    assert.match(appJs, /loadCozinhaRoteamento/);
++    assert.match(acl, /'cozinha-roteamento':\s*'configuracoes'/);
++    assert.match(acl, /page === 'cozinha-unidades' \|\| page === 'cozinha-roteamento'/);
++    assert.match(centro, /data-cfg-pane="cozinhas"/);
++    assert.match(centro, /loadPage\('cozinha-roteamento'\)/);
++    assert.match(centro, /Gestão de Roteamento/);
++  });
++
++  it('preserva S06 e seleção de unidade S07-2 (sem alteração nestes arquivos-chave)', () => {
++    const raiz = path.resolve(__dirname, '../..');
++    // Arquivos de impressão S06 e KDS sessão não devem ser tocados nesta sprint UI.
++    const s06Candidates = [
++      'backend/services/cozinha/cozinhaImpressaoService.js',
++      'backend/services/cozinha/CozinhaDespachoService.js'
++    ];
++    for (const rel of s06Candidates) {
++      const full = path.join(raiz, rel);
++      if (fs.existsSync(full)) {
++        const txt = fs.readFileSync(full, 'utf8');
++        assert.doesNotMatch(txt, /S07-3B/);
++      }
++    }
++    const sessao = fs.readFileSync(
++      path.join(raiz, 'backend/services/cozinha/CozinhaSessaoUnidadeService.js'),
++      'utf8'
++    );
++    assert.doesNotMatch(sessao, /roteamento\/modo|S07-3B/);
++  });
++});
++
++describe('S07-3B — interação UI com fetch (mock) e HTTP real', () => {
++  let server;
++  let baseUrl;
++  let recursoOriginal;
++  let dbHttp;
++  let empresaId;
++  let adminId;
++  let opId;
++  let unA;
++  let unB;
++  let tokenAdmin;
++  let tokenOp;
++  let calls;
++
++  function requestJson(method, urlPath, { token, body } = {}) {
++    const u = new URL(urlPath, baseUrl);
++    const payload = body != null ? JSON.stringify(body) : null;
++    return new Promise((resolve, reject) => {
++      const req = http.request({
++        hostname: u.hostname,
++        port: u.port,
++        path: u.pathname + u.search,
++        method,
++        headers: {
++          'Content-Type': 'application/json',
++          'X-Empresa-Id': String(empresaId),
++          ...(token ? { Authorization: `Bearer ${token}` } : {}),
++          ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {})
++        }
++      }, (res) => {
++        const chunks = [];
++        res.on('data', (c) => chunks.push(c));
++        res.on('end', () => {
++          const raw = Buffer.concat(chunks).toString('utf8');
++          let json = null;
++          try { json = raw ? JSON.parse(raw) : null; } catch (_e) { json = { raw }; }
++          resolve({ status: res.statusCode, body: json });
++        });
++      });
++      req.on('error', reject);
++      if (payload) req.write(payload);
++      req.end();
++    });
++  }
++
++  function criarHostFake() {
++    const store = new Map();
++    function makeEl(id) {
++      if (store.has(id)) return store.get(id);
++      const listeners = {};
++      const el = {
++        id,
++        className: '',
++        textContent: '',
++        innerHTML: '',
++        disabled: false,
++        checked: false,
++        value: '',
++        classList: {
++          _set: new Set(),
++          add(c) { this._set.add(c); el.className = [...this._set].join(' '); },
++          remove(c) { this._set.delete(c); el.className = [...this._set].join(' '); },
++          toggle(c, on) {
++            if (on) this.add(c);
++            else this.remove(c);
++          },
++          contains(c) { return this._set.has(c); }
++        },
++        querySelector() { return null; },
++        querySelectorAll() { return []; },
++        addEventListener(type, fn) {
++          listeners[type] = listeners[type] || [];
++          listeners[type].push(fn);
++        },
++        closest() { return null; },
++        getAttribute() { return null; },
++        setAttribute() {},
++        focus() {}
++      };
++      store.set(id, el);
++      return el;
++    }
++
++    // Minimal DOM host: set innerHTML then resolve querySelector by id regex.
++    const host = {
++      innerHTML: '',
++      querySelector(sel) {
++        const m = String(sel).match(/^#([\w-]+)$/);
++        if (m) return makeEl(m[1]);
++        if (sel === 'input[name="coz-rot-modo"]:checked') {
++          const p = makeEl('coz-rot-modo-padrao');
++          const s = makeEl('coz-rot-modo-segmento');
++          if (p.checked) return p;
++          if (s.checked) return s;
++          return null;
++        }
++        if (String(sel).startsWith('input[name="coz-rot-modo"]')) {
++          return makeEl('coz-rot-modo-padrao');
++        }
++        if (String(sel).includes('coz-rot-seg-unidade')) {
++          const el = makeEl('coz-rot-seg-unidade-proxy');
++          el.value = String(unA);
++          return el;
++        }
++        if (String(sel).includes('salvar-segmento')) {
++          return makeEl('coz-rot-btn-seg-proxy');
++        }
++        return null;
++      },
++      querySelectorAll(sel) {
++        if (String(sel).includes('coz-rot-modo')) {
++          return [makeEl('coz-rot-modo-padrao'), makeEl('coz-rot-modo-segmento')];
++        }
++        if (String(sel).includes('button, input, select')) {
++          return [
++            makeEl('coz-rot-btn-salvar-modo'),
++            makeEl('coz-rot-btn-salvar-padrao'),
++            makeEl('coz-rot-unidade-padrao'),
++            makeEl('coz-rot-modo-padrao'),
++            makeEl('coz-rot-modo-segmento')
++          ];
++        }
++        return [];
++      },
++      addEventListener() {}
++    };
++    return { host, makeEl };
++  }
++
++  before(async () => {
++    dbHttp = require('../../backend/database');
++    await new Promise((resolve, reject) => {
++      const timer = setTimeout(() => reject(new Error('DB timeout')), 60000);
++      dbHttp.whenReady((err) => {
++        clearTimeout(timer);
++        if (err) reject(err);
++        else resolve();
++      });
++    });
++    for (let i = 0; i < 100; i += 1) {
++      const row = await get(dbHttp, `
++        SELECT name FROM sqlite_master WHERE type='table' AND name='cozinha_notificacoes'
++      `);
++      const st = getCozinhaSchemaStatus();
++      if (row && row.name === 'cozinha_notificacoes' && (st.operacional || st.erro)) break;
++      await new Promise((r) => setTimeout(r, 200));
++    }
++    let schemaOut = null;
++    let ultimoErro = null;
++    for (let t = 0; t < 8; t += 1) {
++      try {
++        schemaOut = await garantirSchemaCozinha(dbHttp);
++        ultimoErro = null;
++        break;
++      } catch (err) {
++        ultimoErro = err;
++        await new Promise((r) => setTimeout(r, 300));
++      }
++    }
++    if (!schemaOut || !schemaOut.operacional) {
++      throw ultimoErro || new Error('Schema Cozinha não operacional');
++    }
++    // DDL apenas no setup de teste (temp). APIs de produção não criam schema.
++    await garantirSchemaCozinhaRoteamento(dbHttp);
++    assert.equal((await verificarSchemaCozinhaRoteamento(dbHttp)).disponivel, true);
++    assert.equal(isCozinhaOperacional(), true);
++
++    recursoOriginal = configService.recursoHabilitado;
++    configService.recursoHabilitado = (nome) => {
++      if (nome === 'pedidos') return true;
++      return recursoOriginal.call(configService, nome);
++    };
++
++    const emp = await run(dbHttp, `
++      INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
++      VALUES ('44556677000188', 'Emp R3B', 'R3B', 1)
++    `);
++    empresaId = emp.lastID;
++    const adm = await run(dbHttp, `
++      INSERT INTO usuarios (username, password_hash, role, perfil, ativo, nome)
++      VALUES ('admin_r3b_ui', 'hash', 'admin', 'ADMIN', 1, 'Admin')
++    `);
++    adminId = adm.lastID;
++    const op = await run(dbHttp, `
++      INSERT INTO usuarios (username, password_hash, role, perfil, ativo, nome)
++      VALUES ('op_r3b_ui', 'hash', 'operador', 'USUARIO', 1, 'Op')
++    `);
++    opId = op.lastID;
++    await run(dbHttp, `INSERT INTO usuario_empresas (usuario_id, empresa_id, ativo) VALUES (?, ?, 1)`, [adminId, empresaId]);
++    await run(dbHttp, `INSERT INTO usuario_empresas (usuario_id, empresa_id, ativo) VALUES (?, ?, 1)`, [opId, empresaId]);
++
++    const u1 = await run(dbHttp, `
++      INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'R3B-01', 1)
++    `, [empresaId]);
++    unA = u1.lastID;
++    const u2 = await run(dbHttp, `
++      INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'R3B-02', 1)
++    `, [empresaId]);
++    unB = u2.lastID;
++
++    tokenAdmin = jwt.sign({
++      id: adminId, username: 'admin_r3b_ui', role: 'admin', perfil: 'ADMIN', permissoes: []
++    }, process.env.JWT_SECRET, { expiresIn: '1h' });
++    tokenOp = jwt.sign({
++      id: opId, username: 'op_r3b_ui', role: 'operador', perfil: 'USUARIO', permissoes: []
++    }, process.env.JWT_SECRET, { expiresIn: '1h' });
++
++    const cozinhaRoutes = require('../../backend/rotas/cozinha');
++    const app = express();
++    app.use(express.json());
++    app.use('/api/cozinha', verificarToken, exigirRecurso('pedidos'), cozinhaRoutes);
++    server = http.createServer(app);
++    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
++    baseUrl = `http://127.0.0.1:${server.address().port}`;
++  });
++
++  after(async () => {
++    if (recursoOriginal) configService.recursoHabilitado = recursoOriginal;
++    if (server) await new Promise((resolve) => server.close(resolve));
++  });
++
++  it('HTTP: carrega unidades e configura os dois modos + segmentos', async () => {
++    const unidades = await requestJson('GET', '/api/cozinha/unidades', { token: tokenAdmin });
++    assert.equal(unidades.status, 200);
++    assert.ok((unidades.body.unidades || []).some((u) => u.codigo === 'R3B-01'));
++
++    const padrao = await requestJson('PUT', '/api/cozinha/roteamento/padrao', {
++      token: tokenAdmin,
++      body: { unidade_id: unA }
++    });
++    assert.equal(padrao.status, 200);
++    assert.equal(padrao.body.unidade_padrao_id, unA);
++
++    const segLoja = await requestJson('PUT', '/api/cozinha/roteamento/segmentos', {
++      token: tokenAdmin,
++      body: { segmento: 'LOJA', unidade_id: unA }
++    });
++    assert.equal(segLoja.status, 200);
++
++    const segIfood = await requestJson('PUT', '/api/cozinha/roteamento/segmentos', {
++      token: tokenAdmin,
++      body: { segmento: 'IFOOD', unidade_id: unB }
++    });
++    assert.equal(segIfood.status, 200);
++
++    const modoSeg = await requestJson('PUT', '/api/cozinha/roteamento/modo', {
++      token: tokenAdmin,
++      body: { modo: 'COZINHA_POR_SEGMENTO' }
++    });
++    assert.equal(modoSeg.status, 200);
++    assert.equal(modoSeg.body.modo, 'COZINHA_POR_SEGMENTO');
++
++    const modoPad = await requestJson('PUT', '/api/cozinha/roteamento/modo', {
++      token: tokenAdmin,
++      body: { modo: 'COZINHA_PADRAO' }
++    });
++    assert.equal(modoPad.status, 200);
++    assert.equal(modoPad.body.modo, 'COZINHA_PADRAO');
++
++    const leitura = await requestJson('GET', '/api/cozinha/roteamento', { token: tokenAdmin });
++    assert.equal(leitura.status, 200);
++    assert.equal(leitura.body.unidade_padrao_id, unA);
++    assert.ok(leitura.body.segmentos.some((s) => s.segmento === 'IFOOD' && s.unidade_id === unB));
++  });
++
++  it('HTTP: operador sem permissão recebe 403 ADMIN_OPERACIONAL_OBRIGATORIO', async () => {
++    const r = await requestJson('GET', '/api/cozinha/roteamento', { token: tokenOp });
++    assert.equal(r.status, 403);
++    assert.equal(r.body.codigo, 'ADMIN_OPERACIONAL_OBRIGATORIO');
++  });
++
++  it('UI: carrega unidades/config via fetch e trata 503 schema', async () => {
++    calls = [];
++    const { host, makeEl } = criarHostFake();
++    makeEl('coz-rot-modo-padrao').value = 'COZINHA_PADRAO';
++    makeEl('coz-rot-modo-padrao').checked = true;
++    makeEl('coz-rot-unidade-padrao').value = String(unA);
++
++    const fakeGlobal = {
++      API_URL: baseUrl + '/api',
++      document: {
++        addEventListener() {},
++        removeEventListener() {}
++      },
++      localStorage: {
++        getItem(k) { return k === 'token' ? tokenAdmin : null; }
++      },
++      CdsEmpresaContexto: {
++        temEmpresaSelecionada() { return true; },
++        headersJson(extra) {
++          return Object.assign({
++            Accept: 'application/json',
++            'Content-Type': 'application/json',
++            Authorization: `Bearer ${tokenAdmin}`,
++            'X-Empresa-Id': String(empresaId)
++          }, extra || {});
++        }
++      },
++      fetch: async (url, opts) => {
++        calls.push({ url: String(url), method: (opts && opts.method) || 'GET' });
++        // Proxy to real HTTP server
++        const u = new URL(url, baseUrl);
++        const pathUrl = u.pathname + u.search;
++        const body = opts && opts.body ? JSON.parse(opts.body) : undefined;
++        const r = await requestJson((opts && opts.method) || 'GET', pathUrl.replace(/^\/api/, '') ? pathUrl : pathUrl, {
++          token: tokenAdmin,
++          body
++        });
++        // requestJson paths are /api/cozinha/...
++        const full = pathUrl.startsWith('/api') ? pathUrl : '/api' + pathUrl;
++        const rr = await requestJson((opts && opts.method) || 'GET', full.startsWith('/api') ? full : '/api' + full, {
++          token: tokenAdmin,
++          body
++        });
++        void r;
++        return {
++          ok: rr.status >= 200 && rr.status < 300,
++          status: rr.status,
++          async json() { return rr.body; }
++        };
++      }
++    };
++
++    // Simpler fetch: hit the test server correctly
++    fakeGlobal.fetch = async (url, opts) => {
++      const abs = String(url);
++      const u = new URL(abs, baseUrl);
++      calls.push({ url: abs, method: (opts && opts.method) || 'GET' });
++      const payload = opts && opts.body ? JSON.parse(opts.body) : undefined;
++      const rr = await requestJson((opts && opts.method) || 'GET', u.pathname + u.search, {
++        token: tokenAdmin,
++        body: payload
++      });
++      return {
++        ok: rr.status >= 200 && rr.status < 300,
++        status: rr.status,
++        async json() { return rr.body; }
++      };
++    };
++
++    const ctrl = ui.montarNoNavegador(fakeGlobal);
++    await ctrl.iniciar(host);
++    assert.ok(calls.some((c) => /\/cozinha\/unidades/.test(c.url)));
++    assert.ok(calls.some((c) => /\/cozinha\/roteamento$/.test(c.url) || /\/cozinha\/roteamento\?/.test(c.url) || c.url.endsWith('/cozinha/roteamento')));
++    assert.equal(ctrl.getEstado().schemaIndisponivel, false);
++
++    // Simula 503 em recarga
++    const fetchOk = fakeGlobal.fetch;
++    fakeGlobal.fetch = async (url, opts) => {
++      if (String(url).includes('/roteamento') && (!opts || !opts.method || opts.method === 'GET')) {
++        return {
++          ok: false,
++          status: 503,
++          async json() {
++            return {
++              success: false,
++              codigo: 'SCHEMA_ROTEAMENTO_INDISPONIVEL',
++              mensagem: 'Schema de roteamento indisponível.'
++            };
++          }
++        };
++      }
++      return fetchOk(url, opts);
++    };
++    await ctrl.recarregar();
++    assert.equal(ctrl.getEstado().schemaIndisponivel, true);
++    const alerta = makeEl('coz-rot-schema-alerta');
++    assert.match(alerta.innerHTML || alerta.textContent, /Schema indisponível|aplicação controlada|migration/i);
++  });
++
++  it('UI: bloqueio de operador (403) na carga', async () => {
++    const { host, makeEl } = criarHostFake();
++    const fakeGlobal = {
++      API_URL: baseUrl + '/api',
++      document: { addEventListener() {}, removeEventListener() {} },
++      localStorage: { getItem(k) { return k === 'token' ? tokenOp : null; } },
++      CdsEmpresaContexto: {
++        temEmpresaSelecionada() { return true; },
++        headersJson(extra) {
++          return Object.assign({
++            Accept: 'application/json',
++            'Content-Type': 'application/json',
++            Authorization: `Bearer ${tokenOp}`,
++            'X-Empresa-Id': String(empresaId)
++          }, extra || {});
++        }
++      },
++      fetch: async (url, opts) => {
++        const u = new URL(String(url), baseUrl);
++        const rr = await requestJson((opts && opts.method) || 'GET', u.pathname + u.search, {
++          token: tokenOp,
++          body: opts && opts.body ? JSON.parse(opts.body) : undefined
++        });
++        return {
++          ok: rr.status >= 200 && rr.status < 300,
++          status: rr.status,
++          async json() { return rr.body; }
++        };
++      }
++    };
++    const ctrl = ui.montarNoNavegador(fakeGlobal);
++    await ctrl.iniciar(host);
++    assert.equal(ctrl.getEstado().bloqueado, true);
++    const box = makeEl('coz-rot-bloqueio');
++    assert.match(box.textContent, /administrador operacional|permissão/i);
++  });
++
++  it('flags de isolamento e DB_DIR temporário', () => {
++    assert.equal(process.env.CDS_BLOQUEAR_BANCO_OFICIAL, '1');
++    assert.equal(process.env.CDS_TEST_ISOLATION, '1');
++    assert.equal(process.env.CDS_FORCAR_LOCAL, '1');
++    assert.equal(process.env.CDS_ALLOW_OFFICIAL_DB == null, true);
++    assert.ok(String(dbDir).includes('cds-cozinha-s07-3b'));
++  });
++});
+
+# --- Wiring adicional (app.js / index.html / core.js) — trechos S07-3B ---
+# app.js: page map 'cozinha-roteamento' + case loadCozinhaRoteamento
+# index.html: nav-cozinha-roteamento
+# core.js: catalogo pesquisa cozinha-roteamento (+ cozinha-unidades)
+# Ver RELATORIO-S07-3B para lista completa. Working tree pode conter também linhas S07-1/S07-2 já existentes.
+
+
+       mesas: ['/erp/js/mesas-lancamento.js', '/erp/js/mesas-conferencia.js', '/erp/js/mesas-painel.js'],
+  +    'cozinha-kds': ['/erp/js/cozinha-kds.js'],
+  +    'cozinha-unidades': ['/erp/js/cozinha-unidades.js'],
+> +    'cozinha-roteamento': ['/erp/js/cozinha-roteamento.js'],
+       financeiro: [
+           '/erp/js/financeiro-dashboard.js',
+           '/erp/js/financeiro-receber.js',
+  +            return typeof loadCozinhaUnidades === 'function'
+  +                ? loadCozinhaUnidades()
+  +                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar Unidades de 
+Cozinha.</div>');
+> +        case 'cozinha-roteamento':
+> +            return typeof loadCozinhaRoteamento === 'function'
+> +                ? loadCozinhaRoteamento()
+> +                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar Roteamento de 
+Cozinhas.</div>');
+           case 'financeiro':
+               return carregarPaginaHtml('financeiro.html', function () {
+                   if (typeof initFinanceiro === 'function') initFinanceiro();
+
+
+
+  +                                <li class="nav-item" id="nav-cozinha-unidades">
+  +                                    <a class="nav-link text-white ps-4" href="#" data-page="cozinha-unidades" 
+title="Unidades de Cozinha">
+  +                                        <i class="fas fa-store" aria-hidden="true"></i><span>Unidades</span>
+  +                                    </a>
+  +                                </li>
+> +                                <!-- S07-3B — Gestão de roteamento (Configurações Avançadas / Gestão de Cozinhas) 
+-->
+> +                                <li class="nav-item" id="nav-cozinha-roteamento">
+> +                                    <a class="nav-link text-white ps-4" href="#" data-page="cozinha-roteamento" 
+title="Roteamento de Cozinhas">
+> +                                        <i class="fas fa-route" aria-hidden="true"></i><span>Roteamento</span>
+  +                                    </a>
+  +                                </li>
+                                   <li class="nav-item" id="nav-usuarios">
+                                       <a class="nav-link text-white" href="#" data-page="usuarios" title="Usuários">
+                                           <i class="fas fa-users" aria-hidden="true"></i><span>Usuários</span>
+
+
+
+       { page: 'dfe-auditoria', titulo: 'Auditoria DF-e', keywords: 'dfe auditoria nsu sync dist sefaz suporte', 
+fiscal: true },
+       { page: 'configuracoes', titulo: 'Configurações', keywords: 'empresa configuração' },
+> +    { page: 'cozinha-unidades', titulo: 'Unidades de Cozinha', keywords: 'cozinha unidade kds cadastro' },
+> +    { page: 'cozinha-roteamento', titulo: 'Roteamento de Cozinhas', keywords: 'roteamento cozinha padrão segmento 
+ifood pedido online' },
+       { page: 'usuarios', titulo: 'Usuários', keywords: 'usuário permissão' },
+       { page: 'licenca', titulo: 'Assinatura CDS', keywords: 'licença assinatura' },
+
+

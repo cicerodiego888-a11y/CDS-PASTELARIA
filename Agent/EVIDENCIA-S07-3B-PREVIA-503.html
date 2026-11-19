@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <title>S07-3B — Prévia 503 (módulo real)</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" rel="stylesheet">
+  <style>
+    body { background: #eef1f4; padding: 16px; }
+    #page-content {
+      max-width: 960px; margin: 0 auto; background: #fff;
+      padding: 8px 20px 24px; border-radius: 8px;
+      box-shadow: 0 1px 4px rgba(0,0,0,.08);
+    }
+  </style>
+</head>
+<body>
+  <div class="alert alert-secondary py-2 mb-2" style="max-width:960px;margin:0 auto 12px">
+    Evidência S07-3B — página real com <code>cozinha-roteamento.js</code> + fetch simulado <strong>503 SCHEMA_ROTEAMENTO_INDISPONIVEL</strong>
+  </div>
+  <div id="page-content"></div>
+  <script src="/frontend/erp/js/cozinha-roteamento.js"></script>
+  <script>
+    (function () {
+      const unidades = [
+        { id: 11, codigo: 'COZ-01', ativo: 1 },
+        { id: 12, codigo: 'COZ-02', ativo: 1 }
+      ];
+      window.API_URL = '/api';
+      window.localStorage = {
+        _t: 'evidencia-token',
+        getItem(k) { return k === 'token' ? this._t : null; }
+      };
+      window.CdsEmpresaContexto = {
+        temEmpresaSelecionada() { return true; },
+        headersJson(extra) {
+          return Object.assign({
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer evidencia-token',
+            'X-Empresa-Id': '1'
+          }, extra || {});
+        }
+      };
+      window.fetch = async function (url) {
+        const u = String(url);
+        if (u.includes('/cozinha/unidades')) {
+          return {
+            ok: true, status: 200,
+            async json() { return { success: true, unidades, empresa_id: 1 }; }
+          };
+        }
+        if (u.includes('/cozinha/roteamento')) {
+          return {
+            ok: false, status: 503,
+            async json() {
+              return {
+                success: false,
+                codigo: 'SCHEMA_ROTEAMENTO_INDISPONIVEL',
+                mensagem: 'Schema de roteamento de cozinhas indisponível. Aplique a migration S07-3A antes de usar esta API.'
+              };
+            }
+          };
+        }
+        return { ok: false, status: 404, async json() { return {}; } };
+      };
+      window.loadCozinhaRoteamento();
+    })();
+  </script>
+</body>
+</html>

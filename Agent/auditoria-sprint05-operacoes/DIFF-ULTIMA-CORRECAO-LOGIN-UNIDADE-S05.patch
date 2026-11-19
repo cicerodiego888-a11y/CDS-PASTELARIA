@@ -1,0 +1,276 @@
+# DIFF REAL — Última correção S05: validação operador↔unidade no login
+# Baseline: pós-homologação (JWT claim sem validação de cadastro)
+# Alvo: código atual (validarUnidadeCozinhaNoLogin antes de jwt.sign)
+diff --git a/backend/services/cozinha/cozinhaAuthUnidade.js b/backend/services/cozinha/cozinhaAuthUnidade.js
+index e69de29..67cb1bb 100644
+--- a/backend/services/cozinha/cozinhaAuthUnidade.js
++++ b/backend/services/cozinha/cozinhaAuthUnidade.js
+@@ -0,0 +1,173 @@
++/**
++ * Autorização operador ↔ unidade de cozinha no login.
++ * Não confia em unidade_cozinha_id do cliente sem validar cadastro.
++ *
++ * Estruturas reutilizadas:
++ * - cozinha_unidades (existência, ativo, empresa_id)
++ * - usuario_empresas (operador autorizado na empresa da unidade)
++ * - cozinha_operador_unidades (vínculo fino operador↔unidade; CREATE IF NOT EXISTS)
++ */
++'use strict';
++
++const UsuarioEmpresaService = require('../empresas/UsuarioEmpresaService');
++
++function erroAuth(mensagem, statusCode, codigo, extras = {}) {
++  const err = new Error(mensagem);
++  err.statusCode = statusCode;
++  err.codigo = codigo;
++  Object.assign(err, extras);
++  return err;
++}
++
++function parsePositiveInteger(value) {
++  const num = Number(value);
++  return Number.isInteger(num) && num > 0 ? num : null;
++}
++
++function dbRun(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.run(sql, params, function cb(err) {
++      if (err) return reject(err);
++      resolve(this);
++    });
++  });
++}
++
++function dbGet(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
++  });
++}
++
++/**
++ * Garante tabela de vínculo sem migration/version bump (CREATE IF NOT EXISTS).
++ * Não altera schema version da Cozinha (permanece v3).
++ */
++async function garantirTabelaOperadorUnidades(db) {
++  if (!db) throw erroAuth('Banco indisponível.', 500, 'DB_INDISPONIVEL');
++  await dbRun(db, `
++    CREATE TABLE IF NOT EXISTS cozinha_operador_unidades (
++      id INTEGER PRIMARY KEY AUTOINCREMENT,
++      empresa_id INTEGER NOT NULL,
++      operador_id INTEGER NOT NULL,
++      unidade_id INTEGER NOT NULL,
++      ativo INTEGER NOT NULL DEFAULT 1,
++      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
++      updated_at TEXT,
++      UNIQUE (empresa_id, operador_id, unidade_id),
++      FOREIGN KEY (unidade_id, empresa_id)
++        REFERENCES cozinha_unidades(id, empresa_id)
++    )
++  `);
++  await dbRun(db, `
++    CREATE INDEX IF NOT EXISTS idx_cozinha_operador_unidades_op
++    ON cozinha_operador_unidades(operador_id, ativo)
++  `);
++  await dbRun(db, `
++    CREATE INDEX IF NOT EXISTS idx_cozinha_operador_unidades_un
++    ON cozinha_operador_unidades(unidade_id, ativo)
++  `);
++}
++
++function isAdminOperacional(usuario) {
++  if (!usuario || typeof usuario !== 'object') return false;
++  const perfil = String(usuario.perfil || '').trim().toUpperCase();
++  return usuario.role === 'admin'
++    || ['SUPER_ADMIN', 'ADMIN'].includes(perfil);
++}
++
++/**
++ * Valida unidade solicitada no login contra cadastro.
++ * @returns {Promise<number|null>} unidade autorizada ou null se não solicitada
++ */
++async function validarUnidadeCozinhaNoLogin({
++  db,
++  usuario,
++  unidadeCozinhaIdRaw,
++  empresaIdRaw
++}) {
++  const unidadeSolicitada = parsePositiveInteger(unidadeCozinhaIdRaw);
++  if (unidadeSolicitada == null) {
++    // Login sem unidade (PDV / outros fluxos) — não bloqueia.
++    return null;
++  }
++
++  await garantirTabelaOperadorUnidades(db);
++
++  const unidade = await dbGet(db, `
++    SELECT id, empresa_id, codigo, ativo
++    FROM cozinha_unidades
++    WHERE id = ?
++  `, [unidadeSolicitada]);
++
++  if (!unidade) {
++    throw erroAuth(
++      'Unidade de cozinha inexistente.',
++      403,
++      'UNIDADE_INEXISTENTE'
++    );
++  }
++  if (Number(unidade.ativo) !== 1) {
++    throw erroAuth(
++      'Unidade de cozinha inativa.',
++      403,
++      'UNIDADE_INATIVA'
++    );
++  }
++
++  const empresaSessao = parsePositiveInteger(empresaIdRaw);
++  if (empresaSessao != null && empresaSessao !== Number(unidade.empresa_id)) {
++    throw erroAuth(
++      'Unidade não pertence à empresa da sessão.',
++      403,
++      'UNIDADE_EMPRESA_ISOLAMENTO'
++    );
++  }
++
++  const empresaId = Number(unidade.empresa_id);
++  const operadorId = Number(usuario && (usuario.id || usuario.usuario_id));
++  if (!Number.isInteger(operadorId) || operadorId <= 0) {
++    throw erroAuth('Operador inválido.', 401, 'SESSAO_INVALIDA');
++  }
++
++  const podeEmpresa = await UsuarioEmpresaService.usuarioPodeAcessarEmpresa(
++    operadorId,
++    empresaId,
++    { db, user: usuario }
++  );
++  if (!podeEmpresa) {
++    throw erroAuth(
++      'Operador sem autorização para a empresa da unidade.',
++      403,
++      'UNIDADE_NAO_AUTORIZADA'
++    );
++  }
++
++  // Admin operacional: qualquer unidade ativa da empresa autorizada.
++  // Demais: vínculo explícito em cozinha_operador_unidades.
++  if (!isAdminOperacional(usuario)) {
++    const vinculo = await dbGet(db, `
++      SELECT id, ativo
++      FROM cozinha_operador_unidades
++      WHERE empresa_id = ? AND operador_id = ? AND unidade_id = ?
++      LIMIT 1
++    `, [empresaId, operadorId, unidadeSolicitada]);
++
++    if (!vinculo || Number(vinculo.ativo) !== 1) {
++      throw erroAuth(
++        'Operador sem autorização para esta unidade de cozinha.',
++        403,
++        'UNIDADE_NAO_AUTORIZADA'
++      );
++    }
++  }
++
++  return unidadeSolicitada;
++}
++
++module.exports = {
++  garantirTabelaOperadorUnidades,
++  validarUnidadeCozinhaNoLogin,
++  parsePositiveInteger,
++  isAdminOperacional
++};
+
+diff --git a/backend/rotas/auth.js b/backend/rotas/auth.js
+index b160ad4..0ce5ae9 100644
+--- a/backend/rotas/auth.js
++++ b/backend/rotas/auth.js
+@@ -7,6 +7,9 @@ const { gravarAuditoria } = require('../services/auditoria');
+ const db = require('../database');
+ const UsuarioEmpresaService = require('../services/empresas/UsuarioEmpresaService');
+ const { criarMiddlewareContextoEmpresa, exigirEmpresaAlvoDoContexto } = require('../services/fiscalNaoFiscal/empresaContexto');
++const {
++  validarUnidadeCozinhaNoLogin
++} = require('../services/cozinha/cozinhaAuthUnidade');
+ const {
+   JWT_SECRET,
+   PERMISSOES_DISPONIVEIS,
+@@ -201,12 +204,7 @@ function finalizarLoginComUsuario(req, res, usuario) {
+       ? req.body.empresa_id
+       : req.body?.empresaId;
+ 
+-    const unidadeCozinhaId = (() => {
+-      const n = Number(unidadeCozinhaIdRaw);
+-      return Number.isInteger(n) && n > 0 ? n : null;
+-    })();
+-
+-    const emitirToken = (extraDetalhe = {}) => {
++    const emitirToken = (unidadeCozinhaId, extraDetalhe = {}) => {
+       try {
+         const token = jwt.sign(
+           {
+@@ -265,11 +263,39 @@ function finalizarLoginComUsuario(req, res, usuario) {
+       }
+     };
+ 
++    const concluirLogin = (extraDetalhe = {}) => {
++      // Valida unidade no cadastro ANTES de assinar o JWT (não confia no body).
++      validarUnidadeCozinhaNoLogin({
++        db,
++        usuario,
++        unidadeCozinhaIdRaw,
++        empresaIdRaw: empresaIdSessaoRaw
++      })
++        .then((unidadeValidada) => {
++          emitirToken(unidadeValidada, {
++            ...extraDetalhe,
++            unidade_cozinha_validada: unidadeValidada != null
++          });
++        })
++        .catch((errUnidade) => {
++          const status = errUnidade.statusCode || 403;
++          const codigo = errUnidade.codigo || 'UNIDADE_NAO_AUTORIZADA';
++          if (status >= 500) {
++            return responderErroInternoLogin(res, 'ERRO UNIDADE COZINHA', errUnidade);
++          }
++          return res.status(status).json({
++            success: false,
++            error: errUnidade.message || 'Unidade de cozinha não autorizada.',
++            mensagem: errUnidade.message || 'Unidade de cozinha não autorizada.',
++            codigo
++          });
++        });
++    };
+ 
+     // Garante vínculo empresarial mínimo antes de qualquer módulo (PDV/ERP/Caixa).
+     UsuarioEmpresaService.garantirAcessoEmpresarialMinimo(usuario, { db, user: usuario })
+       .then((acesso) => {
+-        emitirToken({
++        concluirLogin({
+           empresas_disponiveis: Array.isArray(acesso.empresas) ? acesso.empresas.length : 0,
+           empresas_vinculo_auto: !!acesso.healed
+         });
+@@ -277,7 +303,8 @@ function finalizarLoginComUsuario(req, res, usuario) {
+       .catch((errAcesso) => {
+         console.error('Falha ao garantir acesso empresarial no login:', errAcesso);
+         // Login não bloqueia por falha de vínculo; o seletor ainda tentará curar.
+-        emitirToken({ empresas_vinculo_erro: errAcesso && errAcesso.message });
++        // Unidade, se solicitada, ainda é validada em concluirLogin.
++        concluirLogin({ empresas_vinculo_erro: errAcesso && errAcesso.message });
+       });
+   });
+ }
+
+diff --git a/backend/utils/cozinhaSchema.js b/backend/utils/cozinhaSchema.js
+index aee4660..d95b33f 100644
+--- a/backend/utils/cozinhaSchema.js
++++ b/backend/utils/cozinhaSchema.js
+@@ -242,6 +242,8 @@ async function recriarSchemaVazioSeNecessario(db, versaoAtual) {
+ 
+   await dbRun(db, 'PRAGMA foreign_keys = OFF');
+   try {
++    // Auxiliar de autorização (fora de TABELAS_COZINHA / sem bump de versão)
++    await dbRun(db, 'DROP TABLE IF EXISTS cozinha_operador_unidades');
+     for (const t of TABELAS_COZINHA) {
+       await dbRun(db, `DROP TABLE IF EXISTS ${t}`);
+     }
+

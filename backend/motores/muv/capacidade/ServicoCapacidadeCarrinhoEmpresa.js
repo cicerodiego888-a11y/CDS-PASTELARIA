@@ -296,18 +296,26 @@ async function avaliarCapacidadeCarrinho(entrada = {}, deps = {}) {
   const matrizId = Number(matrizRes.empresa.id);
 
   let permitidas = null;
+  // Preferir objeto req.user (perfil/role) — ID numérico sozinho não ativa admin operacional.
+  const sujeitoUsuario = entrada.usuario != null
+    ? entrada.usuario
+    : (entrada.user != null ? entrada.user : entrada.usuarioId);
   if (typeof deps.listarEmpresasPermitidasIds === 'function') {
     permitidas = new Set(
       (await deps.listarEmpresasPermitidasIds({
         usuarioId: entrada.usuarioId,
+        usuario: sujeitoUsuario,
         db
       })).map(Number)
     );
-  } else if (entrada.usuarioId != null && deps.usarAutorizacaoUsuario !== false) {
+  } else if (sujeitoUsuario != null && deps.usarAutorizacaoUsuario !== false) {
     try {
       const UsuarioEmpresaService = deps.UsuarioEmpresaService
         || require('../../../services/empresas/UsuarioEmpresaService');
-      const lista = await UsuarioEmpresaService.listarEmpresasPermitidas(entrada.usuarioId, { db });
+      const lista = await UsuarioEmpresaService.listarEmpresasPermitidas(sujeitoUsuario, {
+        db,
+        user: typeof sujeitoUsuario === 'object' ? sujeitoUsuario : undefined
+      });
       permitidas = new Set((lista || []).map((e) => Number(e.id != null ? e.id : e.empresa_id)));
     } catch (_) {
       permitidas = null;

@@ -1,0 +1,1859 @@
+﻿# DIFF SPRINT 02 — Despacho / Rodadas / FIFO
+# Gerado em: 2026-11-16 11:18:04 -03:00
+# Base git HEAD: 39c4370cdc9e6a7fa84f85693079ed9859773a8c
+# Nota: arquivos cozinha_* estavam untracked; novos arquivos aparecem como /dev/null → path.
+# Escopo Sprint 02 (implementação operacional):
+#   - backend/server.js (mount)
+#   - backend/rotas/cozinha.js (NOVO)
+#   - backend/services/cozinha/CozinhaDespachoService.js (NOVO)
+#   - backend/services/cozinha/cozinhaIdempotenciaHash.js (ajuste DESPACHO_LOTE: empresa_id + pedido_id por item)
+#   - tests/cozinha/sprint02-despacho-fifo.test.js (NOVO)
+# Arquivos de fundação Sprint 01 (suporte, incluídos no pacote de código, não como delta operacional S02):
+#   - backend/utils/cozinhaSchema.js
+#   - backend/services/cozinha/cozinhaQuantidade.js
+#   - backend/database.js (wiring schema — Sprint 01)
+# =============================================================================
+
+diff --git a/backend/server.js b/backend/server.js
+index 2998df2..29be5bb 100644
+--- a/backend/server.js
++++ b/backend/server.js
+@@ -159,6 +159,7 @@ const faturamentoRoutes = require('./rotas/faturamento');
+ const centralFaturamentoRoutes = require('./rotas/centralFaturamento');
+ const pedidosRoutes = require('./rotas/pedidos');
+ const mesasRoutes = require('./rotas/mesas');
++const cozinhaRoutes = require('./rotas/cozinha');
+ const financeiroRoutes = require('./rotas/financeiro');
+ const condicoesPagamentoRoutes = require('./rotas/condicoes-pagamento');
+ const configuracoesRoutes = require('./rotas/configuracoes');
+@@ -241,6 +242,7 @@ app.use('/api/faturamento', verificarToken, exigirRecurso('faturamento'), fatura
+ app.use('/api/central-faturamento', verificarToken, exigirRecurso('nfe'), centralFaturamentoRoutes);
+ app.use('/api/pedidos', verificarToken, exigirRecurso('pedidos'), pedidosRoutes);
+ app.use('/api/mesas', verificarToken, exigirRecurso('pedidos'), mesasRoutes);
++app.use('/api/cozinha', verificarToken, exigirRecurso('pedidos'), cozinhaRoutes);
+ 
+ // Sprint 3.9 — PDV só existe se módulo licenciado (princípio da invisibilidade)
+ const { responderModuloNaoLicenciado } = require('./middleware/errosLicenciamento');
+
+# ----- NEW FILE: backend/rotas/cozinha.js -----
+
+diff --git "a/C:\\Users\\cicer\\AppData\\Local\\Temp\\cds-empty-null.txt" b/backend/rotas/cozinha.js
+index e69de29..f9b6f30 100644
+--- "a/C:\\Users\\cicer\\AppData\\Local\\Temp\\cds-empty-null.txt"
++++ b/backend/rotas/cozinha.js
+@@ -0,0 +1,84 @@
++/**
++ * Rotas — Cozinha (Sprint 02: despacho)
++ */
++'use strict';
++
++const express = require('express');
++const router = express.Router();
++const db = require('../database');
++const { exigirRecurso } = require('../middleware/validarRecursoImplantacao');
++const { criarMiddlewareContextoEmpresa } = require('../services/fiscalNaoFiscal/empresaContexto');
++const { empresaIdDoReqPedido } = require('../services/pedido/empresaIdDoReqPedido');
++const CozinhaDespacho = require('../services/cozinha/CozinhaDespachoService');
++const { isCozinhaOperacional, getCozinhaSchemaStatus } = require('../utils/cozinhaSchema');
++
++router.use(exigirRecurso('pedidos'));
++router.use(criarMiddlewareContextoEmpresa(db));
++
++function responderErro(res, err) {
++  const status = err.statusCode || 500;
++  const payload = {
++    success: false,
++    error: err.message || 'Erro interno.',
++    mensagem: err.message || 'Erro interno.',
++    codigo: err.codigo || err.code || undefined
++  };
++  if (err.detalhes) payload.detalhes = err.detalhes;
++  return res.status(status).json(payload);
++}
++
++function operadorDaSessao(req) {
++  const id = Number(req.user && (req.user.id || req.user.usuario_id));
++  if (!Number.isInteger(id) || id <= 0) {
++    const err = new Error('Sessão sem operador.');
++    err.statusCode = 401;
++    err.codigo = 'SESSAO_INVALIDA';
++    throw err;
++  }
++  return id;
++}
++
++function chaveIdempotencia(req) {
++  const header = req.get('Idempotency-Key');
++  const corpo = req.body && (req.body.idempotency_key || req.body.chave_idempotencia);
++  if (header == null && (corpo == null || String(corpo).trim() === '')) return null;
++  return String(header || corpo).trim();
++}
++
++router.get('/status', (req, res) => {
++  res.json({
++    success: true,
++    operacional: isCozinhaOperacional(),
++    schema: getCozinhaSchemaStatus()
++  });
++});
++
++router.post('/despacho', async (req, res) => {
++  try {
++    if (!isCozinhaOperacional()) {
++      const st = getCozinhaSchemaStatus();
++      return res.status(503).json({
++        success: false,
++        codigo: 'COZINHA_NAO_OPERACIONAL',
++        mensagem: (st.erro && st.erro.mensagem) || 'Módulo Cozinha não operacional.',
++        detalhes: st
++      });
++    }
++
++    const body = req.body || {};
++    const out = await CozinhaDespacho.despacharLote({
++      empresaId: empresaIdDoReqPedido(req),
++      operadorId: operadorDaSessao(req),
++      idempotencyKey: chaveIdempotencia(req),
++      unidade_id: body.unidade_id,
++      mesa_id: body.mesa_id,
++      atendimento_id: body.atendimento_id,
++      itens: body.itens
++    });
++    return res.status(out.repetida ? 200 : 201).json(out);
++  } catch (err) {
++    return responderErro(res, err);
++  }
++});
++
++module.exports = router;
+
+# ----- NEW FILE: backend/services/cozinha/CozinhaDespachoService.js -----
+
+diff --git "a/C:\\Users\\cicer\\AppData\\Local\\Temp\\cds-empty-null.txt" b/backend/services/cozinha/CozinhaDespachoService.js
+index e69de29..5d63135 100644
+--- "a/C:\\Users\\cicer\\AppData\\Local\\Temp\\cds-empty-null.txt"
++++ b/backend/services/cozinha/CozinhaDespachoService.js
+@@ -0,0 +1,622 @@
++/**
++ * CozinhaDespachoService — Sprint 02
++ * Despacho em lote → uma rodada + FIFO da unidade + idempotência central.
++ */
++'use strict';
++
++const {
++  isCozinhaOperacional,
++  getCozinhaSchemaStatus
++} = require('../../utils/cozinhaSchema');
++const {
++  decimalParaMilessimos,
++  milessimosParaDecimalString,
++  somarMilessimos,
++  subtrairMilessimos
++} = require('./cozinhaQuantidade');
++const {
++  TIPOS_OPERACAO,
++  calcularHashOperacao
++} = require('./cozinhaIdempotenciaHash');
++
++const STATUS_DESPACHAVEIS = new Set(['PEDIDO', 'ABERTO', 'EM_SEPARACAO']);
++
++function erro(mensagem, statusCode, codigo, extras = {}) {
++  const err = new Error(mensagem);
++  err.statusCode = statusCode;
++  err.codigo = codigo;
++  Object.assign(err, extras);
++  return err;
++}
++
++function conn(opts) {
++  return (opts && opts.db) || require('../../database');
++}
++
++function run(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.run(sql, params, function cb(err) {
++      if (err) return reject(err);
++      resolve({ lastID: this.lastID, changes: this.changes });
++    });
++  });
++}
++
++function get(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
++  });
++}
++
++function all(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
++  });
++}
++
++async function beginImmediate(db) {
++  await run(db, 'BEGIN IMMEDIATE');
++}
++
++async function commit(db) {
++  await run(db, 'COMMIT');
++}
++
++async function rollback(db) {
++  try {
++    await run(db, 'ROLLBACK');
++  } catch (_e) { /* já desfeita */ }
++}
++
++function exigirEmpresa(empresaId) {
++  const n = Number(empresaId);
++  if (!Number.isInteger(n) || n <= 0) {
++    throw erro('Empresa do contexto é obrigatória.', 400, 'EMPRESA_CONTEXT_REQUIRED');
++  }
++  return n;
++}
++
++function exigirOperador(operadorId) {
++  const n = Number(operadorId);
++  if (!Number.isInteger(n) || n <= 0) {
++    throw erro('Sessão sem operador.', 401, 'SESSAO_INVALIDA');
++  }
++  return n;
++}
++
++function exigirIdempotencyKey(chave) {
++  if (chave == null || String(chave).trim() === '') {
++    throw erro('Idempotency-Key é obrigatória.', 400, 'IDEMPOTENCY_REQUIRED');
++  }
++  const texto = String(chave).trim();
++  if (texto.length > 200) {
++    throw erro('Idempotency-Key inválida.', 400, 'CHAVE_IDEMPOTENCIA_INVALIDA');
++  }
++  return texto;
++}
++
++function classificarTipoItem(item) {
++  const classif = String(item.classificacao_operacional || item.classificacao_operacional_snapshot || '').toUpperCase();
++  const nome = String(
++    item.produto_nome_snapshot || item.produto_nome || item.produto_nome_pedido_snapshot || ''
++  ).toUpperCase();
++  if (
++    classif === 'INSUMO'
++    || /REFRIGERANTE|BEBIDA|SUCO|ÁGUA|AGUA|COCA|GUARAN/.test(nome)
++  ) {
++    return 'BEBIDA';
++  }
++  if (/PASTEL/.test(nome) || classif === 'COMERCIAL' || !classif) {
++    return 'PASTEL';
++  }
++  return 'OUTRO';
++}
++
++function qtySnapshotParaMillis(valor) {
++  if (valor == null || valor === '') return null;
++  try {
++    return decimalParaMilessimos(valor);
++  } catch (_e) {
++    // snapshots legados com mais casas: quantiza truncando à 3ª (só leitura histórica)
++    const n = Number(valor);
++    if (!Number.isFinite(n)) return null;
++    return Math.trunc(n * 1000);
++  }
++}
++
++function montarRespostaRodada(rodada, itensCriados, comandasIds) {
++  return {
++    success: true,
++    repetida: false,
++    rodada: {
++      id: rodada.id,
++      empresa_id: rodada.empresa_id,
++      unidade_id: rodada.unidade_id,
++      mesa_id: rodada.mesa_id,
++      atendimento_id: rodada.atendimento_id,
++      numero_rodada: rodada.numero_rodada,
++      sequencia_global: rodada.sequencia_global,
++      estado_preparacao: rodada.estado_preparacao,
++      retirada_estado: rodada.retirada_estado,
++      entrega_estado: rodada.entrega_estado,
++      enviada_em: rodada.enviada_em
++    },
++    comandas_ids: comandasIds,
++    quantidade_itens: itensCriados.length,
++    itens: itensCriados
++  };
++}
++
++async function despacharLote(entrada = {}, opts = {}) {
++  if (!isCozinhaOperacional() && !(opts && opts.db)) {
++    const st = getCozinhaSchemaStatus();
++    throw erro(
++      (st.erro && st.erro.mensagem) || 'Módulo Cozinha não operacional.',
++      503,
++      'COZINHA_NAO_OPERACIONAL',
++      { detalhes: st }
++    );
++  }
++
++  const empresaId = exigirEmpresa(entrada.empresaId);
++  const operadorId = exigirOperador(entrada.operadorId);
++  const idempotencyKey = exigirIdempotencyKey(entrada.idempotencyKey);
++  const unidadeId = Number(entrada.unidade_id);
++  const mesaId = Number(entrada.mesa_id);
++  const atendimentoId = Number(entrada.atendimento_id);
++  const itensRaw = Array.isArray(entrada.itens) ? entrada.itens : null;
++
++  if (!Number.isInteger(unidadeId) || unidadeId <= 0) {
++    throw erro('unidade_id inválida.', 400, 'UNIDADE_INVALIDA');
++  }
++  if (!Number.isInteger(mesaId) || mesaId <= 0) {
++    throw erro('mesa_id inválida.', 400, 'MESA_INVALIDA');
++  }
++  if (!Number.isInteger(atendimentoId) || atendimentoId <= 0) {
++    throw erro('atendimento_id inválido.', 400, 'ATENDIMENTO_INVALIDO');
++  }
++  if (!itensRaw || !itensRaw.length) {
++    throw erro('Informe ao menos um item para despacho.', 400, 'ITENS_OBRIGATORIOS');
++  }
++
++  const itensNorm = [];
++  const vistos = new Set();
++  for (const raw of itensRaw) {
++    const pedidoId = Number(raw.pedido_id);
++    const pedidoItemId = Number(raw.pedido_item_id);
++    const comandaId = Number(raw.comanda_id);
++    if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
++      throw erro('pedido_id inválido no item.', 400, 'PEDIDO_INVALIDO');
++    }
++    if (!Number.isInteger(pedidoItemId) || pedidoItemId <= 0) {
++      throw erro('pedido_item_id inválido.', 400, 'PEDIDO_ITEM_INVALIDO');
++    }
++    if (!Number.isInteger(comandaId) || comandaId <= 0) {
++      throw erro('comanda_id obrigatório e inválido.', 400, 'COMANDA_ITEM_OBRIGATORIA');
++    }
++    if (vistos.has(pedidoItemId)) {
++      throw erro('Item duplicado no lote.', 400, 'ITEM_DUPLICADO_NO_LOTE');
++    }
++    vistos.add(pedidoItemId);
++    let qtyMillis;
++    try {
++      qtyMillis = decimalParaMilessimos(
++        raw.qty_solicitada != null ? raw.qty_solicitada : raw.quantidade
++      );
++    } catch (e) {
++      if (e && e.codigo === 'QTY_PRECISAO_INVALIDA') throw e;
++      throw erro('Quantidade inválida.', 400, 'QTY_INVALIDA');
++    }
++    if (qtyMillis <= 0) {
++      throw erro('Quantidade deve ser maior que zero.', 400, 'QTY_INVALIDA');
++    }
++    itensNorm.push({
++      pedido_id: pedidoId,
++      pedido_item_id: pedidoItemId,
++      comanda_id: comandaId,
++      qty_solicitada: milessimosParaDecimalString(qtyMillis),
++      qty_solicitada_millis: qtyMillis
++    });
++  }
++
++  const hash = calcularHashOperacao(TIPOS_OPERACAO.DESPACHO_LOTE, {
++    empresa_id: empresaId,
++    unidade_id: unidadeId,
++    atendimento_id: atendimentoId,
++    mesa_id: mesaId,
++    responsavel_operador_id: operadorId,
++    itens: itensNorm.map((it) => ({
++      pedido_id: it.pedido_id,
++      pedido_item_id: it.pedido_item_id,
++      comanda_id: it.comanda_id,
++      qty_solicitada: it.qty_solicitada
++    }))
++  });
++
++  const db = conn(opts);
++  await beginImmediate(db);
++  try {
++    await run(db, 'PRAGMA foreign_keys = ON');
++
++    // 1) Idempotência ANTES das validações de negócio
++    const existente = await get(db, `
++      SELECT * FROM cozinha_idempotencia WHERE idempotency_key = ?
++    `, [idempotencyKey]);
++
++    if (existente) {
++      if (existente.tipo_operacao !== TIPOS_OPERACAO.DESPACHO_LOTE) {
++        throw erro(
++          'Idempotency-Key já utilizada em outra operação.',
++          409,
++          'IDEMPOTENCY_OPERACAO_DIVERGENTE'
++        );
++      }
++      if (String(existente.payload_hash) !== String(hash)) {
++        throw erro(
++          'Idempotency-Key reutilizada com payload diferente.',
++          409,
++          'IDEMPOTENCY_PAYLOAD_DIVERGENTE'
++        );
++      }
++      if (existente.situacao === 'CONCLUIDA' && existente.resultado_json) {
++        await commit(db);
++        const corpo = JSON.parse(existente.resultado_json);
++        return { ...corpo, repetida: true };
++      }
++      if (existente.situacao === 'EM_ANDAMENTO') {
++        throw erro(
++          'Operação de despacho em andamento para esta chave.',
++          409,
++          'IDEMPOTENCY_EM_ANDAMENTO'
++        );
++      }
++    }
++
++    const contexto = JSON.stringify({
++      empresa_id: empresaId,
++      unidade_id: unidadeId,
++      atendimento_id: atendimentoId,
++      mesa_id: mesaId
++    });
++
++    try {
++      await run(db, `
++        INSERT INTO cozinha_idempotencia (
++          idempotency_key, tipo_operacao, contexto, payload_hash, situacao
++        ) VALUES (?, ?, ?, ?, 'EM_ANDAMENTO')
++      `, [idempotencyKey, TIPOS_OPERACAO.DESPACHO_LOTE, contexto, hash]);
++    } catch (e) {
++      if (/UNIQUE/i.test(String(e.message))) {
++        const novamente = await get(db, `
++          SELECT * FROM cozinha_idempotencia WHERE idempotency_key = ?
++        `, [idempotencyKey]);
++        if (
++          novamente
++          && novamente.situacao === 'CONCLUIDA'
++          && String(novamente.payload_hash) === String(hash)
++          && novamente.resultado_json
++        ) {
++          await commit(db);
++          return { ...JSON.parse(novamente.resultado_json), repetida: true };
++        }
++        throw erro(
++          'Conflito de idempotência sob concorrência.',
++          409,
++          'IDEMPOTENCY_CONCORRENTE'
++        );
++      }
++      throw e;
++    }
++
++    // 2) Validações de negócio
++    const unidade = await get(db, `
++      SELECT id, empresa_id, codigo, ativo, sequencia_atual
++      FROM cozinha_unidades
++      WHERE id = ? AND empresa_id = ?
++    `, [unidadeId, empresaId]);
++    if (!unidade) {
++      throw erro('Unidade operacional não encontrada.', 404, 'UNIDADE_NAO_ENCONTRADA');
++    }
++    if (Number(unidade.ativo) !== 1) {
++      throw erro('Unidade operacional inativa.', 409, 'UNIDADE_INATIVA');
++    }
++
++    const mesa = await get(db, `
++      SELECT id, empresa_id, numero, ativo FROM mesas
++      WHERE id = ? AND empresa_id = ?
++    `, [mesaId, empresaId]);
++    if (!mesa) {
++      throw erro('Mesa não encontrada.', 404, 'MESA_NAO_ENCONTRADA');
++    }
++
++    const atendimento = await get(db, `
++      SELECT id, empresa_id, mesa_id, estado
++      FROM mesa_atendimentos
++      WHERE id = ? AND empresa_id = ?
++    `, [atendimentoId, empresaId]);
++    if (!atendimento) {
++      throw erro('Atendimento não encontrado.', 404, 'ATENDIMENTO_NAO_ENCONTRADO');
++    }
++    if (Number(atendimento.mesa_id) !== mesaId) {
++      throw erro('Atendimento não pertence à mesa informada.', 409, 'ATENDIMENTO_MESA_INCOMPATIVEL');
++    }
++    if (atendimento.estado === 'FECHAMENTO') {
++      throw erro('Atendimento em fechamento.', 409, 'ATENDIMENTO_EM_FECHAMENTO');
++    }
++    if (atendimento.estado === 'ENCERRADO') {
++      throw erro('Atendimento encerrado.', 409, 'ATENDIMENTO_JA_ENCERRADO');
++    }
++    if (atendimento.estado !== 'OCUPADA') {
++      throw erro('Atendimento não está aberto.', 409, 'ATENDIMENTO_NAO_ABERTO');
++    }
++
++    const comandaIds = [...new Set(itensNorm.map((i) => i.comanda_id))];
++    const comandas = await all(db, `
++      SELECT id, empresa_id, atendimento_id, numero_comanda, rotulo, pedido_id
++      FROM cozinha_comandas
++      WHERE empresa_id = ? AND id IN (${comandaIds.map(() => '?').join(',')})
++    `, [empresaId, ...comandaIds]);
++    if (comandas.length !== comandaIds.length) {
++      throw erro('Comanda não encontrada para a empresa.', 404, 'COMANDA_NAO_ENCONTRADA');
++    }
++    const comandasPorId = new Map(comandas.map((c) => [Number(c.id), c]));
++    for (const c of comandas) {
++      if (Number(c.atendimento_id) !== atendimentoId) {
++        throw erro(
++          'Comanda não pertence ao atendimento informado.',
++          400,
++          'COMANDA_ATENDIMENTO_INCOMPATIVEL'
++        );
++      }
++    }
++
++    const itensCriados = [];
++    const detalhesPorItem = [];
++
++    for (const linha of itensNorm) {
++      const comandaLinha = comandasPorId.get(linha.comanda_id);
++      if (
++        comandaLinha
++        && comandaLinha.pedido_id != null
++        && Number(comandaLinha.pedido_id) !== linha.pedido_id
++      ) {
++        throw erro(
++          'Comanda não corresponde ao pedido do item.',
++          400,
++          'COMANDA_PEDIDO_INCOMPATIVEL'
++        );
++      }
++      const pedido = await get(db, `
++        SELECT id, empresa_id, status, mesa_id, mesa_atendimento_id
++        FROM pedidos WHERE id = ?
++      `, [linha.pedido_id]);
++      if (!pedido || Number(pedido.empresa_id) !== empresaId) {
++        throw erro('Pedido não encontrado.', 404, 'PEDIDO_NAO_ENCONTRADO');
++      }
++      if (Number(pedido.mesa_atendimento_id) !== atendimentoId) {
++        throw erro(
++          'Pedido não pertence ao atendimento informado.',
++          400,
++          'PEDIDO_ATENDIMENTO_INCOMPATIVEL'
++        );
++      }
++      const status = String(pedido.status || '').toUpperCase();
++      if (status === 'CANCELADO' || status === 'ORCAMENTO') {
++        throw erro(
++          'Pedido em estado incompatível com despacho.',
++          409,
++          'PEDIDO_ESTADO_INCOMPATIVEL'
++        );
++      }
++      if (!STATUS_DESPACHAVEIS.has(status)) {
++        throw erro(
++          'Pedido em estado incompatível com despacho.',
++          409,
++          'PEDIDO_ESTADO_INCOMPATIVEL'
++        );
++      }
++
++      const item = await get(db, `
++        SELECT
++          i.*,
++          COALESCE(NULLIF(i.produto_nome_snapshot, ''), pr.nome) AS produto_nome,
++          COALESCE(i.classificacao_operacional_snapshot, UPPER(COALESCE(pr.tipo_operacional, 'COMERCIAL')))
++            AS classificacao_operacional
++        FROM pedidos_itens i
++        LEFT JOIN produtos pr ON pr.id = i.produto_id
++        WHERE i.id = ? AND i.pedido_id = ?
++      `, [linha.pedido_item_id, linha.pedido_id]);
++      if (!item) {
++        throw erro(
++          'Item não pertence ao pedido informado.',
++          400,
++          'ITEM_PEDIDO_INCOMPATIVEL'
++        );
++      }
++
++      let controle = await get(db, `
++        SELECT * FROM cozinha_pedido_item_controle WHERE pedido_item_id = ?
++      `, [linha.pedido_item_id]);
++      if (!controle) {
++        const refMillis = decimalParaMilessimos(item.quantidade);
++        await run(db, `
++          INSERT INTO cozinha_pedido_item_controle (
++            empresa_id, pedido_id, pedido_item_id,
++            qty_referencia_despacho_millis, qty_referencia_inicial_millis
++          ) VALUES (?, ?, ?, ?, ?)
++        `, [empresaId, linha.pedido_id, linha.pedido_item_id, refMillis, refMillis]);
++        controle = await get(db, `
++          SELECT * FROM cozinha_pedido_item_controle WHERE pedido_item_id = ?
++        `, [linha.pedido_item_id]);
++      } else if (Number(controle.empresa_id) !== empresaId) {
++        throw erro('Controle de quantidade de outra empresa.', 403, 'EMPRESA_ISOLAMENTO');
++      }
++
++      const aut = await get(db, `
++        SELECT COALESCE(SUM(qty_autorizada_millis), 0) AS total
++        FROM cozinha_autorizacoes_qty
++        WHERE pedido_item_id = ? AND empresa_id = ? AND situacao = 'ATIVA'
++      `, [linha.pedido_item_id, empresaId]);
++      const teto = somarMilessimos(
++        Number(controle.qty_referencia_despacho_millis),
++        Number(aut.total || 0)
++      );
++
++      const liquidaRow = await get(db, `
++        SELECT COALESCE(SUM(qty_solicitada_millis - qty_cancelada_millis), 0) AS liquida
++        FROM cozinha_itens
++        WHERE pedido_item_id = ? AND empresa_id = ?
++      `, [linha.pedido_item_id, empresaId]);
++      const liquida = Number(liquidaRow.liquida || 0);
++      const restante = subtrairMilessimos(teto, liquida);
++      if (linha.qty_solicitada_millis > restante) {
++        throw erro(
++          'Quantidade excede o saldo despachável.',
++          409,
++          'QTY_EXCEDE_RESTANTE',
++          {
++            detalhes: {
++              pedido_item_id: linha.pedido_item_id,
++              solicitado: milessimosParaDecimalString(linha.qty_solicitada_millis),
++              restante: milessimosParaDecimalString(restante)
++            }
++          }
++        );
++      }
++
++      const ingredientes = await all(db, `
++        SELECT *
++        FROM pedido_item_ingredientes
++        WHERE pedido_item_id = ?
++        ORDER BY id
++      `, [linha.pedido_item_id]);
++
++      detalhesPorItem.push({
++        linha,
++        item,
++        tipo_item: classificarTipoItem(item),
++        ingredientes
++      });
++    }
++
++    // 3) FIFO + rodada
++    const seqUp = await run(db, `
++      UPDATE cozinha_unidades
++      SET sequencia_atual = sequencia_atual + 1,
++          updated_at = datetime('now')
++      WHERE id = ? AND empresa_id = ?
++    `, [unidadeId, empresaId]);
++    if (seqUp.changes !== 1) {
++      throw erro('Falha ao atribuir sequência FIFO.', 500, 'FIFO_CONCORRENTE');
++    }
++    const unidadeAtual = await get(db, `
++      SELECT sequencia_atual FROM cozinha_unidades WHERE id = ? AND empresa_id = ?
++    `, [unidadeId, empresaId]);
++    const sequenciaGlobal = Number(unidadeAtual.sequencia_atual);
++
++    const maxRodada = await get(db, `
++      SELECT COALESCE(MAX(numero_rodada), 0) AS m
++      FROM cozinha_rodadas
++      WHERE atendimento_id = ? AND empresa_id = ?
++    `, [atendimentoId, empresaId]);
++    const numeroRodada = Number(maxRodada.m) + 1;
++
++    const insRodada = await run(db, `
++      INSERT INTO cozinha_rodadas (
++        empresa_id, unidade_id, mesa_id, atendimento_id, numero_rodada, sequencia_global,
++        enviada_em, operador_envio_id, estado_preparacao, retirada_estado, entrega_estado,
++        idempotency_key_despacho, updated_at
++      ) VALUES (
++        ?, ?, ?, ?, ?, ?,
++        datetime('now'), ?, 'AGUARDANDO', 'PENDENTE', 'PENDENTE',
++        ?, datetime('now')
++      )
++    `, [
++      empresaId, unidadeId, mesaId, atendimentoId, numeroRodada, sequenciaGlobal,
++      operadorId, idempotencyKey
++    ]);
++    const rodadaId = insRodada.lastID;
++
++    for (const det of detalhesPorItem) {
++      const { linha, item, tipo_item, ingredientes } = det;
++      const insItem = await run(db, `
++        INSERT INTO cozinha_itens (
++          empresa_id, unidade_id, rodada_id, comanda_id, pedido_id, pedido_item_id,
++          sequencia_global, tipo_item, tipo_lancamento,
++          qty_solicitada_millis, qty_preparada_millis, qty_cancelada_millis,
++          estado_preparacao, produto_id, produto_nome_snapshot, observacoes_snapshot,
++          updated_at
++        ) VALUES (
++          ?, ?, ?, ?, ?, ?,
++          ?, ?, 'ORIGINAL',
++          ?, 0, 0,
++          'AGUARDANDO', ?, ?, ?,
++          datetime('now')
++        )
++      `, [
++        empresaId, unidadeId, rodadaId, linha.comanda_id, linha.pedido_id, linha.pedido_item_id,
++        sequenciaGlobal, tipo_item,
++        linha.qty_solicitada_millis,
++        item.produto_id || null,
++        item.produto_nome_snapshot || item.produto_nome || null,
++        item.observacao || item.observacoes || null
++      ]);
++
++      for (const ing of ingredientes) {
++        await run(db, `
++          INSERT INTO cozinha_item_ingredientes (
++            cozinha_item_id, insumo_id, insumo_nome_snapshot,
++            quantidade_snapshot_millis, unidade_snapshot,
++            classificacao_comercial_snapshot, selecionado, preco_adicional_snapshot_millis
++          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
++        `, [
++          insItem.lastID,
++          ing.insumo_id || null,
++          ing.insumo_nome_snapshot,
++          qtySnapshotParaMillis(ing.quantidade_snapshot),
++          ing.unidade_snapshot || null,
++          ing.classificacao_comercial_snapshot || null,
++          Number(ing.selecionado) === 1 ? 1 : 0,
++          qtySnapshotParaMillis(ing.preco_adicional_snapshot) || 0
++        ]);
++      }
++
++      itensCriados.push({
++        id: insItem.lastID,
++        pedido_id: linha.pedido_id,
++        pedido_item_id: linha.pedido_item_id,
++        comanda_id: linha.comanda_id,
++        tipo_item,
++        qty_solicitada: milessimosParaDecimalString(linha.qty_solicitada_millis),
++        estado_preparacao: 'AGUARDANDO',
++        produto_nome_snapshot: item.produto_nome_snapshot || item.produto_nome || null
++      });
++    }
++
++    const rodada = await get(db, `SELECT * FROM cozinha_rodadas WHERE id = ?`, [rodadaId]);
++    const resposta = montarRespostaRodada(rodada, itensCriados, comandaIds);
++
++    await run(db, `
++      UPDATE cozinha_idempotencia
++      SET situacao = 'CONCLUIDA',
++          resultado_http_status = 201,
++          resultado_json = ?,
++          recurso_tipo = 'rodada',
++          recurso_id = ?,
++          concluded_at = datetime('now')
++      WHERE idempotency_key = ?
++    `, [JSON.stringify(resposta), rodadaId, idempotencyKey]);
++
++    await commit(db);
++    return resposta;
++  } catch (err) {
++    await rollback(db);
++    throw err;
++  }
++}
++
++module.exports = {
++  despacharLote,
++  STATUS_DESPACHAVEIS,
++  classificarTipoItem
++};
+
+# ----- NEW/UPDATED FILE: backend/services/cozinha/cozinhaIdempotenciaHash.js -----
+
+diff --git "a/C:\\Users\\cicer\\AppData\\Local\\Temp\\cds-empty-null.txt" b/backend/services/cozinha/cozinhaIdempotenciaHash.js
+index e69de29..bac379e 100644
+--- "a/C:\\Users\\cicer\\AppData\\Local\\Temp\\cds-empty-null.txt"
++++ b/backend/services/cozinha/cozinhaIdempotenciaHash.js
+@@ -0,0 +1,179 @@
++/**
++ * Hash determinístico SHA-256 para idempotência da Cozinha (V1.2.3 adendo).
++ * JSON canônico: chaves lexicográficas; arrays preservam ordem; qty com 3 casas.
++ */
++'use strict';
++
++const crypto = require('crypto');
++const { serializarQtyParaHash } = require('./cozinhaQuantidade');
++
++const TIPOS_OPERACAO = Object.freeze({
++  AUTORIZAR_QTY: 'AUTORIZAR_QTY',
++  REDUZIR_TETO: 'REDUZIR_TETO',
++  DESPACHO_LOTE: 'DESPACHO_LOTE'
++});
++
++/** Campos que nunca entram no hash (não determinísticos / gerados pelo servidor). */
++const CAMPOS_EXCLUIDOS = new Set([
++  'created_at',
++  'updated_at',
++  'autorizada_em',
++  'reduzida_em',
++  'enviada_em',
++  'concluded_at',
++  'publicado_em',
++  'processando_em',
++  'assumida_em',
++  'entregue_em',
++  'cancelado_em',
++  'registrado_em',
++  'sequencia_global',
++  'id',
++  'rodada_id',
++  'cozinha_item_id',
++  'job_id',
++  'spooler_job_token',
++  'timestamp',
++  'agora',
++  'server_now',
++  'Date.now',
++  'trace_id',
++  'request_id',
++  'ip',
++  'user_agent'
++]);
++
++const CAMPOS_QTY = new Set([
++  'qty_adicional',
++  'qty_solicitada',
++  'nova_qty_referencia',
++  'quantidade',
++  'qty'
++]);
++
++function isPlainObject(v) {
++  return v != null && typeof v === 'object' && !Array.isArray(v) && !(v instanceof Date);
++}
++
++function normalizarValor(chave, valor) {
++  if (valor === undefined) return undefined;
++  if (valor === null) return null;
++  if (CAMPOS_EXCLUIDOS.has(chave)) return undefined;
++  if (CAMPOS_QTY.has(chave)) {
++    return serializarQtyParaHash(valor);
++  }
++  if (typeof valor === 'number' && Number.isFinite(valor)) {
++    // Números não-qty: inteiros sem .0; demais como string estável sem float drift no hash
++    if (Number.isInteger(valor)) return valor;
++    return String(valor);
++  }
++  if (typeof valor === 'string' || typeof valor === 'boolean') return valor;
++  if (Array.isArray(valor)) {
++    return valor.map((item, idx) => {
++      if (isPlainObject(item)) return normalizarObjeto(item);
++      if (typeof item === 'number' && !Number.isInteger(item)) return String(item);
++      return item;
++    });
++  }
++  if (isPlainObject(valor)) return normalizarObjeto(valor);
++  return String(valor);
++}
++
++function normalizarObjeto(obj) {
++  const out = {};
++  const chaves = Object.keys(obj).filter((k) => !CAMPOS_EXCLUIDOS.has(k)).sort();
++  for (const k of chaves) {
++    const v = normalizarValor(k, obj[k]);
++    if (v !== undefined) out[k] = v;
++  }
++  return out;
++}
++
++/**
++ * Serializa payload para JSON canônico (sem espaços).
++ * @param {object} payload
++ * @returns {string}
++ */
++function canonicalJson(payload) {
++  const normalizado = isPlainObject(payload)
++    ? normalizarObjeto(payload)
++    : Array.isArray(payload)
++      ? payload.map((item) => (isPlainObject(item) ? normalizarObjeto(item) : item))
++      : payload;
++  return JSON.stringify(normalizado);
++}
++
++/**
++ * Calcula SHA-256 hex do payload normalizado.
++ * @param {object} payload
++ * @returns {string}
++ */
++function calcularPayloadHash(payload) {
++  const canon = canonicalJson(payload);
++  return crypto.createHash('sha256').update(canon, 'utf8').digest('hex');
++}
++
++/**
++ * Monta payload semântico mínimo por tipo (campos do adendo).
++ * Não inclui timestamps/ids de servidor.
++ */
++function montarPayloadSemantico(tipoOperacao, dados = {}) {
++  const tipo = String(tipoOperacao || '').toUpperCase();
++  if (tipo === TIPOS_OPERACAO.AUTORIZAR_QTY) {
++    return normalizarObjeto({
++      tipo_operacao: TIPOS_OPERACAO.AUTORIZAR_QTY,
++      pedido_item_id: dados.pedido_item_id,
++      empresa_id: dados.empresa_id,
++      qty_adicional: dados.qty_adicional,
++      motivo: dados.motivo == null ? dados.motivo : String(dados.motivo).trim(),
++      responsavel_operador_id: dados.responsavel_operador_id
++    });
++  }
++  if (tipo === TIPOS_OPERACAO.REDUZIR_TETO) {
++    return normalizarObjeto({
++      tipo_operacao: TIPOS_OPERACAO.REDUZIR_TETO,
++      pedido_item_id: dados.pedido_item_id,
++      nova_qty_referencia: dados.nova_qty_referencia,
++      motivo: dados.motivo == null ? dados.motivo : String(dados.motivo).trim(),
++      responsavel_operador_id: dados.responsavel_operador_id
++    });
++  }
++  if (tipo === TIPOS_OPERACAO.DESPACHO_LOTE) {
++    const itens = Array.isArray(dados.itens)
++      ? dados.itens.map((it) => ({
++        pedido_id: it.pedido_id,
++        pedido_item_id: it.pedido_item_id,
++        comanda_id: it.comanda_id,
++        qty_solicitada: it.qty_solicitada
++      }))
++      : [];
++    return normalizarObjeto({
++      tipo_operacao: TIPOS_OPERACAO.DESPACHO_LOTE,
++      empresa_id: dados.empresa_id,
++      unidade_id: dados.unidade_id,
++      atendimento_id: dados.atendimento_id,
++      mesa_id: dados.mesa_id,
++      pedido_id: dados.pedido_id,
++      itens,
++      responsavel_operador_id: dados.responsavel_operador_id
++    });
++  }
++  const err = new Error(`tipo_operacao inválido: ${tipoOperacao}`);
++  err.codigo = 'IDEMPOTENCY_TIPO_INVALIDO';
++  err.statusCode = 400;
++  throw err;
++}
++
++function calcularHashOperacao(tipoOperacao, dados) {
++  return calcularPayloadHash(montarPayloadSemantico(tipoOperacao, dados));
++}
++
++module.exports = {
++  TIPOS_OPERACAO,
++  CAMPOS_EXCLUIDOS,
++  canonicalJson,
++  calcularPayloadHash,
++  montarPayloadSemantico,
++  calcularHashOperacao,
++  normalizarObjeto
++};
+
+# ----- NEW FILE: tests/cozinha/sprint02-despacho-fifo.test.js -----
+
+diff --git "a/C:\\Users\\cicer\\AppData\\Local\\Temp\\cds-empty-null.txt" b/tests/cozinha/sprint02-despacho-fifo.test.js
+index e69de29..910cd4c 100644
+--- "a/C:\\Users\\cicer\\AppData\\Local\\Temp\\cds-empty-null.txt"
++++ b/tests/cozinha/sprint02-despacho-fifo.test.js
+@@ -0,0 +1,906 @@
++/**
++ * Sprint 02 — Despacho em lote, formação de rodada e FIFO.
++ * Banco temporário apenas (:memory: / tmp). Sem banco oficial.
++ *
++ * Executar:
++ *   node --test --test-concurrency=1 tests/cozinha/sprint02-despacho-fifo.test.js
++ */
++'use strict';
++
++const fs = require('fs');
++const os = require('os');
++const path = require('path');
++const { describe, it, beforeEach } = require('node:test');
++const assert = require('node:assert/strict');
++const sqlite3 = require('sqlite3').verbose();
++
++const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-cozinha-s02-'));
++process.env.DB_DIR = dbDir;
++process.env.CDS_TEST_ISOLATION = '1';
++process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
++process.env.CDS_FORCAR_LOCAL = '1';
++delete process.env.CDS_ALLOW_OFFICIAL_DB;
++
++const {
++  garantirSchemaCozinha,
++  marcarCozinhaOperacional,
++  isCozinhaOperacional
++} = require('../../backend/utils/cozinhaSchema');
++const CozinhaDespacho = require('../../backend/services/cozinha/CozinhaDespachoService');
++const { TIPOS_OPERACAO } = require('../../backend/services/cozinha/cozinhaIdempotenciaHash');
++
++function run(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.run(sql, params, function cb(err) {
++      if (err) reject(err);
++      else resolve(this);
++    });
++  });
++}
++
++function get(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
++  });
++}
++
++function all(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
++  });
++}
++
++function open(arquivo) {
++  return new Promise((resolve, reject) => {
++    const db = new sqlite3.Database(arquivo || ':memory:', (err) => {
++      if (err) return reject(err);
++      db.serialize(() => {
++        db.run('PRAGMA foreign_keys = ON');
++        db.run('PRAGMA busy_timeout = 10000', (fkErr) => (fkErr ? reject(fkErr) : resolve(db)));
++      });
++    });
++  });
++}
++
++function close(db) {
++  return new Promise((resolve) => db.close(() => resolve()));
++}
++
++async function schemaErpMinimo(db) {
++  await run(db, `
++    CREATE TABLE IF NOT EXISTS configuracoes (
++      id INTEGER PRIMARY KEY AUTOINCREMENT,
++      chave VARCHAR(100) UNIQUE NOT NULL,
++      valor TEXT,
++      tipo VARCHAR(50),
++      descricao TEXT,
++      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
++    )
++  `);
++  await run(db, `
++    CREATE TABLE IF NOT EXISTS mesas (
++      id INTEGER PRIMARY KEY AUTOINCREMENT,
++      empresa_id INTEGER NOT NULL,
++      numero INTEGER NOT NULL,
++      ativo INTEGER NOT NULL DEFAULT 1,
++      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
++      updated_at TEXT
++    )
++  `);
++  await run(db, `
++    CREATE TABLE IF NOT EXISTS mesa_atendimentos (
++      id INTEGER PRIMARY KEY AUTOINCREMENT,
++      empresa_id INTEGER NOT NULL,
++      mesa_id INTEGER NOT NULL,
++      estado TEXT NOT NULL,
++      cliente_id INTEGER,
++      operador_abertura_id INTEGER NOT NULL DEFAULT 1,
++      aberto_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
++      operador_encerramento_id INTEGER,
++      encerrado_em TEXT,
++      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
++      updated_at TEXT
++    )
++  `);
++  await run(db, `
++    CREATE TABLE IF NOT EXISTS produtos (
++      id INTEGER PRIMARY KEY AUTOINCREMENT,
++      nome TEXT NOT NULL,
++      tipo_operacional TEXT DEFAULT 'COMERCIAL'
++    )
++  `);
++  await run(db, `
++    CREATE TABLE IF NOT EXISTS pedidos (
++      id INTEGER PRIMARY KEY AUTOINCREMENT,
++      codigo VARCHAR(50),
++      data_pedido DATE NOT NULL DEFAULT '2026-01-01',
++      total DECIMAL(10,2) NOT NULL DEFAULT 0,
++      status TEXT NOT NULL DEFAULT 'PEDIDO',
++      empresa_id INTEGER,
++      mesa_id INTEGER,
++      mesa_atendimento_id INTEGER,
++      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
++      updated_at DATETIME
++    )
++  `);
++  await run(db, `
++    CREATE TABLE IF NOT EXISTS pedidos_itens (
++      id INTEGER PRIMARY KEY AUTOINCREMENT,
++      pedido_id INTEGER NOT NULL,
++      produto_id INTEGER NOT NULL,
++      quantidade REAL NOT NULL,
++      preco_unitario DECIMAL(10,2) NOT NULL DEFAULT 0,
++      subtotal DECIMAL(10,2) NOT NULL DEFAULT 0,
++      classificacao_operacional_snapshot TEXT,
++      produto_nome_snapshot TEXT,
++      observacao TEXT
++    )
++  `);
++  await run(db, `
++    CREATE TABLE IF NOT EXISTS pedido_item_ingredientes (
++      id INTEGER PRIMARY KEY AUTOINCREMENT,
++      pedido_id INTEGER NOT NULL,
++      pedido_item_id INTEGER NOT NULL,
++      empresa_id INTEGER NOT NULL,
++      insumo_id INTEGER NOT NULL,
++      insumo_nome_snapshot TEXT NOT NULL,
++      quantidade_snapshot REAL NOT NULL,
++      unidade_snapshot TEXT NOT NULL,
++      classificacao_comercial_snapshot TEXT NOT NULL,
++      selecionado INTEGER NOT NULL,
++      preco_adicional_snapshot REAL NOT NULL DEFAULT 0
++    )
++  `);
++  const info = await garantirSchemaCozinha(db);
++  assert.equal(info.operacional, true);
++  assert.equal(isCozinhaOperacional(), true);
++}
++
++/**
++ * Cenário padrão empresa 1: mesa, atendimento, unidade, 2 pedidos/comandas.
++ */
++async function semearCenarioBase(db, opts = {}) {
++  const empresaId = opts.empresaId || 1;
++  const mesaNumero = opts.mesaNumero || 5;
++
++  const mesa = await run(db, `
++    INSERT INTO mesas (empresa_id, numero, ativo) VALUES (?, ?, 1)
++  `, [empresaId, mesaNumero]);
++  const mesaId = mesa.lastID;
++
++  const at = await run(db, `
++    INSERT INTO mesa_atendimentos (empresa_id, mesa_id, estado, operador_abertura_id)
++    VALUES (?, ?, 'OCUPADA', 1)
++  `, [empresaId, mesaId]);
++  const atendimentoId = at.lastID;
++
++  const un = await run(db, `
++    INSERT INTO cozinha_unidades (empresa_id, codigo, ativo, sequencia_atual)
++    VALUES (?, ?, 1, 0)
++  `, [empresaId, opts.codigoUnidade || `U-${empresaId}`]);
++  const unidadeId = un.lastID;
++
++  const prod = await run(db, `
++    INSERT INTO produtos (nome, tipo_operacional) VALUES ('Pastel de Carne', 'COMERCIAL')
++  `);
++  const produtoId = prod.lastID;
++  const prodIng = await run(db, `
++    INSERT INTO produtos (nome, tipo_operacional) VALUES ('Queijo', 'INSUMO')
++  `);
++  const insumoId = prodIng.lastID;
++
++  async function criarPedidoComItem(numeroComanda, qty, comIngrediente) {
++    const ped = await run(db, `
++      INSERT INTO pedidos (
++        codigo, data_pedido, total, status, empresa_id, mesa_id, mesa_atendimento_id
++      ) VALUES (?, '2026-01-01', 10, 'PEDIDO', ?, ?, ?)
++    `, [`P-${empresaId}-${numeroComanda}-${Date.now()}-${Math.random()}`, empresaId, mesaId, atendimentoId]);
++    const pedidoId = ped.lastID;
++
++    const item = await run(db, `
++      INSERT INTO pedidos_itens (
++        pedido_id, produto_id, quantidade, preco_unitario, subtotal,
++        classificacao_operacional_snapshot, produto_nome_snapshot
++      ) VALUES (?, ?, ?, 10, 10, 'COMERCIAL', 'Pastel de Carne')
++    `, [pedidoId, produtoId, qty]);
++    const pedidoItemId = item.lastID;
++
++    if (comIngrediente) {
++      await run(db, `
++        INSERT INTO pedido_item_ingredientes (
++          pedido_id, pedido_item_id, empresa_id, insumo_id,
++          insumo_nome_snapshot, quantidade_snapshot, unidade_snapshot,
++          classificacao_comercial_snapshot, selecionado, preco_adicional_snapshot
++        ) VALUES (?, ?, ?, ?, 'Queijo Extra', 1.000, 'UN', 'ADICIONAL', 1, 2.50)
++      `, [pedidoId, pedidoItemId, empresaId, insumoId]);
++    }
++
++    const cmd = await run(db, `
++      INSERT INTO cozinha_comandas (
++        empresa_id, atendimento_id, numero_comanda, rotulo, pedido_id, operador_lancamento_id
++      ) VALUES (?, ?, ?, ?, ?, 1)
++    `, [empresaId, atendimentoId, numeroComanda, `C${numeroComanda}`, pedidoId]);
++    const comandaId = cmd.lastID;
++
++    return { pedidoId, pedidoItemId, comandaId };
++  }
++
++  const a = await criarPedidoComItem(1, 2, true);
++  const b = await criarPedidoComItem(2, 1, false);
++
++  return {
++    empresaId,
++    mesaId,
++    atendimentoId,
++    unidadeId,
++    produtoId,
++    comanda1: a,
++    comanda2: b,
++    criarPedidoComItem
++  };
++}
++
++function entradaDespacho(ctx, itens, chave) {
++  return {
++    empresaId: ctx.empresaId,
++    operadorId: 7,
++    idempotencyKey: chave,
++    unidade_id: ctx.unidadeId,
++    mesa_id: ctx.mesaId,
++    atendimento_id: ctx.atendimentoId,
++    itens
++  };
++}
++
++describe('Sprint 02 — Despacho / rodada / FIFO (banco temporário)', () => {
++  beforeEach(() => {
++    marcarCozinhaOperacional(false);
++  });
++
++  describe('Despacho básico', () => {
++    it('1) uma comanda gera uma rodada', async () => {
++      const db = await open();
++      await schemaErpMinimo(db);
++      const ctx = await semearCenarioBase(db);
++
++      const out = await CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++        pedido_id: ctx.comanda1.pedidoId,
++        pedido_item_id: ctx.comanda1.pedidoItemId,
++        comanda_id: ctx.comanda1.comandaId,
++        qty_solicitada: '2.000'
++      }], 'desp-1-uma-comanda'), { db });
++
++      assert.equal(out.success, true);
++      assert.equal(out.repetida, false);
++      assert.ok(out.rodada.id > 0);
++      assert.equal(out.rodada.numero_rodada, 1);
++      assert.equal(out.rodada.sequencia_global, 1);
++      assert.equal(out.quantidade_itens, 1);
++      assert.deepEqual(out.comandas_ids, [ctx.comanda1.comandaId]);
++
++      const rods = await all(db, `SELECT * FROM cozinha_rodadas`);
++      assert.equal(rods.length, 1);
++      await close(db);
++    });
++
++    it('2) duas comandas do mesmo atendimento geram uma única rodada', async () => {
++      const db = await open();
++      await schemaErpMinimo(db);
++      const ctx = await semearCenarioBase(db);
++
++      const out = await CozinhaDespacho.despacharLote(entradaDespacho(ctx, [
++        {
++          pedido_id: ctx.comanda1.pedidoId,
++          pedido_item_id: ctx.comanda1.pedidoItemId,
++          comanda_id: ctx.comanda1.comandaId,
++          qty_solicitada: '1.000'
++        },
++        {
++          pedido_id: ctx.comanda2.pedidoId,
++          pedido_item_id: ctx.comanda2.pedidoItemId,
++          comanda_id: ctx.comanda2.comandaId,
++          qty_solicitada: '1.000'
++        }
++      ], 'desp-2-duas-comandas'), { db });
++
++      assert.equal(out.quantidade_itens, 2);
++      assert.equal(out.rodada.numero_rodada, 1);
++      const rods = await all(db, `SELECT id FROM cozinha_rodadas`);
++      assert.equal(rods.length, 1);
++      const itens = await all(db, `SELECT rodada_id FROM cozinha_itens`);
++      assert.equal(itens.length, 2);
++      assert.equal(itens[0].rodada_id, out.rodada.id);
++      assert.equal(itens[1].rodada_id, out.rodada.id);
++      await close(db);
++    });
++
++    it('3) cada item permanece vinculado à sua comanda', async () => {
++      const db = await open();
++      await schemaErpMinimo(db);
++      const ctx = await semearCenarioBase(db);
++
++      const out = await CozinhaDespacho.despacharLote(entradaDespacho(ctx, [
++        {
++          pedido_id: ctx.comanda1.pedidoId,
++          pedido_item_id: ctx.comanda1.pedidoItemId,
++          comanda_id: ctx.comanda1.comandaId,
++          qty_solicitada: '1.000'
++        },
++        {
++          pedido_id: ctx.comanda2.pedidoId,
++          pedido_item_id: ctx.comanda2.pedidoItemId,
++          comanda_id: ctx.comanda2.comandaId,
++          qty_solicitada: '1.000'
++        }
++      ], 'desp-3-vinculo-comanda'), { db });
++
++      const porComanda = new Map(out.itens.map((i) => [i.comanda_id, i]));
++      assert.equal(porComanda.get(ctx.comanda1.comandaId).pedido_item_id, ctx.comanda1.pedidoItemId);
++      assert.equal(porComanda.get(ctx.comanda2.comandaId).pedido_item_id, ctx.comanda2.pedidoItemId);
++
++      const rows = await all(db, `SELECT comanda_id, pedido_item_id FROM cozinha_itens ORDER BY id`);
++      assert.equal(rows.length, 2);
++      assert.ok(rows.some((r) => r.comanda_id === ctx.comanda1.comandaId
++        && r.pedido_item_id === ctx.comanda1.pedidoItemId));
++      assert.ok(rows.some((r) => r.comanda_id === ctx.comanda2.comandaId
++        && r.pedido_item_id === ctx.comanda2.pedidoItemId));
++      await close(db);
++    });
++
++    it('4) personalizações são preservadas em cozinha_item_ingredientes', async () => {
++      const db = await open();
++      await schemaErpMinimo(db);
++      const ctx = await semearCenarioBase(db);
++
++      const out = await CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++        pedido_id: ctx.comanda1.pedidoId,
++        pedido_item_id: ctx.comanda1.pedidoItemId,
++        comanda_id: ctx.comanda1.comandaId,
++        qty_solicitada: '2.000'
++      }], 'desp-4-personalizacao'), { db });
++
++      const ings = await all(db, `
++        SELECT * FROM cozinha_item_ingredientes WHERE cozinha_item_id = ?
++      `, [out.itens[0].id]);
++      assert.equal(ings.length, 1);
++      assert.equal(ings[0].insumo_nome_snapshot, 'Queijo Extra');
++      assert.equal(ings[0].selecionado, 1);
++      assert.equal(ings[0].quantidade_snapshot_millis, 1000);
++      assert.equal(ings[0].unidade_snapshot, 'UN');
++
++      const origem = await get(db, `
++        SELECT * FROM pedido_item_ingredientes WHERE pedido_item_id = ?
++      `, [ctx.comanda1.pedidoItemId]);
++      assert.equal(origem.insumo_nome_snapshot, 'Queijo Extra');
++      await close(db);
++    });
++
++    it('5) estados iniciais da rodada e dos itens estão corretos', async () => {
++      const db = await open();
++      await schemaErpMinimo(db);
++      const ctx = await semearCenarioBase(db);
++
++      const out = await CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++        pedido_id: ctx.comanda1.pedidoId,
++        pedido_item_id: ctx.comanda1.pedidoItemId,
++        comanda_id: ctx.comanda1.comandaId,
++        qty_solicitada: '1.000'
++      }], 'desp-5-estados'), { db });
++
++      assert.equal(out.rodada.estado_preparacao, 'AGUARDANDO');
++      assert.equal(out.rodada.retirada_estado, 'PENDENTE');
++      assert.equal(out.rodada.entrega_estado, 'PENDENTE');
++
++      const item = await get(db, `SELECT * FROM cozinha_itens WHERE id = ?`, [out.itens[0].id]);
++      assert.equal(item.estado_preparacao, 'AGUARDANDO');
++      assert.equal(item.qty_preparada_millis, 0);
++      assert.equal(item.qty_cancelada_millis, 0);
++      assert.equal(item.qty_solicitada_millis, 1000);
++      await close(db);
++    });
++  });
++
++  describe('FIFO', () => {
++    it('6) sequências crescem na unidade a cada despacho', async () => {
++      const db = await open();
++      await schemaErpMinimo(db);
++      const ctx = await semearCenarioBase(db);
++
++      const r1 = await CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++        pedido_id: ctx.comanda1.pedidoId,
++        pedido_item_id: ctx.comanda1.pedidoItemId,
++        comanda_id: ctx.comanda1.comandaId,
++        qty_solicitada: '1.000'
++      }], 'fifo-6-a'), { db });
++
++      const r2 = await CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++        pedido_id: ctx.comanda2.pedidoId,
++        pedido_item_id: ctx.comanda2.pedidoItemId,
++        comanda_id: ctx.comanda2.comandaId,
++        qty_solicitada: '1.000'
++      }], 'fifo-6-b'), { db });
++
++      assert.equal(r1.rodada.sequencia_global, 1);
++      assert.equal(r2.rodada.sequencia_global, 2);
++      assert.equal(r1.rodada.numero_rodada, 1);
++      assert.equal(r2.rodada.numero_rodada, 2);
++      assert.notEqual(r1.rodada.id, r2.rodada.id);
++
++      const un = await get(db, `SELECT sequencia_atual FROM cozinha_unidades WHERE id = ?`, [ctx.unidadeId]);
++      assert.equal(un.sequencia_atual, 2);
++      await close(db);
++    });
++
++    it('7) despachos concorrentes não compartilham a mesma sequência', async () => {
++      const arquivo = path.join(dbDir, `fifo-concorrente-${Date.now()}.sqlite`);
++      const db = await open(arquivo);
++      await schemaErpMinimo(db);
++      const ctx = await semearCenarioBase(db);
++      await close(db);
++
++      const abrir = () => open(arquivo);
++
++      const [a, b] = await Promise.all([
++        (async () => {
++          const d = await abrir();
++          try {
++            return await CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++              pedido_id: ctx.comanda1.pedidoId,
++              pedido_item_id: ctx.comanda1.pedidoItemId,
++              comanda_id: ctx.comanda1.comandaId,
++              qty_solicitada: '1.000'
++            }], 'fifo-7-a'), { db: d });
++          } finally {
++            await close(d);
++          }
++        })(),
++        (async () => {
++          const d = await abrir();
++          try {
++            return await CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++              pedido_id: ctx.comanda2.pedidoId,
++              pedido_item_id: ctx.comanda2.pedidoItemId,
++              comanda_id: ctx.comanda2.comandaId,
++              qty_solicitada: '1.000'
++            }], 'fifo-7-b'), { db: d });
++          } finally {
++            await close(d);
++          }
++        })()
++      ]);
++
++      const seqs = [a.rodada.sequencia_global, b.rodada.sequencia_global].sort((x, y) => x - y);
++      assert.deepEqual(seqs, [1, 2]);
++
++      const dbCheck = await open(arquivo);
++      const un = await get(dbCheck, `SELECT sequencia_atual FROM cozinha_unidades WHERE id = ?`, [ctx.unidadeId]);
++      assert.equal(un.sequencia_atual, 2);
++      const rods = await all(dbCheck, `SELECT sequencia_global FROM cozinha_rodadas ORDER BY sequencia_global`);
++      assert.deepEqual(rods.map((r) => r.sequencia_global), [1, 2]);
++      await close(dbCheck);
++    });
++
++    it('8) sequência não reinicia por atendimento; pertence à unidade', async () => {
++      const db = await open();
++      await schemaErpMinimo(db);
++      const ctx = await semearCenarioBase(db);
++
++      await CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++        pedido_id: ctx.comanda1.pedidoId,
++        pedido_item_id: ctx.comanda1.pedidoItemId,
++        comanda_id: ctx.comanda1.comandaId,
++        qty_solicitada: '1.000'
++      }], 'fifo-8-a1'), { db });
++
++      // Encerra atendimento e abre outro na mesma mesa/unidade
++      await run(db, `
++        UPDATE mesa_atendimentos SET estado = 'ENCERRADO' WHERE id = ?
++      `, [ctx.atendimentoId]);
++      const at2 = await run(db, `
++        INSERT INTO mesa_atendimentos (empresa_id, mesa_id, estado, operador_abertura_id)
++        VALUES (?, ?, 'OCUPADA', 1)
++      `, [ctx.empresaId, ctx.mesaId]);
++      const atendimento2 = at2.lastID;
++
++      const ped = await run(db, `
++        INSERT INTO pedidos (
++          codigo, data_pedido, total, status, empresa_id, mesa_id, mesa_atendimento_id
++        ) VALUES ('P-AT2', '2026-01-01', 5, 'PEDIDO', ?, ?, ?)
++      `, [ctx.empresaId, ctx.mesaId, atendimento2]);
++      const item = await run(db, `
++        INSERT INTO pedidos_itens (
++          pedido_id, produto_id, quantidade, preco_unitario, subtotal,
++          classificacao_operacional_snapshot, produto_nome_snapshot
++        ) VALUES (?, ?, 1, 5, 5, 'COMERCIAL', 'Pastel de Carne')
++      `, [ped.lastID, ctx.produtoId]);
++      const cmd = await run(db, `
++        INSERT INTO cozinha_comandas (
++          empresa_id, atendimento_id, numero_comanda, rotulo, pedido_id
++        ) VALUES (?, ?, 1, 'Novo', ?)
++      `, [ctx.empresaId, atendimento2, ped.lastID]);
++
++      const out = await CozinhaDespacho.despacharLote({
++        empresaId: ctx.empresaId,
++        operadorId: 7,
++        idempotencyKey: 'fifo-8-a2',
++        unidade_id: ctx.unidadeId,
++        mesa_id: ctx.mesaId,
++        atendimento_id: atendimento2,
++        itens: [{
++          pedido_id: ped.lastID,
++          pedido_item_id: item.lastID,
++          comanda_id: cmd.lastID,
++          qty_solicitada: '1.000'
++        }]
++      }, { db });
++
++      assert.equal(out.rodada.numero_rodada, 1);
++      assert.equal(out.rodada.sequencia_global, 2);
++      await close(db);
++    });
++  });
++
++  describe('Idempotência', () => {
++    it('9) replay com mesma chave e payload devolve resposta original', async () => {
++      const db = await open();
++      await schemaErpMinimo(db);
++      const ctx = await semearCenarioBase(db);
++      const payload = entradaDespacho(ctx, [{
++        pedido_id: ctx.comanda1.pedidoId,
++        pedido_item_id: ctx.comanda1.pedidoItemId,
++        comanda_id: ctx.comanda1.comandaId,
++        qty_solicitada: '1.000'
++      }], 'idem-9');
++
++      const first = await CozinhaDespacho.despacharLote(payload, { db });
++      // Altera estado do pedido após sucesso — replay não deve revalidar negócio
++      await run(db, `UPDATE pedidos SET status = 'CANCELADO' WHERE id = ?`, [ctx.comanda1.pedidoId]);
++
++      const second = await CozinhaDespacho.despacharLote(payload, { db });
++      assert.equal(second.repetida, true);
++      assert.equal(second.rodada.id, first.rodada.id);
++      assert.equal(second.rodada.sequencia_global, first.rodada.sequencia_global);
++
++      const rods = await all(db, `SELECT id FROM cozinha_rodadas`);
++      assert.equal(rods.length, 1);
++      const un = await get(db, `SELECT sequencia_atual FROM cozinha_unidades WHERE id = ?`, [ctx.unidadeId]);
++      assert.equal(un.sequencia_atual, 1);
++      await close(db);
++    });
++
++    it('10) mesma chave com payload diferente → 409', async () => {
++      const db = await open();
++      await schemaErpMinimo(db);
++      const ctx = await semearCenarioBase(db);
++
++      await CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++        pedido_id: ctx.comanda1.pedidoId,
++        pedido_item_id: ctx.comanda1.pedidoItemId,
++        comanda_id: ctx.comanda1.comandaId,
++        qty_solicitada: '1.000'
++      }], 'idem-10'), { db });
++
++      await assert.rejects(
++        () => CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++          pedido_id: ctx.comanda1.pedidoId,
++          pedido_item_id: ctx.comanda1.pedidoItemId,
++          comanda_id: ctx.comanda1.comandaId,
++          qty_solicitada: '2.000'
++        }], 'idem-10'), { db }),
++        (err) => {
++          assert.equal(err.statusCode, 409);
++          assert.equal(err.codigo, 'IDEMPOTENCY_PAYLOAD_DIVERGENTE');
++          return true;
++        }
++      );
++      await close(db);
++    });
++
++    it('11) mesma chave associada a outro tipo de operação → 409', async () => {
++      const db = await open();
++      await schemaErpMinimo(db);
++      const ctx = await semearCenarioBase(db);
++
++      await run(db, `
++        INSERT INTO cozinha_idempotencia (
++          idempotency_key, tipo_operacao, contexto, payload_hash, situacao,
++          resultado_http_status, resultado_json
++        ) VALUES ('idem-11', 'AUTORIZAR_QTY', '{}', 'abc', 'CONCLUIDA', 201, '{}')
++      `);
++
++      await assert.rejects(
++        () => CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++          pedido_id: ctx.comanda1.pedidoId,
++          pedido_item_id: ctx.comanda1.pedidoItemId,
++          comanda_id: ctx.comanda1.comandaId,
++          qty_solicitada: '1.000'
++        }], 'idem-11'), { db }),
++        (err) => {
++          assert.equal(err.statusCode, 409);
++          assert.equal(err.codigo, 'IDEMPOTENCY_OPERACAO_DIVERGENTE');
++          return true;
++        }
++      );
++      await close(db);
++    });
++  });
++
++  describe('Isolamento e validações', () => {
++    it('12) rejeita pedido de outra empresa', async () => {
++      const db = await open();
++      await schemaErpMinimo(db);
++      const ctx = await semearCenarioBase(db);
++      await run(db, `UPDATE pedidos SET empresa_id = 99 WHERE id = ?`, [ctx.comanda1.pedidoId]);
++
++      await assert.rejects(
++        () => CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++          pedido_id: ctx.comanda1.pedidoId,
++          pedido_item_id: ctx.comanda1.pedidoItemId,
++          comanda_id: ctx.comanda1.comandaId,
++          qty_solicitada: '1.000'
++        }], 'iso-12'), { db }),
++        (err) => {
++          assert.equal(err.statusCode, 404);
++          assert.equal(err.codigo, 'PEDIDO_NAO_ENCONTRADO');
++          return true;
++        }
++      );
++
++      const rods = await all(db, `SELECT id FROM cozinha_rodadas`);
++      assert.equal(rods.length, 0);
++      const un = await get(db, `SELECT sequencia_atual FROM cozinha_unidades WHERE id = ?`, [ctx.unidadeId]);
++      assert.equal(un.sequencia_atual, 0);
++      await close(db);
++    });
++
++    it('13) rejeita atendimento incompatível com a mesa', async () => {
++      const db = await open();
++      await schemaErpMinimo(db);
++      const ctx = await semearCenarioBase(db);
++      const mesa2 = await run(db, `
++        INSERT INTO mesas (empresa_id, numero, ativo) VALUES (1, 99, 1)
++      `);
++
++      await assert.rejects(
++        () => CozinhaDespacho.despacharLote({
++          ...entradaDespacho(ctx, [{
++            pedido_id: ctx.comanda1.pedidoId,
++            pedido_item_id: ctx.comanda1.pedidoItemId,
++            comanda_id: ctx.comanda1.comandaId,
++            qty_solicitada: '1.000'
++          }], 'iso-13'),
++          mesa_id: mesa2.lastID
++        }, { db }),
++        (err) => {
++          assert.equal(err.statusCode, 409);
++          assert.equal(err.codigo, 'ATENDIMENTO_MESA_INCOMPATIVEL');
++          return true;
++        }
++      );
++      await close(db);
++    });
++
++    it('14) rejeita unidade inativa', async () => {
++      const db = await open();
++      await schemaErpMinimo(db);
++      const ctx = await semearCenarioBase(db);
++      await run(db, `UPDATE cozinha_unidades SET ativo = 0 WHERE id = ?`, [ctx.unidadeId]);
++
++      await assert.rejects(
++        () => CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++          pedido_id: ctx.comanda1.pedidoId,
++          pedido_item_id: ctx.comanda1.pedidoItemId,
++          comanda_id: ctx.comanda1.comandaId,
++          qty_solicitada: '1.000'
++        }], 'iso-14'), { db }),
++        (err) => {
++          assert.equal(err.statusCode, 409);
++          assert.equal(err.codigo, 'UNIDADE_INATIVA');
++          return true;
++        }
++      );
++      await close(db);
++    });
++  });
++
++  describe('Quantidades', () => {
++    it('15) rejeita quantidade acima do saldo e não consome FIFO', async () => {
++      const db = await open();
++      await schemaErpMinimo(db);
++      const ctx = await semearCenarioBase(db);
++
++      await assert.rejects(
++        () => CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++          pedido_id: ctx.comanda1.pedidoId,
++          pedido_item_id: ctx.comanda1.pedidoItemId,
++          comanda_id: ctx.comanda1.comandaId,
++          qty_solicitada: '3.000'
++        }], 'qty-15'), { db }),
++        (err) => {
++          assert.equal(err.statusCode, 409);
++          assert.equal(err.codigo, 'QTY_EXCEDE_RESTANTE');
++          return true;
++        }
++      );
++      const un = await get(db, `SELECT sequencia_atual FROM cozinha_unidades WHERE id = ?`, [ctx.unidadeId]);
++      assert.equal(un.sequencia_atual, 0);
++      const rods = await all(db, `SELECT id FROM cozinha_rodadas`);
++      assert.equal(rods.length, 0);
++      await close(db);
++    });
++
++    it('16) despacho parcial reduz o saldo; segundo despacho consome o restante', async () => {
++      const db = await open();
++      await schemaErpMinimo(db);
++      const ctx = await semearCenarioBase(db);
++
++      const r1 = await CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++        pedido_id: ctx.comanda1.pedidoId,
++        pedido_item_id: ctx.comanda1.pedidoItemId,
++        comanda_id: ctx.comanda1.comandaId,
++        qty_solicitada: '1.000'
++      }], 'qty-16-a'), { db });
++      assert.equal(r1.itens[0].qty_solicitada, '1.000');
++
++      const r2 = await CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++        pedido_id: ctx.comanda1.pedidoId,
++        pedido_item_id: ctx.comanda1.pedidoItemId,
++        comanda_id: ctx.comanda1.comandaId,
++        qty_solicitada: '1.000'
++      }], 'qty-16-b'), { db });
++      assert.equal(r2.rodada.sequencia_global, 2);
++
++      await assert.rejects(
++        () => CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++          pedido_id: ctx.comanda1.pedidoId,
++          pedido_item_id: ctx.comanda1.pedidoItemId,
++          comanda_id: ctx.comanda1.comandaId,
++          qty_solicitada: '0.001'
++        }], 'qty-16-c'), { db }),
++        (err) => err.codigo === 'QTY_EXCEDE_RESTANTE'
++      );
++      await close(db);
++    });
++
++    it('17) alteração silenciosa da qty do pedido não eleva o teto', async () => {
++      const db = await open();
++      await schemaErpMinimo(db);
++      const ctx = await semearCenarioBase(db);
++
++      await CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++        pedido_id: ctx.comanda1.pedidoId,
++        pedido_item_id: ctx.comanda1.pedidoItemId,
++        comanda_id: ctx.comanda1.comandaId,
++        qty_solicitada: '2.000'
++      }], 'qty-17-a'), { db });
++
++      await run(db, `
++        UPDATE pedidos_itens SET quantidade = 10 WHERE id = ?
++      `, [ctx.comanda1.pedidoItemId]);
++
++      await assert.rejects(
++        () => CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++          pedido_id: ctx.comanda1.pedidoId,
++          pedido_item_id: ctx.comanda1.pedidoItemId,
++          comanda_id: ctx.comanda1.comandaId,
++          qty_solicitada: '1.000'
++        }], 'qty-17-b'), { db }),
++        (err) => {
++          assert.equal(err.codigo, 'QTY_EXCEDE_RESTANTE');
++          return true;
++        }
++      );
++
++      const ctrl = await get(db, `
++        SELECT qty_referencia_despacho_millis FROM cozinha_pedido_item_controle
++        WHERE pedido_item_id = ?
++      `, [ctx.comanda1.pedidoItemId]);
++      assert.equal(ctrl.qty_referencia_despacho_millis, 2000);
++      await close(db);
++    });
++
++    it('18) rejeita mais de três casas decimais', async () => {
++      const db = await open();
++      await schemaErpMinimo(db);
++      const ctx = await semearCenarioBase(db);
++
++      await assert.rejects(
++        () => CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++          pedido_id: ctx.comanda1.pedidoId,
++          pedido_item_id: ctx.comanda1.pedidoItemId,
++          comanda_id: ctx.comanda1.comandaId,
++          qty_solicitada: '1.0001'
++        }], 'qty-18'), { db }),
++        (err) => {
++          assert.equal(err.codigo, 'QTY_PRECISAO_INVALIDA');
++          assert.equal(err.statusCode, 400);
++          return true;
++        }
++      );
++      await close(db);
++    });
++
++    it('19) armazena quantidades em milésimos inteiros', async () => {
++      const db = await open();
++      await schemaErpMinimo(db);
++      const ctx = await semearCenarioBase(db);
++
++      await CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++        pedido_id: ctx.comanda1.pedidoId,
++        pedido_item_id: ctx.comanda1.pedidoItemId,
++        comanda_id: ctx.comanda1.comandaId,
++        qty_solicitada: '1.500'
++      }], 'qty-19'), { db });
++
++      const item = await get(db, `
++        SELECT qty_solicitada_millis FROM cozinha_itens WHERE pedido_item_id = ?
++      `, [ctx.comanda1.pedidoItemId]);
++      assert.equal(item.qty_solicitada_millis, 1500);
++      assert.equal(Number.isInteger(item.qty_solicitada_millis), true);
++      await close(db);
++    });
++  });
++
++  describe('Transação', () => {
++    it('20) falha após claim de idempotência faz ROLLBACK sem rodada/FIFO', async () => {
++      const db = await open();
++      await schemaErpMinimo(db);
++      const ctx = await semearCenarioBase(db);
++
++      // Item inexistente: passa claim, falha na validação → rollback
++      await assert.rejects(
++        () => CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++          pedido_id: ctx.comanda1.pedidoId,
++          pedido_item_id: 999999,
++          comanda_id: ctx.comanda1.comandaId,
++          qty_solicitada: '1.000'
++        }], 'tx-20'), { db }),
++        (err) => err.codigo === 'ITEM_PEDIDO_INCOMPATIVEL'
++      );
++
++      const rods = await all(db, `SELECT id FROM cozinha_rodadas`);
++      assert.equal(rods.length, 0);
++      const un = await get(db, `SELECT sequencia_atual FROM cozinha_unidades WHERE id = ?`, [ctx.unidadeId]);
++      assert.equal(un.sequencia_atual, 0);
++      const idemp = await get(db, `
++        SELECT * FROM cozinha_idempotencia WHERE idempotency_key = 'tx-20'
++      `);
++      assert.equal(idemp, null);
++
++      // Mesma chave pode ser reutilizada após rollback
++      const ok = await CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++        pedido_id: ctx.comanda1.pedidoId,
++        pedido_item_id: ctx.comanda1.pedidoItemId,
++        comanda_id: ctx.comanda1.comandaId,
++        qty_solicitada: '1.000'
++      }], 'tx-20'), { db });
++      assert.equal(ok.success, true);
++      await close(db);
++    });
++
++    it('21) registra operação CONCLUIDA na tabela central cozinha_idempotencia', async () => {
++      const db = await open();
++      await schemaErpMinimo(db);
++      const ctx = await semearCenarioBase(db);
++
++      const out = await CozinhaDespacho.despacharLote(entradaDespacho(ctx, [{
++        pedido_id: ctx.comanda1.pedidoId,
++        pedido_item_id: ctx.comanda1.pedidoItemId,
++        comanda_id: ctx.comanda1.comandaId,
++        qty_solicitada: '1.000'
++      }], 'tx-21'), { db });
++
++      const row = await get(db, `
++        SELECT * FROM cozinha_idempotencia WHERE idempotency_key = 'tx-21'
++      `);
++      assert.equal(row.tipo_operacao, TIPOS_OPERACAO.DESPACHO_LOTE);
++      assert.equal(row.situacao, 'CONCLUIDA');
++      assert.equal(row.resultado_http_status, 201);
++      assert.equal(row.recurso_tipo, 'rodada');
++      assert.equal(Number(row.recurso_id), out.rodada.id);
++      const corpo = JSON.parse(row.resultado_json);
++      assert.equal(corpo.rodada.id, out.rodada.id);
++      await close(db);
++    });
++  });
++});

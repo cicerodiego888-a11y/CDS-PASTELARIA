@@ -1,0 +1,307 @@
+# DIFF REAL — Correção de homologação Sprint 05 (isolamento operacional por unidade)
+# Baseline: S05 inicial (unidade opcional via body/query)
+# Alvo: código atual
+
+diff --git a/backend/services/cozinha/CozinhaPreparacaoService.js b/backend/services/cozinha/CozinhaPreparacaoService.js
+index 4717728..1a79863 100644
+--- a/backend/services/cozinha/CozinhaPreparacaoService.js
++++ b/backend/services/cozinha/CozinhaPreparacaoService.js
+@@ -19,6 +19,7 @@ const {
+   TIPOS_OPERACAO,
+   calcularHashOperacao
+ } = require('./cozinhaIdempotenciaHash');
++const { exigirUnidadeOperacional } = require('./cozinhaUnidadeOperacional');
+ 
+ const EVENTOS = Object.freeze({
+   PREPARACAO_INICIADA: 'PREPARACAO_INICIADA',
+@@ -280,11 +281,11 @@ function exigirRodadaNaoCancelada(rodada) {
+ 
+ /**
+  * Garante vínculo item ↔ rodada ↔ unidade ↔ comanda na mesma empresa.
+- * Se unidade_id for informado na entrada, deve coincidir com a do item/rodada.
++ * unidadeIdAutorizada é obrigatória (origem: sessão autenticada via rota).
+  */
+ async function validarIntegridadeOperacional(db, item, rodada, {
+   empresaId,
+-  unidadeIdOpcional
++  unidadeIdAutorizada
+ }) {
+   if (Number(item.rodada_id) !== Number(rodada.id)) {
+     throw erro('Item não pertence à rodada informada.', 409, 'ITEM_RODADA_INCOMPATIVEL');
+@@ -301,18 +302,13 @@ async function validarIntegridadeOperacional(db, item, rodada, {
+     );
+   }
+ 
+-  if (unidadeIdOpcional != null && unidadeIdOpcional !== '') {
+-    const unidadeId = Number(unidadeIdOpcional);
+-    if (!Number.isInteger(unidadeId) || unidadeId <= 0) {
+-      throw erro('unidade_id inválida.', 400, 'UNIDADE_INVALIDA');
+-    }
+-    if (unidadeId !== Number(item.unidade_id)) {
+-      throw erro(
+-        'Item não pertence à unidade operacional informada.',
+-        409,
+-        'UNIDADE_ISOLAMENTO'
+-      );
+-    }
++  const unidadeId = exigirUnidadeOperacional(unidadeIdAutorizada);
++  if (unidadeId !== Number(item.unidade_id)) {
++    throw erro(
++      'Item não pertence à unidade operacional autorizada.',
++      409,
++      'UNIDADE_ISOLAMENTO'
++    );
+   }
+ 
+   const comanda = await get(db, `
+@@ -331,7 +327,7 @@ async function validarIntegridadeOperacional(db, item, rodada, {
+     );
+   }
+ 
+-  return { comanda };
++  return { comanda, unidadeId };
+ }
+ 
+ async function carregarItensRodada(db, rodadaId, empresaId) {
+@@ -518,7 +514,7 @@ async function iniciarPreparacao(entrada = {}, opts = {}) {
+     );
+     await validarIntegridadeOperacional(db, item, rodada, {
+       empresaId,
+-      unidadeIdOpcional: entrada.unidade_id != null ? entrada.unidade_id : entrada.unidadeId
++      unidadeIdAutorizada: entrada.unidade_id != null ? entrada.unidade_id : entrada.unidadeId
+     });
+ 
+     if (item.estado_preparacao === 'CANCELADO') {
+@@ -621,7 +617,7 @@ async function marcarItemPronto(entrada = {}, opts = {}) {
+     );
+     await validarIntegridadeOperacional(db, item, rodada, {
+       empresaId,
+-      unidadeIdOpcional: entrada.unidade_id != null ? entrada.unidade_id : entrada.unidadeId
++      unidadeIdAutorizada: entrada.unidade_id != null ? entrada.unidade_id : entrada.unidadeId
+     });
+ 
+     if (item.estado_preparacao === 'CANCELADO') {
+@@ -756,7 +752,7 @@ async function entregarBebida(entrada = {}, opts = {}) {
+     );
+     await validarIntegridadeOperacional(db, item, rodada, {
+       empresaId,
+-      unidadeIdOpcional: entrada.unidade_id != null ? entrada.unidade_id : entrada.unidadeId
++      unidadeIdAutorizada: entrada.unidade_id != null ? entrada.unidade_id : entrada.unidadeId
+     });
+ 
+     if (item.tipo_item !== 'BEBIDA') {
+
+diff --git a/backend/rotas/cozinha.js b/backend/rotas/cozinha.js
+index 4583ad3..8a7c48a 100644
+--- a/backend/rotas/cozinha.js
++++ b/backend/rotas/cozinha.js
+@@ -11,6 +11,7 @@ const { criarMiddlewareContextoEmpresa } = require('../services/fiscalNaoFiscal/
+ const { empresaIdDoReqPedido } = require('../services/pedido/empresaIdDoReqPedido');
+ const CozinhaDespacho = require('../services/cozinha/CozinhaDespachoService');
+ const CozinhaPreparacao = require('../services/cozinha/CozinhaPreparacaoService');
++const { resolverUnidadeOperacionalReq } = require('../services/cozinha/cozinhaUnidadeOperacional');
+ const { isCozinhaOperacional, getCozinhaSchemaStatus } = require('../utils/cozinhaSchema');
+ 
+ router.use(exigirRecurso('pedidos'));
+@@ -94,13 +95,13 @@ router.post('/despacho', async (req, res) => {
+ router.post('/itens/:id/iniciar', async (req, res) => {
+   try {
+     if (!exigirCozinhaOperacional(res)) return;
+-    const body = req.body || {};
+     const out = await CozinhaPreparacao.iniciarPreparacao({
+       empresaId: empresaIdDoReqPedido(req),
+       operadorId: operadorDaSessao(req),
+       idempotencyKey: chaveIdempotencia(req),
+       itemId: req.params.id,
+-      unidade_id: body.unidade_id != null ? body.unidade_id : req.query.unidade_id
++      // unidade autoritativa = JWT (body/query só podem coincidir)
++      unidade_id: resolverUnidadeOperacionalReq(req)
+     });
+     return res.status(200).json(out);
+   } catch (err) {
+@@ -111,13 +112,12 @@ router.post('/itens/:id/iniciar', async (req, res) => {
+ router.post('/itens/:id/pronto', async (req, res) => {
+   try {
+     if (!exigirCozinhaOperacional(res)) return;
+-    const body = req.body || {};
+     const out = await CozinhaPreparacao.marcarItemPronto({
+       empresaId: empresaIdDoReqPedido(req),
+       operadorId: operadorDaSessao(req),
+       idempotencyKey: chaveIdempotencia(req),
+       itemId: req.params.id,
+-      unidade_id: body.unidade_id != null ? body.unidade_id : req.query.unidade_id
++      unidade_id: resolverUnidadeOperacionalReq(req)
+     });
+     return res.status(200).json(out);
+   } catch (err) {
+@@ -134,7 +134,7 @@ router.post('/itens/:id/bebida/entregar', async (req, res) => {
+       operadorId: operadorDaSessao(req),
+       idempotencyKey: chaveIdempotencia(req),
+       itemId: req.params.id,
+-      unidade_id: body.unidade_id != null ? body.unidade_id : req.query.unidade_id,
++      unidade_id: resolverUnidadeOperacionalReq(req),
+       qty_entregue: body.qty_entregue != null ? body.qty_entregue : body.quantidade
+     });
+     return res.status(out.repetida ? 200 : 201).json(out);
+
+diff --git a/backend/rotas/auth.js b/backend/rotas/auth.js
+index 003792c..2d11cbb 100644
+--- a/backend/rotas/auth.js
++++ b/backend/rotas/auth.js
+@@ -194,6 +194,14 @@ function finalizarLoginComUsuario(req, res, usuario) {
+ 
+     const terminalId = parsePositiveInteger(req.body?.terminal_id);
+     const caixaSessaoId = parsePositiveInteger(req.body?.caixa_sessao_id);
++    // Cozinha S05: unidade operacional autenticada no JWT (mesmo padrão de terminal/caixa).
++    // Uma vez assinada, o cliente não consegue forjar outra unidade sem o segredo.
++    const unidadeCozinhaId = parsePositiveInteger(
++      req.body?.unidade_cozinha_id != null
++        ? req.body.unidade_cozinha_id
++        : req.body?.unidadeCozinhaId
++    );
++
+     const emitirToken = (extraDetalhe = {}) => {
+       try {
+         const token = jwt.sign(
+@@ -207,6 +215,7 @@ function finalizarLoginComUsuario(req, res, usuario) {
+             permissoes,
+             terminal_id: terminalId,
+             caixa_sessao_id: caixaSessaoId,
++            unidade_cozinha_id: unidadeCozinhaId
+           },
+           JWT_SECRET,
+           { expiresIn: '8h' }
+@@ -224,6 +233,7 @@ function finalizarLoginComUsuario(req, res, usuario) {
+             permissoes,
+             terminal_id: terminalId,
+             caixa_sessao_id: caixaSessaoId,
++            unidade_cozinha_id: unidadeCozinhaId,
+             troca_senha_obrigatoria: Number(usuario.troca_senha_obrigatoria) === 1
+           },
+           troca_senha_obrigatoria: Number(usuario.troca_senha_obrigatoria) === 1
+
+diff --git a/backend/services/cozinha/cozinhaUnidadeOperacional.js b/backend/services/cozinha/cozinhaUnidadeOperacional.js
+index e69de29..f900159 100644
+--- a/backend/services/cozinha/cozinhaUnidadeOperacional.js
++++ b/backend/services/cozinha/cozinhaUnidadeOperacional.js
+@@ -0,0 +1,119 @@
++/**
++ * Unidade operacional da Cozinha — origem autenticada (JWT / sessão).
++ * Sprint 05 correção de homologação: não confiar só em body/query.
++ */
++'use strict';
++
++function erro(mensagem, statusCode, codigo, extras = {}) {
++  const err = new Error(mensagem);
++  err.statusCode = statusCode;
++  err.codigo = codigo;
++  Object.assign(err, extras);
++  return err;
++}
++
++/**
++ * Extrai e valida a unidade autorizada da sessão autenticada.
++ * @param {object} user — req.user (JWT verificado)
++ * @returns {number}
++ */
++function unidadeCozinhaDaSessao(user) {
++  if (!user || typeof user !== 'object') {
++    throw erro(
++      'Sessão sem unidade operacional de cozinha.',
++      400,
++      'UNIDADE_OBRIGATORIA'
++    );
++  }
++  const raw = user.unidade_cozinha_id != null
++    ? user.unidade_cozinha_id
++    : user.unidadeCozinhaId;
++  if (raw == null || String(raw).trim() === '') {
++    throw erro(
++      'Sessão sem unidade operacional de cozinha.',
++      400,
++      'UNIDADE_OBRIGATORIA'
++    );
++  }
++  const id = Number(raw);
++  if (!Number.isInteger(id) || id <= 0) {
++    throw erro(
++      'Unidade operacional de cozinha inválida na sessão.',
++      400,
++      'UNIDADE_OBRIGATORIA'
++    );
++  }
++  return id;
++}
++
++/**
++ * Resolve a unidade efetiva da requisição.
++ * - Fonte autoritativa: JWT (`req.user.unidade_cozinha_id`).
++ * - body/query.unidade_id, se presente e não vazio, deve coincidir com a sessão.
++ * - Campo vazio no cliente não é tratado como “omitido”.
++ *
++ * @param {import('express').Request} req
++ * @returns {number}
++ */
++function resolverUnidadeOperacionalReq(req) {
++  const unidadeSessao = unidadeCozinhaDaSessao(req && req.user);
++
++  const body = (req && req.body) || {};
++  const query = (req && req.query) || {};
++  const clienteInformou = Object.prototype.hasOwnProperty.call(body, 'unidade_id')
++    || Object.prototype.hasOwnProperty.call(query, 'unidade_id');
++
++  if (clienteInformou) {
++    const raw = body.unidade_id !== undefined ? body.unidade_id : query.unidade_id;
++    if (raw == null || String(raw).trim() === '') {
++      throw erro(
++        'unidade_id vazia não é permitida.',
++        400,
++        'UNIDADE_OBRIGATORIA'
++      );
++    }
++    const cliente = Number(raw);
++    if (!Number.isInteger(cliente) || cliente <= 0) {
++      throw erro('unidade_id inválida.', 400, 'UNIDADE_INVALIDA');
++    }
++    if (cliente !== unidadeSessao) {
++      throw erro(
++        'unidade_id diverge da unidade autorizada na sessão.',
++        409,
++        'UNIDADE_ISOLAMENTO'
++      );
++    }
++  }
++
++  return unidadeSessao;
++}
++
++/**
++ * Valida unidade obrigatória no serviço (chamadas diretas / já resolvidas pela rota).
++ * @param {*} valor
++ * @returns {number}
++ */
++function exigirUnidadeOperacional(valor) {
++  if (valor == null || String(valor).trim() === '') {
++    throw erro(
++      'Unidade operacional obrigatória.',
++      400,
++      'UNIDADE_OBRIGATORIA'
++    );
++  }
++  const id = Number(valor);
++  if (!Number.isInteger(id) || id <= 0) {
++    throw erro(
++      'Unidade operacional inválida.',
++      400,
++      'UNIDADE_OBRIGATORIA'
++    );
++  }
++  return id;
++}
++
++module.exports = {
++  unidadeCozinhaDaSessao,
++  resolverUnidadeOperacionalReq,
++  exigirUnidadeOperacional
++};
+

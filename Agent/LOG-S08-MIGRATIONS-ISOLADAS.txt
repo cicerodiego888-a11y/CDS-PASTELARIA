@@ -1,0 +1,10 @@
+FLAGS: CDS_BLOQUEAR_BANCO_OFICIAL=1 CDS_TEST_ISOLATION=1 CDS_FORCAR_LOCAL=1 DB_DIR=<temporario> CDS_ALLOW_OFFICIAL_DB ausente
+ORDEM: S07-3A -> S07-3C -> S07-3D -> S07-3E; schema base sintetico em SQLite temporario; nenhuma conexao ao oficial
+APPLIED_TEMP_ONLY s07-3a-cozinha-roteamento.sql
+APPLIED_TEMP_ONLY s07-3c-cozinha-canais.sql
+APPLIED_TEMP_ONLY s07-3d-pedido-destino-cozinha.sql
+APPLIED_TEMP_ONLY s07-3e-pedido-despacho-kds.sql
+SCHEMA_ASSERTIONS=PASS
+SYNTHETIC_ROUTE_AND_CLAIM_INSERTS=PASS
+FOREIGN_KEY_CHECK=PASS
+EXIT_CODE=0

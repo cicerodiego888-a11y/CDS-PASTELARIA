@@ -1,0 +1,428 @@
+diff --git a/backend/services/cozinha/CozinhaImpressaoWorkerService.js b/backend/services/cozinha/CozinhaImpressaoWorkerService.js
+--- a/backend/services/cozinha/CozinhaImpressaoWorkerService.js
++++ b/backend/services/cozinha/CozinhaImpressaoWorkerService.js
+@@ -39,8 +39,39 @@
+   });
+ }
+ 
++function dbExec(db, sql) {
++  return new Promise((resolve, reject) => {
++    db.exec(sql, (err) => (err ? reject(err) : resolve()));
++  });
++}
++
+ function agoraIso() {
+   return new Date().toISOString();
++}
++
++/**
++ * Executa fn sob BEGIN IMMEDIATE.
++ * Se a conexão já estiver em transação, executa fn nela (sem nested BEGIN).
++ */
++async function comTransacaoImediata(db, fn) {
++  let ownsTx = false;
++  try {
++    await dbExec(db, 'BEGIN IMMEDIATE');
++    ownsTx = true;
++  } catch (err) {
++    const msg = String(err && err.message ? err.message : err);
++    if (!/within a transaction/i.test(msg)) throw err;
++  }
++  try {
++    const out = await fn();
++    if (ownsTx) await dbExec(db, 'COMMIT');
++    return out;
++  } catch (err) {
++    if (ownsTx) {
++      try { await dbExec(db, 'ROLLBACK'); } catch (_e) { /* ignore */ }
++    }
++    throw err;
++  }
+ }
+ 
+ function exigirEmpresa(empresaId) {
+@@ -69,8 +100,16 @@
+ }
+ 
+ /**
+- * Claim atômico PENDENTE → PROCESSANDO (BEGIN IMMEDIATE).
+- * Dois workers concorrentes: no máximo um obtém changes=1.
++ * Claim atômico PENDENTE → PROCESSANDO.
++ *
++ * Fluxo inequívoco (por chamada):
++ * 1) BEGIN IMMEDIATE
++ * 2) SELECT candidato (id exato)
++ * 3) UPDATE ... WHERE id=? AND estado='PENDENTE' (changes deve ser 1)
++ * 4) SELECT * WHERE id=? (o mesmo id)
++ * 5) COMMIT
++ *
++ * Não recupera o job por worker_id/timestamp/MAX(id).
+  */
+ async function reivindicarProximoJob(entrada = {}, opts = {}) {
+   const db = opts.db || entrada.db;
+@@ -89,72 +128,81 @@
+       : (entrada.estacao_impressao_id != null ? entrada.estacao_impressao_id : entrada.estacaoId)
+   );
+ 
+-  // Claim atômico em uma única UPDATE (SQLite serializa o statement).
+-  // WHERE estado='PENDENTE' impede segundo worker de reivindicar o mesmo id.
+-  const agora = agoraIso();
+-  const filtroEstacao = estacaoId
+-    ? 'AND estacao_impressao_id = ?'
+-    : '';
+-  const paramsCand = estacaoId
+-    ? [empresaId, unidadeId, ESTADOS_FILA.PENDENTE, estacaoId]
+-    : [empresaId, unidadeId, ESTADOS_FILA.PENDENTE];
+-
+-  const upd = await dbRun(db, `
+-    UPDATE cozinha_impressao_fila
+-    SET estado = ?,
+-        worker_id = ?,
+-        processando_em = ?,
+-        tentativas = tentativas + 1,
+-        updated_at = ?,
+-        ultimo_erro = NULL
+-    WHERE id = (
+-      SELECT id FROM (
+-        SELECT id
+-        FROM cozinha_impressao_fila
+-        WHERE empresa_id = ?
+-          AND unidade_id = ?
+-          AND estado = ?
+-          AND tentativas < max_tentativas
+-          ${filtroEstacao}
+-        ORDER BY created_at ASC, id ASC
+-        LIMIT 1
+-      )
+-    )
+-    AND estado = ?
+-  `, [
+-    ESTADOS_FILA.PROCESSANDO,
+-    workerId,
+-    agora,
+-    agora,
+-    ...paramsCand,
+-    ESTADOS_FILA.PENDENTE
+-  ]);
+-
+-  if (!upd || upd.changes !== 1) {
+-    return { success: true, reivindicado: false, job: null, impressao_fisica: false };
+-  }
+-
+-  const row = await dbGet(db, `
+-    SELECT * FROM cozinha_impressao_fila
+-    WHERE empresa_id = ?
+-      AND unidade_id = ?
+-      AND worker_id = ?
+-      AND estado = ?
+-      AND processando_em = ?
+-    ORDER BY id DESC
+-    LIMIT 1
+-  `, [empresaId, unidadeId, workerId, ESTADOS_FILA.PROCESSANDO, agora]);
+-
+-  if (!row) {
+-    return { success: true, reivindicado: false, job: null, impressao_fisica: false };
+-  }
+-
+-  return {
+-    success: true,
+-    reivindicado: true,
+-    job: FilaService.mapearJob(row, { incluirSnapshot: true }),
+-    impressao_fisica: false
+-  };
++  return comTransacaoImediata(db, async () => {
++    let sqlCand = `
++      SELECT id
++      FROM cozinha_impressao_fila
++      WHERE empresa_id = ?
++        AND unidade_id = ?
++        AND estado = ?
++        AND tentativas < max_tentativas
++    `;
++    const paramsCand = [empresaId, unidadeId, ESTADOS_FILA.PENDENTE];
++    if (estacaoId) {
++      sqlCand += ' AND estacao_impressao_id = ?';
++      paramsCand.push(estacaoId);
++    }
++    sqlCand += ' ORDER BY created_at ASC, id ASC LIMIT 1';
++
++    const cand = await dbGet(db, sqlCand, paramsCand);
++    if (!cand || !cand.id) {
++      return { success: true, reivindicado: false, job: null, impressao_fisica: false };
++    }
++
++    const jobId = Number(cand.id);
++    const agora = agoraIso();
++    const upd = await dbRun(db, `
++      UPDATE cozinha_impressao_fila
++      SET estado = ?,
++          worker_id = ?,
++          processando_em = ?,
++          tentativas = tentativas + 1,
++          updated_at = ?,
++          ultimo_erro = NULL
++      WHERE id = ?
++        AND empresa_id = ?
++        AND unidade_id = ?
++        AND estado = ?
++    `, [
++      ESTADOS_FILA.PROCESSANDO,
++      workerId,
++      agora,
++      agora,
++      jobId,
++      empresaId,
++      unidadeId,
++      ESTADOS_FILA.PENDENTE
++    ]);
++
++    if (!upd || upd.changes !== 1) {
++      // Outro worker conquistou o mesmo id entre SELECT e UPDATE.
++      return { success: true, reivindicado: false, job: null, impressao_fisica: false };
++    }
++
++    const row = await dbGet(db, `
++      SELECT *
++      FROM cozinha_impressao_fila
++      WHERE id = ?
++        AND empresa_id = ?
++        AND unidade_id = ?
++    `, [jobId, empresaId, unidadeId]);
++
++    if (!row || row.estado !== ESTADOS_FILA.PROCESSANDO || Number(row.id) !== jobId) {
++      throw erroImpressao(
++        'Claim inconsistente: job reivindicado não encontrado pelo id.',
++        500,
++        'IMPRESSAO_CLAIM_INCONSISTENTE',
++        { detalhes: { job_id: jobId } }
++      );
++    }
++
++    return {
++      success: true,
++      reivindicado: true,
++      job: FilaService.mapearJob(row, { incluirSnapshot: true }),
++      impressao_fisica: false
++    };
++  });
+ }
+ 
+ /**
+diff --git a/tests/cozinha/sprint06-bloco-d-worker-falhas.test.js b/tests/cozinha/sprint06-bloco-d-worker-falhas.test.js
+--- a/tests/cozinha/sprint06-bloco-d-worker-falhas.test.js
++++ b/tests/cozinha/sprint06-bloco-d-worker-falhas.test.js
+@@ -66,6 +66,17 @@
+       db.serialize(() => {
+         db.run('PRAGMA foreign_keys = ON');
+         db.run('PRAGMA busy_timeout = 10000', (e) => (e ? reject(e) : resolve(db)));
++      });
++    });
++  });
++}
++function openFile(dbPath) {
++  return new Promise((resolve, reject) => {
++    const db = new sqlite3.Database(dbPath, (err) => {
++      if (err) return reject(err);
++      db.serialize(() => {
++        db.run('PRAGMA foreign_keys = ON');
++        db.run('PRAGMA busy_timeout = 15000', (e) => (e ? reject(e) : resolve(db)));
+       });
+     });
+   });
+@@ -244,9 +255,12 @@
+   });
+ }
+ 
+-async function despacharComJob(db, ctx, key = 'd-job') {
+-  await criarEstacao(db, ctx, 'PASTEL', { modelo_agrupado: 1, modelo_individual: 0 });
+-  const item = await ctx.criarItem(1, 'PASTEL', 'Pastel D');
++async function despacharComJob(db, ctx, key = 'd-job', opts = {}) {
++  if (opts.criarEstacao !== false) {
++    await criarEstacao(db, ctx, 'PASTEL', { modelo_agrupado: 1, modelo_individual: 0 });
++  }
++  const numeroComanda = opts.numeroComanda != null ? opts.numeroComanda : 1;
++  const item = await ctx.criarItem(numeroComanda, 'PASTEL', opts.nome || 'Pastel D');
+   const out = await CozinhaDespacho.despacharLote(entrada(ctx, [item], key), { db });
+   const jobs = await all(db, `
+     SELECT * FROM cozinha_impressao_fila WHERE rodada_id = ?
+@@ -254,6 +268,16 @@
+   assert.equal(jobs.length, 1);
+   assert.equal(jobs[0].estado, ESTADOS_FILA.PENDENTE);
+   return { despacho: out, job: jobs[0], item };
++}
++
++async function despacharDoisJobsPendentes(db, ctx, prefix = 'd-duo') {
++  const a = await despacharComJob(db, ctx, `${prefix}-a`, { numeroComanda: 1, nome: 'A' });
++  const b = await despacharComJob(db, ctx, `${prefix}-b`, {
++    criarEstacao: false,
++    numeroComanda: 2,
++    nome: 'B'
++  });
++  return [a.job, b.job];
+ }
+ 
+ describe('Sprint 06 Bloco D — worker / FAKE / falhas', () => {
+@@ -625,4 +649,163 @@
+     assert.equal(out.driver, 'FAKE');
+     assert.equal(out.resultado, RESULTADOS_DRIVER.ACEITA);
+   });
++
++  it('17) mesmo worker: chamadas concorrentes recebem jobs distintos', async () => {
++    const dbPath = path.join(dbDir, `claim-17-${Date.now()}.sqlite`);
++    const db1 = await openFile(dbPath);
++    await schemaErpMinimo(db1);
++    const ctx = await prepararBase(db1);
++    const jobsPendentes = await despacharDoisJobsPendentes(db1, ctx, 'd-17');
++    assert.equal(jobsPendentes.length, 2);
++
++    const db2 = await openFile(dbPath);
++    const [c1, c2] = await Promise.all([
++      WorkerService.reivindicarProximoJob({
++        db: db1, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-same'
++      }, { db: db1 }),
++      WorkerService.reivindicarProximoJob({
++        db: db2, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-same'
++      }, { db: db2 })
++    ]);
++
++    assert.equal(c1.reivindicado, true);
++    assert.equal(c2.reivindicado, true);
++    assert.notEqual(c1.job.id, c2.job.id);
++    assert.deepEqual(
++      [c1.job.id, c2.job.id].sort((a, b) => a - b),
++      jobsPendentes.map((j) => j.id).sort((a, b) => a - b)
++    );
++
++    const rows = await all(db1, `
++      SELECT id, estado, worker_id FROM cozinha_impressao_fila ORDER BY id
++    `);
++    assert.equal(rows.length, 2);
++    assert.ok(rows.every((r) => r.estado === ESTADOS_FILA.PROCESSANDO));
++    assert.ok(rows.every((r) => r.worker_id === 'w-same'));
++
++    // Cada chamada recebeu exatamente o id que ela reivindicou (sem cruzamento).
++    const idsRetornados = new Set([c1.job.id, c2.job.id]);
++    assert.equal(idsRetornados.size, 2);
++
++    await close(db2);
++    await close(db1);
++  });
++
++  it('18) concorrência entre workers: um job — só um reivindica', async () => {
++    const dbPath = path.join(dbDir, `claim-18-${Date.now()}.sqlite`);
++    const db1 = await openFile(dbPath);
++    await schemaErpMinimo(db1);
++    const ctx = await prepararBase(db1);
++    await despacharComJob(db1, ctx, 'd-18');
++    const db2 = await openFile(dbPath);
++
++    const [a, b] = await Promise.all([
++      WorkerService.reivindicarProximoJob({
++        db: db1, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-A'
++      }, { db: db1 }),
++      WorkerService.reivindicarProximoJob({
++        db: db2, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-B'
++      }, { db: db2 })
++    ]);
++
++    const ganhos = [a, b].filter((x) => x.reivindicado);
++    const perdas = [a, b].filter((x) => !x.reivindicado);
++    assert.equal(ganhos.length, 1);
++    assert.equal(perdas.length, 1);
++    assert.equal(
++      (await get(db1, `SELECT COUNT(*) AS n FROM cozinha_impressao_fila WHERE estado=?`, [
++        ESTADOS_FILA.PROCESSANDO
++      ])).n,
++      1
++    );
++    await close(db2);
++    await close(db1);
++  });
++
++  it('19) processamento concorrente sem duplicidade no driver', async () => {
++    const dbPath = path.join(dbDir, `claim-19-${Date.now()}.sqlite`);
++    const db1 = await openFile(dbPath);
++    await schemaErpMinimo(db1);
++    const ctx = await prepararBase(db1);
++    const jobsPendentes = await despacharDoisJobsPendentes(db1, ctx, 'd-19');
++    const db2 = await openFile(dbPath);
++
++    const vistos = [];
++    const driver = criarFakeDriver({
++      modo: 'sucesso',
++      resolver: (contexto) => {
++        vistos.push(contexto.job.id);
++        return 'sucesso';
++      }
++    });
++
++    const [p1, p2] = await Promise.all([
++      WorkerService.processarProximo({
++        db: db1, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-19a'
++      }, { db: db1, driver }),
++      WorkerService.processarProximo({
++        db: db2, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-19b'
++      }, { db: db2, driver })
++    ]);
++
++    assert.equal(p1.processado, true);
++    assert.equal(p2.processado, true);
++    assert.notEqual(p1.job.id, p2.job.id);
++    assert.equal(vistos.length, 2);
++    assert.equal(new Set(vistos).size, 2);
++    assert.deepEqual(
++      vistos.slice().sort((a, b) => a - b),
++      jobsPendentes.map((j) => j.id).sort((a, b) => a - b)
++    );
++
++    const finais = await all(db1, `SELECT id, estado FROM cozinha_impressao_fila ORDER BY id`);
++    assert.ok(finais.every((j) => j.estado === ESTADOS_FILA.ACEITA_PELO_SPOOLER));
++    await close(db2);
++    await close(db1);
++  });
++
++  it('20) resultado vinculado ao claim correto (ordem invertida)', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    await despacharDoisJobsPendentes(db, ctx, 'd-20');
++
++    const c1 = await WorkerService.reivindicarProximoJob({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-20'
++    }, { db });
++    const c2 = await WorkerService.reivindicarProximoJob({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-20'
++    }, { db });
++    assert.equal(c1.reivindicado, true);
++    assert.equal(c2.reivindicado, true);
++    assert.notEqual(c1.job.id, c2.job.id);
++
++    // Registra resultados em ordem invertida ao claim.
++    await WorkerService.registrarResultado({
++      db,
++      empresaId: ctx.empresaId,
++      unidadeId: ctx.unidadeId,
++      jobId: c2.job.id,
++      workerId: 'w-20',
++      resultado: RESULTADOS_DRIVER.FALHA,
++      erro: 'falha no segundo claim'
++    }, { db });
++    await WorkerService.registrarResultado({
++      db,
++      empresaId: ctx.empresaId,
++      unidadeId: ctx.unidadeId,
++      jobId: c1.job.id,
++      workerId: 'w-20',
++      resultado: RESULTADOS_DRIVER.ACEITA,
++      spooler_job_token: 'tok-c1'
++    }, { db });
++
++    const j1 = await get(db, `SELECT estado, spooler_job_token, ultimo_erro FROM cozinha_impressao_fila WHERE id=?`, [c1.job.id]);
++    const j2 = await get(db, `SELECT estado, spooler_job_token, ultimo_erro FROM cozinha_impressao_fila WHERE id=?`, [c2.job.id]);
++    assert.equal(j1.estado, ESTADOS_FILA.ACEITA_PELO_SPOOLER);
++    assert.equal(j1.spooler_job_token, 'tok-c1');
++    assert.equal(j2.estado, ESTADOS_FILA.FALHA);
++    assert.match(String(j2.ultimo_erro), /falha no segundo claim/);
++    await close(db);
++  });
+ });

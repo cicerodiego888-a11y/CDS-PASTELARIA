@@ -102,6 +102,29 @@ ipcMain.handle('listar-impressoras', async (event) => {
   }
 });
 
+// Sprint 06 Bloco E — IPC cozinha (isolado; print real off por padrão)
+const { registrarCozinhaImpressaoHandlers } = require('./electron-cozinha-impressao');
+registrarCozinhaImpressaoHandlers(ipcMain);
+
+const {
+  obterOuCriarIntegracaoPadrao,
+  anexarAoReadyToShowMainWindow,
+  obterIntegracaoAtiva
+} = require('./backend/services/cozinha/CozinhaImpressaoElectronCicloVida');
+
+function obterDbCozinhaImpressao() {
+  try {
+    return require('./backend/database');
+  } catch (_e) {
+    return null;
+  }
+}
+
+const integracaoCozinhaImpressao = obterOuCriarIntegracaoPadrao({
+  obterMainWindow: () => mainWindow,
+  obterDb: obterDbCozinhaImpressao
+});
+
 ipcMain.removeHandler('selecionar-pasta-backup');
 ipcMain.handle('selecionar-pasta-backup', async (event) => {
   const { selecionarPastaBackup: abrirSeletorPasta } = require('./backend/services/electronDialogoService');
@@ -582,10 +605,9 @@ function criarMainWindow(tituloJanela, opcoes = {}) {
     }
   }));
 
-  mainWindow.once('ready-to-show', () => {
-    mainWindow.show();
-    mainWindow.focus();
-  });
+  // E-03: único ponto — mesmo módulo de ciclo de vida do electron.js (main).
+  anexarAoReadyToShowMainWindow(mainWindow, integracaoCozinhaImpressao);
+  global.obterIntegracaoCozinhaImpressao = obterIntegracaoAtiva;
 
   return mainWindow;
 }
@@ -804,6 +826,11 @@ function iniciarAplicacaoElectron(options = {}) {
   });
 
   app.on('will-quit', () => {
+    // E-03: interrompe agendador e bloqueia novos ticks.
+    try {
+      const integ = obterIntegracaoAtiva();
+      if (integ && typeof integ.aoWillQuit === 'function') integ.aoWillQuit();
+    } catch (_) { /* ignore */ }
     try {
       const cm = require('./backend/motores/equipamentos/connection/ConnectionManager');
       if (cm && typeof cm.closeAll === 'function') {

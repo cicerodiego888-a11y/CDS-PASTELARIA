@@ -22,6 +22,7 @@
     PREPARACAO_CONCORRENTE: 'O envio mudou. Consulte o pedido novamente.',
     PREPARACAO_JA_ENVIADA: 'O pedido já foi enviado para preparação.',
     CHAVE_IDEMPOTENCIA_DIVERGENTE: 'Esta operação já foi usada em outro contexto.',
+    DESPACHO_JA_CONCLUIDO: 'O pedido já foi confirmado no KDS.',
     RESPOSTA_INVALIDA: 'Resposta inválida do servidor. O envio não foi confirmado.',
     REDE: 'Não foi possível falar com o servidor. O pedido foi preservado.'
   });
@@ -51,8 +52,12 @@
 
   function acaoDoPedido(pedido) {
     const estado = (pedido && pedido.preparacao && pedido.preparacao.estado) || 'NAO_ENVIADO';
-    if (comercialBloqueado(pedido) || estado === 'EM_PREPARACAO' || estado === 'CONCLUIDO') {
+    const despacho = despachoDe(pedido);
+    if (comercialBloqueado(pedido) || despacho.status === 'CONCLUIDO') {
       return { rotulo: 'Ver pedido', editar: false, enviar: false };
+    }
+    if (estado === 'EM_PREPARACAO' || estado === 'CONCLUIDO') {
+      return { rotulo: 'Reprocessar envio ao KDS', editar: false, enviar: true };
     }
     return { rotulo: 'Conferir pedido', editar: true, enviar: true };
   }
@@ -113,6 +118,30 @@
     };
   }
 
+  function despachoDe(pedido) {
+    const despacho = pedido && pedido.despacho;
+    if (despacho && typeof despacho === 'object') return despacho;
+    return {
+      resolucao_status: pedido && pedido.cozinha_resolucao_status || null,
+      status: pedido && pedido.cozinha_despacho_status || null,
+      codigo: pedido && pedido.cozinha_despacho_codigo || null,
+      unidade_id: pedido && pedido.unidade_cozinha_destino_id != null
+        ? Number(pedido.unidade_cozinha_destino_id)
+        : null
+    };
+  }
+
+  function textoDespacho(despacho) {
+    if (despacho.status === 'CONCLUIDO') return 'Enviado ao KDS';
+    if (despacho.status === 'EM_ANDAMENTO') return 'Despacho em andamento';
+    if (despacho.status === 'BLOQUEADO') return 'Bloqueado';
+    if (despacho.status === 'FALHA') return 'Falha no despacho';
+    if (despacho.resolucao_status && despacho.resolucao_status !== 'RESOLVIDO') {
+      return `Destino pendente (${despacho.resolucao_status})`;
+    }
+    return 'Ainda não confirmado no KDS';
+  }
+
   function criarConferencia(deps) {
     const fetchJson = deps && deps.fetchJson;
     const novaChave = deps && deps.novaChave;
@@ -161,9 +190,13 @@
       if (status === 'CANCELADO' || status === 'FATURADO' || status === 'ORCAMENTO') {
         return { ok: false, codigo: 'PREPARACAO_ESTADO_INCOMPATIVEL' };
       }
-      if (prep.estado === 'CONCLUIDO') return { ok: false, codigo: 'PREPARACAO_JA_CONCLUIDA' };
-      if (prep.estado === 'EM_PREPARACAO') return { ok: false, codigo: 'PREPARACAO_JA_ENVIADA' };
-      if (estado.etapa !== 'conferencia') return { ok: false, codigo: 'CONFERENCIA_AUSENTE' };
+      if (!['NAO_ENVIADO', 'EM_PREPARACAO', 'CONCLUIDO'].includes(prep.estado)) {
+        return { ok: false, codigo: 'PREPARACAO_ESTADO_INCOMPATIVEL' };
+      }
+      if (despachoDe(pedido).status === 'CONCLUIDO') return { ok: false, codigo: 'DESPACHO_JA_CONCLUIDO' };
+      if (estado.etapa !== 'conferencia' && estado.etapa !== 'enviado') {
+        return { ok: false, codigo: 'CONFERENCIA_AUSENTE' };
+      }
       return { ok: true };
     }
 
@@ -186,26 +219,47 @@
         const data = await fetchJson('POST', `/pedidos/${pedidoId}/preparacao/enviar`, chaveDo(pedidoId));
         if (!estado.ativo || geracao !== estado.geracao || ticket !== seq) return { obsoleta: true };
         const prep = data && data.preparacao;
-        if (!prep || !prep.enviado_em || prep.estado !== 'EM_PREPARACAO') {
+        if (!prep || !prep.enviado_em || !['EM_PREPARACAO', 'CONCLUIDO'].includes(prep.estado)) {
           estado.sucesso = '';
           estado.aviso = MENSAGENS.RESPOSTA_INVALIDA;
           return { ok: false, codigo: 'RESPOSTA_INVALIDA' };
         }
         estado.preparacao = prep;
+        estado.pedido.despacho = data && data.despacho && typeof data.despacho === 'object'
+          ? data.despacho
+          : null;
         estado.etapa = 'enviado';
-        estado.aviso = '';
-        estado.sucesso = 'Enviado para preparação.';
+        const despacho = despachoDe(estado.pedido);
+        const despachoConcluido = despacho.status === 'CONCLUIDO';
+        estado.aviso = despachoConcluido
+          ? ''
+          : (despacho.mensagem || despacho.codigo
+            ? [despacho.codigo, despacho.mensagem].filter(Boolean).join(': ')
+            : 'A preparação ERP foi registrada, mas o envio ao KDS não foi confirmado.');
+        estado.sucesso = despachoConcluido
+          ? 'Pedido enviado ao KDS.'
+          : 'Preparação ERP registrada.';
         if (deps.listarPedidos) {
           try {
             const lista = await deps.listarPedidos(estado.pedido.mesa_id);
-            if (estado.ativo && geracao === estado.geracao) estado.lista = (lista && lista.pedidos) || [];
-          } catch (_err) {
             if (estado.ativo && geracao === estado.geracao) {
+              estado.lista = (lista && lista.pedidos) || [];
+              const atualizado = estado.lista.find((item) => Number(item.id) === pedidoId);
+              if (atualizado && atualizado.despacho) {
+                estado.pedido.despacho = {
+                  ...despacho,
+                  ...atualizado.despacho,
+                  mensagem: atualizado.despacho.mensagem || despacho.mensagem || null
+                };
+              }
+            }
+          } catch (_err) {
+            if (estado.ativo && geracao === estado.geracao && despachoConcluido) {
               estado.aviso = 'O envio foi registrado. A lista da mesa não pôde ser atualizada.';
             }
           }
         }
-        return { ok: true, preparacao: estado.preparacao, pedidoId };
+        return { ok: true, preparacao: estado.preparacao, despacho: estado.pedido.despacho, pedidoId };
       } catch (err) {
         if (!estado.ativo || geracao !== estado.geracao) return { obsoleta: true };
         estado.sucesso = '';
@@ -256,6 +310,8 @@
     if (!estado || !estado.pedido || (estado.etapa !== 'conferencia' && estado.etapa !== 'enviado')) return '';
     const pedido = estado.pedido;
     const prep = estado.preparacao || {};
+    const despacho = despachoDe(pedido);
+    const despachoStatus = textoDespacho(despacho);
     const numero = estado.numero != null ? estado.numero : pedido.mesa_numero;
     const itens = Array.isArray(pedido.itens) ? pedido.itens : [];
     const linhas = itens.map((item) => `
@@ -265,20 +321,27 @@
     const sucesso = estado.sucesso ? `<div class="alert alert-success" role="status">${escapar(estado.sucesso)}</div>` : '';
     const enviada = prep.estado === 'EM_PREPARACAO' || prep.estado === 'CONCLUIDO';
     const bloqueado = comercialBloqueado(pedido);
+    const despachoConcluido = despacho.status === 'CONCLUIDO';
+    const botaoKds = despachoConcluido
+      ? '<button type="button" class="btn btn-primary" data-acao="outro">Lançar outro pedido nesta mesa</button>'
+      : `<button type="button" class="btn btn-success" data-acao="enviar">${enviada ? 'Reprocessar envio ao KDS' : 'Enviar ao KDS e iniciar preparação'}</button>
+        ${!enviada ? '<button type="button" class="btn btn-outline-secondary" data-acao="corrigir">Corrigir lançamento</button>' : ''}`;
     const acoes = bloqueado ? `
-      <p>O pedido está ${escapar(String(pedido.status || '').toUpperCase())} e esta tela não altera os itens nem reenvia à preparação.</p>` : (enviada ? `
-      <p><strong>Enviado para preparação.</strong> Este é o registro operacional do ERP. Não confirma recebimento por cozinha, impressora ou KDS.</p>
+      <p>O pedido está ${escapar(String(pedido.status || '').toUpperCase())} e esta tela não altera os itens nem reenvia à preparação.</p>` : `
+      ${enviada ? `
+      <p><strong>Preparação ERP:</strong> ${escapar(prep.estado === 'EM_PREPARACAO' ? 'Em preparação' : 'Concluída')}</p>
       <p>Estado ${escapar(prep.estado === 'EM_PREPARACAO' ? 'Em preparação' : 'Concluído')}</p>
       <p>Envio ${escapar(prep.enviado_em || '—')}</p>
       ${prep.concluido_em ? `<p>Conclusão ${escapar(prep.concluido_em)}</p>` : ''}
       <p>Classificação ${escapar(prep.classificacao || '—')}</p>
-      ${prep.tempo_decorrido_segundos != null ? `<p>Tempo informado pelo servidor ${escapar(prep.tempo_decorrido_segundos)} s</p>` : ''}
-      <button type="button" class="btn btn-primary" data-acao="outro">Lançar outro pedido nesta mesa</button>` : `
-      <button type="button" class="btn btn-success" data-acao="enviar">Enviar pedido para cozinha</button>
-      <button type="button" class="btn btn-outline-secondary" data-acao="corrigir">Corrigir lançamento</button>`);
+      ${prep.tempo_decorrido_segundos != null ? `<p>Tempo informado pelo servidor ${escapar(prep.tempo_decorrido_segundos)} s</p>` : ''}` : ''}
+      <p><strong>KDS:</strong> ${escapar(despachoStatus)}${despacho.unidade_id != null ? ` · unidade ${escapar(despacho.unidade_id)}` : ''}</p>
+      ${despacho.codigo ? `<p>Código: ${escapar(despacho.codigo)}</p>` : ''}
+      ${despacho.mensagem ? `<p>${escapar(despacho.mensagem)}</p>` : ''}
+      ${botaoKds}`;
     const lista = (estado.lista || []).map((item) => {
       const itemPrep = item.preparacao || {};
-      return `<li>${escapar(item.codigo || ('Pedido ' + item.id))} · ${escapar(itemPrep.estado || '—')} · ${escapar(itemPrep.classificacao || '—')}</li>`;
+      return `<li>${escapar(item.codigo || ('Pedido ' + item.id))} · ${escapar(itemPrep.estado || '—')} · KDS ${escapar(textoDespacho(item.despacho || {}))}</li>`;
     }).join('');
     return `
       <section class="card shadow-sm mb-3" id="pedConferencia" data-conferencia="1">

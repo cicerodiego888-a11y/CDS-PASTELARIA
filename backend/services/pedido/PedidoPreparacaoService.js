@@ -194,14 +194,95 @@ async function registrarNaoEnviado({ db, empresaId, pedidoId, atendimentoId }) {
   `, [empresaId, pedidoId, atendimentoId]);
 }
 
+async function resolverDestinoPendente(db, empresaId, pedidoId) {
+  const colunas = await all(db, 'PRAGMA table_info(pedidos)');
+  const nomes = new Set((colunas || []).map((coluna) => String(coluna.name)));
+  if (!nomes.has('cozinha_resolucao_status') || !nomes.has('unidade_cozinha_destino_id')) return;
+
+  const campoOrigem = nomes.has('origem_canal') ? 'origem_canal' : 'NULL AS origem_canal';
+  const campoCanal = nomes.has('cozinha_canal_codigo')
+    ? 'cozinha_canal_codigo'
+    : 'NULL AS cozinha_canal_codigo';
+  const pedido = await get(db, `
+    SELECT cozinha_resolucao_status, unidade_cozinha_destino_id,
+           ${campoOrigem}, ${campoCanal}
+    FROM pedidos
+    WHERE id = ? AND empresa_id = ?
+  `, [pedidoId, empresaId]);
+
+  if (
+    !pedido
+    || (String(pedido.cozinha_resolucao_status || '') === 'RESOLVIDO'
+      && pedido.unidade_cozinha_destino_id != null)
+  ) return;
+
+  const canalCodigo = pedido.origem_canal || pedido.cozinha_canal_codigo;
+  const ResolucaoDestino = require('../cozinha/CozinhaResolucaoDestinoService');
+  const PedidoRepository = require('./PedidoRepository');
+  const resolucao = await ResolucaoDestino.resolverDestinoPedido({
+    empresaId,
+    canalCodigo
+  }, { db });
+  await PedidoRepository.persistirResolucaoDestinoCozinha(
+    pedidoId,
+    empresaId,
+    resolucao,
+    { db }
+  );
+}
+
+async function despacharParaKds(db, empresaId, pedidoId, operadorId) {
+  let resultado;
+  try {
+    await resolverDestinoPendente(db, empresaId, pedidoId);
+    const CozinhaDespachoPedido = require('../cozinha/CozinhaDespachoPedidoService');
+    resultado = await CozinhaDespachoPedido.despacharPedidoResolvido({
+      empresaId,
+      pedidoId,
+      operadorId
+    }, { db });
+  } catch (err) {
+    const codigo = err && (err.codigo || err.code)
+      ? String(err.codigo || err.code)
+      : 'DESPACHO_KDS_FALHA';
+    resultado = {
+      success: false,
+      status: 'FALHA',
+      codigo,
+      empresa_id: empresaId,
+      pedido_id: Number(pedidoId),
+      unidade_id: null,
+      rodada_id: null,
+      repetida: false,
+      bloqueado: false,
+      mensagem: err && err.message ? String(err.message) : 'Falha inesperada no despacho KDS.'
+    };
+  }
+
+  if (!resultado || resultado.success !== true) {
+    console.warn(JSON.stringify({
+      evento: 'COZINHA_DESPACHO_PEDIDO_RESULTADO',
+      codigo: resultado && resultado.codigo ? String(resultado.codigo) : 'DESPACHO_KDS_SEM_RESULTADO',
+      status: resultado && resultado.status ? String(resultado.status) : 'FALHA',
+      pedido_id: Number(pedidoId),
+      empresa_id: empresaId,
+      unidade_id: resultado && resultado.unidade_id != null ? Number(resultado.unidade_id) : null,
+      mensagem: resultado && resultado.mensagem ? String(resultado.mensagem).slice(0, 240) : null
+    }));
+  }
+
+  return resultado;
+}
+
 async function enviar(empresaId, pedidoId, entrada = {}, opts = {}) {
   const emp = exigirEmpresa(empresaId);
   const operadorId = exigirOperador(entrada.operadorId);
   const chave = normalizarChave(entrada.idempotencyKey);
   const db = conn(opts);
   const marca = instanteInformado(opts);
+  let resultadoPreparacao;
   try {
-    return await emTransacao(db, async () => {
+    resultadoPreparacao = await emTransacao(db, async () => {
       if (chave) {
         const outra = await get(db, `
           SELECT pedido_id, empresa_id FROM pedido_preparacoes WHERE idempotency_key_envio = ?
@@ -214,16 +295,16 @@ async function enviar(empresaId, pedidoId, entrada = {}, opts = {}) {
       if (pedido.mesa_atendimento_id == null) {
         throw erro('Pedido sem atendimento de salão.', 409, 'PEDIDO_FORA_DO_SALAO');
       }
-      const preparacao = await lerPreparacao(db, pedido.id);
-      if (preparacao && preparacao.estado === 'EM_PREPARACAO') {
-        const agora = await agoraServidor(db, opts);
-        return { success: true, repetida: true, preparacao: apresentar(preparacao, agora) };
-      }
-      if (preparacao && preparacao.estado === 'CONCLUIDO') {
-        throw erro('A preparação já foi concluída.', 409, 'PREPARACAO_JA_CONCLUIDA');
-      }
       if (!STATUS_ENVIAVEIS.includes(String(pedido.status || '').toUpperCase())) {
         throw erro('O pedido não está em estado que permite envio à preparação.', 409, 'PREPARACAO_ESTADO_INCOMPATIVEL');
+      }
+      const preparacao = await lerPreparacao(db, pedido.id);
+      if (
+        preparacao
+        && (preparacao.estado === 'EM_PREPARACAO' || preparacao.estado === 'CONCLUIDO')
+      ) {
+        const agora = await agoraServidor(db, opts);
+        return { success: true, repetida: true, preparacao: apresentar(preparacao, agora) };
       }
       await exigirAtendimentoAberto(db, emp, pedido.mesa_atendimento_id);
       const atualizado = await run(db, `
@@ -237,7 +318,7 @@ async function enviar(empresaId, pedidoId, entrada = {}, opts = {}) {
       `, [marca, operadorId, chave, pedido.id, emp]);
       if (atualizado.changes !== 1) {
         const atual = await lerPreparacao(db, pedido.id);
-        if (atual && atual.estado === 'EM_PREPARACAO') {
+        if (atual && (atual.estado === 'EM_PREPARACAO' || atual.estado === 'CONCLUIDO')) {
           const agora = await agoraServidor(db, opts);
           return { success: true, repetida: true, preparacao: apresentar(atual, agora) };
         }
@@ -257,13 +338,16 @@ async function enviar(empresaId, pedidoId, entrada = {}, opts = {}) {
         rejeitarChaveDivergente();
       }
       const atual = await lerPreparacao(db, pedidoId);
-      if (atual && atual.estado === 'EM_PREPARACAO') {
+      if (atual && (atual.estado === 'EM_PREPARACAO' || atual.estado === 'CONCLUIDO')) {
         const agora = await agoraServidor(db, opts);
-        return { success: true, repetida: true, preparacao: apresentar(atual, agora) };
+        resultadoPreparacao = { success: true, repetida: true, preparacao: apresentar(atual, agora) };
       }
     }
-    throw err;
+    if (!resultadoPreparacao) throw err;
   }
+
+  const despacho = await despacharParaKds(db, emp, pedidoId, operadorId);
+  return { ...resultadoPreparacao, despacho };
 }
 
 async function concluir(empresaId, pedidoId, entrada = {}, opts = {}) {
@@ -347,14 +431,26 @@ async function listarPorMesa(empresaId, mesaId, opts = {}) {
   }
   const agora = await agoraServidor(db, opts);
   const colunasPedidos = await all(db, 'PRAGMA table_info(pedidos)');
-  const temClienteNomeLivre = (colunasPedidos || []).some((c) => String(c.name) === 'cliente_nome');
+  const nomesColunasPedidos = new Set((colunasPedidos || []).map((c) => String(c.name)));
+  const temClienteNomeLivre = nomesColunasPedidos.has('cliente_nome');
   const clienteNomeSelect = temClienteNomeLivre
     ? "COALESCE(NULLIF(TRIM(p.cliente_nome), ''), c.nome)"
     : 'c.nome';
+  const camposDespacho = [
+    'cozinha_resolucao_status',
+    'unidade_cozinha_destino_id',
+    'cozinha_despacho_status',
+    'cozinha_despacho_codigo',
+    'cozinha_despacho_rodada_id'
+  ];
+  const camposDespachoSelect = camposDespacho.map((campo) =>
+    nomesColunasPedidos.has(campo) ? `p.${campo}` : `NULL AS ${campo}`
+  );
   const rows = await all(db, `
     SELECT p.id, p.codigo, p.status, p.total, p.mesa_atendimento_id,
            ${clienteNomeSelect} AS cliente_nome,
-           pr.estado, pr.enviado_em, pr.concluido_em, pr.operador_envio_id, pr.operador_conclusao_id
+           pr.estado, pr.enviado_em, pr.concluido_em, pr.operador_envio_id, pr.operador_conclusao_id,
+           ${camposDespachoSelect.join(', ')}
     FROM pedidos p
     LEFT JOIN clientes c ON c.id = p.cliente_id
     LEFT JOIN pedido_preparacoes pr ON pr.pedido_id = p.id AND pr.empresa_id = p.empresa_id
@@ -373,7 +469,14 @@ async function listarPorMesa(empresaId, mesaId, opts = {}) {
       total: row.total,
       cliente_nome: row.cliente_nome || null,
       mesa_atendimento_id: row.mesa_atendimento_id,
-      preparacao: apresentar(row, agora)
+      preparacao: apresentar(row, agora),
+      despacho: {
+        resolucao_status: row.cozinha_resolucao_status || null,
+        status: row.cozinha_despacho_status || null,
+        codigo: row.cozinha_despacho_codigo || null,
+        unidade_id: row.unidade_cozinha_destino_id != null ? Number(row.unidade_cozinha_destino_id) : null,
+        rodada_id: row.cozinha_despacho_rodada_id != null ? Number(row.cozinha_despacho_rodada_id) : null
+      }
     }))
   };
 }

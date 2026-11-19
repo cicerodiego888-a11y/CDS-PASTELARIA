@@ -151,6 +151,21 @@ describe('grade e modal', () => {
     assert.match(ocupada, /<option value="1">01<\/option>/);
     assert.equal(ocupada.includes('<option value="2">'), false);
     assert.equal(ocupada.includes('<option value="3">'), false);
+    assert.equal(ocupada.includes('data-acao="liberar"'), false, 'com pedidos não mostra Liberar mesa');
+
+    const ocupadaVazia = painel.htmlPainel({
+      ...base,
+      mesaSelecionadaId: 2,
+      detalhe: {
+        situacao: 'OCUPADA',
+        numero: 2,
+        atendimento: base.itens[1].atendimento
+      },
+      pedidos: []
+    }, AGORA);
+    assert.match(ocupadaVazia, /Nenhum pedido vinculado/);
+    assert.match(ocupadaVazia, /data-acao="liberar"/);
+    assert.match(ocupadaVazia, /Liberar mesa/);
 
     const fechamento = painel.htmlPainel({
       ...base,
@@ -160,11 +175,42 @@ describe('grade e modal', () => {
     assert.match(fechamento, /processo de fechamento/);
     assert.equal(fechamento.includes('data-acao="transferir"'), false);
     assert.equal(fechamento.includes('data-acao="abrir"'), false);
+    assert.equal(fechamento.includes('data-acao="liberar"'), false);
     assert.equal(fechamento.includes('encerrar'), false);
   });
 });
 
 describe('ações e concorrência', () => {
+  it('libera mesa OCUPADA sem pedido via atendimento/encerrar', async () => {
+    const chamadas = [];
+    let situacao = itensEmpresa().map((item) => (item.id === 2
+      ? { ...item, situacao: 'OCUPADA', atendimento: { ...item.atendimento } }
+      : item));
+    const { control } = montar(async (method, path) => {
+      chamadas.push({ method, path });
+      if (path === '/mesas/situacao') return { itens: situacao.filter((i) => i.empresa_id === 1) };
+      if (path === '/mesas/2/atendimento' && method === 'GET') {
+        const mesa = situacao.find((i) => i.id === 2);
+        return { situacao: mesa.situacao, numero: 2, atendimento: mesa.atendimento };
+      }
+      if (path === '/mesas/2/atendimento/pedidos') return { pedidos: [] };
+      if (path === '/mesas/2/atendimento/encerrar' && method === 'POST') {
+        situacao = situacao.map((item) => (item.id === 2
+          ? { ...item, situacao: 'LIVRE', atendimento: null }
+          : item));
+        return { success: true, situacao: 'LIVRE' };
+      }
+      throw new Error('rota inesperada ' + method + ' ' + path);
+    }, { confirmar: () => true });
+    await control.iniciar();
+    await control.selecionar(2);
+    assert.equal(control.estado.pedidos.length, 0);
+    const out = await control.liberarAtendimento();
+    assert.equal(out.ok, true);
+    assert.ok(chamadas.some((c) => c.method === 'POST' && c.path === '/mesas/2/atendimento/encerrar'));
+    assert.equal(control.estado.itens.find((i) => i.id === 2).situacao, 'LIVRE');
+  });
+
   it('exige selecionar o cliente pesquisado e envia seu identificador ao abrir a mesa', async () => {
     const chamadas = [];
     let situacao = itensEmpresa();
@@ -415,7 +461,9 @@ describe('preparação e transferência concluída', () => {
 
     const codigos = Object.keys(painel.MENSAGENS);
     assert.deepEqual(codigos.sort(), [
+      'ATENDIMENTO_COM_PEDIDO_ABERTO',
       'ATENDIMENTO_EM_FECHAMENTO',
+      'ATENDIMENTO_JA_ENCERRADO',
       'CHAVE_IDEMPOTENCIA_DIVERGENTE',
       'MESA_DESTINO_IGUAL',
       'MESA_INATIVA',
@@ -454,7 +502,8 @@ describe('navegação e permissões', () => {
     assert.match(pedidos, /let abaAtual = 'pedidos'/);
     assert.match(pedidos, /filtrarPedidosAbertosDaMesa/);
     assert.match(pedidos, /pedidos abertos vigentes da mesa/);
-    assert.doesNotMatch(fonte, /atendimento\/encerrar/);
+    assert.match(fonte, /atendimento\/encerrar/);
+    assert.match(fonte, /liberarAtendimento/);
     assert.doesNotMatch(fonte, /empresa_id:/);
     assert.doesNotMatch(fonte, /operador_id:/);
     assert.equal(painel.INTERVALO_MS, 5000);

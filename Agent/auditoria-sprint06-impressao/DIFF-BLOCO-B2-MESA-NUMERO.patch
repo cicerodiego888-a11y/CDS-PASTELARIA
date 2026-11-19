@@ -1,0 +1,30 @@
+# DIFF — B2 correção mesa_numero (mesas.numero, nunca mesa.id)
+# Bloco C NAO iniciado. Schema v3 inalterado.
+
+diff --git a/backend/services/cozinha/CozinhaDespachoService.js b/backend/services/cozinha/CozinhaDespachoService.js
+--- a/backend/services/cozinha/CozinhaDespachoService.js
++++ b/backend/services/cozinha/CozinhaDespachoService.js
+@@
+-      mesa_numero: String(mesaId)
++      // mesa.numero = número visível; mesa.id nunca substitui mesa_numero no snapshot.
++      mesa_numero: String(mesa.numero)
+
+diff --git a/backend/services/cozinha/CozinhaImpressaoFilaService.js b/backend/services/cozinha/CozinhaImpressaoFilaService.js
+--- a/backend/services/cozinha/CozinhaImpressaoFilaService.js
++++ b/backend/services/cozinha/CozinhaImpressaoFilaService.js
+@@ enfileirarDaRodada
++ // Se mesa_numero omitido: SELECT mesas.numero WHERE id=rodada.mesa_id AND empresa_id=?
++ // Nunca usar rodada.mesa_id como número visível.
++ mesa_numero: mesaNumero
+
+diff --git a/tests/cozinha/sprint06-bloco-b2-idempotencia-despacho.test.js b/tests/cozinha/sprint06-bloco-b2-idempotencia-despacho.test.js
+--- a/tests/cozinha/sprint06-bloco-b2-idempotencia-despacho.test.js
++++ b/tests/cozinha/sprint06-bloco-b2-idempotencia-despacho.test.js
+@@
++ it('14) mesa_numero no snapshot é mesas.numero, nunca o id interno'
++   // mesas.id=3, mesas.numero=5 → snapshot.mesa_numero === '5'
+
+@@ teste 14 (fonte) @@
++L535:   it('14) mesa_numero no snapshot é mesas.numero, nunca o id interno', async () => {
++L543:     assert.notEqual(ctx.mesaId, 5, 'pré-condição: id interno deve diferir do número visível');
++L554:       entradaDespacho(ctx, [itemDespacho(ctx.comanda1)], 'b2-14-mesa-numero'),

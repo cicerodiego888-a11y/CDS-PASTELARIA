@@ -289,7 +289,8 @@ router.post('/selecao-empresa', async (req, res) => {
     const out = await avaliarSelecaoEmpresaPdv({
       body: req.body || {},
       itens: (req.body && req.body.itens) || [],
-      usuarioId
+      usuarioId,
+      usuario: req.user || null
     });
     if (out.bloqueio) {
       return res.status(409).json({

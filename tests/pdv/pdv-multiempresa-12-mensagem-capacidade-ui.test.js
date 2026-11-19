@@ -89,6 +89,14 @@ describe('PDV-MULTIEMPRESA-12 mensagem capacidade UI', () => {
       resumirMensagemSelecaoEmpresaPdv({ code: 'MATRIZ_AUSENTE', mensagem: 'x' }),
       /empresas/i
     );
+    assert.match(
+      resumirMensagemSelecaoEmpresaPdv({ code: 'NENHUMA_EMPRESA_ELEGIVEL', mensagem: 'x' }),
+      /empresa autorizada/i
+    );
+    assert.doesNotMatch(
+      resumirMensagemSelecaoEmpresaPdv({ code: 'NENHUMA_EMPRESA_ELEGIVEL', mensagem: 'x' }),
+      /Estoque insuficiente/i
+    );
   });
 
   it('sucesso limpa bloqueio: render usa estado sem bloqueio (contrato no fonte)', () => {

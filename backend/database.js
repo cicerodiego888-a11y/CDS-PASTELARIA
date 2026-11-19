@@ -3018,6 +3018,8 @@ function inicializarBanco() {
   const { migrarEmpresaIdPedidos, formatarLogMigracaoPedidos } = require('./utils/pedidosEmpresaHelpers');
   const { garantirSchemaMesas } = require('./utils/mesasSchema');
   const { garantirSchemaOrigemPedidos } = require('./utils/pedidosOrigemSchema');
+  const cozinhaSchemaMod = require('./utils/cozinhaSchema');
+  const { garantirSchemaCozinha } = cozinhaSchemaMod;
 
   db.serialize(() => {
     criarTabelas();
@@ -3102,8 +3104,28 @@ function inicializarBanco() {
           if (infoOrigem && !infoOrigem.skipped) {
             console.log(`[ENTRADA] origem_canal garantida | coluna adicionada: ${infoOrigem.colunaAdicionada}`);
           }
+          return garantirSchemaCozinha(db);
         })
-        .catch((err) => console.error('Erro migration 05.38.D/E/F.B/05.40/05.41/05.49:', err.message));
+        .then((infoCozinha) => {
+          if (infoCozinha && infoCozinha.operacional) {
+            console.log(
+              `[COZINHA] schema V1.2.3 v${infoCozinha.versao} operacional` +
+              (infoCozinha.recriado ? ' (recriado com FKs compostas empresa)' : '')
+            );
+          } else if (infoCozinha && infoCozinha.skipped) {
+            console.warn('[COZINHA] schema ignorado (sem conexão); módulo Cozinha NÃO operacional');
+          }
+        })
+        .catch((err) => {
+          // Não derruba a prontidão do ERP/PDV: Cozinha fica explicitamente não operacional.
+          console.error(
+            `[COZINHA] FALHA_SCHEMA: inicialização incompleta — Cozinha NÃO operacional. ` +
+            `codigo=${err && err.codigo ? err.codigo : 'COZINHA_SCHEMA_FALHA'} | ${err && err.message}`
+          );
+          try {
+            cozinhaSchemaMod.marcarCozinhaOperacional(false, err);
+          } catch (_e) { /* ignore */ }
+        });
     });
     inserirConfiguracoesPadrao();
     migrarUrlsFiscalProducao();
@@ -3447,6 +3469,7 @@ function inserirConfiguracoesPadrao() {
     ['backup_google_refresh_token', '', 'text', 'Google Refresh Token para backup']
     ,['tef_ativo', 'true', 'boolean', 'TEF habilitado']
     ,['modo_dashboard_fiscal', '1', 'boolean', 'Modo fiscal ativo por padrão (F12) — ERP e PDV']
+    ,['cozinha_notificacao_modo', 'INDIVIDUAL', 'text', 'Modo de notificação da cozinha (global): INDIVIDUAL ou SIMULTANEA']
   ];
 
   configs.forEach(config => {
@@ -4221,6 +4244,29 @@ db.openExclusiveConnection = async function openExclusiveConnection() {
 
 db.isReady = function isReady() {
   return bancoPronto;
+};
+
+/** Cozinha operacional somente após schema completo (isolado do bancoPronto do ERP). */
+db.isCozinhaOperacional = function isCozinhaOperacional() {
+  try {
+    return require('./utils/cozinhaSchema').isCozinhaOperacional();
+  } catch (_e) {
+    return false;
+  }
+};
+
+db.getCozinhaSchemaStatus = function getCozinhaSchemaStatus() {
+  try {
+    return require('./utils/cozinhaSchema').getCozinhaSchemaStatus();
+  } catch (err) {
+    return {
+      operacional: false,
+      versao: null,
+      versaoAlvo: null,
+      erro: { mensagem: String(err.message || err), codigo: 'COZINHA_SCHEMA_STATUS_INDISPONIVEL' },
+      atualizadoEm: null
+    };
+  }
 };
 
 module.exports = db;

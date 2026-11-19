@@ -1,0 +1,174 @@
+[
+  {
+    "step": "preflight",
+    "database": "C:\\ProgramData\\MercantilFiscal\\dados\\mercadao.db",
+    "schemaVersion": 3,
+    "adminUserId": 1,
+    "empresaId": 1,
+    "unidade": {
+      "id": 1,
+      "codigo": "COZINHA - 01"
+    },
+    "initialCounts": {
+      "roteamento": 0,
+      "canais": 0,
+      "destinos": 0,
+      "despachos": 0,
+      "impressao": 0
+    }
+  },
+  {
+    "step": "listener",
+    "host": "127.0.0.1",
+    "port": 51782,
+    "fullBackendStarted": false,
+    "backgroundServicesStarted": false
+  },
+  {
+    "step": "auth-without-token",
+    "status": 401,
+    "code": "SESSAO_INVALIDA"
+  },
+  {
+    "step": "auth-status",
+    "status": 200,
+    "operacional": true,
+    "schemaVersion": 3
+  },
+  {
+    "step": "routing-read-before",
+    "status": 200,
+    "body": {
+      "success": true,
+      "configurado": false,
+      "empresa_id": 1,
+      "modo": null,
+      "unidade_padrao_id": null,
+      "unidade_padrao": null,
+      "segmentos": [],
+      "segmentos_permitidos": [
+        "LOJA",
+        "IFOOD",
+        "PEDIDO_ONLINE"
+      ],
+      "segmentos_base": [
+        "LOJA",
+        "IFOOD",
+        "PEDIDO_ONLINE"
+      ],
+      "updated_at": null,
+      "updated_by": null
+    }
+  },
+  {
+    "step": "routing-write-read",
+    "writeStatus": 200,
+    "readStatus": 200,
+    "empresaId": 1,
+    "unidadePadraoId": 1,
+    "modo": "COZINHA_PADRAO"
+  },
+  {
+    "step": "channel-write-read",
+    "createStatus": 201,
+    "destinationStatus": 200,
+    "listStatus": 200,
+    "manualChannelId": 2,
+    "manual": {
+      "id": 2,
+      "empresa_id": 1,
+      "codigo": "A2_HOMOLOGA_O_MANUAL",
+      "nome": "A2 Homologa??o Manual",
+      "origem_tipo": "MANUAL",
+      "sistema": false,
+      "ativo": true,
+      "destino": {
+        "unidade_id": 1,
+        "unidade_codigo": "COZINHA - 01",
+        "unidade_ativa": true
+      },
+      "created_at": "2026-11-19 00:51:09",
+      "updated_at": "2026-11-19 00:51:09",
+      "created_by": 1,
+      "updated_by": 1
+    },
+    "loja": {
+      "id": 1,
+      "empresa_id": 1,
+      "codigo": "LOJA",
+      "nome": "Loja",
+      "origem_tipo": "SISTEMA",
+      "sistema": true,
+      "ativo": true,
+      "destino": null,
+      "created_at": "2026-11-19 00:51:09",
+      "updated_at": "2026-11-19 00:51:09",
+      "created_by": 1,
+      "updated_by": 1
+    }
+  },
+  {
+    "step": "company-isolation",
+    "crossUnitStatus": 403,
+    "crossUnitCode": "UNIDADE_EMPRESA_ISOLAMENTO",
+    "crossChannelStatus": 403,
+    "crossChannelCode": "CANAL_EMPRESA_ISOLAMENTO",
+    "secondCompanyConfigCreated": false
+  },
+  {
+    "step": "sqlite-postconditions",
+    "persistedConfig": {
+      "empresa_id": 1,
+      "modo": "COZINHA_PADRAO",
+      "unidade_padrao_id": 1
+    },
+    "persistedChannel": {
+      "id": 2,
+      "empresa_id": 1,
+      "codigo": "A2_HOMOLOGA_O_MANUAL",
+      "nome": "A2 Homologa??o Manual",
+      "origem_tipo": "MANUAL",
+      "ativo": 1
+    },
+    "persistedDestination": {
+      "empresa_id": 1,
+      "canal_id": 2,
+      "unidade_cozinha_id": 1
+    },
+    "finalCounts": {
+      "roteamento": 1,
+      "canais": 2,
+      "destinos": 1,
+      "despachos": 0,
+      "impressao": 0
+    },
+    "kitchenForeignKeyViolations": {
+      "cozinha_unidades": 0,
+      "cozinha_roteamento_config": 0,
+      "cozinha_roteamento_segmentos": 0,
+      "cozinha_canais": 0,
+      "cozinha_canal_destinos": 0,
+      "cozinha_pedido_despachos": 0
+    },
+    "integrityCheck": "ok"
+  },
+  {
+    "step": "reopen-persistence",
+    "configuration": {
+      "empresa_id": 1,
+      "modo": "COZINHA_PADRAO",
+      "unidade_padrao_id": 1
+    },
+    "channel": {
+      "id": 2,
+      "empresa_id": 1,
+      "nome": "A2 Homologa??o Manual",
+      "origem_tipo": "MANUAL"
+    },
+    "destination": {
+      "empresa_id": 1,
+      "canal_id": 2,
+      "unidade_cozinha_id": 1
+    }
+  }
+]

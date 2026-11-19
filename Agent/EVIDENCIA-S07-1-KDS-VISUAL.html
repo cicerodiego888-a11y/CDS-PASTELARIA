@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>S07-1 KDS Evidência Visual</title>
+<style>
+/* Sprint 07 · S07-1 — Painel KDS (somente consulta) */
+.kds-painel {
+  --kds-bg: #0d1117;
+  --kds-surface: #161b22;
+  --kds-surface-2: #1c2330;
+  --kds-border: #30363d;
+  --kds-text: #e6edf3;
+  --kds-muted: #9da7b3;
+  --kds-aguardando: #e6b422;
+  --kds-preparacao: #3b82f6;
+  --kds-prontos: #22c55e;
+  min-height: calc(100vh - 1rem);
+  background:
+    radial-gradient(1200px 480px at 10% -10%, rgba(230, 180, 34, 0.08), transparent 55%),
+    radial-gradient(900px 420px at 90% 0%, rgba(59, 130, 246, 0.1), transparent 50%),
+    var(--kds-bg);
+  color: var(--kds-text);
+  padding: 0 0 1.5rem;
+  font-family: "Segoe UI", "Trebuchet MS", sans-serif;
+}
+
+.kds-cabecalho {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+  background: linear-gradient(180deg, #121821 0%, #0f141c 100%);
+  border-bottom: 1px solid var(--kds-border);
+}
+
+.kds-cabecalho__titulo {
+  margin: 0;
+  font-size: 1.65rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.kds-cabecalho__titulo span {
+  color: var(--kds-aguardando);
+  font-weight: 600;
+  font-size: 0.95rem;
+  margin-left: 0.4rem;
+}
+
+.kds-cabecalho__meta {
+  margin-top: 0.35rem;
+  color: var(--kds-muted);
+  font-size: 0.95rem;
+}
+
+.kds-cabecalho__meta strong {
+  color: var(--kds-text);
+  font-weight: 600;
+}
+
+.kds-cabecalho__acoes {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.kds-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  background: var(--kds-surface-2);
+  border: 1px solid var(--kds-border);
+  font-size: 0.85rem;
+  color: var(--kds-muted);
+}
+
+.kds-status__dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: #6b7280;
+}
+
+.kds-status--ok .kds-status__dot { background: var(--kds-prontos); }
+.kds-status--carregando .kds-status__dot {
+  background: var(--kds-preparacao);
+  animation: kds-pulse 1s ease-in-out infinite;
+}
+.kds-status--erro .kds-status__dot { background: #ef4444; }
+
+@keyframes kds-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.kds-btn-atualizar {
+  border: 1px solid #3d4a5c;
+  background: #243044;
+  color: #fff;
+  border-radius: 10px;
+  padding: 0.55rem 1rem;
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.kds-btn-atualizar:hover {
+  background: #2d3c54;
+  color: #fff;
+}
+
+.kds-btn-atualizar:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.kds-aviso {
+  margin: 0.85rem 1.25rem 0;
+  padding: 0.75rem 1rem;
+  border-radius: 10px;
+  border: 1px solid #7f1d1d;
+  background: rgba(127, 29, 29, 0.28);
+  color: #fecaca;
+}
+
+.kds-colunas {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  padding: 1rem 1.25rem 0;
+}
+
+@media (max-width: 900px) {
+  .kds-colunas {
+    grid-template-columns: 1fr;
+  }
+}
+
+.kds-coluna {
+  min-height: 18rem;
+  background: rgba(22, 27, 34, 0.92);
+  border: 1px solid var(--kds-border);
+  border-radius: 14px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.kds-coluna__cabeca {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.95rem;
+}
+
+.kds-coluna--aguardando .kds-coluna__cabeca {
+  background: rgba(230, 180, 34, 0.16);
+  color: #f5d76e;
+  border-top: 3px solid var(--kds-aguardando);
+}
+
+.kds-coluna--preparacao .kds-coluna__cabeca {
+  background: rgba(59, 130, 246, 0.16);
+  color: #93c5fd;
+  border-top: 3px solid var(--kds-preparacao);
+}
+
+.kds-coluna--prontos .kds-coluna__cabeca {
+  background: rgba(34, 197, 94, 0.14);
+  color: #86efac;
+  border-top: 3px solid var(--kds-prontos);
+}
+
+.kds-contador {
+  min-width: 2rem;
+  height: 2rem;
+  padding: 0 0.55rem;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font-size: 1rem;
+}
+
+.kds-coluna__lista {
+  padding: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  flex: 1;
+}
+
+.kds-vazio {
+  margin: 1.5rem 0.5rem;
+  text-align: center;
+  color: var(--kds-muted);
+  font-size: 1rem;
+}
+
+.kds-card {
+  background: var(--kds-surface-2);
+  border: 1px solid var(--kds-border);
+  border-radius: 12px;
+  padding: 0.9rem 1rem;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.22);
+}
+
+.kds-coluna--aguardando .kds-card { border-left: 4px solid var(--kds-aguardando); }
+.kds-coluna--preparacao .kds-card { border-left: 4px solid var(--kds-preparacao); }
+.kds-coluna--prontos .kds-card { border-left: 4px solid var(--kds-prontos); }
+
+.kds-card__topo {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.65rem;
+}
+
+.kds-card__mesa {
+  font-size: 1.55rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  line-height: 1.1;
+}
+
+.kds-card__hora {
+  color: var(--kds-muted);
+  font-size: 0.95rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.kds-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-bottom: 0.75rem;
+}
+
+.kds-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.18rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--kds-muted);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.kds-item {
+  padding: 0.55rem 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.kds-item:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.kds-item__linha {
+  display: flex;
+  gap: 0.65rem;
+  align-items: baseline;
+}
+
+.kds-item__qtd {
+  flex: 0 0 auto;
+  min-width: 2.4rem;
+  font-size: 1.15rem;
+  font-weight: 800;
+  color: #fff;
+}
+
+.kds-item__nome {
+  flex: 1;
+  font-size: 1.12rem;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.kds-item__tipo {
+  flex: 0 0 auto;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--kds-muted);
+}
+
+.kds-item__obs {
+  margin: 0.35rem 0 0 3.05rem;
+  color: #fbbf24;
+  font-size: 0.92rem;
+  font-style: italic;
+}
+
+.kds-carregando-global {
+  padding: 3rem 1rem;
+  text-align: center;
+  color: var(--kds-muted);
+  font-size: 1.1rem;
+}
+
+body{margin:0;background:#0d1117;min-width:1400px}
+.kds-colunas{grid-template-columns:repeat(3,minmax(0,1fr)) !important}
+.visually-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+</style>
+</head>
+<body>
+      <div class="kds-painel" data-painel-kds="1">
+        <header class="kds-cabecalho">
+          <div>
+            <h1 class="kds-cabecalho__titulo">Cozinha <span>(KDS)</span></h1>
+            <div class="kds-cabecalho__meta">
+              <strong>Pastelaria Centro</strong>
+              · Unidade #3
+              · Última atualização: <strong data-kds-ultima>17/11/2026 21:10:00</strong>
+              <span class="visually-hidden">17/11/2026 21:10:00</span>
+            </div>
+          </div>
+          <div class="kds-cabecalho__acoes">
+            <span class="kds-status kds-status--ok" data-kds-status="kds-status--ok">
+              <span class="kds-status__dot" aria-hidden="true"></span>
+              Atualizado
+            </span>
+            <button type="button" class="kds-btn-atualizar" data-acao="atualizar"
+              >
+              Atualizar agora
+            </button>
+          </div>
+        </header>
+        
+        <div class="kds-colunas">
+          
+      <section class="kds-coluna kds-coluna--aguardando" data-coluna="AGUARDANDO">
+        <header class="kds-coluna__cabeca">
+          <span>Aguardando</span>
+          <span class="kds-contador" data-contador="AGUARDANDO">2</span>
+        </header>
+        <div class="kds-coluna__lista">
+      <article class="kds-card" data-rodada-id="11">
+        <div class="kds-card__topo">
+          <div class="kds-card__mesa">Mesa 01</div>
+          <div class="kds-card__hora">17:55:00</div>
+        </div>
+        <div class="kds-card__meta"><span class="kds-chip">Comanda 12</span><span class="kds-chip">Rodada 2</span><span class="kds-chip">Seq. 1</span></div>
+        
+      <div class="kds-item" data-item-id="201">
+        <div class="kds-item__linha">
+          <span class="kds-item__qtd">3</span>
+          <span class="kds-item__nome">Pastel de queijo</span>
+          <span class="kds-item__tipo">PASTEL</span>
+        </div>
+        <div class="kds-item__obs">Bem passado</div>
+      </div>
+      </article>
+      <article class="kds-card" data-rodada-id="10">
+        <div class="kds-card__topo">
+          <div class="kds-card__mesa">Mesa 05</div>
+          <div class="kds-card__hora">17:58:00</div>
+        </div>
+        <div class="kds-card__meta"><span class="kds-chip">Comanda 44</span><span class="kds-chip">Rodada 1</span><span class="kds-chip">Seq. 2</span></div>
+        
+      <div class="kds-item" data-item-id="101">
+        <div class="kds-item__linha">
+          <span class="kds-item__qtd">2</span>
+          <span class="kds-item__nome">Pastel de carne</span>
+          <span class="kds-item__tipo">PASTEL</span>
+        </div>
+        <div class="kds-item__obs">Sem cebola</div>
+      </div>
+      </article></div>
+      </section>
+          
+      <section class="kds-coluna kds-coluna--preparacao" data-coluna="EM_PREPARACAO">
+        <header class="kds-coluna__cabeca">
+          <span>Em preparação</span>
+          <span class="kds-contador" data-contador="EM_PREPARACAO">1</span>
+        </header>
+        <div class="kds-coluna__lista">
+      <article class="kds-card" data-rodada-id="10">
+        <div class="kds-card__topo">
+          <div class="kds-card__mesa">Mesa 05</div>
+          <div class="kds-card__hora">17:58:00</div>
+        </div>
+        <div class="kds-card__meta"><span class="kds-chip">Comanda 44</span><span class="kds-chip">Rodada 1</span><span class="kds-chip">Seq. 2</span></div>
+        
+      <div class="kds-item" data-item-id="102">
+        <div class="kds-item__linha">
+          <span class="kds-item__qtd">1</span>
+          <span class="kds-item__nome">Refrigerante 200ml</span>
+          <span class="kds-item__tipo">BEBIDA</span>
+        </div>
+        
+      </div>
+      </article></div>
+      </section>
+          
+      <section class="kds-coluna kds-coluna--prontos" data-coluna="PRONTO">
+        <header class="kds-coluna__cabeca">
+          <span>Prontos</span>
+          <span class="kds-contador" data-contador="PRONTO">1</span>
+        </header>
+        <div class="kds-coluna__lista">
+      <article class="kds-card" data-rodada-id="12">
+        <div class="kds-card__topo">
+          <div class="kds-card__mesa">Mesa 07</div>
+          <div class="kds-card__hora">17:50:00</div>
+        </div>
+        <div class="kds-card__meta"><span class="kds-chip">Comanda 99</span><span class="kds-chip">Rodada 3</span><span class="kds-chip">Seq. 3</span></div>
+        
+      <div class="kds-item" data-item-id="301">
+        <div class="kds-item__linha">
+          <span class="kds-item__qtd">1.5</span>
+          <span class="kds-item__nome">Porção batata</span>
+          <span class="kds-item__tipo">OUTRO</span>
+        </div>
+        
+      </div>
+      </article></div>
+      </section>
+        </div>
+        <div class="visually-hidden" data-kds-contadores>
+          Aguardando 2; Em preparação 1; Prontos 1
+        </div>
+      </div></body>
+</html>

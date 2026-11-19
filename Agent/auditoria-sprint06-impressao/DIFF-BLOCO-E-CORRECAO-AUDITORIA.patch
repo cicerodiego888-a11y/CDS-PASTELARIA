@@ -1,0 +1,2324 @@
+diff --git a/backend/services/cozinha/cozinhaImpressaoDriver.js b/backend/services/cozinha/cozinhaImpressaoDriver.js
+--- a/backend/services/cozinha/cozinhaImpressaoDriver.js
++++ b/backend/services/cozinha/cozinhaImpressaoDriver.js
+@@ -1,2 +1,31 @@
++/**
++ * Contrato abstrato de driver de impressão — Sprint 06 Bloco D.
++ * Sem integração desktop, sem chamada de impressão nativa, sem impressora real.
++ */
++'use strict';
++
++const { erroImpressao } = require('./cozinhaImpressaoContratos');
++
++const RESULTADOS_DRIVER = Object.freeze({
++  ACEITA: 'ACEITA',
++  FALHA: 'FALHA',
++  INCERTO: 'INCERTO',
++  /** Simulação/dry-run — NÃO é aceitação do spooler. */
++  SIMULADO: 'SIMULADO'
++});
++
++/**
++ * @typedef {object} DriverImpressaoResultado
++ * @property {'ACEITA'|'FALHA'|'INCERTO'|'SIMULADO'} resultado
++ * @property {string|null} [spooler_job_token]
++ * @property {string|null} [erro]
++ * @property {boolean} impressao_fisica
++ * @property {string} driver
++ * @property {boolean} [dry_run]
++ */
++
++function assertResultadoDriver(out) {
++  if (!out || typeof out !== 'object') {
++    throw erroImpressao('Driver retornou resultado inválido.', 500, 'IMPRESSAO_DRIVER_INVALIDO');
+   }
+   if (out.impressao_fisica === true) {
+@@ -6,2 +35,160 @@
+       'IMPRESSAO_FISICA_PROIBIDA'
+     );
++  }
++  const r = String(out.resultado || '').toUpperCase();
++  if (!RESULTADOS_DRIVER[r]) {
++    throw erroImpressao(
++      'resultado do driver inválido.',
++      500,
++      'IMPRESSAO_DRIVER_RESULTADO_INVALIDO',
++      { detalhes: { resultado: out.resultado } }
++    );
++  }
++  return {
++    resultado: r,
++    spooler_job_token: out.spooler_job_token != null ? String(out.spooler_job_token) : null,
++    erro: out.erro != null ? String(out.erro) : null,
++    impressao_fisica: false,
++    dry_run: out.dry_run === true || r === RESULTADOS_DRIVER.SIMULADO,
++    driver: String(out.driver || 'DESCONHECIDO')
++  };
++}
++
++/**
++ * Interface documental — qualquer driver deve expor imprimir(contexto).
++ * @interface
++ */
++class ImpressaoDriver {
++  /**
++   * @param {object} _contexto
++   * @returns {Promise<DriverImpressaoResultado>}
++   */
++  async imprimir(_contexto) {
++    throw erroImpressao(
++      'Driver abstrato: implementar imprimir().',
++      501,
++      'IMPRESSAO_DRIVER_NAO_IMPLEMENTADO'
++    );
++  }
++
++  get nome() {
++    return 'ABSTRACT';
++  }
++
++  get impressaoFisica() {
++    return false;
++  }
++}
++
++/**
++ * Driver FAKE — simula sucesso, falha conhecida ou resultado incerto.
++ * Nunca acessa impressora real nem runtime desktop de impressão.
++ */
++class FakeImpressaoDriver extends ImpressaoDriver {
++  /**
++   * @param {object} [opts]
++   * @param {'sucesso'|'falha'|'incerto'|'timeout'} [opts.modo]
++   * @param {string} [opts.erro]
++   * @param {string} [opts.tokenPrefix]
++   * @param {number} [opts.delayMs] — apenas simulação (não imprime)
++   * @param {function} [opts.resolver] — override por job: (ctx) => modo|resultado
++   */
++  constructor(opts = {}) {
++    super();
++    this.modo = String(opts.modo || 'sucesso').toLowerCase();
++    this.erroPadrao = opts.erro != null ? String(opts.erro) : null;
++    this.tokenPrefix = opts.tokenPrefix != null ? String(opts.tokenPrefix) : 'fake-spool';
++    this.delayMs = Number(opts.delayMs) > 0 ? Number(opts.delayMs) : 0;
++    this.resolver = typeof opts.resolver === 'function' ? opts.resolver : null;
++    this.chamadas = [];
++    this._seq = 0;
++  }
++
++  get nome() {
++    return 'FAKE';
++  }
++
++  get impressaoFisica() {
++    return false;
++  }
++
++  /**
++   * Altera o modo em runtime (testes / simulação operacional).
++   * @param {'sucesso'|'falha'|'incerto'|'timeout'} modo
++   */
++  setModo(modo) {
++    this.modo = String(modo || 'sucesso').toLowerCase();
++  }
++
++  async imprimir(contexto = {}) {
++    this._seq += 1;
++    const registro = {
++      seq: this._seq,
++      job_id: contexto.job && contexto.job.id,
++      vias: contexto.job && contexto.job.vias,
++      em: new Date().toISOString()
++    };
++    this.chamadas.push(registro);
++
++    if (this.delayMs > 0) {
++      await new Promise((r) => setTimeout(r, this.delayMs));
++    }
++
++    let modo = this.modo;
++    if (this.resolver) {
++      const decidido = this.resolver(contexto, registro);
++      if (decidido && typeof decidido === 'object' && decidido.resultado) {
++        return assertResultadoDriver({
++          ...decidido,
++          impressao_fisica: false,
++          driver: 'FAKE'
++        });
++      }
++      if (typeof decidido === 'string') modo = decidido.toLowerCase();
++    }
++
++    if (modo === 'falha' || modo === 'fail' || modo === 'erro') {
++      return assertResultadoDriver({
++        resultado: RESULTADOS_DRIVER.FALHA,
++        spooler_job_token: null,
++        erro: this.erroPadrao || 'FAKE: falha conhecida antes da aceitação do spooler',
++        impressao_fisica: false,
++        driver: 'FAKE'
++      });
++    }
++
++    if (modo === 'incerto' || modo === 'timeout' || modo === 'uncertain') {
++      return assertResultadoDriver({
++        resultado: RESULTADOS_DRIVER.INCERTO,
++        spooler_job_token: null,
++        erro: this.erroPadrao
++          || (modo === 'timeout'
++            ? 'FAKE: timeout — resultado indeterminável'
++            : 'FAKE: resultado incerto'),
++        impressao_fisica: false,
++        driver: 'FAKE'
++      });
++    }
++
++    // sucesso
++    return assertResultadoDriver({
++      resultado: RESULTADOS_DRIVER.ACEITA,
++      spooler_job_token: `${this.tokenPrefix}:${contexto.job && contexto.job.id}:${this._seq}`,
++      erro: null,
++      impressao_fisica: false,
++      driver: 'FAKE'
++    });
++  }
++}
++
++function criarFakeDriver(opts = {}) {
++  return new FakeImpressaoDriver(opts);
++}
++
++module.exports = {
++  RESULTADOS_DRIVER,
++  ImpressaoDriver,
++  FakeImpressaoDriver,
++  criarFakeDriver,
++  assertResultadoDriver
++};
+diff --git a/backend/services/cozinha/cozinhaImpressaoElectronBridge.js b/backend/services/cozinha/cozinhaImpressaoElectronBridge.js
+--- a/backend/services/cozinha/cozinhaImpressaoElectronBridge.js
++++ b/backend/services/cozinha/cozinhaImpressaoElectronBridge.js
+@@ -1,16 +1,20 @@
+ /**
+- * Ponte local Electron — Sprint 06 Bloco E.
++ * Ponte local Electron — Sprint 06 Bloco E (correção auditoria).
+  * Isolada da impressão comercial/fiscal. Sem HTTP/LAN.
+  *
+- * Impressão real DESLIGADA por padrão.
+- * Requer CDS_COZINHA_IMPRESSAO_FISICA_AUTORIZADA=1 + autorizarSpoolerReal=true.
++ * E-01: dry-run → SIMULADO (nunca ACEITA / ACEITA_PELO_SPOOLER).
++ * E-02: print físico só com job canônico; IPC genérico bloqueado.
+  */
+ 'use strict';
+ 
+ const { erroImpressao, parsePositiveInteger } = require('./cozinhaImpressaoContratos');
++const { RESULTADOS_DRIVER } = require('./cozinhaImpressaoDriver');
+ 
+ const IPC_CANAIS = Object.freeze({
+   LISTAR: 'cozinha-impressao:listar-impressoras',
+-  IMPRIMIR: 'cozinha-impressao:imprimir'
++  /** Canal legado/genérico — sempre rejeitado para print físico. */
++  IMPRIMIR: 'cozinha-impressao:imprimir',
++  /** Print só com referência a job persistido (Worker confiável). */
++  IMPRIMIR_JOB: 'cozinha-impressao:imprimir-job'
+ });
+ 
+@@ -18,5 +22,4 @@
+   const envOk = String(process.env.CDS_COZINHA_IMPRESSAO_FISICA_AUTORIZADA || '') === '1';
+   const optOk = opts.autorizarSpoolerReal === true || opts.autorizar_spooler_real === true;
+-  // Testes automatizados nunca habilitam impressão real.
+   if (String(process.env.CDS_TEST_ISOLATION || '') === '1') return false;
+   if (String(process.env.CDS_BLOQUEAR_BANCO_OFICIAL || '') === '1'
+@@ -28,17 +31,79 @@
+ 
+ /**
+- * IPC/payload sanitizado: não aceita empresa/unidade/snapshot persistido.
+- * Apenas dados necessários para spooler local.
+- */
+-function sanitizarPayloadImpressao(raw = {}) {
++ * Valida remetente IPC (webContents de janela conhecida da app).
++ * @param {object} event — evento Electron IPC
++ * @param {{ permitirSemJanela?: boolean, tokensConfiaveis?: string[] }} [opts]
++ */
++function validarRemetenteIpc(event, opts = {}) {
++  if (opts.tokenWorker && Array.isArray(opts.tokensConfiaveis)) {
++    if (opts.tokensConfiaveis.includes(String(opts.tokenWorker))) {
++      return { ok: true, origem: 'worker-token' };
++    }
++  }
++  const sender = event && event.sender;
++  if (!sender || (typeof sender.isDestroyed === 'function' && sender.isDestroyed())) {
++    throw erroImpressao(
++      'Remetente IPC inválido ou destruído.',
++      403,
++      'IMPRESSAO_IPC_REMETENTE_INVALIDO'
++    );
++  }
++  // BrowserWindow.fromWebContents injetável nos testes via opts.resolveWindow
++  const resolveWindow = typeof opts.resolveWindow === 'function'
++    ? opts.resolveWindow
++    : null;
++  let win = null;
++  if (resolveWindow) {
++    win = resolveWindow(sender);
++  } else {
++    try {
++      // lazy require para não quebrar testes Node sem Electron
++      const { BrowserWindow } = require('electron');
++      win = BrowserWindow.fromWebContents(sender);
++    } catch (_e) {
++      win = null;
++    }
++  }
++  if (!win && !opts.permitirSemJanela) {
++    throw erroImpressao(
++      'Remetente IPC não pertence a janela autorizada da aplicação.',
++      403,
++      'IMPRESSAO_IPC_REMETENTE_INVALIDO'
++    );
++  }
++  return { ok: true, origem: 'browser-window', window_id: win && win.id };
++}
++
++/**
++ * Payload genérico do renderer (texto/device arbitrários) — NÃO autoriza print.
++ * Mantido só para rejeição explícita / listagem auxiliar.
++ */
++function rejeitarImpressaoGenericaPorIpc(raw = {}) {
++  throw erroImpressao(
++    'Impressão física de cozinha não pode ser disparada por IPC genérico do renderer. '
++      + 'Use o Worker com job persistido e snapshot canônico.',
++    403,
++    'IMPRESSAO_IPC_PRINT_BLOQUEADO',
++    {
++      detalhes: {
++        recebeu_texto: raw.texto != null || raw.conteudo != null,
++        recebeu_device: raw.deviceName != null || raw.device_name != null
++      }
++    }
++  );
++}
++
++/**
++ * Referência canônica a job persistido (único caminho físico permitido via IPC).
++ */
++function sanitizarReferenciaJobImpressao(raw = {}) {
+   const proibidos = [
+-    'empresa_id', 'empresaId', 'unidade_id', 'unidadeId',
+-    'payload_snapshot', 'snapshot', 'rodada_id', 'rodadaId',
+-    'itens', 'preco', 'danfe', 'nfce', 'tef'
++    'texto', 'conteudo', 'payload_snapshot', 'snapshot', 'itens',
++    'preco', 'danfe', 'nfce', 'tef'
+   ];
+   for (const k of proibidos) {
+     if (Object.prototype.hasOwnProperty.call(raw, k)) {
+       throw erroImpressao(
+-        `Campo proibido no IPC de cozinha: ${k}`,
++        `Campo proibido na referência de job IPC: ${k}`,
+         400,
+         'IMPRESSAO_IPC_CAMPO_PROIBIDO',
+@@ -48,31 +113,36 @@
+   }
+ 
+-  const deviceName = String(raw.deviceName != null ? raw.deviceName : raw.device_name || '').trim();
+-  if (!deviceName) {
+-    throw erroImpressao('deviceName obrigatório.', 400, 'IMPRESSAO_DEVICE_OBRIGATORIO');
+-  }
+-
+-  const texto = String(raw.texto != null ? raw.texto : raw.conteudo || '');
+-  if (!texto.trim()) {
+-    throw erroImpressao('texto de impressão vazio.', 400, 'IMPRESSAO_TEXTO_VAZIO');
+-  }
+-
+-  const vias = parsePositiveInteger(raw.vias) || 1;
+-  const jobId = raw.jobId != null ? parsePositiveInteger(raw.jobId)
+-    : (raw.job_id != null ? parsePositiveInteger(raw.job_id) : null);
+-  const larguraMm = raw.largura_mm != null ? Number(raw.largura_mm)
+-    : (raw.larguraMm != null ? Number(raw.larguraMm) : null);
+-  const timeoutMs = Number(raw.timeoutMs != null ? raw.timeoutMs : raw.timeout_ms);
+-  const limTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 15000;
++  const jobId = parsePositiveInteger(raw.jobId != null ? raw.jobId : raw.job_id);
++  const empresaId = parsePositiveInteger(raw.empresaId != null ? raw.empresaId : raw.empresa_id);
++  const unidadeId = parsePositiveInteger(raw.unidadeId != null ? raw.unidadeId : raw.unidade_id);
++  const workerId = String(raw.workerId != null ? raw.workerId : raw.worker_id || '').trim();
++
++  if (!jobId || !empresaId || !unidadeId || !workerId) {
++    throw erroImpressao(
++      'Referência de job incompleta (job_id, empresa_id, unidade_id, worker_id).',
++      400,
++      'IMPRESSAO_JOB_REF_INVALIDA'
++    );
++  }
+ 
+   return Object.freeze({
+-    deviceName,
+-    texto,
+-    vias,
+     job_id: jobId,
+-    largura_mm: larguraMm === 58 || larguraMm === 80 ? larguraMm : null,
+-    timeout_ms: limTimeout,
+-    silent: true
++    empresa_id: empresaId,
++    unidade_id: unidadeId,
++    worker_id: workerId,
++    autorizar_spooler_real: raw.autorizarSpoolerReal === true || raw.autorizar_spooler_real === true
+   });
++}
++
++/**
++ * @deprecated Use sanitizarReferenciaJobImpressao / rejeitarImpressaoGenericaPorIpc.
++ * Mantido para testes de rejeição de payload arbitrário.
++ */
++function sanitizarPayloadImpressao(raw = {}) {
++  // Qualquer tentativa de payload com texto+device é bloqueio E-02.
++  if (raw && (raw.texto != null || raw.conteudo != null)) {
++    rejeitarImpressaoGenericaPorIpc(raw);
++  }
++  return sanitizarReferenciaJobImpressao(raw);
+ }
+ 
+@@ -102,9 +172,8 @@
+ 
+ /**
+- * Envia texto ao spooler (ou dry-run).
+- * Listagem/validação NÃO imprime.
++ * Envio ao spooler a partir de conteúdo já renderizado pelo Worker (snapshot canônico).
++ * Dry-run → SIMULADO (nunca ACEITA).
+  */
+ async function enviarParaSpoolerCozinha(entrada = {}, opts = {}) {
+-  const payload = sanitizarPayloadImpressao(entrada);
+   const adapter = opts.adapter || entrada.adapter;
+   if (!adapter || typeof adapter.print !== 'function') {
+@@ -116,15 +185,45 @@
+   }
+ 
+-  // __testeForcarSpooler: apenas sob CDS_TEST_ISOLATION (mocks; nunca impressora real).
++  const jobId = parsePositiveInteger(entrada.job_id != null ? entrada.job_id : entrada.jobId);
++  const deviceName = String(entrada.deviceName != null ? entrada.deviceName : entrada.device_name || '').trim();
++  const texto = String(entrada.texto != null ? entrada.texto : '');
++  const vias = parsePositiveInteger(entrada.vias) || 1;
++  const larguraMm = entrada.largura_mm != null ? Number(entrada.largura_mm) : null;
++  const timeoutMs = Number(entrada.timeoutMs != null ? entrada.timeoutMs : entrada.timeout_ms);
++  const limTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 15000;
++
++  if (!jobId) {
++    throw erroImpressao(
++      'job_id obrigatório para envio ao spooler de cozinha.',
++      400,
++      'IMPRESSAO_JOB_ID_OBRIGATORIO'
++    );
++  }
++  if (!deviceName) {
++    throw erroImpressao('deviceName obrigatório.', 400, 'IMPRESSAO_DEVICE_OBRIGATORIO');
++  }
++  if (!texto.trim()) {
++    throw erroImpressao('texto de impressão vazio.', 400, 'IMPRESSAO_TEXTO_VAZIO');
++  }
++  // Conteúdo deve ter origem canônica (Worker), não IPC renderer.
++  if (opts.origem !== 'worker-canonico' && opts.origem !== 'teste-mock') {
++    throw erroImpressao(
++      'Envio ao spooler exige origem worker-canonico (job persistido + snapshot).',
++      403,
++      'IMPRESSAO_ORIGEM_NAO_CANONICA'
++    );
++  }
++
+   const autorizada = (
+     process.env.CDS_TEST_ISOLATION === '1' && opts.__testeForcarSpooler === true
+   ) || isImpressaoFisicaAutorizada(opts);
++
+   const printers = await listarImpressorasCozinha(adapter);
+-  const existe = printers.impressoras.some((p) => p.name === payload.deviceName);
++  const existe = printers.impressoras.some((p) => p.name === deviceName);
+   if (!existe) {
+     return {
+-      resultado: 'FALHA',
++      resultado: RESULTADOS_DRIVER.FALHA,
+       spooler_job_token: null,
+-      erro: `Impressora inexistente: ${payload.deviceName}`,
++      erro: `Impressora inexistente: ${deviceName}`,
+       impressao_fisica: false,
+       vias_enviadas: 0,
+@@ -134,13 +233,13 @@
+ 
+   if (!autorizada) {
+-    // Dry-run seguro: valida device + render path sem webContents.print.
++    // E-01: simulação distinta — NÃO declara ACEITA.
+     return {
+-      resultado: 'ACEITA',
+-      spooler_job_token: `electron-dry:${payload.job_id || 'x'}:${payload.vias}`,
+-      erro: null,
++      resultado: RESULTADOS_DRIVER.SIMULADO,
++      spooler_job_token: null,
++      erro: 'SIMULADO: impressão real desabilitada (dry-run). Sem aceitação do spooler.',
+       impressao_fisica: false,
+-      vias_enviadas: payload.vias,
++      vias_enviadas: 0,
+       dry_run: true,
+-      aviso: 'Impressão real desabilitada (requer autorização explícita do PO).'
++      aviso: 'Requer CDS_COZINHA_IMPRESSAO_FISICA_AUTORIZADA=1 + autorizarSpoolerReal=true'
+     };
+   }
+@@ -148,13 +247,13 @@
+   const tokens = [];
+   try {
+-    for (let i = 1; i <= payload.vias; i += 1) {
++    for (let i = 1; i <= vias; i += 1) {
+       const printPromise = adapter.print({
+-        deviceName: payload.deviceName,
+-        texto: payload.texto,
++        deviceName,
++        texto,
+         silent: true,
+         via: i,
+-        vias: payload.vias,
+-        job_id: payload.job_id,
+-        largura_mm: payload.largura_mm
++        vias,
++        job_id: jobId,
++        largura_mm: larguraMm
+       });
+       const result = await Promise.race([
+@@ -163,9 +262,9 @@
+           setTimeout(
+             () => reject(Object.assign(new Error('Timeout no spooler Electron'), { codigo: 'TIMEOUT' })),
+-            payload.timeout_ms
++            limTimeout
+           );
+         })
+       ]);
+-      tokens.push(result && result.token ? String(result.token) : `electron:${payload.job_id}:${i}`);
++      tokens.push(result && result.token ? String(result.token) : `electron:${jobId}:${i}`);
+     }
+   } catch (err) {
+@@ -173,5 +272,5 @@
+     if (err && (err.codigo === 'TIMEOUT' || /timeout/i.test(msg))) {
+       return {
+-        resultado: 'INCERTO',
++        resultado: RESULTADOS_DRIVER.INCERTO,
+         spooler_job_token: tokens[0] || null,
+         erro: `Timeout Electron: ${msg}`,
+@@ -183,5 +282,5 @@
+     if (/communica|ECONN|ENOTFOUND|IPC|canal|adapter/i.test(msg)) {
+       return {
+-        resultado: 'FALHA',
++        resultado: RESULTADOS_DRIVER.FALHA,
+         spooler_job_token: null,
+         erro: `Falha de comunicação Electron: ${msg}`,
+@@ -191,7 +290,6 @@
+       };
+     }
+-    // Indeterminável
+     return {
+-      resultado: 'INCERTO',
++      resultado: RESULTADOS_DRIVER.INCERTO,
+       spooler_job_token: tokens[0] || null,
+       erro: `Resultado inconclusivo Electron: ${msg}`,
+@@ -203,9 +301,9 @@
+ 
+   return {
+-    resultado: 'ACEITA',
+-    spooler_job_token: tokens[tokens.length - 1] || `electron:${payload.job_id}`,
++    resultado: RESULTADOS_DRIVER.ACEITA,
++    spooler_job_token: tokens[tokens.length - 1] || `electron:${jobId}`,
+     erro: null,
+     impressao_fisica: false,
+-    vias_enviadas: payload.vias,
++    vias_enviadas: vias,
+     dry_run: false
+   };
+@@ -214,5 +312,9 @@
+ module.exports = {
+   IPC_CANAIS,
++  RESULTADOS_DRIVER,
+   isImpressaoFisicaAutorizada,
++  validarRemetenteIpc,
++  rejeitarImpressaoGenericaPorIpc,
++  sanitizarReferenciaJobImpressao,
+   sanitizarPayloadImpressao,
+   listarImpressorasCozinha,
+diff --git a/backend/services/cozinha/cozinhaImpressaoElectronDriver.js b/backend/services/cozinha/cozinhaImpressaoElectronDriver.js
+--- a/backend/services/cozinha/cozinhaImpressaoElectronDriver.js
++++ b/backend/services/cozinha/cozinhaImpressaoElectronDriver.js
+@@ -1,6 +1,5 @@
+ /**
+- * Driver Electron — Sprint 06 Bloco E.
+- * Separado do FAKE. Impressão real off por padrão.
+- * ACEITA = spooler aceitou (dry-run ou real autorizado), nunca confirma papel.
++ * Driver Electron — Sprint 06 Bloco E (correção auditoria).
++ * Separado do FAKE. Dry-run → SIMULADO (nunca ACEITA_PELO_SPOOLER).
+  */
+ 'use strict';
+@@ -23,7 +22,8 @@
+    * @param {object} [opts]
+    * @param {object} [opts.adapter] — { getPrinters, print }
+-   * @param {boolean} [opts.autorizarSpoolerReal] — exige também env de autorização
++   * @param {boolean} [opts.autorizarSpoolerReal]
+    * @param {number} [opts.timeoutMs]
+-   * @param {string} [opts.deviceName] — override (senão job/estação)
++   * @param {string} [opts.deviceName]
++   * @param {boolean} [opts.producao] — marca driver de produção (E-03)
+    */
+   constructor(opts = {}) {
+@@ -33,4 +33,5 @@
+     this.timeoutMs = Number(opts.timeoutMs) > 0 ? Number(opts.timeoutMs) : 15000;
+     this.deviceNameOverride = opts.deviceName != null ? String(opts.deviceName) : null;
++    this.producao = opts.producao === true;
+     this.chamadas = [];
+     this._seq = 0;
+@@ -41,5 +42,4 @@
+   }
+ 
+-  /** Sempre false no contrato: ACEITA ≠ papel impresso. */
+   get impressaoFisica() {
+     return false;
+@@ -50,4 +50,8 @@
+   }
+ 
++  get isProducao() {
++    return this.producao === true;
++  }
++
+   async listarImpressoras() {
+     return listarImpressorasCozinha(this.adapter);
+@@ -56,11 +60,11 @@
+   resolverDeviceName(contexto = {}) {
+     if (this.deviceNameOverride) return this.deviceNameOverride;
++    if (contexto.estacao && contexto.estacao.device_name) {
++      return String(contexto.estacao.device_name);
++    }
++    if (contexto.device_name) return String(contexto.device_name);
+     if (contexto.deviceName) return String(contexto.deviceName);
+-    if (contexto.device_name) return String(contexto.device_name);
+     const job = contexto.job || {};
+     if (job.device_name) return String(job.device_name);
+-    if (contexto.estacao && contexto.estacao.device_name) {
+-      return String(contexto.estacao.device_name);
+-    }
+     return '';
+   }
+@@ -73,16 +77,25 @@
+     const snapshotRaw = job.payload_snapshot != null
+       ? job.payload_snapshot
+-      : (job.snapshot || contexto.snapshot);
++      : (job.snapshot || null);
++
++    if (!parsePositiveInteger(job.id)) {
++      return assertResultadoDriver({
++        resultado: RESULTADOS_DRIVER.FALHA,
++        erro: 'ELECTRON: job.id persistido obrigatório',
++        impressao_fisica: false,
++        driver: 'ELECTRON'
++      });
++    }
+ 
+     if (!snapshotRaw) {
+       return assertResultadoDriver({
+         resultado: RESULTADOS_DRIVER.FALHA,
+-        erro: 'ELECTRON: snapshot ausente no job',
+-        impressao_fisica: false,
+-        driver: 'ELECTRON'
+-      });
+-    }
+-
+-    // Snapshot imutável: renderiza cópia; nunca altera job.payload_snapshot.
++        erro: 'ELECTRON: snapshot canônico ausente no job persistido',
++        impressao_fisica: false,
++        driver: 'ELECTRON'
++      });
++    }
++
++    // Snapshot imutável: render a partir do persistido; nunca aceita texto externo.
+     const render = renderizarTexto(snapshotRaw, {
+       largura_mm: job.largura_mm
+@@ -98,4 +111,5 @@
+       largura_mm: render.largura_mm,
+       dry_run: !this.spoolerRealHabilitado,
++      producao: this.producao,
+       em: new Date().toISOString()
+     });
+@@ -113,5 +127,5 @@
+       return assertResultadoDriver({
+         resultado: RESULTADOS_DRIVER.FALHA,
+-        erro: 'ELECTRON: adapter IPC ausente',
++        erro: 'ELECTRON: adapter de produção/IPC ausente',
+         impressao_fisica: false,
+         driver: 'ELECTRON'
+@@ -130,16 +144,9 @@
+       }, {
+         adapter: this.adapter,
+-        autorizarSpoolerReal: this.autorizarSpoolerReal
++        autorizarSpoolerReal: this.autorizarSpoolerReal,
++        origem: 'worker-canonico'
+       });
+     } catch (err) {
+       const msg = String(err && err.message ? err.message : err);
+-      if (err && err.codigo === 'IMPRESSAO_IPC_CAMPO_PROIBIDO') {
+-        return assertResultadoDriver({
+-          resultado: RESULTADOS_DRIVER.FALHA,
+-          erro: msg,
+-          impressao_fisica: false,
+-          driver: 'ELECTRON'
+-        });
+-      }
+       return assertResultadoDriver({
+         resultado: RESULTADOS_DRIVER.INCERTO,
+@@ -154,4 +161,5 @@
+       spooler_job_token: out.spooler_job_token,
+       erro: out.erro,
++      dry_run: out.dry_run === true,
+       impressao_fisica: false,
+       driver: 'ELECTRON'
+@@ -164,7 +172,4 @@
+ }
+ 
+-/**
+- * Adapter mock para testes — nunca imprime fisicamente.
+- */
+ function criarAdapterElectronMock(opts = {}) {
+   const printers = Array.isArray(opts.printers) ? opts.printers : [
+@@ -176,4 +181,5 @@
+ 
+   return {
++    tipo: 'mock',
+     printers,
+     prints,
+@@ -185,5 +191,4 @@
+       if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+       if (modo === 'timeout') {
+-        await new Promise((r) => setTimeout(r, (opts.timeoutSimMs || 30)));
+         const err = new Error('mock timeout');
+         err.codigo = 'TIMEOUT';
+@@ -195,4 +200,7 @@
+       if (modo === 'falha') {
+         throw new Error('spooler recusou (mock)');
++      }
++      if (modo === 'hang') {
++        return new Promise(() => {});
+       }
+       return { token: `mock-spool:${payload.deviceName}:${prints.length}` };
+diff --git a/backend/services/cozinha/CozinhaImpressaoElectronProducao.js b/backend/services/cozinha/CozinhaImpressaoElectronProducao.js
+new file mode 100644
+--- a/backend/services/cozinha/CozinhaImpressaoElectronProducao.js
++++ b/backend/services/cozinha/CozinhaImpressaoElectronProducao.js
+@@ -0,0 +1,160 @@
++/**
++ * Integração de produção Worker ↔ Electron — Sprint 06 Bloco E (E-03).
++ *
++ * Instancia o adapter real (webContents.getPrintersAsync / print) e injeta
++ * o driver ELECTRON no Worker. FAKE permanece isolado para testes.
++ *
++ * Impressão física continua desabilitada por padrão.
++ */
++'use strict';
++
++const { criarFakeDriver } = require('./cozinhaImpressaoDriver');
++const { criarElectronDriver } = require('./cozinhaImpressaoElectronDriver');
++const { isImpressaoFisicaAutorizada } = require('./cozinhaImpressaoElectronBridge');
++const { erroImpressao } = require('./cozinhaImpressaoContratos');
++
++/**
++ * Adapter Electron real (processo main). Não usa IPC do renderer para print.
++ * @param {object} deps
++ * @param {function(): object|null} deps.obterWebContents — retorna webContents vivo
++ * @param {function(object): Promise<object>} [deps.criarJanelaImpressao] — opcional
++ */
++function criarAdapterElectronProducao(deps = {}) {
++  if (typeof deps.obterWebContents !== 'function') {
++    throw erroImpressao(
++      'Adapter de produção exige obterWebContents().',
++      500,
++      'IMPRESSAO_ADAPTER_PRODUCAO_INVALIDO'
++    );
++  }
++
++  return {
++    tipo: 'electron-producao',
++    async getPrinters() {
++      const wc = deps.obterWebContents();
++      if (!wc || (typeof wc.isDestroyed === 'function' && wc.isDestroyed())) {
++        return [];
++      }
++      if (typeof wc.getPrintersAsync !== 'function') {
++        throw new Error('webContents.getPrintersAsync indisponível');
++      }
++      const lista = await wc.getPrintersAsync();
++      return (lista || []).map((imp) => ({
++        name: imp.name,
++        displayName: imp.displayName || imp.name,
++        description: imp.description,
++        status: imp.status,
++        isDefault: imp.isDefault === true
++      }));
++    },
++    async print({ deviceName, texto, silent }) {
++      // Print em janela oculta dedicada (mesmo processo main — sem renderer genérico).
++      let win = null;
++      let wc = null;
++      if (typeof deps.criarJanelaImpressao === 'function') {
++        win = await deps.criarJanelaImpressao();
++        wc = win && win.webContents;
++      } else {
++        wc = deps.obterWebContents();
++      }
++      if (!wc || typeof wc.print !== 'function') {
++        throw new Error('webContents.print indisponível no adapter de produção');
++      }
++
++      const html = `<!doctype html><html><head><meta charset="utf-8">
++<style>
++  @page { margin: 0; }
++  body { margin: 0; font-family: monospace; white-space: pre-wrap; font-size: 12px; }
++</style></head><body>${String(texto)
++  .replace(/&/g, '&amp;')
++  .replace(/</g, '&lt;')
++  .replace(/>/g, '&gt;')}</body></html>`;
++
++      if (typeof wc.loadURL === 'function') {
++        await wc.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
++      }
++
++      return new Promise((resolve, reject) => {
++        wc.print(
++          {
++            silent: silent !== false,
++            deviceName: deviceName || undefined,
++            printBackground: false
++          },
++          (success, failureReason) => {
++            if (win && typeof win.destroy === 'function') {
++              try { win.destroy(); } catch (_e) { /* ignore */ }
++            }
++            if (!success) {
++              reject(new Error(failureReason || 'webContents.print falhou'));
++              return;
++            }
++            resolve({ token: `electron-prod:${deviceName}:${Date.now()}` });
++          }
++        );
++      });
++    }
++  };
++}
++
++/**
++ * Driver ELECTRON de produção injetável no Worker.
++ */
++function criarDriverElectronProducao(opts = {}) {
++  const adapter = opts.adapter || criarAdapterElectronProducao(opts);
++  if (adapter.tipo !== 'electron-producao' && opts.exigirTipoProducao !== false) {
++    // Permite injeção de adapter produção-compatível em testes de ligação.
++    if (!opts.permitirAdapterCompat) {
++      throw erroImpressao(
++        'Driver de produção exige adapter electron-producao.',
++        500,
++        'IMPRESSAO_ADAPTER_PRODUCAO_INVALIDO'
++      );
++    }
++  }
++  return criarElectronDriver({
++    adapter,
++    autorizarSpoolerReal: opts.autorizarSpoolerReal === true,
++    timeoutMs: opts.timeoutMs,
++    deviceName: opts.deviceName,
++    producao: true
++  });
++}
++
++/**
++ * Fábrica usada pelo bootstrap do Worker em produção.
++ * @param {'FAKE'|'ELECTRON'} [modo]
++ */
++function criarDriverParaWorker(modo = 'FAKE', opts = {}) {
++  const m = String(modo || 'FAKE').toUpperCase();
++  if (m === 'ELECTRON') {
++    return criarDriverElectronProducao(opts);
++  }
++  return criarFakeDriver(opts.fake || { modo: 'sucesso' });
++}
++
++/**
++ * Evidência de ligação produção: retorna metadados do driver injetado.
++ */
++function descreverIntegracaoProducao(driver) {
++  if (!driver) {
++    return { ok: false, motivo: 'driver ausente' };
++  }
++  return {
++    ok: driver.nome === 'ELECTRON' && driver.isProducao === true,
++    driver: driver.nome,
++    producao: driver.isProducao === true,
++    adapter_tipo: driver.adapter && driver.adapter.tipo,
++    spooler_real_habilitado: typeof driver.spoolerRealHabilitado === 'boolean'
++      ? driver.spoolerRealHabilitado
++      : isImpressaoFisicaAutorizada({ autorizarSpoolerReal: !!driver.autorizarSpoolerReal }),
++    impressao_fisica: driver.impressaoFisica === true
++  };
++}
++
++module.exports = {
++  criarAdapterElectronProducao,
++  criarDriverElectronProducao,
++  criarDriverParaWorker,
++  descreverIntegracaoProducao
++};
+diff --git a/backend/services/cozinha/CozinhaImpressaoWorkerService.js b/backend/services/cozinha/CozinhaImpressaoWorkerService.js
+--- a/backend/services/cozinha/CozinhaImpressaoWorkerService.js
++++ b/backend/services/cozinha/CozinhaImpressaoWorkerService.js
+@@ -1,2 +1,391 @@
++/**
++ * Worker de impressão — Sprint 06 Bloco D.
++ * Claim atômico, FAKE driver, falhas / RESULTADO_INCERTO, sem print físico / Electron / Bloco E.
++ *
++ * Política conservadora: dúvida → RESULTADO_INCERTO; sem reenvio automático.
++ * PROCESSANDO abandonado NÃO volta para PENDENTE.
++ */
++'use strict';
++
++const {
++  erroImpressao,
++  parsePositiveInteger,
++  ESTADOS_FILA
++} = require('./cozinhaImpressaoContratos');
++const { exigirUnidadeOperacional } = require('./cozinhaUnidadeOperacional');
++const { RESULTADOS_DRIVER, assertResultadoDriver, criarFakeDriver } = require('./cozinhaImpressaoDriver');
++const FilaService = require('./CozinhaImpressaoFilaService');
++
++const ABANDONO_PADRAO_MS = 60 * 1000;
++
++function dbAll(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
++  });
++}
++
++function dbGet(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
++  });
++}
++
++function dbRun(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.run(sql, params, function cb(err) {
++      if (err) reject(err);
++      else resolve(this);
++    });
++  });
++}
++
++function dbExec(db, sql) {
++  return new Promise((resolve, reject) => {
++    db.exec(sql, (err) => (err ? reject(err) : resolve()));
++  });
++}
++
++function agoraIso() {
++  return new Date().toISOString();
++}
++
++/**
++ * Executa fn sob BEGIN IMMEDIATE obrigatório.
++ * Não adere a transação externa desconhecida: se a conexão já estiver
++ * em TX, propaga erro (COMMIT/ROLLBACK só da TX iniciada aqui).
++ */
++async function comTransacaoImediata(db, fn) {
++  try {
++    await dbExec(db, 'BEGIN IMMEDIATE');
++  } catch (err) {
++    const msg = String(err && err.message ? err.message : err);
++    if (/within a transaction/i.test(msg)) {
++      throw erroImpressao(
++        'Claim exige BEGIN IMMEDIATE próprio; conexão já está em transação externa.',
++        409,
++        'IMPRESSAO_CLAIM_TX_EXTERNA',
++        { detalhes: { causa: msg } }
++      );
++    }
++    throw err;
++  }
++
++  try {
++    const out = await fn();
++    await dbExec(db, 'COMMIT');
++    return out;
++  } catch (err) {
++    try { await dbExec(db, 'ROLLBACK'); } catch (_e) { /* ignore */ }
++    throw err;
++  }
++}
++
++function exigirEmpresa(empresaId) {
++  const id = parsePositiveInteger(empresaId);
++  if (!id) {
++    throw erroImpressao('empresa_id obrigatório.', 400, 'EMPRESA_OBRIGATORIA');
++  }
++  return id;
++}
++
++function normalizarWorkerId(raw) {
++  const id = String(raw == null ? '' : raw).trim();
++  if (!id) {
++    throw erroImpressao('worker_id obrigatório.', 400, 'IMPRESSAO_WORKER_ID_OBRIGATORIO');
++  }
++  if (id.length > 128) {
++    throw erroImpressao('worker_id excede o tamanho máximo.', 400, 'IMPRESSAO_WORKER_ID_INVALIDO');
++  }
++  return id;
++}
++
++function estadoFinalDeResultadoDriver(resultado) {
++  if (resultado === RESULTADOS_DRIVER.ACEITA) return ESTADOS_FILA.ACEITA_PELO_SPOOLER;
++  if (resultado === RESULTADOS_DRIVER.FALHA) return ESTADOS_FILA.FALHA;
++  // E-01: simulação/dry-run libera o claim sem declarar ACEITA_PELO_SPOOLER.
++  if (resultado === RESULTADOS_DRIVER.SIMULADO) return ESTADOS_FILA.PENDENTE;
++  return ESTADOS_FILA.RESULTADO_INCERTO;
++}
++
++/**
++ * Claim atômico PENDENTE → PROCESSANDO.
++ *
++ * Fluxo inequívoco (por chamada):
++ * 1) BEGIN IMMEDIATE
++ * 2) SELECT candidato (id exato)
++ * 3) UPDATE ... WHERE id=? AND estado='PENDENTE' (changes deve ser 1)
++ * 4) SELECT * WHERE id=? (o mesmo id)
++ * 5) COMMIT
++ *
++ * Não recupera o job por worker_id/timestamp/MAX(id).
++ */
++async function reivindicarProximoJob(entrada = {}, opts = {}) {
++  const db = opts.db || entrada.db;
++  if (!db) throw erroImpressao('Banco indisponível.', 500, 'DB_INDISPONIVEL');
++
++  const empresaId = exigirEmpresa(entrada.empresaId != null ? entrada.empresaId : entrada.empresa_id);
++  const unidadeId = exigirUnidadeOperacional(
++    entrada.unidadeId != null ? entrada.unidadeId : entrada.unidade_id
++  );
++  const workerId = normalizarWorkerId(
++    entrada.workerId != null ? entrada.workerId : entrada.worker_id
++  );
++  const estacaoId = parsePositiveInteger(
++    entrada.estacaoImpressaoId != null
++      ? entrada.estacaoImpressaoId
++      : (entrada.estacao_impressao_id != null ? entrada.estacao_impressao_id : entrada.estacaoId)
++  );
++
++  return comTransacaoImediata(db, async () => {
++    let sqlCand = `
++      SELECT id
++      FROM cozinha_impressao_fila
++      WHERE empresa_id = ?
++        AND unidade_id = ?
++        AND estado = ?
++        AND tentativas < max_tentativas
++    `;
++    const paramsCand = [empresaId, unidadeId, ESTADOS_FILA.PENDENTE];
++    if (estacaoId) {
++      sqlCand += ' AND estacao_impressao_id = ?';
++      paramsCand.push(estacaoId);
++    }
++    sqlCand += ' ORDER BY created_at ASC, id ASC LIMIT 1';
++
++    const cand = await dbGet(db, sqlCand, paramsCand);
++    if (!cand || !cand.id) {
++      return { success: true, reivindicado: false, job: null, impressao_fisica: false };
++    }
++
++    const jobId = Number(cand.id);
++    const agora = agoraIso();
++    const upd = await dbRun(db, `
++      UPDATE cozinha_impressao_fila
++      SET estado = ?,
++          worker_id = ?,
++          processando_em = ?,
++          tentativas = tentativas + 1,
++          updated_at = ?,
++          ultimo_erro = NULL
++      WHERE id = ?
++        AND empresa_id = ?
++        AND unidade_id = ?
++        AND estado = ?
++    `, [
++      ESTADOS_FILA.PROCESSANDO,
++      workerId,
++      agora,
++      agora,
++      jobId,
++      empresaId,
++      unidadeId,
++      ESTADOS_FILA.PENDENTE
++    ]);
++
++    if (!upd || upd.changes !== 1) {
++      // Outro worker conquistou o mesmo id entre SELECT e UPDATE.
++      return { success: true, reivindicado: false, job: null, impressao_fisica: false };
++    }
++
++    const row = await dbGet(db, `
++      SELECT *
++      FROM cozinha_impressao_fila
++      WHERE id = ?
++        AND empresa_id = ?
++        AND unidade_id = ?
++    `, [jobId, empresaId, unidadeId]);
++
++    if (!row || row.estado !== ESTADOS_FILA.PROCESSANDO || Number(row.id) !== jobId) {
++      throw erroImpressao(
++        'Claim inconsistente: job reivindicado não encontrado pelo id.',
++        500,
++        'IMPRESSAO_CLAIM_INCONSISTENTE',
++        { detalhes: { job_id: jobId } }
++      );
++    }
++
++    return {
++      success: true,
++      reivindicado: true,
++      job: FilaService.mapearJob(row, { incluirSnapshot: true }),
++      impressao_fisica: false
++    };
++  });
++}
++
++/**
++ * Jobs PROCESSANDO abandonados → RESULTADO_INCERTO (nunca voltam a PENDENTE).
++ */
++async function recuperarJobsAbandonados(entrada = {}, opts = {}) {
++  const db = opts.db || entrada.db;
++  if (!db) throw erroImpressao('Banco indisponível.', 500, 'DB_INDISPONIVEL');
++
++  const empresaId = exigirEmpresa(entrada.empresaId != null ? entrada.empresaId : entrada.empresa_id);
++  const unidadeId = exigirUnidadeOperacional(
++    entrada.unidadeId != null ? entrada.unidadeId : entrada.unidade_id
++  );
++  const rawLim = entrada.limiteMs != null ? entrada.limiteMs : entrada.abandono_ms;
++  const limiteMs = Number(rawLim);
++  // limiteMs === 0 → todos PROCESSANDO (ex.: reinício do worker); omitido → padrão.
++  const lim = rawLim == null || rawLim === ''
++    ? ABANDONO_PADRAO_MS
++    : (Number.isFinite(limiteMs) && limiteMs >= 0 ? limiteMs : ABANDONO_PADRAO_MS);
++  const agora = Date.now();
++  const limiteIso = new Date(agora - lim).toISOString();
++
++  const rows = await dbAll(db, `
++    SELECT id, processando_em, worker_id
++    FROM cozinha_impressao_fila
++    WHERE empresa_id = ?
++      AND unidade_id = ?
++      AND estado = ?
++      AND (
++        processando_em IS NULL
++        OR processando_em <= ?
++      )
++  `, [empresaId, unidadeId, ESTADOS_FILA.PROCESSANDO, limiteIso]);
++
++  const marcados = [];
++  for (const row of rows) {
++    const agoraUpd = agoraIso();
++    const msg = `Worker abandonado/timeout — resultado indeterminável (worker_id=${row.worker_id || '?'})`;
++    const upd = await dbRun(db, `
++      UPDATE cozinha_impressao_fila
++      SET estado = ?,
++          ultimo_erro = ?,
++          updated_at = ?
++      WHERE id = ?
++        AND empresa_id = ?
++        AND unidade_id = ?
++        AND estado = ?
++    `, [
++      ESTADOS_FILA.RESULTADO_INCERTO,
++      msg,
++      agoraUpd,
++      row.id,
++      empresaId,
++      unidadeId,
++      ESTADOS_FILA.PROCESSANDO
++    ]);
++    if (upd && upd.changes === 1) {
++      marcados.push(row.id);
++    }
++  }
++
++  return {
++    success: true,
++    recuperados: marcados.length,
++    job_ids: marcados,
++    novo_estado: ESTADOS_FILA.RESULTADO_INCERTO,
++    impressao_fisica: false
++  };
++}
++
++/**
++ * Aplica resultado do driver apenas se o job ainda está PROCESSANDO pelo mesmo worker.
++ */
++async function registrarResultado(entrada = {}, opts = {}) {
++  const db = opts.db || entrada.db;
++  if (!db) throw erroImpressao('Banco indisponível.', 500, 'DB_INDISPONIVEL');
++
++  const empresaId = exigirEmpresa(entrada.empresaId != null ? entrada.empresaId : entrada.empresa_id);
++  const unidadeId = exigirUnidadeOperacional(
++    entrada.unidadeId != null ? entrada.unidadeId : entrada.unidade_id
++  );
++  const jobId = parsePositiveInteger(entrada.jobId != null ? entrada.jobId : entrada.id);
++  const workerId = normalizarWorkerId(
++    entrada.workerId != null ? entrada.workerId : entrada.worker_id
++  );
++  if (!jobId) {
++    throw erroImpressao('job id obrigatório.', 400, 'IMPRESSAO_JOB_ID_OBRIGATORIO');
++  }
++
++  const driverOut = assertResultadoDriver({
++    resultado: entrada.resultado,
++    spooler_job_token: entrada.spooler_job_token != null
++      ? entrada.spooler_job_token
++      : entrada.spoolerJobToken,
++    erro: entrada.erro != null ? entrada.erro : entrada.ultimo_erro,
++    impressao_fisica: false,
++    driver: entrada.driver || 'FAKE'
++  });
++
++  const estadoFinal = estadoFinalDeResultadoDriver(driverOut.resultado);
++  const agora = agoraIso();
++  const ehSimulado = driverOut.resultado === RESULTADOS_DRIVER.SIMULADO;
++
++  const upd = await dbRun(db, `
++    UPDATE cozinha_impressao_fila
++    SET estado = ?,
++        spooler_job_token = CASE
++          WHEN ? = 1 THEN NULL
++          WHEN ? IS NOT NULL THEN ?
++          ELSE spooler_job_token
++        END,
++        ultimo_erro = ?,
++        worker_id = CASE WHEN ? = 1 THEN NULL ELSE worker_id END,
++        processando_em = CASE WHEN ? = 1 THEN NULL ELSE processando_em END,
++        updated_at = ?
++    WHERE id = ?
++      AND empresa_id = ?
++      AND unidade_id = ?
++      AND estado = ?
++      AND worker_id = ?
++  `, [
++    estadoFinal,
++    ehSimulado ? 1 : 0,
++    driverOut.spooler_job_token,
++    driverOut.spooler_job_token,
++    driverOut.erro || (ehSimulado ? 'SIMULADO: sem aceitação do spooler' : null),
++    ehSimulado ? 1 : 0,
++    ehSimulado ? 1 : 0,
++    agora,
++    jobId,
++    empresaId,
++    unidadeId,
++    ESTADOS_FILA.PROCESSANDO,
++    workerId
++  ]);
++
++  if (!upd || upd.changes !== 1) {
++    throw erroImpressao(
++      'Job não está PROCESSANDO por este worker (claim perdido ou já finalizado).',
++      409,
++      'IMPRESSAO_RESULTADO_RECUSADO',
++      { detalhes: { job_id: jobId, worker_id: workerId } }
++    );
++  }
++
++  const out = await FilaService.obterJob({
++    db, empresaId, unidadeId, id: jobId
++  }, { db, incluirSnapshot: true });
++
++  return {
++    success: true,
++    job: out.job,
++    resultado_driver: driverOut.resultado,
++    impressao_fisica: false
++  };
++}
++
++/**
++ * Processa um job já reivindicado com o driver (FAKE por padrão).
++ */
++async function processarJobReivindicado(entrada = {}, opts = {}) {
++  const db = opts.db || entrada.db;
++  if (!db) throw erroImpressao('Banco indisponível.', 500, 'DB_INDISPONIVEL');
++
++  const empresaId = exigirEmpresa(entrada.empresaId != null ? entrada.empresaId : entrada.empresa_id);
++  const unidadeId = exigirUnidadeOperacional(
++    entrada.unidadeId != null ? entrada.unidadeId : entrada.unidade_id
++  );
++  const workerId = normalizarWorkerId(
++    entrada.workerId != null ? entrada.workerId : entrada.worker_id
++  );
++  const job = entrada.job;
++  if (!job || !job.id) {
++    throw erroImpressao('job reivindicado obrigatório.', 400, 'IMPRESSAO_JOB_OBRIGATORIO');
++  }
++
+   const driver = opts.driver || entrada.driver || criarFakeDriver({ modo: 'sucesso' });
+   if (driver.impressaoFisica === true) {
+@@ -18,4 +407,7 @@
+ 
+   let driverOut;
++  try {
++    const raw = await driver.imprimir({
++      job,
+       empresaId,
+       unidadeId,
+@@ -26,2 +418,120 @@
+     });
+     driverOut = assertResultadoDriver({
++      ...raw,
++      impressao_fisica: false,
++      driver: raw.driver || driver.nome || 'FAKE'
++    });
++  } catch (err) {
++    // Exceção não determinável → RESULTADO_INCERTO (conservador; não reenvia).
++    driverOut = assertResultadoDriver({
++      resultado: RESULTADOS_DRIVER.INCERTO,
++      spooler_job_token: null,
++      erro: `Exceção no driver: ${err && err.message ? err.message : String(err)}`,
++      impressao_fisica: false,
++      driver: (driver && driver.nome) || 'FAKE'
++    });
++  }
++
++  return registrarResultado({
++    db,
++    empresaId,
++    unidadeId,
++    jobId: job.id,
++    workerId,
++    resultado: driverOut.resultado,
++    spooler_job_token: driverOut.spooler_job_token,
++    erro: driverOut.erro,
++    driver: driverOut.driver
++  }, { db });
++}
++
++/**
++ * Ciclo: recuperação de abandonados + claim + processar um job.
++ * Não reenvia RESULTADO_INCERTO nem ACEITA automaticamente.
++ */
++async function processarProximo(entrada = {}, opts = {}) {
++  const db = opts.db || entrada.db;
++  if (!db) throw erroImpressao('Banco indisponível.', 500, 'DB_INDISPONIVEL');
++
++  const empresaId = exigirEmpresa(entrada.empresaId != null ? entrada.empresaId : entrada.empresa_id);
++  const unidadeId = exigirUnidadeOperacional(
++    entrada.unidadeId != null ? entrada.unidadeId : entrada.unidade_id
++  );
++  const workerId = normalizarWorkerId(
++    entrada.workerId != null ? entrada.workerId : entrada.worker_id
++  );
++
++  const recuperacao = await recuperarJobsAbandonados({
++    db,
++    empresaId,
++    unidadeId,
++    limiteMs: entrada.limiteMs != null ? entrada.limiteMs : entrada.abandono_ms
++  }, { db });
++
++  const claim = await reivindicarProximoJob({
++    db,
++    empresaId,
++    unidadeId,
++    workerId,
++    estacaoImpressaoId: entrada.estacaoImpressaoId != null
++      ? entrada.estacaoImpressaoId
++      : entrada.estacao_impressao_id
++  }, { db });
++
++  if (!claim.reivindicado || !claim.job) {
++    return {
++      success: true,
++      processado: false,
++      recuperacao,
++      job: null,
++      impressao_fisica: false
++    };
++  }
++
++  const resultado = await processarJobReivindicado({
++    db,
++    empresaId,
++    unidadeId,
++    workerId,
++    job: claim.job
++  }, { db, driver: opts.driver || entrada.driver });
++
++  return {
++    success: true,
++    processado: true,
++    recuperacao,
++    job: resultado.job,
++    resultado_driver: resultado.resultado_driver,
++    impressao_fisica: false
++  };
++}
++
++/**
++ * Ao iniciar/reiniciar o worker: apenas marca abandonados como INCERTO.
++ * Nunca devolve PROCESSANDO → PENDENTE.
++ */
++async function aoIniciarWorker(entrada = {}, opts = {}) {
++  const out = await recuperarJobsAbandonados({
++    ...entrada,
++    limiteMs: entrada.limiteMs != null ? entrada.limiteMs : 0
++  }, opts);
++  // limiteMs=0 → processando_em <= agora (todos PROCESSANDO com timestamp)
++  return {
++    ...out,
++    reinicio: true,
++    reenvio_automatico: false,
++    impressao_fisica: false
++  };
++}
++
++module.exports = {
++  ABANDONO_PADRAO_MS,
++  reivindicarProximoJob,
++  recuperarJobsAbandonados,
++  registrarResultado,
++  processarJobReivindicado,
++  processarProximo,
++  aoIniciarWorker,
++  estadoFinalDeResultadoDriver,
++  normalizarWorkerId
++};
+diff --git a/electron-cozinha-impressao.js b/electron-cozinha-impressao.js
+--- a/electron-cozinha-impressao.js
++++ b/electron-cozinha-impressao.js
+@@ -1,8 +1,8 @@
+ /**
+- * IPC Electron — impressão de COZINHA (Sprint 06 Bloco E).
+- * Isolado de cupom/DANFE/TEF. Não reutiliza handlers comerciais.
++ * IPC Electron — impressão de COZINHA (Sprint 06 Bloco E · correção auditoria).
+  *
+- * Impressão real só com CDS_COZINHA_IMPRESSAO_FISICA_AUTORIZADA=1.
+- * Consulta de impressoras nunca inicia print.
++ * E-02: renderer NÃO pode disparar print genérico (texto/device arbitrários).
++ * Print físico só via Worker + adapter de produção (in-process) ou
++ * referência canônica a job (imprimir-job), com remetente validado.
+  */
+ 'use strict';
+@@ -11,9 +11,22 @@
+ const {
+   IPC_CANAIS,
+-  isImpressaoFisicaAutorizada,
+-  sanitizarPayloadImpressao
++  validarRemetenteIpc,
++  rejeitarImpressaoGenericaPorIpc,
++  sanitizarReferenciaJobImpressao,
++  isImpressaoFisicaAutorizada
+ } = require('./backend/services/cozinha/cozinhaImpressaoElectronBridge');
+ 
+-function criarAdapterNativo(event) {
++/** Tokens de Worker confiáveis registrados pelo main (E-02/E-03). */
++const _tokensWorkerConfiaveis = new Set();
++
++function registrarTokenWorkerConfiavel(token) {
++  if (token) _tokensWorkerConfiaveis.add(String(token));
++}
++
++function limparTokensWorkerConfiaveis() {
++  _tokensWorkerConfiaveis.clear();
++}
++
++function criarAdapterListagem(event) {
+   return {
+     async getPrinters() {
+@@ -28,37 +41,4 @@
+         isDefault: imp.isDefault === true
+       }));
+-    },
+-    async print({ deviceName, texto, silent }) {
+-      const win = new BrowserWindow({
+-        show: false,
+-        webPreferences: {
+-          nodeIntegration: false,
+-          contextIsolation: true
+-        }
+-      });
+-      const html = `<!doctype html><html><head><meta charset="utf-8">
+-<style>
+-  @page { margin: 0; }
+-  body { margin: 0; font-family: monospace; white-space: pre-wrap; font-size: 12px; }
+-</style></head><body>${String(texto)
+-  .replace(/&/g, '&amp;')
+-  .replace(/</g, '&lt;')
+-  .replace(/>/g, '&gt;')}</body></html>`;
+-
+-      await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+-      await new Promise((resolve, reject) => {
+-        win.webContents.print(
+-          { silent: silent !== false, deviceName: deviceName || undefined, printBackground: false },
+-          (success, failureReason) => {
+-            try { win.destroy(); } catch (_e) { /* ignore */ }
+-            if (!success) {
+-              reject(new Error(failureReason || 'webContents.print falhou'));
+-              return;
+-            }
+-            resolve({ token: `electron-spool:${deviceName}:${Date.now()}` });
+-          }
+-        );
+-      });
+-      return { token: `electron-spool:${deviceName}:${Date.now()}` };
+     }
+   };
+@@ -73,7 +53,11 @@
+   try { ipcMain.removeHandler(IPC_CANAIS.LISTAR); } catch (_e) { /* ignore */ }
+   try { ipcMain.removeHandler(IPC_CANAIS.IMPRIMIR); } catch (_e) { /* ignore */ }
++  try { ipcMain.removeHandler(IPC_CANAIS.IMPRIMIR_JOB); } catch (_e) { /* ignore */ }
+ 
+   ipcMain.handle(IPC_CANAIS.LISTAR, async (event) => {
+-    const adapter = criarAdapterNativo(event);
++    validarRemetenteIpc(event, {
++      resolveWindow: (sender) => BrowserWindow.fromWebContents(sender)
++    });
++    const adapter = criarAdapterListagem(event);
+     const lista = await adapter.getPrinters();
+     return {
+@@ -86,65 +70,63 @@
+   });
+ 
+-  ipcMain.handle(IPC_CANAIS.IMPRIMIR, async (event, rawPayload = {}) => {
+-    // Rejeita tentativa de alterar empresa/unidade/snapshot via IPC.
+-    const payload = sanitizarPayloadImpressao(rawPayload || {});
+-    if (!isImpressaoFisicaAutorizada({
+-      autorizarSpoolerReal: rawPayload && rawPayload.autorizarSpoolerReal === true
+-    })) {
++  // E-02: canal genérico sempre bloqueado (renderer não imprime).
++  ipcMain.handle(IPC_CANAIS.IMPRIMIR, async (_event, rawPayload = {}) => {
++    try {
++      rejeitarImpressaoGenericaPorIpc(rawPayload || {});
++    } catch (err) {
+       return {
+         success: false,
+         resultado: 'FALHA',
+-        codigo: 'IMPRESSAO_FISICA_NAO_AUTORIZADA',
+-        erro: 'Impressão física de cozinha desabilitada. Requer autorização do PO.',
++        codigo: err.codigo || 'IMPRESSAO_IPC_PRINT_BLOQUEADO',
++        erro: err.message,
+         impressao_fisica: false,
+         dry_run: true
+       };
+     }
++    return {
++      success: false,
++      codigo: 'IMPRESSAO_IPC_PRINT_BLOQUEADO',
++      impressao_fisica: false
++    };
++  });
+ 
+-    const adapter = criarAdapterNativo(event);
+-    const printers = await adapter.getPrinters();
+-    if (!printers.some((p) => p.name === payload.deviceName)) {
++  // Referência a job — ainda exige Worker token + autorização; não aceita texto arbitrário.
++  ipcMain.handle(IPC_CANAIS.IMPRIMIR_JOB, async (event, rawPayload = {}) => {
++    try {
++      validarRemetenteIpc(event, {
++        resolveWindow: (sender) => BrowserWindow.fromWebContents(sender),
++        tokenWorker: rawPayload && rawPayload.worker_token,
++        tokensConfiaveis: [..._tokensWorkerConfiaveis]
++      });
++      const ref = sanitizarReferenciaJobImpressao(rawPayload || {});
++      if (!isImpressaoFisicaAutorizada({
++        autorizarSpoolerReal: ref.autorizar_spooler_real
++      })) {
++        return {
++          success: false,
++          resultado: 'SIMULADO',
++          codigo: 'IMPRESSAO_FISICA_NAO_AUTORIZADA',
++          erro: 'Impressão física desabilitada. Dry-run não declara ACEITA.',
++          impressao_fisica: false,
++          dry_run: true,
++          job_id: ref.job_id
++        };
++      }
++      // Print real via IPC ainda não executa daqui: o caminho físico é o adapter
++      // in-process do Worker (E-03). Este canal só valida autorização/canonicidade.
+       return {
+         success: false,
+         resultado: 'FALHA',
+-        codigo: 'IMPRESSAO_DEVICE_INEXISTENTE',
+-        erro: `Impressora inexistente: ${payload.deviceName}`,
+-        impressao_fisica: false
+-      };
+-    }
+-
+-    try {
+-      const tokens = [];
+-      for (let i = 1; i <= payload.vias; i += 1) {
+-        const r = await adapter.print({
+-          deviceName: payload.deviceName,
+-          texto: payload.texto,
+-          silent: true,
+-          via: i
+-        });
+-        tokens.push(r && r.token ? r.token : `electron:${i}`);
+-      }
+-      return {
+-        success: true,
+-        resultado: 'ACEITA',
+-        spooler_job_token: tokens[tokens.length - 1],
+-        vias_enviadas: payload.vias,
++        codigo: 'IMPRESSAO_USE_WORKER_ADAPTER',
++        erro: 'Use o adapter ELECTRON de produção injetado no Worker (in-process).',
+         impressao_fisica: false,
+-        dry_run: false
++        job_id: ref.job_id
+       };
+     } catch (err) {
+-      const msg = String(err && err.message ? err.message : err);
+-      if (/timeout/i.test(msg)) {
+-        return {
+-          success: false,
+-          resultado: 'INCERTO',
+-          erro: msg,
+-          impressao_fisica: false
+-        };
+-      }
+       return {
+         success: false,
+         resultado: 'FALHA',
+-        erro: msg,
++        codigo: err.codigo || 'IMPRESSAO_IPC_ERRO',
++        erro: err.message,
+         impressao_fisica: false
+       };
+@@ -155,4 +137,6 @@
+ module.exports = {
+   registrarCozinhaImpressaoHandlers,
++  registrarTokenWorkerConfiavel,
++  limparTokensWorkerConfiaveis,
+   IPC_CANAIS
+ };
+diff --git a/preload.js b/preload.js
+--- a/preload.js
++++ b/preload.js
+@@ -1,9 +1,85 @@
++const { contextBridge, ipcRenderer } = require('electron');
++const os = require('os');
++
++function obterDestinoClienteRemoto() {
++  const arg = process.argv.find((item) => item.startsWith('--cds-modo-cliente='));
++  if (!arg) {
++    return null;
++  }
++  return arg.replace('--cds-modo-cliente=', '');
++}
++
++const destinoClienteRemoto = obterDestinoClienteRemoto();
++
++contextBridge.exposeInMainWorld('electronAPI', {
++  app: 'cds-sistemas',
++
++  getTerminalInfo: () => ({
++    hostname: os.hostname(),
++    platform: os.platform(),
++    arch: os.arch()
++  }),
++
++  forcarReflow: () => ipcRenderer.send('forcar-reflow'),
++
++  /** CDS-ERP-PDV-JANELA-INDEPENDENTE-01 — abre/foca janela PDV independente. */
++  abrirPdv: (opcoes) => ipcRenderer.invoke('cds:abrir-pdv', opcoes || {}),
++
++  /** Foca o ERP já aberto; não cria segunda janela ERP se já existir. */
++  abrirErp: (opcoes) => ipcRenderer.invoke('cds:abrir-erp', opcoes || {}),
++
++  abrirComprovante: (html, options) =>
++    ipcRenderer.send('abrir-comprovante', html, options || {}),
++
++  selecionarPastaBackup: () =>
++    ipcRenderer.invoke('selecionar-pasta-backup'),
++
++  listarImpressoras: () =>
++    ipcRenderer.invoke('listar-impressoras'),
++
++  imprimirDANFESilencioso: (html, deviceName) =>
+     ipcRenderer.invoke('imprimir-danfe-silencioso', html, deviceName),
+ 
+-  /** Sprint 06 Bloco E — impressão de cozinha (IPC isolado; print real off por padrão). */
++  /**
++   * Sprint 06 Bloco E — cozinha.
++   * Renderer só lista impressoras. Print genérico bloqueado (E-02).
++   * Print físico: Worker + adapter ELECTRON de produção (in-process).
++   */
+   cozinhaImpressao: {
+     listarImpressoras: () => ipcRenderer.invoke('cozinha-impressao:listar-impressoras'),
++    /** @deprecated Sempre rejeitado — não use do renderer. */
+     imprimir: (payload) => ipcRenderer.invoke('cozinha-impressao:imprimir', payload || {})
+   },
+ 
+   fecharJanela: () => window.close(),
++
++  obterModoEstacao: () => ipcRenderer.invoke('rede-obter-modo-estacao'),
++  voltarModoLocal: () => ipcRenderer.invoke('rede-voltar-modo-local'),
++  salvarModoEstacao: (config) => ipcRenderer.invoke('rede-salvar-modo-estacao', config),
++  obterHostnameEstacao: () => ipcRenderer.invoke('rede-obter-hostname'),
++  estaEmModoClienteRemoto: () => ipcRenderer.invoke('rede-esta-em-modo-cliente'),
++  obterServidorRemoto: () => destinoClienteRemoto,
++
++  // RC3.16.5 — Diagnóstico Electron
++  obterDiagnosticoElectron: (extra) => ipcRenderer.invoke('electron-diagnostico', extra || {}),
++  abrirDiagnosticoElectron: (extra) => ipcRenderer.invoke('electron-diagnostico-abrir', extra || {}),
++  copiarDiagnosticoElectron: (extra) => ipcRenderer.invoke('electron-diagnostico-copiar', extra || {}),
++
++  // RC3.5.0 — Portal Nacional da NF-e (recuperação oficial)
++  portalNfe: {
++    validar: () => ipcRenderer.invoke('portal-nfe-validar'),
++    abrir: (payload) => ipcRenderer.invoke('portal-nfe-abrir', payload || {}),
++    fechar: (payload) => ipcRenderer.invoke('portal-nfe-fechar', payload || {}),
++    status: () => ipcRenderer.invoke('portal-nfe-status'),
++    download: () => ipcRenderer.invoke('portal-nfe-download'),
++    abrirPasta: (payload) => ipcRenderer.invoke('portal-nfe-abrir-pasta', payload || {}),
++    sucesso: (payload) => ipcRenderer.invoke('portal-nfe-sucesso', payload || {}),
++    dirDownloads: () => ipcRenderer.invoke('portal-nfe-dir-downloads'),
++    onEvento: (callback) => {
++      if (typeof callback !== 'function') return () => {};
++      const handler = (_event, payload) => callback(payload);
++      ipcRenderer.on('portal-nfe-evento', handler);
++      return () => ipcRenderer.removeListener('portal-nfe-evento', handler);
++    }
++  }
++});
+diff --git a/tests/cozinha/sprint06-bloco-e-electron-integracao.test.js b/tests/cozinha/sprint06-bloco-e-electron-integracao.test.js
+--- a/tests/cozinha/sprint06-bloco-e-electron-integracao.test.js
++++ b/tests/cozinha/sprint06-bloco-e-electron-integracao.test.js
+@@ -1,4 +1,5 @@
+ /**
+- * Sprint 06 — Bloco E: integração Electron (mocks), IPC isolado, sem print físico real.
++ * Sprint 06 — Bloco E (correção auditoria E-01/E-02/E-03).
++ * Sem impressão física real. Banco temporário.
+  *
+  *   node --test --test-concurrency=1 tests/cozinha/sprint06-bloco-e-electron-integracao.test.js
+@@ -13,5 +14,5 @@
+ const sqlite3 = require('sqlite3').verbose();
+ 
+-const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-cozinha-s06e-'));
++const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-cozinha-s06e-fix-'));
+ process.env.DB_DIR = dbDir;
+ process.env.CDS_TEST_ISOLATION = '1';
+@@ -32,22 +33,25 @@
+ const WorkerService = require('../../backend/services/cozinha/CozinhaImpressaoWorkerService');
+ const { renderizarTexto } = require('../../backend/services/cozinha/CozinhaImpressaoRenderer');
+-const { criarFakeDriver } = require('../../backend/services/cozinha/cozinhaImpressaoDriver');
++const { criarFakeDriver, RESULTADOS_DRIVER } = require('../../backend/services/cozinha/cozinhaImpressaoDriver');
+ const {
+   criarElectronDriver,
+-  criarAdapterElectronMock,
+-  ElectronImpressaoDriver
++  criarAdapterElectronMock
+ } = require('../../backend/services/cozinha/cozinhaImpressaoElectronDriver');
++const {
++  criarDriverElectronProducao,
++  criarDriverParaWorker,
++  descreverIntegracaoProducao,
++  criarAdapterElectronProducao
++} = require('../../backend/services/cozinha/CozinhaImpressaoElectronProducao');
+ const {
+   IPC_CANAIS,
+   isImpressaoFisicaAutorizada,
+-  sanitizarPayloadImpressao,
++  validarRemetenteIpc,
++  rejeitarImpressaoGenericaPorIpc,
++  sanitizarReferenciaJobImpressao,
+   listarImpressorasCozinha,
+   enviarParaSpoolerCozinha
+ } = require('../../backend/services/cozinha/cozinhaImpressaoElectronBridge');
+-const { ESTADOS_FILA, RESULTADOS_DRIVER } = (() => {
+-  const c = require('../../backend/services/cozinha/cozinhaImpressaoContratos');
+-  const d = require('../../backend/services/cozinha/cozinhaImpressaoDriver');
+-  return { ESTADOS_FILA: c.ESTADOS_FILA, RESULTADOS_DRIVER: d.RESULTADOS_DRIVER };
+-})();
++const { ESTADOS_FILA } = require('../../backend/services/cozinha/cozinhaImpressaoContratos');
+ 
+ function run(db, sql, params = []) {
+@@ -89,75 +93,38 @@
+     CREATE TABLE IF NOT EXISTS configuracoes (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+-      chave VARCHAR(100) UNIQUE NOT NULL,
+-      valor TEXT, tipo VARCHAR(50), descricao TEXT,
++      chave VARCHAR(100) UNIQUE NOT NULL, valor TEXT, tipo VARCHAR(50), descricao TEXT,
+       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+-    )
+-  `);
++    )`);
+   await run(db, `
+     CREATE TABLE IF NOT EXISTS mesas (
+-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+-      empresa_id INTEGER NOT NULL,
+-      numero INTEGER NOT NULL,
+-      ativo INTEGER NOT NULL DEFAULT 1
+-    )
+-  `);
++      id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL,
++      numero INTEGER NOT NULL, ativo INTEGER NOT NULL DEFAULT 1)`);
+   await run(db, `
+     CREATE TABLE IF NOT EXISTS mesa_atendimentos (
+-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+-      empresa_id INTEGER NOT NULL,
+-      mesa_id INTEGER NOT NULL,
+-      estado TEXT NOT NULL,
+-      operador_abertura_id INTEGER NOT NULL DEFAULT 1,
+-      aberto_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+-    )
+-  `);
++      id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL, mesa_id INTEGER NOT NULL,
++      estado TEXT NOT NULL, operador_abertura_id INTEGER NOT NULL DEFAULT 1,
++      aberto_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
+   await run(db, `
+     CREATE TABLE IF NOT EXISTS produtos (
+-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+-      nome TEXT NOT NULL,
+-      tipo_operacional TEXT DEFAULT 'COMERCIAL',
+-      utiliza_ficha_tecnica INTEGER DEFAULT 0
+-    )
+-  `);
++      id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL,
++      tipo_operacional TEXT DEFAULT 'COMERCIAL', utiliza_ficha_tecnica INTEGER DEFAULT 0)`);
+   await run(db, `
+     CREATE TABLE IF NOT EXISTS pedidos (
+-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+-      codigo VARCHAR(50),
+-      data_pedido DATE NOT NULL DEFAULT '2026-01-01',
+-      total DECIMAL(10,2) NOT NULL DEFAULT 0,
+-      status TEXT NOT NULL DEFAULT 'PEDIDO',
+-      empresa_id INTEGER,
+-      mesa_id INTEGER,
+-      mesa_atendimento_id INTEGER
+-    )
+-  `);
++      id INTEGER PRIMARY KEY AUTOINCREMENT, codigo VARCHAR(50),
++      data_pedido DATE NOT NULL DEFAULT '2026-01-01', total DECIMAL(10,2) NOT NULL DEFAULT 0,
++      status TEXT NOT NULL DEFAULT 'PEDIDO', empresa_id INTEGER, mesa_id INTEGER, mesa_atendimento_id INTEGER)`);
+   await run(db, `
+     CREATE TABLE IF NOT EXISTS pedidos_itens (
+-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+-      pedido_id INTEGER NOT NULL,
+-      produto_id INTEGER NOT NULL,
+-      quantidade REAL NOT NULL,
+-      preco_unitario DECIMAL(10,2) NOT NULL DEFAULT 0,
+-      subtotal DECIMAL(10,2) NOT NULL DEFAULT 0,
+-      classificacao_operacional_snapshot TEXT,
+-      produto_nome_snapshot TEXT,
+-      observacao TEXT
+-    )
+-  `);
++      id INTEGER PRIMARY KEY AUTOINCREMENT, pedido_id INTEGER NOT NULL, produto_id INTEGER NOT NULL,
++      quantidade REAL NOT NULL, preco_unitario DECIMAL(10,2) NOT NULL DEFAULT 0,
++      subtotal DECIMAL(10,2) NOT NULL DEFAULT 0, classificacao_operacional_snapshot TEXT,
++      produto_nome_snapshot TEXT, observacao TEXT)`);
+   await run(db, `
+     CREATE TABLE IF NOT EXISTS pedido_item_ingredientes (
+-      id INTEGER PRIMARY KEY AUTOINCREMENT,
+-      pedido_id INTEGER NOT NULL,
+-      pedido_item_id INTEGER NOT NULL,
+-      empresa_id INTEGER NOT NULL,
+-      insumo_id INTEGER NOT NULL,
+-      insumo_nome_snapshot TEXT NOT NULL,
+-      quantidade_snapshot REAL NOT NULL,
+-      unidade_snapshot TEXT NOT NULL,
+-      classificacao_comercial_snapshot TEXT NOT NULL,
+-      selecionado INTEGER NOT NULL,
+-      preco_adicional_snapshot REAL NOT NULL DEFAULT 0
+-    )
+-  `);
++      id INTEGER PRIMARY KEY AUTOINCREMENT, pedido_id INTEGER NOT NULL, pedido_item_id INTEGER NOT NULL,
++      empresa_id INTEGER NOT NULL, insumo_id INTEGER NOT NULL, insumo_nome_snapshot TEXT NOT NULL,
++      quantidade_snapshot REAL NOT NULL, unidade_snapshot TEXT NOT NULL,
++      classificacao_comercial_snapshot TEXT NOT NULL, selecionado INTEGER NOT NULL,
++      preco_adicional_snapshot REAL NOT NULL DEFAULT 0)`);
+   const info = await garantirSchemaCozinha(db);
+   assert.equal(info.operacional, true);
+@@ -169,21 +136,15 @@
+   const emp = await run(db, `
+     INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
+-    VALUES ('55555555000155', 'Emp E', 'EE', 1)
+-  `);
++    VALUES ('55555555000155', 'Emp E', 'EE', 1)`);
+   const empresaId = emp.lastID;
+   const mesa = await run(db, `INSERT INTO mesas (empresa_id, numero, ativo) VALUES (?, 21, 1)`, [empresaId]);
+   const at = await run(db, `
+     INSERT INTO mesa_atendimentos (empresa_id, mesa_id, estado, operador_abertura_id)
+-    VALUES (?, ?, 'OCUPADA', 1)
+-  `, [empresaId, mesa.lastID]);
++    VALUES (?, ?, 'OCUPADA', 1)`, [empresaId, mesa.lastID]);
+   const un = await run(db, `
+     INSERT INTO cozinha_unidades (empresa_id, codigo, ativo, sequencia_atual)
+-    VALUES (?, 'U-E', 1, 0)
+-  `, [empresaId]);
++    VALUES (?, 'U-E', 1, 0)`, [empresaId]);
+   const prod = await run(db, `
+-    INSERT INTO produtos (nome, tipo_operacional, utiliza_ficha_tecnica)
+-    VALUES ('Pastel', 'COMERCIAL', 1)
+-  `);
+-
++    INSERT INTO produtos (nome, tipo_operacional, utiliza_ficha_tecnica) VALUES ('Pastel', 'COMERCIAL', 1)`);
+   let n = 0;
+   async function criarItem(numeroComanda, tipo = 'PASTEL', nome = 'Pastel E', qty = 1) {
+@@ -191,26 +152,16 @@
+     const ped = await run(db, `
+       INSERT INTO pedidos (codigo, data_pedido, total, status, empresa_id, mesa_id, mesa_atendimento_id)
+-      VALUES (?, '2026-01-01', 10, 'PEDIDO', ?, ?, ?)
+-    `, [`PE-${n}`, empresaId, mesa.lastID, at.lastID]);
++      VALUES (?, '2026-01-01', 10, 'PEDIDO', ?, ?, ?)`, [`PE-${n}`, empresaId, mesa.lastID, at.lastID]);
+     const item = await run(db, `
+       INSERT INTO pedidos_itens (
+         pedido_id, produto_id, quantidade, preco_unitario, subtotal,
+         classificacao_operacional_snapshot, produto_nome_snapshot, observacao
+-      ) VALUES (?, ?, ?, 9.90, 9.90, ?, ?, 'obs')
+-    `, [ped.lastID, prod.lastID, qty, tipo, nome]);
++      ) VALUES (?, ?, ?, 9.90, 9.90, ?, ?, 'obs')`, [ped.lastID, prod.lastID, qty, tipo, nome]);
+     const cmd = await run(db, `
+       INSERT INTO cozinha_comandas (
+         empresa_id, atendimento_id, numero_comanda, rotulo, pedido_id, operador_lancamento_id
+-      ) VALUES (?, ?, ?, ?, ?, 1)
+-    `, [empresaId, at.lastID, numeroComanda, `C${numeroComanda}`, ped.lastID]);
+-    return {
+-      pedidoId: ped.lastID,
+-      pedidoItemId: item.lastID,
+-      comandaId: cmd.lastID,
+-      tipo,
+-      qty
+-    };
++      ) VALUES (?, ?, ?, ?, ?, 1)`, [empresaId, at.lastID, numeroComanda, `C${numeroComanda}`, ped.lastID]);
++    return { pedidoId: ped.lastID, pedidoItemId: item.lastID, comandaId: cmd.lastID, tipo, qty };
+   }
+-
+   return { empresaId, mesaId: mesa.lastID, atendimentoId: at.lastID, unidadeId: un.lastID, criarItem };
+ }
+@@ -218,14 +169,8 @@
+ function entrada(ctx, itens, chave) {
+   return {
+-    empresaId: ctx.empresaId,
+-    operadorId: 7,
+-    idempotencyKey: chave,
+-    unidade_id: ctx.unidadeId,
+-    mesa_id: ctx.mesaId,
+-    atendimento_id: ctx.atendimentoId,
++    empresaId: ctx.empresaId, operadorId: 7, idempotencyKey: chave,
++    unidade_id: ctx.unidadeId, mesa_id: ctx.mesaId, atendimento_id: ctx.atendimentoId,
+     itens: itens.map((c) => ({
+-      pedido_id: c.pedidoId,
+-      pedido_item_id: c.pedidoItemId,
+-      comanda_id: c.comandaId,
++      pedido_id: c.pedidoId, pedido_item_id: c.pedidoItemId, comanda_id: c.comandaId,
+       qty_solicitada: Number(c.qty || 1).toFixed(3)
+     }))
+@@ -235,14 +180,9 @@
+ async function despacharComJob(db, ctx, key, estacaoOpts = {}) {
+   await EstacaoService.criarEstacao({
+-    db,
+-    empresaId: ctx.empresaId,
+-    unidadeId: ctx.unidadeId,
+-    codigo_estacao: 'PASTEL',
++    db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, codigo_estacao: 'PASTEL',
+     device_name: estacaoOpts.device_name != null ? estacaoOpts.device_name : 'Cozinha-Termica-80',
+     largura_mm: estacaoOpts.largura_mm != null ? estacaoOpts.largura_mm : 80,
+     vias: estacaoOpts.vias != null ? estacaoOpts.vias : 2,
+-    modelo_individual: 0,
+-    modelo_agrupado: 1,
+-    ativo: 1
++    modelo_individual: 0, modelo_agrupado: 1, ativo: 1
+   });
+   const item = await ctx.criarItem(1, 'PASTEL', 'Pastel E');
+@@ -253,5 +193,5 @@
+ }
+ 
+-describe('Sprint 06 Bloco E — Electron integração (mocks)', () => {
++describe('Sprint 06 Bloco E — correção auditoria E-01/E-02/E-03', () => {
+   beforeEach(() => {
+     marcarCozinhaOperacional(false);
+@@ -259,13 +199,11 @@
+   });
+ 
+-  it('1) driver Electron com mock processa job (dry-run)', async () => {
++  it('1) dry-run nunca gera ACEITA_PELO_SPOOLER', async () => {
+     const db = await open();
+     await schemaErpMinimo(db);
+     const ctx = await prepararBase(db);
+-    await despacharComJob(db, ctx, 'e-1');
++    await despacharComJob(db, ctx, 'e-fix-1');
+     const adapter = criarAdapterElectronMock();
+-    const driver = criarElectronDriver({ adapter, deviceName: 'Cozinha-Termica-80' });
+-    assert.ok(driver instanceof ElectronImpressaoDriver);
+-    assert.equal(driver.impressaoFisica, false);
++    const driver = criarElectronDriver({ adapter });
+     assert.equal(driver.spoolerRealHabilitado, false);
+ 
+@@ -273,12 +211,158 @@
+       db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-e1'
+     }, { db, driver });
++
+     assert.equal(out.processado, true);
+-    assert.equal(out.job.estado, ESTADOS_FILA.ACEITA_PELO_SPOOLER);
+-    assert.equal(out.impressao_fisica, false);
+-    assert.equal(adapter.prints.length, 0); // dry-run não chama print
++    assert.equal(out.resultado_driver, RESULTADOS_DRIVER.SIMULADO);
++    assert.notEqual(out.job.estado, ESTADOS_FILA.ACEITA_PELO_SPOOLER);
++    assert.equal(out.job.estado, ESTADOS_FILA.PENDENTE);
++    assert.equal(adapter.prints.length, 0);
++    assert.match(String(out.job.ultimo_erro || ''), /SIMULADO/i);
+     await close(db);
+   });
+ 
+-  it('2) consulta de impressoras não inicia impressão', async () => {
++  it('2) impressão física não pode ser disparada por IPC genérico do renderer', () => {
++    assert.throws(
++      () => rejeitarImpressaoGenericaPorIpc({ deviceName: 'X', texto: 'qualquer' }),
++      (err) => err.codigo === 'IMPRESSAO_IPC_PRINT_BLOQUEADO'
++    );
++    // Canal genérico documentado
++    assert.equal(IPC_CANAIS.IMPRIMIR, 'cozinha-impressao:imprimir');
++  });
++
++  it('3) IPC rejeita remetente não autorizado', () => {
++    assert.throws(
++      () => validarRemetenteIpc({ sender: null }),
++      (err) => err.codigo === 'IMPRESSAO_IPC_REMETENTE_INVALIDO'
++    );
++    assert.throws(
++      () => validarRemetenteIpc(
++        { sender: { isDestroyed: () => false } },
++        { resolveWindow: () => null }
++      ),
++      (err) => err.codigo === 'IMPRESSAO_IPC_REMETENTE_INVALIDO'
++    );
++    const ok = validarRemetenteIpc(
++      { sender: { isDestroyed: () => false } },
++      { resolveWindow: () => ({ id: 1 }), tokenWorker: 'tok', tokensConfiaveis: ['tok'] }
++    );
++    assert.equal(ok.ok, true);
++  });
++
++  it('4) somente job persistido + snapshot canônico no caminho físico', async () => {
++    assert.throws(
++      () => sanitizarReferenciaJobImpressao({ texto: 'hack', deviceName: 'X' }),
++      (err) => err.codigo === 'IMPRESSAO_IPC_CAMPO_PROIBIDO' || err.codigo === 'IMPRESSAO_IPC_PRINT_BLOQUEADO'
++    );
++
++    await assert.rejects(
++      () => enviarParaSpoolerCozinha({
++        deviceName: 'Cozinha-Termica-80', texto: 'x', vias: 1, job_id: 1
++      }, { adapter: criarAdapterElectronMock(), origem: 'renderer' }),
++      (err) => err.codigo === 'IMPRESSAO_ORIGEM_NAO_CANONICA'
++    );
++
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    const { job } = await despacharComJob(db, ctx, 'e-fix-4');
++    assert.ok(job.payload_snapshot);
++    const adapter = criarAdapterElectronMock();
++    const driver = criarElectronDriver({ adapter });
++    // Sem snapshot externo — usa só o do job
++    const r = await driver.imprimir({ job: { ...job, snapshot: undefined } });
++    assert.ok([RESULTADOS_DRIVER.SIMULADO, RESULTADOS_DRIVER.FALHA].includes(r.resultado));
++    assert.notEqual(r.resultado, RESULTADOS_DRIVER.ACEITA);
++    await close(db);
++  });
++
++  it('5) Worker utiliza adapter ELECTRON real no caminho de produção', () => {
++    const prints = [];
++    const adapterProd = {
++      tipo: 'electron-producao',
++      async getPrinters() {
++        return [{ name: 'Cozinha-Termica-80', isDefault: true }];
++      },
++      async print(p) {
++        prints.push(p);
++        return { token: 'prod-token' };
++      }
++    };
++    // Dupla de produção (sem Electron nativo): tipo electron-producao
++    const driver = criarDriverElectronProducao({
++      adapter: adapterProd,
++      autorizarSpoolerReal: false
++    });
++    const meta = descreverIntegracaoProducao(driver);
++    assert.equal(meta.ok, true);
++    assert.equal(meta.driver, 'ELECTRON');
++    assert.equal(meta.producao, true);
++    assert.equal(meta.adapter_tipo, 'electron-producao');
++    assert.equal(meta.impressao_fisica, false);
++
++    const viaFactory = criarDriverParaWorker('ELECTRON', {
++      adapter: adapterProd
++    });
++    assert.equal(viaFactory.nome, 'ELECTRON');
++    assert.equal(viaFactory.isProducao, true);
++
++    const fake = criarDriverParaWorker('FAKE');
++    assert.equal(fake.nome, 'FAKE');
++  });
++
++  it('6) timeout continua gerando RESULTADO_INCERTO, sem reenvio automático', async () => {
++    const adapter = {
++      async getPrinters() { return [{ name: 'T' }]; },
++      async print() { return new Promise(() => {}); }
++    };
++    const out = await enviarParaSpoolerCozinha({
++      deviceName: 'T', texto: 'x', vias: 1, job_id: 3, timeout_ms: 40
++    }, { adapter, origem: 'teste-mock', __testeForcarSpooler: true });
++    assert.equal(out.resultado, RESULTADOS_DRIVER.INCERTO);
++    assert.match(String(out.erro), /timeout/i);
++
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    const { job } = await despacharComJob(db, ctx, 'e-fix-6');
++    const claim = await WorkerService.reivindicarProximoJob({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-to'
++    }, { db });
++    assert.equal(claim.job.id, job.id);
++    await WorkerService.registrarResultado({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId,
++      jobId: claim.job.id, workerId: 'w-to',
++      resultado: RESULTADOS_DRIVER.INCERTO, erro: 'timeout teste'
++    }, { db });
++
++    const tick = await WorkerService.processarProximo({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-to2'
++    }, { db, driver: criarFakeDriver({ modo: 'sucesso' }) });
++    assert.equal(tick.processado, false);
++    assert.equal(
++      (await get(db, `SELECT estado FROM cozinha_impressao_fila WHERE id=?`, [job.id])).estado,
++      ESTADOS_FILA.RESULTADO_INCERTO
++    );
++    await close(db);
++  });
++
++  it('7) falha física não altera preparação nem despacho', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    const { despacho } = await despacharComJob(db, ctx, 'e-fix-7', { device_name: 'Inexistente' });
++    const driver = criarElectronDriver({
++      adapter: criarAdapterElectronMock({ printers: [{ name: 'Outra' }] })
++    });
++    const out = await WorkerService.processarProximo({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-e7'
++    }, { db, driver });
++    assert.equal(out.job.estado, ESTADOS_FILA.FALHA);
++    const item = await get(db, `SELECT estado_preparacao FROM cozinha_itens WHERE rodada_id=?`, [despacho.rodada.id]);
++    assert.equal(item.estado_preparacao, 'AGUARDANDO');
++    assert.equal(despacho.success, true);
++    await close(db);
++  });
++
++  it('8) listagem de impressoras nunca imprime', async () => {
+     const adapter = criarAdapterElectronMock({
+       printers: [{ name: 'A' }, { name: 'B', isDefault: true }]
+@@ -288,53 +372,8 @@
+     assert.equal(lista.impressao_fisica, false);
+     assert.equal(adapter.prints.length, 0);
+-  });
+-
+-  it('3) impressora inexistente → FALHA', async () => {
+-    const adapter = criarAdapterElectronMock({ printers: [{ name: 'Outra' }] });
+-    const driver = criarElectronDriver({ adapter, deviceName: 'Inexistente' });
+-    const out = await driver.imprimir({
+-      job: {
+-        id: 1,
+-        vias: 1,
+-        payload_snapshot: JSON.stringify({
+-          empresa_id: 1, unidade_id: 1, rodada_id: 1, modelo: 'AGRUPADO',
+-          largura_mm: 80, mesa_numero: '1', itens: []
+-        })
+-      }
+-    });
+-    assert.equal(out.resultado, RESULTADOS_DRIVER.FALHA);
+-    assert.match(String(out.erro), /inexistente/i);
+-    assert.equal(adapter.prints.length, 0);
+-  });
+-
+-  it('4) falha de comunicação → FALHA', async () => {
+-    const adapter = {
+-      async getPrinters() { return [{ name: 'X' }]; },
+-      async print() { throw new Error('IPC canal indisponível'); }
+-    };
+-    const out = await enviarParaSpoolerCozinha({
+-      deviceName: 'X', texto: 'ola', vias: 1, job_id: 9, timeout_ms: 2000
+-    }, { adapter, __testeForcarSpooler: true });
+-    assert.equal(out.resultado, 'FALHA');
+-    assert.match(String(out.erro), /communica|IPC/i);
+-    assert.equal(out.impressao_fisica, false);
+-  });
+-
+-  it('5) timeout → RESULTADO_INCERTO', async () => {
+-    const adapter = {
+-      async getPrinters() { return [{ name: 'T' }]; },
+-      async print() {
+-        return new Promise(() => { /* hang */ });
+-      }
+-    };
+-    const out = await enviarParaSpoolerCozinha({
+-      deviceName: 'T', texto: 'x', vias: 1, job_id: 3, timeout_ms: 50
+-    }, { adapter, __testeForcarSpooler: true });
+-    assert.equal(out.resultado, 'INCERTO');
+-    assert.match(String(out.erro), /timeout/i);
+-    assert.equal(out.impressao_fisica, false);
+-  });
+-
+-  it('6) renderização 58 e 80 mm', () => {
++    assert.equal(isImpressaoFisicaAutorizada({ autorizarSpoolerReal: true }), false);
++  });
++
++  it('9) vias e largura continuam respeitadas', async () => {
+     const base = {
+       empresa_id: 1, unidade_id: 1, rodada_id: 1, modelo: 'AGRUPADO',
+@@ -343,126 +382,37 @@
+     const r58 = renderizarTexto({ ...base, largura_mm: 58 }, { largura_mm: 58 });
+     const r80 = renderizarTexto({ ...base, largura_mm: 80 }, { largura_mm: 80 });
+-    assert.equal(r58.largura_mm, 58);
+     assert.equal(r58.colunas, 32);
+-    assert.equal(r80.largura_mm, 80);
+     assert.equal(r80.colunas, 48);
+-    assert.equal(r58.impressao_fisica, false);
+-    assert.equal(r80.impressao_fisica, false);
+-  });
+-
+-  it('7) quantidade de vias respeitada no spooler autorizado (mock)', async () => {
+-    const adapter = criarAdapterElectronMock({ modo: 'sucesso' });
++
++    const adapter = criarAdapterElectronMock();
+     const out = await enviarParaSpoolerCozinha({
+-      deviceName: 'Cozinha-Termica-80', texto: 'COZINHA', vias: 3, job_id: 11
+-    }, { adapter, __testeForcarSpooler: true });
+-    assert.equal(out.resultado, 'ACEITA');
++      deviceName: 'Cozinha-Termica-80', texto: 'COZINHA', vias: 3, job_id: 11, largura_mm: 80
++    }, { adapter, origem: 'teste-mock', __testeForcarSpooler: true });
++    assert.equal(out.resultado, RESULTADOS_DRIVER.ACEITA);
+     assert.equal(out.vias_enviadas, 3);
+     assert.equal(adapter.prints.length, 3);
+-    assert.equal(out.impressao_fisica, false);
+-  });
+-
+-  it('8) snapshot original permanece intacto', async () => {
+-    const db = await open();
+-    await schemaErpMinimo(db);
+-    const ctx = await prepararBase(db);
+-    const { job } = await despacharComJob(db, ctx, 'e-8');
+-    const snap = job.payload_snapshot;
+-    const adapter = criarAdapterElectronMock();
+-    const driver = criarElectronDriver({ adapter });
+-    await WorkerService.processarProximo({
+-      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-e8'
+-    }, { db, driver });
+-    const depois = await get(db, `SELECT payload_snapshot FROM cozinha_impressao_fila WHERE id=?`, [job.id]);
+-    assert.equal(depois.payload_snapshot, snap);
+-    await close(db);
+-  });
+-
+-  it('9) ausência de duplicidade com Electron driver', async () => {
+-    const db = await open();
+-    await schemaErpMinimo(db);
+-    const ctx = await prepararBase(db);
+-    await despacharComJob(db, ctx, 'e-9');
+-    const adapter = criarAdapterElectronMock();
+-    const driver = criarElectronDriver({ adapter });
+-    const a = await WorkerService.processarProximo({
+-      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-e9a'
+-    }, { db, driver });
+-    const b = await WorkerService.processarProximo({
+-      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-e9b'
+-    }, { db, driver });
+-    assert.equal(a.processado, true);
+-    assert.equal(b.processado, false);
+-    assert.equal((await get(db, `SELECT COUNT(*) AS n FROM cozinha_impressao_fila`)).n, 1);
+-    await close(db);
+-  });
+-
+-  it('10) isolamento IPC: payload não pode alterar empresa/unidade/snapshot', () => {
+-    assert.throws(
+-      () => sanitizarPayloadImpressao({
+-        deviceName: 'X', texto: 'ok', empresa_id: 99
+-      }),
+-      (err) => err.codigo === 'IMPRESSAO_IPC_CAMPO_PROIBIDO'
+-    );
+-    assert.throws(
+-      () => sanitizarPayloadImpressao({
+-        deviceName: 'X', texto: 'ok', snapshot: { a: 1 }
+-      }),
+-      (err) => err.codigo === 'IMPRESSAO_IPC_CAMPO_PROIBIDO'
+-    );
+-    const ok = sanitizarPayloadImpressao({
+-      deviceName: 'X', texto: 'COZINHA', vias: 2, job_id: 5, largura_mm: 80
+-    });
+-    assert.equal(ok.deviceName, 'X');
+-    assert.equal(ok.vias, 2);
+-    assert.ok(!Object.prototype.hasOwnProperty.call(ok, 'empresa_id'));
+-  });
+-
+-  it('11) impressão real permanece desabilitada por padrão', () => {
+-    assert.equal(isImpressaoFisicaAutorizada({ autorizarSpoolerReal: true }), false);
+-    assert.equal(isImpressaoFisicaAutorizada({}), false);
+-    assert.equal(IPC_CANAIS.LISTAR, 'cozinha-impressao:listar-impressoras');
+-    assert.equal(IPC_CANAIS.IMPRIMIR, 'cozinha-impressao:imprimir');
+-  });
+-
+-  it('12) FAKE continua disponível e isolado do Electron', async () => {
++  });
++
++  it('10) FAKE isolado + adapter produção tipado + sem print real', () => {
+     const fake = criarFakeDriver({ modo: 'sucesso' });
+     assert.equal(fake.nome, 'FAKE');
+-    const out = await fake.imprimir({ job: { id: 1, vias: 1 } });
+-    assert.equal(out.driver, 'FAKE');
+-    assert.equal(out.impressao_fisica, false);
+-  });
+-
+-  it('13) falha Electron não altera preparação', async () => {
+-    const db = await open();
+-    await schemaErpMinimo(db);
+-    const ctx = await prepararBase(db);
+-    const { despacho } = await despacharComJob(db, ctx, 'e-13', { device_name: 'Inexistente' });
+-    const adapter = criarAdapterElectronMock({ printers: [{ name: 'Outra' }] });
+-    const driver = criarElectronDriver({ adapter });
+-    const out = await WorkerService.processarProximo({
+-      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-e13'
+-    }, { db, driver });
+-    assert.equal(out.job.estado, ESTADOS_FILA.FALHA);
+-    const item = await get(db, `SELECT estado_preparacao FROM cozinha_itens WHERE rodada_id=?`, [despacho.rodada.id]);
+-    assert.equal(item.estado_preparacao, 'AGUARDANDO');
+-    await close(db);
+-  });
+-
+-  it('14) fontes Electron isoladas: sem cupom/DANFE comercial', () => {
+-    const bridgeSrc = fs.readFileSync(
+-      path.join(__dirname, '../../backend/services/cozinha/cozinhaImpressaoElectronBridge.js'), 'utf8'
+-    );
+-    const driverSrc = fs.readFileSync(
+-      path.join(__dirname, '../../backend/services/cozinha/cozinhaImpressaoElectronDriver.js'), 'utf8'
+-    );
+-    const ipcSrc = fs.readFileSync(
+-      path.join(__dirname, '../../electron-cozinha-impressao.js'), 'utf8'
+-    );
+-    assert.ok(!/imprimir-danfe|abrir-comprovante|impressora_cupom|\/api\/impressao\//.test(bridgeSrc));
+-    assert.ok(!/imprimir-danfe|abrir-comprovante|impressora_cupom/.test(driverSrc));
+-    assert.ok(/IPC_CANAIS|cozinha-impressao/.test(ipcSrc));
+-    assert.ok(ipcSrc.includes('CDS_COZINHA_IMPRESSAO_FISICA_AUTORIZADA'));
+-    assert.ok(ipcSrc.includes('getPrintersAsync') || ipcSrc.includes('webContents.print'));
+-    assert.ok(!/imprimir-danfe-silencioso|abrir-comprovante/.test(ipcSrc));
++
++    const adapter = criarAdapterElectronProducao({
++      obterWebContents: () => ({
++        isDestroyed: () => false,
++        getPrintersAsync: async () => [{ name: 'P1', isDefault: true }],
++        print: (opts, cb) => cb(true),
++        loadURL: async () => {}
++      })
++    });
++    assert.equal(adapter.tipo, 'electron-producao');
++
++    const preload = fs.readFileSync(path.join(__dirname, '../../preload.js'), 'utf8');
++    assert.ok(preload.includes('listarImpressoras'));
++    assert.ok(/Print genérico bloqueado|não use do renderer/i.test(preload));
++
++    const ipcSrc = fs.readFileSync(path.join(__dirname, '../../electron-cozinha-impressao.js'), 'utf8');
++    assert.ok(ipcSrc.includes('IMPRESSAO_IPC_PRINT_BLOQUEADO') || ipcSrc.includes('rejeitarImpressaoGenericaPorIpc'));
++    assert.ok(!/imprimir-danfe-silencioso/.test(ipcSrc));
+   });
+ });

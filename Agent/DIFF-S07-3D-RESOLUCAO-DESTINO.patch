@@ -1,0 +1,1040 @@
+﻿diff --git a/backend/migrations/s07-3d-pedido-destino-cozinha.sql b/backend/migrations/s07-3d-pedido-destino-cozinha.sql
+new file mode 100644
+index 0000000..1638b7e
+--- /dev/null
++++ b/backend/migrations/s07-3d-pedido-destino-cozinha.sql
+@@ -0,0 +1,21 @@
++-- S07-3D — Snapshot de resolução de destino de cozinha no pedido
++-- Dependência: pedidos (existente), cozinha_canais / cozinha_canal_destinos (S07-3C).
++-- Origem do canal de entrada continua em pedidos.origem_canal (já existente).
++-- Adaptador EQUIPE (EntradaPedido) resolve para o canal de cozinha LOJA via serviço.
++-- NÃO executar automaticamente no banco oficial.
++-- SQLite: ADD COLUMN é idempotente apenas se a coluna ainda não existir — aplicar com checagem.
++
++-- Canal de cozinha efetivamente usado na resolução (ex.: LOJA, IFOOD).
++ALTER TABLE pedidos ADD COLUMN cozinha_canal_codigo TEXT;
++
++-- Unidade de destino congelada no momento da resolução (não segue alteração futura do roteamento).
++ALTER TABLE pedidos ADD COLUMN unidade_cozinha_destino_id INTEGER;
++
++-- Status estruturado da resolução (RESOLVIDO, DESTINO_NAO_CONFIGURADO, CANAL_INEXISTENTE, ...).
++ALTER TABLE pedidos ADD COLUMN cozinha_resolucao_status TEXT;
++
++CREATE INDEX IF NOT EXISTS idx_pedidos_cozinha_destino
++  ON pedidos(empresa_id, unidade_cozinha_destino_id);
++
++CREATE INDEX IF NOT EXISTS idx_pedidos_cozinha_resolucao
++  ON pedidos(empresa_id, cozinha_resolucao_status);
+diff --git a/backend/services/cozinha/CozinhaResolucaoDestinoService.js b/backend/services/cozinha/CozinhaResolucaoDestinoService.js
+new file mode 100644
+index 0000000..9fb9ed9
+--- /dev/null
++++ b/backend/services/cozinha/CozinhaResolucaoDestinoService.js
+@@ -0,0 +1,242 @@
++/**
++ * S07-3D — Resolução automática do destino de cozinha a partir do canal de origem.
++ * Responsabilidades 1–2 (origem + roteamento). SEM despacho ao KDS.
++ * Usa cozinha_canais / cozinha_canal_destinos / cozinha_unidades (S07-3C).
++ * Empresa só do contexto autenticado. Destino arbitrário do cliente é ignorado.
++ */
++'use strict';
++
++const {
++  verificarSchemaCozinhaCanais,
++  exigirSchemaCozinhaCanais
++} = require('./cozinhaCanaisSchema');
++const { CODIGO_LOJA } = require('./CozinhaCanaisService');
++
++/** Adaptador de entrada (EntradaPedido) → código do canal de cozinha (S07-3C). */
++const MAPA_ADAPTADOR_PARA_CANAL_COZINHA = Object.freeze({
++  EQUIPE: CODIGO_LOJA
++});
++
++const STATUS_RESOLUCAO = Object.freeze({
++  RESOLVIDO: 'RESOLVIDO',
++  DESTINO_NAO_CONFIGURADO: 'DESTINO_NAO_CONFIGURADO',
++  CANAL_INEXISTENTE: 'CANAL_INEXISTENTE',
++  CANAL_INATIVO: 'CANAL_INATIVO',
++  UNIDADE_DESTINO_INVALIDA: 'UNIDADE_DESTINO_INVALIDA',
++  SCHEMA_CANAIS_INDISPONIVEL: 'SCHEMA_CANAIS_INDISPONIVEL',
++  CANAL_ORIGEM_OBRIGATORIO: 'CANAL_ORIGEM_OBRIGATORIO'
++});
++
++function erro(mensagem, statusCode, codigo, extras = {}) {
++  const err = new Error(mensagem);
++  err.statusCode = statusCode;
++  err.codigo = codigo;
++  Object.assign(err, extras);
++  return err;
++}
++
++function conn(opts) {
++  return (opts && opts.db) || require('../../database');
++}
++
++function dbGet(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
++  });
++}
++
++function exigirEmpresa(empresaId) {
++  const n = Number(empresaId);
++  if (!Number.isInteger(n) || n <= 0) {
++    throw erro('Empresa do contexto é obrigatória.', 400, 'EMPRESA_CONTEXT_REQUIRED');
++  }
++  return n;
++}
++
++/**
++ * Normaliza o código do canal de cozinha a partir do adaptador / origem persistida.
++ * EQUIPE (garçom / operação loja) → LOJA. Demais códigos passam em maiúsculas.
++ */
++function normalizarCanalCozinha(canalCodigo) {
++  const raw = String(canalCodigo == null ? '' : canalCodigo).trim().toUpperCase();
++  if (!raw) return null;
++  if (Object.prototype.hasOwnProperty.call(MAPA_ADAPTADOR_PARA_CANAL_COZINHA, raw)) {
++    return MAPA_ADAPTADOR_PARA_CANAL_COZINHA[raw];
++  }
++  return raw;
++}
++
++function montarResultado({
++  status,
++  empresaId,
++  canalCodigoInformado = null,
++  canalCodigoCozinha = null,
++  canal = null,
++  destino = null,
++  pendente = false,
++  mensagem = null
++}) {
++  const resolvido = status === STATUS_RESOLUCAO.RESOLVIDO;
++  return {
++    success: resolvido,
++    status,
++    codigo: status,
++    empresa_id: empresaId,
++    canal_codigo_informado: canalCodigoInformado,
++    canal_codigo: canalCodigoCozinha,
++    canal,
++    destino: resolvido ? destino : null,
++    pendente: !!pendente || status === STATUS_RESOLUCAO.DESTINO_NAO_CONFIGURADO,
++    mensagem,
++    despacho: false
++  };
++}
++
++/**
++ * Resolve a unidade de cozinha para o canal de origem da empresa.
++ * Não utiliza cozinha padrão como fallback silencioso.
++ * Não despacha para o KDS.
++ *
++ * @param {object} entrada
++ * @param {number|string} entrada.empresaId contexto autenticado
++ * @param {string} entrada.canalCodigo origem (adaptador ou código de canal de cozinha)
++ * @param {*} [entrada.bodyEmpresaIdIgnored] ignorado (nunca confiar no cliente)
++ * @param {*} [entrada.unidadeDestinoArbitrariaIgnored] ignorado
++ * @param {*} [entrada.destinoArbitrarioIgnored] ignorado
++ */
++async function resolverDestinoPedido({
++  empresaId,
++  canalCodigo,
++  bodyEmpresaIdIgnored,
++  unidadeDestinoArbitrariaIgnored,
++  destinoArbitrarioIgnored
++} = {}, opts = {}) {
++  void bodyEmpresaIdIgnored;
++  void unidadeDestinoArbitrariaIgnored;
++  void destinoArbitrarioIgnored;
++
++  const empId = exigirEmpresa(empresaId);
++  const informado = canalCodigo == null ? null : String(canalCodigo).trim();
++  const codigoCozinha = normalizarCanalCozinha(canalCodigo);
++
++  if (!codigoCozinha) {
++    return montarResultado({
++      status: STATUS_RESOLUCAO.CANAL_ORIGEM_OBRIGATORIO,
++      empresaId: empId,
++      canalCodigoInformado: informado,
++      mensagem: 'Canal de origem obrigatório para resolução de destino.'
++    });
++  }
++
++  const db = conn(opts);
++  const schema = await verificarSchemaCozinhaCanais(db);
++  if (!schema.disponivel) {
++    return montarResultado({
++      status: STATUS_RESOLUCAO.SCHEMA_CANAIS_INDISPONIVEL,
++      empresaId: empId,
++      canalCodigoInformado: informado,
++      canalCodigoCozinha: codigoCozinha,
++      pendente: true,
++      mensagem: 'Schema de canais de cozinha indisponível.'
++    });
++  }
++
++  const row = await dbGet(db, `
++    SELECT
++      c.id AS canal_id,
++      c.empresa_id AS canal_empresa_id,
++      c.codigo AS canal_codigo,
++      c.nome AS canal_nome,
++      c.origem_tipo AS canal_origem_tipo,
++      c.ativo AS canal_ativo,
++      d.unidade_cozinha_id,
++      u.id AS unidade_id,
++      u.empresa_id AS unidade_empresa_id,
++      u.codigo AS unidade_codigo,
++      u.ativo AS unidade_ativo
++    FROM cozinha_canais c
++    LEFT JOIN cozinha_canal_destinos d
++      ON d.canal_id = c.id AND d.empresa_id = c.empresa_id
++    LEFT JOIN cozinha_unidades u
++      ON u.id = d.unidade_cozinha_id AND u.empresa_id = d.empresa_id
++    WHERE c.empresa_id = ? AND c.codigo = ?
++  `, [empId, codigoCozinha]);
++
++  if (!row) {
++    return montarResultado({
++      status: STATUS_RESOLUCAO.CANAL_INEXISTENTE,
++      empresaId: empId,
++      canalCodigoInformado: informado,
++      canalCodigoCozinha: codigoCozinha,
++      mensagem: `Canal de cozinha "${codigoCozinha}" inexistente para a empresa.`
++    });
++  }
++
++  const canal = {
++    id: Number(row.canal_id),
++    codigo: String(row.canal_codigo),
++    nome: row.canal_nome != null ? String(row.canal_nome) : null,
++    origem_tipo: row.canal_origem_tipo != null ? String(row.canal_origem_tipo) : null,
++    ativo: Number(row.canal_ativo) === 1
++  };
++
++  if (!canal.ativo) {
++    return montarResultado({
++      status: STATUS_RESOLUCAO.CANAL_INATIVO,
++      empresaId: empId,
++      canalCodigoInformado: informado,
++      canalCodigoCozinha: codigoCozinha,
++      canal,
++      mensagem: `Canal de cozinha "${codigoCozinha}" está inativo.`
++    });
++  }
++
++  if (row.unidade_cozinha_id == null) {
++    return montarResultado({
++      status: STATUS_RESOLUCAO.DESTINO_NAO_CONFIGURADO,
++      empresaId: empId,
++      canalCodigoInformado: informado,
++      canalCodigoCozinha: codigoCozinha,
++      canal,
++      pendente: true,
++      mensagem: `Canal "${codigoCozinha}" sem destino de cozinha configurado.`
++    });
++  }
++
++  const unidadeId = Number(row.unidade_id);
++  const unidadeEmpresaOk = Number(row.unidade_empresa_id) === empId;
++  const unidadeAtiva = Number(row.unidade_ativo) === 1;
++
++  if (!Number.isInteger(unidadeId) || unidadeId <= 0 || !unidadeEmpresaOk || !unidadeAtiva) {
++    return montarResultado({
++      status: STATUS_RESOLUCAO.UNIDADE_DESTINO_INVALIDA,
++      empresaId: empId,
++      canalCodigoInformado: informado,
++      canalCodigoCozinha: codigoCozinha,
++      canal,
++      mensagem: 'Unidade de destino inválida, inativa ou de outra empresa.'
++    });
++  }
++
++  return montarResultado({
++    status: STATUS_RESOLUCAO.RESOLVIDO,
++    empresaId: empId,
++    canalCodigoInformado: informado,
++    canalCodigoCozinha: codigoCozinha,
++    canal,
++    destino: {
++      unidade_id: unidadeId,
++      unidade_codigo: row.unidade_codigo != null ? String(row.unidade_codigo) : null
++    },
++    mensagem: null
++  });
++}
++
++module.exports = {
++  MAPA_ADAPTADOR_PARA_CANAL_COZINHA,
++  STATUS_RESOLUCAO,
++  normalizarCanalCozinha,
++  resolverDestinoPedido,
++  verificarSchemaCozinhaCanais,
++  exigirSchemaCozinhaCanais
++};
+diff --git a/backend/services/pedido/EntradaPedidoService.js b/backend/services/pedido/EntradaPedidoService.js
+index 282fa8e..bcbfdbe 100644
+--- a/backend/services/pedido/EntradaPedidoService.js
++++ b/backend/services/pedido/EntradaPedidoService.js
+@@ -7,6 +7,11 @@
+  *
+  * O canal NUNCA é lido do corpo da requisição: quem define a origem é o adaptador (código servidor)
+  * que chama `receber`. Isso evita que um cliente declare livremente um canal.
++ *
++ * S07-3D: o adaptador EQUIPE (garçom / operação da loja) permanece o contrato de entrada;
++ * a resolução de cozinha mapeia EQUIPE → canal LOJA (ver CozinhaResolucaoDestinoService).
++ * Integrações futuras (IFOOD, WHATSAPP, etc.) devem chamar `receber` com o código do canal
++ * correspondente — sem inventar fluxos paralelos nesta sprint.
+  */
+ 'use strict';
+ 
+diff --git a/backend/services/pedido/PedidoOperacionalService.js b/backend/services/pedido/PedidoOperacionalService.js
+index 3661791..df7ca2d 100644
+--- a/backend/services/pedido/PedidoOperacionalService.js
++++ b/backend/services/pedido/PedidoOperacionalService.js
+@@ -33,6 +33,7 @@ const {
+   exigirOperacaoDoPedido,
+   statusDeErroEmpresaPedido
+ } = require('../pedidos/PedidoEmpresaContextoService');
++const CozinhaResolucaoDestino = require('../cozinha/CozinhaResolucaoDestinoService');
+ 
+ const { agoraLocalBrasil } = VendaFinanceiroService;
+ const TOLERANCIA_MONETARIA = 0.01;
+@@ -485,6 +486,25 @@ async function criar(body = {}, operadorId = null, opcoes = {}) {
+         });
+       }
+ 
++      // S07-3D — resolução de destino (origem + roteamento). Sem despacho ao KDS.
++      // Destino/empresa arbitrários do body são ignorados. Falha de resolução não aborta o pedido.
++      if (origemCanal) {
++        try {
++          const resolucao = await CozinhaResolucaoDestino.resolverDestinoPedido({
++            empresaId,
++            canalCodigo: origemCanal,
++            bodyEmpresaIdIgnored: body.empresa_id != null ? body.empresa_id : body.empresaId,
++            unidadeDestinoArbitrariaIgnored: body.unidade_cozinha_destino_id != null
++              ? body.unidade_cozinha_destino_id
++              : (body.unidade_id != null ? body.unidade_id : body.destino),
++            destinoArbitrarioIgnored: body.destino
++          }, { db });
++          await repo.persistirResolucaoDestinoCozinha(pedidoId, empresaId, resolucao, { db });
++        } catch (_) {
++          /* preservação do fluxo comercial: resolução não bloqueia criação */
++        }
++      }
++
+       await PedidoConsumoEstoqueService.registrarPedidoIdempotente(
+         db,
+         empresaId,
+diff --git a/backend/services/pedido/PedidoRepository.js b/backend/services/pedido/PedidoRepository.js
+index 0f0bb19..d17efca 100644
+--- a/backend/services/pedido/PedidoRepository.js
++++ b/backend/services/pedido/PedidoRepository.js
+@@ -1150,6 +1150,78 @@ async function desvincularAtendimentoDaMesa(pedidoId, empresaId, opts = {}) {
+   );
+ }
+ 
++/**
++ * S07-3D — grava snapshot da resolução de destino (sem despacho).
++ * No-op se as colunas ainda não existirem (migration pendente).
++ * Não sobrescreve destino já RESOLVIDO (estabilidade após alteração de roteamento).
++ */
++async function persistirResolucaoDestinoCozinha(pedidoId, empresaId, resolucao, opts = {}) {
++  const db = conn(opts.db);
++  const colunas = await obterColunasTabela('pedidos', db);
++  const temCanal = colunas.has('cozinha_canal_codigo');
++  const temUnidade = colunas.has('unidade_cozinha_destino_id');
++  const temStatus = colunas.has('cozinha_resolucao_status');
++  if (!temCanal && !temUnidade && !temStatus) {
++    return { skipped: true, motivo: 'SCHEMA_DESTINO_AUSENTE' };
++  }
++
++  const id = Number(pedidoId);
++  const emp = Number(empresaId);
++  if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(emp) || emp <= 0) {
++    return { skipped: true, motivo: 'IDENTIFICADORES_INVALIDOS' };
++  }
++
++  const atual = await get(
++    `SELECT ${temStatus ? 'cozinha_resolucao_status' : 'NULL AS cozinha_resolucao_status'},
++            ${temUnidade ? 'unidade_cozinha_destino_id' : 'NULL AS unidade_cozinha_destino_id'}
++       FROM pedidos WHERE id = ? AND empresa_id = ?`,
++    [id, emp],
++    db
++  );
++  if (!atual) return { skipped: true, motivo: 'PEDIDO_NAO_ENCONTRADO' };
++
++  if (
++    String(atual.cozinha_resolucao_status || '') === 'RESOLVIDO'
++    && atual.unidade_cozinha_destino_id != null
++  ) {
++    return { skipped: true, motivo: 'DESTINO_JA_RESOLVIDO' };
++  }
++
++  const canalCodigo = resolucao && resolucao.canal_codigo != null
++    ? String(resolucao.canal_codigo)
++    : null;
++  const unidadeId = resolucao
++    && resolucao.destino
++    && resolucao.destino.unidade_id != null
++    ? Number(resolucao.destino.unidade_id)
++    : null;
++  const status = resolucao && resolucao.status != null ? String(resolucao.status) : null;
++
++  const sets = [];
++  const params = [];
++  if (temCanal) {
++    sets.push('cozinha_canal_codigo = ?');
++    params.push(canalCodigo);
++  }
++  if (temUnidade) {
++    sets.push('unidade_cozinha_destino_id = ?');
++    params.push(Number.isInteger(unidadeId) && unidadeId > 0 ? unidadeId : null);
++  }
++  if (temStatus) {
++    sets.push('cozinha_resolucao_status = ?');
++    params.push(status);
++  }
++  if (!sets.length) return { skipped: true, motivo: 'SCHEMA_DESTINO_AUSENTE' };
++
++  params.push(id, emp);
++  await run(
++    `UPDATE pedidos SET ${sets.join(', ')} WHERE id = ? AND empresa_id = ?`,
++    params,
++    db
++  );
++  return { skipped: false, status, unidade_cozinha_destino_id: unidadeId, canal_codigo: canalCodigo };
++}
++
+ module.exports = {
+   listarAguardandoFaturamento,
+   listarPedidos,
+@@ -1157,6 +1229,7 @@ module.exports = {
+   obterEstadoEdicao,
+   criarErroPedidoImutavel,
+   criarPedido,
++  persistirResolucaoDestinoCozinha,
+   vincularAtendimentoDaMesa,
+   reatribuirAtendimentoDaMesa,
+   desvincularAtendimentoDaMesa,
+diff --git a/backend/utils/pedidosDestinoCozinhaSchema.js b/backend/utils/pedidosDestinoCozinhaSchema.js
+new file mode 100644
+index 0000000..9512939
+--- /dev/null
++++ b/backend/utils/pedidosDestinoCozinhaSchema.js
+@@ -0,0 +1,92 @@
++/**
++ * S07-3D — Snapshot de resolução de destino de cozinha no pedido.
++ * Colunas aditivas (nullable). DDL via migration controlada ou garantir* em testes.
++ * Não executar no banco oficial automaticamente.
++ */
++'use strict';
++
++function dbRun(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.run(sql, params, function cb(err) {
++      if (err) return reject(err);
++      resolve(this);
++    });
++  });
++}
++
++function dbAll(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
++  });
++}
++
++const COLUNAS_DESTINO_COZINHA = Object.freeze([
++  'cozinha_canal_codigo',
++  'unidade_cozinha_destino_id',
++  'cozinha_resolucao_status'
++]);
++
++async function verificarSchemaDestinoCozinhaPedidos(db) {
++  if (!db) return { disponivel: false, faltando: COLUNAS_DESTINO_COZINHA.slice(), skipped: true };
++  const colunas = await dbAll(db, 'PRAGMA table_info(pedidos)');
++  if (!colunas.length) {
++    return { disponivel: false, faltando: COLUNAS_DESTINO_COZINHA.slice(), skipped: true };
++  }
++  const nomes = new Set(colunas.map((c) => String(c.name).toLowerCase()));
++  const faltando = COLUNAS_DESTINO_COZINHA.filter((c) => !nomes.has(c));
++  return { disponivel: faltando.length === 0, faltando, skipped: false };
++}
++
++async function exigirSchemaDestinoCozinhaPedidos(db) {
++  const st = await verificarSchemaDestinoCozinhaPedidos(db);
++  if (st.disponivel) return st;
++  const err = new Error(
++    'Schema de destino de cozinha no pedido indisponível. Aplique a migration S07-3D.'
++  );
++  err.statusCode = 503;
++  err.codigo = 'SCHEMA_DESTINO_COZINHA_PEDIDO_INDISPONIVEL';
++  err.faltando = (st.faltando || []).slice();
++  throw err;
++}
++
++/** CREATE/ALTER IF NOT EXISTS — somente testes / aplicação controlada. */
++async function garantirSchemaDestinoCozinhaPedidos(db) {
++  if (!db) return { skipped: true, colunasAdicionadas: [] };
++  const colunas = await dbAll(db, 'PRAGMA table_info(pedidos)');
++  if (!colunas.length) return { skipped: true, colunasAdicionadas: [] };
++  const nomes = new Set(colunas.map((c) => String(c.name).toLowerCase()));
++  const colunasAdicionadas = [];
++
++  if (!nomes.has('cozinha_canal_codigo')) {
++    await dbRun(db, 'ALTER TABLE pedidos ADD COLUMN cozinha_canal_codigo TEXT');
++    colunasAdicionadas.push('cozinha_canal_codigo');
++  }
++  if (!nomes.has('unidade_cozinha_destino_id')) {
++    await dbRun(db, 'ALTER TABLE pedidos ADD COLUMN unidade_cozinha_destino_id INTEGER');
++    colunasAdicionadas.push('unidade_cozinha_destino_id');
++  }
++  if (!nomes.has('cozinha_resolucao_status')) {
++    await dbRun(db, 'ALTER TABLE pedidos ADD COLUMN cozinha_resolucao_status TEXT');
++    colunasAdicionadas.push('cozinha_resolucao_status');
++  }
++
++  await dbRun(
++    db,
++    `CREATE INDEX IF NOT EXISTS idx_pedidos_cozinha_destino
++      ON pedidos(empresa_id, unidade_cozinha_destino_id)`
++  );
++  await dbRun(
++    db,
++    `CREATE INDEX IF NOT EXISTS idx_pedidos_cozinha_resolucao
++      ON pedidos(empresa_id, cozinha_resolucao_status)`
++  );
++
++  return { skipped: false, colunasAdicionadas };
++}
++
++module.exports = {
++  COLUNAS_DESTINO_COZINHA,
++  verificarSchemaDestinoCozinhaPedidos,
++  exigirSchemaDestinoCozinhaPedidos,
++  garantirSchemaDestinoCozinhaPedidos
++};
+diff --git a/tests/cozinha/sprint07-s07-3d-resolucao-destino.test.js b/tests/cozinha/sprint07-s07-3d-resolucao-destino.test.js
+new file mode 100644
+index 0000000..2a01006
+--- /dev/null
++++ b/tests/cozinha/sprint07-s07-3d-resolucao-destino.test.js
+@@ -0,0 +1,516 @@
++/**
++ * Sprint 07 · S07-3D — Resolução automática do destino dos pedidos.
++ * Banco temporário. Sem migration no oficial. Sem despacho / iFood real / S07-3E+.
++ *
++ *   set CDS_BLOQUEAR_BANCO_OFICIAL=1
++ *   set CDS_TEST_ISOLATION=1
++ *   set CDS_FORCAR_LOCAL=1
++ *   node --test --test-concurrency=1 --test-force-exit tests/cozinha/sprint07-s07-3d-resolucao-destino.test.js
++ */
++'use strict';
++
++const fs = require('fs');
++const os = require('os');
++const path = require('path');
++const { describe, it, after, beforeEach } = require('node:test');
++const assert = require('node:assert/strict');
++const sqlite3 = require('sqlite3').verbose();
++
++const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-cozinha-s07-3d-'));
++process.env.DB_DIR = dbDir;
++process.env.CDS_TEST_ISOLATION = '1';
++process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
++process.env.CDS_FORCAR_LOCAL = '1';
++process.env.JWT_SECRET = process.env.JWT_SECRET || 'cds-test-jwt-s07-3d-resolucao';
++delete process.env.CDS_ALLOW_OFFICIAL_DB;
++delete process.env.CDS_COZINHA_IMPRESSAO_FISICA_AUTORIZADA;
++
++const {
++  garantirSchemaCozinha,
++  marcarCozinhaOperacional
++} = require('../../backend/utils/cozinhaSchema');
++const { garantirSchemaEmpresasAsync } = require('../../backend/services/empresas/empresasSchema');
++const { garantirSchemaUsuarioEmpresasAsync } = require('../../backend/services/empresas/usuarioEmpresasSchema');
++const {
++  garantirSchemaCozinhaRoteamento
++} = require('../../backend/services/cozinha/cozinhaRoteamentoSchema');
++const {
++  garantirSchemaCozinhaCanais
++} = require('../../backend/services/cozinha/cozinhaCanaisSchema');
++const {
++  garantirSchemaDestinoCozinhaPedidos
++} = require('../../backend/utils/pedidosDestinoCozinhaSchema');
++const { garantirSchemaOrigemPedidos } = require('../../backend/utils/pedidosOrigemSchema');
++const Canais = require('../../backend/services/cozinha/CozinhaCanaisService');
++const Resolucao = require('../../backend/services/cozinha/CozinhaResolucaoDestinoService');
++const repo = require('../../backend/services/pedido/PedidoRepository');
++const Roteamento = require('../../backend/services/cozinha/CozinhaRoteamentoConfigService');
++const ui = require('../../frontend/erp/js/cozinha-roteamento.js');
++
++function run(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.run(sql, params, function cb(err) {
++      if (err) reject(err);
++      else resolve(this);
++    });
++  });
++}
++function get(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
++  });
++}
++function openMem() {
++  return new Promise((resolve, reject) => {
++    const db = new sqlite3.Database(':memory:', (err) => {
++      if (err) return reject(err);
++      db.serialize(() => {
++        db.run('PRAGMA foreign_keys = ON');
++        db.run('PRAGMA busy_timeout = 10000', (e) => (e ? reject(e) : resolve(db)));
++      });
++    });
++  });
++}
++function close(db) {
++  return new Promise((resolve) => db.close(() => resolve()));
++}
++
++async function prepararBase(db, { comCanais = true, comDestinoPedido = true } = {}) {
++  await run(db, `
++    CREATE TABLE IF NOT EXISTS usuarios (
++      id INTEGER PRIMARY KEY AUTOINCREMENT,
++      username TEXT UNIQUE NOT NULL,
++      password_hash TEXT NOT NULL,
++      role TEXT DEFAULT 'operador',
++      perfil TEXT DEFAULT 'USUARIO',
++      ativo INTEGER DEFAULT 1,
++      nome TEXT
++    )
++  `);
++  await run(db, `
++    CREATE TABLE IF NOT EXISTS pedidos (
++      id INTEGER PRIMARY KEY AUTOINCREMENT,
++      codigo TEXT,
++      data_pedido TEXT,
++      cliente_id INTEGER,
++      total REAL DEFAULT 0,
++      desconto REAL DEFAULT 0,
++      frete REAL DEFAULT 0,
++      status TEXT,
++      representante_id INTEGER,
++      representante_nome TEXT,
++      observacao TEXT,
++      operador_id INTEGER,
++      empresa_id INTEGER,
++      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
++      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
++    )
++  `);
++  await run(db, `
++    CREATE TABLE IF NOT EXISTS pedidos_itens (
++      id INTEGER PRIMARY KEY AUTOINCREMENT,
++      pedido_id INTEGER NOT NULL,
++      produto_id INTEGER,
++      quantidade REAL,
++      preco_unitario REAL,
++      desconto_percentual REAL DEFAULT 0,
++      subtotal REAL
++    )
++  `);
++  await garantirSchemaEmpresasAsync(db);
++  await garantirSchemaUsuarioEmpresasAsync(db);
++  await garantirSchemaCozinha(db);
++  await garantirSchemaCozinhaRoteamento(db);
++  if (comCanais) await garantirSchemaCozinhaCanais(db);
++  await garantirSchemaOrigemPedidos(db);
++  if (comDestinoPedido) await garantirSchemaDestinoCozinhaPedidos(db);
++
++  const emp1 = await run(db, `
++    INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
++    VALUES ('11111111000111', 'Empresa 1', 'E1', 1)
++  `);
++  const emp2 = await run(db, `
++    INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
++    VALUES ('22222222000122', 'Empresa 2', 'E2', 1)
++  `);
++  const admin = await run(db, `
++    INSERT INTO usuarios (username, password_hash, role, perfil, ativo, nome)
++    VALUES ('admin_r3d', 'hash', 'admin', 'ADMIN', 1, 'Admin')
++  `);
++  const op = await run(db, `
++    INSERT INTO usuarios (username, password_hash, role, perfil, ativo, nome)
++    VALUES ('op_r3d', 'hash', 'operador', 'USUARIO', 1, 'Op')
++  `);
++  await run(db, `INSERT INTO usuario_empresas (usuario_id, empresa_id, ativo) VALUES (?, ?, 1)`, [admin.lastID, emp1.lastID]);
++  await run(db, `INSERT INTO usuario_empresas (usuario_id, empresa_id, ativo) VALUES (?, ?, 1)`, [op.lastID, emp1.lastID]);
++
++  const unA = await run(db, `INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'COZ-01', 1)`, [emp1.lastID]);
++  const unB = await run(db, `INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'COZ-DELIVERY', 1)`, [emp1.lastID]);
++  const unInativa = await run(db, `INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'COZ-OFF', 0)`, [emp1.lastID]);
++  const unOutra = await run(db, `INSERT INTO cozinha_unidades (empresa_id, codigo, ativo) VALUES (?, 'COZ-X', 1)`, [emp2.lastID]);
++
++  return {
++    emp1: emp1.lastID,
++    emp2: emp2.lastID,
++    adminId: admin.lastID,
++    opId: op.lastID,
++    unA: unA.lastID,
++    unB: unB.lastID,
++    unInativa: unInativa.lastID,
++    unOutra: unOutra.lastID
++  };
++}
++
++function userAdmin(ctx) {
++  return { id: ctx.adminId, username: 'admin_r3d', role: 'admin', perfil: 'ADMIN', permissoes: [] };
++}
++
++async function garantirLojaComDestino(db, ctx, unidadeId) {
++  await Canais.listarCanais({ user: userAdmin(ctx), empresaId: ctx.emp1 }, { db });
++  const lista = await Canais.listarCanais({ user: userAdmin(ctx), empresaId: ctx.emp1 }, { db });
++  const loja = lista.canais.find((c) => c.codigo === 'LOJA');
++  assert.ok(loja, 'canal LOJA');
++  await Canais.definirDestinoCanal({
++    user: userAdmin(ctx),
++    empresaId: ctx.emp1,
++    canalIdRaw: loja.id,
++    unidadeIdRaw: unidadeId,
++    bodyEmpresaIdIgnored: 999
++  }, { db });
++  return loja;
++}
++
++async function inserirCanalIntegracao(db, empresaId, codigo, nome, { ativo = 1 } = {}) {
++  const r = await run(db, `
++    INSERT INTO cozinha_canais (
++      empresa_id, codigo, nome, origem_tipo, ativo, created_at, updated_at
++    ) VALUES (?, ?, ?, 'INTEGRACAO', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
++  `, [empresaId, codigo, nome, ativo]);
++  return r.lastID;
++}
++
++describe('S07-3D — isolamento do banco', () => {
++  it('usa DB_DIR temporário e bloqueia oficial', () => {
++    assert.ok(String(process.env.DB_DIR).includes('cds-cozinha-s07-3d-'));
++    assert.equal(process.env.CDS_BLOQUEAR_BANCO_OFICIAL, '1');
++    assert.equal(process.env.CDS_TEST_ISOLATION, '1');
++    assert.equal(process.env.CDS_FORCAR_LOCAL, '1');
++    assert.equal(process.env.CDS_ALLOW_OFFICIAL_DB, undefined);
++    assert.equal(/ProgramData[\\/]MercantilFiscal/i.test(String(process.env.DB_DIR)), false);
++  });
++});
++
++describe('S07-3D — resolução de destino (serviço)', () => {
++  beforeEach(() => marcarCozinhaOperacional(false));
++
++  it('1) origem LOJA (via EQUIPE) com destino configurado', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    await garantirLojaComDestino(db, ctx, ctx.unA);
++
++    const out = await Resolucao.resolverDestinoPedido({
++      empresaId: ctx.emp1,
++      canalCodigo: 'EQUIPE',
++      bodyEmpresaIdIgnored: ctx.emp2,
++      unidadeDestinoArbitrariaIgnored: ctx.unB
++    }, { db });
++
++    assert.equal(out.status, Resolucao.STATUS_RESOLUCAO.RESOLVIDO);
++    assert.equal(out.canal_codigo, 'LOJA');
++    assert.equal(out.destino.unidade_id, ctx.unA);
++    assert.equal(out.despacho, false);
++    assert.notEqual(out.destino.unidade_id, ctx.unB);
++    await close(db);
++  });
++
++  it('2) origem IFOOD com destino configurado', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    const canalId = await inserirCanalIntegracao(db, ctx.emp1, 'IFOOD', 'iFood');
++    await run(db, `
++      INSERT INTO cozinha_canal_destinos (empresa_id, canal_id, unidade_cozinha_id)
++      VALUES (?, ?, ?)
++    `, [ctx.emp1, canalId, ctx.unB]);
++
++    const out = await Resolucao.resolverDestinoPedido({
++      empresaId: ctx.emp1,
++      canalCodigo: 'IFOOD'
++    }, { db });
++
++    assert.equal(out.status, 'RESOLVIDO');
++    assert.equal(out.canal_codigo, 'IFOOD');
++    assert.equal(out.destino.unidade_id, ctx.unB);
++    assert.equal(out.despacho, false);
++    await close(db);
++  });
++
++  it('3) dois canais apontam para a mesma cozinha', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    await garantirLojaComDestino(db, ctx, ctx.unB);
++    const canalId = await inserirCanalIntegracao(db, ctx.emp1, 'WHATSAPP', 'WhatsApp');
++    await run(db, `
++      INSERT INTO cozinha_canal_destinos (empresa_id, canal_id, unidade_cozinha_id)
++      VALUES (?, ?, ?)
++    `, [ctx.emp1, canalId, ctx.unB]);
++
++    const loja = await Resolucao.resolverDestinoPedido({
++      empresaId: ctx.emp1,
++      canalCodigo: 'LOJA'
++    }, { db });
++    const wa = await Resolucao.resolverDestinoPedido({
++      empresaId: ctx.emp1,
++      canalCodigo: 'WHATSAPP'
++    }, { db });
++
++    assert.equal(loja.destino.unidade_id, ctx.unB);
++    assert.equal(wa.destino.unidade_id, ctx.unB);
++    await close(db);
++  });
++
++  it('4) canal sem destino → pendência, sem fallback', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    await Canais.listarCanais({ user: userAdmin(ctx), empresaId: ctx.emp1 }, { db });
++
++    const out = await Resolucao.resolverDestinoPedido({
++      empresaId: ctx.emp1,
++      canalCodigo: 'LOJA'
++    }, { db });
++
++    assert.equal(out.status, 'DESTINO_NAO_CONFIGURADO');
++    assert.equal(out.pendente, true);
++    assert.equal(out.destino, null);
++    assert.equal(out.success, false);
++    await close(db);
++  });
++
++  it('5) canal inexistente', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    await garantirSchemaCozinhaCanais(db);
++
++    const out = await Resolucao.resolverDestinoPedido({
++      empresaId: ctx.emp1,
++      canalCodigo: 'PEDIDO_ONLINE'
++    }, { db });
++
++    assert.equal(out.status, 'CANAL_INEXISTENTE');
++    assert.equal(out.destino, null);
++    await close(db);
++  });
++
++  it('6) canal inativo', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    const canalId = await inserirCanalIntegracao(db, ctx.emp1, 'IFOOD', 'iFood', { ativo: 0 });
++    await run(db, `
++      INSERT INTO cozinha_canal_destinos (empresa_id, canal_id, unidade_cozinha_id)
++      VALUES (?, ?, ?)
++    `, [ctx.emp1, canalId, ctx.unA]);
++
++    const out = await Resolucao.resolverDestinoPedido({
++      empresaId: ctx.emp1,
++      canalCodigo: 'IFOOD'
++    }, { db });
++
++    assert.equal(out.status, 'CANAL_INATIVO');
++    assert.equal(out.destino, null);
++    await close(db);
++  });
++
++  it('7) unidade de destino inativa', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    const canalId = await inserirCanalIntegracao(db, ctx.emp1, 'IFOOD', 'iFood');
++    await run(db, `
++      INSERT INTO cozinha_canal_destinos (empresa_id, canal_id, unidade_cozinha_id)
++      VALUES (?, ?, ?)
++    `, [ctx.emp1, canalId, ctx.unInativa]);
++
++    const out = await Resolucao.resolverDestinoPedido({
++      empresaId: ctx.emp1,
++      canalCodigo: 'IFOOD'
++    }, { db });
++
++    assert.equal(out.status, 'UNIDADE_DESTINO_INVALIDA');
++    assert.equal(out.destino, null);
++    await close(db);
++  });
++
++  it('8) unidade de outra empresa (isolamento)', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    const canalId = await inserirCanalIntegracao(db, ctx.emp1, 'IFOOD', 'iFood');
++    // FK composta impede vínculo cruzado; simula inconsistência com FK off.
++    await run(db, 'PRAGMA foreign_keys = OFF');
++    await run(db, `
++      INSERT INTO cozinha_canal_destinos (empresa_id, canal_id, unidade_cozinha_id)
++      VALUES (?, ?, ?)
++    `, [ctx.emp1, canalId, ctx.unOutra]);
++    await run(db, 'PRAGMA foreign_keys = ON');
++
++    const out = await Resolucao.resolverDestinoPedido({
++      empresaId: ctx.emp1,
++      canalCodigo: 'IFOOD'
++    }, { db });
++
++    assert.equal(out.status, 'UNIDADE_DESTINO_INVALIDA');
++    assert.equal(out.destino, null);
++    await close(db);
++  });
++
++  it('9) empresa do frontend ignorada', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    await garantirLojaComDestino(db, ctx, ctx.unA);
++
++    const out = await Resolucao.resolverDestinoPedido({
++      empresaId: ctx.emp1,
++      canalCodigo: 'LOJA',
++      bodyEmpresaIdIgnored: ctx.emp2
++    }, { db });
++
++    assert.equal(out.empresa_id, ctx.emp1);
++    assert.equal(out.destino.unidade_id, ctx.unA);
++    await close(db);
++  });
++
++  it('10) destino arbitrário do frontend ignorado', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    await garantirLojaComDestino(db, ctx, ctx.unA);
++
++    const out = await Resolucao.resolverDestinoPedido({
++      empresaId: ctx.emp1,
++      canalCodigo: 'LOJA',
++      unidadeDestinoArbitrariaIgnored: ctx.unB,
++      destinoArbitrarioIgnored: { unidade_id: ctx.unB }
++    }, { db });
++
++    assert.equal(out.destino.unidade_id, ctx.unA);
++    assert.notEqual(out.destino.unidade_id, ctx.unB);
++    await close(db);
++  });
++
++  it('11) destino resolvido preservado após alteração do roteamento', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    const loja = await garantirLojaComDestino(db, ctx, ctx.unA);
++
++    const pedidoId = (await run(db, `
++      INSERT INTO pedidos (codigo, data_pedido, total, status, empresa_id, origem_canal)
++      VALUES ('PED-3D-1', date('now'), 10, 'PEDIDO', ?, 'EQUIPE')
++    `, [ctx.emp1])).lastID;
++
++    const resolucao = await Resolucao.resolverDestinoPedido({
++      empresaId: ctx.emp1,
++      canalCodigo: 'EQUIPE'
++    }, { db });
++    assert.equal(resolucao.destino.unidade_id, ctx.unA);
++
++    await repo.persistirResolucaoDestinoCozinha(pedidoId, ctx.emp1, resolucao, { db });
++
++    await Canais.definirDestinoCanal({
++      user: userAdmin(ctx),
++      empresaId: ctx.emp1,
++      canalIdRaw: loja.id,
++      unidadeIdRaw: ctx.unB
++    }, { db });
++
++    const nova = await Resolucao.resolverDestinoPedido({
++      empresaId: ctx.emp1,
++      canalCodigo: 'LOJA'
++    }, { db });
++    assert.equal(nova.destino.unidade_id, ctx.unB);
++
++    // tentativa de regravar NÃO sobrescreve snapshot RESOLVIDO
++    await repo.persistirResolucaoDestinoCozinha(pedidoId, ctx.emp1, nova, { db });
++    const ped = await get(db, `
++      SELECT unidade_cozinha_destino_id, cozinha_resolucao_status, cozinha_canal_codigo, origem_canal
++      FROM pedidos WHERE id = ?
++    `, [pedidoId]);
++
++    assert.equal(Number(ped.unidade_cozinha_destino_id), ctx.unA);
++    assert.equal(ped.cozinha_resolucao_status, 'RESOLVIDO');
++    assert.equal(ped.cozinha_canal_codigo, 'LOJA');
++    assert.equal(ped.origem_canal, 'EQUIPE');
++    await close(db);
++  });
++
++  it('12) schema de canais indisponível', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db, { comCanais: false, comDestinoPedido: true });
++
++    const out = await Resolucao.resolverDestinoPedido({
++      empresaId: ctx.emp1,
++      canalCodigo: 'LOJA'
++    }, { db });
++
++    assert.equal(out.status, 'SCHEMA_CANAIS_INDISPONIVEL');
++    assert.equal(out.pendente, true);
++    assert.equal(out.destino, null);
++    assert.equal(out.despacho, false);
++    await close(db);
++  });
++});
++
++describe('S07-3D — mapeamento e contrato', () => {
++  it('EQUIPE mapeia para LOJA; IFOOD permanece IFOOD', () => {
++    assert.equal(Resolucao.normalizarCanalCozinha('EQUIPE'), 'LOJA');
++    assert.equal(Resolucao.normalizarCanalCozinha('equipe'), 'LOJA');
++    assert.equal(Resolucao.normalizarCanalCozinha('IFOOD'), 'IFOOD');
++    assert.equal(Resolucao.normalizarCanalCozinha('PEDIDO_ONLINE'), 'PEDIDO_ONLINE');
++    assert.equal(Resolucao.MAPA_ADAPTADOR_PARA_CANAL_COZINHA.EQUIPE, 'LOJA');
++  });
++
++  it('não exporta despacho nem chama CozinhaDespachoService', () => {
++    assert.equal(typeof Resolucao.resolverDestinoPedido, 'function');
++    assert.equal(Resolucao.despacharLote, undefined);
++    const src = fs.readFileSync(
++      path.join(__dirname, '../../backend/services/cozinha/CozinhaResolucaoDestinoService.js'),
++      'utf8'
++    );
++    assert.equal(src.includes('CozinhaDespachoService'), false);
++    assert.equal(src.includes('despacharLote'), false);
++  });
++});
++
++describe('S07-3D — regressões S07-3A / 3B / 3C (fumaça)', () => {
++  beforeEach(() => marcarCozinhaOperacional(false));
++
++  it('3A — serviço de roteamento ainda obtém configuração', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    marcarCozinhaOperacional(true);
++    const out = await Roteamento.obterConfiguracao({
++      user: userAdmin(ctx),
++      empresaId: ctx.emp1
++    }, { db });
++    assert.equal(out.success, true);
++    assert.equal(out.empresa_id, ctx.emp1);
++    await close(db);
++  });
++
++  it('3B — UI de roteamento exporta API esperada', () => {
++    assert.ok(ui && typeof ui === 'object');
++    assert.ok(Object.keys(ui).length > 0);
++  });
++
++  it('3C — LOJA + destino via CanaisService', async () => {
++    const db = await openMem();
++    const ctx = await prepararBase(db);
++    const loja = await garantirLojaComDestino(db, ctx, ctx.unA);
++    assert.equal(loja.codigo, 'LOJA');
++    const lista = await Canais.listarCanais({ user: userAdmin(ctx), empresaId: ctx.emp1 }, { db });
++    const atual = lista.canais.find((c) => c.codigo === 'LOJA');
++    assert.equal(atual.destino.unidade_id, ctx.unA);
++    await close(db);
++  });
++});
++
++after(() => {
++  try {
++    fs.rmSync(dbDir, { recursive: true, force: true });
++  } catch (_) { /* ignore */ }
++});

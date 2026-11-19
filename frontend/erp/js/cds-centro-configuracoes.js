@@ -19,6 +19,7 @@
     { id: 'performance', icon: 'fa-tachometer-alt', label: 'Performance', keywords: 'timeout retry sync performance' },
     { id: 'backup', icon: 'fa-hdd', label: 'Backup', keywords: 'backup restauração' },
     { id: 'implantacao', icon: 'fa-file-import', label: 'Implantação', keywords: 'importação inicial produtos xlsx migração implantação cliente base avançadas ferramentas' },
+    { id: 'cozinhas', icon: 'fa-utensils', label: 'Cozinhas', keywords: 'cozinha roteamento kds unidade segmento ifood pedido online padrão gestão avançadas' },
     { id: 'diagnostico', icon: 'fa-stethoscope', label: 'Diagnóstico', keywords: 'central sync nsu scheduler logs debug sefaz saúde mib busca', fiscal: true }
   ]);
 
@@ -569,6 +570,28 @@
             <li>Importação de XML</li>
           </ul>
         `, 'migração banco antigo csv xml futuro')}
+      </div>
+
+      <div class="cds-cfg-pane" data-cfg-pane="cozinhas">
+        <h2 class="cds-cfg-pane__title">Cozinhas</h2>
+        <p class="cds-cfg-pane__sub">Configurações avançadas de unidades e roteamento de pedidos entre cozinhas.</p>
+        ${card('<i class="fas fa-route text-primary"></i> Gestão de Roteamento de Cozinhas', `
+          <p class="cds-cfg-hint mb-3">
+            Escolha o modo <strong>Cozinha padrão</strong> ou <strong>Cozinha por segmento</strong>
+            (loja, iFood, pedido online) e associe as unidades ativas da empresa.
+          </p>
+          <button type="button" class="btn btn-primary btn-sm" id="btnAbrirCozinhaRoteamento"
+            onclick="typeof loadPage==='function'&&loadPage('cozinha-roteamento')">
+            <i class="fas fa-route"></i> Abrir Gestão de Roteamento
+          </button>
+        `, 'roteamento cozinha padrão segmento ifood pedido online')}
+        ${card('<i class="fas fa-store"></i> Unidades de Cozinha', `
+          <p class="cds-cfg-hint mb-3">Cadastre e ative/inative unidades operacionais da empresa.</p>
+          <button type="button" class="btn btn-outline-primary btn-sm" id="btnAbrirCozinhaUnidades"
+            onclick="typeof loadPage==='function'&&loadPage('cozinha-unidades')">
+            <i class="fas fa-store"></i> Abrir Unidades
+          </button>
+        `, 'unidades cozinha cadastro ativo inativo')}
       </div>
 
       <div class="cds-cfg-pane" data-cfg-pane="empresasCanalVenda">

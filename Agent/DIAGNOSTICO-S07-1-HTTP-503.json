@@ -1,0 +1,35 @@
+{
+  "evidencia": "S07-1 diagnostico 503 isolado",
+  "banco_oficial_acessado": false,
+  "estado_in_memory": {
+    "operacional": false,
+    "versao": null,
+    "erro": {
+      "mensagem": "[COZINHA] foreign_key_check encontrou 2082 violação(ões).",
+      "codigo": "COZINHA_SCHEMA_FALHA"
+    },
+    "atualizadoEm": "2026-11-18T00:12:51.329Z",
+    "versaoAlvo": 3
+  },
+  "status_endpoint": {
+    "status": 200,
+    "body": {
+      "success": true,
+      "operacional": false,
+      "versao_schema": null,
+      "erro": {
+        "mensagem": "[COZINHA] foreign_key_check encontrou 2082 violação(ões).",
+        "codigo": "COZINHA_SCHEMA_FALHA"
+      }
+    }
+  },
+  "painel_endpoint": {
+    "status": 503,
+    "body": {
+      "success": false,
+      "codigo": "COZINHA_NAO_OPERACIONAL",
+      "mensagem": "Módulo Cozinha não operacional."
+    }
+  },
+  "conclusao": "REPRODUZIDO: gate exigirCozinhaOperacional bloqueia antes do serviço"
+}

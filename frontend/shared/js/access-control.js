@@ -22,6 +22,9 @@ const PERMISSOES_PAGINAS = {
     faturamento: 'vendas',
     pedidos: 'vendas',
     mesas: 'vendas',
+    'cozinha-kds': 'vendas',
+    'cozinha-unidades': 'configuracoes',
+    'cozinha-roteamento': 'configuracoes',
     'nfe-central': 'fiscal',
     'nfe-avulsa': 'fiscal',
     'nfe-monitor': 'fiscal',
@@ -80,7 +83,7 @@ function obterPermissoesUsuario() {
     const user = obterUsuarioLogado();
     return {
         role: user.role || 'operador',
-        perfil: String(user.perfil || 'USUARIO').toUpperCase(),
+        perfil: String(user.perfil || 'USUARIO').trim().toUpperCase(),
         permissoes: normalizarPermissoes(user.permissoes)
     };
 }
@@ -232,7 +235,7 @@ function usuarioPodeAcessarDiagnosticoCentral(user) {
 }
 
 function usuarioTemPermissao(page) {
-    const { role, permissoes } = obterPermissoesUsuario();
+    const { role, perfil, permissoes } = obterPermissoesUsuario();
 
     // Assinatura sempre liberada para qualquer usuário autenticado poder renovar a licença.
     if (page === 'licenca') {
@@ -245,6 +248,15 @@ function usuarioTemPermissao(page) {
 
     if (page === 'usuarios') {
         return podeGerenciarUsuariosSistema();
+    }
+
+    // S07-2 / S07-3B — Gestão de unidades e roteamento: admin operacional (role admin OU perfil ADMIN/SUPER_ADMIN).
+    // ACL de página mapeia para 'configuracoes'; API /api/cozinha exige recurso 'pedidos' (implantação).
+    // Não liberar pedidos aqui — menu só para admin operacional; API continua sob exigirRecurso('pedidos').
+    if (page === 'cozinha-unidades' || page === 'cozinha-roteamento') {
+        const roleNorm = String(role || '').trim().toLowerCase();
+        const perfilNorm = String(perfil || '').trim().toUpperCase();
+        return roleNorm === 'admin' || perfilNorm === 'ADMIN' || perfilNorm === 'SUPER_ADMIN';
     }
 
     // Contagem física / ajuste de estoque — mesmo gate do backend (exigirPerfilAjusteEstoque).

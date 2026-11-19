@@ -1,0 +1,3664 @@
+{
+  "gerado_em": "2026-11-18T00:19:30.419Z",
+  "origem": {
+    "path": "C:\\ProgramData\\MercantilFiscal\\dados\\mercadao.db",
+    "size": 29904896,
+    "mtime": "2026-11-18T00:14:10.319Z",
+    "classificacao": "BANCO_OFICIAL_PROGRAMDATA",
+    "selecao": "electron.js define DB_DIR=ProgramData/MercantilFiscal/dados; database.js usa exigirAberturaDatabaseModule(); npm start = electron ."
+  },
+  "copia": {
+    "dir": "C:\\Users\\cicer\\AppData\\Local\\Temp\\cds-cozinha-fk-diagnostico",
+    "path": "C:\\Users\\cicer\\AppData\\Local\\Temp\\cds-cozinha-fk-diagnostico\\mercadao-copia-diagnostico.db",
+    "size": 29904896
+  },
+  "auditoria_atual": {
+    "label": "copia_oficial_atual",
+    "dbPath": "C:\\Users\\cicer\\AppData\\Local\\Temp\\cds-cozinha-fk-diagnostico\\mercadao-copia-diagnostico.db",
+    "schema_version": "2",
+    "tabelas_cozinha": [
+      "cozinha_autorizacoes_qty",
+      "cozinha_bebida_entregas",
+      "cozinha_comandas",
+      "cozinha_estacoes_impressao",
+      "cozinha_eventos_outbox",
+      "cozinha_idempotencia",
+      "cozinha_impressao_fila",
+      "cozinha_item_ingredientes",
+      "cozinha_itens",
+      "cozinha_notificacoes",
+      "cozinha_pedido_item_controle",
+      "cozinha_reducoes_teto",
+      "cozinha_rodadas",
+      "cozinha_schema_meta",
+      "cozinha_unidades"
+    ],
+    "contagens_cozinha": {
+      "cozinha_autorizacoes_qty": 0,
+      "cozinha_bebida_entregas": 0,
+      "cozinha_comandas": 0,
+      "cozinha_estacoes_impressao": 0,
+      "cozinha_eventos_outbox": 0,
+      "cozinha_idempotencia": 0,
+      "cozinha_impressao_fila": 0,
+      "cozinha_item_ingredientes": 0,
+      "cozinha_itens": 0,
+      "cozinha_notificacoes": 0,
+      "cozinha_pedido_item_controle": 0,
+      "cozinha_reducoes_teto": 0,
+      "cozinha_rodadas": 0,
+      "cozinha_schema_meta": 1,
+      "cozinha_unidades": 0
+    },
+    "total_violacoes": 2082,
+    "violacoes_cozinha": 0,
+    "violacoes_outras": 2082,
+    "por_tabela": {
+      "produto_unidades": {
+        "total": 712,
+        "porPai": {
+          "produtos": 712
+        },
+        "amostras": [
+          {
+            "table": "produto_unidades",
+            "rowid": 1,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "produto_unidades",
+            "rowid": 2,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "produto_unidades",
+            "rowid": 3,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "produto_unidades",
+            "rowid": 4,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "produto_unidades",
+            "rowid": 5,
+            "parent": "produtos",
+            "fkid": 0
+          }
+        ]
+      },
+      "tipo_comercial_canais": {
+        "total": 16,
+        "porPai": {
+          "canais_venda": 16
+        },
+        "amostras": [
+          {
+            "table": "tipo_comercial_canais",
+            "rowid": 1,
+            "parent": "canais_venda",
+            "fkid": 0
+          },
+          {
+            "table": "tipo_comercial_canais",
+            "rowid": 2,
+            "parent": "canais_venda",
+            "fkid": 0
+          },
+          {
+            "table": "tipo_comercial_canais",
+            "rowid": 3,
+            "parent": "canais_venda",
+            "fkid": 0
+          },
+          {
+            "table": "tipo_comercial_canais",
+            "rowid": 4,
+            "parent": "canais_venda",
+            "fkid": 0
+          },
+          {
+            "table": "tipo_comercial_canais",
+            "rowid": 5,
+            "parent": "canais_venda",
+            "fkid": 0
+          }
+        ]
+      },
+      "consignacoes_itens": {
+        "total": 7,
+        "porPai": {
+          "produtos": 7
+        },
+        "amostras": [
+          {
+            "table": "consignacoes_itens",
+            "rowid": 1,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "consignacoes_itens",
+            "rowid": 2,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "consignacoes_itens",
+            "rowid": 3,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "consignacoes_itens",
+            "rowid": 4,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "consignacoes_itens",
+            "rowid": 5,
+            "parent": "produtos",
+            "fkid": 0
+          }
+        ]
+      },
+      "produtos_preco_historico": {
+        "total": 159,
+        "porPai": {
+          "produtos": 159
+        },
+        "amostras": [
+          {
+            "table": "produtos_preco_historico",
+            "rowid": 1,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "produtos_preco_historico",
+            "rowid": 2,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "produtos_preco_historico",
+            "rowid": 3,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "produtos_preco_historico",
+            "rowid": 4,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "produtos_preco_historico",
+            "rowid": 5,
+            "parent": "produtos",
+            "fkid": 0
+          }
+        ]
+      },
+      "produto_embalagens": {
+        "total": 43,
+        "porPai": {
+          "produtos": 43
+        },
+        "amostras": [
+          {
+            "table": "produto_embalagens",
+            "rowid": 4,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "produto_embalagens",
+            "rowid": 5,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "produto_embalagens",
+            "rowid": 6,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "produto_embalagens",
+            "rowid": 7,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "produto_embalagens",
+            "rowid": 9,
+            "parent": "produtos",
+            "fkid": 0
+          }
+        ]
+      },
+      "produto_atacado": {
+        "total": 2,
+        "porPai": {
+          "produtos": 2
+        },
+        "amostras": [
+          {
+            "table": "produto_atacado",
+            "rowid": 2,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "produto_atacado",
+            "rowid": 3,
+            "parent": "produtos",
+            "fkid": 0
+          }
+        ]
+      },
+      "vendas_itens": {
+        "total": 24,
+        "porPai": {
+          "produtos": 24
+        },
+        "amostras": [
+          {
+            "table": "vendas_itens",
+            "rowid": 1,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "vendas_itens",
+            "rowid": 2,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "vendas_itens",
+            "rowid": 3,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "vendas_itens",
+            "rowid": 4,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "vendas_itens",
+            "rowid": 5,
+            "parent": "produtos",
+            "fkid": 0
+          }
+        ]
+      },
+      "produtos_ajustes_estoque": {
+        "total": 702,
+        "porPai": {
+          "produtos": 702
+        },
+        "amostras": [
+          {
+            "table": "produtos_ajustes_estoque",
+            "rowid": 1,
+            "parent": "produtos",
+            "fkid": 1
+          },
+          {
+            "table": "produtos_ajustes_estoque",
+            "rowid": 2,
+            "parent": "produtos",
+            "fkid": 1
+          },
+          {
+            "table": "produtos_ajustes_estoque",
+            "rowid": 3,
+            "parent": "produtos",
+            "fkid": 1
+          },
+          {
+            "table": "produtos_ajustes_estoque",
+            "rowid": 4,
+            "parent": "produtos",
+            "fkid": 1
+          },
+          {
+            "table": "produtos_ajustes_estoque",
+            "rowid": 5,
+            "parent": "produtos",
+            "fkid": 1
+          }
+        ]
+      },
+      "producoes": {
+        "total": 5,
+        "porPai": {
+          "produtos": 5
+        },
+        "amostras": [
+          {
+            "table": "producoes",
+            "rowid": 1,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "producoes",
+            "rowid": 2,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "producoes",
+            "rowid": 3,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "producoes",
+            "rowid": 4,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "producoes",
+            "rowid": 5,
+            "parent": "produtos",
+            "fkid": 0
+          }
+        ]
+      },
+      "configuracao_comercial": {
+        "total": 1,
+        "porPai": {
+          "canais_venda": 1
+        },
+        "amostras": [
+          {
+            "table": "configuracao_comercial",
+            "rowid": 1,
+            "parent": "canais_venda",
+            "fkid": 0
+          }
+        ]
+      },
+      "fichas_tecnicas": {
+        "total": 3,
+        "porPai": {
+          "produtos": 3
+        },
+        "amostras": [
+          {
+            "table": "fichas_tecnicas",
+            "rowid": 1,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "fichas_tecnicas",
+            "rowid": 2,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "fichas_tecnicas",
+            "rowid": 3,
+            "parent": "produtos",
+            "fkid": 0
+          }
+        ]
+      },
+      "compras_itens": {
+        "total": 2,
+        "porPai": {
+          "produtos": 2
+        },
+        "amostras": [
+          {
+            "table": "compras_itens",
+            "rowid": 1,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "compras_itens",
+            "rowid": 2,
+            "parent": "produtos",
+            "fkid": 0
+          }
+        ]
+      },
+      "producoes_itens": {
+        "total": 10,
+        "porPai": {
+          "produtos": 10
+        },
+        "amostras": [
+          {
+            "table": "producoes_itens",
+            "rowid": 1,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "producoes_itens",
+            "rowid": 2,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "producoes_itens",
+            "rowid": 3,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "producoes_itens",
+            "rowid": 4,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "producoes_itens",
+            "rowid": 5,
+            "parent": "produtos",
+            "fkid": 0
+          }
+        ]
+      },
+      "estoque_movimentos": {
+        "total": 55,
+        "porPai": {
+          "produtos": 55
+        },
+        "amostras": [
+          {
+            "table": "estoque_movimentos",
+            "rowid": 1,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "estoque_movimentos",
+            "rowid": 2,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "estoque_movimentos",
+            "rowid": 3,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "estoque_movimentos",
+            "rowid": 4,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "estoque_movimentos",
+            "rowid": 5,
+            "parent": "produtos",
+            "fkid": 0
+          }
+        ]
+      },
+      "miip_decisoes": {
+        "total": 90,
+        "porPai": {
+          "produtos": 90
+        },
+        "amostras": [
+          {
+            "table": "miip_decisoes",
+            "rowid": 17,
+            "parent": "produtos",
+            "fkid": 2
+          },
+          {
+            "table": "miip_decisoes",
+            "rowid": 18,
+            "parent": "produtos",
+            "fkid": 2
+          },
+          {
+            "table": "miip_decisoes",
+            "rowid": 19,
+            "parent": "produtos",
+            "fkid": 2
+          },
+          {
+            "table": "miip_decisoes",
+            "rowid": 20,
+            "parent": "produtos",
+            "fkid": 2
+          },
+          {
+            "table": "miip_decisoes",
+            "rowid": 21,
+            "parent": "produtos",
+            "fkid": 2
+          }
+        ]
+      },
+      "miip_associacoes": {
+        "total": 2,
+        "porPai": {
+          "produtos": 2
+        },
+        "amostras": [
+          {
+            "table": "miip_associacoes",
+            "rowid": 1,
+            "parent": "produtos",
+            "fkid": 1
+          },
+          {
+            "table": "miip_associacoes",
+            "rowid": 2,
+            "parent": "produtos",
+            "fkid": 1
+          }
+        ]
+      },
+      "estoque_movimentacoes": {
+        "total": 2,
+        "porPai": {
+          "produtos": 2
+        },
+        "amostras": [
+          {
+            "table": "estoque_movimentacoes",
+            "rowid": 1,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "estoque_movimentacoes",
+            "rowid": 2,
+            "parent": "produtos",
+            "fkid": 0
+          }
+        ]
+      },
+      "auditoria": {
+        "total": 15,
+        "porPai": {
+          "usuarios": 15
+        },
+        "amostras": [
+          {
+            "table": "auditoria",
+            "rowid": 30,
+            "parent": "usuarios",
+            "fkid": 0
+          },
+          {
+            "table": "auditoria",
+            "rowid": 357,
+            "parent": "usuarios",
+            "fkid": 0
+          },
+          {
+            "table": "auditoria",
+            "rowid": 771,
+            "parent": "usuarios",
+            "fkid": 0
+          },
+          {
+            "table": "auditoria",
+            "rowid": 1029,
+            "parent": "usuarios",
+            "fkid": 0
+          },
+          {
+            "table": "auditoria",
+            "rowid": 1030,
+            "parent": "usuarios",
+            "fkid": 0
+          }
+        ]
+      },
+      "fichas_tecnicas_itens": {
+        "total": 6,
+        "porPai": {
+          "produtos": 6
+        },
+        "amostras": [
+          {
+            "table": "fichas_tecnicas_itens",
+            "rowid": 1,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "fichas_tecnicas_itens",
+            "rowid": 2,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "fichas_tecnicas_itens",
+            "rowid": 3,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "fichas_tecnicas_itens",
+            "rowid": 4,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "fichas_tecnicas_itens",
+            "rowid": 5,
+            "parent": "produtos",
+            "fkid": 0
+          }
+        ]
+      },
+      "produto_identificadores": {
+        "total": 217,
+        "porPai": {
+          "produtos": 217
+        },
+        "amostras": [
+          {
+            "table": "produto_identificadores",
+            "rowid": 1,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "produto_identificadores",
+            "rowid": 2,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "produto_identificadores",
+            "rowid": 3,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "produto_identificadores",
+            "rowid": 4,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "produto_identificadores",
+            "rowid": 5,
+            "parent": "produtos",
+            "fkid": 0
+          }
+        ]
+      },
+      "produto_imagens": {
+        "total": 9,
+        "porPai": {
+          "produtos": 9
+        },
+        "amostras": [
+          {
+            "table": "produto_imagens",
+            "rowid": 1,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "produto_imagens",
+            "rowid": 2,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "produto_imagens",
+            "rowid": 3,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "produto_imagens",
+            "rowid": 4,
+            "parent": "produtos",
+            "fkid": 0
+          },
+          {
+            "table": "produto_imagens",
+            "rowid": 5,
+            "parent": "produtos",
+            "fkid": 0
+          }
+        ]
+      }
+    },
+    "top_tabelas": [
+      {
+        "tabela": "produto_unidades",
+        "total": 712,
+        "porPai": {
+          "produtos": 712
+        }
+      },
+      {
+        "tabela": "produtos_ajustes_estoque",
+        "total": 702,
+        "porPai": {
+          "produtos": 702
+        }
+      },
+      {
+        "tabela": "produto_identificadores",
+        "total": 217,
+        "porPai": {
+          "produtos": 217
+        }
+      },
+      {
+        "tabela": "produtos_preco_historico",
+        "total": 159,
+        "porPai": {
+          "produtos": 159
+        }
+      },
+      {
+        "tabela": "miip_decisoes",
+        "total": 90,
+        "porPai": {
+          "produtos": 90
+        }
+      },
+      {
+        "tabela": "estoque_movimentos",
+        "total": 55,
+        "porPai": {
+          "produtos": 55
+        }
+      },
+      {
+        "tabela": "produto_embalagens",
+        "total": 43,
+        "porPai": {
+          "produtos": 43
+        }
+      },
+      {
+        "tabela": "vendas_itens",
+        "total": 24,
+        "porPai": {
+          "produtos": 24
+        }
+      },
+      {
+        "tabela": "tipo_comercial_canais",
+        "total": 16,
+        "porPai": {
+          "canais_venda": 16
+        }
+      },
+      {
+        "tabela": "auditoria",
+        "total": 15,
+        "porPai": {
+          "usuarios": 15
+        }
+      },
+      {
+        "tabela": "producoes_itens",
+        "total": 10,
+        "porPai": {
+          "produtos": 10
+        }
+      },
+      {
+        "tabela": "produto_imagens",
+        "total": 9,
+        "porPai": {
+          "produtos": 9
+        }
+      },
+      {
+        "tabela": "consignacoes_itens",
+        "total": 7,
+        "porPai": {
+          "produtos": 7
+        }
+      },
+      {
+        "tabela": "fichas_tecnicas_itens",
+        "total": 6,
+        "porPai": {
+          "produtos": 6
+        }
+      },
+      {
+        "tabela": "producoes",
+        "total": 5,
+        "porPai": {
+          "produtos": 5
+        }
+      },
+      {
+        "tabela": "fichas_tecnicas",
+        "total": 3,
+        "porPai": {
+          "produtos": 3
+        }
+      },
+      {
+        "tabela": "produto_atacado",
+        "total": 2,
+        "porPai": {
+          "produtos": 2
+        }
+      },
+      {
+        "tabela": "compras_itens",
+        "total": 2,
+        "porPai": {
+          "produtos": 2
+        }
+      },
+      {
+        "tabela": "miip_associacoes",
+        "total": 2,
+        "porPai": {
+          "produtos": 2
+        }
+      },
+      {
+        "tabela": "estoque_movimentacoes",
+        "total": 2,
+        "porPai": {
+          "produtos": 2
+        }
+      },
+      {
+        "tabela": "configuracao_comercial",
+        "total": 1,
+        "porPai": {
+          "canais_venda": 1
+        }
+      }
+    ],
+    "relacoes_fk": {
+      "produto_unidades": [
+        {
+          "id": 0,
+          "seq": 0,
+          "table": "produtos",
+          "from": "produto_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "CASCADE"
+        }
+      ],
+      "tipo_comercial_canais": [
+        {
+          "id": 0,
+          "seq": 0,
+          "table": "canais_venda",
+          "from": "canal_venda_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        },
+        {
+          "id": 1,
+          "seq": 0,
+          "table": "tipos_comerciais",
+          "from": "tipo_comercial_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "CASCADE"
+        }
+      ],
+      "consignacoes_itens": [
+        {
+          "id": 0,
+          "seq": 0,
+          "table": "produtos",
+          "from": "produto_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "RESTRICT"
+        },
+        {
+          "id": 1,
+          "seq": 0,
+          "table": "consignacoes",
+          "from": "consignacao_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "RESTRICT"
+        }
+      ],
+      "produtos_preco_historico": [
+        {
+          "id": 0,
+          "seq": 0,
+          "table": "produtos",
+          "from": "produto_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "CASCADE"
+        }
+      ],
+      "produto_embalagens": [
+        {
+          "id": 0,
+          "seq": 0,
+          "table": "produtos",
+          "from": "produto_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "CASCADE"
+        }
+      ],
+      "produto_atacado": [
+        {
+          "id": 0,
+          "seq": 0,
+          "table": "produtos",
+          "from": "produto_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "CASCADE"
+        }
+      ],
+      "vendas_itens": [
+        {
+          "id": 0,
+          "seq": 0,
+          "table": "produtos",
+          "from": "produto_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        },
+        {
+          "id": 1,
+          "seq": 0,
+          "table": "vendas",
+          "from": "venda_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "CASCADE"
+        }
+      ],
+      "produtos_ajustes_estoque": [
+        {
+          "id": 0,
+          "seq": 0,
+          "table": "usuarios",
+          "from": "usuario_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        },
+        {
+          "id": 1,
+          "seq": 0,
+          "table": "produtos",
+          "from": "produto_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        }
+      ],
+      "producoes": [
+        {
+          "id": 0,
+          "seq": 0,
+          "table": "produtos",
+          "from": "produto_resultante_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        },
+        {
+          "id": 1,
+          "seq": 0,
+          "table": "fichas_tecnicas",
+          "from": "ficha_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        }
+      ],
+      "configuracao_comercial": [
+        {
+          "id": 0,
+          "seq": 0,
+          "table": "canais_venda",
+          "from": "canal_atacado_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        },
+        {
+          "id": 1,
+          "seq": 0,
+          "table": "tabelas_preco",
+          "from": "tabela_preco_padrao_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        }
+      ],
+      "fichas_tecnicas": [
+        {
+          "id": 0,
+          "seq": 0,
+          "table": "produtos",
+          "from": "produto_resultante_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        }
+      ],
+      "compras_itens": [
+        {
+          "id": 0,
+          "seq": 0,
+          "table": "produtos",
+          "from": "produto_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        },
+        {
+          "id": 1,
+          "seq": 0,
+          "table": "compras",
+          "from": "compra_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "CASCADE"
+        }
+      ],
+      "producoes_itens": [
+        {
+          "id": 0,
+          "seq": 0,
+          "table": "produtos",
+          "from": "produto_insumo_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        },
+        {
+          "id": 1,
+          "seq": 0,
+          "table": "producoes",
+          "from": "producao_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "CASCADE"
+        }
+      ],
+      "estoque_movimentos": [
+        {
+          "id": 0,
+          "seq": 0,
+          "table": "produtos",
+          "from": "produto_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        }
+      ],
+      "miip_decisoes": [
+        {
+          "id": 0,
+          "seq": 0,
+          "table": "usuarios",
+          "from": "usuario_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "SET NULL"
+        },
+        {
+          "id": 1,
+          "seq": 0,
+          "table": "produtos",
+          "from": "produto_decidido_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "SET NULL"
+        },
+        {
+          "id": 2,
+          "seq": 0,
+          "table": "produtos",
+          "from": "produto_sugerido_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "SET NULL"
+        }
+      ],
+      "miip_associacoes": [
+        {
+          "id": 0,
+          "seq": 0,
+          "table": "usuarios",
+          "from": "confirmado_por_usuario_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "SET NULL"
+        },
+        {
+          "id": 1,
+          "seq": 0,
+          "table": "produtos",
+          "from": "produto_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "CASCADE"
+        }
+      ],
+      "estoque_movimentacoes": [
+        {
+          "id": 0,
+          "seq": 0,
+          "table": "produtos",
+          "from": "produto_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "CASCADE"
+        }
+      ],
+      "auditoria": [
+        {
+          "id": 0,
+          "seq": 0,
+          "table": "usuarios",
+          "from": "usuario_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        }
+      ],
+      "fichas_tecnicas_itens": [
+        {
+          "id": 0,
+          "seq": 0,
+          "table": "produtos",
+          "from": "produto_insumo_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "NO ACTION"
+        },
+        {
+          "id": 1,
+          "seq": 0,
+          "table": "fichas_tecnicas",
+          "from": "ficha_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "CASCADE"
+        }
+      ],
+      "produto_identificadores": [
+        {
+          "id": 0,
+          "seq": 0,
+          "table": "produtos",
+          "from": "produto_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "CASCADE"
+        }
+      ],
+      "produto_imagens": [
+        {
+          "id": 0,
+          "seq": 0,
+          "table": "produtos",
+          "from": "produto_id",
+          "to": "id",
+          "on_update": "NO ACTION",
+          "on_delete": "CASCADE"
+        }
+      ]
+    },
+    "amostras_enriquecidas": {
+      "produto_unidades": [
+        {
+          "table": "produto_unidades",
+          "rowid": 1,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 1,
+            "produto_id": 1,
+            "unidade": "UN",
+            "descricao": "UN",
+            "fator_conversao": 1,
+            "preco": 6.5,
+            "codigo_barras": null,
+            "codigo_auxiliar": "12277",
+            "principal": 1,
+            "ativo": 1,
+            "ordem": 0,
+            "created_at": "2026-09-05 02:09:29",
+            "updated_at": "2026-09-05 02:09:29"
+          }
+        },
+        {
+          "table": "produto_unidades",
+          "rowid": 2,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 2,
+            "produto_id": 2,
+            "unidade": "UN",
+            "descricao": "UN",
+            "fator_conversao": 1,
+            "preco": 3.5,
+            "codigo_barras": null,
+            "codigo_auxiliar": "13983",
+            "principal": 1,
+            "ativo": 1,
+            "ordem": 0,
+            "created_at": "2026-09-05 02:09:29",
+            "updated_at": "2026-09-05 02:09:29"
+          }
+        },
+        {
+          "table": "produto_unidades",
+          "rowid": 3,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 3,
+            "produto_id": 3,
+            "unidade": "UN",
+            "descricao": "UN",
+            "fator_conversao": 1,
+            "preco": 21,
+            "codigo_barras": null,
+            "codigo_auxiliar": "13981",
+            "principal": 1,
+            "ativo": 1,
+            "ordem": 0,
+            "created_at": "2026-09-05 02:09:29",
+            "updated_at": "2026-09-05 02:09:29"
+          }
+        },
+        {
+          "table": "produto_unidades",
+          "rowid": 4,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 4,
+            "produto_id": 4,
+            "unidade": "UN",
+            "descricao": "UN",
+            "fator_conversao": 1,
+            "preco": 34.99,
+            "codigo_barras": null,
+            "codigo_auxiliar": "13399",
+            "principal": 1,
+            "ativo": 1,
+            "ordem": 0,
+            "created_at": "2026-09-05 02:09:29",
+            "updated_at": "2026-09-05 02:09:29"
+          }
+        },
+        {
+          "table": "produto_unidades",
+          "rowid": 5,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 5,
+            "produto_id": 5,
+            "unidade": "UN",
+            "descricao": "UN",
+            "fator_conversao": 1,
+            "preco": 3.8,
+            "codigo_barras": null,
+            "codigo_auxiliar": "12575",
+            "principal": 1,
+            "ativo": 1,
+            "ordem": 0,
+            "created_at": "2026-09-05 02:09:29",
+            "updated_at": "2026-09-05 02:09:29"
+          }
+        }
+      ],
+      "tipo_comercial_canais": [
+        {
+          "table": "tipo_comercial_canais",
+          "rowid": 1,
+          "parent": "canais_venda",
+          "fkid": 0,
+          "registro": {
+            "id": 1,
+            "tipo_comercial_id": 1,
+            "canal_venda_id": 1,
+            "created_at": "2026-09-05 02:09:33"
+          }
+        },
+        {
+          "table": "tipo_comercial_canais",
+          "rowid": 2,
+          "parent": "canais_venda",
+          "fkid": 0,
+          "registro": {
+            "id": 2,
+            "tipo_comercial_id": 2,
+            "canal_venda_id": 6,
+            "created_at": "2026-09-05 02:09:33"
+          }
+        },
+        {
+          "table": "tipo_comercial_canais",
+          "rowid": 3,
+          "parent": "canais_venda",
+          "fkid": 0,
+          "registro": {
+            "id": 3,
+            "tipo_comercial_id": 3,
+            "canal_venda_id": 2,
+            "created_at": "2026-09-05 02:09:33"
+          }
+        },
+        {
+          "table": "tipo_comercial_canais",
+          "rowid": 4,
+          "parent": "canais_venda",
+          "fkid": 0,
+          "registro": {
+            "id": 4,
+            "tipo_comercial_id": 4,
+            "canal_venda_id": 2,
+            "created_at": "2026-09-05 02:09:33"
+          }
+        },
+        {
+          "table": "tipo_comercial_canais",
+          "rowid": 5,
+          "parent": "canais_venda",
+          "fkid": 0,
+          "registro": {
+            "id": 5,
+            "tipo_comercial_id": 5,
+            "canal_venda_id": 2,
+            "created_at": "2026-09-05 02:09:33"
+          }
+        }
+      ],
+      "consignacoes_itens": [
+        {
+          "table": "consignacoes_itens",
+          "rowid": 1,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 1,
+            "consignacao_id": 1,
+            "produto_id": 711,
+            "quantidade_entregue": 2,
+            "quantidade_devolvida": 0,
+            "quantidade_vendida": 2,
+            "quantidade_perdida": 0,
+            "quantidade_cortesia": 0,
+            "preco_unitario": 15,
+            "subtotal_entregue": 30,
+            "subtotal_acertado": 30,
+            "created_at": "2026-09-05 02:33:12",
+            "updated_at": "2026-09-05 02:35:16",
+            "observacao": null,
+            "linha_comercial_id": null,
+            "tabela_preco_id": null,
+            "canal_venda": "CONSIGNADO",
+            "unidade_comercial": "UN",
+            "preco_origem": "produto.preco_venda",
+            "preco_fallback": 1
+          }
+        },
+        {
+          "table": "consignacoes_itens",
+          "rowid": 2,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 2,
+            "consignacao_id": 1,
+            "produto_id": 129,
+            "quantidade_entregue": 1,
+            "quantidade_devolvida": 0,
+            "quantidade_vendida": 1,
+            "quantidade_perdida": 0,
+            "quantidade_cortesia": 0,
+            "preco_unitario": 54,
+            "subtotal_entregue": 54,
+            "subtotal_acertado": 54,
+            "created_at": "2026-09-05 02:33:12",
+            "updated_at": "2026-09-05 02:35:16",
+            "observacao": null,
+            "linha_comercial_id": null,
+            "tabela_preco_id": null,
+            "canal_venda": "CONSIGNADO",
+            "unidade_comercial": "UN",
+            "preco_origem": "produto.preco_venda",
+            "preco_fallback": 1
+          }
+        },
+        {
+          "table": "consignacoes_itens",
+          "rowid": 3,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 3,
+            "consignacao_id": 2,
+            "produto_id": 711,
+            "quantidade_entregue": 2,
+            "quantidade_devolvida": 0,
+            "quantidade_vendida": 2,
+            "quantidade_perdida": 0,
+            "quantidade_cortesia": 0,
+            "preco_unitario": 15,
+            "subtotal_entregue": 30,
+            "subtotal_acertado": 30,
+            "created_at": "2026-09-05 02:48:56",
+            "updated_at": "2026-09-05 02:52:05",
+            "observacao": null,
+            "linha_comercial_id": null,
+            "tabela_preco_id": null,
+            "canal_venda": "CONSIGNADO",
+            "unidade_comercial": "UN",
+            "preco_origem": "produto.preco_venda",
+            "preco_fallback": 1
+          }
+        },
+        {
+          "table": "consignacoes_itens",
+          "rowid": 4,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 4,
+            "consignacao_id": 2,
+            "produto_id": 710,
+            "quantidade_entregue": 2,
+            "quantidade_devolvida": 0,
+            "quantidade_vendida": 2,
+            "quantidade_perdida": 0,
+            "quantidade_cortesia": 0,
+            "preco_unitario": 11,
+            "subtotal_entregue": 22,
+            "subtotal_acertado": 22,
+            "created_at": "2026-09-05 02:48:56",
+            "updated_at": "2026-09-05 02:52:05",
+            "observacao": "",
+            "linha_comercial_id": null,
+            "tabela_preco_id": null,
+            "canal_venda": "CONSIGNADO",
+            "unidade_comercial": "UN",
+            "preco_origem": "produto.preco_venda",
+            "preco_fallback": 1
+          }
+        },
+        {
+          "table": "consignacoes_itens",
+          "rowid": 5,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 5,
+            "consignacao_id": 3,
+            "produto_id": 711,
+            "quantidade_entregue": 5,
+            "quantidade_devolvida": 0,
+            "quantidade_vendida": 5,
+            "quantidade_perdida": 0,
+            "quantidade_cortesia": 0,
+            "preco_unitario": 15,
+            "subtotal_entregue": 75,
+            "subtotal_acertado": 75,
+            "created_at": "2026-09-05 02:56:51",
+            "updated_at": "2026-09-05 03:18:50",
+            "observacao": null,
+            "linha_comercial_id": null,
+            "tabela_preco_id": null,
+            "canal_venda": "CONSIGNADO",
+            "unidade_comercial": "UN",
+            "preco_origem": "produto.preco_venda",
+            "preco_fallback": 1
+          }
+        }
+      ],
+      "produtos_preco_historico": [
+        {
+          "table": "produtos_preco_historico",
+          "rowid": 1,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 1,
+            "produto_id": 18,
+            "preco_compra_anterior": 2.5074,
+            "preco_compra_novo": 2.5074,
+            "preco_venda_anterior": 5.0148,
+            "preco_venda_novo": 5.01,
+            "created_at": "2026-08-12 02:57:29"
+          }
+        },
+        {
+          "table": "produtos_preco_historico",
+          "rowid": 2,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 2,
+            "produto_id": 35,
+            "preco_compra_anterior": 14.044,
+            "preco_compra_novo": 14.044,
+            "preco_venda_anterior": 28.088,
+            "preco_venda_novo": 28.09,
+            "created_at": "2026-08-12 19:29:48"
+          }
+        },
+        {
+          "table": "produtos_preco_historico",
+          "rowid": 3,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 3,
+            "produto_id": 623,
+            "preco_compra_anterior": 12.93,
+            "preco_compra_novo": 12.93,
+            "preco_venda_anterior": 25.86,
+            "preco_venda_novo": 21.55,
+            "created_at": "2026-08-15 18:22:27"
+          }
+        },
+        {
+          "table": "produtos_preco_historico",
+          "rowid": 4,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 4,
+            "produto_id": 624,
+            "preco_compra_anterior": 5.54,
+            "preco_compra_novo": 5.54,
+            "preco_venda_anterior": 11.08,
+            "preco_venda_novo": 9.5,
+            "created_at": "2026-08-15 18:36:20"
+          }
+        },
+        {
+          "table": "produtos_preco_historico",
+          "rowid": 5,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 5,
+            "produto_id": 626,
+            "preco_compra_anterior": 16.79,
+            "preco_compra_novo": 16.79,
+            "preco_venda_anterior": 33.58,
+            "preco_venda_novo": 28,
+            "created_at": "2026-08-15 18:36:50"
+          }
+        }
+      ],
+      "produto_embalagens": [
+        {
+          "table": "produto_embalagens",
+          "rowid": 4,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 4,
+            "produto_id": 4,
+            "tipo": "PCT",
+            "descricao": null,
+            "quantidade": 50,
+            "unidade": "un",
+            "gtin": null,
+            "codigo_fornecedor": null,
+            "fornecedor_cnpj": null,
+            "fornecedor_nome": null,
+            "valor_compra": 20.917,
+            "preco_venda": 41.83,
+            "principal": 1,
+            "compra": 1,
+            "venda": 1,
+            "estoque": 1,
+            "ativa": 1,
+            "created_at": "2026-08-11 17:28:41",
+            "updated_at": "2026-08-11 17:28:41",
+            "tipo_conversao": "MULTIPLICACAO",
+            "codigo_interno_fornecedor": null,
+            "fornecedor_descricao": null,
+            "vigencia_inicio": null,
+            "vigencia_fim": null,
+            "origem": "IMPORTACAO_INICIAL",
+            "usuario_criacao": 1,
+            "usuario_alteracao": null,
+            "observacao": null,
+            "motivo_alteracao": null
+          }
+        },
+        {
+          "table": "produto_embalagens",
+          "rowid": 5,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 5,
+            "produto_id": 42,
+            "tipo": "ROLO",
+            "descricao": null,
+            "quantidade": 150,
+            "unidade": "m",
+            "gtin": null,
+            "codigo_fornecedor": null,
+            "fornecedor_cnpj": null,
+            "fornecedor_nome": null,
+            "valor_compra": 119.89,
+            "preco_venda": 239.78,
+            "principal": 1,
+            "compra": 1,
+            "venda": 1,
+            "estoque": 1,
+            "ativa": 1,
+            "created_at": "2026-08-11 17:28:41",
+            "updated_at": "2026-08-11 17:28:41",
+            "tipo_conversao": "MULTIPLICACAO",
+            "codigo_interno_fornecedor": null,
+            "fornecedor_descricao": null,
+            "vigencia_inicio": null,
+            "vigencia_fim": null,
+            "origem": "IMPORTACAO_INICIAL",
+            "usuario_criacao": 1,
+            "usuario_alteracao": null,
+            "observacao": null,
+            "motivo_alteracao": null
+          }
+        },
+        {
+          "table": "produto_embalagens",
+          "rowid": 6,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 6,
+            "produto_id": 43,
+            "tipo": "ROLO",
+            "descricao": null,
+            "quantidade": 240,
+            "unidade": "m",
+            "gtin": null,
+            "codigo_fornecedor": null,
+            "fornecedor_cnpj": null,
+            "fornecedor_nome": null,
+            "valor_compra": 259.5,
+            "preco_venda": 519,
+            "principal": 1,
+            "compra": 1,
+            "venda": 1,
+            "estoque": 1,
+            "ativa": 1,
+            "created_at": "2026-08-11 17:28:41",
+            "updated_at": "2026-08-11 17:28:41",
+            "tipo_conversao": "MULTIPLICACAO",
+            "codigo_interno_fornecedor": null,
+            "fornecedor_descricao": null,
+            "vigencia_inicio": null,
+            "vigencia_fim": null,
+            "origem": "IMPORTACAO_INICIAL",
+            "usuario_criacao": 1,
+            "usuario_alteracao": null,
+            "observacao": null,
+            "motivo_alteracao": null
+          }
+        },
+        {
+          "table": "produto_embalagens",
+          "rowid": 7,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 7,
+            "produto_id": 44,
+            "tipo": "ROLO",
+            "descricao": null,
+            "quantidade": 165,
+            "unidade": "m",
+            "gtin": null,
+            "codigo_fornecedor": null,
+            "fornecedor_cnpj": null,
+            "fornecedor_nome": null,
+            "valor_compra": 269.5,
+            "preco_venda": 539,
+            "principal": 1,
+            "compra": 1,
+            "venda": 1,
+            "estoque": 1,
+            "ativa": 1,
+            "created_at": "2026-08-11 17:28:41",
+            "updated_at": "2026-08-11 17:28:41",
+            "tipo_conversao": "MULTIPLICACAO",
+            "codigo_interno_fornecedor": null,
+            "fornecedor_descricao": null,
+            "vigencia_inicio": null,
+            "vigencia_fim": null,
+            "origem": "IMPORTACAO_INICIAL",
+            "usuario_criacao": 1,
+            "usuario_alteracao": null,
+            "observacao": null,
+            "motivo_alteracao": null
+          }
+        },
+        {
+          "table": "produto_embalagens",
+          "rowid": 9,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 9,
+            "produto_id": 57,
+            "tipo": "PCT",
+            "descricao": null,
+            "quantidade": 100,
+            "unidade": "un",
+            "gtin": null,
+            "codigo_fornecedor": null,
+            "fornecedor_cnpj": null,
+            "fornecedor_nome": null,
+            "valor_compra": 59.79,
+            "preco_venda": 119.58,
+            "principal": 1,
+            "compra": 1,
+            "venda": 1,
+            "estoque": 1,
+            "ativa": 1,
+            "created_at": "2026-08-11 17:28:41",
+            "updated_at": "2026-08-11 17:28:41",
+            "tipo_conversao": "MULTIPLICACAO",
+            "codigo_interno_fornecedor": null,
+            "fornecedor_descricao": null,
+            "vigencia_inicio": null,
+            "vigencia_fim": null,
+            "origem": "IMPORTACAO_INICIAL",
+            "usuario_criacao": 1,
+            "usuario_alteracao": null,
+            "observacao": null,
+            "motivo_alteracao": null
+          }
+        }
+      ],
+      "produto_atacado": [
+        {
+          "table": "produto_atacado",
+          "rowid": 2,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 2,
+            "produto_id": 228,
+            "quantidade_minima": 10,
+            "preco_atacado": 2.25,
+            "created_at": "2026-08-15 20:09:45",
+            "updated_at": "2026-08-15 20:09:45"
+          }
+        },
+        {
+          "table": "produto_atacado",
+          "rowid": 3,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 3,
+            "produto_id": 48,
+            "quantidade_minima": 260,
+            "preco_atacado": 0.4,
+            "created_at": "2026-08-18 15:39:15",
+            "updated_at": "2026-08-18 15:39:15"
+          }
+        }
+      ],
+      "vendas_itens": [
+        {
+          "table": "vendas_itens",
+          "rowid": 1,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 1,
+            "venda_id": 1,
+            "produto_id": 553,
+            "quantidade": 2,
+            "preco_unitario": 6.14,
+            "desconto_percentual": 0,
+            "promocao_id": null,
+            "desconto_atacado": 0,
+            "tipo_preco": "varejo",
+            "subtotal": 12.28,
+            "item_fiscal": 0,
+            "quantidade_fiscal": 0,
+            "quantidade_nao_fiscal": 2,
+            "valor_fiscal": 0,
+            "preco_unitario_interno": 6.14,
+            "modo_venda": "peso",
+            "tipo_venda": "PESO",
+            "desconto_valor": 0,
+            "desconto_manual": 0,
+            "valor_nao_fiscal": 12.28,
+            "apresentacao_id": null,
+            "apresentacao_nome": null,
+            "quantidade_apresentacoes": 0,
+            "quantidade_bolas": null,
+            "forma_comercializacao": null,
+            "unidade_comercial_id": null,
+            "unidade_comercial": null,
+            "fator_conversao": 1,
+            "codigo_barras_comercial": null,
+            "custo_unitario": null,
+            "controla_estoque": null,
+            "produto_apresentacao_id": null,
+            "unidade_base": null,
+            "quantidade_base": null,
+            "quantidade_apresentacao": null
+          }
+        },
+        {
+          "table": "vendas_itens",
+          "rowid": 2,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 2,
+            "venda_id": 1,
+            "produto_id": 390,
+            "quantidade": 1,
+            "preco_unitario": 21,
+            "desconto_percentual": 0,
+            "promocao_id": null,
+            "desconto_atacado": 0,
+            "tipo_preco": "varejo",
+            "subtotal": 21,
+            "item_fiscal": 0,
+            "quantidade_fiscal": 0,
+            "quantidade_nao_fiscal": 1,
+            "valor_fiscal": 0,
+            "preco_unitario_interno": 21,
+            "modo_venda": "peso",
+            "tipo_venda": "PESO",
+            "desconto_valor": 0,
+            "desconto_manual": 0,
+            "valor_nao_fiscal": 21,
+            "apresentacao_id": null,
+            "apresentacao_nome": null,
+            "quantidade_apresentacoes": 0,
+            "quantidade_bolas": null,
+            "forma_comercializacao": null,
+            "unidade_comercial_id": null,
+            "unidade_comercial": null,
+            "fator_conversao": 1,
+            "codigo_barras_comercial": null,
+            "custo_unitario": null,
+            "controla_estoque": null,
+            "produto_apresentacao_id": null,
+            "unidade_base": null,
+            "quantidade_base": null,
+            "quantidade_apresentacao": null
+          }
+        },
+        {
+          "table": "vendas_itens",
+          "rowid": 3,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 3,
+            "venda_id": 1,
+            "produto_id": 391,
+            "quantidade": 1,
+            "preco_unitario": 6.5,
+            "desconto_percentual": 0,
+            "promocao_id": null,
+            "desconto_atacado": 0,
+            "tipo_preco": "varejo",
+            "subtotal": 6.5,
+            "item_fiscal": 0,
+            "quantidade_fiscal": 0,
+            "quantidade_nao_fiscal": 1,
+            "valor_fiscal": 0,
+            "preco_unitario_interno": 6.5,
+            "modo_venda": "peso",
+            "tipo_venda": "PESO",
+            "desconto_valor": 0,
+            "desconto_manual": 0,
+            "valor_nao_fiscal": 6.5,
+            "apresentacao_id": null,
+            "apresentacao_nome": null,
+            "quantidade_apresentacoes": 0,
+            "quantidade_bolas": null,
+            "forma_comercializacao": null,
+            "unidade_comercial_id": null,
+            "unidade_comercial": null,
+            "fator_conversao": 1,
+            "codigo_barras_comercial": null,
+            "custo_unitario": null,
+            "controla_estoque": null,
+            "produto_apresentacao_id": null,
+            "unidade_base": null,
+            "quantidade_base": null,
+            "quantidade_apresentacao": null
+          }
+        },
+        {
+          "table": "vendas_itens",
+          "rowid": 4,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 4,
+            "venda_id": 2,
+            "produto_id": 528,
+            "quantidade": 1,
+            "preco_unitario": 1.5,
+            "desconto_percentual": 0,
+            "promocao_id": null,
+            "desconto_atacado": 0,
+            "tipo_preco": "varejo",
+            "subtotal": 1.5,
+            "item_fiscal": 0,
+            "quantidade_fiscal": 0,
+            "quantidade_nao_fiscal": 1,
+            "valor_fiscal": 0,
+            "preco_unitario_interno": 1.5,
+            "modo_venda": "peso",
+            "tipo_venda": "PESO",
+            "desconto_valor": 0,
+            "desconto_manual": 0,
+            "valor_nao_fiscal": 1.5,
+            "apresentacao_id": null,
+            "apresentacao_nome": null,
+            "quantidade_apresentacoes": 0,
+            "quantidade_bolas": null,
+            "forma_comercializacao": null,
+            "unidade_comercial_id": null,
+            "unidade_comercial": null,
+            "fator_conversao": 1,
+            "codigo_barras_comercial": null,
+            "custo_unitario": null,
+            "controla_estoque": null,
+            "produto_apresentacao_id": null,
+            "unidade_base": null,
+            "quantidade_base": null,
+            "quantidade_apresentacao": null
+          }
+        },
+        {
+          "table": "vendas_itens",
+          "rowid": 5,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 5,
+            "venda_id": 3,
+            "produto_id": 267,
+            "quantidade": 1,
+            "preco_unitario": 24.65,
+            "desconto_percentual": 0,
+            "promocao_id": null,
+            "desconto_atacado": 0,
+            "tipo_preco": "varejo",
+            "subtotal": 24.65,
+            "item_fiscal": 1,
+            "quantidade_fiscal": 1,
+            "quantidade_nao_fiscal": 0,
+            "valor_fiscal": 24.65,
+            "preco_unitario_interno": 24.65,
+            "modo_venda": "peso",
+            "tipo_venda": "PESO",
+            "desconto_valor": 0,
+            "desconto_manual": 0,
+            "valor_nao_fiscal": 0,
+            "apresentacao_id": null,
+            "apresentacao_nome": null,
+            "quantidade_apresentacoes": 0,
+            "quantidade_bolas": null,
+            "forma_comercializacao": null,
+            "unidade_comercial_id": null,
+            "unidade_comercial": null,
+            "fator_conversao": 1,
+            "codigo_barras_comercial": null,
+            "custo_unitario": null,
+            "controla_estoque": null,
+            "produto_apresentacao_id": null,
+            "unidade_base": null,
+            "quantidade_base": null,
+            "quantidade_apresentacao": null
+          }
+        }
+      ],
+      "produtos_ajustes_estoque": [
+        {
+          "table": "produtos_ajustes_estoque",
+          "rowid": 1,
+          "parent": "produtos",
+          "fkid": 1,
+          "registro": {
+            "id": 1,
+            "produto_id": 113,
+            "usuario_id": 1,
+            "usuario_nome": "Diego",
+            "motivo": "ESTOQUE INICIAL — IMPORTAÇÃO DE PRODUTOS | import=ff198d980b127e6f9d25e75388b5dadf | codigo=257 | custo_un=9.39 | custo_total=112.68",
+            "ajuste_fiscal": 12,
+            "ajuste_nao_fiscal": 0,
+            "saldo_fiscal_antes": 0,
+            "saldo_fiscal_depois": 12,
+            "saldo_nao_fiscal_antes": 0,
+            "saldo_nao_fiscal_depois": 0,
+            "estoque_total_antes": 0,
+            "estoque_total_depois": 12,
+            "criado_em": "2026-08-12 02:29:56"
+          }
+        },
+        {
+          "table": "produtos_ajustes_estoque",
+          "rowid": 2,
+          "parent": "produtos",
+          "fkid": 1,
+          "registro": {
+            "id": 2,
+            "produto_id": 114,
+            "usuario_id": 1,
+            "usuario_nome": "Diego",
+            "motivo": "ESTOQUE INICIAL — IMPORTAÇÃO DE PRODUTOS | import=ff198d980b127e6f9d25e75388b5dadf | codigo=258 | custo_un=7.56 | custo_total=181.44",
+            "ajuste_fiscal": 24,
+            "ajuste_nao_fiscal": 0,
+            "saldo_fiscal_antes": 0,
+            "saldo_fiscal_depois": 24,
+            "saldo_nao_fiscal_antes": 0,
+            "saldo_nao_fiscal_depois": 0,
+            "estoque_total_antes": 0,
+            "estoque_total_depois": 24,
+            "criado_em": "2026-08-12 02:29:56"
+          }
+        },
+        {
+          "table": "produtos_ajustes_estoque",
+          "rowid": 3,
+          "parent": "produtos",
+          "fkid": 1,
+          "registro": {
+            "id": 3,
+            "produto_id": 115,
+            "usuario_id": 1,
+            "usuario_nome": "Diego",
+            "motivo": "ESTOQUE INICIAL — IMPORTAÇÃO DE PRODUTOS | import=ff198d980b127e6f9d25e75388b5dadf | codigo=259 | custo_un=15.89 | custo_total=95.34",
+            "ajuste_fiscal": 6,
+            "ajuste_nao_fiscal": 0,
+            "saldo_fiscal_antes": 0,
+            "saldo_fiscal_depois": 6,
+            "saldo_nao_fiscal_antes": 0,
+            "saldo_nao_fiscal_depois": 0,
+            "estoque_total_antes": 0,
+            "estoque_total_depois": 6,
+            "criado_em": "2026-08-12 02:29:56"
+          }
+        },
+        {
+          "table": "produtos_ajustes_estoque",
+          "rowid": 4,
+          "parent": "produtos",
+          "fkid": 1,
+          "registro": {
+            "id": 4,
+            "produto_id": 116,
+            "usuario_id": 1,
+            "usuario_nome": "Diego",
+            "motivo": "ESTOQUE INICIAL — IMPORTAÇÃO DE PRODUTOS | import=ff198d980b127e6f9d25e75388b5dadf | codigo=260 | custo_un=18.69 | custo_total=112.14",
+            "ajuste_fiscal": 6,
+            "ajuste_nao_fiscal": 0,
+            "saldo_fiscal_antes": 0,
+            "saldo_fiscal_depois": 6,
+            "saldo_nao_fiscal_antes": 0,
+            "saldo_nao_fiscal_depois": 0,
+            "estoque_total_antes": 0,
+            "estoque_total_depois": 6,
+            "criado_em": "2026-08-12 02:29:56"
+          }
+        },
+        {
+          "table": "produtos_ajustes_estoque",
+          "rowid": 5,
+          "parent": "produtos",
+          "fkid": 1,
+          "registro": {
+            "id": 5,
+            "produto_id": 117,
+            "usuario_id": 1,
+            "usuario_nome": "Diego",
+            "motivo": "ESTOQUE INICIAL — IMPORTAÇÃO DE PRODUTOS | import=ff198d980b127e6f9d25e75388b5dadf | codigo=261 | custo_un=18.89 | custo_total=226.68",
+            "ajuste_fiscal": 12,
+            "ajuste_nao_fiscal": 0,
+            "saldo_fiscal_antes": 0,
+            "saldo_fiscal_depois": 12,
+            "saldo_nao_fiscal_antes": 0,
+            "saldo_nao_fiscal_depois": 0,
+            "estoque_total_antes": 0,
+            "estoque_total_depois": 12,
+            "criado_em": "2026-08-12 02:29:56"
+          }
+        }
+      ],
+      "producoes": [
+        {
+          "table": "producoes",
+          "rowid": 1,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 1,
+            "ficha_id": 1,
+            "produto_resultante_id": 714,
+            "quantidade_produzida": 5,
+            "unidade": "kg",
+            "fator": 1,
+            "tipo_saldo": "FXNF",
+            "quantidade_fiscal": 0,
+            "quantidade_nao_fiscal": 5,
+            "status": "CANCELADA",
+            "usuario_id": 1,
+            "usuario_nome": "Administrador",
+            "observacoes": null,
+            "cancelado_em": "2026-08-20 04:00:14",
+            "cancelado_por": 1,
+            "cancelado_por_nome": "Administrador",
+            "motivo_cancelamento": null,
+            "created_at": "2026-08-20 03:59:22"
+          }
+        },
+        {
+          "table": "producoes",
+          "rowid": 2,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 2,
+            "ficha_id": 1,
+            "produto_resultante_id": 714,
+            "quantidade_produzida": 5,
+            "unidade": "kg",
+            "fator": 1,
+            "tipo_saldo": "FXNF",
+            "quantidade_fiscal": 0,
+            "quantidade_nao_fiscal": 5,
+            "status": "CANCELADA",
+            "usuario_id": 1,
+            "usuario_nome": "Administrador",
+            "observacoes": null,
+            "cancelado_em": "2026-08-20 04:33:07",
+            "cancelado_por": 1,
+            "cancelado_por_nome": "Administrador",
+            "motivo_cancelamento": null,
+            "created_at": "2026-08-20 04:00:10"
+          }
+        },
+        {
+          "table": "producoes",
+          "rowid": 3,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 3,
+            "ficha_id": 2,
+            "produto_resultante_id": 714,
+            "quantidade_produzida": 3.75,
+            "unidade": "kg",
+            "fator": 0.75,
+            "tipo_saldo": "ORIGEM_INSUMO",
+            "quantidade_fiscal": 1.875,
+            "quantidade_nao_fiscal": 1.875,
+            "status": "CONCLUIDA",
+            "usuario_id": 1,
+            "usuario_nome": "Administrador",
+            "observacoes": null,
+            "cancelado_em": null,
+            "cancelado_por": null,
+            "cancelado_por_nome": null,
+            "motivo_cancelamento": null,
+            "created_at": "2026-08-20 04:37:08"
+          }
+        },
+        {
+          "table": "producoes",
+          "rowid": 4,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 4,
+            "ficha_id": 2,
+            "produto_resultante_id": 714,
+            "quantidade_produzida": 5,
+            "unidade": "kg",
+            "fator": 1,
+            "tipo_saldo": "ORIGEM_INSUMO",
+            "quantidade_fiscal": 5,
+            "quantidade_nao_fiscal": 0,
+            "status": "CONCLUIDA",
+            "usuario_id": 1,
+            "usuario_nome": "Administrador",
+            "observacoes": null,
+            "cancelado_em": null,
+            "cancelado_por": null,
+            "cancelado_por_nome": null,
+            "motivo_cancelamento": null,
+            "created_at": "2026-08-20 13:34:10"
+          }
+        },
+        {
+          "table": "producoes",
+          "rowid": 5,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 5,
+            "ficha_id": 2,
+            "produto_resultante_id": 714,
+            "quantidade_produzida": 5,
+            "unidade": "kg",
+            "fator": 1,
+            "tipo_saldo": "ORIGEM_INSUMO",
+            "quantidade_fiscal": 1.25,
+            "quantidade_nao_fiscal": 3.75,
+            "status": "CONCLUIDA",
+            "usuario_id": 1,
+            "usuario_nome": "Administrador",
+            "observacoes": null,
+            "cancelado_em": null,
+            "cancelado_por": null,
+            "cancelado_por_nome": null,
+            "motivo_cancelamento": null,
+            "created_at": "2026-08-20 13:36:38"
+          }
+        }
+      ],
+      "configuracao_comercial": [
+        {
+          "table": "configuracao_comercial",
+          "rowid": 1,
+          "parent": "canais_venda",
+          "fkid": 0,
+          "registro": {
+            "id": 1,
+            "atacado_habilitado": 0,
+            "quantidade_minima": 30,
+            "tipo_contagem": "TOTAL_VENDA",
+            "permitir_produtos_diferentes": 1,
+            "permitir_categorias_diferentes": 1,
+            "canal_atacado_id": 2,
+            "created_at": "2026-09-05 02:09:33",
+            "updated_at": "2026-09-05 02:09:33",
+            "tabela_preco_padrao_id": null
+          }
+        }
+      ],
+      "fichas_tecnicas": [
+        {
+          "table": "fichas_tecnicas",
+          "rowid": 1,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 1,
+            "produto_resultante_id": 714,
+            "rendimento": 5,
+            "rendimento_unidade": "kg",
+            "status": "INATIVA",
+            "versao": 1,
+            "observacoes": null,
+            "usuario_id": 1,
+            "usuario_nome": "Administrador",
+            "created_at": "2026-08-20 03:57:17",
+            "updated_at": "2026-08-20 04:33:04"
+          }
+        },
+        {
+          "table": "fichas_tecnicas",
+          "rowid": 2,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 2,
+            "produto_resultante_id": 714,
+            "rendimento": 5,
+            "rendimento_unidade": "kg",
+            "status": "ATIVA",
+            "versao": 1,
+            "observacoes": null,
+            "usuario_id": 1,
+            "usuario_nome": "Administrador",
+            "created_at": "2026-08-20 04:36:36",
+            "updated_at": "2026-08-20 04:36:36"
+          }
+        },
+        {
+          "table": "fichas_tecnicas",
+          "rowid": 3,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 3,
+            "produto_resultante_id": 714,
+            "rendimento": 6,
+            "rendimento_unidade": "kg",
+            "status": "RASCUNHO",
+            "versao": 1,
+            "observacoes": null,
+            "usuario_id": 1,
+            "usuario_nome": "Administrador",
+            "created_at": "2026-08-20 13:33:19",
+            "updated_at": "2026-08-20 13:33:19"
+          }
+        }
+      ],
+      "compras_itens": [
+        {
+          "table": "compras_itens",
+          "rowid": 1,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 1,
+            "compra_id": 2,
+            "produto_id": 717,
+            "quantidade": 10,
+            "preco_unitario": 5.5,
+            "subtotal": 58.6,
+            "item_fiscal": 1,
+            "descricao_produto": "Refrigerante Cola 2L",
+            "codigo_barras": "7891234567890",
+            "margem_lucro": 118.18,
+            "preco_venda_sugerido": 12,
+            "unidade": "UN",
+            "ncm": "22021000",
+            "frete_rateado": 4.78,
+            "desconto_rateado": 2.39,
+            "outras_despesas_rateado": 1.2,
+            "custo_unitario_final": 5.86,
+            "vendido_por_peso": 0,
+            "peso_total_compra": 10,
+            "custo_por_kg": 5.86,
+            "atualizar_preco_venda": 1,
+            "quantidade_fiscal": 10,
+            "quantidade_nao_fiscal": 0,
+            "compra_em": null,
+            "quantidade_embalagens": 10,
+            "quantidade_por_embalagem": 0,
+            "valor_total_embalagem": 55,
+            "cfop": null,
+            "tipo_fiscal_item": "REVENDA",
+            "bonificacao": 0,
+            "embalagem_id": null,
+            "produto_apresentacao_id": null,
+            "resultado_conversao_json": "{\"produtoId\":717,\"apresentacaoId\":null,\"origem\":\"MANUAL\",\"quantidadeCompra\":10,\"unidadeCompra\":\"UN\",\"fatorConversao\":1,\"quantidadeEstoque\":10,\"quantidadeFiscal\":10,\"quantidadeNaoFiscal\":0,\"unidadeEstoque\":\"un\",\"custoUnitario\":5.86,\"custoTotal\":58.6,\"tipoConversao\":\"UNIDADE\",\"confianca\":60,\"metodoInferencia\":\"DIRETO\",\"subtotal\":58.6,\"timestamp\":\"2026-09-09T03:38:07.362Z\",\"versaoMotor\":\"RC2.1\",\"versaoRegra\":\"1.0.0\",\"regraAplicada\":\"UNIDADE_DIRETA\",\"origemDados\":\"COMPRA_ITEM\",\"tempoProcessamentoMs\":1.44,\"warnings\":[\"Quantidade por apresentação não informada; usando fator 1.\"],\"metadata\":{\"regraId\":\"MUC-R001\",\"dataRegra\":\"2026-07-31\",\"motivoRegra\":\"Conversão 1:1 sem fator multiplicador\"},\"hashConversao\":\"2c7049044dd1a418\",\"correlationId\":\"b9b1c9726d40cef6\",\"hash\":\"2c7049044dd1a418\"}",
+            "fator_conversao": 1,
+            "tipo_conversao": "UNIDADE",
+            "origem_conversao": "MANUAL",
+            "confianca_conversao": 60,
+            "tipo_origem_compra": null,
+            "apresentacao_id": null,
+            "apresentacao_nome": null,
+            "unidade_apresentacao": null,
+            "conteudo_apresentacao": 0,
+            "unidade_conteudo": null,
+            "quantidade_apresentacoes": 0,
+            "status_estoque": "APLICADO",
+            "pendencia_estoque_json": null,
+            "nfe_item_n": null,
+            "tipo_operacional": null,
+            "nfe_item_original_json": null,
+            "dados_roteamento_json": null
+          }
+        },
+        {
+          "table": "compras_itens",
+          "rowid": 2,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 2,
+            "compra_id": 2,
+            "produto_id": 718,
+            "quantidade": 5,
+            "preco_unitario": 12,
+            "subtotal": 63.9,
+            "item_fiscal": 1,
+            "descricao_produto": "Suco Natural 1L",
+            "codigo_barras": "7891234567891",
+            "margem_lucro": 108.33,
+            "preco_venda_sugerido": 26.62,
+            "unidade": "CX",
+            "ncm": "20098990",
+            "frete_rateado": 5.22,
+            "desconto_rateado": 2.61,
+            "outras_despesas_rateado": 1.3,
+            "custo_unitario_final": 12.78,
+            "vendido_por_peso": 0,
+            "peso_total_compra": 5,
+            "custo_por_kg": 12.78,
+            "atualizar_preco_venda": 1,
+            "quantidade_fiscal": 5,
+            "quantidade_nao_fiscal": 0,
+            "compra_em": null,
+            "quantidade_embalagens": 5,
+            "quantidade_por_embalagem": 0,
+            "valor_total_embalagem": 60,
+            "cfop": null,
+            "tipo_fiscal_item": "REVENDA",
+            "bonificacao": 0,
+            "embalagem_id": null,
+            "produto_apresentacao_id": null,
+            "resultado_conversao_json": "{\"produtoId\":718,\"apresentacaoId\":null,\"origem\":\"MANUAL\",\"quantidadeCompra\":5,\"unidadeCompra\":\"UN\",\"fatorConversao\":1,\"quantidadeEstoque\":5,\"quantidadeFiscal\":5,\"quantidadeNaoFiscal\":0,\"unidadeEstoque\":\"cx\",\"custoUnitario\":12.78,\"custoTotal\":63.9,\"tipoConversao\":\"UNIDADE\",\"confianca\":60,\"metodoInferencia\":\"DIRETO\",\"subtotal\":63.9,\"timestamp\":\"2026-09-09T03:38:07.376Z\",\"versaoMotor\":\"RC2.1\",\"versaoRegra\":\"1.0.0\",\"regraAplicada\":\"UNIDADE_DIRETA\",\"origemDados\":\"COMPRA_ITEM\",\"tempoProcessamentoMs\":0.31,\"warnings\":[\"Quantidade por apresentação não informada; usando fator 1.\"],\"metadata\":{\"regraId\":\"MUC-R001\",\"dataRegra\":\"2026-07-31\",\"motivoRegra\":\"Conversão 1:1 sem fator multiplicador\"},\"hashConversao\":\"00285a9bc376e48d\",\"correlationId\":\"d4cdb70955b14f19\",\"hash\":\"00285a9bc376e48d\"}",
+            "fator_conversao": 1,
+            "tipo_conversao": "UNIDADE",
+            "origem_conversao": "MANUAL",
+            "confianca_conversao": 60,
+            "tipo_origem_compra": null,
+            "apresentacao_id": null,
+            "apresentacao_nome": null,
+            "unidade_apresentacao": null,
+            "conteudo_apresentacao": 0,
+            "unidade_conteudo": null,
+            "quantidade_apresentacoes": 0,
+            "status_estoque": "APLICADO",
+            "pendencia_estoque_json": null,
+            "nfe_item_n": null,
+            "tipo_operacional": null,
+            "nfe_item_original_json": null,
+            "dados_roteamento_json": null
+          }
+        }
+      ],
+      "producoes_itens": [
+        {
+          "table": "producoes_itens",
+          "rowid": 1,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 1,
+            "producao_id": 1,
+            "produto_insumo_id": 712,
+            "quantidade_ficha": 2.5,
+            "quantidade_consumida": 2.5,
+            "unidade": "kg",
+            "quantidade_estoque": 2.5,
+            "unidade_estoque": "kg",
+            "quantidade_fiscal": 2.5,
+            "quantidade_nao_fiscal": 0,
+            "apresentacao_id": null,
+            "apresentacao_nome": null,
+            "unidade_apresentacao": null,
+            "conteudo_apresentacao": 0,
+            "unidade_conteudo": null,
+            "quantidade_apresentacoes": 0
+          }
+        },
+        {
+          "table": "producoes_itens",
+          "rowid": 2,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 2,
+            "producao_id": 1,
+            "produto_insumo_id": 713,
+            "quantidade_ficha": 2.5,
+            "quantidade_consumida": 2.5,
+            "unidade": "balde",
+            "quantidade_estoque": 2.5,
+            "unidade_estoque": "balde",
+            "quantidade_fiscal": 2.5,
+            "quantidade_nao_fiscal": 0,
+            "apresentacao_id": null,
+            "apresentacao_nome": null,
+            "unidade_apresentacao": null,
+            "conteudo_apresentacao": 0,
+            "unidade_conteudo": null,
+            "quantidade_apresentacoes": 0
+          }
+        },
+        {
+          "table": "producoes_itens",
+          "rowid": 3,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 3,
+            "producao_id": 2,
+            "produto_insumo_id": 712,
+            "quantidade_ficha": 2.5,
+            "quantidade_consumida": 2.5,
+            "unidade": "kg",
+            "quantidade_estoque": 2.5,
+            "unidade_estoque": "kg",
+            "quantidade_fiscal": 2.5,
+            "quantidade_nao_fiscal": 0,
+            "apresentacao_id": null,
+            "apresentacao_nome": null,
+            "unidade_apresentacao": null,
+            "conteudo_apresentacao": 0,
+            "unidade_conteudo": null,
+            "quantidade_apresentacoes": 0
+          }
+        },
+        {
+          "table": "producoes_itens",
+          "rowid": 4,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 4,
+            "producao_id": 2,
+            "produto_insumo_id": 713,
+            "quantidade_ficha": 2.5,
+            "quantidade_consumida": 2.5,
+            "unidade": "balde",
+            "quantidade_estoque": 2.5,
+            "unidade_estoque": "balde",
+            "quantidade_fiscal": 2.5,
+            "quantidade_nao_fiscal": 0,
+            "apresentacao_id": null,
+            "apresentacao_nome": null,
+            "unidade_apresentacao": null,
+            "conteudo_apresentacao": 0,
+            "unidade_conteudo": null,
+            "quantidade_apresentacoes": 0
+          }
+        },
+        {
+          "table": "producoes_itens",
+          "rowid": 5,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 5,
+            "producao_id": 3,
+            "produto_insumo_id": 712,
+            "quantidade_ficha": 3,
+            "quantidade_consumida": 2.25,
+            "unidade": "kg",
+            "quantidade_estoque": 2.25,
+            "unidade_estoque": "kg",
+            "quantidade_fiscal": 1.125,
+            "quantidade_nao_fiscal": 1.125,
+            "apresentacao_id": null,
+            "apresentacao_nome": null,
+            "unidade_apresentacao": null,
+            "conteudo_apresentacao": 0,
+            "unidade_conteudo": null,
+            "quantidade_apresentacoes": 0
+          }
+        }
+      ],
+      "estoque_movimentos": [
+        {
+          "table": "estoque_movimentos",
+          "rowid": 1,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 1,
+            "produto_id": 711,
+            "tipo_saldo": "FISCAL",
+            "quantidade": 10,
+            "saldo_fiscal_antes": 0,
+            "saldo_fiscal_depois": 10,
+            "saldo_nao_fiscal_antes": 0,
+            "saldo_nao_fiscal_depois": 0,
+            "estoque_total_antes": 0,
+            "estoque_total_depois": 10,
+            "tipo_movimento": "AJUSTE",
+            "origem": "SALDO_INICIAL",
+            "referencia_tipo": null,
+            "referencia_id": null,
+            "usuario_id": null,
+            "usuario_nome": null,
+            "observacao": null,
+            "created_at": "2026-08-20 02:23:55"
+          }
+        },
+        {
+          "table": "estoque_movimentos",
+          "rowid": 2,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 2,
+            "produto_id": 711,
+            "tipo_saldo": "FISCAL",
+            "quantidade": 1,
+            "saldo_fiscal_antes": 10,
+            "saldo_fiscal_depois": 9,
+            "saldo_nao_fiscal_antes": 0,
+            "saldo_nao_fiscal_depois": 0,
+            "estoque_total_antes": 10,
+            "estoque_total_depois": 9,
+            "tipo_movimento": "SAIDA",
+            "origem": "VENDA",
+            "referencia_tipo": null,
+            "referencia_id": null,
+            "usuario_id": null,
+            "usuario_nome": null,
+            "observacao": null,
+            "created_at": "2026-08-20 03:43:42"
+          }
+        },
+        {
+          "table": "estoque_movimentos",
+          "rowid": 3,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 3,
+            "produto_id": 711,
+            "tipo_saldo": "FISCAL",
+            "quantidade": 1,
+            "saldo_fiscal_antes": 9,
+            "saldo_fiscal_depois": 8,
+            "saldo_nao_fiscal_antes": 0,
+            "saldo_nao_fiscal_depois": 0,
+            "estoque_total_antes": 9,
+            "estoque_total_depois": 8,
+            "tipo_movimento": "SAIDA",
+            "origem": "VENDA",
+            "referencia_tipo": null,
+            "referencia_id": null,
+            "usuario_id": null,
+            "usuario_nome": null,
+            "observacao": null,
+            "created_at": "2026-08-20 03:44:52"
+          }
+        },
+        {
+          "table": "estoque_movimentos",
+          "rowid": 4,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 4,
+            "produto_id": 709,
+            "tipo_saldo": "FISCAL",
+            "quantidade": 1,
+            "saldo_fiscal_antes": 20,
+            "saldo_fiscal_depois": 19,
+            "saldo_nao_fiscal_antes": 0,
+            "saldo_nao_fiscal_depois": 0,
+            "estoque_total_antes": 20,
+            "estoque_total_depois": 19,
+            "tipo_movimento": "SAIDA",
+            "origem": "VENDA",
+            "referencia_tipo": null,
+            "referencia_id": null,
+            "usuario_id": null,
+            "usuario_nome": null,
+            "observacao": null,
+            "created_at": "2026-08-20 03:45:17"
+          }
+        },
+        {
+          "table": "estoque_movimentos",
+          "rowid": 5,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 5,
+            "produto_id": 711,
+            "tipo_saldo": "FISCAL",
+            "quantidade": 1,
+            "saldo_fiscal_antes": 8,
+            "saldo_fiscal_depois": 7,
+            "saldo_nao_fiscal_antes": 0,
+            "saldo_nao_fiscal_depois": 0,
+            "estoque_total_antes": 8,
+            "estoque_total_depois": 7,
+            "tipo_movimento": "SAIDA",
+            "origem": "VENDA",
+            "referencia_tipo": null,
+            "referencia_id": null,
+            "usuario_id": null,
+            "usuario_nome": null,
+            "observacao": null,
+            "created_at": "2026-08-20 03:49:53"
+          }
+        }
+      ],
+      "miip_decisoes": [
+        {
+          "table": "miip_decisoes",
+          "rowid": 17,
+          "parent": "produtos",
+          "fkid": 2,
+          "registro": {
+            "id": 17,
+            "operacao_id": "miip-1788874200794-y15rbjax0",
+            "origem": "compra",
+            "item_hash": null,
+            "item_snapshot": "{\"produtoNome\":\"Refrigerante Cola 2L\",\"codigoBarras\":\"7891234567890\",\"codigoFornecedor\":\"ABC001\",\"ncm\":\"22021000\",\"cest\":\"\",\"unidade\":\"UN\",\"marca\":null,\"marcaNome\":null,\"embalagem\":null,\"plu\":null,\"codigoInterno\":null,\"codigo\":null,\"fornecedorCnpj\":\"12345678000199\",\"fornecedorNome\":\"Distribuidora Teste Ltda\",\"precoUnitario\":5.5,\"produtoIdHint\":null}",
+            "contexto_snapshot": "{\"origem\":\"compra\",\"usuarioId\":null,\"sessaoId\":null,\"operacaoId\":\"miip-1788874200794-y15rbjax0\",\"timestamp\":\"2026-09-08T13:30:00.793Z\"}",
+            "candidatos_snapshot": "[{\"produtoId\":717,\"snapshot\":{\"id\":717,\"codigo\":\"ABC001\",\"codigo_barras\":\"7891234567890\",\"nome\":\"Refrigerante Cola 2L\",\"unidade\":\"un\",\"ncm\":\"22021000\",\"cest\":\"\",\"categoria_id\":null,\"subcategoria_id\":null,\"fornecedor\":\"Distribuidora Teste Ltda\",\"ativo\":1,\"marcaNome\":\"\",\"atributos\":{},\"metadata\":{\"origem\":\"produtos\",\"carregadoEm\":\"2026-09-08T13:30:00.803Z\"}},\"produto\":{\"id\":717,\"codigo\":\"ABC001\",\"nome\":\"Refrigerante Cola 2L\",\"codigoBarras\":\"7891234567890\",\"unidade\":\"un\",\"ncm\":\"22021000\",\"cest\":\"\",\"ativo\":1,\"marca\":null,\"fornecedor\":\"Distribuidora Teste Ltda\"},\"scoreTotal\":100,\"confianca\":\"ALTA\",\"ranking\":1,\"evidencias\":[{\"motor\":\"motor_gtin\",\"tipo\":\"gtin_exato\",\"descricao\":\"GTIN localizado em produtos.codigo_barras\",\"peso\":100,\"valor\":\"7891234567890\",\"score\":100,\"timestamp\":\"2026-09-08T13:30:00.804Z\"},{\"motor\":\"motor_gtin\",\"tipo\":\"campo_origem\",\"descricao\":\"Campo utilizado na identificação\",\"peso\":0,\"valor\":\"codigo_barras\",\"score\":0,\"timestamp\":\"2026-09-08T13:30:00.804Z\"},{\"motor\":\"motor_gtin\",\"tipo\":\"produto_encontrado\",\"descricao\":\"Produto localizado via ProdutoRepository\",\"peso\":100,\"valor\":717,\"score\":100,\"timestamp\":\"2026-09-08T13:30:00.804Z\"},{\"motor\":\"motor_gtin\",\"tipo\":\"produto_ativo\",\"descricao\":\"Status do produto no cadastro\",\"peso\":100,\"valor\":true,\"score\":100,\"timestamp\":\"2026-09-08T13:30:00.804Z\"}],\"motoresQueVotaram\":[\"motor_gtin\"],\"atributosExtraidos\":{\"gtin\":\"7891234567890\",\"origemDados\":\"ProdutoRepository\",\"campoOrigem\":\"codigo_barras\"}}]",
+            "motores_snapshot": "{\"executados\":[\"motor_canonical\",\"motor_attribute_extractor\",\"motor_synonyms\",\"motor_gtin\",\"motor_associacao_fornecedor\",\"motor_mubc\",\"motor_similarity\"],\"semanticProduct\":{\"original\":\"Refrigerante Cola 2L\",\"canonico\":\"REFRIGERANTE COLA 2L\",\"tipo\":\"REFRIGERANTE\",\"categoria\":null,\"subcategoria\":null,\"marca\":\"COLA\",\"modelo\":null,\"linha\":null,\"familia\":null,\"tecnologia\":null,\"potencia\":null,\"tensao\":null,\"corrente\":null,\"cor\":null,\"material\":null,\"acabamento\":null,\"bitola\":null,\"diametro\":null,\"comprimento\":null,\"largura\":null,\"altura\":null,\"espessura\":null,\"peso\":null,\"volume\":\"2L\",\"capacidade\":null,\"unidadeMedida\":\"L\",\"embalagem\":null,\"quantidadeEmbalagem\":null,\"ncm\":null,\"cest\":null,\"gtin\":null,\"tokens\":[\"REFRIGERANTE\",\"COLA\",\"2L\"],\"normalizedTokens\":[{\"textoOriginal\":\"REFRIGERANTE\",\"textoCanonico\":\"REFRIGERANTE\",\"tipo\":\"PALAVRA\",\"posicao\":0,\"normalizado\":\"REFRIGERANTE\"},{\"textoOriginal\":\"COLA\",\"textoCanonico\":\"COLA\",\"tipo\":\"MARCA\",\"posicao\":1,\"normalizado\":\"COLA\"},{\"textoOriginal\":\"2L\",\"textoCanonico\":\"2L\",\"tipo\":\"MEDIDA\",\"posicao\":2,\"normalizado\":\"2L\"}],\"synonyms\":[{\"original\":\"COLA\",\"sinonimo\":\"ADESIVO\",\"categoria\":\"construction\",\"confianca\":100,\"origem\":\"construction.json\"}],\"relatedTokens\":[\"ADESIVO\"],\"semanticAliases\":[\"COLA=ADESIVO\"],\"atributosExtras\":[{\"tipo\":\"MARCA\",\"valor\":\"COLA\",\"confianca\":100,\"origem\":\"token_tipo\",\"normalizado\":\"COLA\",\"metadata\":{\"campo\":\"marca\"}},{\"tipo\":\"VOLUME\",\"valor\":\"2L\",\"confianca\":100,\"origem\":\"padrao_medida\",\"normalizado\":\"2L\",\"metadata\":{\"campo\":\"volume\"}},{\"tipo\":\"TIPO\",\"valor\":\"REFRIGERANTE\",\"confianca\":85,\"origem\":\"inferencia\",\"normalizado\":\"REFRIGERANTE\",\"metadata\":{\"campo\":\"tipo\"}},{\"tipo\":\"UNIDADE\",\"valor\":\"L\",\"confianca\":90,\"origem\":\"padrao_medida\",\"normalizado\":\"L\",\"metadata\":{\"campo\":\"unidadeMedida\"}}],\"metadata\":{\"versao\":\"1.0.0\",\"origem\":\"canonical\",\"timestamp\":\"2026-09-08T13:30:00.800Z\",\"engine\":\"motor_attribute_extractor\",\"observacoes\":null}},\"similarityResult\":{\"versao\":\"1.0.0\",\"score\":100,\"confidence\":\"ALTA\",\"matchedAttributes\":[\"marca\",\"tipo\",\"unidadeMedida\"],\"differentAttributes\":[],\"votes\":[{\"atributo\":\"marca\",\"peso\":25,\"score\":100,\"motivo\":\"Marca: COLA = COLA (100%)\"},{\"atributo\":\"tipo\",\"peso\":20,\"score\":100,\"motivo\":\"Tipo: REFRIGERANTE = REFRIGERANTE (100%)\"},{\"atributo\":\"unidadeMedida\",\"peso\":5,\"score\":100,\"motivo\":\"Unidade: L = L (100%)\"}],\"explicacao\":{\"linhas\":[\"Marca compatível.\",\"Tipo compatível.\",\"Unidade compatível.\"],\"texto\":\"Marca compatível.\\nTipo compatível.\\nUnidade compatível.\"},\"estatisticas\":{\"quantidadeAtributosComparados\":3,\"quantidadeIguais\":3,\"quantidadeDiferentes\":0,\"tempo\":0}}}",
+            "produto_sugerido_id": 717,
+            "produto_decidido_id": null,
+            "acao_recomendada": "auto_vincular",
+            "confianca": "ALTA",
+            "score_final": 100,
+            "score_gap": null,
+            "conflito": 0,
+            "feedback_status": "pendente",
+            "usuario_id": null,
+            "duracao_total_ms": 16,
+            "erro": null,
+            "metadados": "{\"versaoRegra\":\"1.0.0\",\"explicacao\":{\"versao\":\"1.0.0\",\"titulo\":\"Produto identificado automaticamente.\",\"resumo\":\"Identificação automática com alta confiança.\",\"nivelCerteza\":\"ALTA\",\"motivosPositivos\":[\"Código de barras igual\",\"Código de barras confirmado\",\"Marca confirmado\",\"Tipo confirmado\",\"Unidade confirmado\",\"Marca igual\",\"Tipo igual\",\"Unidade igual\"],\"motivosNegativos\":[],\"atributosCoincidentes\":[\"marca\",\"tipo\",\"unidadeMedida\"],\"atributosDivergentes\":[],\"explicacaoCompleta\":\"Produto identificado automaticamente.\\n\\nMotivos:\\n✔ Código de barras igual\\n✔ Código de barras confirmado\\n✔ Marca confirmado\\n✔ Tipo confirmado\\n✔ Unidade confirmado\\n✔ Marca igual\\n✔ Tipo igual\\n✔ Unidade igual\\n\\nRecomendação:\\nProduto será associado automaticamente.\",\"explicacaoCurta\":\"Produto identificado automaticamente. Identificação automática com alta confiança.\",\"recomendacao\":\"Produto será associado automaticamente.\"},\"decisionResult\":{\"versao\":\"1.0.0\",\"acao\":\"AUTO_ASSOCIAR\",\"nivelCerteza\":\"ALTA\",\"motivos\":[\"gtin_100\",\"gtin_exato_100\"],\"explicacao\":{\"linhas\":[\"Produto identificado automaticamente.\"],\"baseadoEm\":[\"Código de barras.\",\"Marca.\",\"Tipo.\",\"Unidade.\"],\"texto\":\"Produto identificado automaticamente.\\nBaseado em:\\nCódigo de barras.\\nMarca.\\nTipo.\\nUnidade.\"},\"produtoSelecionado\":{\"produtoId\":717,\"produto\":{\"id\":717,\"codigo\":\"ABC001\",\"nome\":\"Refrigerante Cola 2L\",\"codigoBarras\":\"7891234567890\",\"unidade\":\"un\",\"ncm\":\"22021000\",\"cest\":\"\",\"ativo\":1,\"marca\":null,\"fornecedor\":\"Distribuidora Teste Ltda\"},\"score\":100,\"confianca\":\"ALTA\",\"motoresQueVotaram\":[\"motor_gtin\"]},\"alternativas\":[],\"precisaConfirmacao\":false,\"precisaCadastro\":false,\"score\":100,\"estatisticas\":{\"quantidadeRegrasAvaliadas\":1,\"tempo\":1,\"regraVencedora\":\"gtin_100\"},\"historico\":{\"regra\":\"gtin_100\",\"score\":100,\"data\":\"2026-09-08T13:30:00.809Z\",\"versaoRegra\":\"1.0.0\",\"acao\":\"AUTO_ASSOCIAR\",\"operacaoId\":\"miip-1788874200794-y15rbjax0\"}},\"requestId\":\"miip-1788874200794-y15rbjax0\",\"timestamp\":\"2026-09-08T13:30:00.810Z\"}",
+            "created_at": "2026-09-08 13:30:00",
+            "updated_at": "2026-09-08 13:30:00",
+            "decided_at": "2026-09-08T13:30:00.810Z"
+          }
+        },
+        {
+          "table": "miip_decisoes",
+          "rowid": 18,
+          "parent": "produtos",
+          "fkid": 2,
+          "registro": {
+            "id": 18,
+            "operacao_id": "miip-1788874200827-dece2iyte",
+            "origem": "compra",
+            "item_hash": null,
+            "item_snapshot": "{\"produtoNome\":\"Suco Natural 1L\",\"codigoBarras\":\"7891234567891\",\"codigoFornecedor\":\"ABC002\",\"ncm\":\"20098990\",\"cest\":\"\",\"unidade\":\"CX\",\"marca\":null,\"marcaNome\":null,\"embalagem\":null,\"plu\":null,\"codigoInterno\":null,\"codigo\":null,\"fornecedorCnpj\":\"12345678000199\",\"fornecedorNome\":\"Distribuidora Teste Ltda\",\"precoUnitario\":12,\"produtoIdHint\":null}",
+            "contexto_snapshot": "{\"origem\":\"compra\",\"usuarioId\":null,\"sessaoId\":null,\"operacaoId\":\"miip-1788874200827-dece2iyte\",\"timestamp\":\"2026-09-08T13:30:00.826Z\"}",
+            "candidatos_snapshot": "[{\"produtoId\":718,\"snapshot\":{\"id\":718,\"codigo\":\"ABC002\",\"codigo_barras\":\"7891234567891\",\"nome\":\"Suco Natural 1L\",\"unidade\":\"un\",\"ncm\":\"20098990\",\"cest\":\"\",\"categoria_id\":null,\"subcategoria_id\":null,\"fornecedor\":\"Distribuidora Teste Ltda\",\"ativo\":1,\"marcaNome\":\"\",\"atributos\":{},\"metadata\":{\"origem\":\"produtos\",\"carregadoEm\":\"2026-09-08T13:30:00.828Z\"}},\"produto\":{\"id\":718,\"codigo\":\"ABC002\",\"nome\":\"Suco Natural 1L\",\"codigoBarras\":\"7891234567891\",\"unidade\":\"un\",\"ncm\":\"20098990\",\"cest\":\"\",\"ativo\":1,\"marca\":null,\"fornecedor\":\"Distribuidora Teste Ltda\"},\"scoreTotal\":100,\"confianca\":\"ALTA\",\"ranking\":1,\"evidencias\":[{\"motor\":\"motor_gtin\",\"tipo\":\"gtin_exato\",\"descricao\":\"GTIN localizado em produtos.codigo_barras\",\"peso\":100,\"valor\":\"7891234567891\",\"score\":100,\"timestamp\":\"2026-09-08T13:30:00.828Z\"},{\"motor\":\"motor_gtin\",\"tipo\":\"campo_origem\",\"descricao\":\"Campo utilizado na identificação\",\"peso\":0,\"valor\":\"codigo_barras\",\"score\":0,\"timestamp\":\"2026-09-08T13:30:00.828Z\"},{\"motor\":\"motor_gtin\",\"tipo\":\"produto_encontrado\",\"descricao\":\"Produto localizado via ProdutoRepository\",\"peso\":100,\"valor\":718,\"score\":100,\"timestamp\":\"2026-09-08T13:30:00.828Z\"},{\"motor\":\"motor_gtin\",\"tipo\":\"produto_ativo\",\"descricao\":\"Status do produto no cadastro\",\"peso\":100,\"valor\":true,\"score\":100,\"timestamp\":\"2026-09-08T13:30:00.828Z\"}],\"motoresQueVotaram\":[\"motor_gtin\"],\"atributosExtraidos\":{\"gtin\":\"7891234567891\",\"origemDados\":\"ProdutoRepository\",\"campoOrigem\":\"codigo_barras\"}}]",
+            "motores_snapshot": "{\"executados\":[\"motor_canonical\",\"motor_attribute_extractor\",\"motor_synonyms\",\"motor_gtin\",\"motor_associacao_fornecedor\",\"motor_mubc\",\"motor_similarity\"],\"semanticProduct\":{\"original\":\"Suco Natural 1L\",\"canonico\":\"SUCO NATURAL 1L\",\"tipo\":\"SUCO\",\"categoria\":null,\"subcategoria\":null,\"marca\":null,\"modelo\":null,\"linha\":null,\"familia\":null,\"tecnologia\":null,\"potencia\":null,\"tensao\":null,\"corrente\":null,\"cor\":null,\"material\":null,\"acabamento\":\"NATURAL\",\"bitola\":null,\"diametro\":null,\"comprimento\":null,\"largura\":null,\"altura\":null,\"espessura\":null,\"peso\":null,\"volume\":\"1L\",\"capacidade\":null,\"unidadeMedida\":\"L\",\"embalagem\":null,\"quantidadeEmbalagem\":null,\"ncm\":null,\"cest\":null,\"gtin\":null,\"tokens\":[\"SUCO\",\"NATURAL\",\"1L\"],\"normalizedTokens\":[{\"textoOriginal\":\"SUCO\",\"textoCanonico\":\"SUCO\",\"tipo\":\"PALAVRA\",\"posicao\":0,\"normalizado\":\"SUCO\"},{\"textoOriginal\":\"NATURAL\",\"textoCanonico\":\"NATURAL\",\"tipo\":\"PALAVRA\",\"posicao\":1,\"normalizado\":\"NATURAL\"},{\"textoOriginal\":\"1L\",\"textoCanonico\":\"1L\",\"tipo\":\"MEDIDA\",\"posicao\":2,\"normalizado\":\"1L\"}],\"synonyms\":[],\"relatedTokens\":[],\"semanticAliases\":[],\"atributosExtras\":[{\"tipo\":\"VOLUME\",\"valor\":\"1L\",\"confianca\":100,\"origem\":\"padrao_medida\",\"normalizado\":\"1L\",\"metadata\":{\"campo\":\"volume\"}},{\"tipo\":\"OUTRO\",\"valor\":\"NATURAL\",\"confianca\":95,\"origem\":\"dicionario\",\"normalizado\":\"NATURAL\",\"metadata\":{\"campo\":\"acabamento\"}},{\"tipo\":\"TIPO\",\"valor\":\"SUCO\",\"confianca\":85,\"origem\":\"inferencia\",\"normalizado\":\"SUCO\",\"metadata\":{\"campo\":\"tipo\"}},{\"tipo\":\"UNIDADE\",\"valor\":\"L\",\"confianca\":90,\"origem\":\"padrao_medida\",\"normalizado\":\"L\",\"metadata\":{\"campo\":\"unidadeMedida\"}}],\"metadata\":{\"versao\":\"1.0.0\",\"origem\":\"canonical\",\"timestamp\":\"2026-09-08T13:30:00.827Z\",\"engine\":\"motor_attribute_extractor\",\"observacoes\":null}},\"similarityResult\":{\"versao\":\"1.0.0\",\"score\":100,\"confidence\":\"ALTA\",\"matchedAttributes\":[\"tipo\",\"unidadeMedida\"],\"differentAttributes\":[],\"votes\":[{\"atributo\":\"tipo\",\"peso\":20,\"score\":100,\"motivo\":\"Tipo: SUCO = SUCO (100%)\"},{\"atributo\":\"unidadeMedida\",\"peso\":5,\"score\":100,\"motivo\":\"Unidade: L = L (100%)\"}],\"explicacao\":{\"linhas\":[\"Tipo compatível.\",\"Unidade compatível.\"],\"texto\":\"Tipo compatível.\\nUnidade compatível.\"},\"estatisticas\":{\"quantidadeAtributosComparados\":2,\"quantidadeIguais\":2,\"quantidadeDiferentes\":0,\"tempo\":0}}}",
+            "produto_sugerido_id": 718,
+            "produto_decidido_id": null,
+            "acao_recomendada": "auto_vincular",
+            "confianca": "ALTA",
+            "score_final": 100,
+            "score_gap": null,
+            "conflito": 0,
+            "feedback_status": "pendente",
+            "usuario_id": null,
+            "duracao_total_ms": 2,
+            "erro": null,
+            "metadados": "{\"versaoRegra\":\"1.0.0\",\"explicacao\":{\"versao\":\"1.0.0\",\"titulo\":\"Produto identificado automaticamente.\",\"resumo\":\"Identificação automática com alta confiança.\",\"nivelCerteza\":\"ALTA\",\"motivosPositivos\":[\"Código de barras igual\",\"Código de barras confirmado\",\"Tipo confirmado\",\"Unidade confirmado\",\"Tipo igual\",\"Unidade igual\"],\"motivosNegativos\":[],\"atributosCoincidentes\":[\"tipo\",\"unidadeMedida\"],\"atributosDivergentes\":[],\"explicacaoCompleta\":\"Produto identificado automaticamente.\\n\\nMotivos:\\n✔ Código de barras igual\\n✔ Código de barras confirmado\\n✔ Tipo confirmado\\n✔ Unidade confirmado\\n✔ Tipo igual\\n✔ Unidade igual\\n\\nRecomendação:\\nProduto será associado automaticamente.\",\"explicacaoCurta\":\"Produto identificado automaticamente. Identificação automática com alta confiança.\",\"recomendacao\":\"Produto será associado automaticamente.\"},\"decisionResult\":{\"versao\":\"1.0.0\",\"acao\":\"AUTO_ASSOCIAR\",\"nivelCerteza\":\"ALTA\",\"motivos\":[\"gtin_100\",\"gtin_exato_100\"],\"explicacao\":{\"linhas\":[\"Produto identificado automaticamente.\"],\"baseadoEm\":[\"Código de barras.\",\"Tipo.\",\"Unidade.\"],\"texto\":\"Produto identificado automaticamente.\\nBaseado em:\\nCódigo de barras.\\nTipo.\\nUnidade.\"},\"produtoSelecionado\":{\"produtoId\":718,\"produto\":{\"id\":718,\"codigo\":\"ABC002\",\"nome\":\"Suco Natural 1L\",\"codigoBarras\":\"7891234567891\",\"unidade\":\"un\",\"ncm\":\"20098990\",\"cest\":\"\",\"ativo\":1,\"marca\":null,\"fornecedor\":\"Distribuidora Teste Ltda\"},\"score\":100,\"confianca\":\"ALTA\",\"motoresQueVotaram\":[\"motor_gtin\"]},\"alternativas\":[],\"precisaConfirmacao\":false,\"precisaCadastro\":false,\"score\":100,\"estatisticas\":{\"quantidadeRegrasAvaliadas\":1,\"tempo\":0,\"regraVencedora\":\"gtin_100\"},\"historico\":{\"regra\":\"gtin_100\",\"score\":100,\"data\":\"2026-09-08T13:30:00.829Z\",\"versaoRegra\":\"1.0.0\",\"acao\":\"AUTO_ASSOCIAR\",\"operacaoId\":\"miip-1788874200827-dece2iyte\"}},\"requestId\":\"miip-1788874200827-dece2iyte\",\"timestamp\":\"2026-09-08T13:30:00.829Z\"}",
+            "created_at": "2026-09-08 13:30:00",
+            "updated_at": "2026-09-08 13:30:00",
+            "decided_at": "2026-09-08T13:30:00.829Z"
+          }
+        },
+        {
+          "table": "miip_decisoes",
+          "rowid": 19,
+          "parent": "produtos",
+          "fkid": 2,
+          "registro": {
+            "id": 19,
+            "operacao_id": "miip-1788874273957-wr42ksl4c",
+            "origem": "compra",
+            "item_hash": null,
+            "item_snapshot": "{\"produtoNome\":\"Refrigerante Cola 2L\",\"codigoBarras\":\"7891234567890\",\"codigoFornecedor\":\"ABC001\",\"ncm\":\"22021000\",\"cest\":\"\",\"unidade\":\"UN\",\"marca\":null,\"marcaNome\":null,\"embalagem\":null,\"plu\":null,\"codigoInterno\":null,\"codigo\":null,\"fornecedorCnpj\":\"12345678000199\",\"fornecedorNome\":\"Distribuidora Teste Ltda\",\"precoUnitario\":5.5,\"produtoIdHint\":null}",
+            "contexto_snapshot": "{\"origem\":\"compra\",\"usuarioId\":null,\"sessaoId\":null,\"operacaoId\":\"miip-1788874273957-wr42ksl4c\",\"timestamp\":\"2026-09-08T13:31:13.955Z\"}",
+            "candidatos_snapshot": "[{\"produtoId\":717,\"snapshot\":{\"id\":717,\"codigo\":\"ABC001\",\"codigo_barras\":\"7891234567890\",\"nome\":\"Refrigerante Cola 2L\",\"unidade\":\"un\",\"ncm\":\"22021000\",\"cest\":\"\",\"categoria_id\":null,\"subcategoria_id\":null,\"fornecedor\":\"Distribuidora Teste Ltda\",\"ativo\":1,\"marcaNome\":\"\",\"atributos\":{},\"metadata\":{\"origem\":\"produtos\",\"carregadoEm\":\"2026-09-08T13:31:13.966Z\"}},\"produto\":{\"id\":717,\"codigo\":\"ABC001\",\"nome\":\"Refrigerante Cola 2L\",\"codigoBarras\":\"7891234567890\",\"unidade\":\"un\",\"ncm\":\"22021000\",\"cest\":\"\",\"ativo\":1,\"marca\":null,\"fornecedor\":\"Distribuidora Teste Ltda\"},\"scoreTotal\":100,\"confianca\":\"ALTA\",\"ranking\":1,\"evidencias\":[{\"motor\":\"motor_gtin\",\"tipo\":\"gtin_exato\",\"descricao\":\"GTIN localizado em produtos.codigo_barras\",\"peso\":100,\"valor\":\"7891234567890\",\"score\":100,\"timestamp\":\"2026-09-08T13:31:13.967Z\"},{\"motor\":\"motor_gtin\",\"tipo\":\"campo_origem\",\"descricao\":\"Campo utilizado na identificação\",\"peso\":0,\"valor\":\"codigo_barras\",\"score\":0,\"timestamp\":\"2026-09-08T13:31:13.967Z\"},{\"motor\":\"motor_gtin\",\"tipo\":\"produto_encontrado\",\"descricao\":\"Produto localizado via ProdutoRepository\",\"peso\":100,\"valor\":717,\"score\":100,\"timestamp\":\"2026-09-08T13:31:13.967Z\"},{\"motor\":\"motor_gtin\",\"tipo\":\"produto_ativo\",\"descricao\":\"Status do produto no cadastro\",\"peso\":100,\"valor\":true,\"score\":100,\"timestamp\":\"2026-09-08T13:31:13.967Z\"},{\"motor\":\"motor_associacao_fornecedor\",\"tipo\":\"associacao_fornecedor\",\"descricao\":\"Associação ativa encontrada em miip_associacoes\",\"peso\":100,\"valor\":1,\"score\":100,\"timestamp\":\"2026-09-08T13:31:13.968Z\"},{\"motor\":\"motor_associacao_fornecedor\",\"tipo\":\"fornecedor_cnpj\",\"descricao\":\"CNPJ do fornecedor utilizado no lookup\",\"peso\":0,\"valor\":\"12345678000199\",\"score\":0,\"timestamp\":\"2026-09-08T13:31:13.968Z\"},{\"motor\":\"motor_associacao_fornecedor\",\"tipo\":\"codigo_fornecedor\",\"descricao\":\"Código cProd do fornecedor utilizado no lookup\",\"peso\":0,\"valor\":\"ABC001\",\"score\":0,\"timestamp\":\"2026-09-08T13:31:13.968Z\"},{\"motor\":\"motor_associacao_fornecedor\",\"tipo\":\"produto_snapshot\",\"descricao\":\"Produto carregado via ProdutoRepository\",\"peso\":100,\"valor\":717,\"score\":100,\"timestamp\":\"2026-09-08T13:31:13.968Z\"},{\"motor\":\"motor_associacao_fornecedor\",\"tipo\":\"origem_dados\",\"descricao\":\"Fontes consultadas pelo motor\",\"peso\":0,\"valor\":\"miip_associacoes+ProdutoRepository\",\"score\":0,\"timestamp\":\"2026-09-08T13:31:13.968Z\"}],\"motoresQueVotaram\":[\"motor_gtin\",\"motor_associacao_fornecedor\"],\"atributosExtraidos\":{\"gtin\":\"7891234567890\",\"origemDados\":\"ProdutoRepository\",\"campoOrigem\":\"codigo_barras\"}}]",
+            "motores_snapshot": "{\"executados\":[\"motor_canonical\",\"motor_attribute_extractor\",\"motor_synonyms\",\"motor_gtin\",\"motor_associacao_fornecedor\",\"motor_mubc\",\"motor_similarity\"],\"semanticProduct\":{\"original\":\"Refrigerante Cola 2L\",\"canonico\":\"REFRIGERANTE COLA 2L\",\"tipo\":\"REFRIGERANTE\",\"categoria\":null,\"subcategoria\":null,\"marca\":\"COLA\",\"modelo\":null,\"linha\":null,\"familia\":null,\"tecnologia\":null,\"potencia\":null,\"tensao\":null,\"corrente\":null,\"cor\":null,\"material\":null,\"acabamento\":null,\"bitola\":null,\"diametro\":null,\"comprimento\":null,\"largura\":null,\"altura\":null,\"espessura\":null,\"peso\":null,\"volume\":\"2L\",\"capacidade\":null,\"unidadeMedida\":\"L\",\"embalagem\":null,\"quantidadeEmbalagem\":null,\"ncm\":null,\"cest\":null,\"gtin\":null,\"tokens\":[\"REFRIGERANTE\",\"COLA\",\"2L\"],\"normalizedTokens\":[{\"textoOriginal\":\"REFRIGERANTE\",\"textoCanonico\":\"REFRIGERANTE\",\"tipo\":\"PALAVRA\",\"posicao\":0,\"normalizado\":\"REFRIGERANTE\"},{\"textoOriginal\":\"COLA\",\"textoCanonico\":\"COLA\",\"tipo\":\"MARCA\",\"posicao\":1,\"normalizado\":\"COLA\"},{\"textoOriginal\":\"2L\",\"textoCanonico\":\"2L\",\"tipo\":\"MEDIDA\",\"posicao\":2,\"normalizado\":\"2L\"}],\"synonyms\":[{\"original\":\"COLA\",\"sinonimo\":\"ADESIVO\",\"categoria\":\"construction\",\"confianca\":100,\"origem\":\"construction.json\"}],\"relatedTokens\":[\"ADESIVO\"],\"semanticAliases\":[\"COLA=ADESIVO\"],\"atributosExtras\":[{\"tipo\":\"MARCA\",\"valor\":\"COLA\",\"confianca\":100,\"origem\":\"token_tipo\",\"normalizado\":\"COLA\",\"metadata\":{\"campo\":\"marca\"}},{\"tipo\":\"VOLUME\",\"valor\":\"2L\",\"confianca\":100,\"origem\":\"padrao_medida\",\"normalizado\":\"2L\",\"metadata\":{\"campo\":\"volume\"}},{\"tipo\":\"TIPO\",\"valor\":\"REFRIGERANTE\",\"confianca\":85,\"origem\":\"inferencia\",\"normalizado\":\"REFRIGERANTE\",\"metadata\":{\"campo\":\"tipo\"}},{\"tipo\":\"UNIDADE\",\"valor\":\"L\",\"confianca\":90,\"origem\":\"padrao_medida\",\"normalizado\":\"L\",\"metadata\":{\"campo\":\"unidadeMedida\"}}],\"metadata\":{\"versao\":\"1.0.0\",\"origem\":\"canonical\",\"timestamp\":\"2026-09-08T13:31:13.963Z\",\"engine\":\"motor_attribute_extractor\",\"observacoes\":null}},\"similarityResult\":{\"versao\":\"1.0.0\",\"score\":100,\"confidence\":\"ALTA\",\"matchedAttributes\":[\"marca\",\"tipo\",\"unidadeMedida\"],\"differentAttributes\":[],\"votes\":[{\"atributo\":\"marca\",\"peso\":25,\"score\":100,\"motivo\":\"Marca: COLA = COLA (100%)\"},{\"atributo\":\"tipo\",\"peso\":20,\"score\":100,\"motivo\":\"Tipo: REFRIGERANTE = REFRIGERANTE (100%)\"},{\"atributo\":\"unidadeMedida\",\"peso\":5,\"score\":100,\"motivo\":\"Unidade: L = L (100%)\"}],\"explicacao\":{\"linhas\":[\"Marca compatível.\",\"Tipo compatível.\",\"Unidade compatível.\"],\"texto\":\"Marca compatível.\\nTipo compatível.\\nUnidade compatível.\"},\"estatisticas\":{\"quantidadeAtributosComparados\":3,\"quantidadeIguais\":3,\"quantidadeDiferentes\":0,\"tempo\":0}}}",
+            "produto_sugerido_id": 717,
+            "produto_decidido_id": null,
+            "acao_recomendada": "auto_vincular",
+            "confianca": "ALTA",
+            "score_final": 100,
+            "score_gap": null,
+            "conflito": 0,
+            "feedback_status": "pendente",
+            "usuario_id": null,
+            "duracao_total_ms": 14,
+            "erro": null,
+            "metadados": "{\"versaoRegra\":\"1.0.0\",\"explicacao\":{\"versao\":\"1.0.0\",\"titulo\":\"Produto identificado automaticamente.\",\"resumo\":\"Identificação automática com alta confiança.\",\"nivelCerteza\":\"ALTA\",\"motivosPositivos\":[\"Código de barras igual\",\"Código de barras confirmado\",\"Fornecedor confirmado\",\"Marca confirmado\",\"Tipo confirmado\",\"Unidade confirmado\",\"Marca igual\",\"Tipo igual\",\"Unidade igual\"],\"motivosNegativos\":[],\"atributosCoincidentes\":[\"marca\",\"tipo\",\"unidadeMedida\"],\"atributosDivergentes\":[],\"explicacaoCompleta\":\"Produto identificado automaticamente.\\n\\nMotivos:\\n✔ Código de barras igual\\n✔ Código de barras confirmado\\n✔ Fornecedor confirmado\\n✔ Marca confirmado\\n✔ Tipo confirmado\\n✔ Unidade confirmado\\n✔ Marca igual\\n✔ Tipo igual\\n✔ Unidade igual\\n\\nRecomendação:\\nProduto será associado automaticamente.\",\"explicacaoCurta\":\"Produto identificado automaticamente. Identificação automática com alta confiança.\",\"recomendacao\":\"Produto será associado automaticamente.\"},\"decisionResult\":{\"versao\":\"1.0.0\",\"acao\":\"AUTO_ASSOCIAR\",\"nivelCerteza\":\"ALTA\",\"motivos\":[\"gtin_100\",\"gtin_exato_100\"],\"explicacao\":{\"linhas\":[\"Produto identificado automaticamente.\"],\"baseadoEm\":[\"Código de barras.\",\"Fornecedor.\",\"Marca.\",\"Tipo.\",\"Unidade.\"],\"texto\":\"Produto identificado automaticamente.\\nBaseado em:\\nCódigo de barras.\\nFornecedor.\\nMarca.\\nTipo.\\nUnidade.\"},\"produtoSelecionado\":{\"produtoId\":717,\"produto\":{\"id\":717,\"codigo\":\"ABC001\",\"nome\":\"Refrigerante Cola 2L\",\"codigoBarras\":\"7891234567890\",\"unidade\":\"un\",\"ncm\":\"22021000\",\"cest\":\"\",\"ativo\":1,\"marca\":null,\"fornecedor\":\"Distribuidora Teste Ltda\"},\"score\":100,\"confianca\":\"ALTA\",\"motoresQueVotaram\":[\"motor_gtin\",\"motor_associacao_fornecedor\"]},\"alternativas\":[],\"precisaConfirmacao\":false,\"precisaCadastro\":false,\"score\":100,\"estatisticas\":{\"quantidadeRegrasAvaliadas\":1,\"tempo\":1,\"regraVencedora\":\"gtin_100\"},\"historico\":{\"regra\":\"gtin_100\",\"score\":100,\"data\":\"2026-09-08T13:31:13.970Z\",\"versaoRegra\":\"1.0.0\",\"acao\":\"AUTO_ASSOCIAR\",\"operacaoId\":\"miip-1788874273957-wr42ksl4c\"}},\"requestId\":\"miip-1788874273957-wr42ksl4c\",\"timestamp\":\"2026-09-08T13:31:13.972Z\"}",
+            "created_at": "2026-09-08 13:31:13",
+            "updated_at": "2026-09-08 13:31:13",
+            "decided_at": "2026-09-08T13:31:13.972Z"
+          }
+        },
+        {
+          "table": "miip_decisoes",
+          "rowid": 20,
+          "parent": "produtos",
+          "fkid": 2,
+          "registro": {
+            "id": 20,
+            "operacao_id": "miip-1788874273989-0w9gdphwa",
+            "origem": "compra",
+            "item_hash": null,
+            "item_snapshot": "{\"produtoNome\":\"Suco Natural 1L\",\"codigoBarras\":\"7891234567891\",\"codigoFornecedor\":\"ABC002\",\"ncm\":\"20098990\",\"cest\":\"\",\"unidade\":\"CX\",\"marca\":null,\"marcaNome\":null,\"embalagem\":null,\"plu\":null,\"codigoInterno\":null,\"codigo\":null,\"fornecedorCnpj\":\"12345678000199\",\"fornecedorNome\":\"Distribuidora Teste Ltda\",\"precoUnitario\":12,\"produtoIdHint\":null}",
+            "contexto_snapshot": "{\"origem\":\"compra\",\"usuarioId\":null,\"sessaoId\":null,\"operacaoId\":\"miip-1788874273989-0w9gdphwa\",\"timestamp\":\"2026-09-08T13:31:13.989Z\"}",
+            "candidatos_snapshot": "[{\"produtoId\":718,\"snapshot\":{\"id\":718,\"codigo\":\"ABC002\",\"codigo_barras\":\"7891234567891\",\"nome\":\"Suco Natural 1L\",\"unidade\":\"un\",\"ncm\":\"20098990\",\"cest\":\"\",\"categoria_id\":null,\"subcategoria_id\":null,\"fornecedor\":\"Distribuidora Teste Ltda\",\"ativo\":1,\"marcaNome\":\"\",\"atributos\":{},\"metadata\":{\"origem\":\"produtos\",\"carregadoEm\":\"2026-09-08T13:31:13.991Z\"}},\"produto\":{\"id\":718,\"codigo\":\"ABC002\",\"nome\":\"Suco Natural 1L\",\"codigoBarras\":\"7891234567891\",\"unidade\":\"un\",\"ncm\":\"20098990\",\"cest\":\"\",\"ativo\":1,\"marca\":null,\"fornecedor\":\"Distribuidora Teste Ltda\"},\"scoreTotal\":100,\"confianca\":\"ALTA\",\"ranking\":1,\"evidencias\":[{\"motor\":\"motor_gtin\",\"tipo\":\"gtin_exato\",\"descricao\":\"GTIN localizado em produtos.codigo_barras\",\"peso\":100,\"valor\":\"7891234567891\",\"score\":100,\"timestamp\":\"2026-09-08T13:31:13.991Z\"},{\"motor\":\"motor_gtin\",\"tipo\":\"campo_origem\",\"descricao\":\"Campo utilizado na identificação\",\"peso\":0,\"valor\":\"codigo_barras\",\"score\":0,\"timestamp\":\"2026-09-08T13:31:13.991Z\"},{\"motor\":\"motor_gtin\",\"tipo\":\"produto_encontrado\",\"descricao\":\"Produto localizado via ProdutoRepository\",\"peso\":100,\"valor\":718,\"score\":100,\"timestamp\":\"2026-09-08T13:31:13.991Z\"},{\"motor\":\"motor_gtin\",\"tipo\":\"produto_ativo\",\"descricao\":\"Status do produto no cadastro\",\"peso\":100,\"valor\":true,\"score\":100,\"timestamp\":\"2026-09-08T13:31:13.991Z\"},{\"motor\":\"motor_associacao_fornecedor\",\"tipo\":\"associacao_fornecedor\",\"descricao\":\"Associação ativa encontrada em miip_associacoes\",\"peso\":100,\"valor\":2,\"score\":100,\"timestamp\":\"2026-09-08T13:31:13.991Z\"},{\"motor\":\"motor_associacao_fornecedor\",\"tipo\":\"fornecedor_cnpj\",\"descricao\":\"CNPJ do fornecedor utilizado no lookup\",\"peso\":0,\"valor\":\"12345678000199\",\"score\":0,\"timestamp\":\"2026-09-08T13:31:13.991Z\"},{\"motor\":\"motor_associacao_fornecedor\",\"tipo\":\"codigo_fornecedor\",\"descricao\":\"Código cProd do fornecedor utilizado no lookup\",\"peso\":0,\"valor\":\"ABC002\",\"score\":0,\"timestamp\":\"2026-09-08T13:31:13.991Z\"},{\"motor\":\"motor_associacao_fornecedor\",\"tipo\":\"produto_snapshot\",\"descricao\":\"Produto carregado via ProdutoRepository\",\"peso\":100,\"valor\":718,\"score\":100,\"timestamp\":\"2026-09-08T13:31:13.991Z\"},{\"motor\":\"motor_associacao_fornecedor\",\"tipo\":\"origem_dados\",\"descricao\":\"Fontes consultadas pelo motor\",\"peso\":0,\"valor\":\"miip_associacoes+ProdutoRepository\",\"score\":0,\"timestamp\":\"2026-09-08T13:31:13.991Z\"}],\"motoresQueVotaram\":[\"motor_gtin\",\"motor_associacao_fornecedor\"],\"atributosExtraidos\":{\"gtin\":\"7891234567891\",\"origemDados\":\"ProdutoRepository\",\"campoOrigem\":\"codigo_barras\"}}]",
+            "motores_snapshot": "{\"executados\":[\"motor_canonical\",\"motor_attribute_extractor\",\"motor_synonyms\",\"motor_gtin\",\"motor_associacao_fornecedor\",\"motor_mubc\",\"motor_similarity\"],\"semanticProduct\":{\"original\":\"Suco Natural 1L\",\"canonico\":\"SUCO NATURAL 1L\",\"tipo\":\"SUCO\",\"categoria\":null,\"subcategoria\":null,\"marca\":null,\"modelo\":null,\"linha\":null,\"familia\":null,\"tecnologia\":null,\"potencia\":null,\"tensao\":null,\"corrente\":null,\"cor\":null,\"material\":null,\"acabamento\":\"NATURAL\",\"bitola\":null,\"diametro\":null,\"comprimento\":null,\"largura\":null,\"altura\":null,\"espessura\":null,\"peso\":null,\"volume\":\"1L\",\"capacidade\":null,\"unidadeMedida\":\"L\",\"embalagem\":null,\"quantidadeEmbalagem\":null,\"ncm\":null,\"cest\":null,\"gtin\":null,\"tokens\":[\"SUCO\",\"NATURAL\",\"1L\"],\"normalizedTokens\":[{\"textoOriginal\":\"SUCO\",\"textoCanonico\":\"SUCO\",\"tipo\":\"PALAVRA\",\"posicao\":0,\"normalizado\":\"SUCO\"},{\"textoOriginal\":\"NATURAL\",\"textoCanonico\":\"NATURAL\",\"tipo\":\"PALAVRA\",\"posicao\":1,\"normalizado\":\"NATURAL\"},{\"textoOriginal\":\"1L\",\"textoCanonico\":\"1L\",\"tipo\":\"MEDIDA\",\"posicao\":2,\"normalizado\":\"1L\"}],\"synonyms\":[],\"relatedTokens\":[],\"semanticAliases\":[],\"atributosExtras\":[{\"tipo\":\"VOLUME\",\"valor\":\"1L\",\"confianca\":100,\"origem\":\"padrao_medida\",\"normalizado\":\"1L\",\"metadata\":{\"campo\":\"volume\"}},{\"tipo\":\"OUTRO\",\"valor\":\"NATURAL\",\"confianca\":95,\"origem\":\"dicionario\",\"normalizado\":\"NATURAL\",\"metadata\":{\"campo\":\"acabamento\"}},{\"tipo\":\"TIPO\",\"valor\":\"SUCO\",\"confianca\":85,\"origem\":\"inferencia\",\"normalizado\":\"SUCO\",\"metadata\":{\"campo\":\"tipo\"}},{\"tipo\":\"UNIDADE\",\"valor\":\"L\",\"confianca\":90,\"origem\":\"padrao_medida\",\"normalizado\":\"L\",\"metadata\":{\"campo\":\"unidadeMedida\"}}],\"metadata\":{\"versao\":\"1.0.0\",\"origem\":\"canonical\",\"timestamp\":\"2026-09-08T13:31:13.990Z\",\"engine\":\"motor_attribute_extractor\",\"observacoes\":null}},\"similarityResult\":{\"versao\":\"1.0.0\",\"score\":100,\"confidence\":\"ALTA\",\"matchedAttributes\":[\"tipo\",\"unidadeMedida\"],\"differentAttributes\":[],\"votes\":[{\"atributo\":\"tipo\",\"peso\":20,\"score\":100,\"motivo\":\"Tipo: SUCO = SUCO (100%)\"},{\"atributo\":\"unidadeMedida\",\"peso\":5,\"score\":100,\"motivo\":\"Unidade: L = L (100%)\"}],\"explicacao\":{\"linhas\":[\"Tipo compatível.\",\"Unidade compatível.\"],\"texto\":\"Tipo compatível.\\nUnidade compatível.\"},\"estatisticas\":{\"quantidadeAtributosComparados\":2,\"quantidadeIguais\":2,\"quantidadeDiferentes\":0,\"tempo\":0}}}",
+            "produto_sugerido_id": 718,
+            "produto_decidido_id": null,
+            "acao_recomendada": "auto_vincular",
+            "confianca": "ALTA",
+            "score_final": 100,
+            "score_gap": null,
+            "conflito": 0,
+            "feedback_status": "pendente",
+            "usuario_id": null,
+            "duracao_total_ms": 3,
+            "erro": null,
+            "metadados": "{\"versaoRegra\":\"1.0.0\",\"explicacao\":{\"versao\":\"1.0.0\",\"titulo\":\"Produto identificado automaticamente.\",\"resumo\":\"Identificação automática com alta confiança.\",\"nivelCerteza\":\"ALTA\",\"motivosPositivos\":[\"Código de barras igual\",\"Código de barras confirmado\",\"Fornecedor confirmado\",\"Tipo confirmado\",\"Unidade confirmado\",\"Tipo igual\",\"Unidade igual\"],\"motivosNegativos\":[],\"atributosCoincidentes\":[\"tipo\",\"unidadeMedida\"],\"atributosDivergentes\":[],\"explicacaoCompleta\":\"Produto identificado automaticamente.\\n\\nMotivos:\\n✔ Código de barras igual\\n✔ Código de barras confirmado\\n✔ Fornecedor confirmado\\n✔ Tipo confirmado\\n✔ Unidade confirmado\\n✔ Tipo igual\\n✔ Unidade igual\\n\\nRecomendação:\\nProduto será associado automaticamente.\",\"explicacaoCurta\":\"Produto identificado automaticamente. Identificação automática com alta confiança.\",\"recomendacao\":\"Produto será associado automaticamente.\"},\"decisionResult\":{\"versao\":\"1.0.0\",\"acao\":\"AUTO_ASSOCIAR\",\"nivelCerteza\":\"ALTA\",\"motivos\":[\"gtin_100\",\"gtin_exato_100\"],\"explicacao\":{\"linhas\":[\"Produto identificado automaticamente.\"],\"baseadoEm\":[\"Código de barras.\",\"Fornecedor.\",\"Tipo.\",\"Unidade.\"],\"texto\":\"Produto identificado automaticamente.\\nBaseado em:\\nCódigo de barras.\\nFornecedor.\\nTipo.\\nUnidade.\"},\"produtoSelecionado\":{\"produtoId\":718,\"produto\":{\"id\":718,\"codigo\":\"ABC002\",\"nome\":\"Suco Natural 1L\",\"codigoBarras\":\"7891234567891\",\"unidade\":\"un\",\"ncm\":\"20098990\",\"cest\":\"\",\"ativo\":1,\"marca\":null,\"fornecedor\":\"Distribuidora Teste Ltda\"},\"score\":100,\"confianca\":\"ALTA\",\"motoresQueVotaram\":[\"motor_gtin\",\"motor_associacao_fornecedor\"]},\"alternativas\":[],\"precisaConfirmacao\":false,\"precisaCadastro\":false,\"score\":100,\"estatisticas\":{\"quantidadeRegrasAvaliadas\":1,\"tempo\":0,\"regraVencedora\":\"gtin_100\"},\"historico\":{\"regra\":\"gtin_100\",\"score\":100,\"data\":\"2026-09-08T13:31:13.992Z\",\"versaoRegra\":\"1.0.0\",\"acao\":\"AUTO_ASSOCIAR\",\"operacaoId\":\"miip-1788874273989-0w9gdphwa\"}},\"requestId\":\"miip-1788874273989-0w9gdphwa\",\"timestamp\":\"2026-09-08T13:31:13.992Z\"}",
+            "created_at": "2026-09-08 13:31:13",
+            "updated_at": "2026-09-08 13:31:13",
+            "decided_at": "2026-09-08T13:31:13.992Z"
+          }
+        },
+        {
+          "table": "miip_decisoes",
+          "rowid": 21,
+          "parent": "produtos",
+          "fkid": 2,
+          "registro": {
+            "id": 21,
+            "operacao_id": "miip-1788874630588-9kfjow1jw",
+            "origem": "compra",
+            "item_hash": null,
+            "item_snapshot": "{\"produtoNome\":\"Refrigerante Cola 2L\",\"codigoBarras\":\"7891234567890\",\"codigoFornecedor\":\"ABC001\",\"ncm\":\"22021000\",\"cest\":\"\",\"unidade\":\"UN\",\"marca\":null,\"marcaNome\":null,\"embalagem\":null,\"plu\":null,\"codigoInterno\":null,\"codigo\":null,\"fornecedorCnpj\":\"12345678000199\",\"fornecedorNome\":\"Distribuidora Teste Ltda\",\"precoUnitario\":5.5,\"produtoIdHint\":null}",
+            "contexto_snapshot": "{\"origem\":\"compra\",\"usuarioId\":null,\"sessaoId\":null,\"operacaoId\":\"miip-1788874630588-9kfjow1jw\",\"timestamp\":\"2026-09-08T13:37:10.586Z\"}",
+            "candidatos_snapshot": "[{\"produtoId\":717,\"snapshot\":{\"id\":717,\"codigo\":\"ABC001\",\"codigo_barras\":\"7891234567890\",\"nome\":\"Refrigerante Cola 2L\",\"unidade\":\"un\",\"ncm\":\"22021000\",\"cest\":\"\",\"categoria_id\":null,\"subcategoria_id\":null,\"fornecedor\":\"Distribuidora Teste Ltda\",\"ativo\":1,\"marcaNome\":\"\",\"atributos\":{},\"metadata\":{\"origem\":\"produtos\",\"carregadoEm\":\"2026-09-08T13:37:10.600Z\"}},\"produto\":{\"id\":717,\"codigo\":\"ABC001\",\"nome\":\"Refrigerante Cola 2L\",\"codigoBarras\":\"7891234567890\",\"unidade\":\"un\",\"ncm\":\"22021000\",\"cest\":\"\",\"ativo\":1,\"marca\":null,\"fornecedor\":\"Distribuidora Teste Ltda\"},\"scoreTotal\":100,\"confianca\":\"ALTA\",\"ranking\":1,\"evidencias\":[{\"motor\":\"motor_gtin\",\"tipo\":\"gtin_exato\",\"descricao\":\"GTIN localizado em produtos.codigo_barras\",\"peso\":100,\"valor\":\"7891234567890\",\"score\":100,\"timestamp\":\"2026-09-08T13:37:10.600Z\"},{\"motor\":\"motor_gtin\",\"tipo\":\"campo_origem\",\"descricao\":\"Campo utilizado na identificação\",\"peso\":0,\"valor\":\"codigo_barras\",\"score\":0,\"timestamp\":\"2026-09-08T13:37:10.600Z\"},{\"motor\":\"motor_gtin\",\"tipo\":\"produto_encontrado\",\"descricao\":\"Produto localizado via ProdutoRepository\",\"peso\":100,\"valor\":717,\"score\":100,\"timestamp\":\"2026-09-08T13:37:10.600Z\"},{\"motor\":\"motor_gtin\",\"tipo\":\"produto_ativo\",\"descricao\":\"Status do produto no cadastro\",\"peso\":100,\"valor\":true,\"score\":100,\"timestamp\":\"2026-09-08T13:37:10.600Z\"},{\"motor\":\"motor_associacao_fornecedor\",\"tipo\":\"associacao_fornecedor\",\"descricao\":\"Associação ativa encontrada em miip_associacoes\",\"peso\":100,\"valor\":1,\"score\":100,\"timestamp\":\"2026-09-08T13:37:10.601Z\"},{\"motor\":\"motor_associacao_fornecedor\",\"tipo\":\"fornecedor_cnpj\",\"descricao\":\"CNPJ do fornecedor utilizado no lookup\",\"peso\":0,\"valor\":\"12345678000199\",\"score\":0,\"timestamp\":\"2026-09-08T13:37:10.601Z\"},{\"motor\":\"motor_associacao_fornecedor\",\"tipo\":\"codigo_fornecedor\",\"descricao\":\"Código cProd do fornecedor utilizado no lookup\",\"peso\":0,\"valor\":\"ABC001\",\"score\":0,\"timestamp\":\"2026-09-08T13:37:10.601Z\"},{\"motor\":\"motor_associacao_fornecedor\",\"tipo\":\"produto_snapshot\",\"descricao\":\"Produto carregado via ProdutoRepository\",\"peso\":100,\"valor\":717,\"score\":100,\"timestamp\":\"2026-09-08T13:37:10.601Z\"},{\"motor\":\"motor_associacao_fornecedor\",\"tipo\":\"origem_dados\",\"descricao\":\"Fontes consultadas pelo motor\",\"peso\":0,\"valor\":\"miip_associacoes+ProdutoRepository\",\"score\":0,\"timestamp\":\"2026-09-08T13:37:10.601Z\"}],\"motoresQueVotaram\":[\"motor_gtin\",\"motor_associacao_fornecedor\"],\"atributosExtraidos\":{\"gtin\":\"7891234567890\",\"origemDados\":\"ProdutoRepository\",\"campoOrigem\":\"codigo_barras\"}}]",
+            "motores_snapshot": "{\"executados\":[\"motor_canonical\",\"motor_attribute_extractor\",\"motor_synonyms\",\"motor_gtin\",\"motor_associacao_fornecedor\",\"motor_mubc\",\"motor_similarity\"],\"semanticProduct\":{\"original\":\"Refrigerante Cola 2L\",\"canonico\":\"REFRIGERANTE COLA 2L\",\"tipo\":\"REFRIGERANTE\",\"categoria\":null,\"subcategoria\":null,\"marca\":\"COLA\",\"modelo\":null,\"linha\":null,\"familia\":null,\"tecnologia\":null,\"potencia\":null,\"tensao\":null,\"corrente\":null,\"cor\":null,\"material\":null,\"acabamento\":null,\"bitola\":null,\"diametro\":null,\"comprimento\":null,\"largura\":null,\"altura\":null,\"espessura\":null,\"peso\":null,\"volume\":\"2L\",\"capacidade\":null,\"unidadeMedida\":\"L\",\"embalagem\":null,\"quantidadeEmbalagem\":null,\"ncm\":null,\"cest\":null,\"gtin\":null,\"tokens\":[\"REFRIGERANTE\",\"COLA\",\"2L\"],\"normalizedTokens\":[{\"textoOriginal\":\"REFRIGERANTE\",\"textoCanonico\":\"REFRIGERANTE\",\"tipo\":\"PALAVRA\",\"posicao\":0,\"normalizado\":\"REFRIGERANTE\"},{\"textoOriginal\":\"COLA\",\"textoCanonico\":\"COLA\",\"tipo\":\"MARCA\",\"posicao\":1,\"normalizado\":\"COLA\"},{\"textoOriginal\":\"2L\",\"textoCanonico\":\"2L\",\"tipo\":\"MEDIDA\",\"posicao\":2,\"normalizado\":\"2L\"}],\"synonyms\":[{\"original\":\"COLA\",\"sinonimo\":\"ADESIVO\",\"categoria\":\"construction\",\"confianca\":100,\"origem\":\"construction.json\"}],\"relatedTokens\":[\"ADESIVO\"],\"semanticAliases\":[\"COLA=ADESIVO\"],\"atributosExtras\":[{\"tipo\":\"MARCA\",\"valor\":\"COLA\",\"confianca\":100,\"origem\":\"token_tipo\",\"normalizado\":\"COLA\",\"metadata\":{\"campo\":\"marca\"}},{\"tipo\":\"VOLUME\",\"valor\":\"2L\",\"confianca\":100,\"origem\":\"padrao_medida\",\"normalizado\":\"2L\",\"metadata\":{\"campo\":\"volume\"}},{\"tipo\":\"TIPO\",\"valor\":\"REFRIGERANTE\",\"confianca\":85,\"origem\":\"inferencia\",\"normalizado\":\"REFRIGERANTE\",\"metadata\":{\"campo\":\"tipo\"}},{\"tipo\":\"UNIDADE\",\"valor\":\"L\",\"confianca\":90,\"origem\":\"padrao_medida\",\"normalizado\":\"L\",\"metadata\":{\"campo\":\"unidadeMedida\"}}],\"metadata\":{\"versao\":\"1.0.0\",\"origem\":\"canonical\",\"timestamp\":\"2026-09-08T13:37:10.595Z\",\"engine\":\"motor_attribute_extractor\",\"observacoes\":null}},\"similarityResult\":{\"versao\":\"1.0.0\",\"score\":100,\"confidence\":\"ALTA\",\"matchedAttributes\":[\"marca\",\"tipo\",\"unidadeMedida\"],\"differentAttributes\":[],\"votes\":[{\"atributo\":\"marca\",\"peso\":25,\"score\":100,\"motivo\":\"Marca: COLA = COLA (100%)\"},{\"atributo\":\"tipo\",\"peso\":20,\"score\":100,\"motivo\":\"Tipo: REFRIGERANTE = REFRIGERANTE (100%)\"},{\"atributo\":\"unidadeMedida\",\"peso\":5,\"score\":100,\"motivo\":\"Unidade: L = L (100%)\"}],\"explicacao\":{\"linhas\":[\"Marca compatível.\",\"Tipo compatível.\",\"Unidade compatível.\"],\"texto\":\"Marca compatível.\\nTipo compatível.\\nUnidade compatível.\"},\"estatisticas\":{\"quantidadeAtributosComparados\":3,\"quantidadeIguais\":3,\"quantidadeDiferentes\":0,\"tempo\":1}}}",
+            "produto_sugerido_id": 717,
+            "produto_decidido_id": null,
+            "acao_recomendada": "auto_vincular",
+            "confianca": "ALTA",
+            "score_final": 100,
+            "score_gap": null,
+            "conflito": 0,
+            "feedback_status": "pendente",
+            "usuario_id": null,
+            "duracao_total_ms": 16,
+            "erro": null,
+            "metadados": "{\"versaoRegra\":\"1.0.0\",\"explicacao\":{\"versao\":\"1.0.0\",\"titulo\":\"Produto identificado automaticamente.\",\"resumo\":\"Identificação automática com alta confiança.\",\"nivelCerteza\":\"ALTA\",\"motivosPositivos\":[\"Código de barras igual\",\"Código de barras confirmado\",\"Fornecedor confirmado\",\"Marca confirmado\",\"Tipo confirmado\",\"Unidade confirmado\",\"Marca igual\",\"Tipo igual\",\"Unidade igual\"],\"motivosNegativos\":[],\"atributosCoincidentes\":[\"marca\",\"tipo\",\"unidadeMedida\"],\"atributosDivergentes\":[],\"explicacaoCompleta\":\"Produto identificado automaticamente.\\n\\nMotivos:\\n✔ Código de barras igual\\n✔ Código de barras confirmado\\n✔ Fornecedor confirmado\\n✔ Marca confirmado\\n✔ Tipo confirmado\\n✔ Unidade confirmado\\n✔ Marca igual\\n✔ Tipo igual\\n✔ Unidade igual\\n\\nRecomendação:\\nProduto será associado automaticamente.\",\"explicacaoCurta\":\"Produto identificado automaticamente. Identificação automática com alta confiança.\",\"recomendacao\":\"Produto será associado automaticamente.\"},\"decisionResult\":{\"versao\":\"1.0.0\",\"acao\":\"AUTO_ASSOCIAR\",\"nivelCerteza\":\"ALTA\",\"motivos\":[\"gtin_100\",\"gtin_exato_100\"],\"explicacao\":{\"linhas\":[\"Produto identificado automaticamente.\"],\"baseadoEm\":[\"Código de barras.\",\"Fornecedor.\",\"Marca.\",\"Tipo.\",\"Unidade.\"],\"texto\":\"Produto identificado automaticamente.\\nBaseado em:\\nCódigo de barras.\\nFornecedor.\\nMarca.\\nTipo.\\nUnidade.\"},\"produtoSelecionado\":{\"produtoId\":717,\"produto\":{\"id\":717,\"codigo\":\"ABC001\",\"nome\":\"Refrigerante Cola 2L\",\"codigoBarras\":\"7891234567890\",\"unidade\":\"un\",\"ncm\":\"22021000\",\"cest\":\"\",\"ativo\":1,\"marca\":null,\"fornecedor\":\"Distribuidora Teste Ltda\"},\"score\":100,\"confianca\":\"ALTA\",\"motoresQueVotaram\":[\"motor_gtin\",\"motor_associacao_fornecedor\"]},\"alternativas\":[],\"precisaConfirmacao\":false,\"precisaCadastro\":false,\"score\":100,\"estatisticas\":{\"quantidadeRegrasAvaliadas\":1,\"tempo\":1,\"regraVencedora\":\"gtin_100\"},\"historico\":{\"regra\":\"gtin_100\",\"score\":100,\"data\":\"2026-09-08T13:37:10.604Z\",\"versaoRegra\":\"1.0.0\",\"acao\":\"AUTO_ASSOCIAR\",\"operacaoId\":\"miip-1788874630588-9kfjow1jw\"}},\"requestId\":\"miip-1788874630588-9kfjow1jw\",\"timestamp\":\"2026-09-08T13:37:10.606Z\"}",
+            "created_at": "2026-09-08 13:37:10",
+            "updated_at": "2026-09-08 13:37:10",
+            "decided_at": "2026-09-08T13:37:10.606Z"
+          }
+        }
+      ],
+      "miip_associacoes": [
+        {
+          "table": "miip_associacoes",
+          "rowid": 1,
+          "parent": "produtos",
+          "fkid": 1,
+          "registro": {
+            "id": 1,
+            "produto_id": 717,
+            "origem": "auto_motor_gtin",
+            "fornecedor_cnpj": "12345678000199",
+            "fornecedor_nome": "Distribuidora Teste Ltda",
+            "codigo_fornecedor": "ABC001",
+            "codigo_barras": "7891234567890",
+            "nome_item": "Refrigerante Cola 2L",
+            "nome_normalizado": "refrigerante cola 2l",
+            "ncm": "22021000",
+            "unidade": "UN",
+            "score": 100,
+            "confianca": "ALTA",
+            "status": "ativa",
+            "fonte": "aprendizado",
+            "decisao_operacao_id": "miip-1788874200794-y15rbjax0",
+            "confirmado_por_usuario_id": null,
+            "metadados": "{\"servico\":\"MiipLearningService\",\"evento\":{\"requestId\":\"miip-1788874200794-y15rbjax0\",\"produtoId\":717,\"fornecedor\":\"Distribuidora Teste Ltda\",\"cnpj\":\"12345678000199\",\"codigoFornecedor\":\"ABC001\",\"descricaoFornecedor\":\"Refrigerante Cola 2L\",\"usuario\":null,\"origem\":\"auto_motor_gtin\",\"timestamp\":\"2026-09-08T13:30:00.817Z\"},\"confirmacoes\":19,\"ultima_confirmacao\":\"2026-10-18T11:35:15.969Z\",\"ultimo_usuario\":null}",
+            "created_at": "2026-09-08 13:30:00",
+            "updated_at": "2026-10-18 11:35:15",
+            "last_used_at": "2026-10-18T11:35:15.969Z"
+          }
+        },
+        {
+          "table": "miip_associacoes",
+          "rowid": 2,
+          "parent": "produtos",
+          "fkid": 1,
+          "registro": {
+            "id": 2,
+            "produto_id": 718,
+            "origem": "auto_motor_gtin",
+            "fornecedor_cnpj": "12345678000199",
+            "fornecedor_nome": "Distribuidora Teste Ltda",
+            "codigo_fornecedor": "ABC002",
+            "codigo_barras": "7891234567891",
+            "nome_item": "Suco Natural 1L",
+            "nome_normalizado": "suco natural 1l",
+            "ncm": "20098990",
+            "unidade": "CX",
+            "score": 100,
+            "confianca": "ALTA",
+            "status": "ativa",
+            "fonte": "aprendizado",
+            "decisao_operacao_id": "miip-1788874200827-dece2iyte",
+            "confirmado_por_usuario_id": null,
+            "metadados": "{\"servico\":\"MiipLearningService\",\"evento\":{\"requestId\":\"miip-1788874200827-dece2iyte\",\"produtoId\":718,\"fornecedor\":\"Distribuidora Teste Ltda\",\"cnpj\":\"12345678000199\",\"codigoFornecedor\":\"ABC002\",\"descricaoFornecedor\":\"Suco Natural 1L\",\"usuario\":null,\"origem\":\"auto_motor_gtin\",\"timestamp\":\"2026-09-08T13:30:00.833Z\"},\"confirmacoes\":19,\"ultima_confirmacao\":\"2026-10-18T11:35:15.993Z\",\"ultimo_usuario\":null}",
+            "created_at": "2026-09-08 13:30:00",
+            "updated_at": "2026-10-18 11:35:15",
+            "last_used_at": "2026-10-18T11:35:15.993Z"
+          }
+        }
+      ],
+      "estoque_movimentacoes": [
+        {
+          "table": "estoque_movimentacoes",
+          "rowid": 1,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 1,
+            "produto_id": 711,
+            "quantidade_base": 2,
+            "quantidade_fiscal": -2,
+            "quantidade_nao_fiscal": 0,
+            "operacao": "SAIDA",
+            "origem": "CONSIGNACAO",
+            "lote_id": null,
+            "referencia_tipo": "consignacao",
+            "referencia_id": 1,
+            "saldo_antes": 3,
+            "saldo_depois": 1,
+            "usuario_id": null,
+            "motivo": "COM_ENTREGA:1",
+            "motor": "MotorEstoque",
+            "created_at": "2026-09-05 02:34:49"
+          }
+        },
+        {
+          "table": "estoque_movimentacoes",
+          "rowid": 2,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 2,
+            "produto_id": 711,
+            "quantidade_base": 1,
+            "quantidade_fiscal": -1,
+            "quantidade_nao_fiscal": 0,
+            "operacao": "SAIDA",
+            "origem": "CONSIGNACAO",
+            "lote_id": null,
+            "referencia_tipo": "consignacao",
+            "referencia_id": 4,
+            "saldo_antes": 1,
+            "saldo_depois": 0,
+            "usuario_id": null,
+            "motivo": "COM_ENTREGA:4",
+            "motor": "MotorEstoque",
+            "created_at": "2026-09-05 03:28:55"
+          }
+        }
+      ],
+      "auditoria": [
+        {
+          "table": "auditoria",
+          "rowid": 30,
+          "parent": "usuarios",
+          "fkid": 0,
+          "registro": {
+            "id": 30,
+            "usuario_id": 2,
+            "usuario_nome": "rc4320_1786503633724",
+            "modulo": "auth",
+            "acao": "login",
+            "referencia_tipo": "usuario",
+            "referencia_id": 2,
+            "detalhes": "{\"ip\":\"127.0.0.1\",\"username\":\"rc4320_1786503633724\"}",
+            "ip_requisicao": "127.0.0.1",
+            "criado_em": "2026-08-12 03:00:33"
+          }
+        },
+        {
+          "table": "auditoria",
+          "rowid": 357,
+          "parent": "usuarios",
+          "fkid": 0,
+          "registro": {
+            "id": 357,
+            "usuario_id": 3,
+            "usuario_nome": "rc4320_1787078635358",
+            "modulo": "auth",
+            "acao": "login",
+            "referencia_tipo": "usuario",
+            "referencia_id": 3,
+            "detalhes": "{\"ip\":\"127.0.0.1\",\"username\":\"rc4320_1787078635358\"}",
+            "ip_requisicao": "127.0.0.1",
+            "criado_em": "2026-08-18 18:43:55"
+          }
+        },
+        {
+          "table": "auditoria",
+          "rowid": 771,
+          "parent": "usuarios",
+          "fkid": 0,
+          "registro": {
+            "id": 771,
+            "usuario_id": 4,
+            "usuario_nome": "rc4320_1787318357168",
+            "modulo": "auth",
+            "acao": "login",
+            "referencia_tipo": "usuario",
+            "referencia_id": 4,
+            "detalhes": "{\"ip\":\"127.0.0.1\",\"username\":\"rc4320_1787318357168\"}",
+            "ip_requisicao": "127.0.0.1",
+            "criado_em": "2026-08-21 13:19:17"
+          }
+        },
+        {
+          "table": "auditoria",
+          "rowid": 1029,
+          "parent": "usuarios",
+          "fkid": 0,
+          "registro": {
+            "id": 1029,
+            "usuario_id": 5,
+            "usuario_nome": "rc4320_1788874087580",
+            "modulo": "auth",
+            "acao": "login",
+            "referencia_tipo": "usuario",
+            "referencia_id": 5,
+            "detalhes": "{\"ip\":\"127.0.0.1\",\"username\":\"rc4320_1788874087580\"}",
+            "ip_requisicao": "127.0.0.1",
+            "criado_em": "2026-09-08 13:28:07"
+          }
+        },
+        {
+          "table": "auditoria",
+          "rowid": 1030,
+          "parent": "usuarios",
+          "fkid": 0,
+          "registro": {
+            "id": 1030,
+            "usuario_id": 6,
+            "usuario_nome": "rc4320_1788874200238",
+            "modulo": "auth",
+            "acao": "login",
+            "referencia_tipo": "usuario",
+            "referencia_id": 6,
+            "detalhes": "{\"ip\":\"127.0.0.1\",\"username\":\"rc4320_1788874200238\"}",
+            "ip_requisicao": "127.0.0.1",
+            "criado_em": "2026-09-08 13:30:00"
+          }
+        }
+      ],
+      "fichas_tecnicas_itens": [
+        {
+          "table": "fichas_tecnicas_itens",
+          "rowid": 1,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 1,
+            "ficha_id": 1,
+            "produto_insumo_id": 712,
+            "quantidade": 2.5,
+            "unidade": "kg",
+            "ordem": 1,
+            "ativo": 1,
+            "created_at": "2026-08-20 03:57:17",
+            "updated_at": "2026-08-20 03:57:17",
+            "apresentacao_id": null,
+            "apresentacao_nome": null,
+            "unidade_apresentacao": null,
+            "conteudo_apresentacao": 0,
+            "unidade_conteudo": null,
+            "quantidade_estoque": 2.5,
+            "unidade_estoque": "kg"
+          }
+        },
+        {
+          "table": "fichas_tecnicas_itens",
+          "rowid": 2,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 2,
+            "ficha_id": 1,
+            "produto_insumo_id": 713,
+            "quantidade": 2.5,
+            "unidade": "balde",
+            "ordem": 2,
+            "ativo": 1,
+            "created_at": "2026-08-20 03:57:17",
+            "updated_at": "2026-08-20 03:57:17",
+            "apresentacao_id": null,
+            "apresentacao_nome": null,
+            "unidade_apresentacao": null,
+            "conteudo_apresentacao": 0,
+            "unidade_conteudo": null,
+            "quantidade_estoque": 2.5,
+            "unidade_estoque": "balde"
+          }
+        },
+        {
+          "table": "fichas_tecnicas_itens",
+          "rowid": 3,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 3,
+            "ficha_id": 2,
+            "produto_insumo_id": 712,
+            "quantidade": 3,
+            "unidade": "kg",
+            "ordem": 1,
+            "ativo": 1,
+            "created_at": "2026-08-20 04:36:36",
+            "updated_at": "2026-08-20 04:36:36",
+            "apresentacao_id": null,
+            "apresentacao_nome": null,
+            "unidade_apresentacao": null,
+            "conteudo_apresentacao": 0,
+            "unidade_conteudo": null,
+            "quantidade_estoque": 3,
+            "unidade_estoque": "kg"
+          }
+        },
+        {
+          "table": "fichas_tecnicas_itens",
+          "rowid": 4,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 4,
+            "ficha_id": 2,
+            "produto_insumo_id": 713,
+            "quantidade": 4,
+            "unidade": "balde",
+            "ordem": 2,
+            "ativo": 1,
+            "created_at": "2026-08-20 04:36:36",
+            "updated_at": "2026-08-20 04:36:36",
+            "apresentacao_id": null,
+            "apresentacao_nome": null,
+            "unidade_apresentacao": null,
+            "conteudo_apresentacao": 0,
+            "unidade_conteudo": null,
+            "quantidade_estoque": 4,
+            "unidade_estoque": "balde"
+          }
+        },
+        {
+          "table": "fichas_tecnicas_itens",
+          "rowid": 5,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 5,
+            "ficha_id": 3,
+            "produto_insumo_id": 712,
+            "quantidade": 3,
+            "unidade": "kg",
+            "ordem": 1,
+            "ativo": 1,
+            "created_at": "2026-08-20 13:33:19",
+            "updated_at": "2026-08-20 13:33:19",
+            "apresentacao_id": null,
+            "apresentacao_nome": null,
+            "unidade_apresentacao": null,
+            "conteudo_apresentacao": 0,
+            "unidade_conteudo": null,
+            "quantidade_estoque": 3,
+            "unidade_estoque": "kg"
+          }
+        }
+      ],
+      "produto_identificadores": [
+        {
+          "table": "produto_identificadores",
+          "rowid": 1,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 1,
+            "produto_id": 18,
+            "tipo": "INTERNO",
+            "codigo": "13105",
+            "codigo_exibicao": "13105",
+            "escopo": null,
+            "escopo_valor": null,
+            "ativo": 1,
+            "principal": 1,
+            "origem": "dual_write",
+            "metadados": null,
+            "created_at": "2026-08-12 02:57:29",
+            "updated_at": "2026-08-12 02:57:29"
+          }
+        },
+        {
+          "table": "produto_identificadores",
+          "rowid": 2,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 2,
+            "produto_id": 35,
+            "tipo": "INTERNO",
+            "codigo": "9121",
+            "codigo_exibicao": "9121",
+            "escopo": null,
+            "escopo_valor": null,
+            "ativo": 1,
+            "principal": 1,
+            "origem": "dual_write",
+            "metadados": null,
+            "created_at": "2026-08-12 19:29:48",
+            "updated_at": "2026-08-12 19:29:48"
+          }
+        },
+        {
+          "table": "produto_identificadores",
+          "rowid": 3,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 3,
+            "produto_id": 623,
+            "tipo": "INTERNO",
+            "codigo": "1010",
+            "codigo_exibicao": "1010",
+            "escopo": null,
+            "escopo_valor": null,
+            "ativo": 1,
+            "principal": 1,
+            "origem": "dual_write",
+            "metadados": null,
+            "created_at": "2026-08-15 18:22:27",
+            "updated_at": "2026-08-15 18:22:27"
+          }
+        },
+        {
+          "table": "produto_identificadores",
+          "rowid": 4,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 4,
+            "produto_id": 623,
+            "tipo": "EAN13",
+            "codigo": "1010",
+            "codigo_exibicao": "1010",
+            "escopo": null,
+            "escopo_valor": null,
+            "ativo": 1,
+            "principal": 1,
+            "origem": "dual_write",
+            "metadados": null,
+            "created_at": "2026-08-15 18:22:27",
+            "updated_at": "2026-08-15 18:22:27"
+          }
+        },
+        {
+          "table": "produto_identificadores",
+          "rowid": 5,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 5,
+            "produto_id": 688,
+            "tipo": "INTERNO",
+            "codigo": "5986222426",
+            "codigo_exibicao": "5986222426",
+            "escopo": null,
+            "escopo_valor": null,
+            "ativo": 1,
+            "principal": 1,
+            "origem": "dual_write",
+            "metadados": null,
+            "created_at": "2026-08-15 18:28:01",
+            "updated_at": "2026-08-15 18:28:01"
+          }
+        }
+      ],
+      "produto_imagens": [
+        {
+          "table": "produto_imagens",
+          "rowid": 1,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 1,
+            "produto_id": 283,
+            "arquivo": "/storage/produtos/produto_1787077940181_stqu0s.jpg",
+            "ordem": 1,
+            "principal": 1,
+            "ativo": 1,
+            "created_at": "2026-08-18 15:32:25",
+            "updated_at": "2026-08-18 15:32:25"
+          }
+        },
+        {
+          "table": "produto_imagens",
+          "rowid": 2,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 2,
+            "produto_id": 292,
+            "arquivo": "/storage/produtos/produto_1787078082454_f6svg6.jpg",
+            "ordem": 1,
+            "principal": 1,
+            "ativo": 1,
+            "created_at": "2026-08-18 15:34:46",
+            "updated_at": "2026-08-18 15:34:46"
+          }
+        },
+        {
+          "table": "produto_imagens",
+          "rowid": 3,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 3,
+            "produto_id": 293,
+            "arquivo": "/storage/produtos/produto_1787078205906_9gegyb.jpg",
+            "ordem": 1,
+            "principal": 1,
+            "ativo": 1,
+            "created_at": "2026-08-18 15:36:47",
+            "updated_at": "2026-08-18 15:36:47"
+          }
+        },
+        {
+          "table": "produto_imagens",
+          "rowid": 4,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 4,
+            "produto_id": 282,
+            "arquivo": "/storage/produtos/produto_1787078302725_bjr20h.jpg",
+            "ordem": 1,
+            "principal": 1,
+            "ativo": 1,
+            "created_at": "2026-08-18 15:38:24",
+            "updated_at": "2026-08-18 15:38:24"
+          }
+        },
+        {
+          "table": "produto_imagens",
+          "rowid": 5,
+          "parent": "produtos",
+          "fkid": 0,
+          "registro": {
+            "id": 5,
+            "produto_id": 709,
+            "arquivo": "/storage/produtos/produto_1787190807473_9w61rs.jpg",
+            "ordem": 1,
+            "principal": 0,
+            "ativo": 0,
+            "created_at": "2026-08-19 22:53:37",
+            "updated_at": "2026-08-19 23:18:42"
+          }
+        }
+      ]
+    }
+  },
+  "historicos": [
+    {
+      "label": "backup_2026-11-15",
+      "origem": "C:\\ProgramData\\MercantilFiscal\\dados\\backups\\backup_pdv_2026-11-15_11-35-47.db",
+      "copia": "C:\\Users\\cicer\\AppData\\Local\\Temp\\cds-cozinha-fk-diagnostico\\backup_2026-11-15.db",
+      "existe": true,
+      "total_violacoes": 2082,
+      "violacoes_cozinha": 0,
+      "violacoes_outras": 2082,
+      "schema_version": null,
+      "top_tabelas": [
+        {
+          "tabela": "produto_unidades",
+          "total": 712,
+          "porPai": {
+            "produtos": 712
+          }
+        },
+        {
+          "tabela": "produtos_ajustes_estoque",
+          "total": 702,
+          "porPai": {
+            "produtos": 702
+          }
+        },
+        {
+          "tabela": "produto_identificadores",
+          "total": 217,
+          "porPai": {
+            "produtos": 217
+          }
+        },
+        {
+          "tabela": "produtos_preco_historico",
+          "total": 159,
+          "porPai": {
+            "produtos": 159
+          }
+        },
+        {
+          "tabela": "miip_decisoes",
+          "total": 90,
+          "porPai": {
+            "produtos": 90
+          }
+        },
+        {
+          "tabela": "estoque_movimentos",
+          "total": 55,
+          "porPai": {
+            "produtos": 55
+          }
+        },
+        {
+          "tabela": "produto_embalagens",
+          "total": 43,
+          "porPai": {
+            "produtos": 43
+          }
+        },
+        {
+          "tabela": "vendas_itens",
+          "total": 24,
+          "porPai": {
+            "produtos": 24
+          }
+        },
+        {
+          "tabela": "tipo_comercial_canais",
+          "total": 16,
+          "porPai": {
+            "canais_venda": 16
+          }
+        },
+        {
+          "tabela": "auditoria",
+          "total": 15,
+          "porPai": {
+            "usuarios": 15
+          }
+        },
+        {
+          "tabela": "producoes_itens",
+          "total": 10,
+          "porPai": {
+            "produtos": 10
+          }
+        },
+        {
+          "tabela": "produto_imagens",
+          "total": 9,
+          "porPai": {
+            "produtos": 9
+          }
+        },
+        {
+          "tabela": "consignacoes_itens",
+          "total": 7,
+          "porPai": {
+            "produtos": 7
+          }
+        },
+        {
+          "tabela": "fichas_tecnicas_itens",
+          "total": 6,
+          "porPai": {
+            "produtos": 6
+          }
+        },
+        {
+          "tabela": "producoes",
+          "total": 5,
+          "porPai": {
+            "produtos": 5
+          }
+        }
+      ]
+    },
+    {
+      "label": "backup_2026-11-16",
+      "origem": "C:\\ProgramData\\MercantilFiscal\\dados\\backups\\backup_pdv_2026-11-16_07-31-15.db",
+      "copia": "C:\\Users\\cicer\\AppData\\Local\\Temp\\cds-cozinha-fk-diagnostico\\backup_2026-11-16.db",
+      "existe": true,
+      "total_violacoes": 2082,
+      "violacoes_cozinha": 0,
+      "violacoes_outras": 2082,
+      "schema_version": null,
+      "top_tabelas": [
+        {
+          "tabela": "produto_unidades",
+          "total": 712,
+          "porPai": {
+            "produtos": 712
+          }
+        },
+        {
+          "tabela": "produtos_ajustes_estoque",
+          "total": 702,
+          "porPai": {
+            "produtos": 702
+          }
+        },
+        {
+          "tabela": "produto_identificadores",
+          "total": 217,
+          "porPai": {
+            "produtos": 217
+          }
+        },
+        {
+          "tabela": "produtos_preco_historico",
+          "total": 159,
+          "porPai": {
+            "produtos": 159
+          }
+        },
+        {
+          "tabela": "miip_decisoes",
+          "total": 90,
+          "porPai": {
+            "produtos": 90
+          }
+        },
+        {
+          "tabela": "estoque_movimentos",
+          "total": 55,
+          "porPai": {
+            "produtos": 55
+          }
+        },
+        {
+          "tabela": "produto_embalagens",
+          "total": 43,
+          "porPai": {
+            "produtos": 43
+          }
+        },
+        {
+          "tabela": "vendas_itens",
+          "total": 24,
+          "porPai": {
+            "produtos": 24
+          }
+        },
+        {
+          "tabela": "tipo_comercial_canais",
+          "total": 16,
+          "porPai": {
+            "canais_venda": 16
+          }
+        },
+        {
+          "tabela": "auditoria",
+          "total": 15,
+          "porPai": {
+            "usuarios": 15
+          }
+        },
+        {
+          "tabela": "producoes_itens",
+          "total": 10,
+          "porPai": {
+            "produtos": 10
+          }
+        },
+        {
+          "tabela": "produto_imagens",
+          "total": 9,
+          "porPai": {
+            "produtos": 9
+          }
+        },
+        {
+          "tabela": "consignacoes_itens",
+          "total": 7,
+          "porPai": {
+            "produtos": 7
+          }
+        },
+        {
+          "tabela": "fichas_tecnicas_itens",
+          "total": 6,
+          "porPai": {
+            "produtos": 6
+          }
+        },
+        {
+          "tabela": "producoes",
+          "total": 5,
+          "porPai": {
+            "produtos": 5
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1563 @@
+# DIFF — Sprint 06 E-03 auditoria complementar
+# Gerado: 2026-11-17T18:17:59.241Z
+
+diff --git a/backend/config/secrets.js b/backend/config/secrets.js
+index c21bbaf..00701ed 100644
+--- a/backend/config/secrets.js
++++ b/backend/config/secrets.js
+@@ -22,11 +22,17 @@ function getJwtSecret() {
+   const secret = process.env.JWT_SECRET;
+   if (secret) return secret;
+ 
++  // Produção: nunca cair silenciosamente na chave de desenvolvimento.
+   if (process.env.NODE_ENV === 'production') {
+-    console.error('[SEGURANÇA] JWT_SECRET não definido em produção. Defina a variável de ambiente.');
+-  } else {
+-    warnOnce(jwtWarnFlag, '[SEGURANÇA] JWT_SECRET não definido — usando chave de desenvolvimento.');
++    const err = new Error(
++      '[SEGURANÇA] JWT_SECRET obrigatório em produção. Inicialização/autenticação bloqueada.'
++    );
++    err.codigo = 'JWT_SECRET_AUSENTE_PRODUCAO';
++    throw err;
+   }
++
++  // Desenvolvimento / isolamento: fallback explícito (aviso único; valor não é logado).
++  warnOnce(jwtWarnFlag, '[SEGURANÇA] JWT_SECRET não definido — usando chave de desenvolvimento.');
+   return DEV_JWT_FALLBACK;
+ }
+ 
+
+diff --git a/backend/middleware/auth.js b/backend/middleware/auth.js
+index 8cc7187..e79450c 100644
+--- a/backend/middleware/auth.js
++++ b/backend/middleware/auth.js
+@@ -8,6 +8,8 @@ const jwt = require('jsonwebtoken');
+ const db = require('../database');
+ const { getJwtSecret } = require('../config/secrets');
+ 
++// Origem única: backend/config/secrets.getJwtSecret().
++// Em produção sem JWT_SECRET, getJwtSecret() lança (impede boot/auth silencioso com chave de dev).
+ const JWT_SECRET = getJwtSecret();
+ 
+ const PERMISSOES_DISPONIVEIS = [
+@@ -74,7 +76,17 @@ function verificarToken(req, res, next) {
+     return res.status(401).json({ error: 'Acesso negado', code: 'SESSAO_INVALIDA' });
+   }
+ 
+-  jwt.verify(token, JWT_SECRET, (err, user) => {
++  let secret;
++  try {
++    secret = getJwtSecret();
++  } catch (err) {
++    return res.status(503).json({
++      error: 'Autenticação indisponível: JWT_SECRET não configurado.',
++      code: err.codigo || 'JWT_SECRET_AUSENTE_PRODUCAO'
++    });
++  }
++
++  jwt.verify(token, secret, (err, user) => {
+     if (err) {
+       if (!api && req.accepts('html')) {
+         const next = encodeURIComponent(req.originalUrl || '/');
+
+diff --git a/backend/services/cozinha/cozinhaImpressaoSessaoElectron.js b/backend/services/cozinha/cozinhaImpressaoSessaoElectron.js
+index e69de29..481a5be 100644
+--- a/backend/services/cozinha/cozinhaImpressaoSessaoElectron.js
++++ b/backend/services/cozinha/cozinhaImpressaoSessaoElectron.js
+@@ -0,0 +1,182 @@
++/**
++ * Sessão operacional de cozinha no processo Electron main — E-03.
++ * Fonte de verdade: JWT verificado (getJwtSecret) + unidade persistida (empresa_id).
++ * Renderer não escolhe livremente empresa/unidade.
++ */
++'use strict';
++
++const jwt = require('jsonwebtoken');
++const { getJwtSecret } = require('../../config/secrets');
++const { erroImpressao, parsePositiveInteger } = require('./cozinhaImpressaoContratos');
++
++let _sessao = null;
++
++function dbGet(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
++  });
++}
++
++function obterSessaoAutenticadaCozinha() {
++  return _sessao ? { ..._sessao } : null;
++}
++
++function limparSessaoAutenticadaCozinha() {
++  _sessao = null;
++}
++
++/**
++ * Estabelece sessão a partir de JWT (processo main).
++ * empresaId vem do cadastro da unidade — não do renderer.
++ * Em falha de autenticação, a sessão anterior é invalidada.
++ */
++async function estabelecerSessaoApartirDoToken({ token, db }) {
++  if (!db) {
++    limparSessaoAutenticadaCozinha();
++    throw erroImpressao('Banco indisponível para sessão cozinha.', 500, 'DB_INDISPONIVEL');
++  }
++  const raw = String(token || '').trim();
++  if (!raw) {
++    limparSessaoAutenticadaCozinha();
++    throw erroImpressao('Token de sessão obrigatório.', 401, 'IMPRESSAO_SESSAO_TOKEN_OBRIGATORIO');
++  }
++
++  let payload;
++  try {
++    // Lê o segredo no momento da verificação (não cachear valor de boot).
++    payload = jwt.verify(raw, getJwtSecret());
++  } catch (err) {
++    limparSessaoAutenticadaCozinha();
++    if (err && err.name === 'TokenExpiredError') {
++      throw erroImpressao(
++        'Token de sessão expirado.',
++        401,
++        'IMPRESSAO_SESSAO_TOKEN_EXPIRADO'
++      );
++    }
++    throw erroImpressao(
++      'Token de sessão inválido.',
++      401,
++      'IMPRESSAO_SESSAO_TOKEN_INVALIDO'
++    );
++  }
++
++  const unidadeId = parsePositiveInteger(payload.unidade_cozinha_id);
++  if (!unidadeId) {
++    limparSessaoAutenticadaCozinha();
++    throw erroImpressao(
++      'Sessão sem unidade de cozinha autenticada.',
++      403,
++      'IMPRESSAO_SESSAO_SEM_UNIDADE'
++    );
++  }
++
++  const unidade = await dbGet(db, `
++    SELECT id, empresa_id, ativo
++    FROM cozinha_unidades
++    WHERE id = ?
++  `, [unidadeId]);
++
++  if (!unidade) {
++    limparSessaoAutenticadaCozinha();
++    throw erroImpressao('Unidade da sessão inexistente.', 403, 'IMPRESSAO_SESSAO_UNIDADE_INEXISTENTE');
++  }
++  if (Number(unidade.ativo) !== 1) {
++    limparSessaoAutenticadaCozinha();
++    throw erroImpressao('Unidade da sessão inativa.', 403, 'IMPRESSAO_SESSAO_UNIDADE_INATIVA');
++  }
++
++  const empresaId = parsePositiveInteger(unidade.empresa_id);
++  if (!empresaId) {
++    limparSessaoAutenticadaCozinha();
++    throw erroImpressao('Empresa da unidade inválida.', 403, 'IMPRESSAO_SESSAO_EMPRESA_INVALIDA');
++  }
++
++  // Se o JWT trouxer empresa_id, deve coincidir com a unidade (isolamento).
++  const empresaClaim = parsePositiveInteger(payload.empresa_id);
++  if (empresaClaim != null && empresaClaim !== empresaId) {
++    limparSessaoAutenticadaCozinha();
++    throw erroImpressao(
++      'empresa_id do token divergente da unidade autenticada.',
++      403,
++      'IMPRESSAO_SESSAO_EMPRESA_DIVERGENTE',
++      { detalhes: { token_empresa_id: empresaClaim, unidade_empresa_id: empresaId } }
++    );
++  }
++
++  _sessao = {
++    empresaId,
++    unidadeId,
++    usuarioId: parsePositiveInteger(payload.id != null ? payload.id : payload.usuario_id),
++    estabelecido_em: new Date().toISOString()
++  };
++  return { ..._sessao };
++}
++
++/**
++ * Valida IDs opcionais do renderer contra a sessão autenticada no main.
++ * Se IDs forem enviados e divergirem → rejeita.
++ * Retorna sempre o contexto canônico da sessão.
++ */
++function validarContextoContraSessaoAutenticada(raw = {}, sessao = null) {
++  const s = sessao || _sessao;
++  if (!s || !s.empresaId || !s.unidadeId) {
++    throw erroImpressao(
++      'Sessão autenticada de cozinha ausente no processo principal.',
++      401,
++      'IMPRESSAO_SESSAO_AUSENTE'
++    );
++  }
++
++  const empRaw = raw.empresaId != null ? raw.empresaId : raw.empresa_id;
++  const unRaw = raw.unidadeId != null ? raw.unidadeId
++    : (raw.unidade_id != null ? raw.unidade_id : raw.unidade_cozinha_id);
++
++  if (empRaw != null && empRaw !== '' && parsePositiveInteger(empRaw) !== Number(s.empresaId)) {
++    throw erroImpressao(
++      'empresa_id divergente da sessão autenticada.',
++      403,
++      'IMPRESSAO_CONTEXTO_DIVERGENTE_SESSAO',
++      { detalhes: { sessao_empresa_id: s.empresaId, recebido: empRaw } }
++    );
++  }
++  if (unRaw != null && unRaw !== '' && parsePositiveInteger(unRaw) !== Number(s.unidadeId)) {
++    throw erroImpressao(
++      'unidade_id divergente da sessão autenticada.',
++      403,
++      'IMPRESSAO_CONTEXTO_DIVERGENTE_SESSAO',
++      { detalhes: { sessao_unidade_id: s.unidadeId, recebido: unRaw } }
++    );
++  }
++
++  return {
++    empresaId: Number(s.empresaId),
++    unidadeId: Number(s.unidadeId)
++  };
++}
++
++/** Somente testes auxiliares — não substitui os testes JWT reais. */
++function _definirSessaoAutenticadaParaTeste(sessao) {
++  if (!sessao) {
++    _sessao = null;
++    return null;
++  }
++  _sessao = {
++    empresaId: parsePositiveInteger(sessao.empresaId != null ? sessao.empresaId : sessao.empresa_id),
++    unidadeId: parsePositiveInteger(
++      sessao.unidadeId != null ? sessao.unidadeId
++        : (sessao.unidade_id != null ? sessao.unidade_id : sessao.unidade_cozinha_id)
++    ),
++    usuarioId: parsePositiveInteger(sessao.usuarioId != null ? sessao.usuarioId : sessao.usuario_id),
++    estabelecido_em: new Date().toISOString()
++  };
++  return { ..._sessao };
++}
++
++module.exports = {
++  obterSessaoAutenticadaCozinha,
++  limparSessaoAutenticadaCozinha,
++  estabelecerSessaoApartirDoToken,
++  validarContextoContraSessaoAutenticada,
++  _definirSessaoAutenticadaParaTeste
++};
+
+diff --git a/backend/services/cozinha/CozinhaImpressaoElectronCicloVida.js b/backend/services/cozinha/CozinhaImpressaoElectronCicloVida.js
+index e69de29..f8866ed 100644
+--- a/backend/services/cozinha/CozinhaImpressaoElectronCicloVida.js
++++ b/backend/services/cozinha/CozinhaImpressaoElectronCicloVida.js
+@@ -0,0 +1,467 @@
++/**
++ * Ciclo de vida Electron ↔ Worker de impressão de cozinha — Sprint 06 E-03.
++ *
++ * - instalação única + agendador único
++ * - contexto só após DB + sessão autenticada
++ * - troca de contexto segura (aguarda tick em curso; não cria outro timer/Worker)
++ * - encerramento no will-quit
++ */
++'use strict';
++
++const {
++  instalarWorkerImpressaoCozinhaNoElectron,
++  encerrarWorkerImpressaoCozinhaNoElectron,
++  obterWorkerImpressaoCozinhaInstalado,
++  contarInstalacoesWorkerImpressao
++} = require('./CozinhaImpressaoWorkerBootstrap');
++const {
++  obterSessaoAutenticadaCozinha,
++  validarContextoContraSessaoAutenticada,
++  limparSessaoAutenticadaCozinha
++} = require('./cozinhaImpressaoSessaoElectron');
++
++const INTERVALO_TICK_PADRAO_MS = 5000;
++const POLL_CONTEXTO_MS = 500;
++
++/** Singleton por processo Electron. */
++let _integracao = null;
++
++function parsePositiveInteger(v) {
++  const n = Number(v);
++  return Number.isInteger(n) && n > 0 ? n : null;
++}
++
++/**
++ * @param {object} deps
++ * @param {function(): object|null} deps.obterMainWindow
++ * @param {function(): object|null} deps.obterDb
++ * @param {function(): object|null} [deps.obterSessaoAutenticada]
++ * @param {boolean} [deps.exigirSessaoAutenticada] — default true
++ * @param {object} [deps.adapter]
++ * @param {boolean} [deps.permitirAdapterCompat]
++ * @param {number} [deps.intervaloTickMs]
++ */
++function criarIntegracaoCicloVidaCozinhaImpressao(deps = {}) {
++  if (typeof deps.obterMainWindow !== 'function') {
++    throw new Error('obterMainWindow obrigatório');
++  }
++  if (typeof deps.obterDb !== 'function') {
++    throw new Error('obterDb obrigatório');
++  }
++
++  const exigirSessao = deps.exigirSessaoAutenticada !== false;
++  const obterSessao = typeof deps.obterSessaoAutenticada === 'function'
++    ? deps.obterSessaoAutenticada
++    : obterSessaoAutenticadaCozinha;
++
++  let _contextoAplicado = null; // { empresaId, unidadeId, geracao }
++  let _geracaoContexto = 0;
++  let _timerTick = null;
++  let _timerPollContexto = null;
++  let _tickEmCurso = false;
++  let _tickGeracao = null;
++  let _encerrado = false;
++  let _agendadorAtivo = false;
++  let _instaladoViaReady = false;
++  let _ultimoErroTick = null;
++  let _ticksExecutados = 0;
++  let _ticksDescartadosObsoletos = 0;
++  let _esperaFimTick = null;
++
++  function sinalizarFimTick() {
++    if (_esperaFimTick) {
++      const r = _esperaFimTick;
++      _esperaFimTick = null;
++      r();
++    }
++  }
++
++  function aguardarTickEmCurso() {
++    if (!_tickEmCurso) return Promise.resolve();
++    if (!_esperaFimTick) {
++      let resolve;
++      const p = new Promise((r) => { resolve = r; });
++      _esperaFimTick = resolve;
++      return p;
++    }
++    return new Promise((resolve) => {
++      const prev = _esperaFimTick;
++      _esperaFimTick = () => {
++        prev();
++        resolve();
++      };
++    });
++  }
++
++  function lerContextoAplicado() {
++    return _contextoAplicado
++      ? { empresaId: _contextoAplicado.empresaId, unidadeId: _contextoAplicado.unidadeId }
++      : { empresaId: null, unidadeId: null };
++  }
++
++  function contextoPronto() {
++    const db = deps.obterDb();
++    const { empresaId, unidadeId } = lerContextoAplicado();
++    return !!(db && empresaId && unidadeId);
++  }
++
++  function aplicarContextoNoWorker(empresaId, unidadeId) {
++    const db = deps.obterDb();
++    const worker = obterWorkerImpressaoCozinhaInstalado();
++    if (!worker || !db) return false;
++    worker.atualizarContexto({ db, empresaId, unidadeId });
++    return true;
++  }
++
++  function aoReadyToShow() {
++    if (_encerrado) return { ok: false, motivo: 'encerrado' };
++    const worker = instalarWorkerImpressaoCozinhaNoElectron({
++      modo: 'ELECTRON',
++      autorizarSpoolerReal: false,
++      obterWebContents: () => {
++        const w = deps.obterMainWindow();
++        return w && !w.isDestroyed && !w.isDestroyed() ? w.webContents : null;
++      },
++      adapter: deps.adapter,
++      permitirAdapterCompat: deps.permitirAdapterCompat === true,
++      workerId: deps.workerId || 'electron-cozinha-worker'
++    });
++    _instaladoViaReady = true;
++    iniciarPollContexto();
++    tentarAtivarAgendador();
++    return {
++      ok: true,
++      instalado: true,
++      instalacoes: contarInstalacoesWorkerImpressao(),
++      worker: worker && worker.descrever ? worker.descrever() : null,
++      agendador_ativo: _agendadorAtivo
++    };
++  }
++
++  /**
++   * Notifica/troca contexto. Valida contra sessão autenticada no main.
++   * Se houver tick em curso, aguarda o fim antes de aplicar o novo contexto.
++   * Não cria segundo Worker nem segundo timer.
++   */
++  async function notificarContextoOperacional(raw = {}) {
++    if (_encerrado) {
++      return { ok: false, codigo: 'IMPRESSAO_WORKER_ENCERRADO' };
++    }
++
++    let canonico;
++    try {
++      if (exigirSessao) {
++        const sessao = obterSessao();
++        canonico = validarContextoContraSessaoAutenticada(raw || {}, sessao);
++      } else {
++        // Apenas testes unitários explícitos com exigirSessaoAutenticada:false
++        const empresaId = parsePositiveInteger(raw.empresaId != null ? raw.empresaId : raw.empresa_id);
++        const unidadeId = parsePositiveInteger(
++          raw.unidadeId != null ? raw.unidadeId
++            : (raw.unidade_id != null ? raw.unidade_id : raw.unidade_cozinha_id)
++        );
++        if (!empresaId || !unidadeId) {
++          return { ok: false, codigo: 'IMPRESSAO_CONTEXTO_INVALIDO' };
++        }
++        canonico = { empresaId, unidadeId };
++      }
++    } catch (err) {
++      return {
++        ok: false,
++        codigo: err.codigo || 'IMPRESSAO_CONTEXTO_REJEITADO',
++        erro: err.message,
++        detalhes: err.detalhes || null
++      };
++    }
++
++    const anterior = lerContextoAplicado();
++    const mudou = !anterior.empresaId
++      || Number(anterior.empresaId) !== Number(canonico.empresaId)
++      || Number(anterior.unidadeId) !== Number(canonico.unidadeId);
++
++    // Aguarda tick em andamento — não aplica troca no meio do processamento.
++    if (_tickEmCurso) {
++      await aguardarTickEmCurso();
++    }
++
++    // Se o Worker encerrou enquanto aguardava, não aplicar contexto pendente.
++    if (_encerrado) {
++      return { ok: false, codigo: 'IMPRESSAO_WORKER_ENCERRADO' };
++    }
++
++    _geracaoContexto += 1;
++    const geracao = _geracaoContexto;
++    _contextoAplicado = {
++      empresaId: canonico.empresaId,
++      unidadeId: canonico.unidadeId,
++      geracao
++    };
++
++    if (_instaladoViaReady || obterWorkerImpressaoCozinhaInstalado()) {
++      try {
++        aplicarContextoNoWorker(canonico.empresaId, canonico.unidadeId);
++      } catch (err) {
++        return {
++          ok: false,
++          codigo: err.codigo || 'IMPRESSAO_CONTEXTO_APLICAR_FALHA',
++          erro: err.message
++        };
++      }
++    }
++
++    // Agendador: ativa se necessário; NÃO cria segundo timer se já ativo.
++    if (!_agendadorAtivo) {
++      tentarAtivarAgendador();
++    }
++
++    return {
++      ok: true,
++      trocou: mudou,
++      empresaId: canonico.empresaId,
++      unidadeId: canonico.unidadeId,
++      geracao,
++      agendador_ativo: _agendadorAtivo,
++      instalacoes: contarInstalacoesWorkerImpressao(),
++      tem_timer_unico: !!_timerTick && _agendadorAtivo
++    };
++  }
++
++  function iniciarPollContexto() {
++    if (_timerPollContexto || _encerrado || _agendadorAtivo) return;
++    _timerPollContexto = setInterval(() => {
++      if (_encerrado) {
++        pararPollContexto();
++        return;
++      }
++      if (tentarAtivarAgendador()) {
++        pararPollContexto();
++      }
++    }, POLL_CONTEXTO_MS);
++  }
++
++  function pararPollContexto() {
++    if (_timerPollContexto) {
++      clearInterval(_timerPollContexto);
++      _timerPollContexto = null;
++    }
++  }
++
++  function tentarAtivarAgendador() {
++    if (_encerrado) return false;
++    if (_agendadorAtivo) {
++      // Já ativo: apenas garante contexto no worker (troca já aplicada em notificar).
++      if (_contextoAplicado) {
++        try {
++          aplicarContextoNoWorker(_contextoAplicado.empresaId, _contextoAplicado.unidadeId);
++        } catch (_e) { /* ignore */ }
++      }
++      return true;
++    }
++    if (!_instaladoViaReady && !obterWorkerImpressaoCozinhaInstalado()) {
++      return false;
++    }
++    const db = deps.obterDb();
++    if (!db || !_contextoAplicado) return false;
++
++    const worker = obterWorkerImpressaoCozinhaInstalado();
++    if (!worker) return false;
++
++    try {
++      aplicarContextoNoWorker(_contextoAplicado.empresaId, _contextoAplicado.unidadeId);
++    } catch (err) {
++      console.warn('[COZINHA] atualizarContexto:', err && err.message ? err.message : err);
++      return false;
++    }
++
++    const intervalo = Number(deps.intervaloTickMs) > 0
++      ? Number(deps.intervaloTickMs)
++      : (Number(process.env.CDS_COZINHA_WORKER_TICK_MS) > 0
++        ? Number(process.env.CDS_COZINHA_WORKER_TICK_MS)
++        : INTERVALO_TICK_PADRAO_MS);
++
++    _timerTick = setInterval(() => {
++      void executarTickSeguro();
++    }, intervalo);
++    _agendadorAtivo = true;
++    pararPollContexto();
++    setImmediate(() => { void executarTickSeguro(); });
++    return true;
++  }
++
++  async function executarTickSeguro() {
++    if (_encerrado || _tickEmCurso) return { skipped: true };
++    const worker = obterWorkerImpressaoCozinhaInstalado();
++    if (!worker || !worker.estaAtivo()) return { skipped: true };
++    if (!_contextoAplicado) return { skipped: true, motivo: 'sem_contexto' };
++
++    const geracaoInicio = _geracaoContexto;
++    const ctxSnap = {
++      empresaId: _contextoAplicado.empresaId,
++      unidadeId: _contextoAplicado.unidadeId
++    };
++
++    _tickEmCurso = true;
++    _tickGeracao = geracaoInicio;
++    try {
++      // Tick com contexto explícito do snapshot (não usa IDs inventados).
++      const out = await worker.tick({
++        db: deps.obterDb(),
++        empresaId: ctxSnap.empresaId,
++        unidadeId: ctxSnap.unidadeId
++      });
++
++      if (geracaoInicio !== _geracaoContexto) {
++        // Contexto trocou após o tick ter começado — resultado não conta como ciclo do novo contexto.
++        _ticksDescartadosObsoletos += 1;
++        return {
++          ok: true,
++          out,
++          contexto_obsoleto: true,
++          geracao_inicio: geracaoInicio,
++          geracao_atual: _geracaoContexto
++        };
++      }
++
++      _ticksExecutados += 1;
++      _ultimoErroTick = null;
++      return {
++        ok: true,
++        out,
++        contexto: ctxSnap,
++        geracao: geracaoInicio
++      };
++    } catch (err) {
++      _ultimoErroTick = err && err.message ? err.message : String(err);
++      console.warn('[COZINHA] tick erro (processo Electron segue):', _ultimoErroTick);
++      return { ok: false, erro: _ultimoErroTick };
++    } finally {
++      _tickEmCurso = false;
++      _tickGeracao = null;
++      sinalizarFimTick();
++    }
++  }
++
++  function aoWillQuit() {
++    _encerrado = true;
++    pararPollContexto();
++    if (_timerTick) {
++      clearInterval(_timerTick);
++      _timerTick = null;
++    }
++    _agendadorAtivo = false;
++    encerrarWorkerImpressaoCozinhaNoElectron();
++    limparSessaoAutenticadaCozinha();
++    sinalizarFimTick();
++    return {
++      encerrado: true,
++      ticks_executados: _ticksExecutados,
++      instalacoes: contarInstalacoesWorkerImpressao()
++    };
++  }
++
++  function descrever() {
++    const worker = obterWorkerImpressaoCozinhaInstalado();
++    const sessao = obterSessao();
++    return {
++      instalado_via_ready: _instaladoViaReady,
++      agendador_ativo: _agendadorAtivo,
++      tick_em_curso: _tickEmCurso,
++      tick_geracao: _tickGeracao,
++      encerrado: _encerrado,
++      ticks_executados: _ticksExecutados,
++      ticks_descartados_obsoletos: _ticksDescartadosObsoletos,
++      geracao_contexto: _geracaoContexto,
++      ultimo_erro_tick: _ultimoErroTick,
++      contexto: {
++        empresaId: _contextoAplicado ? _contextoAplicado.empresaId : null,
++        unidadeId: _contextoAplicado ? _contextoAplicado.unidadeId : null,
++        tem_db: !!deps.obterDb()
++      },
++      sessao_autenticada: sessao
++        ? { empresaId: sessao.empresaId, unidadeId: sessao.unidadeId }
++        : null,
++      instalacoes: contarInstalacoesWorkerImpressao(),
++      worker: worker && worker.descrever ? worker.descrever() : null
++    };
++  }
++
++  return {
++    aoReadyToShow,
++    aoWillQuit,
++    notificarContextoOperacional,
++    tentarAtivarAgendador,
++    executarTickSeguro,
++    contextoPronto,
++    descrever,
++    aguardarTickEmCurso,
++    _estadoInterno() {
++      return {
++        agendadorAtivo: _agendadorAtivo,
++        tickEmCurso: _tickEmCurso,
++        temTimerTick: !!_timerTick,
++        temPoll: !!_timerPollContexto,
++        ticksExecutados: _ticksExecutados,
++        ticksDescartadosObsoletos: _ticksDescartadosObsoletos,
++        geracaoContexto: _geracaoContexto,
++        encerrado: _encerrado,
++        contextoAplicado: _contextoAplicado
++      };
++    }
++  };
++}
++
++function anexarAoReadyToShowMainWindow(mainWindow, integracao, opts = {}) {
++  if (!mainWindow || typeof mainWindow.once !== 'function') {
++    throw new Error('mainWindow inválida para anexar ready-to-show');
++  }
++  if (!integracao || typeof integracao.aoReadyToShow !== 'function') {
++    throw new Error('integracao.aoReadyToShow obrigatório');
++  }
++  mainWindow.once('ready-to-show', () => {
++    try {
++      if (opts.show !== false && mainWindow && typeof mainWindow.isDestroyed === 'function'
++        && !mainWindow.isDestroyed()) {
++        if (typeof mainWindow.show === 'function') mainWindow.show();
++        if (typeof mainWindow.focus === 'function') mainWindow.focus();
++      }
++    } catch (_e) { /* ignore */ }
++    try {
++      integracao.aoReadyToShow();
++    } catch (err) {
++      console.warn(
++        '[COZINHA] Falha aoReadyToShow:',
++        err && err.message ? err.message : err
++      );
++    }
++  });
++  return mainWindow;
++}
++
++function obterOuCriarIntegracaoPadrao(deps) {
++  if (_integracao && !_integracao.descrever().encerrado) {
++    return _integracao;
++  }
++  _integracao = criarIntegracaoCicloVidaCozinhaImpressao(deps);
++  return _integracao;
++}
++
++function obterIntegracaoAtiva() {
++  return _integracao;
++}
++
++function _resetIntegracaoCicloVidaParaTeste() {
++  if (_integracao && typeof _integracao.aoWillQuit === 'function') {
++    try { _integracao.aoWillQuit(); } catch (_e) { /* ignore */ }
++  }
++  _integracao = null;
++  limparSessaoAutenticadaCozinha();
++}
++
++module.exports = {
++  INTERVALO_TICK_PADRAO_MS,
++  criarIntegracaoCicloVidaCozinhaImpressao,
++  anexarAoReadyToShowMainWindow,
++  obterOuCriarIntegracaoPadrao,
++  obterIntegracaoAtiva,
++  _resetIntegracaoCicloVidaParaTeste
++};
+
+diff --git a/electron-cozinha-impressao.js b/electron-cozinha-impressao.js
+index e69de29..0717e61 100644
+--- a/electron-cozinha-impressao.js
++++ b/electron-cozinha-impressao.js
+@@ -0,0 +1,243 @@
++/**
++ * IPC Electron — impressão de COZINHA (Sprint 06 Bloco E · correção auditoria).
++ *
++ * E-02: renderer NÃO pode disparar print genérico (texto/device arbitrários).
++ * Print físico só via Worker + adapter de produção (in-process) ou
++ * referência canônica a job (imprimir-job), com remetente validado.
++ */
++'use strict';
++
++const { BrowserWindow } = require('electron');
++const {
++  IPC_CANAIS,
++  validarRemetenteIpc,
++  rejeitarImpressaoGenericaPorIpc,
++  sanitizarReferenciaJobImpressao,
++  isImpressaoFisicaAutorizada
++} = require('./backend/services/cozinha/cozinhaImpressaoElectronBridge');
++
++/** Tokens de Worker confiáveis registrados pelo main (E-02/E-03). */
++const _tokensWorkerConfiaveis = new Set();
++
++function registrarTokenWorkerConfiavel(token) {
++  if (token) _tokensWorkerConfiaveis.add(String(token));
++}
++
++function limparTokensWorkerConfiaveis() {
++  _tokensWorkerConfiaveis.clear();
++}
++
++function criarAdapterListagem(event) {
++  return {
++    async getPrinters() {
++      const win = BrowserWindow.fromWebContents(event.sender);
++      if (!win || !win.webContents) return [];
++      const lista = await win.webContents.getPrintersAsync();
++      return (lista || []).map((imp) => ({
++        name: imp.name,
++        displayName: imp.displayName || imp.name,
++        description: imp.description,
++        status: imp.status,
++        isDefault: imp.isDefault === true
++      }));
++    }
++  };
++}
++
++/**
++ * @param {import('electron').IpcMain} ipcMain
++ * @param {{ obterDb?: () => any, resolveWindow?: (sender: any) => any }} [opts]
++ *   obterDb/resolveWindow: injeção opcional (testes isolados); produção usa database + BrowserWindow.
++ */
++function registrarCozinhaImpressaoHandlers(ipcMain, opts = {}) {
++  if (!ipcMain || typeof ipcMain.handle !== 'function') return;
++
++  const resolveWindow = typeof opts.resolveWindow === 'function'
++    ? opts.resolveWindow
++    : (sender) => BrowserWindow.fromWebContents(sender);
++  const obterDb = typeof opts.obterDb === 'function'
++    ? opts.obterDb
++    : () => {
++      try { return require('./backend/database'); } catch (_e) { return null; }
++    };
++
++  try { ipcMain.removeHandler(IPC_CANAIS.LISTAR); } catch (_e) { /* ignore */ }
++  try { ipcMain.removeHandler(IPC_CANAIS.IMPRIMIR); } catch (_e) { /* ignore */ }
++  try { ipcMain.removeHandler(IPC_CANAIS.IMPRIMIR_JOB); } catch (_e) { /* ignore */ }
++
++  ipcMain.handle(IPC_CANAIS.LISTAR, async (event) => {
++    validarRemetenteIpc(event, { resolveWindow });
++    const adapter = criarAdapterListagem(event);
++    const lista = await adapter.getPrinters();
++    return {
++      success: true,
++      total: lista.length,
++      impressoras: lista,
++      impressao_fisica: false,
++      canal: IPC_CANAIS.LISTAR
++    };
++  });
++
++  // E-02: canal genérico sempre bloqueado (renderer não imprime).
++  ipcMain.handle(IPC_CANAIS.IMPRIMIR, async (_event, rawPayload = {}) => {
++    try {
++      rejeitarImpressaoGenericaPorIpc(rawPayload || {});
++    } catch (err) {
++      return {
++        success: false,
++        resultado: 'FALHA',
++        codigo: err.codigo || 'IMPRESSAO_IPC_PRINT_BLOQUEADO',
++        erro: err.message,
++        impressao_fisica: false,
++        dry_run: true
++      };
++    }
++    return {
++      success: false,
++      codigo: 'IMPRESSAO_IPC_PRINT_BLOQUEADO',
++      impressao_fisica: false
++    };
++  });
++
++  // E-03: sessão autenticada no main (JWT) — renderer não escolhe empresa/unidade.
++  const CANAL_SESSAO = 'cozinha-impressao:sessao-autenticada';
++  const CANAL_CONTEXTO = 'cozinha-impressao:contexto-operacional';
++  try { ipcMain.removeHandler(CANAL_SESSAO); } catch (_e) { /* ignore */ }
++  try { ipcMain.removeHandler(CANAL_CONTEXTO); } catch (_e) { /* ignore */ }
++
++  ipcMain.handle(CANAL_SESSAO, async (event, rawPayload = {}) => {
++    try {
++      validarRemetenteIpc(event, { resolveWindow });
++    } catch (err) {
++      return {
++        success: false,
++        codigo: err.codigo || 'IMPRESSAO_IPC_REMETENTE_INVALIDO',
++        erro: err.message
++      };
++    }
++    try {
++      const {
++        estabelecerSessaoApartirDoToken
++      } = require('./backend/services/cozinha/cozinhaImpressaoSessaoElectron');
++      const db = obterDb();
++      const sessao = await estabelecerSessaoApartirDoToken({
++        token: rawPayload && rawPayload.token,
++        db
++      });
++      const {
++        obterIntegracaoAtiva
++      } = require('./backend/services/cozinha/CozinhaImpressaoElectronCicloVida');
++      const integ = obterIntegracaoAtiva();
++      let contexto = null;
++      if (integ && typeof integ.notificarContextoOperacional === 'function') {
++        contexto = await integ.notificarContextoOperacional({
++          empresa_id: sessao.empresaId,
++          unidade_id: sessao.unidadeId
++        });
++      }
++      return {
++        success: true,
++        sessao: {
++          empresaId: sessao.empresaId,
++          unidadeId: sessao.unidadeId
++        },
++        contexto
++      };
++    } catch (err) {
++      return {
++        success: false,
++        codigo: err.codigo || 'IMPRESSAO_SESSAO_ERRO',
++        erro: err.message
++      };
++    }
++  });
++
++  // Contexto: IDs opcionais só são aceitos se coincidirem com a sessão do main.
++  ipcMain.handle(CANAL_CONTEXTO, async (event, rawPayload = {}) => {
++    try {
++      validarRemetenteIpc(event, { resolveWindow });
++    } catch (err) {
++      return {
++        success: false,
++        codigo: err.codigo || 'IMPRESSAO_IPC_REMETENTE_INVALIDO',
++        erro: err.message
++      };
++    }
++    const {
++      obterIntegracaoAtiva
++    } = require('./backend/services/cozinha/CozinhaImpressaoElectronCicloVida');
++    const {
++      validarContextoContraSessaoAutenticada,
++      obterSessaoAutenticadaCozinha
++    } = require('./backend/services/cozinha/cozinhaImpressaoSessaoElectron');
++
++    try {
++      // Rejeita divergência antes mesmo de notificar a integração.
++      validarContextoContraSessaoAutenticada(rawPayload || {}, obterSessaoAutenticadaCozinha());
++    } catch (err) {
++      return {
++        success: false,
++        codigo: err.codigo || 'IMPRESSAO_CONTEXTO_DIVERGENTE_SESSAO',
++        erro: err.message,
++        detalhes: err.detalhes || null
++      };
++    }
++
++    const integ = obterIntegracaoAtiva();
++    if (!integ || typeof integ.notificarContextoOperacional !== 'function') {
++      return { success: false, codigo: 'IMPRESSAO_INTEGRACAO_AUSENTE' };
++    }
++    const out = await integ.notificarContextoOperacional(rawPayload || {});
++    return { success: out.ok === true, ...out };
++  });
++
++  // Referência a job — ainda exige Worker token + autorização; não aceita texto arbitrário.
++  ipcMain.handle(IPC_CANAIS.IMPRIMIR_JOB, async (event, rawPayload = {}) => {
++    try {
++      validarRemetenteIpc(event, {
++        resolveWindow: (sender) => BrowserWindow.fromWebContents(sender),
++        tokenWorker: rawPayload && rawPayload.worker_token,
++        tokensConfiaveis: [..._tokensWorkerConfiaveis]
++      });
++      const ref = sanitizarReferenciaJobImpressao(rawPayload || {});
++      if (!isImpressaoFisicaAutorizada({
++        autorizarSpoolerReal: ref.autorizar_spooler_real
++      })) {
++        return {
++          success: false,
++          resultado: 'SIMULADO',
++          codigo: 'IMPRESSAO_FISICA_NAO_AUTORIZADA',
++          erro: 'Impressão física desabilitada. Dry-run não declara ACEITA.',
++          impressao_fisica: false,
++          dry_run: true,
++          job_id: ref.job_id
++        };
++      }
++      // Print real via IPC ainda não executa daqui: o caminho físico é o adapter
++      // in-process do Worker (E-03). Este canal só valida autorização/canonicidade.
++      return {
++        success: false,
++        resultado: 'FALHA',
++        codigo: 'IMPRESSAO_USE_WORKER_ADAPTER',
++        erro: 'Use o adapter ELECTRON de produção injetado no Worker (in-process).',
++        impressao_fisica: false,
++        job_id: ref.job_id
++      };
++    } catch (err) {
++      return {
++        success: false,
++        resultado: 'FALHA',
++        codigo: err.codigo || 'IMPRESSAO_IPC_ERRO',
++        erro: err.message,
++        impressao_fisica: false
++      };
++    }
++  });
++}
++
++module.exports = {
++  registrarCozinhaImpressaoHandlers,
++  registrarTokenWorkerConfiavel,
++  limparTokensWorkerConfiaveis,
++  IPC_CANAIS
++};
+
+diff --git a/tests/cozinha/sprint06-bloco-e-e03-auditoria-complementar.test.js b/tests/cozinha/sprint06-bloco-e-e03-auditoria-complementar.test.js
+index e69de29..c4a8cc6 100644
+--- a/tests/cozinha/sprint06-bloco-e-e03-auditoria-complementar.test.js
++++ b/tests/cozinha/sprint06-bloco-e-e03-auditoria-complementar.test.js
+@@ -0,0 +1,585 @@
++/**
++ * Sprint 06 — Bloco E · E-03 auditoria complementar
++ * IPC real (handler invocado) + JWT real (estabelecerSessaoApartirDoToken) + chave + ciclo de vida.
++ *
++ *   node --test --test-concurrency=1 tests/cozinha/sprint06-bloco-e-e03-auditoria-complementar.test.js
++ */
++'use strict';
++
++const fs = require('fs');
++const os = require('os');
++const path = require('path');
++const Module = require('module');
++const { describe, it, beforeEach, after } = require('node:test');
++const assert = require('node:assert/strict');
++const sqlite3 = require('sqlite3').verbose();
++const jwt = require('jsonwebtoken');
++const { EventEmitter } = require('events');
++
++const JWT_TEST_SECRET = 'cds-test-jwt-secret-e03-complementar-explicit';
++process.env.JWT_SECRET = JWT_TEST_SECRET;
++const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-cozinha-s06e03c-'));
++process.env.DB_DIR = dbDir;
++process.env.CDS_TEST_ISOLATION = '1';
++process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
++process.env.CDS_FORCAR_LOCAL = '1';
++delete process.env.CDS_COZINHA_IMPRESSAO_FISICA_AUTORIZADA;
++delete process.env.CDS_ALLOW_OFFICIAL_DB;
++if (process.env.NODE_ENV === 'production') {
++  process.env.NODE_ENV = 'test';
++}
++
++/** Mock Electron antes de carregar electron-cozinha-impressao.js */
++const electronMock = {
++  BrowserWindow: {
++    fromWebContents(sender) {
++      if (!sender || sender.__unauthorized === true) return null;
++      if (typeof sender.isDestroyed === 'function' && sender.isDestroyed()) return null;
++      return sender.__win || { id: 1, webContents: sender };
++    }
++  }
++};
++const _origRequire = Module.prototype.require;
++Module.prototype.require = function mockElectronRequire(id) {
++  if (id === 'electron') return electronMock;
++  return _origRequire.apply(this, arguments);
++};
++
++const {
++  garantirSchemaCozinha,
++  marcarCozinhaOperacional,
++  isCozinhaOperacional,
++  COZINHA_SCHEMA_VERSION
++} = require('../../backend/utils/cozinhaSchema');
++const { garantirSchemaEmpresasAsync } = require('../../backend/services/empresas/empresasSchema');
++const {
++  criarIntegracaoCicloVidaCozinhaImpressao,
++  obterOuCriarIntegracaoPadrao,
++  anexarAoReadyToShowMainWindow,
++  _resetIntegracaoCicloVidaParaTeste,
++  obterIntegracaoAtiva
++} = require('../../backend/services/cozinha/CozinhaImpressaoElectronCicloVida');
++const {
++  obterWorkerImpressaoCozinhaInstalado,
++  contarInstalacoesWorkerImpressao,
++  _resetBootstrapWorkerImpressaoParaTeste
++} = require('../../backend/services/cozinha/CozinhaImpressaoWorkerBootstrap');
++const {
++  estabelecerSessaoApartirDoToken,
++  obterSessaoAutenticadaCozinha,
++  limparSessaoAutenticadaCozinha
++} = require('../../backend/services/cozinha/cozinhaImpressaoSessaoElectron');
++const { getJwtSecret } = require('../../backend/config/secrets');
++const { registrarCozinhaImpressaoHandlers } = require('../../electron-cozinha-impressao');
++
++function run(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.run(sql, params, function cb(err) {
++      if (err) reject(err);
++      else resolve(this);
++    });
++  });
++}
++function open() {
++  return new Promise((resolve, reject) => {
++    const db = new sqlite3.Database(':memory:', (err) => {
++      if (err) return reject(err);
++      db.serialize(() => {
++        db.run('PRAGMA foreign_keys = ON');
++        db.run('PRAGMA busy_timeout = 10000', (e) => (e ? reject(e) : resolve(db)));
++      });
++    });
++  });
++}
++function close(db) {
++  return new Promise((resolve) => db.close(() => resolve()));
++}
++
++async function schemaErpMinimo(db) {
++  await garantirSchemaEmpresasAsync(db);
++  await run(db, `CREATE TABLE IF NOT EXISTS configuracoes (
++    id INTEGER PRIMARY KEY AUTOINCREMENT, chave VARCHAR(100) UNIQUE NOT NULL,
++    valor TEXT, tipo VARCHAR(50), descricao TEXT, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
++  await run(db, `CREATE TABLE IF NOT EXISTS mesas (
++    id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL,
++    numero INTEGER NOT NULL, ativo INTEGER NOT NULL DEFAULT 1)`);
++  await run(db, `CREATE TABLE IF NOT EXISTS mesa_atendimentos (
++    id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL, mesa_id INTEGER NOT NULL,
++    estado TEXT NOT NULL, operador_abertura_id INTEGER NOT NULL DEFAULT 1,
++    aberto_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
++  await run(db, `CREATE TABLE IF NOT EXISTS produtos (
++    id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL,
++    tipo_operacional TEXT DEFAULT 'COMERCIAL', utiliza_ficha_tecnica INTEGER DEFAULT 0)`);
++  await run(db, `CREATE TABLE IF NOT EXISTS pedidos (
++    id INTEGER PRIMARY KEY AUTOINCREMENT, codigo VARCHAR(50),
++    data_pedido DATE NOT NULL DEFAULT '2026-01-01', total DECIMAL(10,2) NOT NULL DEFAULT 0,
++    status TEXT NOT NULL DEFAULT 'PEDIDO', empresa_id INTEGER, mesa_id INTEGER, mesa_atendimento_id INTEGER)`);
++  await run(db, `CREATE TABLE IF NOT EXISTS pedidos_itens (
++    id INTEGER PRIMARY KEY AUTOINCREMENT, pedido_id INTEGER NOT NULL, produto_id INTEGER NOT NULL,
++    quantidade REAL NOT NULL, preco_unitario DECIMAL(10,2) NOT NULL DEFAULT 0,
++    subtotal DECIMAL(10,2) NOT NULL DEFAULT 0, classificacao_operacional_snapshot TEXT,
++    produto_nome_snapshot TEXT, observacao TEXT)`);
++  await run(db, `CREATE TABLE IF NOT EXISTS pedido_item_ingredientes (
++    id INTEGER PRIMARY KEY AUTOINCREMENT, pedido_id INTEGER NOT NULL, pedido_item_id INTEGER NOT NULL,
++    empresa_id INTEGER NOT NULL, insumo_id INTEGER NOT NULL, insumo_nome_snapshot TEXT NOT NULL,
++    quantidade_snapshot REAL NOT NULL, unidade_snapshot TEXT NOT NULL,
++    classificacao_comercial_snapshot TEXT NOT NULL, selecionado INTEGER NOT NULL,
++    preco_adicional_snapshot REAL NOT NULL DEFAULT 0)`);
++  const info = await garantirSchemaCozinha(db);
++  assert.equal(info.operacional, true);
++  assert.equal(COZINHA_SCHEMA_VERSION, 3);
++  assert.equal(isCozinhaOperacional(), true);
++}
++
++async function prepararUnidades(db) {
++  const empA = await run(db, `
++    INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
++    VALUES ('11111111000191', 'Emp A', 'EA', 1)`);
++  const empB = await run(db, `
++    INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
++    VALUES ('22222222000182', 'Emp B', 'EB', 1)`);
++  const unA = await run(db, `
++    INSERT INTO cozinha_unidades (empresa_id, codigo, ativo, sequencia_atual)
++    VALUES (?, 'U-A', 1, 0)`, [empA.lastID]);
++  const unB = await run(db, `
++    INSERT INTO cozinha_unidades (empresa_id, codigo, ativo, sequencia_atual)
++    VALUES (?, 'U-B', 1, 0)`, [empB.lastID]);
++  const unInativa = await run(db, `
++    INSERT INTO cozinha_unidades (empresa_id, codigo, ativo, sequencia_atual)
++    VALUES (?, 'U-OFF', 0, 0)`, [empA.lastID]);
++  return {
++    empresaA: empA.lastID,
++    empresaB: empB.lastID,
++    unidadeA: unA.lastID,
++    unidadeB: unB.lastID,
++    unidadeInativa: unInativa.lastID
++  };
++}
++
++function assinarToken(payload, opts = {}) {
++  return jwt.sign(payload, JWT_TEST_SECRET, opts.expiresIn ? { expiresIn: opts.expiresIn } : undefined);
++}
++
++function criarIpcMainMock() {
++  const handlers = new Map();
++  return {
++    handle(canal, fn) {
++      handlers.set(canal, fn);
++    },
++    removeHandler(canal) {
++      handlers.delete(canal);
++    },
++    async invoke(canal, event, payload) {
++      const fn = handlers.get(canal);
++      if (!fn) throw new Error(`Handler ausente: ${canal}`);
++      return fn(event, payload);
++    },
++    has(canal) {
++      return handlers.has(canal);
++    }
++  };
++}
++
++function criarSenderAutorizado(win) {
++  return {
++    __win: win || { id: 42 },
++    isDestroyed: () => false
++  };
++}
++
++function criarSenderNaoAutorizado() {
++  return {
++    __unauthorized: true,
++    isDestroyed: () => false
++  };
++}
++
++function adapterSpy() {
++  const prints = [];
++  return {
++    tipo: 'electron-producao',
++    prints,
++    async getPrinters() {
++      return [{ name: 'Cozinha-Termica-80', isDefault: true }];
++    },
++    async print() {
++      prints.push({});
++      throw new Error('print físico proibido na auditoria complementar');
++    }
++  };
++}
++
++class MockWindow extends EventEmitter {
++  constructor() {
++    super();
++    this._destroyed = false;
++    this.webContents = {
++      isDestroyed: () => false,
++      getPrintersAsync: async () => [{ name: 'Cozinha-Termica-80', isDefault: true }],
++      print: () => { throw new Error('print físico proibido'); }
++    };
++  }
++  isDestroyed() { return this._destroyed; }
++  show() {}
++  focus() {}
++}
++
++describe('Sprint 06 E-03 — auditoria complementar IPC/JWT/ciclo', () => {
++  beforeEach(() => {
++    process.env.JWT_SECRET = JWT_TEST_SECRET;
++    marcarCozinhaOperacional(false);
++    limparSessaoAutenticadaCozinha();
++    _resetIntegracaoCicloVidaParaTeste();
++    _resetBootstrapWorkerImpressaoParaTeste();
++  });
++
++  after(() => {
++    Module.prototype.require = _origRequire;
++  });
++
++  it('C1) JWT_SECRET: produção sem chave lança; teste usa segredo explícito; segredo não logado', () => {
++    assert.equal(getJwtSecret(), JWT_TEST_SECRET);
++
++    const prevEnv = process.env.NODE_ENV;
++    const prevSecret = process.env.JWT_SECRET;
++    delete process.env.JWT_SECRET;
++    process.env.NODE_ENV = 'production';
++    assert.throws(
++      () => getJwtSecret(),
++      (err) => err.codigo === 'JWT_SECRET_AUSENTE_PRODUCAO'
++        && !String(err.message).includes(JWT_TEST_SECRET)
++        && !String(err.message).includes('cds-dev-jwt')
++    );
++    process.env.NODE_ENV = prevEnv || 'test';
++    process.env.JWT_SECRET = prevSecret;
++
++    // Evidência: middleware importa getJwtSecret (não chave hardcoded de produção).
++    const authSrc = fs.readFileSync(
++      path.join(__dirname, '../../backend/middleware/auth.js'),
++      'utf8'
++    );
++    assert.ok(authSrc.includes("require('../config/secrets')"));
++    assert.ok(authSrc.includes('getJwtSecret()'));
++    assert.ok(!authSrc.includes('cds-dev-jwt-change-in-production'));
++
++    const secretsSrc = fs.readFileSync(
++      path.join(__dirname, '../../backend/config/secrets.js'),
++      'utf8'
++    );
++    assert.ok(secretsSrc.includes('JWT_SECRET_AUSENTE_PRODUCAO'));
++    assert.ok(secretsSrc.includes('NODE_ENV === \'production\''));
++  });
++
++  it('C2) JWT real: token válido estabelece sessão (empresa da unidade no DB)', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ids = await prepararUnidades(db);
++
++    const token = assinarToken({
++      id: 7,
++      unidade_cozinha_id: ids.unidadeA,
++      empresa_id: ids.empresaA
++    }, { expiresIn: '1h' });
++
++    const sessao = await estabelecerSessaoApartirDoToken({ token, db });
++    assert.equal(sessao.empresaId, ids.empresaA);
++    assert.equal(sessao.unidadeId, ids.unidadeA);
++    assert.equal(obterSessaoAutenticadaCozinha().empresaId, ids.empresaA);
++    await close(db);
++  });
++
++  it('C3) JWT real: inválido / expirado invalidam sessão anterior', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ids = await prepararUnidades(db);
++
++    const ok = assinarToken({
++      id: 1,
++      unidade_cozinha_id: ids.unidadeA,
++      empresa_id: ids.empresaA
++    }, { expiresIn: '1h' });
++    await estabelecerSessaoApartirDoToken({ token: ok, db });
++    assert.ok(obterSessaoAutenticadaCozinha());
++
++    await assert.rejects(
++      () => estabelecerSessaoApartirDoToken({ token: 'nao-e-jwt', db }),
++      (err) => err.codigo === 'IMPRESSAO_SESSAO_TOKEN_INVALIDO'
++    );
++    assert.equal(obterSessaoAutenticadaCozinha(), null);
++
++    await estabelecerSessaoApartirDoToken({ token: ok, db });
++    const expired = jwt.sign(
++      { id: 1, unidade_cozinha_id: ids.unidadeA, empresa_id: ids.empresaA },
++      JWT_TEST_SECRET,
++      { expiresIn: -10 }
++    );
++    await assert.rejects(
++      () => estabelecerSessaoApartirDoToken({ token: expired, db }),
++      (err) => err.codigo === 'IMPRESSAO_SESSAO_TOKEN_EXPIRADO'
++    );
++    assert.equal(obterSessaoAutenticadaCozinha(), null);
++
++    await close(db);
++  });
++
++  it('C4) JWT real: unidade inexistente / inativa / empresa divergente', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ids = await prepararUnidades(db);
++
++    await assert.rejects(
++      () => estabelecerSessaoApartirDoToken({
++        token: assinarToken({ id: 1, unidade_cozinha_id: 999999 }, { expiresIn: '1h' }),
++        db
++      }),
++      (err) => err.codigo === 'IMPRESSAO_SESSAO_UNIDADE_INEXISTENTE'
++    );
++    assert.equal(obterSessaoAutenticadaCozinha(), null);
++
++    await assert.rejects(
++      () => estabelecerSessaoApartirDoToken({
++        token: assinarToken({ id: 1, unidade_cozinha_id: ids.unidadeInativa }, { expiresIn: '1h' }),
++        db
++      }),
++      (err) => err.codigo === 'IMPRESSAO_SESSAO_UNIDADE_INATIVA'
++    );
++    assert.equal(obterSessaoAutenticadaCozinha(), null);
++
++    // Token afirma empresa B, mas unidade A pertence à empresa A.
++    await assert.rejects(
++      () => estabelecerSessaoApartirDoToken({
++        token: assinarToken({
++          id: 1,
++          unidade_cozinha_id: ids.unidadeA,
++          empresa_id: ids.empresaB
++        }, { expiresIn: '1h' }),
++        db
++      }),
++      (err) => err.codigo === 'IMPRESSAO_SESSAO_EMPRESA_DIVERGENTE'
++    );
++    assert.equal(obterSessaoAutenticadaCozinha(), null);
++
++    await close(db);
++  });
++
++  it('C5) IPC real: handler contexto-operacional (autorizado / não autorizado / sessão / divergente / válido)', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ids = await prepararUnidades(db);
++
++    const win = new MockWindow();
++    const adapter = adapterSpy();
++    // Mesmo caminho do electron.js: singleton ativo para o handler IPC.
++    const integracao = obterOuCriarIntegracaoPadrao({
++      obterMainWindow: () => win,
++      obterDb: () => db,
++      adapter,
++      permitirAdapterCompat: true,
++      intervaloTickMs: 60000,
++      workerId: 'electron-cozinha-worker-c5'
++    });
++    anexarAoReadyToShowMainWindow(win, integracao);
++    win.emit('ready-to-show');
++    assert.strictEqual(obterIntegracaoAtiva(), integracao);
++
++    const ipcMain = criarIpcMainMock();
++    registrarCozinhaImpressaoHandlers(ipcMain, {
++      obterDb: () => db,
++      resolveWindow: (sender) => electronMock.BrowserWindow.fromWebContents(sender)
++    });
++    assert.equal(ipcMain.has('cozinha-impressao:contexto-operacional'), true);
++    assert.equal(ipcMain.has('cozinha-impressao:sessao-autenticada'), true);
++
++    const eventOk = { sender: criarSenderAutorizado(win) };
++    const eventBad = { sender: criarSenderNaoAutorizado() };
++
++    // Remetente não autorizado
++    const rNaoAuth = await ipcMain.invoke(
++      'cozinha-impressao:contexto-operacional',
++      eventBad,
++      { empresa_id: ids.empresaA, unidade_id: ids.unidadeA }
++    );
++    assert.equal(rNaoAuth.success, false);
++    assert.equal(rNaoAuth.codigo, 'IMPRESSAO_IPC_REMETENTE_INVALIDO');
++
++    // Sessão ausente
++    limparSessaoAutenticadaCozinha();
++    const rSemSessao = await ipcMain.invoke(
++      'cozinha-impressao:contexto-operacional',
++      eventOk,
++      { empresa_id: ids.empresaA, unidade_id: ids.unidadeA }
++    );
++    assert.equal(rSemSessao.success, false);
++    assert.equal(rSemSessao.codigo, 'IMPRESSAO_SESSAO_AUSENTE');
++
++    // Sessão via JWT real (IPC sessao-autenticada)
++    const token = assinarToken({
++      id: 7,
++      unidade_cozinha_id: ids.unidadeA,
++      empresa_id: ids.empresaA
++    }, { expiresIn: '1h' });
++    const rSessao = await ipcMain.invoke(
++      'cozinha-impressao:sessao-autenticada',
++      eventOk,
++      { token }
++    );
++    assert.equal(rSessao.success, true);
++    assert.equal(rSessao.sessao.empresaId, ids.empresaA);
++    assert.equal(rSessao.sessao.unidadeId, ids.unidadeA);
++    assert.equal(rSessao.contexto.ok, true);
++    assert.equal(integracao.descrever().contexto.empresaId, ids.empresaA);
++
++    // Renderer tenta outra empresa/unidade → rejeitado
++    const rDivEmp = await ipcMain.invoke(
++      'cozinha-impressao:contexto-operacional',
++      eventOk,
++      { empresa_id: ids.empresaB, unidade_id: ids.unidadeA }
++    );
++    assert.equal(rDivEmp.success, false);
++    assert.equal(rDivEmp.codigo, 'IMPRESSAO_CONTEXTO_DIVERGENTE_SESSAO');
++
++    const rDivUn = await ipcMain.invoke(
++      'cozinha-impressao:contexto-operacional',
++      eventOk,
++      { empresa_id: ids.empresaA, unidade_id: ids.unidadeB }
++    );
++    assert.equal(rDivUn.success, false);
++    assert.equal(rDivUn.codigo, 'IMPRESSAO_CONTEXTO_DIVERGENTE_SESSAO');
++    assert.equal(integracao.descrever().contexto.empresaId, ids.empresaA);
++    assert.equal(integracao.descrever().contexto.unidadeId, ids.unidadeA);
++
++    // Contexto válido (coincide com sessão)
++    const rOk = await ipcMain.invoke(
++      'cozinha-impressao:contexto-operacional',
++      eventOk,
++      { empresa_id: ids.empresaA, unidade_id: ids.unidadeA }
++    );
++    assert.equal(rOk.success, true);
++    assert.equal(rOk.ok, true);
++    assert.equal(rOk.empresaId, ids.empresaA);
++    assert.equal(rOk.unidadeId, ids.unidadeA);
++
++    // Payload vazio → usa sessão canônica (renderer não escolhe)
++    const rVazio = await ipcMain.invoke(
++      'cozinha-impressao:contexto-operacional',
++      eventOk,
++      {}
++    );
++    assert.equal(rVazio.success, true);
++    assert.equal(rVazio.empresaId, ids.empresaA);
++    assert.equal(rVazio.unidadeId, ids.unidadeA);
++
++    assert.equal(adapter.prints.length, 0);
++    integracao.aoWillQuit();
++    await close(db);
++  });
++
++  it('C6) Ciclo: troca de sessão durante tick; logout; contexto pendente após encerramento', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ids = await prepararUnidades(db);
++
++    const win = new MockWindow();
++    const adapter = adapterSpy();
++    const integracao = criarIntegracaoCicloVidaCozinhaImpressao({
++      obterMainWindow: () => win,
++      obterDb: () => db,
++      adapter,
++      permitirAdapterCompat: true,
++      intervaloTickMs: 60000,
++      workerId: 'electron-cozinha-worker-c6'
++    });
++    anexarAoReadyToShowMainWindow(win, integracao);
++    win.emit('ready-to-show');
++
++    const tokenA = assinarToken({
++      id: 7,
++      unidade_cozinha_id: ids.unidadeA,
++      empresa_id: ids.empresaA
++    }, { expiresIn: '1h' });
++    await estabelecerSessaoApartirDoToken({ token: tokenA, db });
++    const nA = await integracao.notificarContextoOperacional({
++      empresa_id: ids.empresaA,
++      unidade_id: ids.unidadeA
++    });
++    assert.equal(nA.ok, true);
++
++    const worker = obterWorkerImpressaoCozinhaInstalado();
++    assert.ok(worker);
++    const tickOrig = worker.tick.bind(worker);
++    let releaseHold;
++    const hold = new Promise((r) => { releaseHold = r; });
++    worker.tick = async (entrada) => {
++      await hold;
++      return tickOrig(entrada);
++    };
++
++    const tickPromise = integracao.executarTickSeguro();
++    for (let i = 0; i < 40 && !integracao._estadoInterno().tickEmCurso; i += 1) {
++      await new Promise((r) => setTimeout(r, 10));
++    }
++    assert.equal(integracao._estadoInterno().tickEmCurso, true);
++
++    // Troca de sessão JWT A→B enquanto tick em curso
++    const tokenB = assinarToken({
++      id: 7,
++      unidade_cozinha_id: ids.unidadeB,
++      empresa_id: ids.empresaB
++    }, { expiresIn: '1h' });
++    await estabelecerSessaoApartirDoToken({ token: tokenB, db });
++    const trocaPromise = integracao.notificarContextoOperacional({
++      empresa_id: ids.empresaB,
++      unidade_id: ids.unidadeB
++    });
++    assert.equal(integracao.descrever().contexto.empresaId, ids.empresaA);
++
++    releaseHold();
++    await tickPromise;
++    const troca = await trocaPromise;
++    assert.equal(troca.ok, true);
++    assert.equal(troca.empresaId, ids.empresaB);
++    assert.equal(contarInstalacoesWorkerImpressao(), 1);
++
++    // Logout: limpa sessão — contexto divergente / ausente rejeitado
++    limparSessaoAutenticadaCozinha();
++    assert.equal(obterSessaoAutenticadaCozinha(), null);
++    const aposLogout = await integracao.notificarContextoOperacional({
++      empresa_id: ids.empresaB,
++      unidade_id: ids.unidadeB
++    });
++    assert.equal(aposLogout.ok, false);
++    assert.equal(aposLogout.codigo, 'IMPRESSAO_SESSAO_AUSENTE');
++
++    // Restaura sessão e inicia tick longo; encerrar durante espera → contexto não aplica
++    await estabelecerSessaoApartirDoToken({ token: tokenB, db });
++    let release2;
++    const hold2 = new Promise((r) => { release2 = r; });
++    worker.tick = async (entrada) => {
++      await hold2;
++      return tickOrig(entrada);
++    };
++    const tick2 = integracao.executarTickSeguro();
++    for (let i = 0; i < 40 && !integracao._estadoInterno().tickEmCurso; i += 1) {
++      await new Promise((r) => setTimeout(r, 10));
++    }
++    assert.equal(integracao._estadoInterno().tickEmCurso, true);
++
++    const pendente = integracao.notificarContextoOperacional({
++      empresa_id: ids.empresaB,
++      unidade_id: ids.unidadeB
++    });
++    const fim = integracao.aoWillQuit();
++    assert.equal(fim.encerrado, true);
++    assert.equal(obterSessaoAutenticadaCozinha(), null);
++    assert.equal(obterWorkerImpressaoCozinhaInstalado(), null);
++
++    release2();
++    await tick2;
++    const pendenteOut = await pendente;
++    assert.equal(pendenteOut.ok, false);
++    assert.equal(pendenteOut.codigo, 'IMPRESSAO_WORKER_ENCERRADO');
++
++    assert.equal(adapter.prints.length, 0);
++    await close(db);
++  });
++});
+

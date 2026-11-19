@@ -1,0 +1,66 @@
+[
+  {
+    "step": "api-name-update",
+    "status": 200,
+    "channel": {
+      "id": 2,
+      "code": "A2_HOMOLOGA_O_MANUAL",
+      "name": "A2 Homologação Manual",
+      "origin": "MANUAL"
+    },
+    "utf8CodePoints": [
+      "41",
+      "32",
+      "20",
+      "48",
+      "6f",
+      "6d",
+      "6f",
+      "6c",
+      "6f",
+      "67",
+      "61",
+      "e7",
+      "e3",
+      "6f",
+      "20",
+      "4d",
+      "61",
+      "6e",
+      "75",
+      "61",
+      "6c"
+    ],
+    "destinationUnitId": 1,
+    "printQueueCount": 0,
+    "kdsDispatchCount": 0
+  },
+  {
+    "step": "reopen-verify",
+    "channelId": 2,
+    "utf8CodePoints": [
+      "41",
+      "32",
+      "20",
+      "48",
+      "6f",
+      "6d",
+      "6f",
+      "6c",
+      "6f",
+      "67",
+      "61",
+      "e7",
+      "e3",
+      "6f",
+      "20",
+      "4d",
+      "61",
+      "6e",
+      "75",
+      "61",
+      "6c"
+    ],
+    "destinationUnitId": 1
+  }
+]

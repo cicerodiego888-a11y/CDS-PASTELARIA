@@ -1,0 +1,1820 @@
+# DIFF — Sprint 06 Bloco E · correção final pontual (E-01/E-02)
+# Gerado: 2026-11-17T17:03:20.840Z
+# Escopo: isolamento simulação + proteção propriedade pré-print
+
+diff --git a/backend/services/cozinha/CozinhaImpressaoWorkerService.js b/backend/services/cozinha/CozinhaImpressaoWorkerService.js
+index e69de29..36164f3 100644
+--- a/backend/services/cozinha/CozinhaImpressaoWorkerService.js
++++ b/backend/services/cozinha/CozinhaImpressaoWorkerService.js
+@@ -0,0 +1,906 @@
++/**
++ * Worker de impressão — Sprint 06 Bloco D + E.
++ * Claim atômico, FAKE / ELECTRON, falhas / RESULTADO_INCERTO.
++ *
++ * E-01: simulação (dry-run) NÃO faz claim e NÃO consome tentativas.
++ * E-02: processarJob valida job persistido no banco antes do driver.
++ * Política: dúvida → RESULTADO_INCERTO; sem reenvio automático.
++ */
++'use strict';
++
++const {
++  erroImpressao,
++  parsePositiveInteger,
++  ESTADOS_FILA
++} = require('./cozinhaImpressaoContratos');
++const { exigirUnidadeOperacional } = require('./cozinhaUnidadeOperacional');
++const { RESULTADOS_DRIVER, assertResultadoDriver, criarFakeDriver } = require('./cozinhaImpressaoDriver');
++const FilaService = require('./CozinhaImpressaoFilaService');
++
++const ABANDONO_PADRAO_MS = 60 * 1000;
++
++/**
++ * Jobs cuja propriedade foi confirmada e o driver ainda está em execução.
++ * Impede que recuperarJobsAbandonados invalide a propriedade no meio do print
++ * (sem alteração de schema). Escopo: processo atual.
++ */
++const _jobsImpressaoAtivos = new Set();
++
++function chaveJobImpressaoAtivo(empresaId, unidadeId, jobId) {
++  return `${Number(empresaId)}:${Number(unidadeId)}:${Number(jobId)}`;
++}
++
++function marcarJobImpressaoAtivo(empresaId, unidadeId, jobId) {
++  _jobsImpressaoAtivos.add(chaveJobImpressaoAtivo(empresaId, unidadeId, jobId));
++}
++
++function liberarJobImpressaoAtivo(empresaId, unidadeId, jobId) {
++  _jobsImpressaoAtivos.delete(chaveJobImpressaoAtivo(empresaId, unidadeId, jobId));
++}
++
++function jobImpressaoEstaAtivo(empresaId, unidadeId, jobId) {
++  return _jobsImpressaoAtivos.has(chaveJobImpressaoAtivo(empresaId, unidadeId, jobId));
++}
++
++/** Somente testes — não usar em produção. */
++function _resetJobsImpressaoAtivosParaTeste() {
++  _jobsImpressaoAtivos.clear();
++}
++
++function dbAll(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
++  });
++}
++
++function dbGet(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
++  });
++}
++
++function dbRun(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.run(sql, params, function cb(err) {
++      if (err) reject(err);
++      else resolve(this);
++    });
++  });
++}
++
++function dbExec(db, sql) {
++  return new Promise((resolve, reject) => {
++    db.exec(sql, (err) => (err ? reject(err) : resolve()));
++  });
++}
++
++function agoraIso() {
++  return new Date().toISOString();
++}
++
++/**
++ * Executa fn sob BEGIN IMMEDIATE obrigatório.
++ * Não adere a transação externa desconhecida: se a conexão já estiver
++ * em TX, propaga erro (COMMIT/ROLLBACK só da TX iniciada aqui).
++ */
++async function comTransacaoImediata(db, fn) {
++  try {
++    await dbExec(db, 'BEGIN IMMEDIATE');
++  } catch (err) {
++    const msg = String(err && err.message ? err.message : err);
++    if (/within a transaction/i.test(msg)) {
++      throw erroImpressao(
++        'Claim exige BEGIN IMMEDIATE próprio; conexão já está em transação externa.',
++        409,
++        'IMPRESSAO_CLAIM_TX_EXTERNA',
++        { detalhes: { causa: msg } }
++      );
++    }
++    throw err;
++  }
++
++  try {
++    const out = await fn();
++    await dbExec(db, 'COMMIT');
++    return out;
++  } catch (err) {
++    try { await dbExec(db, 'ROLLBACK'); } catch (_e) { /* ignore */ }
++    throw err;
++  }
++}
++
++function exigirEmpresa(empresaId) {
++  const id = parsePositiveInteger(empresaId);
++  if (!id) {
++    throw erroImpressao('empresa_id obrigatório.', 400, 'EMPRESA_OBRIGATORIA');
++  }
++  return id;
++}
++
++function normalizarWorkerId(raw) {
++  const id = String(raw == null ? '' : raw).trim();
++  if (!id) {
++    throw erroImpressao('worker_id obrigatório.', 400, 'IMPRESSAO_WORKER_ID_OBRIGATORIO');
++  }
++  if (id.length > 128) {
++    throw erroImpressao('worker_id excede o tamanho máximo.', 400, 'IMPRESSAO_WORKER_ID_INVALIDO');
++  }
++  return id;
++}
++
++function estadoFinalDeResultadoDriver(resultado) {
++  if (resultado === RESULTADOS_DRIVER.ACEITA) return ESTADOS_FILA.ACEITA_PELO_SPOOLER;
++  if (resultado === RESULTADOS_DRIVER.FALHA) return ESTADOS_FILA.FALHA;
++  // SIMULADO não é estado de fila operacional — não deve passar por registrarResultado.
++  if (resultado === RESULTADOS_DRIVER.SIMULADO) {
++    throw erroImpressao(
++      'SIMULADO não mapeia estado operacional da fila (use simularProximoSemClaim).',
++      409,
++      'IMPRESSAO_SIMULADO_NAO_OPERACIONAL'
++    );
++  }
++  return ESTADOS_FILA.RESULTADO_INCERTO;
++}
++
++function driverEmModoSimulacao(driver) {
++  if (!driver) return false;
++  if (driver.nome === 'ELECTRON') {
++    return driver.spoolerRealHabilitado !== true;
++  }
++  return false;
++}
++
++/**
++ * E-02: carrega job canônico do banco. Não confia no objeto recebido.
++ */
++async function carregarJobCanonicoParaProcessamento(db, {
++  jobId,
++  empresaId,
++  unidadeId,
++  workerId
++}) {
++  const id = parsePositiveInteger(jobId);
++  if (!id) {
++    throw erroImpressao('job id obrigatório.', 400, 'IMPRESSAO_JOB_ID_OBRIGATORIO');
++  }
++  const row = await dbGet(db, `
++    SELECT *
++    FROM cozinha_impressao_fila
++    WHERE id = ?
++  `, [id]);
++
++  if (!row) {
++    throw erroImpressao(
++      'Trabalho de impressão não encontrado.',
++      404,
++      'IMPRESSAO_JOB_NAO_ENCONTRADO',
++      { detalhes: { job_id: id } }
++    );
++  }
++  if (Number(row.empresa_id) !== Number(empresaId)) {
++    throw erroImpressao(
++      'Job não pertence à empresa autenticada.',
++      403,
++      'IMPRESSAO_JOB_EMPRESA_DIVERGENTE',
++      { detalhes: { job_id: id, empresa_id: row.empresa_id } }
++    );
++  }
++  if (Number(row.unidade_id) !== Number(unidadeId)) {
++    throw erroImpressao(
++      'Job não pertence à unidade autenticada.',
++      403,
++      'IMPRESSAO_JOB_UNIDADE_DIVERGENTE',
++      { detalhes: { job_id: id, unidade_id: row.unidade_id } }
++    );
++  }
++  if (String(row.estado) !== ESTADOS_FILA.PROCESSANDO) {
++    throw erroImpressao(
++      'Job não está PROCESSANDO.',
++      409,
++      'IMPRESSAO_JOB_ESTADO_INVALIDO',
++      { detalhes: { job_id: id, estado: row.estado } }
++    );
++  }
++  if (String(row.worker_id || '') !== String(workerId)) {
++    throw erroImpressao(
++      'Job reivindicado por outro worker.',
++      409,
++      'IMPRESSAO_WORKER_DIVERGENTE',
++      { detalhes: { job_id: id, worker_id: row.worker_id } }
++    );
++  }
++  if (row.payload_snapshot == null || String(row.payload_snapshot).trim() === '') {
++    throw erroImpressao(
++      'Snapshot canônico ausente no job persistido.',
++      409,
++      'IMPRESSAO_SNAPSHOT_AUSENTE',
++      { detalhes: { job_id: id } }
++    );
++  }
++  return row;
++}
++
++/**
++ * Claim atômico PENDENTE → PROCESSANDO.
++ *
++ * Fluxo inequívoco (por chamada):
++ * 1) BEGIN IMMEDIATE
++ * 2) SELECT candidato (id exato)
++ * 3) UPDATE ... WHERE id=? AND estado='PENDENTE' (changes deve ser 1)
++ * 4) SELECT * WHERE id=? (o mesmo id)
++ * 5) COMMIT
++ *
++ * Não recupera o job por worker_id/timestamp/MAX(id).
++ */
++async function reivindicarProximoJob(entrada = {}, opts = {}) {
++  const db = opts.db || entrada.db;
++  if (!db) throw erroImpressao('Banco indisponível.', 500, 'DB_INDISPONIVEL');
++
++  const empresaId = exigirEmpresa(entrada.empresaId != null ? entrada.empresaId : entrada.empresa_id);
++  const unidadeId = exigirUnidadeOperacional(
++    entrada.unidadeId != null ? entrada.unidadeId : entrada.unidade_id
++  );
++  const workerId = normalizarWorkerId(
++    entrada.workerId != null ? entrada.workerId : entrada.worker_id
++  );
++  const estacaoId = parsePositiveInteger(
++    entrada.estacaoImpressaoId != null
++      ? entrada.estacaoImpressaoId
++      : (entrada.estacao_impressao_id != null ? entrada.estacao_impressao_id : entrada.estacaoId)
++  );
++
++  return comTransacaoImediata(db, async () => {
++    let sqlCand = `
++      SELECT id
++      FROM cozinha_impressao_fila
++      WHERE empresa_id = ?
++        AND unidade_id = ?
++        AND estado = ?
++        AND tentativas < max_tentativas
++    `;
++    const paramsCand = [empresaId, unidadeId, ESTADOS_FILA.PENDENTE];
++    if (estacaoId) {
++      sqlCand += ' AND estacao_impressao_id = ?';
++      paramsCand.push(estacaoId);
++    }
++    sqlCand += ' ORDER BY created_at ASC, id ASC LIMIT 1';
++
++    const cand = await dbGet(db, sqlCand, paramsCand);
++    if (!cand || !cand.id) {
++      return { success: true, reivindicado: false, job: null, impressao_fisica: false };
++    }
++
++    const jobId = Number(cand.id);
++    const agora = agoraIso();
++    const upd = await dbRun(db, `
++      UPDATE cozinha_impressao_fila
++      SET estado = ?,
++          worker_id = ?,
++          processando_em = ?,
++          tentativas = tentativas + 1,
++          updated_at = ?,
++          ultimo_erro = NULL
++      WHERE id = ?
++        AND empresa_id = ?
++        AND unidade_id = ?
++        AND estado = ?
++    `, [
++      ESTADOS_FILA.PROCESSANDO,
++      workerId,
++      agora,
++      agora,
++      jobId,
++      empresaId,
++      unidadeId,
++      ESTADOS_FILA.PENDENTE
++    ]);
++
++    if (!upd || upd.changes !== 1) {
++      // Outro worker conquistou o mesmo id entre SELECT e UPDATE.
++      return { success: true, reivindicado: false, job: null, impressao_fisica: false };
++    }
++
++    const row = await dbGet(db, `
++      SELECT *
++      FROM cozinha_impressao_fila
++      WHERE id = ?
++        AND empresa_id = ?
++        AND unidade_id = ?
++    `, [jobId, empresaId, unidadeId]);
++
++    if (!row || row.estado !== ESTADOS_FILA.PROCESSANDO || Number(row.id) !== jobId) {
++      throw erroImpressao(
++        'Claim inconsistente: job reivindicado não encontrado pelo id.',
++        500,
++        'IMPRESSAO_CLAIM_INCONSISTENTE',
++        { detalhes: { job_id: jobId } }
++      );
++    }
++
++    return {
++      success: true,
++      reivindicado: true,
++      job: FilaService.mapearJob(row, { incluirSnapshot: true }),
++      impressao_fisica: false
++    };
++  });
++}
++
++/**
++ * Jobs PROCESSANDO abandonados → RESULTADO_INCERTO (nunca voltam a PENDENTE).
++ */
++async function recuperarJobsAbandonados(entrada = {}, opts = {}) {
++  const db = opts.db || entrada.db;
++  if (!db) throw erroImpressao('Banco indisponível.', 500, 'DB_INDISPONIVEL');
++
++  const empresaId = exigirEmpresa(entrada.empresaId != null ? entrada.empresaId : entrada.empresa_id);
++  const unidadeId = exigirUnidadeOperacional(
++    entrada.unidadeId != null ? entrada.unidadeId : entrada.unidade_id
++  );
++  const rawLim = entrada.limiteMs != null ? entrada.limiteMs : entrada.abandono_ms;
++  const limiteMs = Number(rawLim);
++  // limiteMs === 0 → todos PROCESSANDO (ex.: reinício do worker); omitido → padrão.
++  const lim = rawLim == null || rawLim === ''
++    ? ABANDONO_PADRAO_MS
++    : (Number.isFinite(limiteMs) && limiteMs >= 0 ? limiteMs : ABANDONO_PADRAO_MS);
++  const agora = Date.now();
++  const limiteIso = new Date(agora - lim).toISOString();
++
++  const rows = await dbAll(db, `
++    SELECT id, processando_em, worker_id
++    FROM cozinha_impressao_fila
++    WHERE empresa_id = ?
++      AND unidade_id = ?
++      AND estado = ?
++      AND (
++        processando_em IS NULL
++        OR processando_em <= ?
++      )
++  `, [empresaId, unidadeId, ESTADOS_FILA.PROCESSANDO, limiteIso]);
++
++  const marcados = [];
++  for (const row of rows) {
++    // E-02: não invalidar propriedade enquanto o driver ainda executa neste processo.
++    if (jobImpressaoEstaAtivo(empresaId, unidadeId, row.id)) {
++      continue;
++    }
++    const agoraUpd = agoraIso();
++    const msg = `Worker abandonado/timeout — resultado indeterminável (worker_id=${row.worker_id || '?'})`;
++    const upd = await dbRun(db, `
++      UPDATE cozinha_impressao_fila
++      SET estado = ?,
++          ultimo_erro = ?,
++          updated_at = ?
++      WHERE id = ?
++        AND empresa_id = ?
++        AND unidade_id = ?
++        AND estado = ?
++    `, [
++      ESTADOS_FILA.RESULTADO_INCERTO,
++      msg,
++      agoraUpd,
++      row.id,
++      empresaId,
++      unidadeId,
++      ESTADOS_FILA.PROCESSANDO
++    ]);
++    if (upd && upd.changes === 1) {
++      marcados.push(row.id);
++    }
++  }
++
++  return {
++    success: true,
++    recuperados: marcados.length,
++    job_ids: marcados,
++    novo_estado: ESTADOS_FILA.RESULTADO_INCERTO,
++    impressao_fisica: false
++  };
++}
++
++/**
++ * Aplica resultado do driver apenas se o job ainda está PROCESSANDO pelo mesmo worker.
++ */
++async function registrarResultado(entrada = {}, opts = {}) {
++  const db = opts.db || entrada.db;
++  if (!db) throw erroImpressao('Banco indisponível.', 500, 'DB_INDISPONIVEL');
++
++  const empresaId = exigirEmpresa(entrada.empresaId != null ? entrada.empresaId : entrada.empresa_id);
++  const unidadeId = exigirUnidadeOperacional(
++    entrada.unidadeId != null ? entrada.unidadeId : entrada.unidade_id
++  );
++  const jobId = parsePositiveInteger(entrada.jobId != null ? entrada.jobId : entrada.id);
++  const workerId = normalizarWorkerId(
++    entrada.workerId != null ? entrada.workerId : entrada.worker_id
++  );
++  if (!jobId) {
++    throw erroImpressao('job id obrigatório.', 400, 'IMPRESSAO_JOB_ID_OBRIGATORIO');
++  }
++
++  const driverOut = assertResultadoDriver({
++    resultado: entrada.resultado,
++    spooler_job_token: entrada.spooler_job_token != null
++      ? entrada.spooler_job_token
++      : entrada.spoolerJobToken,
++    erro: entrada.erro != null ? entrada.erro : entrada.ultimo_erro,
++    impressao_fisica: false,
++    driver: entrada.driver || 'FAKE'
++  });
++
++  if (driverOut.resultado === RESULTADOS_DRIVER.SIMULADO) {
++    throw erroImpressao(
++      'SIMULADO não pode ser registrado na fila operacional.',
++      409,
++      'IMPRESSAO_SIMULADO_NAO_OPERACIONAL'
++    );
++  }
++
++  const estadoFinal = estadoFinalDeResultadoDriver(driverOut.resultado);
++  const agora = agoraIso();
++
++  const upd = await dbRun(db, `
++    UPDATE cozinha_impressao_fila
++    SET estado = ?,
++        spooler_job_token = CASE
++          WHEN ? IS NOT NULL THEN ?
++          ELSE spooler_job_token
++        END,
++        ultimo_erro = ?,
++        updated_at = ?
++    WHERE id = ?
++      AND empresa_id = ?
++      AND unidade_id = ?
++      AND estado = ?
++      AND worker_id = ?
++  `, [
++    estadoFinal,
++    driverOut.spooler_job_token,
++    driverOut.spooler_job_token,
++    driverOut.erro,
++    agora,
++    jobId,
++    empresaId,
++    unidadeId,
++    ESTADOS_FILA.PROCESSANDO,
++    workerId
++  ]);
++
++  if (!upd || upd.changes !== 1) {
++    throw erroImpressao(
++      'Job não está PROCESSANDO por este worker (claim perdido ou já finalizado).',
++      409,
++      'IMPRESSAO_RESULTADO_RECUSADO',
++      { detalhes: { job_id: jobId, worker_id: workerId } }
++    );
++  }
++
++  const out = await FilaService.obterJob({
++    db, empresaId, unidadeId, id: jobId
++  }, { db, incluirSnapshot: true });
++
++  return {
++    success: true,
++    job: out.job,
++    resultado_driver: driverOut.resultado,
++    impressao_fisica: false
++  };
++}
++
++/**
++ * E-01: simulação sem claim — não consome tentativas, não altera estado,
++ * não gera ACEITA_PELO_SPOOLER nem token de spooler.
++ */
++async function simularProximoSemClaim(entrada = {}, opts = {}) {
++  const db = opts.db || entrada.db;
++  if (!db) throw erroImpressao('Banco indisponível.', 500, 'DB_INDISPONIVEL');
++
++  const empresaId = exigirEmpresa(entrada.empresaId != null ? entrada.empresaId : entrada.empresa_id);
++  const unidadeId = exigirUnidadeOperacional(
++    entrada.unidadeId != null ? entrada.unidadeId : entrada.unidade_id
++  );
++  const workerId = normalizarWorkerId(
++    entrada.workerId != null ? entrada.workerId : (entrada.worker_id != null ? entrada.worker_id : 'sim-worker')
++  );
++  const driver = opts.driver || entrada.driver;
++  if (!driver) {
++    throw erroImpressao('Driver obrigatório para simulação.', 400, 'IMPRESSAO_DRIVER_OBRIGATORIO');
++  }
++
++  let sql = `
++    SELECT *
++    FROM cozinha_impressao_fila
++    WHERE empresa_id = ?
++      AND unidade_id = ?
++      AND estado = ?
++    ORDER BY created_at ASC, id ASC
++    LIMIT 1
++  `;
++  const params = [empresaId, unidadeId, ESTADOS_FILA.PENDENTE];
++  const row = await dbGet(db, sql, params);
++  if (!row) {
++    return {
++      success: true,
++      processado: false,
++      simulado: true,
++      resultado_driver: RESULTADOS_DRIVER.SIMULADO,
++      job: null,
++      tentativas: null,
++      impressao_fisica: false
++    };
++  }
++
++  const tentativasAntes = Number(row.tentativas) || 0;
++  const estacao = row.estacao_impressao_id
++    ? await dbGet(db, `
++        SELECT id, device_name, largura_mm, vias, codigo_estacao
++        FROM cozinha_estacoes_impressao
++        WHERE id = ? AND empresa_id = ? AND unidade_id = ?
++      `, [row.estacao_impressao_id, empresaId, unidadeId])
++    : null;
++
++  const jobCanonico = FilaService.mapearJob(row, { incluirSnapshot: true });
++  // Snapshot exclusivamente do banco (já em row.payload_snapshot).
++  jobCanonico.payload_snapshot = row.payload_snapshot;
++
++  let driverOut;
++  try {
++    const raw = await driver.imprimir({
++      job: jobCanonico,
++      empresaId,
++      unidadeId,
++      workerId,
++      estacao,
++      device_name: estacao && estacao.device_name,
++      impressao_fisica: false,
++      modo_simulacao: true
++    });
++    driverOut = assertResultadoDriver({
++      ...raw,
++      resultado: raw.resultado === RESULTADOS_DRIVER.ACEITA
++        ? RESULTADOS_DRIVER.SIMULADO
++        : raw.resultado,
++      spooler_job_token: null,
++      impressao_fisica: false,
++      dry_run: true,
++      driver: raw.driver || driver.nome || 'ELECTRON'
++    });
++  } catch (err) {
++    driverOut = assertResultadoDriver({
++      resultado: RESULTADOS_DRIVER.SIMULADO,
++      spooler_job_token: null,
++      erro: `Simulação: ${err && err.message ? err.message : String(err)}`,
++      impressao_fisica: false,
++      dry_run: true,
++      driver: (driver && driver.nome) || 'ELECTRON'
++    });
++  }
++
++  // Força contrato E-01: nunca ACEITA / nunca token.
++  if (driverOut.resultado === RESULTADOS_DRIVER.ACEITA) {
++    driverOut.resultado = RESULTADOS_DRIVER.SIMULADO;
++  }
++  driverOut.spooler_job_token = null;
++  driverOut.dry_run = true;
++
++  const depois = await dbGet(db, `
++    SELECT id, estado, tentativas, spooler_job_token, payload_snapshot
++    FROM cozinha_impressao_fila WHERE id = ?
++  `, [row.id]);
++
++  return {
++    success: true,
++    processado: false,
++    simulado: true,
++    resultado_driver: RESULTADOS_DRIVER.SIMULADO,
++    job: FilaService.mapearJob(depois || row, { incluirSnapshot: true }),
++    tentativas: Number(depois && depois.tentativas != null ? depois.tentativas : tentativasAntes),
++    tentativas_antes: tentativasAntes,
++    estado: (depois && depois.estado) || ESTADOS_FILA.PENDENTE,
++    spooler_job_token: null,
++    impressao_fisica: false
++  };
++}
++
++/**
++ * E-02: confirma propriedade atomicamente imediatamente antes do driver.
++ * - Se ownership já foi perdida → não chama imprimir.
++ * - Renova processando_em e marca job ativo para a recuperação não invalidar
++ *   a propriedade enquanto o driver executa.
++ * @returns {Promise<{ liberar: function }>}
++ */
++async function confirmarPropriedadeAntesDeImprimir(db, {
++  jobId,
++  empresaId,
++  unidadeId,
++  workerId
++}) {
++  const id = parsePositiveInteger(jobId);
++  if (!id) {
++    throw erroImpressao('job id obrigatório.', 400, 'IMPRESSAO_JOB_ID_OBRIGATORIO');
++  }
++  const agora = agoraIso();
++  const upd = await dbRun(db, `
++    UPDATE cozinha_impressao_fila
++    SET processando_em = ?,
++        updated_at = ?
++    WHERE id = ?
++      AND empresa_id = ?
++      AND unidade_id = ?
++      AND estado = ?
++      AND worker_id = ?
++  `, [
++    agora,
++    agora,
++    id,
++    empresaId,
++    unidadeId,
++    ESTADOS_FILA.PROCESSANDO,
++    workerId
++  ]);
++
++  if (!upd || upd.changes !== 1) {
++    throw erroImpressao(
++      'Propriedade do job perdida antes da impressão — driver não será chamado.',
++      409,
++      'IMPRESSAO_PROPRIEDADE_PERDIDA',
++      { detalhes: { job_id: id, worker_id: workerId } }
++    );
++  }
++
++  marcarJobImpressaoAtivo(empresaId, unidadeId, id);
++  return {
++    liberar() {
++      liberarJobImpressaoAtivo(empresaId, unidadeId, id);
++    }
++  };
++}
++
++/**
++ * Processa um job já reivindicado com o driver (FAKE por padrão).
++ * E-02: valida e lê snapshot exclusivamente do banco antes do driver;
++ * confirma propriedade imediatamente antes de imprimir.
++ */
++async function processarJobReivindicado(entrada = {}, opts = {}) {
++  const db = opts.db || entrada.db;
++  if (!db) throw erroImpressao('Banco indisponível.', 500, 'DB_INDISPONIVEL');
++
++  const empresaId = exigirEmpresa(entrada.empresaId != null ? entrada.empresaId : entrada.empresa_id);
++  const unidadeId = exigirUnidadeOperacional(
++    entrada.unidadeId != null ? entrada.unidadeId : entrada.unidade_id
++  );
++  const workerId = normalizarWorkerId(
++    entrada.workerId != null ? entrada.workerId : entrada.worker_id
++  );
++  const jobIdHint = parsePositiveInteger(
++    (entrada.job && entrada.job.id) != null ? entrada.job.id : (entrada.jobId != null ? entrada.jobId : entrada.id)
++  );
++  if (!jobIdHint) {
++    throw erroImpressao('job reivindicado obrigatório.', 400, 'IMPRESSAO_JOB_OBRIGATORIO');
++  }
++
++  // E-02: nunca confiar no objeto job recebido — recarrega do banco.
++  const row = await carregarJobCanonicoParaProcessamento(db, {
++    jobId: jobIdHint,
++    empresaId,
++    unidadeId,
++    workerId
++  });
++
++  const driver = opts.driver || entrada.driver || criarFakeDriver({ modo: 'sucesso' });
++  if (driver.impressaoFisica === true) {
++    throw erroImpressao(
++      'Driver não pode declarar impressaoFisica=true (ACEITA ≠ papel impresso).',
++      500,
++      'IMPRESSAO_FISICA_PROIBIDA'
++    );
++  }
++  if (driverEmModoSimulacao(driver)) {
++    throw erroImpressao(
++      'Driver em modo simulação não pode processar claim operacional.',
++      409,
++      'IMPRESSAO_SIMULADO_NAO_OPERACIONAL'
++    );
++  }
++
++  const estacao = row.estacao_impressao_id
++    ? await dbGet(db, `
++        SELECT id, device_name, largura_mm, vias, codigo_estacao
++        FROM cozinha_estacoes_impressao
++        WHERE id = ? AND empresa_id = ? AND unidade_id = ?
++      `, [row.estacao_impressao_id, empresaId, unidadeId])
++    : null;
++
++  const jobCanonico = FilaService.mapearJob(row, { incluirSnapshot: true });
++  jobCanonico.payload_snapshot = row.payload_snapshot;
++
++  // Gancho somente de teste: permite invalidar propriedade entre validação e confirmação.
++  if (typeof opts.__aposValidacaoCanonico === 'function') {
++    await opts.__aposValidacaoCanonico({
++      db, jobId: row.id, empresaId, unidadeId, workerId, row
++    });
++  }
++
++  // E-02: fecha a janela validação → driver. Sem propriedade → sem imprimir.
++  const posse = await confirmarPropriedadeAntesDeImprimir(db, {
++    jobId: row.id,
++    empresaId,
++    unidadeId,
++    workerId
++  });
++
++  let driverOut;
++  try {
++    try {
++      const raw = await driver.imprimir({
++        job: jobCanonico,
++        empresaId,
++        unidadeId,
++        workerId,
++        estacao,
++        device_name: estacao && estacao.device_name,
++        impressao_fisica: false
++      });
++      driverOut = assertResultadoDriver({
++        ...raw,
++        impressao_fisica: false,
++        driver: raw.driver || driver.nome || 'FAKE'
++      });
++    } catch (err) {
++      if (err && err.codigo && String(err.codigo).startsWith('IMPRESSAO_')) {
++        throw err;
++      }
++      driverOut = assertResultadoDriver({
++        resultado: RESULTADOS_DRIVER.INCERTO,
++        spooler_job_token: null,
++        erro: `Exceção no driver: ${err && err.message ? err.message : String(err)}`,
++        impressao_fisica: false,
++        driver: (driver && driver.nome) || 'FAKE'
++      });
++    }
++
++    if (driverOut.resultado === RESULTADOS_DRIVER.SIMULADO) {
++      throw erroImpressao(
++        'Driver retornou SIMULADO em caminho operacional.',
++        409,
++        'IMPRESSAO_SIMULADO_NAO_OPERACIONAL'
++      );
++    }
++
++    return await registrarResultado({
++      db,
++      empresaId,
++      unidadeId,
++      jobId: row.id,
++      workerId,
++      resultado: driverOut.resultado,
++      spooler_job_token: driverOut.spooler_job_token,
++      erro: driverOut.erro,
++      driver: driverOut.driver
++    }, { db });
++  } finally {
++    posse.liberar();
++  }
++}
++
++/**
++ * Ciclo: (simulação sem claim, sem recuperação) OU (recuperação + claim + processar).
++ * E-01: ELECTRON sem spooler autorizado → simularProximoSemClaim (sem recuperarJobsAbandonados).
++ */
++async function processarProximo(entrada = {}, opts = {}) {
++  const db = opts.db || entrada.db;
++  if (!db) throw erroImpressao('Banco indisponível.', 500, 'DB_INDISPONIVEL');
++
++  const empresaId = exigirEmpresa(entrada.empresaId != null ? entrada.empresaId : entrada.empresa_id);
++  const unidadeId = exigirUnidadeOperacional(
++    entrada.unidadeId != null ? entrada.unidadeId : entrada.unidade_id
++  );
++  const workerId = normalizarWorkerId(
++    entrada.workerId != null ? entrada.workerId : entrada.worker_id
++  );
++  const driver = opts.driver || entrada.driver || criarFakeDriver({ modo: 'sucesso' });
++
++  // E-01: simulação isolada — não recupera abandonados e não altera fila persistida.
++  if (driverEmModoSimulacao(driver)) {
++    const sim = await simularProximoSemClaim({
++      db, empresaId, unidadeId, workerId
++    }, { db, driver });
++    return {
++      success: true,
++      processado: false,
++      simulado: true,
++      recuperacao: {
++        success: true,
++        recuperados: 0,
++        job_ids: [],
++        omitida: true,
++        motivo: 'simulacao'
++      },
++      job: sim.job,
++      resultado_driver: RESULTADOS_DRIVER.SIMULADO,
++      tentativas: sim.tentativas,
++      impressao_fisica: false
++    };
++  }
++
++  const recuperacao = await recuperarJobsAbandonados({
++    db,
++    empresaId,
++    unidadeId,
++    limiteMs: entrada.limiteMs != null ? entrada.limiteMs : entrada.abandono_ms
++  }, { db });
++
++  const claim = await reivindicarProximoJob({
++    db,
++    empresaId,
++    unidadeId,
++    workerId,
++    estacaoImpressaoId: entrada.estacaoImpressaoId != null
++      ? entrada.estacaoImpressaoId
++      : entrada.estacao_impressao_id
++  }, { db });
++
++  if (!claim.reivindicado || !claim.job) {
++    return {
++      success: true,
++      processado: false,
++      simulado: false,
++      recuperacao,
++      job: null,
++      impressao_fisica: false
++    };
++  }
++
++  const resultado = await processarJobReivindicado({
++    db,
++    empresaId,
++    unidadeId,
++    workerId,
++    job: { id: claim.job.id }
++  }, { db, driver });
++
++  return {
++    success: true,
++    processado: true,
++    simulado: false,
++    recuperacao,
++    job: resultado.job,
++    resultado_driver: resultado.resultado_driver,
++    impressao_fisica: false
++  };
++}
++
++/**
++ * Ao iniciar/reiniciar o worker: apenas marca abandonados como INCERTO.
++ * Nunca devolve PROCESSANDO → PENDENTE.
++ */
++async function aoIniciarWorker(entrada = {}, opts = {}) {
++  const out = await recuperarJobsAbandonados({
++    ...entrada,
++    limiteMs: entrada.limiteMs != null ? entrada.limiteMs : 0
++  }, opts);
++  // limiteMs=0 → processando_em <= agora (todos PROCESSANDO com timestamp)
++  return {
++    ...out,
++    reinicio: true,
++    reenvio_automatico: false,
++    impressao_fisica: false
++  };
++}
++
++module.exports = {
++  ABANDONO_PADRAO_MS,
++  reivindicarProximoJob,
++  recuperarJobsAbandonados,
++  registrarResultado,
++  carregarJobCanonicoParaProcessamento,
++  confirmarPropriedadeAntesDeImprimir,
++  driverEmModoSimulacao,
++  simularProximoSemClaim,
++  processarJobReivindicado,
++  processarProximo,
++  aoIniciarWorker,
++  estadoFinalDeResultadoDriver,
++  normalizarWorkerId,
++  jobImpressaoEstaAtivo,
++  _resetJobsImpressaoAtivosParaTeste
++};
+
+diff --git a/backend/services/cozinha/cozinhaImpressaoDriver.js b/backend/services/cozinha/cozinhaImpressaoDriver.js
+index e69de29..94a0273 100644
+--- a/backend/services/cozinha/cozinhaImpressaoDriver.js
++++ b/backend/services/cozinha/cozinhaImpressaoDriver.js
+@@ -0,0 +1,194 @@
++/**
++ * Contrato abstrato de driver de impressão — Sprint 06 Bloco D.
++ * Sem integração desktop, sem chamada de impressão nativa, sem impressora real.
++ */
++'use strict';
++
++const { erroImpressao } = require('./cozinhaImpressaoContratos');
++
++const RESULTADOS_DRIVER = Object.freeze({
++  ACEITA: 'ACEITA',
++  FALHA: 'FALHA',
++  INCERTO: 'INCERTO',
++  /** Simulação/dry-run — NÃO é aceitação do spooler. */
++  SIMULADO: 'SIMULADO'
++});
++
++/**
++ * @typedef {object} DriverImpressaoResultado
++ * @property {'ACEITA'|'FALHA'|'INCERTO'|'SIMULADO'} resultado
++ * @property {string|null} [spooler_job_token]
++ * @property {string|null} [erro]
++ * @property {boolean} impressao_fisica
++ * @property {string} driver
++ * @property {boolean} [dry_run]
++ */
++
++function assertResultadoDriver(out) {
++  if (!out || typeof out !== 'object') {
++    throw erroImpressao('Driver retornou resultado inválido.', 500, 'IMPRESSAO_DRIVER_INVALIDO');
++  }
++  if (out.impressao_fisica === true) {
++    throw erroImpressao(
++      'Contrato de driver: impressao_fisica=true é proibido (ACEITA ≠ papel impresso).',
++      500,
++      'IMPRESSAO_FISICA_PROIBIDA'
++    );
++  }
++  const r = String(out.resultado || '').toUpperCase();
++  if (!RESULTADOS_DRIVER[r]) {
++    throw erroImpressao(
++      'resultado do driver inválido.',
++      500,
++      'IMPRESSAO_DRIVER_RESULTADO_INVALIDO',
++      { detalhes: { resultado: out.resultado } }
++    );
++  }
++  return {
++    resultado: r,
++    spooler_job_token: out.spooler_job_token != null ? String(out.spooler_job_token) : null,
++    erro: out.erro != null ? String(out.erro) : null,
++    impressao_fisica: false,
++    dry_run: out.dry_run === true || r === RESULTADOS_DRIVER.SIMULADO,
++    driver: String(out.driver || 'DESCONHECIDO')
++  };
++}
++
++/**
++ * Interface documental — qualquer driver deve expor imprimir(contexto).
++ * @interface
++ */
++class ImpressaoDriver {
++  /**
++   * @param {object} _contexto
++   * @returns {Promise<DriverImpressaoResultado>}
++   */
++  async imprimir(_contexto) {
++    throw erroImpressao(
++      'Driver abstrato: implementar imprimir().',
++      501,
++      'IMPRESSAO_DRIVER_NAO_IMPLEMENTADO'
++    );
++  }
++
++  get nome() {
++    return 'ABSTRACT';
++  }
++
++  get impressaoFisica() {
++    return false;
++  }
++}
++
++/**
++ * Driver FAKE — simula sucesso, falha conhecida ou resultado incerto.
++ * Nunca acessa impressora real nem runtime desktop de impressão.
++ */
++class FakeImpressaoDriver extends ImpressaoDriver {
++  /**
++   * @param {object} [opts]
++   * @param {'sucesso'|'falha'|'incerto'|'timeout'} [opts.modo]
++   * @param {string} [opts.erro]
++   * @param {string} [opts.tokenPrefix]
++   * @param {number} [opts.delayMs] — apenas simulação (não imprime)
++   * @param {function} [opts.resolver] — override por job: (ctx) => modo|resultado
++   */
++  constructor(opts = {}) {
++    super();
++    this.modo = String(opts.modo || 'sucesso').toLowerCase();
++    this.erroPadrao = opts.erro != null ? String(opts.erro) : null;
++    this.tokenPrefix = opts.tokenPrefix != null ? String(opts.tokenPrefix) : 'fake-spool';
++    this.delayMs = Number(opts.delayMs) > 0 ? Number(opts.delayMs) : 0;
++    this.resolver = typeof opts.resolver === 'function' ? opts.resolver : null;
++    this.chamadas = [];
++    this._seq = 0;
++  }
++
++  get nome() {
++    return 'FAKE';
++  }
++
++  get impressaoFisica() {
++    return false;
++  }
++
++  /**
++   * Altera o modo em runtime (testes / simulação operacional).
++   * @param {'sucesso'|'falha'|'incerto'|'timeout'} modo
++   */
++  setModo(modo) {
++    this.modo = String(modo || 'sucesso').toLowerCase();
++  }
++
++  async imprimir(contexto = {}) {
++    this._seq += 1;
++    const registro = {
++      seq: this._seq,
++      job_id: contexto.job && contexto.job.id,
++      vias: contexto.job && contexto.job.vias,
++      em: new Date().toISOString()
++    };
++    this.chamadas.push(registro);
++
++    if (this.delayMs > 0) {
++      await new Promise((r) => setTimeout(r, this.delayMs));
++    }
++
++    let modo = this.modo;
++    if (this.resolver) {
++      const decidido = await Promise.resolve(this.resolver(contexto, registro));
++      if (decidido && typeof decidido === 'object' && decidido.resultado) {
++        return assertResultadoDriver({
++          ...decidido,
++          impressao_fisica: false,
++          driver: 'FAKE'
++        });
++      }
++      if (typeof decidido === 'string') modo = decidido.toLowerCase();
++    }
++
++    if (modo === 'falha' || modo === 'fail' || modo === 'erro') {
++      return assertResultadoDriver({
++        resultado: RESULTADOS_DRIVER.FALHA,
++        spooler_job_token: null,
++        erro: this.erroPadrao || 'FAKE: falha conhecida antes da aceitação do spooler',
++        impressao_fisica: false,
++        driver: 'FAKE'
++      });
++    }
++
++    if (modo === 'incerto' || modo === 'timeout' || modo === 'uncertain') {
++      return assertResultadoDriver({
++        resultado: RESULTADOS_DRIVER.INCERTO,
++        spooler_job_token: null,
++        erro: this.erroPadrao
++          || (modo === 'timeout'
++            ? 'FAKE: timeout — resultado indeterminável'
++            : 'FAKE: resultado incerto'),
++        impressao_fisica: false,
++        driver: 'FAKE'
++      });
++    }
++
++    // sucesso
++    return assertResultadoDriver({
++      resultado: RESULTADOS_DRIVER.ACEITA,
++      spooler_job_token: `${this.tokenPrefix}:${contexto.job && contexto.job.id}:${this._seq}`,
++      erro: null,
++      impressao_fisica: false,
++      driver: 'FAKE'
++    });
++  }
++}
++
++function criarFakeDriver(opts = {}) {
++  return new FakeImpressaoDriver(opts);
++}
++
++module.exports = {
++  RESULTADOS_DRIVER,
++  ImpressaoDriver,
++  FakeImpressaoDriver,
++  criarFakeDriver,
++  assertResultadoDriver
++};
+
+diff --git a/tests/cozinha/sprint06-bloco-e-electron-integracao.test.js b/tests/cozinha/sprint06-bloco-e-electron-integracao.test.js
+index e69de29..6b627c4 100644
+--- a/tests/cozinha/sprint06-bloco-e-electron-integracao.test.js
++++ b/tests/cozinha/sprint06-bloco-e-electron-integracao.test.js
+@@ -0,0 +1,698 @@
++/**
++ * Sprint 06 — Bloco E · 2ª rodada correção auditoria (E-01/E-02/E-03).
++ *
++ *   node --test --test-concurrency=1 tests/cozinha/sprint06-bloco-e-electron-integracao.test.js
++ */
++'use strict';
++
++const fs = require('fs');
++const os = require('os');
++const path = require('path');
++const { describe, it, beforeEach } = require('node:test');
++const assert = require('node:assert/strict');
++const sqlite3 = require('sqlite3').verbose();
++
++const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-cozinha-s06e2-'));
++process.env.DB_DIR = dbDir;
++process.env.CDS_TEST_ISOLATION = '1';
++process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
++process.env.CDS_FORCAR_LOCAL = '1';
++delete process.env.CDS_COZINHA_IMPRESSAO_FISICA_AUTORIZADA;
++delete process.env.CDS_ALLOW_OFFICIAL_DB;
++
++const {
++  garantirSchemaCozinha,
++  marcarCozinhaOperacional,
++  isCozinhaOperacional,
++  COZINHA_SCHEMA_VERSION
++} = require('../../backend/utils/cozinhaSchema');
++const { garantirSchemaEmpresasAsync } = require('../../backend/services/empresas/empresasSchema');
++const CozinhaDespacho = require('../../backend/services/cozinha/CozinhaDespachoService');
++const EstacaoService = require('../../backend/services/cozinha/CozinhaImpressaoEstacaoService');
++const WorkerService = require('../../backend/services/cozinha/CozinhaImpressaoWorkerService');
++const { renderizarTexto } = require('../../backend/services/cozinha/CozinhaImpressaoRenderer');
++const { criarFakeDriver, RESULTADOS_DRIVER } = require('../../backend/services/cozinha/cozinhaImpressaoDriver');
++const {
++  criarElectronDriver,
++  criarAdapterElectronMock
++} = require('../../backend/services/cozinha/cozinhaImpressaoElectronDriver');
++const {
++  criarDriverElectronProducao,
++  criarDriverParaWorker,
++  descreverIntegracaoProducao
++} = require('../../backend/services/cozinha/CozinhaImpressaoElectronProducao');
++const {
++  criarWorkerImpressaoCozinha
++} = require('../../backend/services/cozinha/CozinhaImpressaoWorkerBootstrap');
++const {
++  IPC_CANAIS,
++  isImpressaoFisicaAutorizada,
++  validarRemetenteIpc,
++  rejeitarImpressaoGenericaPorIpc,
++  listarImpressorasCozinha,
++  enviarParaSpoolerCozinha
++} = require('../../backend/services/cozinha/cozinhaImpressaoElectronBridge');
++const { ESTADOS_FILA } = require('../../backend/services/cozinha/cozinhaImpressaoContratos');
++
++function run(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.run(sql, params, function cb(err) {
++      if (err) reject(err);
++      else resolve(this);
++    });
++  });
++}
++function get(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
++  });
++}
++function all(db, sql, params = []) {
++  return new Promise((resolve, reject) => {
++    db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
++  });
++}
++function open() {
++  return new Promise((resolve, reject) => {
++    const db = new sqlite3.Database(':memory:', (err) => {
++      if (err) return reject(err);
++      db.serialize(() => {
++        db.run('PRAGMA foreign_keys = ON');
++        db.run('PRAGMA busy_timeout = 10000', (e) => (e ? reject(e) : resolve(db)));
++      });
++    });
++  });
++}
++function close(db) {
++  return new Promise((resolve) => db.close(() => resolve()));
++}
++
++async function schemaErpMinimo(db) {
++  await garantirSchemaEmpresasAsync(db);
++  await run(db, `CREATE TABLE IF NOT EXISTS configuracoes (
++    id INTEGER PRIMARY KEY AUTOINCREMENT, chave VARCHAR(100) UNIQUE NOT NULL,
++    valor TEXT, tipo VARCHAR(50), descricao TEXT, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
++  await run(db, `CREATE TABLE IF NOT EXISTS mesas (
++    id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL,
++    numero INTEGER NOT NULL, ativo INTEGER NOT NULL DEFAULT 1)`);
++  await run(db, `CREATE TABLE IF NOT EXISTS mesa_atendimentos (
++    id INTEGER PRIMARY KEY AUTOINCREMENT, empresa_id INTEGER NOT NULL, mesa_id INTEGER NOT NULL,
++    estado TEXT NOT NULL, operador_abertura_id INTEGER NOT NULL DEFAULT 1,
++    aberto_em TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`);
++  await run(db, `CREATE TABLE IF NOT EXISTS produtos (
++    id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT NOT NULL,
++    tipo_operacional TEXT DEFAULT 'COMERCIAL', utiliza_ficha_tecnica INTEGER DEFAULT 0)`);
++  await run(db, `CREATE TABLE IF NOT EXISTS pedidos (
++    id INTEGER PRIMARY KEY AUTOINCREMENT, codigo VARCHAR(50),
++    data_pedido DATE NOT NULL DEFAULT '2026-01-01', total DECIMAL(10,2) NOT NULL DEFAULT 0,
++    status TEXT NOT NULL DEFAULT 'PEDIDO', empresa_id INTEGER, mesa_id INTEGER, mesa_atendimento_id INTEGER)`);
++  await run(db, `CREATE TABLE IF NOT EXISTS pedidos_itens (
++    id INTEGER PRIMARY KEY AUTOINCREMENT, pedido_id INTEGER NOT NULL, produto_id INTEGER NOT NULL,
++    quantidade REAL NOT NULL, preco_unitario DECIMAL(10,2) NOT NULL DEFAULT 0,
++    subtotal DECIMAL(10,2) NOT NULL DEFAULT 0, classificacao_operacional_snapshot TEXT,
++    produto_nome_snapshot TEXT, observacao TEXT)`);
++  await run(db, `CREATE TABLE IF NOT EXISTS pedido_item_ingredientes (
++    id INTEGER PRIMARY KEY AUTOINCREMENT, pedido_id INTEGER NOT NULL, pedido_item_id INTEGER NOT NULL,
++    empresa_id INTEGER NOT NULL, insumo_id INTEGER NOT NULL, insumo_nome_snapshot TEXT NOT NULL,
++    quantidade_snapshot REAL NOT NULL, unidade_snapshot TEXT NOT NULL,
++    classificacao_comercial_snapshot TEXT NOT NULL, selecionado INTEGER NOT NULL,
++    preco_adicional_snapshot REAL NOT NULL DEFAULT 0)`);
++  const info = await garantirSchemaCozinha(db);
++  assert.equal(info.operacional, true);
++  assert.equal(COZINHA_SCHEMA_VERSION, 3);
++  assert.equal(isCozinhaOperacional(), true);
++}
++
++async function prepararBase(db, cnpj = '55555555000155') {
++  const emp = await run(db, `
++    INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
++    VALUES (?, 'Emp E', 'EE', 1)`, [cnpj]);
++  const empresaId = emp.lastID;
++  const mesa = await run(db, `INSERT INTO mesas (empresa_id, numero, ativo) VALUES (?, 21, 1)`, [empresaId]);
++  const at = await run(db, `
++    INSERT INTO mesa_atendimentos (empresa_id, mesa_id, estado, operador_abertura_id)
++    VALUES (?, ?, 'OCUPADA', 1)`, [empresaId, mesa.lastID]);
++  const un = await run(db, `
++    INSERT INTO cozinha_unidades (empresa_id, codigo, ativo, sequencia_atual)
++    VALUES (?, 'U-E', 1, 0)`, [empresaId]);
++  const prod = await run(db, `
++    INSERT INTO produtos (nome, tipo_operacional, utiliza_ficha_tecnica) VALUES ('Pastel', 'COMERCIAL', 1)`);
++  let n = 0;
++  async function criarItem(numeroComanda, tipo = 'PASTEL', nome = 'Pastel E', qty = 1) {
++    n += 1;
++    const ped = await run(db, `
++      INSERT INTO pedidos (codigo, data_pedido, total, status, empresa_id, mesa_id, mesa_atendimento_id)
++      VALUES (?, '2026-01-01', 10, 'PEDIDO', ?, ?, ?)`, [`PE-${n}`, empresaId, mesa.lastID, at.lastID]);
++    const item = await run(db, `
++      INSERT INTO pedidos_itens (
++        pedido_id, produto_id, quantidade, preco_unitario, subtotal,
++        classificacao_operacional_snapshot, produto_nome_snapshot, observacao
++      ) VALUES (?, ?, ?, 9.90, 9.90, ?, ?, 'obs')`, [ped.lastID, prod.lastID, qty, tipo, nome]);
++    const cmd = await run(db, `
++      INSERT INTO cozinha_comandas (
++        empresa_id, atendimento_id, numero_comanda, rotulo, pedido_id, operador_lancamento_id
++      ) VALUES (?, ?, ?, ?, ?, 1)`, [empresaId, at.lastID, numeroComanda, `C${numeroComanda}`, ped.lastID]);
++    return { pedidoId: ped.lastID, pedidoItemId: item.lastID, comandaId: cmd.lastID, tipo, qty };
++  }
++  return { empresaId, mesaId: mesa.lastID, atendimentoId: at.lastID, unidadeId: un.lastID, criarItem };
++}
++
++function entrada(ctx, itens, chave) {
++  return {
++    empresaId: ctx.empresaId, operadorId: 7, idempotencyKey: chave,
++    unidade_id: ctx.unidadeId, mesa_id: ctx.mesaId, atendimento_id: ctx.atendimentoId,
++    itens: itens.map((c) => ({
++      pedido_id: c.pedidoId, pedido_item_id: c.pedidoItemId, comanda_id: c.comandaId,
++      qty_solicitada: Number(c.qty || 1).toFixed(3)
++    }))
++  };
++}
++
++async function despacharComJob(db, ctx, key, estacaoOpts = {}) {
++  await EstacaoService.criarEstacao({
++    db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, codigo_estacao: 'PASTEL',
++    device_name: estacaoOpts.device_name != null ? estacaoOpts.device_name : 'Cozinha-Termica-80',
++    largura_mm: estacaoOpts.largura_mm != null ? estacaoOpts.largura_mm : 80,
++    vias: estacaoOpts.vias != null ? estacaoOpts.vias : 2,
++    modelo_individual: 0, modelo_agrupado: 1, ativo: 1
++  });
++  const item = await ctx.criarItem(1, 'PASTEL', 'Pastel E');
++  const out = await CozinhaDespacho.despacharLote(entrada(ctx, [item], key), { db });
++  const jobs = await all(db, `SELECT * FROM cozinha_impressao_fila WHERE rodada_id=?`, [out.rodada.id]);
++  assert.equal(jobs.length, 1);
++  return { despacho: out, job: jobs[0] };
++}
++
++function adapterProducaoSpy(opts = {}) {
++  const prints = [];
++  return {
++    tipo: 'electron-producao',
++    prints,
++    async getPrinters() {
++      return opts.printers || [{ name: 'Cozinha-Termica-80', isDefault: true }];
++    },
++    async print(payload) {
++      prints.push(payload);
++      if (opts.modo === 'falha-comunicacao') throw new Error('IPC canal indisponível');
++      if (opts.modo === 'hang') return new Promise(() => {});
++      return { token: `prod:${prints.length}` };
++    }
++  };
++}
++
++describe('Sprint 06 Bloco E — 2ª rodada E-01/E-02/E-03', () => {
++  beforeEach(() => {
++    marcarCozinhaOperacional(false);
++    delete process.env.CDS_COZINHA_IMPRESSAO_FISICA_AUTORIZADA;
++    WorkerService._resetJobsImpressaoAtivosParaTeste();
++  });
++
++  it('1) E-01: dry-run nunca ACEITA_PELO_SPOOLER e não consome tentativas em ciclos', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    const { job } = await despacharComJob(db, ctx, 'e2-1');
++    assert.equal(job.tentativas, 0);
++
++    const adapter = criarAdapterElectronMock();
++    const driver = criarElectronDriver({ adapter });
++    assert.equal(driver.spoolerRealHabilitado, false);
++
++    for (let i = 0; i < 5; i += 1) {
++      const out = await WorkerService.processarProximo({
++        db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: `w-sim-${i}`
++      }, { db, driver });
++      assert.equal(out.simulado, true);
++      assert.equal(out.processado, false);
++      assert.equal(out.resultado_driver, RESULTADOS_DRIVER.SIMULADO);
++      assert.notEqual(out.job.estado, ESTADOS_FILA.ACEITA_PELO_SPOOLER);
++      assert.equal(out.job.estado, ESTADOS_FILA.PENDENTE);
++      assert.equal(out.job.spooler_job_token, null);
++      assert.equal(Number(out.tentativas), 0);
++      assert.equal(adapter.prints.length, 0);
++    }
++
++    const final = await get(db, `SELECT estado, tentativas, max_tentativas, spooler_job_token FROM cozinha_impressao_fila WHERE id=?`, [job.id]);
++    assert.equal(final.estado, ESTADOS_FILA.PENDENTE);
++    assert.equal(final.tentativas, 0);
++    assert.ok(final.tentativas < final.max_tentativas);
++    assert.equal(final.spooler_job_token, null);
++    await close(db);
++  });
++
++  it('2) E-02: job inexistente não chama print', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    const adapter = adapterProducaoSpy();
++    let imprimirChamadas = 0;
++    const driverSpy = criarFakeDriver({
++      modo: 'sucesso',
++      resolver: () => {
++        imprimirChamadas += 1;
++        adapter.prints.push({ via: 'driver' });
++        return 'sucesso';
++      }
++    });
++    await assert.rejects(
++      () => WorkerService.processarJobReivindicado({
++        db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w',
++        job: { id: 999999 }
++      }, { db, driver: driverSpy }),
++      (err) => err.codigo === 'IMPRESSAO_JOB_NAO_ENCONTRADO'
++    );
++    assert.equal(imprimirChamadas, 0);
++    assert.equal(adapter.prints.length, 0);
++    await close(db);
++  });
++
++  it('3) E-02: empresa/unidade/worker/estado divergentes bloqueiam print', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    const { job } = await despacharComJob(db, ctx, 'e2-3');
++    const claim = await WorkerService.reivindicarProximoJob({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-ok'
++    }, { db });
++    assert.equal(claim.reivindicado, true);
++
++    const adapter = adapterProducaoSpy();
++    let imprimirChamadas = 0;
++    const fakePrint = criarFakeDriver({
++      modo: 'sucesso',
++      resolver: () => {
++        imprimirChamadas += 1;
++        adapter.prints.push({ via: 'driver' });
++        return 'sucesso';
++      }
++    });
++
++    await assert.rejects(
++      () => WorkerService.processarJobReivindicado({
++        db, empresaId: ctx.empresaId + 1, unidadeId: ctx.unidadeId, workerId: 'w-ok',
++        job: { id: claim.job.id }
++      }, { db, driver: fakePrint }),
++      (err) => err.codigo === 'IMPRESSAO_JOB_EMPRESA_DIVERGENTE'
++    );
++
++    await assert.rejects(
++      () => WorkerService.processarJobReivindicado({
++        db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId + 1, workerId: 'w-ok',
++        job: { id: claim.job.id }
++      }, { db, driver: fakePrint }),
++      (err) => err.codigo === 'IMPRESSAO_JOB_UNIDADE_DIVERGENTE'
++    );
++
++    await assert.rejects(
++      () => WorkerService.processarJobReivindicado({
++        db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-outro',
++        job: { id: claim.job.id }
++      }, { db, driver: fakePrint }),
++      (err) => err.codigo === 'IMPRESSAO_WORKER_DIVERGENTE'
++    );
++
++    // Fora de PROCESSANDO
++    await run(db, `UPDATE cozinha_impressao_fila SET estado='PENDENTE', worker_id=NULL WHERE id=?`, [job.id]);
++    await assert.rejects(
++      () => WorkerService.processarJobReivindicado({
++        db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-ok',
++        job: { id: job.id }
++      }, { db, driver: fakePrint }),
++      (err) => err.codigo === 'IMPRESSAO_JOB_ESTADO_INVALIDO'
++    );
++
++    assert.equal(imprimirChamadas, 0);
++    assert.equal(adapter.prints.length, 0);
++    await close(db);
++  });
++
++  it('4) E-02: snapshot adulterado no argumento é ignorado; persistido preservado', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    const { job } = await despacharComJob(db, ctx, 'e2-4');
++    const snapOriginal = job.payload_snapshot;
++    const claim = await WorkerService.reivindicarProximoJob({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-snap'
++    }, { db });
++
++    let snapshotVisto = null;
++    const driver = criarFakeDriver({
++      resolver: (ctxJob) => {
++        snapshotVisto = ctxJob.job.payload_snapshot;
++        return 'sucesso';
++      }
++    });
++
++    await WorkerService.processarJobReivindicado({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-snap',
++      job: {
++        id: claim.job.id,
++        payload_snapshot: JSON.stringify({ adulterado: true, empresa_id: 1, unidade_id: 1, rodada_id: 1, modelo: 'AGRUPADO', itens: [] })
++      }
++    }, { db, driver });
++
++    assert.equal(snapshotVisto, snapOriginal);
++    const depois = await get(db, `SELECT payload_snapshot, estado FROM cozinha_impressao_fila WHERE id=?`, [job.id]);
++    assert.equal(depois.payload_snapshot, snapOriginal);
++    assert.equal(depois.estado, ESTADOS_FILA.ACEITA_PELO_SPOOLER);
++    await close(db);
++  });
++
++  it('5) E-03: bootstrap injeta ELECTRON e executa tick completo (físico off)', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    await despacharComJob(db, ctx, 'e2-5');
++
++    const adapter = adapterProducaoSpy();
++    const worker = criarWorkerImpressaoCozinha({
++      modo: 'ELECTRON',
++      adapter,
++      autorizarSpoolerReal: false,
++      permitirAdapterCompat: true,
++      empresaId: ctx.empresaId,
++      unidadeId: ctx.unidadeId,
++      workerId: 'bootstrap-e',
++      db
++    });
++
++    assert.equal(worker.obterDriverInjetado().nome, 'ELECTRON');
++    assert.equal(worker.obterDriverInjetado().isProducao, true);
++    assert.equal(worker.meta.ok, true);
++    assert.equal(worker.descrever().impressao_fisica_autorizada, false);
++
++    const t1 = await worker.tick();
++    assert.equal(t1.simulado, true);
++    assert.equal(t1.resultado_driver, RESULTADOS_DRIVER.SIMULADO);
++    assert.equal(adapter.prints.length, 0);
++
++    const t2 = await worker.tick();
++    assert.equal(t2.simulado, true);
++    assert.equal(Number(t2.tentativas), 0);
++    assert.equal(adapter.prints.length, 0);
++
++    // FAKE isolado
++    const fakeWorker = criarWorkerImpressaoCozinha({ modo: 'FAKE', db });
++    assert.equal(fakeWorker.obterDriverInjetado().nome, 'FAKE');
++    await close(db);
++  });
++
++  it('6) timeout → INCERTO sem reenvio automático', async () => {
++    const out = await enviarParaSpoolerCozinha({
++      deviceName: 'T', texto: 'x', vias: 1, job_id: 3, timeout_ms: 40
++    }, {
++      adapter: { async getPrinters() { return [{ name: 'T' }]; }, async print() { return new Promise(() => {}); } },
++      origem: 'teste-mock',
++      __testeForcarSpooler: true
++    });
++    assert.equal(out.resultado, RESULTADOS_DRIVER.INCERTO);
++
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    const { job } = await despacharComJob(db, ctx, 'e2-6');
++    const claim = await WorkerService.reivindicarProximoJob({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-to'
++    }, { db });
++    await WorkerService.registrarResultado({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId,
++      jobId: claim.job.id, workerId: 'w-to',
++      resultado: RESULTADOS_DRIVER.INCERTO, erro: 'timeout'
++    }, { db });
++    const tick = await WorkerService.processarProximo({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-to2'
++    }, { db, driver: criarFakeDriver({ modo: 'sucesso' }) });
++    assert.equal(tick.processado, false);
++    assert.equal((await get(db, `SELECT estado FROM cozinha_impressao_fila WHERE id=?`, [job.id])).estado, ESTADOS_FILA.RESULTADO_INCERTO);
++    await close(db);
++  });
++
++  it('7) falha não altera preparação; listagem não imprime; vias/largura', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    const { despacho } = await despacharComJob(db, ctx, 'e2-7', { device_name: 'Inexistente' });
++    const driver = criarElectronDriver({
++      adapter: criarAdapterElectronMock({ printers: [{ name: 'Outra' }] })
++    });
++    const out = await WorkerService.processarProximo({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-f'
++    }, { db, driver });
++    // simulação: device inexistente ainda é dry-run SIMULADO sem claim
++    assert.equal(out.simulado, true);
++    const item = await get(db, `SELECT estado_preparacao FROM cozinha_itens WHERE rodada_id=?`, [despacho.rodada.id]);
++    assert.equal(item.estado_preparacao, 'AGUARDANDO');
++
++    const adapter = criarAdapterElectronMock({ printers: [{ name: 'A' }] });
++    const lista = await listarImpressorasCozinha(adapter);
++    assert.equal(lista.impressao_fisica, false);
++    assert.equal(adapter.prints.length, 0);
++
++    const r58 = renderizarTexto({
++      empresa_id: 1, unidade_id: 1, rodada_id: 1, modelo: 'AGRUPADO', largura_mm: 58,
++      mesa_numero: '1', itens: [{ descricao: 'X', qty: '1.000', tipo_item: 'PASTEL', ingredientes: [] }]
++    }, { largura_mm: 58 });
++    assert.equal(r58.colunas, 32);
++
++    const viasOut = await enviarParaSpoolerCozinha({
++      deviceName: 'Cozinha-Termica-80', texto: 'Z', vias: 3, job_id: 8
++    }, { adapter: criarAdapterElectronMock(), origem: 'teste-mock', __testeForcarSpooler: true });
++    assert.equal(viasOut.vias_enviadas, 3);
++    await close(db);
++  });
++
++  it('8) falha de comunicação no spooler mock; snapshot imutável; sem duplicidade FAKE', async () => {
++    const falha = await enviarParaSpoolerCozinha({
++      deviceName: 'X', texto: 'ola', vias: 1, job_id: 9
++    }, {
++      adapter: {
++        async getPrinters() { return [{ name: 'X' }]; },
++        async print() { throw new Error('IPC canal indisponível'); }
++      },
++      origem: 'teste-mock',
++      __testeForcarSpooler: true
++    });
++    assert.equal(falha.resultado, RESULTADOS_DRIVER.FALHA);
++
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    const { job } = await despacharComJob(db, ctx, 'e2-8');
++    const snap = job.payload_snapshot;
++    const r1 = await WorkerService.processarProximo({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-dup1'
++    }, { db, driver: criarFakeDriver({ modo: 'sucesso' }) });
++    assert.equal(r1.processado, true);
++    const r2 = await WorkerService.processarProximo({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-dup2'
++    }, { db, driver: criarFakeDriver({ modo: 'sucesso' }) });
++    assert.equal(r2.processado, false);
++    assert.equal((await get(db, `SELECT COUNT(*) AS n FROM cozinha_impressao_fila`)).n, 1);
++    assert.equal((await get(db, `SELECT payload_snapshot FROM cozinha_impressao_fila WHERE id=?`, [job.id])).payload_snapshot, snap);
++    await close(db);
++  });
++
++  it('9) IPC genérico/remetente bloqueados; isolamento comercial', () => {
++    assert.throws(
++      () => rejeitarImpressaoGenericaPorIpc({ deviceName: 'X', texto: 'x' }),
++      (err) => err.codigo === 'IMPRESSAO_IPC_PRINT_BLOQUEADO'
++    );
++    assert.throws(
++      () => validarRemetenteIpc({ sender: null }),
++      (err) => err.codigo === 'IMPRESSAO_IPC_REMETENTE_INVALIDO'
++    );
++    assert.equal(isImpressaoFisicaAutorizada({ autorizarSpoolerReal: true }), false);
++    assert.equal(IPC_CANAIS.IMPRIMIR, 'cozinha-impressao:imprimir');
++
++    const ipcSrc = fs.readFileSync(path.join(__dirname, '../../electron-cozinha-impressao.js'), 'utf8');
++    assert.ok(!/imprimir-danfe-silencioso|impressora_cupom/.test(ipcSrc));
++    const bootSrc = fs.readFileSync(
++      path.join(__dirname, '../../backend/services/cozinha/CozinhaImpressaoWorkerBootstrap.js'), 'utf8'
++    );
++    assert.ok(bootSrc.includes("criarDriverParaWorker"));
++    assert.ok(bootSrc.includes('processarProximo'));
++    const electronSrc = fs.readFileSync(path.join(__dirname, '../../electron.js'), 'utf8');
++    assert.ok(electronSrc.includes('instalarWorkerImpressaoCozinhaNoElectron'));
++  });
++
++  it('10) E-03 evidência: factory sozinha ≠ integração; tick usa driver injetado', async () => {
++    const apenasFactory = criarDriverParaWorker('ELECTRON', {
++      adapter: adapterProducaoSpy(),
++      permitirAdapterCompat: true
++    });
++    assert.equal(apenasFactory.nome, 'ELECTRON');
++
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    await despacharComJob(db, ctx, 'e2-10');
++    const adapter = adapterProducaoSpy();
++    const worker = criarWorkerImpressaoCozinha({
++      modo: 'ELECTRON',
++      adapter,
++      permitirAdapterCompat: true,
++      db,
++      empresaId: ctx.empresaId,
++      unidadeId: ctx.unidadeId
++    });
++    assert.strictEqual(worker.obterDriverInjetado(), worker.driver);
++    const meta = descreverIntegracaoProducao(worker.obterDriverInjetado());
++    assert.equal(meta.ok, true);
++    const tick = await worker.tick({ db });
++    assert.equal(tick.simulado, true);
++    assert.equal(adapter.prints.length, 0);
++    await close(db);
++  });
++
++  it('11) E-01: tick simulação não altera job antigo em PROCESSANDO', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    const { job } = await despacharComJob(db, ctx, 'e2-11-pend');
++    // Job antigo PROCESSANDO (seria recuperado se a simulação chamasse recuperarJobsAbandonados).
++    const claim = await WorkerService.reivindicarProximoJob({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-old'
++    }, { db });
++    assert.equal(claim.reivindicado, true);
++    assert.equal(Number(claim.job.id), Number(job.id));
++    const antigoIso = new Date(Date.now() - 10 * 60 * 1000).toISOString();
++    await run(db, `
++      UPDATE cozinha_impressao_fila
++      SET processando_em = ?, updated_at = ?, tentativas = 2, ultimo_erro = 'hold'
++      WHERE id = ?
++    `, [antigoIso, antigoIso, claim.job.id]);
++
++    const antes = await get(db, `
++      SELECT id, estado, tentativas, worker_id, spooler_job_token, processando_em,
++             ultimo_erro, payload_snapshot, updated_at
++      FROM cozinha_impressao_fila WHERE id = ?
++    `, [claim.job.id]);
++    assert.equal(antes.estado, ESTADOS_FILA.PROCESSANDO);
++
++    // Job PENDENTE separado para o dry-run observar.
++    const item2 = await ctx.criarItem(2, 'PASTEL', 'Pastel E2');
++    const out2 = await CozinhaDespacho.despacharLote(entrada(ctx, [item2], 'e2-11-b'), { db });
++    const pendJobs = await all(db, `SELECT * FROM cozinha_impressao_fila WHERE rodada_id=?`, [out2.rodada.id]);
++    assert.equal(pendJobs.length, 1);
++    assert.equal(pendJobs[0].estado, ESTADOS_FILA.PENDENTE);
++
++    const driver = criarElectronDriver({ adapter: criarAdapterElectronMock() });
++    const tick = await WorkerService.processarProximo({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-sim',
++      limiteMs: 0
++    }, { db, driver });
++    assert.equal(tick.simulado, true);
++    assert.equal(tick.recuperacao && tick.recuperacao.omitida, true);
++    assert.equal(tick.recuperacao.recuperados, 0);
++
++    const depois = await get(db, `
++      SELECT id, estado, tentativas, worker_id, spooler_job_token, processando_em,
++             ultimo_erro, payload_snapshot, updated_at
++      FROM cozinha_impressao_fila WHERE id = ?
++    `, [claim.job.id]);
++    assert.deepEqual(depois, antes);
++    assert.equal(depois.estado, ESTADOS_FILA.PROCESSANDO);
++    assert.equal(depois.tentativas, 2);
++    assert.equal(depois.worker_id, 'w-old');
++    assert.equal(depois.spooler_job_token, null);
++    await close(db);
++  });
++
++  it('12) E-02: propriedade perdida não chama driver; recuperação não invalida durante print', async () => {
++    const db = await open();
++    await schemaErpMinimo(db);
++    const ctx = await prepararBase(db);
++    const { job } = await despacharComJob(db, ctx, 'e2-12a');
++    const claim = await WorkerService.reivindicarProximoJob({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-prop'
++    }, { db });
++    assert.equal(claim.reivindicado, true);
++
++    let imprimirChamadas = 0;
++    const driverSpy = criarFakeDriver({
++      resolver: () => {
++        imprimirChamadas += 1;
++        return 'sucesso';
++      }
++    });
++
++    // Janela validação → confirmação: invalida propriedade antes do driver.
++    await assert.rejects(
++      () => WorkerService.processarJobReivindicado({
++        db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-prop',
++        job: { id: claim.job.id }
++      }, {
++        db,
++        driver: driverSpy,
++        async __aposValidacaoCanonico() {
++          await run(db, `
++            UPDATE cozinha_impressao_fila
++            SET estado = ?, worker_id = 'outro', updated_at = ?
++            WHERE id = ?
++          `, [ESTADOS_FILA.RESULTADO_INCERTO, new Date().toISOString(), claim.job.id]);
++        }
++      }),
++      (err) => err.codigo === 'IMPRESSAO_PROPRIEDADE_PERDIDA'
++    );
++    assert.equal(imprimirChamadas, 0);
++
++    // Novo job: durante driver, recuperação lim=0 NÃO invalida propriedade ativa.
++    const itemB = await ctx.criarItem(3, 'PASTEL', 'Pastel Conc');
++    const despB = await CozinhaDespacho.despacharLote(entrada(ctx, [itemB], 'e2-12b'), { db });
++    const jobB = (await all(db, `SELECT * FROM cozinha_impressao_fila WHERE rodada_id=?`, [despB.rodada.id]))[0];
++    const claimB = await WorkerService.reivindicarProximoJob({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-conc'
++    }, { db });
++    assert.equal(claimB.reivindicado, true);
++    assert.equal(Number(claimB.job.id), Number(jobB.id));
++
++    let releaseDriver;
++    const hold = new Promise((resolve) => { releaseDriver = resolve; });
++    let durantePrintEstado = null;
++    let recuperadosDurante = null;
++
++    const driverHold = criarFakeDriver({
++      resolver: async () => {
++        assert.equal(
++          WorkerService.jobImpressaoEstaAtivo(ctx.empresaId, ctx.unidadeId, claimB.job.id),
++          true
++        );
++        recuperadosDurante = await WorkerService.recuperarJobsAbandonados({
++          db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, limiteMs: 0
++        }, { db });
++        durantePrintEstado = await get(db, `
++          SELECT estado, worker_id FROM cozinha_impressao_fila WHERE id = ?
++        `, [claimB.job.id]);
++        await hold;
++        return 'sucesso';
++      }
++    });
++
++    const procPromise = WorkerService.processarJobReivindicado({
++      db, empresaId: ctx.empresaId, unidadeId: ctx.unidadeId, workerId: 'w-conc',
++      job: { id: claimB.job.id }
++    }, { db, driver: driverHold });
++
++    // Aguarda o driver entrar no hold (poll curto).
++    for (let i = 0; i < 50 && recuperadosDurante == null; i += 1) {
++      await new Promise((r) => setTimeout(r, 10));
++    }
++    assert.ok(recuperadosDurante, 'driver deveria ter iniciado');
++    assert.equal(recuperadosDurante.recuperados, 0);
++    assert.ok(!(recuperadosDurante.job_ids || []).includes(claimB.job.id));
++    assert.equal(durantePrintEstado.estado, ESTADOS_FILA.PROCESSANDO);
++    assert.equal(durantePrintEstado.worker_id, 'w-conc');
++
++    releaseDriver();
++    const out = await procPromise;
++    assert.equal(out.resultado_driver, RESULTADOS_DRIVER.ACEITA);
++    assert.equal(out.job.estado, ESTADOS_FILA.ACEITA_PELO_SPOOLER);
++    assert.equal(WorkerService.jobImpressaoEstaAtivo(ctx.empresaId, ctx.unidadeId, claimB.job.id), false);
++
++    // Job A permanece INCERTO (não reimpresso).
++    const jobA = await get(db, `SELECT estado FROM cozinha_impressao_fila WHERE id=?`, [job.id]);
++    assert.equal(jobA.estado, ESTADOS_FILA.RESULTADO_INCERTO);
++    await close(db);
++  });
++});
+

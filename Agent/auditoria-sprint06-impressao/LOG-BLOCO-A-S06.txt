@@ -1,0 +1,57 @@
+﻿Tabela empresas criada/verificada
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+▶ Sprint 06 Bloco A — UNIQUE codigo_estacao por unidade
+  ✔ 1) mesmo codigo_estacao em unidades distintas da mesma empresa é permitido (33.5836ms)
+Tabela empresas criada/verificada
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ✔ 2) mesmo codigo_estacao na mesma unidade é rejeitado (15.029ms)
+Tabela empresas criada/verificada
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ✔ 3) DROP do índice legado + recreate idempotente (sem V4) (14.4543ms)
+✔ Sprint 06 Bloco A — UNIQUE codigo_estacao por unidade (64.3202ms)
+Tabela empresas criada/verificada
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+▶ Sprint 06 Bloco A — CRUD estações
+  ✔ 4) cria, lista, obtém e atualiza estação na unidade autenticada (2.715ms)
+  ✔ 5) rejeita estação de outra empresa / outra unidade (2.5208ms)
+  ✔ 6) largura_mm 58/80 ok; demais rejeitados (0.849ms)
+✔ Sprint 06 Bloco A — CRUD estações (19.0776ms)
+▶ Sprint 06 Bloco A — snapshot e renderer
+  ✔ 7) snapshot canônico sem preços/fiscais; input sujo é descartado (1.176ms)
+  ✔ 8) renderer gera texto 80/58 e marca impressao_fisica=false (0.5156ms)
+Tabela empresas criada/verificada
+[COZINHA] Recriando schema vazio v0 → v3 (tabelas vazias; FKs compostas empresa_id)
+  ✔ 9) teste de estação (D6) não imprime e não exige fila (13.3336ms)
+  ✔ 10) rejeita modelo/tipo inválidos no snapshot (0.3579ms)
+✔ Sprint 06 Bloco A — snapshot e renderer (15.6801ms)
+▶ Sprint 06 Bloco A — não acopla impressão comercial
+  ✔ 11) módulos de impressão cozinha não referenciam impressora_cupom /api/impressao (0.5674ms)
+✔ Sprint 06 Bloco A — não acopla impressão comercial (0.6403ms)
+ℹ tests 11
+ℹ suites 4
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 344.2456
+==== REGRESSAO S01+S05 ====
+
+▶ Correção Sprint 01 — isolamento empresa (FK composta)
+✔ Correção Sprint 01 — isolamento empresa (FK composta) (104.2594ms)
+▶ Correção Sprint 01 — falha de inicialização
+✔ Correção Sprint 01 — falha de inicialização (1186.7675ms)
+▶ Sprint 05 — Operações dos itens
+✔ Sprint 05 — Operações dos itens (669.9376ms)
+ℹ tests 31
+ℹ suites 7
+ℹ pass 31
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 2459.1285
+
+
+TOTAL_FAIL=0
+Blocos B-E: NAO INICIADOS

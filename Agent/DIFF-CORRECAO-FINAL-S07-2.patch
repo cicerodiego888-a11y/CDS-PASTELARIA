@@ -1,0 +1,760 @@
+﻿diff --git a/Agent/auditoria-sprint07-s07-2/cozinha-kds.js b/frontend/erp/js/cozinha-kds.js
+index ef972bf..4d2d3c6 100644
+--- a/Agent/auditoria-sprint07-s07-2/cozinha-kds.js
++++ b/frontend/erp/js/cozinha-kds.js
+@@ -186,6 +186,26 @@
+     }
+   }
+ 
++  /**
++   * Exige claim unidade_cozinha_id no JWT exatamente igual à unidade selecionada.
++   * Não aceita corpo HTTP (data.unidade_cozinha_id) como substituto.
++   */
++  function exigirUnidadeNoJwt(token, unidadeSelecionadaId) {
++    const esperada = Number(unidadeSelecionadaId);
++    const claim = lerUnidadeCozinhaDoToken(token);
++    if (claim == null) {
++      throw Object.assign(new Error('Token recebido sem unidade_cozinha_id.'), {
++        codigo: 'TOKEN_UNIDADE_AUSENTE'
++      });
++    }
++    if (!Number.isInteger(esperada) || esperada <= 0 || claim !== esperada) {
++      throw Object.assign(new Error('Token recebido com unidade divergente da selecionada.'), {
++        codigo: 'TOKEN_UNIDADE_DIVERGENTE'
++      });
++    }
++    return claim;
++  }
++
+   function htmlSelecaoUnidade(estado) {
+     const empresa = estado.empresaRotulo
+       || (estado.empresaId != null ? `Empresa #${estado.empresaId}` : 'Empresa');
+@@ -494,17 +514,17 @@
+             codigo: 'TOKEN_AUSENTE'
+           });
+         }
+-        if (typeof deps.aoAtualizarSessao === 'function') {
+-          deps.aoAtualizarSessao(data);
+-        }
+-        const unidadeToken = lerUnidadeCozinhaDoToken(data.token);
+-        if (unidadeToken !== id && Number(data.unidade_cozinha_id) !== id) {
+-          throw Object.assign(new Error('Token recebido sem a unidade selecionada.'), {
+-            codigo: 'TOKEN_UNIDADE_DIVERGENTE'
+-          });
++        // Claim do JWT é a única fonte autoritativa — não usar data.unidade_cozinha_id.
++        const unidadeToken = exigirUnidadeNoJwt(data.token, id);
++        if (typeof deps.aoAtualizarSessao !== 'function') {
++          throw Object.assign(
++            new Error('Persistência de sessão obrigatória ausente.'),
++            { codigo: 'SESSAO_PERSISTENCIA_OBRIGATORIA' }
++          );
+         }
++        await deps.aoAtualizarSessao(data);
+         estado.modo = 'painel';
+-        estado.unidadeId = Number(data.unidade_cozinha_id) || id;
++        estado.unidadeId = unidadeToken;
+         estado.selecaoConfirmando = false;
+         publicar();
+         await atualizar({ silencioso: false });
+@@ -513,6 +533,8 @@
+       } catch (err) {
+         estado.selecaoErro = mensagemDe(err);
+         estado.selecaoConfirmando = false;
++        estado.modo = 'selecao';
++        // Permanece em modo seleção; painel/polling não iniciam.
+         publicar();
+         return { erro: err };
+       }
+@@ -571,22 +593,154 @@
+     return data;
+   }
+ 
+-  function persistirSessao(global, data) {
++  /**
++   * Contrato IPC de electronAPI.cozinhaImpressao.estabelecerSessao
++   * (electron-cozinha-impressao.js → canal cozinha-impressao:sessao-autenticada):
++   * - Sucesso: { success: true, sessao: { empresaId, unidadeId }, contexto }
++   * - Falha: Promise resolve com { success: false, codigo, erro }
++   *   (não rejeita — validar success explicitamente).
++   * - Também pode rejeitar em falha de bridge.
++   */
++  function interpretarRetornoEstabelecerSessao(retorno) {
++    if (retorno && retorno.success === true) {
++      return { ok: true, retorno };
++    }
++    const codigo = (retorno && (retorno.codigo || retorno.code))
++      || 'SESSAO_ELECTRON_FALHA';
++    const msg = (retorno && (retorno.erro || retorno.mensagem || retorno.error))
++      || 'Falha ao atualizar sessão Electron.';
++    const err = new Error(msg);
++    err.codigo = codigo;
++    err.retornoElectron = retorno || null;
++    throw err;
++  }
++
++  /**
++   * Persiste sessão somente após validação prévia do JWT pelo chamador.
++   * Aguarda e valida retorno de estabelecerSessao quando a API existir.
++   * Não altera o mecanismo de impressão do Sprint 06 — só notifica a sessão.
++   */
++  async function persistirSessao(global, data) {
++    if (!data || !data.token) {
++      throw Object.assign(new Error('Sessão sem token para persistir.'), {
++        codigo: 'TOKEN_AUSENTE'
++      });
++    }
++    if (!global || !global.localStorage
++      || typeof global.localStorage.setItem !== 'function'
++      || typeof global.localStorage.getItem !== 'function') {
++      throw Object.assign(new Error('localStorage indisponível para persistir a sessão.'), {
++        codigo: 'SESSAO_PERSISTENCIA_FALHA'
++      });
++    }
++
++    let tokenAnterior;
++    let userAnterior;
++    let snapshotOk = false;
+     try {
+-      if (global.localStorage) {
+-        global.localStorage.setItem('token', data.token);
+-        if (data.user) {
+-          global.localStorage.setItem('user', JSON.stringify(data.user));
+-        }
++      tokenAnterior = global.localStorage.getItem('token');
++      userAnterior = global.localStorage.getItem('user');
++      snapshotOk = true;
++    } catch (e) {
++      throw Object.assign(
++        new Error('Falha ao ler sessão anterior para rollback.'),
++        { codigo: 'SESSAO_PERSISTENCIA_FALHA', cause: e }
++      );
++    }
++
++    const restaurarAnterior = () => {
++      if (!snapshotOk) {
++        throw Object.assign(
++          new Error('Rollback impossível: snapshot anterior indisponível.'),
++          { codigo: 'SESSAO_ROLLBACK_FALHA' }
++        );
+       }
+-    } catch (_e) { /* ignore */ }
++      try {
++        if (tokenAnterior == null) global.localStorage.removeItem('token');
++        else global.localStorage.setItem('token', tokenAnterior);
++        if (userAnterior == null) global.localStorage.removeItem('user');
++        else global.localStorage.setItem('user', userAnterior);
++      } catch (e) {
++        throw Object.assign(
++          new Error('Falha ao restaurar sessão anterior no localStorage.'),
++          { codigo: 'SESSAO_ROLLBACK_FALHA', cause: e }
++        );
++      }
++    };
++
++    const falhaPersistencia = (mensagem, cause) => {
++      let rollbackErro = null;
++      try {
++        restaurarAnterior();
++      } catch (rb) {
++        rollbackErro = rb;
++      }
++      const err = Object.assign(new Error(mensagem), {
++        codigo: 'SESSAO_PERSISTENCIA_FALHA',
++        cause
++      });
++      if (rollbackErro) {
++        err.rollbackErro = rollbackErro;
++        err.codigo = 'SESSAO_ROLLBACK_FALHA';
++      }
++      return err;
++    };
++
+     try {
+-      if (global.electronAPI
+-        && global.electronAPI.cozinhaImpressao
+-        && typeof global.electronAPI.cozinhaImpressao.estabelecerSessao === 'function') {
+-        global.electronAPI.cozinhaImpressao.estabelecerSessao({ token: data.token });
++      global.localStorage.setItem('token', data.token);
++    } catch (e) {
++      throw falhaPersistencia('Falha ao gravar token no localStorage.', e);
++    }
++
++    if (data.user) {
++      try {
++        global.localStorage.setItem('user', JSON.stringify(data.user));
++      } catch (e) {
++        // Token novo sem user novo — rollback integral obrigatório.
++        throw falhaPersistencia(
++          'Falha ao gravar usuário no localStorage após gravar o token.',
++          e
++        );
+       }
+-    } catch (_e2) { /* ignore */ }
++    }
++
++    const estabelecer = global.electronAPI
++      && global.electronAPI.cozinhaImpressao
++      && typeof global.electronAPI.cozinhaImpressao.estabelecerSessao === 'function'
++      ? global.electronAPI.cozinhaImpressao.estabelecerSessao.bind(global.electronAPI.cozinhaImpressao)
++      : null;
++
++    if (estabelecer) {
++      try {
++        const retorno = await estabelecer({ token: data.token });
++        interpretarRetornoEstabelecerSessao(retorno);
++      } catch (e) {
++        let rollbackErro = null;
++        try {
++          restaurarAnterior();
++        } catch (rb) {
++          rollbackErro = rb;
++        }
++        const err = Object.assign(
++          new Error(e && e.message ? e.message : 'Falha ao atualizar sessão Electron.'),
++          {
++            codigo: (e && e.codigo) || 'SESSAO_ELECTRON_FALHA',
++            cause: e,
++            retornoElectron: e && e.retornoElectron != null ? e.retornoElectron : null
++          }
++        );
++        if (rollbackErro) {
++          err.rollbackErro = rollbackErro;
++          err.codigo = 'SESSAO_ROLLBACK_FALHA';
++        }
++        throw err;
++      }
++    }
++
++    return {
++      ok: true,
++      electronAtualizado: !!estabelecer
++    };
+   }
+ 
+   function montarNoNavegador(global) {
+@@ -670,8 +824,11 @@
+     distribuirPorEstado,
+     contadores,
+     lerUnidadeCozinhaDoToken,
++    exigirUnidadeNoJwt,
++    interpretarRetornoEstabelecerSessao,
+     htmlSelecaoUnidade,
+     htmlPainel,
++    persistirSessao,
+     criarControlador,
+     montarNoNavegador
+   };
+diff --git a/Agent/auditoria-sprint07-s07-2/sprint07-s07-2-sessao-unidade-kds.test.js b/tests/cozinha/sprint07-s07-2-sessao-unidade-kds.test.js
+index 680c0db..d194317 100644
+--- a/Agent/auditoria-sprint07-s07-2/sprint07-s07-2-sessao-unidade-kds.test.js
++++ b/tests/cozinha/sprint07-s07-2-sessao-unidade-kds.test.js
+@@ -32,7 +32,8 @@ delete process.env.CDS_COZINHA_IMPRESSAO_FISICA_AUTORIZADA;
+ const {
+   garantirSchemaCozinha,
+   marcarCozinhaOperacional,
+-  isCozinhaOperacional
++  isCozinhaOperacional,
++  getCozinhaSchemaStatus
+ } = require('../../backend/utils/cozinhaSchema');
+ const { garantirTabelaOperadorUnidades } = require('../../backend/services/cozinha/cozinhaAuthUnidade');
+ const { garantirSchemaUsuarioEmpresasAsync } = require('../../backend/services/empresas/usuarioEmpresasSchema');
+@@ -392,7 +393,7 @@ describe('S07-2 — UI seleção KDS', () => {
+     const control = kds.criarControlador({
+       empresaId: 1,
+       lerUnidadeJwt: () => null,
+-      aoAtualizarSessao: (data) => sessoes.push(data),
++      aoAtualizarSessao: async (data) => { sessoes.push(data); },
+       fetchJson: async (method, path, corpo) => {
+         chamadas.push({ method, path, corpo });
+         if (path === '/cozinha/unidades-disponiveis') {
+@@ -452,6 +453,444 @@ describe('S07-2 — UI seleção KDS', () => {
+   });
+ });
+ 
++describe('S07-2 correção — validação JWT antes de persistir', () => {
++  function memoriaStorage(inicial = {}) {
++    const map = { ...inicial };
++    return {
++      getItem: (k) => (Object.prototype.hasOwnProperty.call(map, k) ? map[k] : null),
++      setItem: (k, v) => { map[k] = String(v); },
++      removeItem: (k) => { delete map[k]; },
++      _dump: () => ({ ...map })
++    };
++  }
++
++  function montarConfirmacao({ tokenResposta, corpoUnidadeHttp, aoAtualizarSessao, agendar }) {
++    const chamadas = [];
++    const timers = [];
++    const control = kds.criarControlador({
++      empresaId: 1,
++      lerUnidadeJwt: () => null,
++      aoAtualizarSessao,
++      fetchJson: async (method, path, corpo) => {
++        chamadas.push({ method, path, corpo });
++        if (path === '/cozinha/unidades-disponiveis') {
++          return { success: true, unidades: [{ id: 10, codigo: 'UA' }] };
++        }
++        if (path === '/cozinha/sessao/unidade') {
++          return {
++            success: true,
++            token: tokenResposta,
++            unidade_cozinha_id: corpoUnidadeHttp != null ? corpoUnidadeHttp : 10,
++            user: { id: 1, unidade_cozinha_id: corpoUnidadeHttp != null ? corpoUnidadeHttp : 10 }
++          };
++        }
++        return { success: true, empresa_id: 1, unidade_id: 10, rodadas: [] };
++      },
++      agendar: (fn, ms) => {
++        const t = { fn, ms, ativo: true };
++        timers.push(t);
++        if (agendar) agendar(t);
++        return t;
++      },
++      cancelar: (t) => { if (t) t.ativo = false; }
++    });
++    return { control, chamadas, timers };
++  }
++
++  it('A) JWT com unidade correta: aceito e persistido', async () => {
++    const token = jwt.sign({ id: 1, unidade_cozinha_id: 10 }, process.env.JWT_SECRET, { expiresIn: '1h' });
++    const store = memoriaStorage();
++    const electronCalls = [];
++    const globalFake = {
++      localStorage: store,
++      electronAPI: {
++        cozinhaImpressao: {
++          estabelecerSessao: async (payload) => {
++            electronCalls.push(payload);
++            // Contrato real IPC: success explícito (Promise resolve ≠ sucesso).
++            return {
++              success: true,
++              sessao: { empresaId: 1, unidadeId: 10 },
++              contexto: null
++            };
++          }
++        }
++      }
++    };
++    const ordem = [];
++    const { control, chamadas, timers } = montarConfirmacao({
++      tokenResposta: token,
++      aoAtualizarSessao: async (data) => {
++        ordem.push('persistir');
++        await kds.persistirSessao(globalFake, data);
++        ordem.push('persistido');
++      }
++    });
++    await control.iniciar();
++    control.definirUnidadeSelecionada(10);
++    const r = await control.confirmarUnidade();
++    assert.equal(r.ok, true);
++    assert.equal(control.estado.modo, 'painel');
++    assert.equal(store.getItem('token'), token);
++    assert.equal(electronCalls.length, 1);
++    assert.equal(control.estado.unidadeId, 10);
++    assert.ok(chamadas.some((c) => String(c.path).includes('/cozinha/preparacao/painel')));
++    assert.ok(timers.length >= 1);
++    assert.deepEqual(ordem, ['persistir', 'persistido']);
++  });
++
++  it('B) JWT sem unidade_cozinha_id: rejeitado, sem persistência', async () => {
++    const token = jwt.sign({ id: 1 }, process.env.JWT_SECRET, { expiresIn: '1h' });
++    const persistencias = [];
++    const { control, chamadas, timers } = montarConfirmacao({
++      tokenResposta: token,
++      corpoUnidadeHttp: 10,
++      aoAtualizarSessao: async (data) => { persistencias.push(data); }
++    });
++    await control.iniciar();
++    control.definirUnidadeSelecionada(10);
++    const r = await control.confirmarUnidade();
++    assert.ok(r.erro);
++    assert.equal(r.erro.codigo, 'TOKEN_UNIDADE_AUSENTE');
++    assert.equal(persistencias.length, 0);
++    assert.equal(control.estado.modo, 'selecao');
++    assert.ok(!chamadas.some((c) => String(c.path).includes('/cozinha/preparacao/painel')));
++    assert.equal(timers.length, 0);
++  });
++
++  it('C) JWT com unidade divergente: rejeitado, sem persistência', async () => {
++    const token = jwt.sign({ id: 1, unidade_cozinha_id: 99 }, process.env.JWT_SECRET, { expiresIn: '1h' });
++    const persistencias = [];
++    const { control, chamadas, timers } = montarConfirmacao({
++      tokenResposta: token,
++      corpoUnidadeHttp: 10,
++      aoAtualizarSessao: async (data) => { persistencias.push(data); }
++    });
++    await control.iniciar();
++    control.definirUnidadeSelecionada(10);
++    const r = await control.confirmarUnidade();
++    assert.ok(r.erro);
++    assert.equal(r.erro.codigo, 'TOKEN_UNIDADE_DIVERGENTE');
++    assert.equal(persistencias.length, 0);
++    assert.equal(control.estado.modo, 'selecao');
++    assert.ok(!chamadas.some((c) => String(c.path).includes('/cozinha/preparacao/painel')));
++    assert.equal(timers.length, 0);
++  });
++
++  it('D) HTTP com unidade correta mas JWT sem claim: rejeitada', async () => {
++    const token = jwt.sign({ id: 1 }, process.env.JWT_SECRET, { expiresIn: '1h' });
++    assert.equal(kds.lerUnidadeCozinhaDoToken(token), null);
++    const persistencias = [];
++    const { control } = montarConfirmacao({
++      tokenResposta: token,
++      corpoUnidadeHttp: 10,
++      aoAtualizarSessao: async (data) => { persistencias.push(data); }
++    });
++    await control.iniciar();
++    control.definirUnidadeSelecionada(10);
++    const r = await control.confirmarUnidade();
++    assert.ok(r.erro);
++    assert.equal(r.erro.codigo, 'TOKEN_UNIDADE_AUSENTE');
++    assert.equal(persistencias.length, 0);
++    assert.equal(control.estado.modo, 'selecao');
++  });
++
++  it('E) Falha Electron: tratada sem declarar sessão atualizada', async () => {
++    const token = jwt.sign({ id: 1, unidade_cozinha_id: 10 }, process.env.JWT_SECRET, { expiresIn: '1h' });
++    const store = memoriaStorage({ token: 'token-anterior', user: '{"id":1}' });
++    const globalFake = {
++      localStorage: store,
++      electronAPI: {
++        cozinhaImpressao: {
++          estabelecerSessao: async () => {
++            throw new Error('IPC falhou');
++          }
++        }
++      }
++    };
++    await assert.rejects(
++      () => kds.persistirSessao(globalFake, {
++        token,
++        user: { id: 1, unidade_cozinha_id: 10 }
++      }),
++      (err) => err.codigo === 'SESSAO_ELECTRON_FALHA'
++    );
++    assert.equal(store.getItem('token'), 'token-anterior');
++    assert.equal(store.getItem('user'), '{"id":1}');
++
++    const { control, chamadas, timers } = montarConfirmacao({
++      tokenResposta: token,
++      aoAtualizarSessao: async (data) => kds.persistirSessao(globalFake, data)
++    });
++    await control.iniciar();
++    control.definirUnidadeSelecionada(10);
++    const r = await control.confirmarUnidade();
++    assert.ok(r.erro);
++    assert.equal(r.erro.codigo, 'SESSAO_ELECTRON_FALHA');
++    assert.equal(control.estado.modo, 'selecao');
++    assert.equal(store.getItem('token'), 'token-anterior');
++    assert.ok(!chamadas.some((c) => String(c.path).includes('/cozinha/preparacao/painel')));
++    assert.equal(timers.length, 0);
++  });
++
++  it('F) Painel e polling não iniciam antes da persistência bem-sucedida', async () => {
++    const token = jwt.sign({ id: 1, unidade_cozinha_id: 10 }, process.env.JWT_SECRET, { expiresIn: '1h' });
++    let liberarPersistencia;
++    const barreira = new Promise((resolve) => { liberarPersistencia = resolve; });
++    const ordem = [];
++    const { control, chamadas, timers } = montarConfirmacao({
++      tokenResposta: token,
++      aoAtualizarSessao: async () => {
++        ordem.push('persistindo');
++        await barreira;
++        ordem.push('persistido');
++      }
++    });
++    await control.iniciar();
++    control.definirUnidadeSelecionada(10);
++    const promessa = control.confirmarUnidade();
++    await new Promise((r) => setImmediate(r));
++    assert.equal(control.estado.modo, 'selecao');
++    assert.ok(!chamadas.some((c) => String(c.path).includes('/cozinha/preparacao/painel')));
++    assert.equal(timers.length, 0);
++    liberarPersistencia();
++    const r = await promessa;
++    assert.equal(r.ok, true);
++    assert.deepEqual(ordem, ['persistindo', 'persistido']);
++    assert.equal(control.estado.modo, 'painel');
++    assert.ok(chamadas.some((c) => String(c.path).includes('/cozinha/preparacao/painel')));
++    assert.ok(timers.length >= 1);
++  });
++
++  it('exigirUnidadeNoJwt rejeita corpo HTTP como substituto', () => {
++    const tokenSem = jwt.sign({ id: 1 }, process.env.JWT_SECRET);
++    assert.throws(
++      () => kds.exigirUnidadeNoJwt(tokenSem, 10),
++      (err) => err.codigo === 'TOKEN_UNIDADE_AUSENTE'
++    );
++    const tokenOk = jwt.sign({ id: 1, unidade_cozinha_id: 10 }, process.env.JWT_SECRET);
++    assert.equal(kds.exigirUnidadeNoJwt(tokenOk, 10), 10);
++  });
++
++  it('persistência ausente: não avança para painel', async () => {
++    const token = jwt.sign({ id: 1, unidade_cozinha_id: 10 }, process.env.JWT_SECRET, { expiresIn: '1h' });
++    const { control, chamadas, timers } = montarConfirmacao({
++      tokenResposta: token,
++      aoAtualizarSessao: undefined
++    });
++    await control.iniciar();
++    control.definirUnidadeSelecionada(10);
++    const r = await control.confirmarUnidade();
++    assert.ok(r.erro);
++    assert.equal(r.erro.codigo, 'SESSAO_PERSISTENCIA_OBRIGATORIA');
++    assert.equal(control.estado.modo, 'selecao');
++    assert.ok(!chamadas.some((c) => String(c.path).includes('/cozinha/preparacao/painel')));
++    assert.equal(timers.length, 0);
++  });
++
++  it('Electron resolve com success:false → falha + rollback', async () => {
++    const token = jwt.sign({ id: 1, unidade_cozinha_id: 10 }, process.env.JWT_SECRET, { expiresIn: '1h' });
++    const store = memoriaStorage({ token: 'tok-ant', user: '{"id":9}' });
++    const globalFake = {
++      localStorage: store,
++      electronAPI: {
++        cozinhaImpressao: {
++          // Contrato real: resolve sem rejeitar, success=false.
++          estabelecerSessao: async () => ({
++            success: false,
++            codigo: 'IMPRESSAO_SESSAO_SEM_UNIDADE',
++            erro: 'Sessão sem unidade de cozinha autenticada.'
++          })
++        }
++      }
++    };
++    await assert.rejects(
++      () => kds.persistirSessao(globalFake, {
++        token,
++        user: { id: 1, unidade_cozinha_id: 10 }
++      }),
++      (err) => err.codigo === 'IMPRESSAO_SESSAO_SEM_UNIDADE'
++        || err.codigo === 'SESSAO_ELECTRON_FALHA'
++    );
++    assert.equal(store.getItem('token'), 'tok-ant');
++    assert.equal(store.getItem('user'), '{"id":9}');
++
++    const { control, timers } = montarConfirmacao({
++      tokenResposta: token,
++      aoAtualizarSessao: async (data) => kds.persistirSessao(globalFake, data)
++    });
++    await control.iniciar();
++    control.definirUnidadeSelecionada(10);
++    const r = await control.confirmarUnidade();
++    assert.ok(r.erro);
++    assert.equal(control.estado.modo, 'selecao');
++    assert.equal(timers.length, 0);
++  });
++
++  it('falha na gravação do token: rollback e sem painel', async () => {
++    const token = jwt.sign({ id: 1, unidade_cozinha_id: 10 }, process.env.JWT_SECRET, { expiresIn: '1h' });
++    const store = memoriaStorage({ token: 'tok-ant', user: '{"id":1}' });
++    const originalSet = store.setItem.bind(store);
++    store.setItem = (k, v) => {
++      if (k === 'token' && v === token) throw new Error('quota token');
++      return originalSet(k, v);
++    };
++    await assert.rejects(
++      () => kds.persistirSessao({ localStorage: store }, {
++        token,
++        user: { id: 1, unidade_cozinha_id: 10 }
++      }),
++      (err) => err.codigo === 'SESSAO_PERSISTENCIA_FALHA'
++        || err.codigo === 'SESSAO_ROLLBACK_FALHA'
++    );
++    assert.equal(store.getItem('token'), 'tok-ant');
++    assert.equal(store.getItem('user'), '{"id":1}');
++  });
++
++  it('falha na gravação do usuário após token: rollback integral', async () => {
++    const token = jwt.sign({ id: 1, unidade_cozinha_id: 10 }, process.env.JWT_SECRET, { expiresIn: '1h' });
++    const store = memoriaStorage({ token: 'tok-ant', user: '{"id":1}' });
++    const originalSet = store.setItem.bind(store);
++    store.setItem = (k, v) => {
++      if (k === 'user' && String(v).includes('"unidade_cozinha_id":10')) {
++        throw new Error('quota user');
++      }
++      return originalSet(k, v);
++    };
++    await assert.rejects(
++      () => kds.persistirSessao({ localStorage: store }, {
++        token,
++        user: { id: 1, unidade_cozinha_id: 10 }
++      }),
++      (err) => err.codigo === 'SESSAO_PERSISTENCIA_FALHA'
++        || err.codigo === 'SESSAO_ROLLBACK_FALHA'
++    );
++    // Não pode ficar token novo + user antigo.
++    assert.equal(store.getItem('token'), 'tok-ant');
++    assert.equal(store.getItem('user'), '{"id":1}');
++  });
++
++  it('rollback preserva token e usuário anteriores', async () => {
++    const token = jwt.sign({ id: 1, unidade_cozinha_id: 10 }, process.env.JWT_SECRET, { expiresIn: '1h' });
++    const store = memoriaStorage({ token: 'prev-token', user: '{"id":7,"nome":"Prev"}' });
++    const globalFake = {
++      localStorage: store,
++      electronAPI: {
++        cozinhaImpressao: {
++          estabelecerSessao: async () => ({
++            success: false,
++            codigo: 'IMPRESSAO_SESSAO_TOKEN_INVALIDO',
++            erro: 'Token de sessão inválido.'
++          })
++        }
++      }
++    };
++    await assert.rejects(
++      () => kds.persistirSessao(globalFake, {
++        token,
++        user: { id: 1, unidade_cozinha_id: 10 }
++      }),
++      (err) => !!err.codigo
++    );
++    assert.equal(store.getItem('token'), 'prev-token');
++    assert.equal(store.getItem('user'), '{"id":7,"nome":"Prev"}');
++  });
++
++  it('interpretarRetornoEstabelecerSessao exige success:true', () => {
++    assert.doesNotThrow(() => kds.interpretarRetornoEstabelecerSessao({
++      success: true,
++      sessao: { empresaId: 1, unidadeId: 2 }
++    }));
++    assert.throws(
++      () => kds.interpretarRetornoEstabelecerSessao({
++        success: false,
++        codigo: 'IMPRESSAO_SESSAO_ERRO',
++        erro: 'x'
++      }),
++      (err) => err.codigo === 'IMPRESSAO_SESSAO_ERRO'
++    );
++    assert.throws(
++      () => kds.interpretarRetornoEstabelecerSessao({ ok: true }),
++      (err) => err.codigo === 'SESSAO_ELECTRON_FALHA'
++    );
++  });
++});
++
++describe('S07-2 — schema Cozinha / cozinha_notificacoes', () => {
++  it('garantirSchema sequencial cria cozinha_notificacoes e marca operacional', async () => {
++    const db = await openMem();
++    marcarCozinhaOperacional(false);
++    const out = await garantirSchemaCozinha(db);
++    assert.equal(out.operacional, true);
++    assert.equal(isCozinhaOperacional(), true);
++    const row = await get(db, `
++      SELECT name FROM sqlite_master
++      WHERE type='table' AND name='cozinha_notificacoes'
++    `);
++    assert.ok(row, 'cozinha_notificacoes deve existir após garantirSchemaCozinha');
++    const idx = await get(db, `
++      SELECT name FROM sqlite_master
++      WHERE type='index' AND name='ux_cozinha_notificacoes_evento'
++    `);
++    assert.ok(idx, 'índice de cozinha_notificacoes deve existir');
++    await close(db);
++  });
++
++  it('falha ao indexar notificações deixa Cozinha NÃO operacional', async () => {
++    const db = await openMem();
++    marcarCozinhaOperacional(false);
++    await garantirSchemaCozinha(db);
++    assert.equal(isCozinhaOperacional(), true);
++
++    // Simula condição observada nos logs: índice sem tabela (DROP concorrente).
++    await run(db, 'DROP TABLE IF EXISTS cozinha_notificacoes');
++    await assert.rejects(
++      () => run(db, `
++        CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_notificacoes_evento
++        ON cozinha_notificacoes(evento_chave)
++      `),
++      (err) => /no such table:\s*(main\.)?cozinha_notificacoes/i.test(String(err.message))
++    );
++
++    // Política: não declarar operacional enquanto a falha persistir.
++    marcarCozinhaOperacional(false, Object.assign(
++      new Error('SQLITE_ERROR: no such table: main.cozinha_notificacoes'),
++      { codigo: 'COZINHA_SCHEMA_FALHA' }
++    ));
++    assert.equal(isCozinhaOperacional(), false);
++    const st = getCozinhaSchemaStatus();
++    assert.equal(st.operacional, false);
++    assert.match(String(st.erro && st.erro.mensagem || st.erro), /cozinha_notificacoes/);
++
++    // Recuperação somente via garantirSchema bem-sucedido (não ocultar).
++    const recovery = await garantirSchemaCozinha(db);
++    assert.equal(recovery.operacional, true);
++    assert.equal(isCozinhaOperacional(), true);
++    const row = await get(db, `
++      SELECT name FROM sqlite_master
++      WHERE type='table' AND name='cozinha_notificacoes'
++    `);
++    assert.ok(row);
++    await close(db);
++  });
++
++  it('origem da falha: CREATE INDEX após DROP concorrente da tabela', async () => {
++    // Evidência de sequência (não altera schema de produção):
++    // 1) recriarSchemaVazioSeNecessario faz DROP TABLE de TABELAS_COZINHA
++    // 2) criarTabelasCozinha recria cozinha_notificacoes e em seguida os índices
++    // 3) segunda chamada concorrente de garantirSchemaCozinha pode DROPar a tabela
++    //    enquanto a primeira ainda executa CREATE INDEX → SQLITE_ERROR no such table
++    const schemaSrc = fs.readFileSync(
++      path.join(__dirname, '../../backend/utils/cozinhaSchema.js'),
++      'utf8'
++    );
++    assert.match(schemaSrc, /CREATE TABLE IF NOT EXISTS cozinha_notificacoes/);
++    assert.match(schemaSrc, /ux_cozinha_notificacoes_evento/);
++    assert.match(schemaSrc, /DROP TABLE IF EXISTS \$\{t\}|DROP TABLE IF EXISTS/);
++    assert.match(schemaSrc, /marcarCozinhaOperacional\(false/);
++  });
++});
++
+ describe('S07-2 — HTTP (listagem, seleção, painel, login)', () => {
+   let server;
+   let baseUrl;
+@@ -513,17 +952,39 @@ describe('S07-2 — HTTP (listagem, seleção, painel, login)', () => {
+         else resolve();
+       });
+     });
+-    for (let i = 0; i < 80; i += 1) {
++    // Aguarda estabilização do boot (evita corrida com DROP/CREATE de cozinha_notificacoes).
++    for (let i = 0; i < 100; i += 1) {
+       const row = await get(dbHttp, `
+-        SELECT name FROM sqlite_master WHERE type='table' AND name='cozinha_comandas'
++        SELECT name FROM sqlite_master WHERE type='table' AND name='cozinha_notificacoes'
+       `);
+-      if (row && row.name === 'cozinha_comandas') break;
+-      await new Promise((r) => setTimeout(r, 250));
++      const st = getCozinhaSchemaStatus();
++      if (row && row.name === 'cozinha_notificacoes' && (st.operacional || st.erro)) break;
++      await new Promise((r) => setTimeout(r, 200));
++    }
++    // Uma única garantia sequencial — não marcar operacional se falhar.
++    let schemaOut = null;
++    let ultimoErroSchema = null;
++    for (let tentativa = 0; tentativa < 8; tentativa += 1) {
++      try {
++        schemaOut = await garantirSchemaCozinha(dbHttp);
++        ultimoErroSchema = null;
++        break;
++      } catch (err) {
++        ultimoErroSchema = err;
++        // Se ainda há corrida de boot, espera e tenta de novo.
++        await new Promise((r) => setTimeout(r, 300));
++      }
++    }
++    if (!schemaOut || !schemaOut.operacional) {
++      assert.equal(isCozinhaOperacional(), false);
++      throw ultimoErroSchema || new Error('Schema Cozinha não operacional após tentativas.');
+     }
+-    await garantirSchemaCozinha(dbHttp);
+     await garantirTabelaOperadorUnidades(dbHttp);
+-    marcarCozinhaOperacional(true);
+     assert.equal(isCozinhaOperacional(), true);
++    const notif = await get(dbHttp, `
++      SELECT name FROM sqlite_master WHERE type='table' AND name='cozinha_notificacoes'
++    `);
++    assert.ok(notif, 'cozinha_notificacoes obrigatória antes dos testes HTTP');
+ 
+     recursoOriginal = configService.recursoHabilitado;
+     configService.recursoHabilitado = (nome) => {

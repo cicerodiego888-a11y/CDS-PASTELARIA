@@ -8,6 +8,8 @@ const jwt = require('jsonwebtoken');
 const db = require('../database');
 const { getJwtSecret } = require('../config/secrets');
 
+// Origem única: backend/config/secrets.getJwtSecret().
+// Em produção sem JWT_SECRET, getJwtSecret() lança (impede boot/auth silencioso com chave de dev).
 const JWT_SECRET = getJwtSecret();
 
 const PERMISSOES_DISPONIVEIS = [
@@ -74,7 +76,17 @@ function verificarToken(req, res, next) {
     return res.status(401).json({ error: 'Acesso negado', code: 'SESSAO_INVALIDA' });
   }
 
-  jwt.verify(token, JWT_SECRET, (err, user) => {
+  let secret;
+  try {
+    secret = getJwtSecret();
+  } catch (err) {
+    return res.status(503).json({
+      error: 'Autenticação indisponível: JWT_SECRET não configurado.',
+      code: err.codigo || 'JWT_SECRET_AUSENTE_PRODUCAO'
+    });
+  }
+
+  jwt.verify(token, secret, (err, user) => {
     if (err) {
       if (!api && req.accepts('html')) {
         const next = encodeURIComponent(req.originalUrl || '/');

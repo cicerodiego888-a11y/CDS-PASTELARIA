@@ -27,6 +27,8 @@
     MESA_INATIVA: 'A mesa está desativada.',
     MESA_NAO_ENCONTRADA: 'A mesa não foi encontrada nesta empresa.',
     ATENDIMENTO_EM_FECHAMENTO: 'O atendimento está em fechamento.',
+    ATENDIMENTO_COM_PEDIDO_ABERTO: 'Há pedido em aberto neste atendimento. Conclua ou cancele antes de liberar.',
+    ATENDIMENTO_JA_ENCERRADO: 'O atendimento já está encerrado.',
     MESA_DESTINO_IGUAL: 'Escolha uma mesa de destino diferente da origem.',
     CHAVE_IDEMPOTENCIA_DIVERGENTE: 'Esta operação já foi usada em outro contexto.'
   });
@@ -402,6 +404,43 @@
       return resultado;
     }
 
+    /**
+     * Libera mesa OCUPADA sem pedido vinculado (encerramento técnico do atendimento).
+     * Recusa na UI se ainda houver pedidos listados; o backend reforça a regra.
+     */
+    async function liberarAtendimento() {
+      const mesa = mesaAtual();
+      if (!mesa || mesa.situacao !== 'OCUPADA') return { ok: false };
+      if ((estado.pedidos || []).length > 0) {
+        estado.aviso = 'Há pedido vinculado a este atendimento. Conclua ou cancele antes de liberar a mesa.';
+        estado.sucesso = '';
+        if (deps.aoMudar && estado.ativo) deps.aoMudar();
+        return { ok: false, codigo: 'ATENDIMENTO_COM_PEDIDO_ABERTO' };
+      }
+      if (operacao) return { ok: false, ignorada: true };
+      const confirmar = typeof deps.confirmar === 'function' ? deps.confirmar : () => true;
+      if (!confirmar(`Mesa ${numeroMesa(mesa.numero)} está ocupada sem pedido. Liberar o atendimento?`)) {
+        return { ok: false, cancelado: true };
+      }
+      operacao = true;
+      try {
+        const resultado = await executar(
+          'POST',
+          `/mesas/${mesa.id}/atendimento/encerrar`,
+          {},
+          mesa.id
+        );
+        if (resultado.ok) {
+          estado.sucesso = `Mesa ${numeroMesa(mesa.numero)} liberada.`;
+          estado.pedidos = [];
+          if (deps.aoMudar && estado.ativo) deps.aoMudar();
+        }
+        return resultado;
+      } finally {
+        operacao = false;
+      }
+    }
+
     async function executar(method, path, corpo, mesaDepois) {
       estado.sucesso = '';
       try {
@@ -489,6 +528,7 @@
       gerarVendaPdv,
       atualizarPedidos,
       transferir,
+      liberarAtendimento,
       definirDestino,
       definirCliente,
       selecionarCliente,
@@ -572,6 +612,7 @@
       const opcoes = livres.map((item) => `
         <option value="${escapar(item.id)}"${String(item.id) === String(estado.destinoId) ? ' selected' : ''}>${numeroMesa(item.numero)}</option>`).join('');
       const destino = livres.find((item) => String(item.id) === String(estado.destinoId));
+      const semPedidos = !(estado.pedidos || []).length;
       corpo = `
         <p>Estado <strong>OCUPADA</strong>.</p>
         ${blocoAtendimento(atendimento, instante, estado.pedidos)}
@@ -579,7 +620,13 @@
         <div class="d-flex flex-wrap gap-2 mb-3">
           ${mesa && mesa.ativo === false ? '' : '<button type="button" class="btn btn-success" data-acao="lancar">Lançar pedido</button>'}
           <button type="button" class="btn btn-outline-primary" data-acao="pedidos">Ver todos os pedidos</button>
+          ${semPedidos
+            ? '<button type="button" class="btn btn-outline-warning" data-acao="liberar" title="Encerrar atendimento sem pedido vinculado">Liberar mesa</button>'
+            : ''}
         </div>
+        ${semPedidos
+          ? '<p class="text-muted small mb-3">Atendimento aberto sem pedido. Use <strong>Liberar mesa</strong> para deixar a mesa livre novamente.</p>'
+          : ''}
         <label for="mesasDestino">Transferir para mesa livre</label>
         <select id="mesasDestino" class="form-select form-select-sm mb-2">
           <option value="">Selecione</option>
@@ -817,6 +864,8 @@
     });
     const transferir = raiz.querySelector('[data-acao="transferir"]');
     if (transferir) transferir.addEventListener('click', () => control.transferir());
+    const liberar = raiz.querySelector('[data-acao="liberar"]');
+    if (liberar) liberar.addEventListener('click', () => control.liberarAtendimento());
     const cliente = raiz.querySelector('#mesasCliente');
     if (cliente) cliente.addEventListener('input', () => {
       control.definirCliente(cliente.value);
