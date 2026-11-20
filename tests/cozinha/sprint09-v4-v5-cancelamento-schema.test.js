@@ -14,7 +14,10 @@ const path = require('path');
 const fs = require('fs');
 const sqlite3 = require('sqlite3');
 
-const { garantirSchemaCozinha } = require('../../backend/utils/cozinhaSchema');
+const {
+  garantirSchemaCozinha,
+  getCozinhaSchemaStatus
+} = require('../../backend/utils/cozinhaSchema');
 const CozinhaPreparacao = require('../../backend/services/cozinha/CozinhaPreparacaoService');
 
 function dbRun(db, sql, params = []) {
@@ -87,7 +90,7 @@ async function teste_schema_v5_criacao_novo_banco() {
 
     const resultado = await garantirSchemaCozinha(db);
     assert(resultado.operacional === true, 'Schema deve estar operacional');
-    assert(resultado.versao === 5, `Versão esperada 5, obtida ${resultado.versao}`);
+    assert(resultado.versao === 7, `Versão esperada 7, obtida ${resultado.versao}`);
 
     const rodadasInfo = await dbAll(db, 'PRAGMA table_info(cozinha_rodadas)');
     const colNomes = rodadasInfo.map(c => c.name);
@@ -134,9 +137,206 @@ async function teste_motivos_cancelamento() {
   console.log('[PASS] motivos de cancelamento validados');
 }
 
+async function prepararV4(db, rodadasJaAtualizadas = false) {
+  await garantirSchemaCozinha(db);
+  const objetos = await dbAll(db, `
+    SELECT tbl_name, sql FROM sqlite_master
+    WHERE type IN ('table', 'index') AND sql IS NOT NULL
+      AND tbl_name IN ('cozinha_rodadas', 'cozinha_idempotencia')
+  `);
+  const sqlRodadas = objetos.find(o => o.sql.startsWith('CREATE TABLE') && o.tbl_name === 'cozinha_rodadas').sql;
+  const sqlIdempotencia = objetos.find(o => o.sql.startsWith('CREATE TABLE') && o.tbl_name === 'cozinha_idempotencia').sql;
+  const rodadasV4 = sqlRodadas.replace(
+    /cancelamento_motivo TEXT[\s\S]*?cancelamento_etapa TEXT,\s*/,
+    ''
+  );
+  const idempotenciaV4 = sqlIdempotencia
+    .replace(/,\s*'CANCELAMENTO_RODADA'/, '')
+    .replace(/,\s*'PREPARACAO_REVERTIDA'/, '')
+    .replace(/,\s*'CANCELAMENTO_ITEM'/, '');
+  assert.notStrictEqual(rodadasV4, sqlRodadas);
+  assert.notStrictEqual(idempotenciaV4, sqlIdempotencia);
+
+  await dbRun(db, 'PRAGMA foreign_keys=OFF');
+  if (!rodadasJaAtualizadas) {
+    await dbRun(db, 'DROP TABLE cozinha_rodadas');
+    await dbRun(db, rodadasV4);
+  }
+  await dbRun(db, 'DROP TABLE cozinha_idempotencia');
+  await dbRun(db, idempotenciaV4);
+  for (const objeto of objetos.filter(o => o.sql.startsWith('CREATE') && !o.sql.startsWith('CREATE TABLE'))) {
+    if (!rodadasJaAtualizadas || objeto.tbl_name === 'cozinha_idempotencia') {
+      await dbRun(db, objeto.sql);
+    }
+  }
+  await dbRun(db, `UPDATE cozinha_schema_meta SET valor='4' WHERE chave='schema_version'`);
+  await dbRun(db, 'PRAGMA foreign_keys=ON');
+
+  await dbRun(db, `INSERT INTO cozinha_unidades (id, empresa_id, codigo) VALUES (1, 1, 'COZINHA')`);
+  await dbRun(db, `INSERT INTO cozinha_comandas (id, empresa_id, atendimento_id, numero_comanda, pedido_id)
+    VALUES (1, 1, 1, 1, 1)`);
+  await dbRun(db, `INSERT INTO cozinha_rodadas (id, empresa_id, unidade_id, mesa_id, atendimento_id, numero_rodada, sequencia_global)
+    VALUES (1, 1, 1, 1, 1, 1, 1)`);
+  await dbRun(db, `INSERT INTO cozinha_itens (id, empresa_id, unidade_id, rodada_id, comanda_id, pedido_id,
+    pedido_item_id, sequencia_global, tipo_item, qty_solicitada_millis, produto_nome_snapshot)
+    VALUES (1, 1, 1, 1, 1, 1, 1, 1, 'PASTEL', 1000, 'Pastel')`);
+  await dbRun(db, `INSERT INTO cozinha_idempotencia (id, idempotency_key, tipo_operacao, payload_hash, situacao)
+    VALUES (1, 'registro-existente', 'RETIRADA_CONFIRMADA', 'hash', 'CONCLUIDA')`);
+  await dbRun(db, `UPDATE sqlite_sequence SET seq=25 WHERE name IN ('cozinha_rodadas', 'cozinha_idempotencia')`);
+  await dbRun(db, 'CREATE INDEX idx_teste_rodadas ON cozinha_rodadas(mesa_id)');
+}
+
+async function teste_migracao_v4_populado(rodadasJaAtualizadas) {
+  const { db, dbPath } = await setup();
+  try {
+    await prepararV4(db, rodadasJaAtualizadas);
+    const rodadaAntes = await dbGet(db, 'SELECT id, empresa_id, unidade_id, mesa_id FROM cozinha_rodadas');
+    const itemAntes = await dbGet(db, 'SELECT * FROM cozinha_itens');
+    const idempotenciaAntes = await dbGet(db, 'SELECT * FROM cozinha_idempotencia');
+
+    await assert.rejects(() => garantirSchemaCozinha(db, { simularFalha: 'apos_copia' }),
+      err => err.codigo === 'COZINHA_MIGRACAO_SIMULADA');
+    assert.strictEqual((await dbGet(db, `SELECT valor FROM cozinha_schema_meta WHERE chave='schema_version'`)).valor, '4');
+    assert.deepStrictEqual(await dbGet(db, 'SELECT * FROM cozinha_itens'), itemAntes);
+    assert.deepStrictEqual(await dbGet(db, 'SELECT * FROM cozinha_idempotencia'), idempotenciaAntes);
+    assert.strictEqual((await dbGet(db, 'PRAGMA foreign_keys')).foreign_keys, 1);
+    assert.strictEqual(getCozinhaSchemaStatus().operacional, false);
+
+    const resultado = await garantirSchemaCozinha(db);
+    assert.strictEqual(resultado.operacional, true);
+    assert.strictEqual((await dbGet(db, `SELECT valor FROM cozinha_schema_meta WHERE chave='schema_version'`)).valor, '7');
+    assert.deepStrictEqual(await dbGet(db, 'SELECT id, empresa_id, unidade_id, mesa_id FROM cozinha_rodadas'), rodadaAntes);
+    assert.deepStrictEqual(await dbGet(db, 'SELECT * FROM cozinha_itens'), itemAntes);
+    assert.deepStrictEqual(await dbGet(db, 'SELECT * FROM cozinha_idempotencia'), idempotenciaAntes);
+    assert.deepStrictEqual(await dbAll(db, 'PRAGMA foreign_key_check'), []);
+    assert((await dbAll(db, 'PRAGMA foreign_key_list(cozinha_itens)')).some(f => f.table === 'cozinha_rodadas'));
+    assert(await dbGet(db, `SELECT name FROM sqlite_master WHERE type='index' AND name='idx_teste_rodadas'`));
+    const seq = await dbAll(db, `SELECT name, seq FROM sqlite_sequence WHERE name IN ('cozinha_rodadas', 'cozinha_idempotencia')`);
+    assert(seq.every(row => row.seq >= 25));
+    await dbRun(db, `INSERT INTO cozinha_idempotencia (idempotency_key, tipo_operacao, payload_hash)
+      VALUES ('novo-cancelamento', 'CANCELAMENTO_RODADA', 'hash')`);
+    assert.strictEqual((await garantirSchemaCozinha(db)).operacional, true);
+    console.log(`[PASS] migração v4 populada, rodadas atualizadas: ${rodadasJaAtualizadas}`);
+  } finally {
+    await fechaDb(db);
+    if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+  }
+}
+
+async function teste_migracao_preserva_sequencia_vazia() {
+  const { db, dbPath } = await setup();
+  try {
+    await prepararV4(db);
+    await dbRun(db, 'DELETE FROM cozinha_itens');
+    await dbRun(db, 'DELETE FROM cozinha_rodadas');
+    await dbRun(db, 'DELETE FROM cozinha_idempotencia');
+    await garantirSchemaCozinha(db);
+    const seq = await dbAll(db, `SELECT name, seq FROM sqlite_sequence
+      WHERE name IN ('cozinha_rodadas', 'cozinha_idempotencia')`);
+    assert.strictEqual(seq.length, 2);
+    assert(seq.every(row => row.seq >= 25));
+    console.log('[PASS] sequências preservadas em tabelas vazias');
+  } finally {
+    await fechaDb(db);
+    if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+  }
+}
+
+async function teste_migracao_v5_para_v6() {
+  const { db, dbPath } = await setup();
+  try {
+    await prepararV4(db);
+    await garantirSchemaCozinha(db);
+    const sql = (await dbGet(db, `SELECT sql FROM sqlite_master
+      WHERE type='table' AND name='cozinha_idempotencia'`)).sql;
+    const sqlV5 = sql.replace(/,\s*'PREPARACAO_REVERTIDA'/, '').replace(/,\s*'CANCELAMENTO_ITEM'/, '');
+    assert.notStrictEqual(sqlV5, sql);
+    const indexes = await dbAll(db, `SELECT sql FROM sqlite_master
+      WHERE type='index' AND tbl_name='cozinha_idempotencia' AND sql IS NOT NULL`);
+    const dados = await dbAll(db, 'SELECT * FROM cozinha_idempotencia ORDER BY id');
+    await dbRun(db, 'PRAGMA foreign_keys=OFF');
+    await dbRun(db, 'ALTER TABLE cozinha_idempotencia RENAME TO idempotencia_original_teste');
+    await dbRun(db, sqlV5);
+    await dbRun(db, 'INSERT INTO cozinha_idempotencia SELECT * FROM idempotencia_original_teste');
+    await dbRun(db, 'DROP TABLE idempotencia_original_teste');
+    for (const index of indexes) await dbRun(db, index.sql);
+    await dbRun(db, 'CREATE INDEX idx_idempotencia_teste ON cozinha_idempotencia(contexto)');
+    await dbRun(db, `UPDATE sqlite_sequence SET seq=100 WHERE name='cozinha_idempotencia'`);
+    await dbRun(db, `UPDATE cozinha_schema_meta SET valor='5' WHERE chave='schema_version'`);
+    await dbRun(db, 'PRAGMA foreign_keys=ON');
+
+    await assert.rejects(() => garantirSchemaCozinha(db, { simularFalha: 'v6_apos_copia' }),
+      err => err.codigo === 'COZINHA_MIGRACAO_SIMULADA');
+    assert.strictEqual((await dbGet(db, `SELECT valor FROM cozinha_schema_meta WHERE chave='schema_version'`)).valor, '5');
+    assert.deepStrictEqual(await dbAll(db, 'SELECT * FROM cozinha_idempotencia ORDER BY id'), dados);
+    assert.strictEqual((await dbGet(db, 'PRAGMA foreign_keys')).foreign_keys, 1);
+
+    const resultado = await garantirSchemaCozinha(db);
+    assert.strictEqual(resultado.migrado_v5_v6, true);
+    assert.deepStrictEqual(await dbAll(db, 'SELECT * FROM cozinha_idempotencia ORDER BY id'), dados);
+    assert(await dbGet(db, `SELECT name FROM sqlite_master WHERE type='index' AND name='idx_idempotencia_teste'`));
+    assert((await dbGet(db, `SELECT seq FROM sqlite_sequence WHERE name='cozinha_idempotencia'`)).seq >= 100);
+    assert.deepStrictEqual(await dbAll(db, 'PRAGMA foreign_key_check'), []);
+    const inserido = await dbRun(db, `INSERT INTO cozinha_idempotencia (idempotency_key, tipo_operacao, payload_hash)
+      VALUES ('novo-retorno', 'PREPARACAO_REVERTIDA', 'hash')`);
+    assert(inserido.lastID > 100);
+    assert.strictEqual((await garantirSchemaCozinha(db)).versao, 7);
+  } finally {
+    await fechaDb(db);
+    if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+  }
+}
+
+async function teste_migracao_v6_para_v7() {
+  const { db, dbPath } = await setup();
+  try {
+    await prepararV4(db);
+    await garantirSchemaCozinha(db);
+    const sql = (await dbGet(db, `SELECT sql FROM sqlite_master
+      WHERE type='table' AND name='cozinha_idempotencia'`)).sql;
+    const sqlV6 = sql.replace(/,\s*'CANCELAMENTO_ITEM'/, '');
+    assert.notStrictEqual(sqlV6, sql);
+    const indexes = await dbAll(db, `SELECT sql FROM sqlite_master
+      WHERE type='index' AND tbl_name='cozinha_idempotencia' AND sql IS NOT NULL`);
+    const dados = await dbAll(db, 'SELECT * FROM cozinha_idempotencia ORDER BY id');
+    await dbRun(db, 'PRAGMA foreign_keys=OFF');
+    await dbRun(db, 'ALTER TABLE cozinha_idempotencia RENAME TO idempotencia_original_teste');
+    await dbRun(db, sqlV6);
+    await dbRun(db, 'INSERT INTO cozinha_idempotencia SELECT * FROM idempotencia_original_teste');
+    await dbRun(db, 'DROP TABLE idempotencia_original_teste');
+    for (const index of indexes) await dbRun(db, index.sql);
+    await dbRun(db, 'CREATE INDEX idx_idempotencia_v7_teste ON cozinha_idempotencia(contexto)');
+    await dbRun(db, `UPDATE sqlite_sequence SET seq=100 WHERE name='cozinha_idempotencia'`);
+    await dbRun(db, `UPDATE cozinha_schema_meta SET valor='6' WHERE chave='schema_version'`);
+    await dbRun(db, 'PRAGMA foreign_keys=ON');
+    await assert.rejects(() => garantirSchemaCozinha(db, { simularFalha: 'v7_apos_copia' }),
+      err => err.codigo === 'COZINHA_MIGRACAO_SIMULADA');
+    assert.strictEqual((await dbGet(db, `SELECT valor FROM cozinha_schema_meta WHERE chave='schema_version'`)).valor, '6');
+    assert.deepStrictEqual(await dbAll(db, 'SELECT * FROM cozinha_idempotencia ORDER BY id'), dados);
+    assert.strictEqual((await dbGet(db, 'PRAGMA foreign_keys')).foreign_keys, 1);
+    const resultado = await garantirSchemaCozinha(db);
+    assert.strictEqual(resultado.migrado_v6_v7, true);
+    assert.deepStrictEqual(await dbAll(db, 'SELECT * FROM cozinha_idempotencia ORDER BY id'), dados);
+    assert(await dbGet(db, `SELECT name FROM sqlite_master WHERE type='index' AND name='idx_idempotencia_v7_teste'`));
+    assert((await dbGet(db, `SELECT seq FROM sqlite_sequence WHERE name='cozinha_idempotencia'`)).seq >= 100);
+    assert.deepStrictEqual(await dbAll(db, 'PRAGMA foreign_key_check'), []);
+    const inserido = await dbRun(db, `INSERT INTO cozinha_idempotencia (idempotency_key, tipo_operacao, payload_hash)
+      VALUES ('novo-item-cancelado', 'CANCELAMENTO_ITEM', 'hash')`);
+    assert(inserido.lastID > 100);
+  } finally {
+    await fechaDb(db);
+    if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+  }
+}
+
 async function rodarTestes() {
   try {
     await teste_schema_v5_criacao_novo_banco();
+    await teste_migracao_v4_populado(false);
+    await teste_migracao_v4_populado(true);
+    await teste_migracao_preserva_sequencia_vazia();
+    await teste_migracao_v5_para_v6();
+    await teste_migracao_v6_para_v7();
     await teste_motivos_cancelamento();
     console.log('\n✓ Todos os testes passaram\n');
   } catch (err) {

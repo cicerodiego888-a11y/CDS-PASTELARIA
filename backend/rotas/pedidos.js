@@ -20,6 +20,9 @@ const FaturamentoService = require('../services/faturamento/FaturamentoService')
 const PedidoPreparacaoService = require('../services/pedido/PedidoPreparacaoService');
 const MesaAtendimentoService = require('../services/pedido/MesaAtendimentoService');
 const VendaConsolidadaMesa = require('../services/vendas/VendaConsolidadaMesaService');
+const ComandaSnapshot = require('../services/cozinha/CozinhaComandaSnapshotService');
+const { htmlComanda } = require('../services/cozinha/CozinhaComandaRenderer');
+const { validarUnidadeCozinhaNoLogin } = require('../services/cozinha/cozinhaAuthUnidade');
 
 router.use(exigirRecurso('pedidos'));
 router.use(criarMiddlewareContextoEmpresa(db));
@@ -371,6 +374,105 @@ function chaveIdempotencia(req) {
   if (header == null && (corpo == null || String(corpo).trim() === '')) return null;
   return String(header || corpo).trim();
 }
+
+async function comandaAutorizada(req, snapshotId) {
+  const empresaId = empresaIdDoReqPedido(req);
+  const id = Number(snapshotId);
+  if (!Number.isInteger(id) || id <= 0) {
+    throw ComandaSnapshot.erro('Snapshot inválido.', 400, 'SNAPSHOT_INVALIDO');
+  }
+  const referencia = await ComandaSnapshot.get(db, `
+    SELECT unidade_id FROM cozinha_comanda_snapshots
+    WHERE id = ? AND empresa_id = ?
+  `, [id, empresaId]);
+  if (!referencia) throw ComandaSnapshot.erro('Comanda não encontrada.', 404, 'SNAPSHOT_NAO_DISPONIVEL');
+  const unidadeId = Number(referencia.unidade_id);
+  const unidadeSessao = req.user && (req.user.unidade_cozinha_id || req.user.unidadeCozinhaId);
+  if (unidadeSessao != null && Number(unidadeSessao) !== unidadeId) {
+    throw ComandaSnapshot.erro('Unidade divergente da sessão.', 403, 'UNIDADE_ISOLAMENTO');
+  }
+  await validarUnidadeCozinhaNoLogin({
+    db, usuario: req.user, unidadeCozinhaIdRaw: unidadeId, empresaIdRaw: empresaId
+  });
+  const snapshot = await ComandaSnapshot.obter(db, empresaId, unidadeId, id);
+  return { empresaId, unidadeId, snapshot };
+}
+
+router.get('/:id/comanda-kds', async (req, res) => {
+  try {
+    operadorDaSessao(req);
+    const empresaId = empresaIdDoReqPedido(req);
+    const pedidoId = Number(req.params.id);
+    if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
+      throw ComandaSnapshot.erro('Pedido inválido.', 400, 'PEDIDO_INVALIDO');
+    }
+    const ref = await ComandaSnapshot.get(db, `
+      SELECT s.id FROM cozinha_comanda_snapshots s
+      JOIN cozinha_pedido_despachos d
+        ON d.empresa_id = s.empresa_id AND d.pedido_id = s.pedido_id
+        AND d.unidade_id = s.unidade_id AND d.rodada_id = s.rodada_id
+        AND d.idempotency_key = s.idempotency_key
+      WHERE s.empresa_id = ? AND s.pedido_id = ? AND d.status = 'CONCLUIDO'
+    `, [empresaId, pedidoId]);
+    if (!ref) throw ComandaSnapshot.erro('Comanda não encontrada.', 404, 'SNAPSHOT_NAO_DISPONIVEL');
+    const autorizado = await comandaAutorizada(req, ref.id);
+    return res.json({
+      success: true,
+      snapshot_id: autorizado.snapshot.id,
+      html: htmlComanda(autorizado.snapshot.conteudo)
+    });
+  } catch (err) {
+    return responderErro(res, err);
+  }
+});
+
+router.post('/comanda-kds/:snapshotId/tentativas', async (req, res) => {
+  try {
+    const operadorId = operadorDaSessao(req);
+    const { empresaId, unidadeId, snapshot } = await comandaAutorizada(req, req.params.snapshotId);
+    let tentativa;
+    try {
+      tentativa = await ComandaSnapshot.run(db, `
+        INSERT INTO cozinha_comanda_tentativas (snapshot_id, empresa_id, unidade_id, operador_id)
+        VALUES (?, ?, ?, ?)
+      `, [snapshot.id, empresaId, unidadeId, operadorId]);
+    } catch (err) {
+      if (err && err.code === 'SQLITE_CONSTRAINT') {
+        throw ComandaSnapshot.erro('Já existe uma tentativa em andamento ou com resultado desconhecido.', 409, 'IMPRESSAO_EM_ANDAMENTO');
+      }
+      throw err;
+    }
+    return res.status(201).json({ success: true, tentativa_id: tentativa.id, snapshot: snapshot.conteudo });
+  } catch (err) {
+    return responderErro(res, err);
+  }
+});
+
+router.post('/comanda-kds/:snapshotId/tentativas/:tentativaId', async (req, res) => {
+  try {
+    const operadorId = operadorDaSessao(req);
+    const { empresaId, unidadeId, snapshot } = await comandaAutorizada(req, req.params.snapshotId);
+    const tentativaId = Number(req.params.tentativaId);
+    const estado = req.body && req.body.estado;
+    if (!Number.isInteger(tentativaId) || tentativaId <= 0
+      || !['ACEITA_PELO_SPOOLER', 'FALHA'].includes(estado)) {
+      throw ComandaSnapshot.erro('Resultado de impressão inválido.', 400, 'IMPRESSAO_RESULTADO_INVALIDO');
+    }
+    const atualizado = await ComandaSnapshot.run(db, `
+      UPDATE cozinha_comanda_tentativas
+      SET estado = ?, detalhe = ?, concluida_em = CURRENT_TIMESTAMP
+      WHERE id = ? AND snapshot_id = ? AND empresa_id = ? AND unidade_id = ?
+        AND operador_id = ? AND estado = 'EM_ANDAMENTO'
+    `, [estado, String(req.body.detalhe || '').slice(0, 500) || null, tentativaId,
+      snapshot.id, empresaId, unidadeId, operadorId]);
+    if (atualizado.changes !== 1) {
+      throw ComandaSnapshot.erro('Tentativa não encontrada ou já finalizada.', 409, 'IMPRESSAO_TENTATIVA_INVALIDA');
+    }
+    return res.json({ success: true, estado });
+  } catch (err) {
+    return responderErro(res, err);
+  }
+});
 
 router.post('/:id/preparacao/enviar', async (req, res) => {
   try {

@@ -28,6 +28,7 @@ const {
 } = require('../../backend/utils/cozinhaSchema');
 const CozinhaDespacho = require('../../backend/services/cozinha/CozinhaDespachoService');
 const CozinhaPreparacao = require('../../backend/services/cozinha/CozinhaPreparacaoService');
+const CozinhaKdsPainel = require('../../backend/services/cozinha/CozinhaKdsPainelService');
 const {
   classificarItemCozinha
 } = require('../../backend/services/cozinha/cozinhaClassificacaoItem');
@@ -438,6 +439,239 @@ describe('Sprint 03 — Preparação / conclusão de rodada', () => {
   });
 
   describe('Controle independente e conclusão', () => {
+    it('aceita os sete motivos padronizados em cancelamentos operacionais', async () => {
+      const db = await open();
+      try {
+        await schemaErp(db);
+        const infra = await seedInfra(db);
+        const motivos = [
+          'PRAZO_EXCEDIDO', 'CLIENTE_DESISTIU', 'CANCELAMENTO_IFOOD', 'PEDIDO_DUPLICADO',
+          'ERRO_LANCAMENTO', 'FALTA_PRODUTO', 'OUTRO'
+        ];
+        for (const motivo of motivos) {
+          const pedido = await criarPedidoItem(db, infra, { produtoId: infra.prodPastelId, nome: motivo, classifSnapshot: 'COMERCIAL' });
+          const despacho = await despacharItens(db, infra, [pedido], `g1-motivo-${motivo}`);
+          const resultado = await CozinhaPreparacao.cancelarRodada({
+            empresaId: 1, unidade_id: infra.unidadeId, operadorId: 7, rodadaId: despacho.rodada.id,
+            motivo, justificativa: motivo === 'OUTRO' ? 'Detalhe' : null,
+            idempotencyKey: `g1-motivo-cancelar-${motivo}`
+          }, { db });
+          assert.equal(resultado.rodada.cancelamento_motivo, motivo);
+        }
+      } finally { await close(db); }
+    });
+
+    it('retira estado pronto da rodada quando o item restante passa a ser bloqueador', async () => {
+      const db = await open();
+      try {
+        await schemaErp(db);
+        const infra = await seedInfra(db);
+        const pastel = await criarPedidoItem(db, infra, { produtoId: infra.prodPastelId, nome: 'Pastel', classifSnapshot: 'COMERCIAL' });
+        const outro = await criarPedidoItem(db, infra, { produtoId: infra.prodOutroId, nome: 'Outro', classifSnapshot: 'COMERCIAL' });
+        const despacho = await despacharItens(db, infra, [pastel, outro], 'g1-mudanca-regra');
+        const id = despacho.itens.find((item) => item.tipo_item === 'PASTEL').id;
+        const base = { empresaId: 1, unidade_id: infra.unidadeId, operadorId: 7 };
+        await CozinhaPreparacao.iniciarPreparacao({ ...base, itemId: id, idempotencyKey: 'g1-mudanca-inicio' }, { db });
+        await CozinhaPreparacao.marcarItemPronto({ ...base, itemId: id, idempotencyKey: 'g1-mudanca-pronto' }, { db });
+        const resultado = await CozinhaPreparacao.cancelarItem({
+          ...base, itemId: id, idempotencyKey: 'g1-mudanca-cancelar', motivo: 'FALTA_PRODUTO'
+        }, { db });
+        assert.equal(resultado.rodada.estado_preparacao, 'AGUARDANDO');
+        const ativo = await CozinhaKdsPainel.listarPainelPreparacao({ ...base, fila: 'ativa' }, { db });
+        assert.equal(ativo.rodadas[0].rodada_pronta_em, null);
+        const historico = await CozinhaKdsPainel.listarPainelPreparacao({ ...base, historico: 'cancelados' }, { db });
+        assert.ok(historico.rodadas[0].itens[0].rodada_pronta_em_cancelamento);
+      } finally { await close(db); }
+    });
+
+    it('cancelamento individual preserva produção e encerra rodada ao cancelar último item', async () => {
+      const db = await open();
+      try {
+        await schemaErp(db);
+        const infra = await seedInfra(db);
+        await run(db, 'ALTER TABLE produtos ADD COLUMN estoque_atual REAL');
+        await run(db, 'UPDATE produtos SET estoque_atual=23 WHERE id=?', [infra.prodPastelId]);
+        const p1 = await criarPedidoItem(db, infra, { produtoId: infra.prodPastelId, nome: 'Pastel A', classifSnapshot: 'COMERCIAL' });
+        const p2 = await criarPedidoItem(db, infra, { produtoId: infra.prodPastelId, nome: 'Pastel B', classifSnapshot: 'COMERCIAL' });
+        const despacho = await despacharItens(db, infra, [p1, p2], 'g1-individual-despacho');
+        const [a, b] = despacho.itens.map((item) => item.id);
+        const base = { empresaId: 1, unidade_id: infra.unidadeId, operadorId: 7 };
+        await CozinhaPreparacao.iniciarPreparacao({ ...base, itemId: a, idempotencyKey: 'g1-individual-inicio' }, { db });
+        await CozinhaPreparacao.marcarItemPronto({ ...base, itemId: a, idempotencyKey: 'g1-individual-pronto' }, { db });
+        await CozinhaPreparacao.iniciarPreparacao({ ...base, itemId: b, idempotencyKey: 'g1-individual-inicio-b' }, { db });
+        await run(db, 'UPDATE cozinha_itens SET qty_preparada_millis=400 WHERE id=?', [b]);
+        const antes = await get(db, 'SELECT qty_solicitada_millis,qty_preparada_millis,qty_cancelada_millis FROM cozinha_itens WHERE id=?', [a]);
+        const parcialAntes = await get(db, 'SELECT qty_solicitada_millis,qty_preparada_millis,qty_cancelada_millis FROM cozinha_itens WHERE id=?', [b]);
+        const estoqueFila = await get(db, 'SELECT COUNT(*) AS n FROM cozinha_impressao_fila');
+        const entrada = { ...base, itemId: a, motivo: 'OUTRO', justificativa: 'Produto inadequado', idempotencyKey: 'g1-item-a' };
+        await assert.rejects(() => CozinhaPreparacao.cancelarItem({ ...entrada, justificativa: '  ' }, { db }),
+          (err) => err.codigo === 'JUSTIFICATIVA_OBRIGATORIA');
+        await assert.rejects(() => CozinhaPreparacao.cancelarItem({ ...entrada, motivo: 'INVALIDO' }, { db }),
+          (err) => err.codigo === 'MOTIVO_CANCELAMENTO_INVALIDO');
+        await assert.rejects(() => CozinhaPreparacao.cancelarItem({ ...entrada, unidade_id: infra.unidadeId + 1 }, { db }),
+          (err) => err.codigo === 'UNIDADE_ISOLAMENTO');
+        await assert.rejects(() => CozinhaPreparacao.cancelarItem({ ...entrada, empresaId: 2 }, { db }),
+          (err) => err.codigo === 'ITEM_NAO_ENCONTRADO');
+        await assert.rejects(() => CozinhaPreparacao.cancelarItem({ ...entrada, idempotencyKey: 'g1-item-falha' },
+          { db, simularFalha: 'antes_commit' }), (err) => err.codigo === 'FALHA_SIMULADA');
+        assert.equal((await get(db, 'SELECT estado_preparacao FROM cozinha_itens WHERE id=?', [a])).estado_preparacao, 'PRONTO');
+        const cancelado = await CozinhaPreparacao.cancelarItem(entrada, { db });
+        assert.equal(cancelado.item.estado_anterior, 'PRONTO');
+        assert.equal(cancelado.item.cancelamento_por, 7);
+        assert.match(cancelado.item.cancelamento_em, /Z$/);
+        assert.equal(cancelado.rodada.estado_preparacao, 'EM_PREPARACAO');
+        assert.equal((await CozinhaPreparacao.cancelarItem(entrada, { db })).repetida, true);
+        await assert.rejects(() => CozinhaPreparacao.cancelarItem({ ...entrada, justificativa: 'Outra' }, { db }),
+          (err) => err.codigo === 'IDEMPOTENCY_PAYLOAD_DIVERGENTE');
+        await assert.rejects(() => CozinhaPreparacao.cancelarItem({ ...entrada, idempotencyKey: 'g1-item-duplicado' }, { db }),
+          (err) => err.codigo === 'ITEM_CANCELADO');
+        assert.deepEqual(await get(db, 'SELECT qty_solicitada_millis,qty_preparada_millis,qty_cancelada_millis FROM cozinha_itens WHERE id=?', [a]), antes);
+        assert.equal((await get(db, 'SELECT estado_preparacao FROM cozinha_itens WHERE id=?', [b])).estado_preparacao, 'EM_PREPARACAO');
+        const ultimo = await CozinhaPreparacao.cancelarItem({ ...base, itemId: b, motivo: 'CLIENTE_DESISTIU', idempotencyKey: 'g1-item-b' }, { db });
+        assert.equal(ultimo.rodada.estado_preparacao, 'CANCELADA');
+        assert.deepEqual(await get(db, 'SELECT qty_solicitada_millis,qty_preparada_millis,qty_cancelada_millis FROM cozinha_itens WHERE id=?', [b]), parcialAntes);
+        const historico = await CozinhaKdsPainel.listarPainelPreparacao({ ...base, historico: 'cancelados' }, { db });
+        const itemHistorico = historico.rodadas[0].itens.find((item) => item.id === a);
+        assert.equal(itemHistorico.estado_anterior, 'PRONTO');
+        assert.equal(itemHistorico.cancelamento_justificativa, 'Produto inadequado');
+        assert.ok(itemHistorico.iniciado_em);
+        assert.ok(itemHistorico.pronto_em);
+        assert.equal((await get(db, "SELECT COUNT(*) AS n FROM cozinha_eventos_outbox WHERE tipo='ITEM_CANCELADO'")).n, 2);
+        assert.equal((await get(db, "SELECT COUNT(*) AS n FROM cozinha_eventos_outbox WHERE tipo='RODADA_CANCELADA'")).n, 1);
+        assert.deepEqual(await get(db, 'SELECT COUNT(*) AS n FROM cozinha_impressao_fila'), estoqueFila);
+        assert.equal((await get(db, 'SELECT estoque_atual FROM produtos WHERE id=?', [infra.prodPastelId])).estoque_atual, 23);
+        assert.equal((await get(db, 'SELECT status FROM pedidos WHERE id=?', [p1.pedidoId])).status, 'PEDIDO');
+        assert.equal((await get(db, 'SELECT estado FROM mesa_atendimentos WHERE id=?', [infra.atendimentoId])).estado, 'OCUPADA');
+      } finally { await close(db); }
+    });
+
+    it('cancelamento da rodada registra estado dos itens e bloqueia duplicação e retirada', async () => {
+      const db = await open();
+      try {
+        await schemaErp(db);
+        const infra = await seedInfra(db);
+        const p1 = await criarPedidoItem(db, infra, { produtoId: infra.prodPastelId, nome: 'Pastel A', classifSnapshot: 'COMERCIAL' });
+        const p2 = await criarPedidoItem(db, infra, { produtoId: infra.prodPastelId, nome: 'Pastel B', classifSnapshot: 'COMERCIAL' });
+        const despacho = await despacharItens(db, infra, [p1, p2], 'g1-rodada-despacho');
+        const [a] = despacho.itens.map((item) => item.id);
+        const base = { empresaId: 1, unidade_id: infra.unidadeId, operadorId: 7 };
+        await CozinhaPreparacao.iniciarPreparacao({ ...base, itemId: a, idempotencyKey: 'g1-rodada-inicio' }, { db });
+        const entrada = { ...base, rodadaId: despacho.rodada.id, motivo: 'FALTA_PRODUTO', idempotencyKey: 'g1-rodada' };
+        await run(db, "UPDATE cozinha_rodadas SET retirada_estado='RETIRADA' WHERE id=?", [despacho.rodada.id]);
+        await assert.rejects(() => CozinhaPreparacao.cancelarRodada(entrada, { db }), (err) => err.codigo === 'RODADA_JA_RETIRADA');
+        await assert.rejects(() => CozinhaPreparacao.cancelarItem({ ...base, itemId: a, motivo: 'FALTA_PRODUTO', idempotencyKey: 'g1-retirado' }, { db }),
+          (err) => err.codigo === 'RODADA_JA_RETIRADA');
+        await run(db, "UPDATE cozinha_rodadas SET retirada_estado='PENDENTE' WHERE id=?", [despacho.rodada.id]);
+        const resultado = await CozinhaPreparacao.cancelarRodada(entrada, { db });
+        assert.equal(resultado.rodada.cancelamento_etapa, 'EM_PREPARACAO');
+        assert.equal(resultado.rodada.cancelamento_por, 7);
+        assert.match(resultado.rodada.cancelamento_em, /Z$/);
+        assert.equal((await CozinhaPreparacao.cancelarRodada(entrada, { db })).repetida, true);
+        await assert.rejects(() => CozinhaPreparacao.cancelarRodada({ ...entrada, idempotencyKey: 'g1-rodada-duplicada' }, { db }),
+          (err) => err.codigo === 'RODADA_JA_CANCELADA');
+        const historico = await CozinhaKdsPainel.listarPainelPreparacao({ ...base, historico: 'cancelados' }, { db });
+        assert.equal(historico.rodadas[0].itens.find((item) => item.id === a).estado_anterior, 'EM_PREPARACAO');
+        assert.equal(historico.rodadas[0].itens.find((item) => item.id !== a).estado_anterior, 'AGUARDANDO');
+        assert.equal((await get(db, "SELECT COUNT(*) AS n FROM cozinha_eventos_outbox WHERE tipo='RODADA_CANCELADA'")).n, 1);
+        assert.equal((await CozinhaKdsPainel.listarPainelPreparacao({ ...base, fila: 'ativa' }, { db })).rodadas.length, 0);
+      } finally { await close(db); }
+    });
+
+    it('retorna somente o item selecionado, preserva histórico e permite reiniciar', async () => {
+      const db = await open();
+      try {
+        await schemaErp(db);
+        const infra = await seedInfra(db);
+        const p1 = await criarPedidoItem(db, infra, {
+          produtoId: infra.prodPastelId, nome: 'Pastel 1', classifSnapshot: 'COMERCIAL'
+        });
+        const p2 = await criarPedidoItem(db, infra, {
+          produtoId: infra.prodPastelId, nome: 'Pastel 2', classifSnapshot: 'COMERCIAL'
+        });
+        const out = await despacharItens(db, infra, [p1, p2], 'retorno-despacho');
+        const [idA, idB] = out.itens.map((item) => item.id);
+        const base = { empresaId: 1, operadorId: 7, unidade_id: infra.unidadeId };
+        const iniciar = (itemId, key) => CozinhaPreparacao.iniciarPreparacao({
+          ...base, itemId, idempotencyKey: key
+        }, { db });
+        const voltar = (itemId, key, extra = {}) => CozinhaPreparacao.voltarParaAguardando({
+          ...base, itemId, idempotencyKey: key, ...extra
+        }, { db });
+        await iniciar(idA, 'retorno-inicio-a');
+        await iniciar(idB, 'retorno-inicio-b');
+        await assert.rejects(() => voltar(idA, 'retorno-inicio-a'),
+          (err) => err.codigo === 'IDEMPOTENCY_OPERACAO_DIVERGENTE');
+        await assert.rejects(() => voltar(idA, 'retorno-unidade', { unidade_id: infra.unidadeId + 1 }),
+          (err) => err.codigo === 'UNIDADE_ISOLAMENTO');
+        await assert.rejects(() => voltar(idA, 'retorno-empresa', { empresaId: 2 }),
+          (err) => err.codigo === 'ITEM_NAO_ENCONTRADO');
+        await assert.rejects(() => CozinhaPreparacao.voltarParaAguardando({
+          ...base, itemId: idA, idempotencyKey: 'retorno-falha'
+        }, { db, simularFalha: 'antes_commit' }), (err) => err.codigo === 'FALHA_SIMULADA');
+        assert.equal((await get(db, 'SELECT estado_preparacao FROM cozinha_itens WHERE id=?', [idA])).estado_preparacao, 'EM_PREPARACAO');
+        assert.equal((await get(db, "SELECT COUNT(*) AS n FROM cozinha_idempotencia WHERE idempotency_key='retorno-falha'")).n, 0);
+
+        const resultado = await voltar(idA, 'retorno-a');
+        assert.equal(resultado.item.estado_preparacao, 'AGUARDANDO');
+        assert.equal(resultado.rodada.estado_preparacao, 'EM_PREPARACAO');
+        assert.equal((await voltar(idA, 'retorno-a')).repetida, true);
+        await assert.rejects(() => voltar(idB, 'retorno-a'), (err) => err.codigo === 'IDEMPOTENCY_PAYLOAD_DIVERGENTE');
+        const painel = await CozinhaKdsPainel.listarPainelPreparacao({
+          empresaId: 1, unidadeId: infra.unidadeId
+        }, { db });
+        const itens = painel.rodadas[0].itens;
+        const itemA = itens.find((item) => item.id === idA);
+        const itemB = itens.find((item) => item.id === idB);
+        assert.equal(itemA.iniciado_em, null);
+        assert.equal(itemA.operador_inicio_id, null);
+        assert.equal(itemB.estado_preparacao, 'EM_PREPARACAO');
+        assert.ok(itemB.iniciado_em);
+        assert.equal((await get(db, "SELECT COUNT(*) AS n FROM cozinha_eventos_outbox WHERE tipo='PREPARACAO_REVERTIDA'")).n, 1);
+        await voltar(idB, 'retorno-b');
+        assert.equal((await get(db, 'SELECT estado_preparacao FROM cozinha_rodadas WHERE id=?', [out.rodada.id])).estado_preparacao, 'AGUARDANDO');
+        await assert.rejects(() => voltar(idA, 'retorno-invalido'), (err) => err.codigo === 'TRANSICAO_INVALIDA');
+        const reinicio = await iniciar(idA, 'retorno-reinicio');
+        const novoPainel = await CozinhaKdsPainel.listarPainelPreparacao({ empresaId: 1, unidadeId: infra.unidadeId }, { db });
+        const itemReiniciado = novoPainel.rodadas[0].itens.find((item) => item.id === idA);
+        assert.equal(itemReiniciado.iniciado_em, reinicio.iniciado_em);
+        assert.equal(itemReiniciado.operador_inicio_id, 7);
+        assert.equal((await get(db, "SELECT COUNT(*) AS n FROM cozinha_eventos_outbox WHERE tipo='PREPARACAO_INICIADA'")).n, 3);
+        await run(db, "UPDATE cozinha_rodadas SET retirada_estado='RETIRADA' WHERE id=?", [out.rodada.id]);
+        await assert.rejects(() => voltar(idA, 'retorno-retirada'), (err) => err.codigo === 'RETIRADA_ESTADO_INVALIDO');
+        await run(db, "UPDATE cozinha_rodadas SET estado_preparacao='CANCELADA' WHERE id=?", [out.rodada.id]);
+        await assert.rejects(() => voltar(idA, 'retorno-cancelada'), (err) => err.codigo === 'RODADA_CANCELADA');
+      } finally {
+        await close(db);
+      }
+    });
+
+    it('mantém a rodada pronta ao retornar item que não bloqueia a conclusão', async () => {
+      const db = await open();
+      try {
+        await schemaErp(db);
+        const infra = await seedInfra(db);
+        const pastel = await criarPedidoItem(db, infra, {
+          produtoId: infra.prodPastelId, nome: 'Pastel', classifSnapshot: 'COMERCIAL'
+        });
+        const outro = await criarPedidoItem(db, infra, {
+          produtoId: infra.prodOutroId, nome: 'Outro', classifSnapshot: 'COMERCIAL'
+        });
+        const out = await despacharItens(db, infra, [pastel, outro], 'retorno-pronta-desp');
+        const base = { empresaId: 1, operadorId: 7, unidade_id: infra.unidadeId };
+        const idPastel = out.itens.find((item) => item.tipo_item === 'PASTEL').id;
+        const idOutro = out.itens.find((item) => item.tipo_item === 'OUTRO').id;
+        await CozinhaPreparacao.iniciarPreparacao({ ...base, itemId: idOutro, idempotencyKey: 'retorno-pronta-outro' }, { db });
+        await CozinhaPreparacao.iniciarPreparacao({ ...base, itemId: idPastel, idempotencyKey: 'retorno-pronta-pastel' }, { db });
+        await CozinhaPreparacao.marcarItemPronto({ ...base, itemId: idPastel, idempotencyKey: 'retorno-pronta-final' }, { db });
+        const resultado = await CozinhaPreparacao.voltarParaAguardando({
+          ...base, itemId: idOutro, idempotencyKey: 'retorno-pronta-voltar'
+        }, { db });
+        assert.equal(resultado.rodada.estado_preparacao, 'PRONTA');
+      } finally {
+        await close(db);
+      }
+    });
+
     it('5-7) dois pastéis independentes; um pronto não conclui; todos concluem', async () => {
       const db = await open();
       await schemaErp(db);

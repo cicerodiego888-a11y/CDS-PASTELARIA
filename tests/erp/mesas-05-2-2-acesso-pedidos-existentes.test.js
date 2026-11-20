@@ -118,28 +118,32 @@ describe('acesso ao pedido existente', () => {
     const emPreparo = pedidoBase({
       preparacao: { estado: 'EM_PREPARACAO', classificacao: 'NORMAL', enviado_em: '2026-11-02 14:47:02', tempo_decorrido_segundos: 75 }
     });
-    assert.equal(conferencia.acaoDoPedido(emPreparo).rotulo, 'Ver pedido');
+    assert.equal(conferencia.acaoDoPedido(emPreparo).rotulo, 'Reprocessar envio ao KDS');
     assert.equal(conferencia.acaoDoPedido(emPreparo).editar, false);
-    assert.match(htmlMesa([emPreparo]), /Ver pedido/);
+    assert.match(htmlMesa([emPreparo]), /Reprocessar envio ao KDS/);
     const fetches = [];
     const tela = conferencia.criarConferencia({
       novaChave: () => 'chave',
-      fetchJson: async () => { fetches.push('envio'); return {}; }
+      fetchJson: async () => {
+        fetches.push('envio');
+        return { preparacao: emPreparo.preparacao, despacho: { success: false, status: 'BLOQUEADO', mensagem: 'Destino indisponível' } };
+      }
     });
     tela.finalizar(emPreparo, { numero: 1 });
     const html = tela.html();
     assert.match(html, /Em preparação/);
     assert.match(html, /2026-11-02 14:47:02/);
     assert.match(html, /NORMAL/);
-    assert.equal(html.includes('data-acao="enviar"'), false);
+    assert.equal(html.includes('data-acao="enviar"'), true);
     assert.equal(html.includes('data-acao="corrigir"'), false);
     assert.equal(tela.corrigir().ok, false);
     const repetido = await tela.enviar();
-    assert.equal(repetido.codigo, 'PREPARACAO_JA_ENVIADA');
-    assert.equal(fetches.length, 0);
+    assert.equal(repetido.ok, false);
+    assert.equal(fetches.length, 1);
     assert.equal(tela.estado.preparacao.enviado_em, '2026-11-02 14:47:02');
 
     const concluido = pedidoBase({
+      despacho: { status: 'CONCLUIDO' },
       preparacao: {
         estado: 'CONCLUIDO',
         classificacao: 'CONCLUIDO',
@@ -154,11 +158,11 @@ describe('acesso ao pedido existente', () => {
     assert.equal(vista.html().includes('data-acao="enviar"'), false);
     await vista.enviar();
     assert.equal(vista.estado.preparacao.enviado_em, '2026-11-02 14:47:02');
-    assert.equal(fetches.length, 0);
+    assert.equal(fetches.length, 1);
   });
 
-  it('bloqueia faturado, cancelado, inexistente, outra empresa, encerrado, rede e resposta atrasada', async () => {
-    for (const status of ['FATURADO', 'CANCELADO']) {
+  it('bloqueia cancelado, inexistente, outra empresa, encerrado, rede e resposta atrasada', async () => {
+    for (const status of ['CANCELADO']) {
       const pedido = pedidoBase({ status, preparacao: { estado: 'NAO_ENVIADO', classificacao: 'NAO_ENVIADO', enviado_em: null } });
       assert.equal(conferencia.acaoDoPedido(pedido).rotulo, 'Ver pedido');
       assert.equal(conferencia.acaoDoPedido(pedido).enviar, false);
@@ -213,8 +217,8 @@ describe('acesso ao pedido existente', () => {
     })]);
     assert.equal(atualizado.total, 1);
     assert.equal(control.estado.pedidos.length, 1);
-    assert.match(control.html(), /Ver pedido/);
-    assert.equal((control.html().match(/data-pedido-id="40"/g) || []).length, 1);
+    assert.match(control.html(), /Reprocessar envio ao KDS/);
+    assert.equal((control.html().match(/data-acao="pedido" data-pedido-id="40"/g) || []).length, 1);
     const lancado = control.lancarPedido();
     assert.equal(lancado.ok, true);
     const fonte = fs.readFileSync(path.join(__dirname, '../../frontend/erp/js/pedidos.js'), 'utf8');

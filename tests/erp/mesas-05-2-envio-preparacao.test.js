@@ -8,6 +8,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const vm = require('vm');
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 
@@ -177,7 +178,7 @@ describe('conferência na tela', () => {
     control.finalizar(pedidoSalao());
 
     const primeira = await control.enviar();
-    assert.equal(primeira.ok, true);
+    assert.equal(primeira.ok, false);
     assert.equal(control.estado.preparacao.estado, 'EM_PREPARACAO');
     assert.equal(control.podeEnviar().ok, true);
     assert.match(control.html(), /Preparação ERP registrada/);
@@ -244,7 +245,7 @@ describe('conferência na tela', () => {
       chamadas.push(path);
       return {};
     });
-    for (const status of ['CANCELADO', 'FATURADO']) {
+    for (const status of ['CANCELADO', 'ORCAMENTO']) {
       control.finalizar(pedidoSalao({ status }));
       const resultado = await control.enviar();
       assert.equal(resultado.codigo, 'PREPARACAO_ESTADO_INCOMPATIVEL');
@@ -264,6 +265,52 @@ describe('conferência na tela', () => {
     assert.match(modulo, /preparacao\/enviar/);
     assert.match(mobile, /mesa_id: estado\.mesaId \? Number\(estado\.mesaId\) : null/);
     assert.doesNotMatch(mobile, /mesa_atendimento_id:/);
+  });
+
+  it('permite enviar pedido faturado sem despacho, sem permitir edição', async () => {
+    let chamadas = 0;
+    const control = criar(async () => {
+      chamadas += 1;
+      return {
+        preparacao: { estado: 'EM_PREPARACAO', enviado_em: '2026-11-02 12:10:00' },
+        despacho: { success: false, status: 'BLOQUEADO', codigo: 'SCHEMA_COMANDA_INDISPONIVEL', mensagem: 'Migration ausente.' }
+      };
+    }, {
+      listarPedidos: async () => ({ pedidos: [{ id: 40, despacho: { status: null, codigo: null } }] })
+    });
+
+    it('preserva a conferência anterior quando a consulta da mesa falha', async () => {
+      const control = criar(async () => ({}));
+      control.finalizar(pedidoSalao());
+      const antes = control.html();
+      let faixa;
+      const fonte = fs.readFileSync(path.join(__dirname, '../../frontend/erp/js/pedidos.js'), 'utf8');
+      const inicio = fonte.indexOf('async function consultarPedidoDaMesa');
+      const fim = fonte.indexOf('async function aplicarLancamentoDaMesa', inicio);
+      assert.ok(inicio >= 0 && fim > inicio);
+      const contexto = {
+        window: { CdsMesasConferencia: conferenciaApi },
+        cdsConsultaPedidoSeq: 0,
+        conferencia: control,
+        requisitarMesas: async () => { throw new Error('Rede indisponível'); },
+        pintarFaixaMesa: (valor) => { faixa = valor; }
+      };
+      const consultar = vm.runInNewContext(`(${fonte.slice(inicio, fim).trim()})`, contexto);
+      await consultar({ mesa_id: 8, pedido_id: 41 });
+      assert.equal(control.html(), antes);
+      assert.match(faixa.mensagem, /conferência anterior foi mantida/);
+    });
+    control.finalizar(pedidoSalao({ status: 'FATURADO' }));
+    assert.match(control.html(), /data-acao="enviar"/);
+    assert.doesNotMatch(control.html(), /data-acao="corrigir"/);
+    const resposta = await control.enviar();
+    assert.equal(resposta.ok, false);
+    assert.equal(chamadas, 1);
+    assert.equal(control.estado.pedido.status, 'FATURADO');
+    assert.equal(control.estado.pedido.despacho.status, 'BLOQUEADO');
+    assert.match(control.html(), /SCHEMA_COMANDA_INDISPONIVEL/);
+    assert.match(control.html(), /Migration ausente/);
+    assert.doesNotMatch(control.html(), /Pedido enviado ao KDS/);
   });
 });
 
@@ -387,7 +434,7 @@ describe('envio no atendimento', () => {
     );
   });
 
-  it('recusa cancelado, faturado e mesa em fechamento', async () => {
+  it('aceita faturado e recusa cancelado e mesa em fechamento', async () => {
     const ctx = await ambiente();
     const mesa = (await MesaService.criar(ctx.a.id, { numero: 8 }, { db: ctx.db })).mesa;
     const aberto = await Atendimento.abrir(ctx.a.id, mesa.id, { operadorId: 8 }, { db: ctx.db });
@@ -399,10 +446,9 @@ describe('envio no atendimento', () => {
     );
     const faturado = await receber(ctx, { mesaId: mesa.id });
     await run(ctx.db, `UPDATE pedidos SET status = 'FATURADO' WHERE id = ?`, [faturado.pedido.id]);
-    await rejeita(
-      () => Preparacao.enviar(ctx.a.id, faturado.pedido.id, { operadorId: 8, idempotencyKey: 'fat' }, { db: ctx.db }),
-      'PREPARACAO_ESTADO_INCOMPATIVEL'
-    );
+    const faturadoEnviado = await Preparacao.enviar(ctx.a.id, faturado.pedido.id, { operadorId: 8, idempotencyKey: 'fat' }, { db: ctx.db });
+    assert.equal(faturadoEnviado.preparacao.estado, 'EM_PREPARACAO');
+    assert.equal((await get(ctx.db, 'SELECT status FROM pedidos WHERE id = ?', [faturado.pedido.id])).status, 'FATURADO');
     const abertoAinda = await receber(ctx, { mesaId: mesa.id });
     await run(ctx.db, `UPDATE mesa_atendimentos SET estado = 'FECHAMENTO' WHERE id = ?`, [aberto.atendimento.id]);
     await rejeita(

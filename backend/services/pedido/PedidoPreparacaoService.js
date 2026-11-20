@@ -7,7 +7,7 @@
 
 const { LIMITES_PREPARACAO_MINUTOS } = require('./preparacaoLimites');
 
-const STATUS_ENVIAVEIS = Object.freeze(['PEDIDO', 'ABERTO', 'EM_SEPARACAO']);
+const STATUS_ENVIAVEIS = Object.freeze(['PEDIDO', 'ABERTO', 'EM_SEPARACAO', 'FATURADO']);
 const filas = new WeakMap();
 
 function erro(mensagem, statusCode, codigo) {

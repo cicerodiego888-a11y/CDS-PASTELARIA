@@ -40,6 +40,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   imprimirDANFESilencioso: (html, deviceName) =>
     ipcRenderer.invoke('imprimir-danfe-silencioso', html, deviceName),
 
+  comandaKds: {
+    configurarSessao: (token, empresaId) =>
+      ipcRenderer.invoke('comanda-kds:sessao', { token, empresaId }),
+    imprimir: (snapshotId) => ipcRenderer.invoke('comanda-kds:imprimir', snapshotId)
+  },
+
   /**
    * Sprint 06 Bloco E — cozinha.
    * Renderer só lista impressoras. Print genérico bloqueado (E-02).

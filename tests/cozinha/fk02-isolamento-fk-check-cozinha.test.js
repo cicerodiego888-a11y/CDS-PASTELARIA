@@ -212,10 +212,36 @@ describe('FK-02 — lista controlada', () => {
   });
 });
 
+describe('FK-03 — inicialização concorrente', () => {
+  it('serializa a criação do schema quando há várias conexões no mesmo banco', async () => {
+    const arquivo = path.join(dbDir, `concorrente-${Date.now()}.sqlite`);
+    const conexoes = await Promise.all(Array.from({ length: 6 }, () => open(arquivo)));
+
+    try {
+      const resultados = await Promise.all(
+        conexoes.map((conexao) => garantirSchemaCozinha(conexao))
+      );
+      assert.equal(resultados.length, 6);
+      assert.ok(resultados.every((resultado) => resultado.operacional));
+      assert.equal(await lerVersaoSchema(conexoes[0]), COZINHA_SCHEMA_VERSION);
+
+      const tabelas = await all(conexoes[0], `
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name IN (
+          'cozinha_unidades', 'cozinha_estacoes_impressao', 'cozinha_impressao_fila'
+        )
+      `);
+      assert.equal(tabelas.length, 3);
+    } finally {
+      await Promise.all(conexoes.map((conexao) => close(conexao)));
+    }
+  });
+});
+
 describe('FK-02 Cenário A — legado ERP não bloqueia Cozinha', () => {
   beforeEach(() => marcarCozinhaOperacional(false));
 
-  it('órfãos ERP persistem e migração v2→v3 conclui', async () => {
+  it('órfãos ERP persistem e a migração até o schema atual conclui', async () => {
     const arquivo = path.join(dbDir, `a-legado-${Date.now()}.sqlite`);
     const db = await open(arquivo);
     await schemaErpMinimo(db);
@@ -228,9 +254,9 @@ describe('FK-02 Cenário A — legado ERP não bloqueia Cozinha', () => {
     marcarCozinhaOperacional(false);
     const info = await garantirSchemaCozinha(db);
     assert.equal(info.operacional, true);
-    assert.equal(await lerVersaoSchema(db), 3);
+    assert.equal(await lerVersaoSchema(db), COZINHA_SCHEMA_VERSION);
     assert.equal(isCozinhaOperacional(), true);
-    assert.equal(COZINHA_SCHEMA_VERSION, 4);
+    assert.equal(COZINHA_SCHEMA_VERSION, 7);
     assert.equal(
       checkIdempotenciaAceitaPreparacao(await obterSqlTabela(db, 'cozinha_idempotencia')),
       true
@@ -270,7 +296,7 @@ describe('FK-02 Cenário B — integridade Cozinha válida', () => {
     marcarCozinhaOperacional(false);
     const info = await garantirSchemaCozinha(db);
     assert.equal(info.operacional, true);
-    assert.equal(await lerVersaoSchema(db), 3);
+    assert.equal(await lerVersaoSchema(db), COZINHA_SCHEMA_VERSION);
 
     const depois = await verificarForeignKeysDominioCozinha(db);
     assert.equal(depois.length, 0);
@@ -403,7 +429,7 @@ describe('FK-02 Cenário E — regressão gate / schema', () => {
     await semearOrfaosErpLegados(db);
     await garantirSchemaCozinha(db);
     assert.equal(isCozinhaOperacional(), true);
-    assert.equal(await lerVersaoSchema(db), 3);
+    assert.equal(await lerVersaoSchema(db), COZINHA_SCHEMA_VERSION);
 
     // Simula módulo off + ensure com domínio limpo → volta a operacional.
     marcarCozinhaOperacional(false, new Error('simulado'));

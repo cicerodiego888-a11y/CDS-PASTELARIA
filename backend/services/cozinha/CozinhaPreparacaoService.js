@@ -23,6 +23,7 @@ const { exigirUnidadeOperacional } = require('./cozinhaUnidadeOperacional');
 
 const EVENTOS = Object.freeze({
   PREPARACAO_INICIADA: 'PREPARACAO_INICIADA',
+  PREPARACAO_REVERTIDA: 'PREPARACAO_REVERTIDA',
   ITEM_PRONTO: 'ITEM_PRONTO',
   BEBIDA_ENTREGUE: 'BEBIDA_ENTREGUE',
   RODADA_PRONTA: 'RODADA_PRONTA',
@@ -678,6 +679,104 @@ async function iniciarPreparacao(entrada = {}, opts = {}) {
   });
 }
 
+async function voltarParaAguardando(entrada = {}, opts = {}) {
+  garantirOperacional(opts);
+  const empresaId = exigirEmpresa(entrada.empresaId);
+  const operadorId = exigirOperador(entrada.operadorId);
+  const itemId = exigirId(entrada.itemId, 'ITEM_INVALIDO', 'item_id inválido.');
+  const idempotencyKey = exigirChave(entrada.idempotencyKey);
+  const unidadeId = exigirUnidadeOperacional(
+    entrada.unidade_id != null ? entrada.unidade_id : entrada.unidadeId
+  );
+  const db = conn(opts);
+  const hash = calcularHashOperacao(TIPOS_OPERACAO.PREPARACAO_REVERTIDA, {
+    empresa_id: empresaId,
+    unidade_id: unidadeId,
+    item_id: itemId,
+    responsavel_operador_id: operadorId
+  });
+
+  return serializarTransacao(db, async () => {
+    await run(db, 'PRAGMA foreign_keys = ON');
+    await beginImmediate(db);
+    try {
+      const item = await carregarItemEmpresa(db, itemId, empresaId);
+      const rodada = exigirRodadaNaoCancelada(
+        await carregarRodadaEmpresa(db, item.rodada_id, empresaId)
+      );
+      await validarIntegridadeOperacional(db, item, rodada, {
+        empresaId,
+        unidadeIdAutorizada: unidadeId
+      });
+      const claim = await claimIdempotenciaCentral(db, {
+        idempotencyKey,
+        tipoOperacao: TIPOS_OPERACAO.PREPARACAO_REVERTIDA,
+        hash,
+        contexto: JSON.stringify({ empresa_id: empresaId, unidade_id: unidadeId, item_id: itemId })
+      });
+      if (claim.replay) {
+        await commit(db);
+        return { ...claim.corpo, repetida: true };
+      }
+      if (rodada.retirada_estado !== 'PENDENTE'
+        || rodada.retirada_em != null || rodada.retirada_por != null) {
+        throw erro('Não é permitido alterar uma rodada retirada ou em retirada.', 409, 'RETIRADA_ESTADO_INVALIDO');
+      }
+      if (item.estado_preparacao !== 'EM_PREPARACAO') {
+        throw erro('Só é possível retornar itens em preparação.', 409, 'TRANSICAO_INVALIDA');
+      }
+      const revertidoEm = await timestampUtc(db);
+      const atualizado = await run(db, `
+        UPDATE cozinha_itens SET estado_preparacao = 'AGUARDANDO', updated_at = ?
+        WHERE id = ? AND empresa_id = ? AND estado_preparacao = 'EM_PREPARACAO'
+      `, [revertidoEm, itemId, empresaId]);
+      if (atualizado.changes !== 1) {
+        throw erro('O estado do item mudou durante o retorno.', 409, 'TRANSICAO_CONCORRENTE');
+      }
+
+      const itens = await carregarItensRodada(db, rodada.id, empresaId);
+      let estadoRodada = rodada.estado_preparacao;
+      if (estadoRodada === 'EM_PREPARACAO'
+        && !itens.some((i) => i.estado_preparacao === 'EM_PREPARACAO' || i.estado_preparacao === 'PRONTO')) {
+        await run(db, `
+          UPDATE cozinha_rodadas SET estado_preparacao = 'AGUARDANDO', updated_at = ?
+          WHERE id = ? AND empresa_id = ? AND estado_preparacao = 'EM_PREPARACAO'
+        `, [revertidoEm, rodada.id, empresaId]);
+        estadoRodada = 'AGUARDANDO';
+      }
+      const resposta = {
+        success: true,
+        repetida: false,
+        operador_id: operadorId,
+        revertido_em: revertidoEm,
+        item: dtoItem(await carregarItemEmpresa(db, itemId, empresaId)),
+        rodada: { id: rodada.id, estado_preparacao: estadoRodada },
+        evento: EVENTOS.PREPARACAO_REVERTIDA
+      };
+      await run(db, `
+        INSERT INTO cozinha_eventos_outbox
+          (empresa_id, unidade_id, tipo, payload_json, idempotency_key)
+        VALUES (?, ?, ?, ?, ?)
+      `, [empresaId, unidadeId, EVENTOS.PREPARACAO_REVERTIDA, JSON.stringify(resposta), `${idempotencyKey}:EVENTO`]);
+      await concluirIdempotencia(db, {
+        idempotencyKey,
+        resultado: resposta,
+        httpStatus: 200,
+        recursoTipo: 'cozinha_item',
+        recursoId: itemId
+      });
+      if (opts.simularFalha === 'antes_commit') {
+        throw erro('Falha simulada antes do commit.', 500, 'FALHA_SIMULADA');
+      }
+      await commit(db);
+      return resposta;
+    } catch (err) {
+      await rollback(db);
+      throw err;
+    }
+  });
+}
+
 async function marcarItemPronto(entrada = {}, opts = {}) {
   garantirOperacional(opts);
   const empresaId = exigirEmpresa(entrada.empresaId);
@@ -1174,7 +1273,9 @@ async function consultarPreparacaoRodada(entrada = {}, opts = {}) {
   const rodada = await carregarRodadaEmpresa(db, rodadaId, empresaId);
   const itens = await carregarItensRodada(db, rodadaId, empresaId);
   const avaliacao = avaliarConclusaoRodada(itens);
-  const rodadaProntaEm = await carregarRodadaProntaEm(db, rodada);
+  const rodadaProntaEm = rodada.estado_preparacao === 'PRONTA'
+    || (rodada.estado_preparacao === 'CANCELADA' && rodada.cancelamento_etapa === 'PRONTA')
+    ? await carregarRodadaProntaEm(db, rodada) : null;
 
   const detalhe = [];
   let qtySolicBebida = 0;
@@ -1251,6 +1352,150 @@ const MOTIVOS_CANCELAMENTO = Object.freeze([
   'OUTRO'
 ]);
 
+function validarMotivoCancelamento(entrada) {
+  const motivo = String(entrada.motivo || '').toUpperCase().trim();
+  const justificativa = String(entrada.justificativa || '').trim();
+  if (!MOTIVOS_CANCELAMENTO.includes(motivo)) {
+    throw erro('Motivo de cancelamento inválido.', 400, 'MOTIVO_CANCELAMENTO_INVALIDO');
+  }
+  if (motivo === 'OUTRO' && !justificativa) {
+    throw erro('Justificativa é obrigatória quando o motivo é OUTRO.', 400, 'JUSTIFICATIVA_OBRIGATORIA');
+  }
+  return { motivo, justificativa: justificativa || null };
+}
+
+function exigirRetiradaPendente(rodada) {
+  if (rodada.retirada_estado !== 'PENDENTE' || rodada.retirada_em != null || rodada.retirada_por != null) {
+    throw erro('Não é permitido cancelar uma rodada retirada ou em retirada.', 409, 'RODADA_JA_RETIRADA');
+  }
+}
+
+async function registrarCancelamentoRodada(db, rodada, itens, dados) {
+  const { empresaId, unidadeId, operadorId, motivo, justificativa, canceladoEm, idempotencyKey } = dados;
+  await run(db, `
+    UPDATE cozinha_rodadas SET estado_preparacao='CANCELADA', cancelamento_motivo=?,
+      cancelamento_justificativa=?, cancelamento_por=?, cancelamento_em=?,
+      cancelamento_etapa=?, updated_at=?
+    WHERE id=? AND empresa_id=?
+  `, [motivo, justificativa, operadorId, canceladoEm, rodada.estado_preparacao, canceladoEm, rodada.id, empresaId]);
+  await run(db, `
+    UPDATE cozinha_itens SET estado_preparacao='CANCELADO', motivo_cancelamento=?,
+      operador_cancelamento_id=?, cancelado_em=?, updated_at=?
+    WHERE rodada_id=? AND empresa_id=? AND estado_preparacao <> 'CANCELADO'
+  `, [motivo, operadorId, canceladoEm, canceladoEm, rodada.id, empresaId]);
+  const payload = {
+    empresa_id: empresaId, unidade_id: unidadeId, rodada_id: rodada.id,
+    cancelamento_motivo: motivo, cancelamento_justificativa: justificativa,
+    cancelamento_por: operadorId, cancelamento_em: canceladoEm,
+    cancelamento_etapa: rodada.estado_preparacao,
+    rodada_pronta_em: rodada.estado_preparacao === 'PRONTA' ? await carregarRodadaProntaEm(db, rodada) : null,
+    itens: itens.filter((item) => item.estado_preparacao !== 'CANCELADO').map((item) => ({
+      item_id: item.id, pedido_id: item.pedido_id, estado_anterior: item.estado_preparacao
+    }))
+  };
+  await run(db, `
+    INSERT INTO cozinha_eventos_outbox
+      (empresa_id, unidade_id, tipo, payload_json, idempotency_key, created_at)
+    VALUES (?, ?, 'RODADA_CANCELADA', ?, ?, ?)
+  `, [empresaId, unidadeId, JSON.stringify(payload), `${idempotencyKey}:RODADA_CANCELADA`, canceladoEm]);
+  return {
+    id: rodada.id, estado_preparacao: 'CANCELADA',
+    cancelamento_motivo: motivo, cancelamento_justificativa: justificativa,
+    cancelamento_por: operadorId, cancelamento_em: canceladoEm,
+    cancelamento_etapa: rodada.estado_preparacao
+  };
+}
+
+async function cancelarItem(entrada = {}, opts = {}) {
+  garantirOperacional(opts);
+  const empresaId = exigirEmpresa(entrada.empresaId);
+  const operadorId = exigirOperador(entrada.operadorId);
+  const itemId = exigirId(entrada.itemId, 'ITEM_INVALIDO', 'item_id inválido.');
+  const unidadeId = exigirUnidadeOperacional(entrada.unidade_id != null ? entrada.unidade_id : entrada.unidadeId);
+  const idempotencyKey = exigirChave(entrada.idempotencyKey);
+  const { motivo, justificativa } = validarMotivoCancelamento(entrada);
+  const hash = calcularHashOperacao(TIPOS_OPERACAO.CANCELAMENTO_ITEM, {
+    empresa_id: empresaId, unidade_id: unidadeId, item_id: itemId,
+    motivo, justificativa, responsavel_operador_id: operadorId
+  });
+  const db = conn(opts);
+  return serializarTransacao(db, async () => {
+    await run(db, 'PRAGMA foreign_keys = ON');
+    await beginImmediate(db);
+    try {
+      const item = await carregarItemEmpresa(db, itemId, empresaId);
+      const rodada = await carregarRodadaEmpresa(db, item.rodada_id, empresaId);
+      await validarIntegridadeOperacional(db, item, rodada, { empresaId, unidadeIdAutorizada: unidadeId });
+      const claim = await claimIdempotenciaCentral(db, {
+        idempotencyKey, tipoOperacao: TIPOS_OPERACAO.CANCELAMENTO_ITEM, hash,
+        contexto: JSON.stringify({ empresa_id: empresaId, unidade_id: unidadeId, item_id: itemId })
+      });
+      if (claim.replay) {
+        await commit(db);
+        return { ...claim.corpo, repetida: true };
+      }
+      exigirRetiradaPendente(rodada);
+      exigirRodadaNaoCancelada(rodada);
+      if (!['AGUARDANDO', 'EM_PREPARACAO', 'PRONTO'].includes(item.estado_preparacao)) {
+        throw erro('Item já cancelado ou em estado incompatível.', 409, 'ITEM_CANCELADO');
+      }
+      const canceladoEm = await timestampUtc(db);
+      await run(db, `
+        UPDATE cozinha_itens SET estado_preparacao='CANCELADO', motivo_cancelamento=?,
+          operador_cancelamento_id=?, cancelado_em=?, updated_at=?
+        WHERE id=? AND empresa_id=?
+      `, [motivo, operadorId, canceladoEm, canceladoEm, itemId, empresaId]);
+      const evento = {
+        empresa_id: empresaId, unidade_id: unidadeId, rodada_id: rodada.id,
+        item_id: itemId, pedido_id: item.pedido_id, estado_anterior: item.estado_preparacao,
+        cancelamento_etapa: rodada.estado_preparacao, cancelamento_motivo: motivo,
+        cancelamento_justificativa: justificativa, cancelamento_por: operadorId, cancelamento_em: canceladoEm,
+        rodada_pronta_em: rodada.estado_preparacao === 'PRONTA' ? await carregarRodadaProntaEm(db, rodada) : null
+      };
+      await run(db, `
+        INSERT INTO cozinha_eventos_outbox
+          (empresa_id, unidade_id, tipo, payload_json, idempotency_key, created_at)
+        VALUES (?, ?, 'ITEM_CANCELADO', ?, ?, ?)
+      `, [empresaId, unidadeId, JSON.stringify(evento), `${idempotencyKey}:ITEM_CANCELADO`, canceladoEm]);
+      const itens = await carregarItensRodada(db, rodada.id, empresaId);
+      let resultadoRodada;
+      if (itens.every((i) => i.estado_preparacao === 'CANCELADO')) {
+        resultadoRodada = await registrarCancelamentoRodada(db, rodada, itens, {
+          empresaId, unidadeId, operadorId, motivo, justificativa, canceladoEm, idempotencyKey
+        });
+      } else {
+        const avaliacao = avaliarConclusaoRodada(itens);
+        if (avaliacao.pronta) {
+          const sync = await sincronizarEstadoRodada(db, rodada, itens, {
+            empresaId, operadorId, idempotencyKeyBase: idempotencyKey, transicaoEm: canceladoEm
+          });
+          resultadoRodada = { id: rodada.id, estado_preparacao: sync.estado_preparacao };
+        } else {
+          const estado = itens.some((i) => ['EM_PREPARACAO', 'PRONTO'].includes(i.estado_preparacao))
+            ? 'EM_PREPARACAO' : 'AGUARDANDO';
+          await run(db, 'UPDATE cozinha_rodadas SET estado_preparacao=?, updated_at=? WHERE id=? AND empresa_id=?',
+            [estado, canceladoEm, rodada.id, empresaId]);
+          resultadoRodada = { id: rodada.id, estado_preparacao: estado };
+        }
+      }
+      const resposta = {
+        success: true, repetida: false,
+        item: dtoItem(await carregarItemEmpresa(db, itemId, empresaId), evento),
+        rodada: resultadoRodada
+      };
+      await concluirIdempotencia(db, {
+        idempotencyKey, resultado: resposta, httpStatus: 200, recursoTipo: 'cozinha_item', recursoId: itemId
+      });
+      if (opts.simularFalha === 'antes_commit') throw erro('Falha simulada antes do commit.', 500, 'FALHA_SIMULADA');
+      await commit(db);
+      return resposta;
+    } catch (err) {
+      await rollback(db);
+      throw err;
+    }
+  });
+}
+
 async function cancelarRodada(entrada = {}, opts = {}) {
   garantirOperacional(opts);
   const empresaId = exigirEmpresa(entrada.empresaId);
@@ -1259,27 +1504,15 @@ async function cancelarRodada(entrada = {}, opts = {}) {
   const unidadeIdAutorizada = exigirUnidadeOperacional(
     entrada.unidade_id != null ? entrada.unidade_id : entrada.unidadeId
   );
-  const motivo = String(entrada.motivo || '').toUpperCase().trim();
-  if (!MOTIVOS_CANCELAMENTO.includes(motivo)) {
-    throw erro(
-      `Motivo de cancelamento inválido: ${motivo}. Válidos: ${MOTIVOS_CANCELAMENTO.join(', ')}.`,
-      400,
-      'MOTIVO_CANCELAMENTO_INVALIDO'
-    );
-  }
-  if (motivo === 'OUTRO' && !entrada.justificativa) {
-    throw erro(
-      'Justificativa é obrigatória quando o motivo é OUTRO.',
-      400,
-      'JUSTIFICATIVA_OBRIGATORIA'
-    );
-  }
-  const justificativa = String(entrada.justificativa || '').trim();
+  const { motivo, justificativa } = validarMotivoCancelamento(entrada);
   const idempotencyKey = exigirChave(entrada.idempotencyKey);
   const db = conn(opts);
   const hash = calcularHashOperacao('CANCELAMENTO_RODADA', {
     empresa_id: empresaId,
+    unidade_id: unidadeIdAutorizada,
     rodada_alvo_id: rodadaId,
+    motivo,
+    justificativa,
     responsavel_operador_id: operadorId
   });
 
@@ -1313,15 +1546,9 @@ async function cancelarRodada(entrada = {}, opts = {}) {
         return { ...claim.corpo, repetida: true };
       }
 
-      if (rodada.retirada_estado === 'RETIRADA') {
-        throw erro(
-          'Não é permitido cancelar uma rodada já retirada.',
-          409,
-          'RODADA_JA_RETIRADA'
-        );
-      }
+      exigirRetiradaPendente(rodada);
 
-      if (rodada.cancelamento_motivo != null) {
+      if (rodada.estado_preparacao === 'CANCELADA' || rodada.cancelamento_motivo != null) {
         throw erro(
           'Esta rodada já foi cancelada.',
           409,
@@ -1330,74 +1557,13 @@ async function cancelarRodada(entrada = {}, opts = {}) {
       }
 
       const canceladoEm = await timestampUtc(db);
-      const estadoAnterior = rodada.estado_preparacao;
-
-      await run(db, `
-        UPDATE cozinha_rodadas
-        SET
-          estado_preparacao = 'CANCELADA',
-          cancelamento_motivo = ?,
-          cancelamento_justificativa = ?,
-          cancelamento_por = ?,
-          cancelamento_em = ?,
-          cancelamento_etapa = ?,
-          updated_at = ?
-        WHERE id = ? AND empresa_id = ?
-      `, [
-        motivo,
-        justificativa || null,
-        operadorId,
-        canceladoEm,
-        estadoAnterior,
-        canceladoEm,
-        rodadaId,
-        empresaId
-      ]);
-
-      await run(db, `
-        UPDATE cozinha_itens
-        SET
-          estado_preparacao = 'CANCELADO',
-          updated_at = ?
-        WHERE rodada_id = ? AND empresa_id = ? AND estado_preparacao <> 'CANCELADO'
-      `, [canceladoEm, rodadaId, empresaId]);
-
-      const eventKey = `cancelamento:empresa:${empresaId}:rodada:${rodadaId}`;
-      const eventPayload = {
-        empresa_id: empresaId,
-        unidade_id: unidadeIdAutorizada,
-        rodada_id: rodadaId,
-        cancelamento_motivo: motivo,
-        cancelamento_justificativa: justificativa || null,
-        cancelamento_por: operadorId,
-        cancelamento_em: canceladoEm,
-        cancelamento_etapa: estadoAnterior
-      };
-
-      await run(db, `
-        INSERT INTO cozinha_eventos_outbox (
-          empresa_id, unidade_id, tipo, payload_json, idempotency_key, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
-      `, [
-        empresaId,
-        unidadeIdAutorizada,
-        'RODADA_CANCELADA',
-        JSON.stringify(eventPayload),
-        `${idempotencyKey}:EVENTO`,
-        canceladoEm
-      ]);
-
+      const rodadaCancelada = await registrarCancelamentoRodada(
+        db, rodada, await carregarItensRodada(db, rodadaId, empresaId),
+        { empresaId, unidadeId: unidadeIdAutorizada, operadorId, motivo, justificativa, canceladoEm, idempotencyKey }
+      );
       const resposta = {
         success: true,
-        rodada: {
-          id: rodadaId,
-          estado_preparacao: 'CANCELADA',
-          cancelamento_motivo: motivo,
-          cancelamento_justificativa: justificativa || null,
-          cancelamento_por: operadorId,
-          cancelamento_em: canceladoEm,
-          cancelamento_etapa: estadoAnterior
-        }
+        rodada: rodadaCancelada
       };
 
       await concluirIdempotencia(db, {
@@ -1425,10 +1591,12 @@ module.exports = {
   EVENTOS,
   MOTIVOS_CANCELAMENTO,
   iniciarPreparacao,
+  voltarParaAguardando,
   marcarItemPronto,
   confirmarRetirada,
   entregarBebida,
   cancelarRodada,
+  cancelarItem,
   consultarPreparacaoRodada,
   avaliarConclusaoRodada,
   sincronizarEstadoRodada

@@ -73,7 +73,7 @@ function close(db) {
 async function prepararContexto(db) {
   await garantirSchemaEmpresasAsync(db);
   await garantirSchemaCozinha(db);
-  assert.equal(COZINHA_SCHEMA_VERSION, 4);
+  assert.ok(COZINHA_SCHEMA_VERSION >= 4);
 
   const e1 = await run(db, `
     INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)

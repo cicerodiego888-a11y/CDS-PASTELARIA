@@ -4,10 +4,12 @@
  * Versão 3: amplia CHECK de cozinha_idempotencia.tipo_operacao (preparação S03).
  * Versão 4: inclui confirmação idempotente de retirada no CHECK.
  * Versão 5: adiciona cancelamento estruturado (motivo, justificativa, operador, etc).
+ * Versão 6: registra idempotência do retorno de preparo para aguardando.
+ * Versão 7: registra idempotência do cancelamento individual de itens.
  */
 'use strict';
 
-const COZINHA_SCHEMA_VERSION = 5;
+const COZINHA_SCHEMA_VERSION = 7;
 
 const IDEMPOTENCIA_COLUNAS = Object.freeze([
   'id',
@@ -105,6 +107,15 @@ const SQL_CREATE_COZINHA_IDEMPOTENCIA_V5 = `
   )
 `;
 
+const SQL_CREATE_COZINHA_IDEMPOTENCIA_V6 = SQL_CREATE_COZINHA_IDEMPOTENCIA_V5.replace(
+  "'CANCELAMENTO_RODADA'",
+  "'CANCELAMENTO_RODADA',\n        'PREPARACAO_REVERTIDA'"
+);
+const SQL_CREATE_COZINHA_IDEMPOTENCIA_V7 = SQL_CREATE_COZINHA_IDEMPOTENCIA_V6.replace(
+  "'PREPARACAO_REVERTIDA'",
+  "'PREPARACAO_REVERTIDA',\n        'CANCELAMENTO_ITEM'"
+);
+
 const TABELAS_COZINHA = Object.freeze([
   'cozinha_item_ingredientes',
   'cozinha_bebida_entregas',
@@ -137,6 +148,7 @@ let statusCozinha = {
   erro: null,
   atualizadoEm: null
 };
+let filaGarantiaSchemaCozinha = Promise.resolve();
 
 function dbRun(db, sql, params = []) {
   return new Promise((resolve, reject) => {
@@ -247,6 +259,11 @@ function checkIdempotenciaAceitaRetirada(sqlCreate) {
 function checkIdempotenciaAceitaCancelamento(sqlCreate) {
   return checkIdempotenciaAceitaRetirada(sqlCreate)
     && String(sqlCreate || '').toUpperCase().includes('CANCELAMENTO_RODADA');
+}
+
+function checkIdempotenciaAceitaRetorno(sqlCreate) {
+  return checkIdempotenciaAceitaCancelamento(sqlCreate)
+    && String(sqlCreate || '').toUpperCase().includes('PREPARACAO_REVERTIDA');
 }
 
 async function validarColunasIdempotencia(db, tabela = 'cozinha_idempotencia') {
@@ -380,6 +397,16 @@ function lerEstadoForeignKeys(pragmaRow) {
 
 async function restaurarForeignKeys(db, fkWasOn) {
   await dbRun(db, fkWasOn ? 'PRAGMA foreign_keys = ON' : 'PRAGMA foreign_keys = OFF');
+}
+
+async function preservarSequencia(db, tabela, sequencia) {
+  if (!sequencia) return;
+  const resultado = await dbRun(db, `
+    UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = ?
+  `, [sequencia.seq, tabela]);
+  if (!resultado.changes) {
+    await dbRun(db, `INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)`, [tabela, sequencia.seq]);
+  }
 }
 
 /**
@@ -900,17 +927,20 @@ async function migrarCozinhaV4paraV5(db, opts = {}) {
   }
 
   const sqlAntes = await obterSqlTabela(db, 'cozinha_rodadas');
-  const jaPossuiCancelamento = sqlAntes && sqlAntes.includes('cancelamento_motivo');
-  if (jaPossuiCancelamento) {
-    await gravarVersaoSchema(db, 5);
-    return {
-      migrado: true,
-      jaCompativel: true,
-      registros: await contarLinhas(db, 'cozinha_rodadas')
-    };
+  if (!sqlAntes) {
+    const err = new Error('[COZINHA] Migração v4→v5: tabela cozinha_rodadas ausente.');
+    err.codigo = 'COZINHA_SCHEMA_INCOMPATIVEL';
+    throw err;
   }
 
-  const contagemAntes = await contarLinhas(db, 'cozinha_rodadas');
+  await validarColunasIdempotencia(db);
+  const sqlIdempotencia = await obterSqlTabela(db, 'cozinha_idempotencia');
+  if (!checkIdempotenciaAceitaRetirada(sqlIdempotencia)) {
+    const err = new Error('[COZINHA] Meta=v4 mas CHECK de idempotência não aceita retirada.');
+    err.codigo = 'COZINHA_SCHEMA_INCOMPATIVEL';
+    throw err;
+  }
+
   const fkAntes = await dbGet(db, 'PRAGMA foreign_keys');
   const fkWasOn = lerEstadoForeignKeys(fkAntes);
   let fkAlteradas = false;
@@ -935,23 +965,26 @@ async function migrarCozinhaV4paraV5(db, opts = {}) {
     transacaoAberta = true;
 
     try {
-      const backup = 'cozinha_rodadas__v4_bak';
-      const bakResidual = await dbGet(db, `
-        SELECT name FROM sqlite_master WHERE type='table' AND name=?
-      `, [backup]);
-      if (bakResidual) {
-        const err = new Error(
-          `[COZINHA] Migração v4→v5 interrompida: existe backup residual ${backup}.`
-        );
-        err.codigo = 'COZINHA_MIGRACAO_BACKUP_RESIDUAL';
-        throw err;
+      for (const tabela of [
+        'cozinha_rodadas__v4_bak',
+        'cozinha_rodadas__v5_nova',
+        'cozinha_idempotencia__v5_nova'
+      ]) {
+        const residual = await dbGet(db, `
+          SELECT name FROM sqlite_master WHERE type='table' AND name=?
+        `, [tabela]);
+        if (residual) {
+          const err = new Error(
+            `[COZINHA] Migração v4→v5 interrompida: existe tabela residual ${tabela}.`
+          );
+          err.codigo = 'COZINHA_MIGRACAO_BACKUP_RESIDUAL';
+          throw err;
+        }
       }
 
+      const contagemAntes = await contarLinhas(db, 'cozinha_rodadas');
       const sqlColunasAntes = await dbAll(db, 'PRAGMA table_info(cozinha_rodadas)');
       const colunasAntes = sqlColunasAntes.map(c => c.name);
-
-      await dbRun(db, `ALTER TABLE cozinha_rodadas RENAME TO ${backup}`);
-
       const colunasCancelamento = [
         'cancelamento_motivo',
         'cancelamento_justificativa',
@@ -960,94 +993,126 @@ async function migrarCozinhaV4paraV5(db, opts = {}) {
         'cancelamento_etapa'
       ];
 
-      const colunasComum = colunasAntes.filter(c => !colunasCancelamento.includes(c));
-      const colunasComumStr = colunasComum.join(', ');
-      const colunasNewStr = colunasComum.concat(colunasCancelamento).join(', ');
-
-      await dbRun(db, `
-        CREATE TABLE cozinha_rodadas (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          empresa_id INTEGER NOT NULL,
-          unidade_id INTEGER NOT NULL,
-          mesa_id INTEGER NOT NULL,
-          atendimento_id INTEGER NOT NULL,
-          numero_rodada INTEGER NOT NULL,
-          sequencia_global INTEGER NOT NULL,
-          enviada_em TEXT,
-          operador_envio_id INTEGER,
-          estado_preparacao TEXT NOT NULL DEFAULT 'AGUARDANDO'
-            CHECK (estado_preparacao IN ('AGUARDANDO', 'EM_PREPARACAO', 'PRONTA', 'CANCELADA')),
-          retirada_estado TEXT NOT NULL DEFAULT 'PENDENTE'
-            CHECK (retirada_estado IN ('PENDENTE', 'ASSUMIDA_RETIRADA', 'RETIRADA')),
-          retirada_em TEXT,
-          retirada_por INTEGER,
-          entrega_estado TEXT NOT NULL DEFAULT 'PENDENTE'
-            CHECK (entrega_estado IN ('PENDENTE', 'ENTREGUE')),
-          entrega_em TEXT,
-          entrega_por INTEGER,
-          cancelamento_motivo TEXT
-            CHECK (cancelamento_motivo IS NULL OR cancelamento_motivo IN (
-              'PRAZO_EXCEDIDO',
-              'CLIENTE_DESISTIU',
-              'CANCELAMENTO_IFOOD',
-              'PEDIDO_DUPLICADO',
-              'ERRO_LANCAMENTO',
-              'FALTA_PRODUTO',
-              'OUTRO'
-            )),
-          cancelamento_justificativa TEXT,
-          cancelamento_por INTEGER,
-          cancelamento_em TEXT,
-          cancelamento_etapa TEXT,
-          idempotency_key_despacho TEXT,
-          created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-          updated_at TEXT,
-          CHECK (numero_rodada > 0),
-          CHECK (sequencia_global > 0),
-          UNIQUE (id, empresa_id),
-          FOREIGN KEY (unidade_id, empresa_id)
-            REFERENCES cozinha_unidades(id, empresa_id)
-        )
-      `);
-
-      await dbRun(db, `
-        INSERT INTO cozinha_rodadas (${colunasComumStr}, cancelamento_motivo, cancelamento_justificativa, cancelamento_por, cancelamento_em, cancelamento_etapa)
-        SELECT ${colunasComumStr}, NULL, NULL, NULL, NULL, NULL FROM ${backup}
-      `);
-
-      const contagemDepois = await contarLinhas(db, 'cozinha_rodadas');
-      if (contagemDepois !== contagemAntes) {
-        const err = new Error(
-          `[COZINHA] Migração v4→v5: contagem divergente ` +
-          `(antes=${contagemAntes}, depois=${contagemDepois}).`
-        );
-        err.codigo = 'COZINHA_MIGRACAO_CONTAGEM';
+      const cancelamentoExistente = colunasCancelamento.filter(c => colunasAntes.includes(c));
+      if (cancelamentoExistente.length !== 0 && cancelamentoExistente.length !== colunasCancelamento.length) {
+        const err = new Error('[COZINHA] Migração v4→v5: colunas de cancelamento incompletas.');
+        err.codigo = 'COZINHA_SCHEMA_INCOMPATIVEL';
         throw err;
       }
 
-      await dbRun(db, `DROP TABLE ${backup}`);
+      const jaPossuiCancelamento = cancelamentoExistente.length === colunasCancelamento.length;
+      const jaPossuiIdempotencia = checkIdempotenciaAceitaCancelamento(sqlIdempotencia);
+      if (!jaPossuiCancelamento) {
+        const objetosRodadas = await dbAll(db, `
+          SELECT sql FROM sqlite_master
+          WHERE tbl_name='cozinha_rodadas' AND type IN ('index', 'trigger') AND sql IS NOT NULL
+        `);
+        const sequenciaRodadas = await dbGet(db, `
+          SELECT seq FROM sqlite_sequence WHERE name='cozinha_rodadas'
+        `);
+        const colunasComumStr = colunasAntes.map(c => `"${c.replace(/"/g, '""')}"`).join(', ');
 
-      await dbRun(db, `
-        CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_rodadas_atendimento_numero
-        ON cozinha_rodadas(atendimento_id, numero_rodada)
-      `);
-      await dbRun(db, `
-        CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_rodadas_unidade_sequencia
-        ON cozinha_rodadas(unidade_id, sequencia_global)
-      `);
-      await dbRun(db, `
-        CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_rodadas_idempotency
-        ON cozinha_rodadas(idempotency_key_despacho)
-        WHERE idempotency_key_despacho IS NOT NULL
-      `);
-      await dbRun(db, `
-        CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_rodadas_id_empresa
-        ON cozinha_rodadas(id, empresa_id)
-      `);
-      await dbRun(db, `
-        CREATE INDEX IF NOT EXISTS idx_cozinha_rodadas_empresa_unidade_estado
-        ON cozinha_rodadas(empresa_id, unidade_id, estado_preparacao, enviada_em)
-      `);
+        await dbRun(db, `
+          CREATE TABLE cozinha_rodadas__v5_nova (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            empresa_id INTEGER NOT NULL,
+            unidade_id INTEGER NOT NULL,
+            mesa_id INTEGER NOT NULL,
+            atendimento_id INTEGER NOT NULL,
+            numero_rodada INTEGER NOT NULL,
+            sequencia_global INTEGER NOT NULL,
+            enviada_em TEXT,
+            operador_envio_id INTEGER,
+            estado_preparacao TEXT NOT NULL DEFAULT 'AGUARDANDO'
+              CHECK (estado_preparacao IN ('AGUARDANDO', 'EM_PREPARACAO', 'PRONTA', 'CANCELADA')),
+            retirada_estado TEXT NOT NULL DEFAULT 'PENDENTE'
+              CHECK (retirada_estado IN ('PENDENTE', 'ASSUMIDA_RETIRADA', 'RETIRADA')),
+            retirada_em TEXT,
+            retirada_por INTEGER,
+            entrega_estado TEXT NOT NULL DEFAULT 'PENDENTE'
+              CHECK (entrega_estado IN ('PENDENTE', 'ENTREGUE')),
+            entrega_em TEXT,
+            entrega_por INTEGER,
+            cancelamento_motivo TEXT
+              CHECK (cancelamento_motivo IS NULL OR cancelamento_motivo IN (
+                'PRAZO_EXCEDIDO',
+                'CLIENTE_DESISTIU',
+                'CANCELAMENTO_IFOOD',
+                'PEDIDO_DUPLICADO',
+                'ERRO_LANCAMENTO',
+                'FALTA_PRODUTO',
+                'OUTRO'
+              )),
+            cancelamento_justificativa TEXT,
+            cancelamento_por INTEGER,
+            cancelamento_em TEXT,
+            cancelamento_etapa TEXT,
+            idempotency_key_despacho TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT,
+            CHECK (numero_rodada > 0),
+            CHECK (sequencia_global > 0),
+            UNIQUE (id, empresa_id),
+            FOREIGN KEY (unidade_id, empresa_id)
+              REFERENCES cozinha_unidades(id, empresa_id)
+          )
+        `);
+
+        await dbRun(db, `
+          INSERT INTO cozinha_rodadas__v5_nova (${colunasComumStr})
+          SELECT ${colunasComumStr} FROM cozinha_rodadas
+        `);
+
+        const contagemDepois = await contarLinhas(db, 'cozinha_rodadas__v5_nova');
+        if (contagemDepois !== contagemAntes) {
+          const err = new Error(
+            `[COZINHA] Migração v4→v5: contagem divergente ` +
+            `(antes=${contagemAntes}, depois=${contagemDepois}).`
+          );
+          err.codigo = 'COZINHA_MIGRACAO_CONTAGEM';
+          throw err;
+        }
+
+        await dbRun(db, 'DROP TABLE cozinha_rodadas');
+        await dbRun(db, 'ALTER TABLE cozinha_rodadas__v5_nova RENAME TO cozinha_rodadas');
+        for (const objeto of objetosRodadas) await dbRun(db, objeto.sql);
+        await preservarSequencia(db, 'cozinha_rodadas', sequenciaRodadas);
+      }
+
+      if (!jaPossuiIdempotencia) {
+        const colunas = await dbAll(db, 'PRAGMA table_info(cozinha_idempotencia)');
+        if (colunas.length !== IDEMPOTENCIA_COLUNAS.length) {
+          const err = new Error('[COZINHA] Migração v4→v5: colunas extras em cozinha_idempotencia.');
+          err.codigo = 'COZINHA_SCHEMA_INCOMPATIVEL';
+          throw err;
+        }
+        const objetosIdempotencia = await dbAll(db, `
+          SELECT sql FROM sqlite_master
+          WHERE tbl_name='cozinha_idempotencia' AND type IN ('index', 'trigger') AND sql IS NOT NULL
+        `);
+        const sequenciaIdempotencia = await dbGet(db, `
+          SELECT seq FROM sqlite_sequence WHERE name='cozinha_idempotencia'
+        `);
+        const cols = IDEMPOTENCIA_COLUNAS.join(', ');
+        const contagemIdempotencia = await contarLinhas(db, 'cozinha_idempotencia');
+        await dbRun(db, SQL_CREATE_COZINHA_IDEMPOTENCIA_V5.replace(
+          'IF NOT EXISTS cozinha_idempotencia',
+          'IF NOT EXISTS cozinha_idempotencia__v5_nova'
+        ));
+        await dbRun(db, `
+          INSERT INTO cozinha_idempotencia__v5_nova (${cols})
+          SELECT ${cols} FROM cozinha_idempotencia
+        `);
+        if (await contarLinhas(db, 'cozinha_idempotencia__v5_nova') !== contagemIdempotencia) {
+          const err = new Error('[COZINHA] Migração v4→v5: contagem de idempotência divergente.');
+          err.codigo = 'COZINHA_MIGRACAO_CONTAGEM';
+          throw err;
+        }
+        await dbRun(db, 'DROP TABLE cozinha_idempotencia');
+        await dbRun(db, 'ALTER TABLE cozinha_idempotencia__v5_nova RENAME TO cozinha_idempotencia');
+        for (const objeto of objetosIdempotencia) await dbRun(db, objeto.sql);
+        await preservarSequencia(db, 'cozinha_idempotencia', sequenciaIdempotencia);
+      }
 
       if (opts.simularFalha === 'apos_copia') {
         const err = new Error('[COZINHA] Falha simulada após cópia na migração v4→v5.');
@@ -1075,7 +1140,7 @@ async function migrarCozinhaV4paraV5(db, opts = {}) {
       transacaoAberta = false;
       return {
         migrado: true,
-        jaCompativel: false,
+        jaCompativel: jaPossuiCancelamento && jaPossuiIdempotencia,
         registros: contagemAntes,
         de: 4,
         para: 5
@@ -1110,6 +1175,112 @@ async function migrarCozinhaV4paraV5(db, opts = {}) {
             : null
         };
         err.causa = erroPrincipal || fkErr;
+        throw err;
+      }
+    }
+  }
+}
+
+async function migrarCozinhaV5paraV6(db, opts = {}) {
+  return migrarIdempotencia(db, opts, 5, 6, SQL_CREATE_COZINHA_IDEMPOTENCIA_V6,
+    checkIdempotenciaAceitaCancelamento, checkIdempotenciaAceitaRetorno);
+}
+
+async function migrarIdempotencia(db, opts, de, para, sqlCriacao, checkAnterior, checkNovo) {
+  const sqlAntes = await obterSqlTabela(db, 'cozinha_idempotencia');
+  if (!checkAnterior(sqlAntes)) {
+    const err = new Error(`[COZINHA] Meta=v${de} mas CHECK de idempotência é incompatível.`);
+    err.codigo = 'COZINHA_SCHEMA_INCOMPATIVEL';
+    throw err;
+  }
+  await validarColunasIdempotencia(db);
+  const fkAntes = await dbGet(db, 'PRAGMA foreign_keys');
+  const fkWasOn = lerEstadoForeignKeys(fkAntes);
+  let fkAlteradas = false;
+  let transacaoAberta = false;
+  let erroPrincipal = null;
+  try {
+    await dbRun(db, 'PRAGMA foreign_keys = OFF');
+    fkAlteradas = true;
+    await dbRun(db, 'BEGIN IMMEDIATE');
+    transacaoAberta = true;
+    const jaCompativel = checkNovo(sqlAntes);
+    if (!jaCompativel) {
+      const tabelaNova = `cozinha_idempotencia__v${para}_nova`;
+      const residual = await dbGet(db, `
+        SELECT name FROM sqlite_master WHERE type='table' AND name=?
+      `, [tabelaNova]);
+      if (residual) {
+        const err = new Error(`[COZINHA] Migração v${de}→v${para} interrompida: tabela temporária residual.`);
+        err.codigo = 'COZINHA_MIGRACAO_BACKUP_RESIDUAL';
+        throw err;
+      }
+      const colunas = await dbAll(db, 'PRAGMA table_info(cozinha_idempotencia)');
+      if (colunas.length !== IDEMPOTENCIA_COLUNAS.length) {
+        const err = new Error(`[COZINHA] Migração v${de}→v${para}: colunas extras em cozinha_idempotencia.`);
+        err.codigo = 'COZINHA_SCHEMA_INCOMPATIVEL';
+        throw err;
+      }
+      const objetos = await dbAll(db, `
+        SELECT sql FROM sqlite_master
+        WHERE tbl_name='cozinha_idempotencia' AND type IN ('index', 'trigger') AND sql IS NOT NULL
+      `);
+      const sequencia = await dbGet(db, `
+        SELECT seq FROM sqlite_sequence WHERE name='cozinha_idempotencia'
+      `);
+      const cols = IDEMPOTENCIA_COLUNAS.join(', ');
+      const contagem = await contarLinhas(db, 'cozinha_idempotencia');
+      await dbRun(db, sqlCriacao.replace(
+        'IF NOT EXISTS cozinha_idempotencia',
+        `IF NOT EXISTS ${tabelaNova}`
+      ));
+      await dbRun(db, `
+        INSERT INTO ${tabelaNova} (${cols})
+        SELECT ${cols} FROM cozinha_idempotencia
+      `);
+      if (await contarLinhas(db, tabelaNova) !== contagem) {
+        const err = new Error(`[COZINHA] Migração v${de}→v${para}: contagem de idempotência divergente.`);
+        err.codigo = 'COZINHA_MIGRACAO_CONTAGEM';
+        throw err;
+      }
+      await dbRun(db, 'DROP TABLE cozinha_idempotencia');
+      await dbRun(db, `ALTER TABLE ${tabelaNova} RENAME TO cozinha_idempotencia`);
+      for (const objeto of objetos) await dbRun(db, objeto.sql);
+      await preservarSequencia(db, 'cozinha_idempotencia', sequencia);
+    }
+    if (opts.simularFalha === `v${para}_apos_copia`) {
+      const err = new Error(`[COZINHA] Falha simulada na migração v${de}→v${para}.`);
+      err.codigo = 'COZINHA_MIGRACAO_SIMULADA';
+      throw err;
+    }
+    await pragmaIntegrityOk(db);
+    await pragmaForeignKeyCheckOk(db);
+    await gravarVersaoSchema(db, para);
+    await dbRun(db, 'COMMIT');
+    transacaoAberta = false;
+    return { migrado: true, jaCompativel, de, para };
+  } catch (err) {
+    erroPrincipal = err;
+    if (transacaoAberta) {
+      try {
+        await dbRun(db, 'ROLLBACK');
+      } catch (rollbackErr) {
+        err.erro_rollback = rollbackErr;
+      }
+    }
+    if (!err.codigo) err.codigo = `COZINHA_MIGRACAO_V${de}_V${para}_FALHOU`;
+    throw err;
+  } finally {
+    if (fkAlteradas) {
+      try {
+        await restaurarForeignKeys(db, fkWasOn);
+      } catch (fkErr) {
+        const err = new Error(`[COZINHA] Falha ao restaurar foreign_keys após migração v${de}→v${para}.`);
+        err.codigo = 'COZINHA_FK_RESTAURACAO_FALHOU';
+        err.detalhes = {
+          mensagem_restauracao: fkErr.message,
+          erro_migracao: erroPrincipal ? erroPrincipal.message : null
+        };
         throw err;
       }
     }
@@ -1617,7 +1788,7 @@ async function criarTabelasCozinha(db) {
   `);
 
   // —— Idempotência central (sem empresa_id — contexto JSON; UNIQUE global da key) ——
-  await dbRun(db, SQL_CREATE_COZINHA_IDEMPOTENCIA_V5);
+  await dbRun(db, SQL_CREATE_COZINHA_IDEMPOTENCIA_V7);
   await dbRun(db, `
     CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_idempotencia_key
     ON cozinha_idempotencia(idempotency_key)
@@ -1649,7 +1820,15 @@ async function garantirIndiceEstacoesCodigoPorUnidade(db) {
   `);
 }
 
-async function garantirSchemaCozinha(db, opts = {}) {
+function garantirSchemaCozinha(db, opts = {}) {
+  const tarefa = filaGarantiaSchemaCozinha.then(
+    () => garantirSchemaCozinhaSemConcorrencia(db, opts)
+  );
+  filaGarantiaSchemaCozinha = tarefa.then(() => undefined, () => undefined);
+  return tarefa;
+}
+
+async function garantirSchemaCozinhaSemConcorrencia(db, opts = {}) {
   if (!db) {
     marcarCozinhaOperacional(false, new Error('Conexão de banco ausente para schema Cozinha.'));
     return { skipped: true, operacional: false };
@@ -1672,9 +1851,12 @@ async function garantirSchemaCozinha(db, opts = {}) {
     let migradoV2V3 = false;
     let migradoV3V4 = false;
     let migradoV4V5 = false;
+    let migradoV5V6 = false;
+    let detalheMigracaoV6V7 = null;
     let detalheMigracaoV2V3 = null;
     let detalheMigracaoV3V4 = null;
     let detalheMigracaoV4V5 = null;
+    let detalheMigracaoV5V6 = null;
 
     if (versaoAtual === 2) {
       detalheMigracaoV2V3 = await migrarCozinhaV2paraV3(db, opts);
@@ -1703,7 +1885,7 @@ async function garantirSchemaCozinha(db, opts = {}) {
       await criarTabelasCozinha(db);
       await gravarVersaoSchema(db, COZINHA_SCHEMA_VERSION);
     } else {
-      // já v5
+      // v5 ou versão atual
       await criarTabelasCozinha(db);
       const sqlIdem = await obterSqlTabela(db, 'cozinha_idempotencia');
       if (sqlIdem && !checkIdempotenciaAceitaCancelamento(sqlIdem)) {
@@ -1714,6 +1896,28 @@ async function garantirSchemaCozinha(db, opts = {}) {
         err.codigo = 'COZINHA_SCHEMA_INCOMPATIVEL';
         throw err;
       }
+    }
+
+    if (versaoAtual >= 2 && versaoAtual < 6) {
+      detalheMigracaoV5V6 = await migrarCozinhaV5paraV6(db, opts);
+      migradoV5V6 = !!detalheMigracaoV5V6.migrado;
+    } else if (versaoAtual === 6
+      && !checkIdempotenciaAceitaRetorno(await obterSqlTabela(db, 'cozinha_idempotencia'))) {
+      const err = new Error('[COZINHA] Meta=v6 mas CHECK de idempotência não aceita retorno.');
+      err.codigo = 'COZINHA_SCHEMA_INCOMPATIVEL';
+      throw err;
+    }
+
+    const aceitaCancelamentoItem = (sql) => checkIdempotenciaAceitaRetorno(sql)
+      && String(sql || '').toUpperCase().includes('CANCELAMENTO_ITEM');
+    if (versaoAtual >= 2 && versaoAtual < 7) {
+      detalheMigracaoV6V7 = await migrarIdempotencia(db, opts, 6, 7,
+        SQL_CREATE_COZINHA_IDEMPOTENCIA_V7, checkIdempotenciaAceitaRetorno, aceitaCancelamentoItem);
+    } else if (versaoAtual === 7
+      && !aceitaCancelamentoItem(await obterSqlTabela(db, 'cozinha_idempotencia'))) {
+      const err = new Error('[COZINHA] Meta=v7 mas CHECK de idempotência não aceita cancelamento de item.');
+      err.codigo = 'COZINHA_SCHEMA_INCOMPATIVEL';
+      throw err;
     }
 
     try {
@@ -1742,9 +1946,13 @@ async function garantirSchemaCozinha(db, opts = {}) {
       migrado_v2_v3: migradoV2V3,
       migrado_v3_v4: migradoV3V4,
       migrado_v4_v5: migradoV4V5,
+      migrado_v5_v6: migradoV5V6,
+      migrado_v6_v7: !!detalheMigracaoV6V7,
       migracao_v2_v3: detalheMigracaoV2V3,
       migracao_v3_v4: detalheMigracaoV3V4,
-      migracao_v4_v5: detalheMigracaoV4V5
+      migracao_v4_v5: detalheMigracaoV4V5,
+      migracao_v5_v6: detalheMigracaoV5V6,
+      migracao_v6_v7: detalheMigracaoV6V7
     };
   } catch (err) {
     marcarCozinhaOperacional(false, err);

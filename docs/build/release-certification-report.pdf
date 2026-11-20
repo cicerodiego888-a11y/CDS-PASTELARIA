@@ -12,7 +12,7 @@ endobj
 endobj
 
 4 0 obj
-<< /Length 1932 >>
+<< /Length 1885 >>
 stream
 BT
 /F1 10 Tf
@@ -29,13 +29,13 @@ BT
 0 -14 Td
 (- Commit: 694fb39) Tj
 0 -14 Td
-(- Build: 2026-11-15T23:06:56.540Z) Tj
+(- Build: 2026-11-16T10:37:28.934Z) Tj
 0 -14 Td
-(- Hash app.asar: `ab10862ce658ce92de523456835c8dff09c4bdf1d1c3d2a986607f4d48e9420c`) Tj
+(- Hash app.asar: `49f5f7c7025c2500cebe468739895426f0d69bf8b5baa4d0758413fc629c15aa`) Tj
 0 -14 Td
-(- Origem: instalador-desatualizado) Tj
+(- Origem: fonte) Tj
 0 -14 Td
-(- Data: 2026-11-16T10:37:27.752Z) Tj
+(- Data: 2026-11-19T18:25:33.673Z) Tj
 0 -14 Td
 () Tj
 0 -14 Td
@@ -45,15 +45,15 @@ BT
 0 -14 Td
 (? Inicializa??o do ERP) Tj
 0 -14 Td
-(  - DB ok | pacote: instalador-desatualizado | asar: ab10862ce658?) Tj
+(  - DB ok | pacote: fonte | asar: N/A?) Tj
 0 -14 Td
 (? Login) Tj
 0 -14 Td
-(  - user=rc4320_1794825446879 perfil=SUPER_ADMIN) Tj
+(  - user=rc4320_1795112732430 perfil=SUPER_ADMIN) Tj
 0 -14 Td
 (? Cadastro de Produtos) Tj
 0 -14 Td
-(  - CRUD ok | embalagem CX?12 | codigo=RC4320-1794825442121-P) Tj
+(  - CRUD ok | embalagem CX?12 | codigo=RC4320-1795112729424-P) Tj
 0 -14 Td
 (? Compras) Tj
 0 -14 Td
@@ -89,7 +89,7 @@ BT
 0 -14 Td
 (? Performance) Tj
 0 -14 Td
-(  - 5.6s | mem 34.9MB | sql=16) Tj
+(  - 4.2s | mem 32.6MB | sql=16) Tj
 0 -14 Td
 () Tj
 0 -14 Td
@@ -97,11 +97,11 @@ BT
 0 -14 Td
 () Tj
 0 -14 Td
-(- Tempo total: 5.6s) Tj
+(- Tempo total: 4.3s) Tj
 0 -14 Td
-(- Mem?ria m?xima: 34.9 MB) Tj
+(- Mem?ria m?xima: 32.6 MB) Tj
 0 -14 Td
-(- CPU user: 1907 ms) Tj
+(- CPU user: 1469 ms) Tj
 0 -14 Td
 (- Testes/etapas: 12) Tj
 0 -14 Td
@@ -133,9 +133,9 @@ xref
 0000000058 00000 n 
 0000000115 00000 n 
 0000000241 00000 n 
-0000002225 00000 n 
+0000002178 00000 n 
 trailer
 << /Size 6 /Root 1 0 R >>
 startxref
-2295
+2248
 %%EOF

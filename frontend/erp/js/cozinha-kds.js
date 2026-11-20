@@ -35,8 +35,19 @@
     AGUARDANDO: 'kds-coluna--aguardando',
     EM_PREPARACAO: 'kds-coluna--preparacao',
     PRONTO: 'kds-coluna--prontos',
-    RETIRADO: 'kds-coluna--retirados'
+    RETIRADO: 'kds-coluna--retirados',
+    CANCELADO: 'kds-coluna--cancelados'
   });
+  const ROTULO_CANCELADOS = 'Cancelados';
+  const MOTIVOS_CANCELAMENTO = Object.freeze([
+    ['PRAZO_EXCEDIDO', 'Prazo excedido'],
+    ['CLIENTE_DESISTIU', 'Cliente desistiu'],
+    ['CANCELAMENTO_IFOOD', 'Cancelamento iFood'],
+    ['PEDIDO_DUPLICADO', 'Pedido duplicado'],
+    ['ERRO_LANCAMENTO', 'Erro de lançamento'],
+    ['FALTA_PRODUTO', 'Falta de produto'],
+    ['OUTRO', 'Outro']
+  ]);
 
   function escapar(valor) {
     return String(valor == null ? '' : valor)
@@ -96,28 +107,79 @@
       : Date.now();
     const chegadaEm = card.enviada_em;
     const retiradaConfirmada = card.retirada_estado === 'RETIRADA';
-    const chegadaFim = retiradaConfirmada ? card.retirada_em : null;
-    const chegouSegundos = retiradaConfirmada && !chegadaFim
+    const canceladoEm = card.historico_cancelamento ? (item.cancelamento_em || card.cancelamento_em) : null;
+    const chegadaFim = card.historico_cancelamento ? canceladoEm : (retiradaConfirmada ? card.retirada_em : null);
+    const fimAusente = (card.historico_cancelamento || retiradaConfirmada) && !chegadaFim;
+    const chegouSegundos = fimAusente
       ? null
       : segundosEntre(chegadaEm, chegadaFim, agoraMs);
     const estado = String(item.estado_preparacao || '').toUpperCase();
-    const esperaAtiva = !item.iniciado_em && estado === 'AGUARDANDO';
-    const esperaSegundos = item.iniciado_em || esperaAtiva
-      ? segundosEntre(chegadaEm, item.iniciado_em || null, agoraMs)
+    const esperaFim = item.iniciado_em || chegadaFim;
+    const esperaAtiva = !card.historico_cancelamento && !retiradaConfirmada && !esperaFim && estado === 'AGUARDANDO';
+    let esperaSegundos = esperaFim || esperaAtiva
+      ? segundosEntre(chegadaEm, esperaFim || null, agoraMs)
       : null;
-    const preparoAtivo = !item.pronto_em && estado === 'EM_PREPARACAO';
-    const preparoSegundos = item.iniciado_em && (item.pronto_em || preparoAtivo)
-      ? segundosEntre(item.iniciado_em, item.pronto_em || null, agoraMs)
+    const preparoAtivo = !item.pronto_em && estado === 'EM_PREPARACAO' && !retiradaConfirmada && !card.historico_cancelamento;
+    const preparoFim = item.pronto_em || (item.iniciado_em
+      ? chegadaFim : null);
+    let preparoSegundos = item.iniciado_em && (preparoFim || preparoAtivo)
+      ? segundosEntre(item.iniciado_em, preparoFim || null, agoraMs)
       : null;
-    const esperaGarcomAtiva = !!card.rodada_pronta_em && !retiradaConfirmada;
+    const esperaGarcomAtiva = !!card.rodada_pronta_em && !retiradaConfirmada && !card.historico_cancelamento;
     const esperaGarcomSegundos = card.rodada_pronta_em
-      && (!retiradaConfirmada || card.retirada_em)
+      && !fimAusente
       ? segundosEntre(
         card.rodada_pronta_em,
-        retiradaConfirmada ? card.retirada_em : null,
+        chegadaFim,
         agoraMs
       )
       : null;
+    let periodos = null;
+    if (Array.isArray(item.eventos_preparacao)) {
+      let etapa = 'AGUARDANDO';
+      let inicio = chegadaEm;
+      let espera = 0;
+      let preparo = 0;
+      let valido = Number.isFinite(parseServidor(inicio));
+      for (const evento of item.eventos_preparacao) {
+        const proxima = evento.tipo === 'PREPARACAO_INICIADA' ? 'EM_PREPARACAO'
+          : evento.tipo === 'PREPARACAO_REVERTIDA' ? 'AGUARDANDO'
+            : evento.tipo === 'ITEM_PRONTO' ? 'PRONTO'
+              : evento.tipo === 'ITEM_CANCELADO' ? 'CANCELADO' : null;
+        const permitida = (etapa === 'AGUARDANDO' && ['EM_PREPARACAO', 'CANCELADO'].includes(proxima))
+          || (etapa === 'EM_PREPARACAO' && ['AGUARDANDO', 'PRONTO', 'CANCELADO'].includes(proxima))
+          || (etapa === 'PRONTO' && proxima === 'CANCELADO');
+        const duracao = parseServidor(evento.em) - parseServidor(inicio);
+        if (!permitida || !evento.em || !Number.isFinite(duracao) || duracao < 0
+          || (evento.tipo === 'ITEM_CANCELADO' && (!evento.estado_anterior || evento.estado_anterior !== etapa))) {
+          valido = false;
+          break;
+        }
+        if (etapa === 'AGUARDANDO') espera += duracao;
+        if (etapa === 'EM_PREPARACAO') preparo += duracao;
+        etapa = proxima;
+        inicio = evento.em;
+      }
+      if (etapa !== estado) valido = false;
+      const fim = chegadaFim;
+      if (fimAusente) valido = false;
+      if (valido && fim && ['AGUARDANDO', 'EM_PREPARACAO'].includes(etapa)) {
+        const duracao = parseServidor(fim) - parseServidor(inicio);
+        if (!Number.isFinite(duracao) || duracao < 0) valido = false;
+        else if (etapa === 'AGUARDANDO') espera += duracao;
+        else preparo += duracao;
+      }
+      const ativa = valido && !fim && ['AGUARDANDO', 'EM_PREPARACAO'].includes(etapa);
+      const decorridos = ativa ? agoraMs - parseServidor(inicio) : 0;
+      if (ativa && (!Number.isFinite(decorridos) || decorridos < 0)) valido = false;
+      esperaSegundos = valido ? Math.floor((espera + (ativa && etapa === 'AGUARDANDO' ? decorridos : 0)) / 1000) : null;
+      preparoSegundos = valido ? Math.floor((preparo + (ativa && etapa === 'EM_PREPARACAO' ? decorridos : 0)) / 1000) : null;
+      periodos = {
+        valido, esperaMs: espera, preparoMs: preparo,
+        esperaInicio: ativa && etapa === 'AGUARDANDO' ? inicio : null,
+        preparoInicio: ativa && etapa === 'EM_PREPARACAO' ? inicio : null
+      };
+    }
     return {
       chegada: chegouSegundos,
       espera: esperaSegundos,
@@ -125,17 +187,29 @@
       esperaGarcom: esperaGarcomSegundos,
       chegadaEm,
       chegadaFim,
-      chegadaAtiva: !retiradaConfirmada,
+      chegadaAtiva: !retiradaConfirmada && !card.historico_cancelamento,
       esperaInicio: chegadaEm,
-      esperaFim: item.iniciado_em || null,
+      esperaFim: esperaFim || null,
       esperaAtiva,
       preparoInicio: item.iniciado_em || null,
-      preparoFim: item.pronto_em || null,
+      preparoFim: preparoFim || null,
       preparoAtivo,
       esperaGarcomInicio: card.rodada_pronta_em || null,
-      esperaGarcomFim: retiradaConfirmada ? card.retirada_em || null : null,
-      esperaGarcomAtiva
+      esperaGarcomFim: chegadaFim || null,
+      esperaGarcomAtiva,
+      periodos
     };
+  }
+
+  function htmlTempoAcumulado(rotulo, baseMs, inicio, valido, agora) {
+    const decorrido = inicio ? (agora instanceof Date ? agora.getTime() : Date.now()) - parseServidor(inicio) : 0;
+    const segundos = valido && Number.isFinite(decorrido) && decorrido >= 0
+      ? Math.floor((baseMs + decorrido) / 1000) : null;
+    const atributos = valido && inicio
+      ? ` data-kds-cronometro data-inicio="${escapar(inicio)}" data-fim="" data-base-ms="${baseMs}"`
+      : '';
+    return `<span class="kds-tempo"><span class="kds-tempo__rotulo">${escapar(rotulo)}</span>` +
+      `<time class="kds-tempo__valor"${atributos}>${escapar(formatarDuracao(segundos))}</time></span>`;
   }
 
   function htmlCronometro(rotulo, inicio, fim, ativo, agora) {
@@ -152,11 +226,20 @@
   function atualizarCronometros(host, agoraMs = Date.now()) {
     if (!host || typeof host.querySelectorAll !== 'function') return;
     host.querySelectorAll('[data-kds-cronometro]').forEach((el) => {
-      el.textContent = formatarDuracao(segundosEntre(
+      const baseMs = el.getAttribute('data-base-ms');
+      if (baseMs != null) {
+        const decorrido = agoraMs - parseServidor(el.getAttribute('data-inicio'));
+        const base = Number(baseMs);
+        el.textContent = formatarDuracao(Number.isFinite(decorrido) && decorrido >= 0 && Number.isFinite(base)
+          ? Math.floor((base + decorrido) / 1000) : null);
+        return;
+      }
+      const segundos = segundosEntre(
         el.getAttribute('data-inicio'),
         el.getAttribute('data-fim') || null,
         agoraMs
-      ));
+      );
+      el.textContent = formatarDuracao(segundos);
     });
   }
 
@@ -285,7 +368,7 @@
         });
       }
     });
-    ESTADOS_COLUNA.forEach((estado) => {
+    ESTADOS_COLUNA.filter((estado) => estado !== 'RETIRADO').forEach((estado) => {
       out[estado].sort(compararFifo);
     });
     return out;
@@ -425,15 +508,20 @@
     const tempos = calcularTemposItem(card, item, instante);
     let acao = '';
     let conclusao = '';
-    if (estado === 'AGUARDANDO') {
+    const somenteLeitura = card.retirada_estado === 'RETIRADA' || card.historico_cancelamento;
+    if (!somenteLeitura && estado === 'AGUARDANDO') {
       acao = `<div class="kds-item__acoes">
         <button type="button" class="kds-btn-operacao" data-acao="iniciar-preparo" data-item-id="${escapar(item.id)}"
           ${operando ? 'disabled' : ''}>
           ${operando ? 'PROCESSANDO…' : 'INICIAR PREPARO'}
         </button>
       </div>`;
-    } else if (estado === 'EM_PREPARACAO') {
+    } else if (!somenteLeitura && estado === 'EM_PREPARACAO') {
       acao = `<div class="kds-item__acoes">
+        ${card.retirada_estado === 'PENDENTE' ? `<button type="button" class="kds-btn-operacao"
+          data-acao="voltar-aguardando" data-item-id="${escapar(item.id)}" ${operando ? 'disabled' : ''}>
+          ${operando ? 'PROCESSANDO…' : 'VOLTAR PARA AGUARDANDO'}
+        </button>` : ''}
         <button type="button" class="kds-btn-operacao kds-btn-operacao--pronto"
           data-acao="marcar-pronto" data-item-id="${escapar(item.id)}" ${operando ? 'disabled' : ''}>
           ${operando ? 'PROCESSANDO…' : 'MARCAR COMO PRONTO'}
@@ -447,13 +535,28 @@
         Concluído às ${escapar(formatarHora(item.pronto_em))} UTC${operador}
       </div>`;
     }
+    if (!somenteLeitura && card.retirada_estado === 'PENDENTE'
+      && ['AGUARDANDO', 'EM_PREPARACAO', 'PRONTO'].includes(estado)) {
+      acao += `<div class="kds-item__acoes"><button type="button" class="kds-btn-operacao kds-btn-operacao--cancelar"
+        data-acao="cancelar-item" data-item-id="${escapar(item.id)}" ${operando ? 'disabled' : ''}>
+        CANCELAR ITEM
+      </button></div>`;
+    }
     const obs = item.observacoes_snapshot != null && String(item.observacoes_snapshot).trim() !== ''
       ? `<div class="kds-item__obs">${escapar(item.observacoes_snapshot)}</div>`
       : '';
     const temposEtapa = `<div class="kds-item__tempos">
-      ${htmlCronometro('Espera', tempos.esperaInicio, tempos.esperaFim, tempos.esperaAtiva, instante)}
-      ${htmlCronometro('Preparo', tempos.preparoInicio, tempos.preparoFim, tempos.preparoAtivo, instante)}
+      ${tempos.periodos
+        ? htmlTempoAcumulado('Espera', tempos.periodos.esperaMs, tempos.periodos.esperaInicio, tempos.periodos.valido, instante)
+        : htmlCronometro('Espera', tempos.esperaInicio, tempos.esperaFim, tempos.esperaAtiva, instante)}
+      ${tempos.periodos
+        ? htmlTempoAcumulado('Preparo', tempos.periodos.preparoMs, tempos.periodos.preparoInicio, tempos.periodos.valido, instante)
+        : htmlCronometro('Preparo', tempos.preparoInicio, tempos.preparoFim, tempos.preparoAtivo, instante)}
+      ${tempos.periodos && !tempos.periodos.valido ? '<span>Histórico de tempos incompleto</span>' : ''}
     </div>`;
+    const quantidades = card.historico_cancelamento
+      ? `<div class="kds-item__obs">Preparada: ${escapar(formatarQtd(item.qty_preparada || 0))} · Cancelada: ${escapar(formatarQtd(item.qty_cancelada || 0))}</div>`
+      : '';
     return `
       <div class="kds-item" data-item-id="${escapar(item.id)}">
         <div class="kds-item__linha">
@@ -461,7 +564,11 @@
           <span class="kds-item__nome">${escapar(item.produto_nome_snapshot || 'Produto')}</span>
           <span class="kds-item__tipo">${escapar(item.tipo_item || '')}</span>
         </div>
+        ${(somenteLeitura && item.pedido_id != null) ? `<div class="kds-item__obs">Pedido #${escapar(item.pedido_id)}</div>` : ''}
+        ${card.retirada_estado === 'RETIRADA' && !card.historico_cancelamento
+          ? `<div class="kds-item__obs">Retirado na rodada às ${escapar(formatarHora(card.retirada_em))} UTC · Preparo: ${escapar(estado)}</div>` : ''}
         ${obs}
+        ${quantidades}
         ${temposEtapa}
         ${acao}
         ${conclusao}
@@ -478,7 +585,9 @@
     ].filter(Boolean).map((t) => `<span class="kds-chip">${escapar(t)}</span>`).join('');
     const tempos = calcularTemposItem(card, (card.itens || [])[0] || {}, instante);
     const retiradaEmCurso = !!(retiradasEmCurso && retiradasEmCurso[card.id]);
-    const retirada = card.retirada_estado === 'RETIRADA'
+    const retirada = card.retirada_estado === 'RETIRADA' && card.historico_cancelamento
+      ? `<div class="kds-card__retirada">Rodada retirada às ${escapar(formatarHora(card.retirada_em))} UTC; item cancelado não retirado.</div>`
+      : card.retirada_estado === 'RETIRADA'
       ? `<div class="kds-card__retirada">
           Retirada confirmada${card.retirada_em ? ` às ${escapar(formatarHora(card.retirada_em))} UTC` : ''}
           ${card.retirada_por != null ? ` · Responsável #${escapar(card.retirada_por)}` : ''}
@@ -496,7 +605,7 @@
         </div>`
       : '';
     
-    const acacaoCancelamento = (card.retirada_estado !== 'RETIRADA' && card.estado_preparacao !== 'CANCELADA')
+    const acacaoCancelamento = (!card.historico_cancelamento && card.retirada_estado === 'PENDENTE' && card.estado_preparacao !== 'CANCELADA')
       ? `<div class="kds-card__acoes">
           <button type="button" class="kds-btn-operacao kds-btn-operacao--cancelar"
             data-acao="cancelar-rodada" data-rodada-id="${escapar(card.id)}">
@@ -505,6 +614,18 @@
         </div>`
       : '';
 
+    const cancelamento = card.historico_cancelamento
+      ? `<div class="kds-card__cancelamento">
+          ${card.historico_tipo === 'rodada' ? 'Cancelamento da rodada' : 'Item cancelado'} · Estado atual da rodada: ${escapar(card.estado_preparacao)}
+          <br>
+          Motivo: ${escapar(card.cancelamento_motivo || 'Não informado')}
+          ${card.cancelamento_justificativa ? `<br>Justificativa: ${escapar(card.cancelamento_justificativa)}` : ''}
+          <br>Operador: ${card.cancelamento_por != null ? `#${escapar(card.cancelamento_por)}` : 'Não informado'}
+          · ${escapar(formatarDataHoraUtc(new Date(parseServidor(card.cancelamento_em))))} UTC
+          <br>Etapa: ${escapar(card.cancelamento_etapa || 'Não informada')}
+          · Estado anterior: ${escapar(card.estado_anterior || 'Não informado')}
+        </div>`
+      : '';
     return `
       <article class="kds-card" data-rodada-id="${escapar(card.id)}">
         <div class="kds-card__topo">
@@ -526,6 +647,7 @@
         </div>
         ${(card.itens || []).map((item) => htmlItem(item, operacoesEmCurso, card, instante)).join('')}
         ${retirada}
+        ${cancelamento}
         ${acaoRetirada}
         ${acacaoCancelamento}
       </article>`;
@@ -538,11 +660,89 @@
     return `
       <section class="kds-coluna ${CLASSES_COLUNA[estado]}" data-coluna="${estado}">
         <header class="kds-coluna__cabeca">
-          <span>${escapar(ROTULOS_COLUNA[estado])}</span>
+          <span>${escapar(ROTULOS_COLUNA[estado] || ROTULO_CANCELADOS)}</span>
           <span class="kds-contador" data-contador="${estado}">${cards.length}</span>
         </header>
         <div class="kds-coluna__lista">${lista}</div>
       </section>`;
+  }
+
+  function htmlHistoricoLegado(estado, instante) {
+    const disponivel = (valor) => valor == null || String(valor).trim() === '' ? 'Não disponível' : String(valor);
+    const data = (valor) => {
+      const ms = parseServidor(valor);
+      return Number.isFinite(ms) ? `${formatarDataHoraUtc(new Date(ms))} UTC` : 'Não disponível';
+    };
+    const duracao = (valor) => valor == null ? 'Não reconstruível' : formatarDuracao(valor);
+    const registros = (estado.legado || []).map((rodada) => {
+      const fim = rodada.retirada_estado === 'RETIRADA' ? rodada.retirada_em
+        : rodada.estado_preparacao === 'CANCELADA' ? rodada.cancelamento_em : null;
+      const total = fim ? segundosEntre(rodada.enviada_em, fim, instante.getTime()) : null;
+      const garcom = fim && (rodada.retirada_estado === 'RETIRADA' || rodada.cancelamento_etapa === 'PRONTA')
+        ? segundosEntre(rodada.rodada_pronta_em, fim, instante.getTime()) : null;
+      const itens = (rodada.itens || []).map((item) => {
+        const cancelado = item.estado_preparacao === 'CANCELADO';
+        const fimItem = cancelado ? item.cancelamento_em
+          : rodada.retirada_estado === 'RETIRADA' ? rodada.retirada_em : null;
+        const tempos = fimItem && !item.cancelamento_sem_evento
+          && Array.isArray(item.eventos_preparacao) && item.eventos_preparacao.length
+          ? calcularTemposItem({ ...rodada, historico_cancelamento: cancelado, cancelamento_em: null }, item, instante)
+          : null;
+        return `<div class="kds-item">
+          <div class="kds-item__linha"><strong>${escapar(disponivel(item.produto_nome_snapshot))}</strong>
+            · Item #${escapar(item.id)} · ${escapar(disponivel(item.estado_preparacao))}</div>
+          <div class="kds-item__obs">Comanda: ${escapar(disponivel(item.numero_comanda))}
+            · Pedido: ${escapar(disponivel(item.pedido_id))} · Tipo: ${escapar(disponivel(item.tipo_item))}</div>
+          <div class="kds-item__obs">Solicitada: ${escapar(disponivel(item.qty_solicitada))}
+            · Preparada: ${escapar(disponivel(item.qty_preparada))}
+            · Cancelada: ${escapar(disponivel(item.qty_cancelada))}</div>
+          ${cancelado ? `<div class="kds-item__obs">Cancelamento do item${item.cancelamento_sem_evento ? ' — evento ausente' : ''}
+            · Motivo: ${escapar(disponivel(item.motivo_cancelamento))}
+            · Justificativa: ${escapar(disponivel(item.cancelamento_justificativa))}
+            · Operador: ${escapar(disponivel(item.operador_cancelamento_id))}
+            · ${escapar(data(item.cancelamento_em))}</div>` : ''}
+          <div class="kds-item__obs">Espera: ${escapar(duracao(tempos && tempos.espera))}
+            · Preparação: ${escapar(duracao(tempos && tempos.preparo))}</div>
+        </div>`;
+      }).join('');
+      return `<article class="kds-card" data-legado-rodada-id="${escapar(rodada.id)}">
+        <div class="kds-card__topo"><strong>Mesa ${escapar(disponivel(rodada.mesa_numero))}</strong>
+          <span>Rodada ${escapar(disponivel(rodada.numero_rodada))} · ID ${escapar(rodada.id)}</span></div>
+        <div class="kds-card__meta">Estado da rodada: ${escapar(disponivel(rodada.estado_preparacao))}
+          · Envio: ${escapar(data(rodada.enviada_em))}
+          · Operador do envio: ${escapar(disponivel(rodada.operador_envio_id))}</div>
+        <div class="kds-card__meta">Retirada: ${escapar(disponivel(rodada.retirada_estado))}
+          ${rodada.retirada_sem_evento ? ' — evento ausente' : ''}
+          · Horário: ${escapar(data(rodada.retirada_em))}
+          · Operador: ${escapar(disponivel(rodada.retirada_por))}</div>
+        ${rodada.estado_preparacao === 'CANCELADA' ? `<div class="kds-card__cancelamento">
+          Cancelamento da rodada${rodada.cancelamento_sem_evento ? ' — evento ausente' : ''}
+          · Motivo: ${escapar(disponivel(rodada.cancelamento_motivo))}
+          · Justificativa: ${escapar(disponivel(rodada.cancelamento_justificativa))}
+          · Operador: ${escapar(disponivel(rodada.cancelamento_por))}
+          · Horário: ${escapar(data(rodada.cancelamento_em))}
+          · Etapa: ${escapar(disponivel(rodada.cancelamento_etapa))}
+        </div>` : ''}
+        <div class="kds-card__meta">Total: ${escapar(duracao(total))}
+          · Espera do garçom: ${escapar(duracao(garcom))}</div>
+        ${itens}
+      </article>`;
+    }).join('');
+    const paginas = estado.paginasLegado;
+    return `<section class="kds-historico" aria-label="Histórico legado">
+      <h2>Histórico legado</h2>
+      <p>Registros com eventos ausentes; dados e estados apresentados conforme persistidos.</p>
+      ${estado.erroLegado ? `<div class="kds-aviso" role="alert">${escapar(estado.erroLegado)}</div>` : ''}
+      <div class="kds-coluna__lista">${registros || (estado.erroLegado ? ''
+        : `<div class="kds-vazio">${estado.carregando ? 'Carregando histórico legado…' : 'Nenhum registro legado nesta página'}</div>`)}</div>
+      <div class="kds-historico__paginacao">
+        <button type="button" class="kds-btn-secundario" data-acao="pagina-legado-anterior"
+          ${!paginas || paginas.indice <= 0 ? 'disabled' : ''}>Anterior</button>
+        <span>Página ${paginas ? paginas.indice + 1 : 1} · Atualizar agora inicia uma nova consulta</span>
+        <button type="button" class="kds-btn-secundario" data-acao="pagina-legado-proxima"
+          ${!paginas || !paginas.proximo ? 'disabled' : ''}>Próxima</button>
+      </div>
+    </section>`;
   }
 
   function htmlPainel(estado, instante) {
@@ -584,7 +784,15 @@
           ${htmlColuna('AGUARDANDO', dist.AGUARDANDO || [], operacoesEmCurso, retiradasEmCurso, instante)}
           ${htmlColuna('EM_PREPARACAO', dist.EM_PREPARACAO || [], operacoesEmCurso, retiradasEmCurso, instante)}
           ${htmlColuna('PRONTO', dist.PRONTO || [], operacoesEmCurso, retiradasEmCurso, instante)}
+          ${htmlColuna('RETIRADO', dist.RETIRADO || [], operacoesEmCurso, retiradasEmCurso, instante)}
         </div>`;
+    const pagina = (tipo, dados, total, semEvento) => `
+      <div class="kds-historico__paginacao">
+        <button type="button" class="kds-btn-secundario" data-acao="pagina-${tipo}-anterior" ${!dados || dados.indice <= 0 ? 'disabled' : ''}>Anterior</button>
+        <span>Página ${dados ? dados.indice + 1 : 1} · ${total} rodadas no snapshot (use Atualizar agora para novos eventos)</span>
+        <button type="button" class="kds-btn-secundario" data-acao="pagina-${tipo}-proxima" ${!dados || !dados.proximo ? 'disabled' : ''}>Próxima</button>
+        ${semEvento ? `<span role="alert">${semEvento} rodada(s) sem evento histórico; consulte o histórico legado.</span>` : ''}
+      </div>`;
 
     return `
       <div class="kds-painel" data-painel-kds="1">
@@ -607,6 +815,12 @@
               title="Voltar para a seleção de unidade de cozinha">
               Trocar unidade
             </button>
+            <button type="button" class="kds-btn-secundario" data-acao="historico-cancelados">
+              ${estado.mostrarCancelados ? 'Ocultar cancelados' : 'Histórico de cancelados'}
+            </button>
+            <button type="button" class="kds-btn-secundario" data-acao="historico-legado">
+              ${estado.mostrarLegado ? 'Ocultar histórico legado' : 'Histórico legado'}
+            </button>
             <button type="button" class="kds-btn-atualizar" data-acao="atualizar"
               ${estado.carregando ? 'disabled' : ''}>
               Atualizar agora
@@ -616,6 +830,12 @@
         ${aviso}
         ${feedback}
         ${corpoVazioInicial}
+        ${pagina('retirados', estado.paginasRetirados, estado.totalRetirados || 0, estado.semEventoRetirados)}
+        ${estado.mostrarCancelados ? `<div class="kds-historico">
+          ${htmlColuna('CANCELADO', estado.cancelados || [], operacoesEmCurso, retiradasEmCurso, instante)}
+          ${pagina('cancelados', estado.paginasCancelados, estado.totalCancelados || 0, estado.semEventoCancelados)}
+        </div>` : ''}
+        ${estado.mostrarLegado ? htmlHistoricoLegado(estado, instante) : ''}
         <div class="visually-hidden" data-kds-contadores>
           Aguardando ${counts.AGUARDANDO}; Em preparação ${counts.EM_PREPARACAO}; Prontos ${counts.PRONTO}
         </div>
@@ -641,6 +861,18 @@
       empresaRotulo: deps.empresaRotulo || '',
       unidadeId: null,
       rodadas: [],
+      cancelados: [],
+      mostrarCancelados: false,
+      legado: [],
+      mostrarLegado: false,
+      erroLegado: '',
+      paginasLegado: { cursores: [null], indice: 0, proximo: null },
+      paginasRetirados: { cursores: [null], indice: 0, proximo: null },
+      paginasCancelados: { cursores: [null], indice: 0, proximo: null },
+      totalRetirados: 0,
+      totalCancelados: 0,
+      semEventoRetirados: 0,
+      semEventoCancelados: 0,
       distribuicao: distribuirPorEstado([]),
       total: 0,
       ordenacao: null,
@@ -690,6 +922,7 @@
 
     function parar() {
       estado.ativo = false;
+      if (typeof deps.fecharSolicitacaoCancelamento === 'function') deps.fecharSolicitacaoCancelamento();
       if (timer != null && deps.cancelar) deps.cancelar(timer);
       timer = null;
       pararCronometros();
@@ -708,9 +941,79 @@
       publicar();
       const ticket = ++seq;
       try {
-        const data = await fetchJson('GET', `/cozinha/preparacao/painel?limite=${LIMITE_PAINEL}&offset=0`);
+        const retirados = estado.paginasRetirados;
+        const cancelados = estado.paginasCancelados;
+        const indiceCancelados = cancelados.indice;
+        const cursorRetirados = retirados.cursores[retirados.indice];
+        const cursorCancelados = cancelados.cursores[indiceCancelados];
+        const data = await fetchJson('GET', `/cozinha/preparacao/painel?limite=${LIMITE_PAINEL}&offset=0&historicos=1&paginacao=cursor${cursorRetirados ? `&cursor_retirados=${encodeURIComponent(cursorRetirados)}` : ''}${cursorCancelados ? `&cursor_cancelados=${encodeURIComponent(cursorCancelados)}` : ''}`);
         if (!estado.ativo || ticket !== seq) return { obsoleta: true };
         estado.rodadas = Array.isArray(data && data.rodadas) ? data.rodadas : [];
+        if (data.historico_retirados && Array.isArray(data.historico_retirados.rodadas)) {
+          estado.rodadas = estado.rodadas.concat(data.historico_retirados.rodadas);
+          estado.totalRetirados = Number(data.historico_retirados.total) || 0;
+          estado.semEventoRetirados = Number(data.historico_retirados.registros_sem_evento) || 0;
+          retirados.cursores[retirados.indice] = data.historico_retirados.cursor_atual || null;
+          retirados.proximo = data.historico_retirados.cursor_proximo || null;
+        }
+        if (estado.paginasCancelados === cancelados && cancelados.indice === indiceCancelados
+          && data.historico_cancelados && Array.isArray(data.historico_cancelados.rodadas)) {
+          estado.totalCancelados = Number(data.historico_cancelados.total) || 0;
+          estado.semEventoCancelados = Number(data.historico_cancelados.registros_sem_evento) || 0;
+          cancelados.cursores[indiceCancelados] = data.historico_cancelados.cursor_atual || null;
+          cancelados.proximo = data.historico_cancelados.cursor_proximo || null;
+          estado.cancelados = data.historico_cancelados.rodadas.flatMap((rodada) => {
+            const evento = rodada.cancelamento_evento;
+            const resumoRodada = evento ? [{
+              ...rodada,
+              itens: evento.item_ids == null ? rodada.itens : rodada.itens.filter((item) => evento.item_ids.includes(item.id)),
+              historico_cancelamento: true,
+              historico_tipo: 'rodada',
+              cancelamento_motivo: evento.motivo,
+              cancelamento_justificativa: evento.justificativa,
+              cancelamento_por: evento.operador_id,
+              cancelamento_em: evento.em,
+              cancelamento_etapa: evento.etapa,
+              estado_anterior: evento.etapa
+            }] : [];
+            return resumoRodada.concat(rodada.itens.map((item) => ({
+              ...rodada,
+              itens: [item],
+              historico_cancelamento: true,
+              historico_tipo: 'item',
+              rodada_pronta_em: item.rodada_pronta_em_cancelamento
+                || (item.cancelamento_etapa === 'PRONTA' ? rodada.rodada_pronta_em : null),
+              cancelamento_motivo: item.cancelamento_motivo,
+              cancelamento_justificativa: item.cancelamento_justificativa,
+              cancelamento_por: item.cancelamento_por,
+              cancelamento_em: item.cancelamento_em,
+              cancelamento_etapa: item.cancelamento_etapa,
+              estado_anterior: item.estado_anterior
+            })));
+          });
+        }
+        if (estado.mostrarLegado) {
+          const paginas = estado.paginasLegado;
+          const indice = paginas.indice;
+          const cursor = paginas.cursores[indice];
+          try {
+            const legado = await fetchJson('GET', `/cozinha/preparacao/painel?historico=legado&limite=${LIMITE_PAINEL}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`);
+            if (!estado.ativo || ticket !== seq) return { obsoleta: true };
+            if (estado.mostrarLegado && estado.paginasLegado === paginas && paginas.indice === indice) {
+              if (!legado || !Array.isArray(legado.registros)) throw new Error('Resposta inválida do histórico legado.');
+              estado.legado = legado.registros;
+              paginas.cursores[indice] = legado.cursor_atual || null;
+              paginas.proximo = legado.cursor_proximo || null;
+              estado.erroLegado = '';
+            }
+          } catch (err) {
+            if (!estado.ativo || ticket !== seq) return { obsoleta: true };
+            if (estado.mostrarLegado && estado.paginasLegado === paginas && paginas.indice === indice) {
+              estado.legado = [];
+              estado.erroLegado = mensagemDe(err);
+            }
+          }
+        }
         estado.distribuicao = distribuirPorEstado(estado.rodadas);
         estado.total = data && data.total != null ? Number(data.total) : estado.rodadas.length;
         estado.ordenacao = data && data.ordenacao ? data.ordenacao : null;
@@ -737,6 +1040,59 @@
       }
     }
 
+    async function alternarHistoricoCancelados() {
+      estado.mostrarCancelados = !estado.mostrarCancelados;
+      if (estado.mostrarCancelados) {
+        reiniciarHistorico('cancelados');
+        estado.cancelados = [];
+        estado.totalCancelados = 0;
+        estado.semEventoCancelados = 0;
+      }
+      publicar();
+      if (estado.mostrarCancelados) return atualizar({ forcar: true });
+    }
+
+    async function alternarHistoricoLegado() {
+      estado.mostrarLegado = !estado.mostrarLegado;
+      publicar();
+      if (estado.mostrarLegado) return atualizar({ forcar: true });
+    }
+
+    async function mudarPaginaHistorico(tipo, direcao) {
+      const chave = { retirados: 'paginasRetirados', cancelados: 'paginasCancelados', legado: 'paginasLegado' }[tipo];
+      if (!chave) throw new Error('Histórico inválido.');
+      const paginas = estado[chave];
+      if (direcao < 0) {
+        if (paginas.indice === 0) return;
+        paginas.indice -= 1;
+      } else {
+        if (!paginas.proximo) return;
+        paginas.cursores = paginas.cursores.slice(0, paginas.indice + 1);
+        paginas.cursores.push(paginas.proximo);
+        paginas.indice += 1;
+      }
+      if (tipo === 'legado') {
+        estado.legado = [];
+        estado.erroLegado = '';
+      }
+      await atualizar({ forcar: true });
+    }
+
+    function reiniciarHistorico(tipo) {
+      const chave = { retirados: 'paginasRetirados', cancelados: 'paginasCancelados', legado: 'paginasLegado' }[tipo];
+      if (!chave) throw new Error('Histórico inválido.');
+      estado[chave] = { cursores: [null], indice: 0, proximo: null };
+    }
+
+    async function atualizarHistoricos() {
+      reiniciarHistorico('retirados');
+      reiniciarHistorico('cancelados');
+      reiniciarHistorico('legado');
+      estado.legado = [];
+      estado.erroLegado = '';
+      return atualizar({ forcar: true });
+    }
+
     function localizarItem(itemId) {
       for (const rodada of estado.rodadas) {
         const item = (rodada.itens || []).find((candidato) => Number(candidato.id) === itemId);
@@ -752,7 +1108,6 @@
           estadoEsperado: 'AGUARDANDO',
           estadoDestino: 'EM_PREPARACAO',
           caminho: 'iniciar',
-          confirmar: 'Iniciar o preparo deste item?',
           sucesso: 'Preparo iniciado.'
         }
         : acao === 'pronto'
@@ -760,10 +1115,16 @@
             estadoEsperado: 'EM_PREPARACAO',
             estadoDestino: 'PRONTO',
             caminho: 'pronto',
-            confirmar: 'Marcar este item como pronto?',
             sucesso: 'Item marcado como pronto.'
           }
-          : null;
+          : acao === 'voltar'
+            ? {
+              estadoEsperado: 'EM_PREPARACAO',
+              estadoDestino: 'AGUARDANDO',
+              caminho: 'aguardando',
+              sucesso: 'Item retornado para aguardando.'
+            }
+            : null;
       if (!Number.isInteger(itemId) || itemId <= 0 || !operacao) {
         return { ignorada: true };
       }
@@ -775,10 +1136,6 @@
         publicar();
         return { erro: true };
       }
-      if (typeof deps.confirmar === 'function' && !deps.confirmar(operacao.confirmar)) {
-        return { cancelada: true };
-      }
-
       estado.acoesEmCurso[itemId] = true;
       estado.feedback = '';
       estado.feedbackTipo = '';
@@ -808,6 +1165,9 @@
             atual.item.operador_inicio_id = data.operador_id != null
               ? Number(data.operador_id)
               : atual.item.operador_inicio_id || null;
+          } else if (acao === 'voltar') {
+            atual.item.iniciado_em = null;
+            atual.item.operador_inicio_id = null;
           } else {
             atual.item.pronto_em = data.pronto_em
               || data.item.pronto_em
@@ -849,11 +1209,6 @@
         publicar();
         return { erro: true };
       }
-      if (typeof deps.confirmar === 'function'
-        && !deps.confirmar('Confirmar a retirada desta rodada pelo garçom?')) {
-        return { cancelada: true };
-      }
-
       estado.retiradasEmCurso[rodadaId] = true;
       estado.feedback = '';
       estado.feedbackTipo = '';
@@ -875,6 +1230,7 @@
           });
         }
         Object.assign(rodada, data.rodada);
+        reiniciarHistorico('retirados');
         estado.distribuicao = distribuirPorEstado(estado.rodadas);
         estado.feedback = data.repetida ? 'Retirada já estava confirmada.' : 'Retirada confirmada.';
         estado.feedbackTipo = 'sucesso';
@@ -892,74 +1248,85 @@
       }
     }
 
-    async function cancelarRodada(rodadaIdRaw) {
-      const rodadaId = Number(rodadaIdRaw);
-      if (!Number.isInteger(rodadaId) || rodadaId <= 0) return { ignorada: true };
+    async function cancelarOperacao(tipo, idRaw) {
+      const id = Number(idRaw);
+      if (!Number.isInteger(id) || id <= 0) return { ignorada: true };
+      let encontrado = tipo === 'item' ? localizarItem(id) : null;
+      let rodada = encontrado ? encontrado.rodada : estado.rodadas.find((candidata) => Number(candidata.id) === id);
+      let item = encontrado && encontrado.item;
+      const chaveOperacao = `${tipo}:${id}`;
       if (estado.cancelamentosEmCurso === undefined) estado.cancelamentosEmCurso = {};
-      if (estado.cancelamentosEmCurso[rodadaId]) return { ignorada: true, sobreposta: true };
-      const rodada = estado.rodadas.find((candidata) => Number(candidata.id) === rodadaId);
-      if (!rodada || rodada.retirada_estado === 'RETIRADA' || rodada.estado_preparacao === 'CANCELADA') {
+      if (estado.cancelamentosEmCurso[chaveOperacao]) return { ignorada: true, sobreposta: true };
+      if (!rodada || (tipo === 'item' && !item) || rodada.retirada_estado !== 'PENDENTE' || rodada.estado_preparacao === 'CANCELADA') {
         estado.feedback = 'A rodada já foi retirada ou cancelada. Não é possível cancelar.';
         estado.feedbackTipo = 'erro';
         publicar();
         return { erro: true };
       }
 
-      const motivo = prompt('Motivo do cancelamento:\n1) PRAZO_EXCEDIDO\n2) CLIENTE_DESISTIU\n3) CANCELAMENTO_IFOOD\n4) PEDIDO_DUPLICADO\n5) ERRO_LANCAMENTO\n6) FALTA_PRODUTO\n7) OUTRO\n\nDigite o número ou o motivo exato:');
-      if (!motivo) return { cancelada: true };
-
-      const motivosValidos = ['PRAZO_EXCEDIDO', 'CLIENTE_DESISTIU', 'CANCELAMENTO_IFOOD', 'PEDIDO_DUPLICADO', 'ERRO_LANCAMENTO', 'FALTA_PRODUTO', 'OUTRO'];
-      let motivoFinal = motivosValidos[Number(motivo) - 1] || motivo;
-      if (!motivosValidos.includes(motivoFinal)) {
-        estado.feedback = 'Motivo inválido. Cancelamento não foi enviado.';
+      if (typeof deps.solicitarCancelamento !== 'function') {
+        estado.feedback = 'Não foi possível solicitar o motivo do cancelamento.';
         estado.feedbackTipo = 'erro';
         publicar();
         return { erro: true };
       }
-
-      let justificativa = '';
-      if (motivoFinal === 'OUTRO') {
-        justificativa = prompt('Justificativa do cancelamento (obrigatória):');
-        if (!justificativa || !String(justificativa).trim()) {
-          estado.feedback = 'Justificativa obrigatória para motivo "OUTRO". Cancelamento não foi enviado.';
-          estado.feedbackTipo = 'erro';
-          publicar();
-          return { erro: true };
-        }
-      }
-
-      if (typeof deps.confirmar === 'function'
-        && !deps.confirmar(`Confirmar cancelamento desta rodada?\nMotivo: ${motivoFinal}${justificativa ? '\nJustificativa: ' + justificativa : ''}`)) {
-        return { cancelada: true };
-      }
-
-      estado.cancelamentosEmCurso[rodadaId] = true;
-      estado.feedback = '';
-      estado.feedbackTipo = '';
-      publicar();
-      const chave = typeof deps.gerarChaveIdempotencia === 'function'
-        ? deps.gerarChaveIdempotencia('cancelamento', rodadaId)
-        : `kds:cancelamento:${rodadaId}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+      estado.cancelamentosEmCurso[chaveOperacao] = true;
+      const empresaId = estado.empresaId;
+      const unidadeId = estado.unidadeId;
       try {
+        const dados = await deps.solicitarCancelamento(tipo, id);
+        if (!dados) return { cancelada: true };
+        const motivoFinal = String(dados.motivo || '').trim().toUpperCase();
+        const justificativa = String(dados.justificativa || '').trim();
+        if (!MOTIVOS_CANCELAMENTO.some(([codigo]) => codigo === motivoFinal)) {
+          throw new Error('Motivo inválido. Cancelamento não foi enviado.');
+        }
+        if (motivoFinal === 'OUTRO' && !justificativa) {
+          throw new Error('Justificativa obrigatória para motivo "OUTRO". Cancelamento não foi enviado.');
+        }
+        if (!estado.ativo || estado.modo !== 'painel'
+          || estado.empresaId !== empresaId || estado.unidadeId !== unidadeId
+          || (typeof deps.lerUnidadeJwt === 'function' && Number(deps.lerUnidadeJwt()) !== Number(unidadeId))) {
+          throw new Error('O contexto da cozinha mudou. Cancelamento não foi enviado.');
+        }
+        encontrado = tipo === 'item' ? localizarItem(id) : null;
+        rodada = encontrado ? encontrado.rodada : estado.rodadas.find((candidata) => Number(candidata.id) === id);
+        item = encontrado && encontrado.item;
+        if (!rodada || (tipo === 'item' && (!item || item.estado_preparacao === 'CANCELADO'))
+          || rodada.retirada_estado !== 'PENDENTE' || rodada.estado_preparacao === 'CANCELADA') {
+          throw new Error('A rodada ou o item não está mais disponível para cancelamento.');
+        }
+        estado.feedback = '';
+        estado.feedbackTipo = '';
+        publicar();
+        const chave = typeof deps.gerarChaveIdempotencia === 'function'
+          ? deps.gerarChaveIdempotencia(`cancelamento-${tipo}`, id)
+          : `kds:cancelamento:${tipo}:${id}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
         const data = await fetchJson(
           'POST',
-          `/cozinha/rodadas/${rodadaId}/cancelar`,
+          `/cozinha/${tipo === 'item' ? 'itens' : 'rodadas'}/${id}/cancelar`,
           {
             idempotency_key: chave,
-            cancelamento_motivo: motivoFinal,
-            cancelamento_justificativa: justificativa || null
+            motivo: motivoFinal,
+            justificativa: justificativa || null
           }
         );
         if (!data || data.success !== true || !data.rodada
-          || Number(data.rodada.id) !== rodadaId
-          || data.rodada.estado_preparacao !== 'CANCELADA') {
+          || Number(data.rodada.id) !== Number(rodada.id)
+          || (tipo === 'rodada' && data.rodada.estado_preparacao !== 'CANCELADA')
+          || (tipo === 'item' && (!data.item || Number(data.item.id) !== id || data.item.estado_preparacao !== 'CANCELADO'))) {
           throw Object.assign(new Error('O servidor não confirmou o cancelamento.'), {
             codigo: 'RESPOSTA_CANCELAMENTO_INVALIDA'
           });
         }
+        if (item) Object.assign(item, data.item);
+        if (tipo === 'rodada') {
+          (rodada.itens || []).forEach((i) => { i.estado_preparacao = 'CANCELADO'; });
+        }
         Object.assign(rodada, data.rodada);
+        reiniciarHistorico('cancelados');
         estado.distribuicao = distribuirPorEstado(estado.rodadas);
-        estado.feedback = data.repetida ? 'Cancelamento já estava registrado.' : 'Rodada cancelada com sucesso.';
+        estado.feedback = data.repetida ? 'Cancelamento já estava registrado.' : 'Cancelamento operacional registrado.';
         estado.feedbackTipo = 'sucesso';
         publicar();
         await atualizar({ silencioso: true, forcar: true });
@@ -970,10 +1337,13 @@
         publicar();
         return { erro: err };
       } finally {
-        delete estado.cancelamentosEmCurso[rodadaId];
+        delete estado.cancelamentosEmCurso[chaveOperacao];
         publicar();
       }
     }
+
+    function cancelarRodada(id) { return cancelarOperacao('rodada', id); }
+    function cancelarItem(id) { return cancelarOperacao('item', id); }
 
     async function carregarUnidadesDisponiveis(opts) {
       const forcar = !!(opts && opts.forcar);
@@ -1082,9 +1452,27 @@
      * Não altera o JWT até o operador confirmar outra unidade.
      */
     async function voltarParaSelecao() {
+      if (typeof deps.fecharSolicitacaoCancelamento === 'function') deps.fecharSolicitacaoCancelamento();
       if (timer != null && deps.cancelar) deps.cancelar(timer);
       timer = null;
       pararCronometros();
+      seq += 1;
+      estado.emCurso = false;
+      estado.carregando = false;
+      estado.rodadas = [];
+      estado.cancelados = [];
+      estado.legado = [];
+      estado.mostrarLegado = false;
+      estado.erroLegado = '';
+      estado.distribuicao = distribuirPorEstado([]);
+      reiniciarHistorico('retirados');
+      reiniciarHistorico('cancelados');
+      reiniciarHistorico('legado');
+      estado.totalRetirados = 0;
+      estado.totalCancelados = 0;
+      estado.semEventoRetirados = 0;
+      estado.semEventoCancelados = 0;
+      estado.teveSucesso = false;
       estado.modo = 'selecao';
       estado.unidadeSelecionadaId = null;
       estado.selecaoErro = '';
@@ -1104,10 +1492,15 @@
       operarItem,
       confirmarRetirada,
       cancelarRodada,
+      cancelarItem,
+      alternarHistoricoCancelados,
+      alternarHistoricoLegado,
+      mudarPaginaHistorico,
       carregarUnidadesDisponiveis,
       definirUnidadeSelecionada,
       confirmarUnidade,
       voltarParaSelecao,
+      atualizarHistoricos,
       html: () => (estado.modo === 'selecao'
         ? htmlSelecaoUnidade(estado)
         : htmlPainel(estado, agora()))
@@ -1292,9 +1685,83 @@
     };
   }
 
+  function criarSolicitadorCancelamento(global) {
+    let fecharAtual = null;
+
+    function solicitar(tipo, id) {
+      if (fecharAtual) throw new Error('Já existe um cancelamento em andamento.');
+      const dialogo = global.document.createElement('dialog');
+      dialogo.className = 'kds-dialogo-cancelamento';
+      dialogo.setAttribute('aria-labelledby', 'kds-cancelamento-titulo');
+      dialogo.innerHTML = `
+        <form class="kds-dialogo-cancelamento__form">
+          <h2 id="kds-cancelamento-titulo">Cancelar ${tipo === 'item' ? 'item' : 'rodada'}${id ? ` #${escapar(id)}` : ''}</h2>
+          <p>Este cancelamento é somente operacional e não cancela o pedido ou pagamento.</p>
+          <label for="kds-cancelamento-motivo">Motivo do cancelamento</label>
+          <select id="kds-cancelamento-motivo">
+            <option value="">Selecione um motivo</option>
+            ${MOTIVOS_CANCELAMENTO.map(([codigo, rotulo]) => `<option value="${codigo}">${escapar(rotulo)}</option>`).join('')}
+          </select>
+          <label for="kds-cancelamento-justificativa">Justificativa <span>(obrigatória para Outro)</span></label>
+          <textarea id="kds-cancelamento-justificativa" rows="3"></textarea>
+          <div class="kds-dialogo-cancelamento__erro" role="alert"></div>
+          <div class="kds-dialogo-cancelamento__acoes">
+            <button type="button" data-acao="fechar">Voltar</button>
+            <button type="submit" class="kds-dialogo-cancelamento__confirmar">Confirmar cancelamento</button>
+          </div>
+        </form>`;
+      const form = dialogo.querySelector('form');
+      const motivo = dialogo.querySelector('#kds-cancelamento-motivo');
+      const justificativa = dialogo.querySelector('#kds-cancelamento-justificativa');
+      const erro = dialogo.querySelector('.kds-dialogo-cancelamento__erro');
+      const focoAnterior = global.document.activeElement;
+      return new Promise((resolve, reject) => {
+        function fechar(resultado) {
+          fecharAtual = null;
+          if (dialogo.open) dialogo.close();
+          dialogo.remove();
+          if (focoAnterior && focoAnterior.isConnected && typeof focoAnterior.focus === 'function') focoAnterior.focus();
+          resolve(resultado);
+        }
+        fecharAtual = () => fechar(null);
+        dialogo.addEventListener('cancel', (event) => {
+          event.preventDefault();
+          fechar(null);
+        });
+        dialogo.querySelector('[data-acao="fechar"]').addEventListener('click', () => fechar(null));
+        form.addEventListener('submit', (event) => {
+          event.preventDefault();
+          if (!motivo.value) {
+            erro.textContent = 'Selecione um motivo.';
+            motivo.focus();
+            return;
+          }
+          if (motivo.value === 'OUTRO' && !justificativa.value.trim()) {
+            erro.textContent = 'Informe a justificativa para o motivo Outro.';
+            justificativa.focus();
+            return;
+          }
+          fechar({ motivo: motivo.value, justificativa: justificativa.value.trim() });
+        });
+        try {
+          global.document.body.appendChild(dialogo);
+          dialogo.showModal();
+          motivo.focus();
+        } catch (err) {
+          fecharAtual = null;
+          dialogo.remove();
+          reject(err);
+        }
+      });
+    }
+
+    return { solicitar, fechar: () => { if (fecharAtual) fecharAtual(); } };
+  }
+
   function montarNoNavegador(global) {
     const contexto = global.CdsEmpresaContexto;
     const empresa = contexto && contexto.lerEmpresa ? contexto.lerEmpresa() : null;
+    const solicitador = criarSolicitadorCancelamento(global);
     let control;
     control = criarControlador({
       empresaId: contexto && contexto.lerEmpresaId ? contexto.lerEmpresaId() : null,
@@ -1316,6 +1783,8 @@
       confirmar: typeof global.confirm === 'function'
         ? global.confirm.bind(global)
         : null,
+      solicitarCancelamento: solicitador.solicitar,
+      fecharSolicitacaoCancelamento: solicitador.fechar,
       lerUnidadeJwt: () => {
         try {
           return lerUnidadeCozinhaDoToken(global.localStorage && global.localStorage.getItem('token'));
@@ -1373,7 +1842,7 @@
     const botao = raiz.querySelector('[data-acao="atualizar"]');
     if (botao) {
       botao.addEventListener('click', () => {
-        control.atualizar({ silencioso: false });
+        control.atualizarHistoricos();
       });
     }
     const trocar = raiz.querySelector('[data-acao="trocar-unidade"]');
@@ -1382,12 +1851,24 @@
         control.voltarParaSelecao();
       });
     }
-    raiz.querySelectorAll('[data-acao="iniciar-preparo"], [data-acao="marcar-pronto"]')
+    const historico = raiz.querySelector('[data-acao="historico-cancelados"]');
+    if (historico) historico.addEventListener('click', () => control.alternarHistoricoCancelados());
+    const legado = raiz.querySelector('[data-acao="historico-legado"]');
+    if (legado) legado.addEventListener('click', () => control.alternarHistoricoLegado());
+    ['retirados', 'cancelados', 'legado'].forEach((tipo) => {
+      ['anterior', 'proxima'].forEach((sentido) => {
+        const botaoPagina = raiz.querySelector(`[data-acao="pagina-${tipo}-${sentido}"]`);
+        if (botaoPagina) botaoPagina.addEventListener('click', () =>
+          control.mudarPaginaHistorico(tipo, sentido === 'anterior' ? -1 : 1));
+      });
+    });
+    raiz.querySelectorAll('[data-acao="iniciar-preparo"], [data-acao="marcar-pronto"], [data-acao="voltar-aguardando"]')
       .forEach((botaoAcao) => {
         botaoAcao.addEventListener('click', () => {
-          const acao = botaoAcao.getAttribute('data-acao') === 'iniciar-preparo'
+          const nomeAcao = botaoAcao.getAttribute('data-acao');
+          const acao = nomeAcao === 'iniciar-preparo'
             ? 'iniciar'
-            : 'pronto';
+            : nomeAcao === 'voltar-aguardando' ? 'voltar' : 'pronto';
           control.operarItem(botaoAcao.getAttribute('data-item-id'), acao);
         });
       });
@@ -1400,6 +1881,9 @@
       botaoAcao.addEventListener('click', () => {
         control.cancelarRodada(botaoAcao.getAttribute('data-rodada-id'));
       });
+    });
+    raiz.querySelectorAll('[data-acao="cancelar-item"]').forEach((botaoAcao) => {
+      botaoAcao.addEventListener('click', () => control.cancelarItem(botaoAcao.getAttribute('data-item-id')));
     });
   }
 
@@ -1427,6 +1911,7 @@
     htmlSelecaoUnidade,
     htmlPainel,
     persistirSessao,
+    criarSolicitadorCancelamento,
     criarControlador,
     montarNoNavegador
   };

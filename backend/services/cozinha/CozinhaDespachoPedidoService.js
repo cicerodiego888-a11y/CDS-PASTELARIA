@@ -542,6 +542,25 @@ async function despacharPedidoResolvido({
       mensagem: 'Schema de despacho indisponível.'
     });
   }
+  const schemaComanda = await dbGet(db, `
+    SELECT COUNT(*) AS total FROM sqlite_master WHERE name IN (
+      'cozinha_comanda_snapshots', 'cozinha_comanda_tentativas',
+      'cozinha_comanda_snapshot_imutavel', 'cozinha_comanda_snapshot_nao_excluir',
+      'cozinha_comanda_snapshot_liberar', 'cozinha_comanda_snapshot_vinculo',
+      'ux_cozinha_comanda_tentativa_em_andamento'
+    )
+  `);
+  if (!schemaComanda || Number(schemaComanda.total) !== 7) {
+    return montarResultado({
+      success: false,
+      status: STATUS.BLOQUEADO,
+      codigo: 'SCHEMA_COMANDA_INDISPONIVEL',
+      empresa_id: empId,
+      pedido_id: pedId,
+      bloqueado: true,
+      mensagem: 'A migration da comanda KDS ainda não foi aplicada.'
+    });
+  }
 
   const pedido = await dbGet(db, `
     SELECT id, empresa_id, status, mesa_id, mesa_atendimento_id,
@@ -806,7 +825,10 @@ async function despacharPedidoResolvido({
     }, {
       db,
       // S07-3E: despacho operacional KDS sem autorizar impressão física automática (S06 intacta).
-      omitirEnfileiramentoImpressao: true
+      omitirEnfileiramentoImpressao: true,
+      permitirPedidoFaturado: true,
+      pedidoSnapshotComandaId: pedId,
+      simularFalhaAposSnapshot: opts.simularFalhaAposSnapshot === true
     });
 
     const rodadaId = out && out.rodada && out.rodada.id != null ? Number(out.rodada.id) : null;

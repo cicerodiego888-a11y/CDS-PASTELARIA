@@ -129,6 +129,22 @@ router.post('/itens/:id/iniciar', async (req, res) => {
   }
 });
 
+router.post('/itens/:id/aguardando', async (req, res) => {
+  try {
+    if (!exigirCozinhaOperacional(res)) return;
+    const out = await CozinhaPreparacao.voltarParaAguardando({
+      empresaId: empresaIdDoReqPedido(req),
+      operadorId: operadorDaSessao(req),
+      idempotencyKey: chaveIdempotencia(req),
+      itemId: req.params.id,
+      unidade_id: resolverUnidadeOperacionalReq(req)
+    });
+    return res.status(200).json(out);
+  } catch (err) {
+    return responderErro(res, err);
+  }
+});
+
 router.post('/itens/:id/pronto', async (req, res) => {
   try {
     if (!exigirCozinhaOperacional(res)) return;
@@ -154,6 +170,25 @@ router.post('/rodadas/:id/retirada', async (req, res) => {
       idempotencyKey: chaveIdempotencia(req),
       rodadaId: req.params.id,
       unidade_id: resolverUnidadeOperacionalReq(req)
+    });
+    return res.status(200).json(out);
+  } catch (err) {
+    return responderErro(res, err);
+  }
+});
+
+router.post('/itens/:id/cancelar', async (req, res) => {
+  try {
+    if (!exigirCozinhaOperacional(res)) return;
+    const body = req.body || {};
+    const out = await CozinhaPreparacao.cancelarItem({
+      empresaId: empresaIdDoReqPedido(req),
+      operadorId: operadorDaSessao(req),
+      idempotencyKey: chaveIdempotencia(req),
+      itemId: req.params.id,
+      unidade_id: resolverUnidadeOperacionalReq(req),
+      motivo: body.motivo,
+      justificativa: body.justificativa
     });
     return res.status(200).json(out);
   } catch (err) {
@@ -500,6 +535,12 @@ router.get('/preparacao/painel', async (req, res) => {
     }
 
     const unidadeId = resolverUnidadeOperacionalReq(req);
+    if (q.historico === 'legado') {
+      const legado = await CozinhaKdsPainel.listarHistoricoLegado({
+        empresaId: empresaIdDoReqPedido(req), unidadeId, limite: q.limite, cursor: q.cursor
+      }, { db });
+      return res.status(200).json(legado);
+    }
     const out = await CozinhaKdsPainel.listarPainelPreparacao({
       empresaId: empresaIdDoReqPedido(req),
       unidadeId,
@@ -507,10 +548,27 @@ router.get('/preparacao/painel', async (req, res) => {
       estado_rodada: q.estado_rodada != null ? q.estado_rodada : q.estadoRodada,
       limite: q.limite != null ? q.limite : q.limit,
       offset: q.offset,
+      historico: q.historico,
+      paginacao: q.paginacao,
+      cursor: q.cursor,
+      fila: q.historicos === '1' ? 'ativa' : q.fila,
       incluir_cancelados: q.incluir_cancelados != null
         ? q.incluir_cancelados
         : q.incluirCancelados
     }, { db });
+    if (q.historicos === '1') {
+      const contexto = { empresaId: empresaIdDoReqPedido(req), unidadeId, limite: q.limite, paginacao: q.paginacao };
+      const [retirados, cancelados] = await Promise.all([
+        CozinhaKdsPainel.listarPainelPreparacao({
+          ...contexto, historico: 'retirados', offset: q.offset_retirados, cursor: q.cursor_retirados
+        }, { db }),
+        CozinhaKdsPainel.listarPainelPreparacao({
+          ...contexto, historico: 'cancelados', offset: q.offset_cancelados, cursor: q.cursor_cancelados
+        }, { db })
+      ]);
+      out.historico_retirados = retirados;
+      out.historico_cancelados = cancelados;
+    }
     return res.status(200).json(out);
   } catch (err) {
     return responderErro(res, err);

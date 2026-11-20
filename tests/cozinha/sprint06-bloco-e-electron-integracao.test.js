@@ -137,7 +137,8 @@ async function schemaErpMinimo(db) {
     preco_adicional_snapshot REAL NOT NULL DEFAULT 0)`);
   const info = await garantirSchemaCozinha(db);
   assert.equal(info.operacional, true);
-  assert.equal(COZINHA_SCHEMA_VERSION, 4);
+  assert.equal(info.versao, COZINHA_SCHEMA_VERSION);
+  assert.ok(COZINHA_SCHEMA_VERSION >= 6);
   assert.equal(isCozinhaOperacional(), true);
 }
 
@@ -1034,6 +1035,7 @@ describe('Sprint 06 Bloco E — 2ª rodada E-01/E-02/E-03', () => {
     const worker = obterWorkerImpressaoCozinhaInstalado();
     const tickOrig = worker.tick.bind(worker);
     worker.tick = async () => { throw new Error('boom-teste-tick'); };
+    await integracao.aguardarTickEmCurso();
     const rErr = await integracao.executarTickSeguro();
     assert.equal(rErr.ok, false);
     assert.match(integracao.descrever().ultimo_erro_tick, /boom-teste-tick/);

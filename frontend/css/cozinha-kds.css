@@ -140,7 +140,7 @@
 
 .kds-colunas {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0.75rem;
   padding: 0.75rem 1rem 0;
 }
@@ -197,6 +197,22 @@
   color: #cbd5e1;
   border-top: 2px solid #64748b;
 }
+
+.kds-coluna--cancelados .kds-coluna__cabeca {
+  background: rgba(127, 29, 29, 0.18);
+  color: #fecaca;
+  border-top: 2px solid #9b4545;
+}
+
+.kds-historico { padding: 0.75rem 1rem; }
+.kds-historico__paginacao {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
+}
+.kds-card__cancelamento { margin-top: 0.4rem; color: #fecaca; font-size: 0.72rem; }
 
 .kds-contador {
   min-width: 1.45rem;
@@ -357,6 +373,8 @@
 
 .kds-item__acoes {
   display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
   justify-content: flex-end;
   margin-top: 0.4rem;
 }
@@ -392,6 +410,83 @@
 .kds-btn-operacao--cancelar:hover:not(:disabled) {
   background: #452f2f;
   border-color: #8b5556;
+}
+
+.kds-dialogo-cancelamento {
+  width: min(28rem, calc(100% - 2rem));
+  padding: 1.25rem;
+  border: 1px solid #444d57;
+  border-radius: 6px;
+  background: #161b22;
+  color: #e6edf3;
+  font-family: "Segoe UI", "Trebuchet MS", sans-serif;
+}
+
+.kds-dialogo-cancelamento::backdrop {
+  background: rgba(0, 0, 0, 0.7);
+}
+
+.kds-dialogo-cancelamento__form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.kds-dialogo-cancelamento h2 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.kds-dialogo-cancelamento p {
+  margin: 0 0 0.5rem;
+  color: #9da7b3;
+  font-size: 0.85rem;
+}
+
+.kds-dialogo-cancelamento label {
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.kds-dialogo-cancelamento label span {
+  color: #9da7b3;
+  font-weight: 400;
+}
+
+.kds-dialogo-cancelamento select,
+.kds-dialogo-cancelamento textarea {
+  width: 100%;
+  padding: 0.45rem;
+  border: 1px solid #444d57;
+  border-radius: 5px;
+  background: #0d1117;
+  color: #e6edf3;
+}
+
+.kds-dialogo-cancelamento__erro {
+  color: #e88a8a;
+  font-size: 0.85rem;
+}
+
+.kds-dialogo-cancelamento__acoes {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.kds-dialogo-cancelamento__acoes button {
+  padding: 0.4rem 0.7rem;
+  border: 1px solid #444d57;
+  border-radius: 5px;
+  background: #252d35;
+  color: #e6edf3;
+  cursor: pointer;
+}
+
+.kds-dialogo-cancelamento__acoes .kds-dialogo-cancelamento__confirmar {
+  border-color: #663d3b;
+  background: #352626;
+  color: #e88a8a;
 }
 
 .kds-card__acoes {

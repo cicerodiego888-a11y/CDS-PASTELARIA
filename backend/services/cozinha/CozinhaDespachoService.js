@@ -23,6 +23,7 @@ const {
   classificarItemCozinha
 } = require('./cozinhaClassificacaoItem');
 const CozinhaImpressaoFila = require('./CozinhaImpressaoFilaService');
+const CozinhaComandaSnapshot = require('./CozinhaComandaSnapshotService');
 
 const STATUS_DESPACHAVEIS = new Set(['PEDIDO', 'ABERTO', 'EM_SEPARACAO']);
 
@@ -399,7 +400,7 @@ async function despacharLote(entrada = {}, opts = {}) {
           'PEDIDO_ESTADO_INCOMPATIVEL'
         );
       }
-      if (!STATUS_DESPACHAVEIS.has(status)) {
+      if (!STATUS_DESPACHAVEIS.has(status) && !(status === 'FATURADO' && opts.permitirPedidoFaturado === true)) {
         throw erro(
           'Pedido em estado incompatível com despacho.',
           409,
@@ -625,6 +626,19 @@ async function despacharLote(entrada = {}, opts = {}) {
     }
 
     const rodada = await get(db, `SELECT * FROM cozinha_rodadas WHERE id = ?`, [rodadaId]);
+
+    if (opts && opts.pedidoSnapshotComandaId) {
+      await CozinhaComandaSnapshot.registrar(db, {
+        empresaId,
+        unidadeId,
+        pedidoId: opts.pedidoSnapshotComandaId,
+        rodadaId,
+        chave: idempotencyKey
+      });
+      if (opts.simularFalhaAposSnapshot === true) {
+        throw erro('Falha simulada após snapshot.', 500, 'SIMULAR_FALHA_SNAPSHOT');
+      }
+    }
 
     // Sprint 06 B2: enfileira jobs na MESMA TX (D2=a). Sem print físico.
     // Ausência de estação → aviso IMPRESSAO_SEM_ESTACAO; despacho segue (D5).

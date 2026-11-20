@@ -1856,10 +1856,6 @@ function loadPedidos() {
   async function consultarPedidoDaMesa(ctx) {
     const api = window.CdsMesasConferencia;
     const seq = ++cdsConsultaPedidoSeq;
-    if (conferencia) {
-      conferencia.dispensar();
-      pintarConferencia();
-    }
     try {
       const consulta = await requisitarMesas(`/${ctx.mesa_id}/atendimento`);
       if (seq !== cdsConsultaPedidoSeq) return;
@@ -1897,16 +1893,12 @@ function loadPedidos() {
     } catch (err) {
       if (seq !== cdsConsultaPedidoSeq) return;
       if (!err.codigo) err.rede = true;
-      if (conferencia) {
-        conferencia.dispensar();
-        pintarConferencia();
-      }
       pintarFaixaMesa({
         bloqueado: true,
         numero: ctx.mesa_id,
         situacao: '',
         titulo: 'Mesa do Controle de Mesas',
-        mensagem: err.rede ? 'Não foi possível consultar o pedido. Os dados anteriores não foram mantidos.' : (err.message || 'Não foi possível consultar o pedido.')
+        mensagem: err.rede ? 'Não foi possível consultar o pedido. A conferência anterior foi mantida.' : (err.message || 'Não foi possível consultar o pedido.')
       });
     }
   }
@@ -2163,11 +2155,145 @@ function loadPedidos() {
     return data;
   }
 
+  const janelasComanda = window.cdsJanelasComandaKds || new Map();
+  window.cdsJanelasComandaKds = janelasComanda;
+
+  function abrirPreviaComanda(atual) {
+    const existente = janelasComanda.get(atual.snapshotId);
+    if (existente && !existente.popup.closed) {
+      if (existente.atual === atual) {
+        existente.popup.focus();
+        return;
+      }
+      existente.popup.close();
+    }
+    let popup;
+    try {
+      popup = window.open('', `cds-comanda-kds-${atual.snapshotId}`, 'width=420,height=720');
+      if (!popup) throw new Error('A janela da comanda foi bloqueada.');
+      popup.document.title = 'Prévia da comanda';
+      popup.document.body.innerHTML = `
+        <style>
+          body{margin:0;background:#20242a;color:#fff;font:14px Arial,sans-serif}
+          header{padding:14px;text-align:center;font-weight:bold}
+          iframe{display:block;width:80mm;height:calc(100vh - 180px);min-height:180px;margin:auto;border:0;background:#fff}
+          .acoes{padding:14px;text-align:center}
+          button{padding:9px 14px;margin:4px;cursor:pointer}
+        </style>
+        <header>Prévia da comanda de cozinha</header>
+        <div id="comanda"></div>
+        <div class="acoes"><p id="mensagem">Carregando prévia...</p>
+        <button id="sim" type="button" disabled>Sim, imprimir</button>
+        <button id="nao" type="button">Não, agora não</button></div>`;
+      const doc = popup.document;
+      const quadro = doc.createElement('iframe');
+      quadro.title = 'Prévia da comanda';
+      quadro.setAttribute('sandbox', '');
+      const mensagem = doc.getElementById('mensagem');
+      const sim = doc.getElementById('sim');
+      const nao = doc.getElementById('nao');
+      janelasComanda.set(atual.snapshotId, { popup, atual });
+
+      const timeout = setTimeout(() => {
+        if (conferencia.estado.impressao !== atual || popup.closed) return;
+        atual.etapa = 'falha_previa';
+        atual.html = null;
+        atual.mensagem = 'Não foi possível apresentar a comanda. Tente novamente.';
+        popup.close();
+        pintarConferencia();
+      }, 15000);
+      popup.addEventListener('beforeunload', () => {
+        clearTimeout(timeout);
+        const registro = janelasComanda.get(atual.snapshotId);
+        if (registro && registro.popup === popup) janelasComanda.delete(atual.snapshotId);
+        if (conferencia.estado.impressao === atual && !['imprimindo', 'falha_previa'].includes(atual.etapa)) {
+          conferencia.naoImprimir();
+          pintarConferencia();
+        }
+      }, { once: true });
+      quadro.addEventListener('load', () => {
+        clearTimeout(timeout);
+        if (popup.closed || conferencia.estado.impressao !== atual) return;
+        atual.apresentada = true;
+        mensagem.textContent = 'Deseja imprimir a comanda?';
+        sim.disabled = false;
+      }, { once: true });
+      nao.addEventListener('click', () => popup.close());
+      sim.addEventListener('click', async () => {
+        if (conferencia.estado.impressao !== atual || !atual.apresentada) return;
+        sim.disabled = true;
+        nao.disabled = true;
+        const pendente = conferencia.imprimir();
+        mensagem.textContent = 'Encaminhando impressão...';
+        pintarConferencia();
+        await pendente;
+        if (conferencia.estado.impressao !== atual) return;
+        if (popup.closed) {
+          conferencia.estado.aviso = atual.mensagem;
+          conferencia.naoImprimir();
+          pintarConferencia();
+          return;
+        }
+        mensagem.textContent = atual.mensagem;
+        nao.disabled = false;
+        nao.textContent = 'Fechar';
+        if (atual.etapa === 'falha') {
+          sim.textContent = 'Tentar novamente';
+          sim.disabled = false;
+        }
+        pintarConferencia();
+      });
+      quadro.srcdoc = atual.html;
+      doc.getElementById('comanda').appendChild(quadro);
+      popup.focus();
+    } catch (err) {
+      atual.etapa = 'falha_previa';
+      atual.html = null;
+      atual.mensagem = `Não foi possível abrir a prévia: ${err && err.message ? err.message : String(err)}`;
+      if (popup && !popup.closed) popup.close();
+      janelasComanda.delete(atual.snapshotId);
+      pintarConferencia();
+    }
+  }
+
+  async function carregarComandaKds(pedidoId) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const resp = await fetch(`${API_URL}/pedidos/${pedidoId}/comanda-kds`, {
+        headers: _pedHeaders(),
+        signal: controller.signal
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.mensagem || data.error || 'Comanda indisponível.');
+      return data;
+    } catch (err) {
+      if (controller.signal.aborted) throw new Error('Tempo esgotado ao carregar a comanda. Tente novamente.');
+      throw err;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   const conferencia = window.CdsMesasConferencia
     ? window.CdsMesasConferencia.criarConferencia({
       novaChave: novaChaveIdempotencia,
       fetchJson: (method, path, chave) => enviarPreparacao(method, path, chave),
-      listarPedidos: (mesaId) => requisitarMesas(`/${mesaId}/atendimento/pedidos`)
+      listarPedidos: (mesaId) => requisitarMesas(`/${mesaId}/atendimento/pedidos`),
+      carregarComanda: carregarComandaKds,
+      previaEmJanela: !!window.electronAPI,
+      aoAtualizar: () => pintarConferencia(),
+      imprimirComanda: async (snapshotId) => {
+        if (!window.electronAPI || !window.electronAPI.comandaKds) {
+          throw new Error('Impressão disponível somente no aplicativo Electron.');
+        }
+        const token = localStorage.getItem('token') || '';
+        const empresaId = typeof CdsEmpresaContexto !== 'undefined'
+          && typeof CdsEmpresaContexto.lerEmpresaId === 'function'
+          ? Number(CdsEmpresaContexto.lerEmpresaId()) : 0;
+        await window.electronAPI.comandaKds.configurarSessao(token, empresaId);
+        return window.electronAPI.comandaKds.imprimir(snapshotId);
+      }
     })
     : null;
 
@@ -2175,6 +2301,32 @@ function loadPedidos() {
     const host = document.getElementById('pedConferenciaHost');
     if (!host || !conferencia) return;
     host.innerHTML = conferencia.html();
+    if (conferencia.estado.previaEmJanela && conferencia.estado.impressao
+      && conferencia.estado.impressao.etapa === 'pergunta') {
+      abrirPreviaComanda(conferencia.estado.impressao);
+    }
+    const previa = host.querySelector('iframe[title="Prévia da comanda"]');
+    const confirmacao = host.querySelector('[data-confirmacao-previa]');
+    if (previa && confirmacao) {
+      const atual = conferencia.estado.impressao;
+      confirmacao.hidden = true;
+      const timeout = setTimeout(() => {
+        if (conferencia.estado.impressao !== atual || !host.contains(previa)) return;
+        atual.etapa = 'falha_previa';
+        atual.html = null;
+        atual.mensagem = 'Não foi possível apresentar a comanda. Tente novamente.';
+        pintarConferencia();
+      }, 15000);
+      previa.addEventListener('load', () => {
+        clearTimeout(timeout);
+        if (conferencia.estado.impressao !== atual || !host.contains(previa)) return;
+        confirmacao.hidden = false;
+        if (!atual.apresentada) {
+          atual.apresentada = true;
+          previa.scrollIntoView({ block: 'nearest' });
+        }
+      }, { once: true });
+    }
   }
 
   async function enviarPreparacao(method, path, chave) {
@@ -2842,6 +2994,25 @@ function loadPedidos() {
     const resultado = conferencia.corrigir();
     pintarConferencia();
     if (resultado && resultado.ok) await abrirEditor(resultado.pedidoId);
+  });
+  $('#pedConferenciaHost').on('click', '[data-acao="reimprimir-comanda"]', async () => {
+    if (!conferencia) return;
+    const pendente = conferencia.perguntarImpressao();
+    pintarConferencia();
+    await pendente;
+    pintarConferencia();
+  });
+  $('#pedConferenciaHost').on('click', '[data-acao="nao-imprimir"]', () => {
+    if (!conferencia) return;
+    conferencia.naoImprimir();
+    pintarConferencia();
+  });
+  $('#pedConferenciaHost').on('click', '[data-acao="imprimir-comanda"]', async () => {
+    if (!conferencia) return;
+    const pendente = conferencia.imprimir();
+    pintarConferencia();
+    await pendente;
+    pintarConferencia();
   });
   $('#pedConferenciaHost').on('click', '[data-acao="outro"]', async () => {
     if (!conferencia) return;

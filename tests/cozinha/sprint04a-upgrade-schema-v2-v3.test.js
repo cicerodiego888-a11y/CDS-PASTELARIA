@@ -266,9 +266,9 @@ describe('Sprint 04A — Upgrade schema Cozinha v2 → v3', () => {
       marcarCozinhaOperacional(false);
       const info = await garantirSchemaCozinha(db);
       assert.equal(info.operacional, true);
-      assert.equal(info.versao, 4);
+      assert.equal(info.versao, COZINHA_SCHEMA_VERSION);
       assert.equal(info.migrado_v2_v3, true);
-      assert.equal(await lerVersaoSchema(db), 3);
+      assert.equal(await lerVersaoSchema(db), COZINHA_SCHEMA_VERSION);
       assert.equal(
         checkIdempotenciaAceitaPreparacao(await obterSqlTabela(db, 'cozinha_idempotencia')),
         true
@@ -306,7 +306,7 @@ describe('Sprint 04A — Upgrade schema Cozinha v2 → v3', () => {
       marcarCozinhaOperacional(false);
       const info = await garantirSchemaCozinha(db);
       assert.equal(info.migrado_v2_v3, true);
-      assert.equal(await lerVersaoSchema(db), 3);
+      assert.equal(await lerVersaoSchema(db), COZINHA_SCHEMA_VERSION);
 
       const contDepois = await snapshotContagens(db);
       assert.deepEqual(contDepois, contAntes);
@@ -391,7 +391,7 @@ describe('Sprint 04A — Upgrade schema Cozinha v2 → v3', () => {
       marcarCozinhaOperacional(false);
       const ok = await garantirSchemaCozinha(db);
       assert.equal(ok.operacional, true);
-      assert.equal(await lerVersaoSchema(db), 3);
+      assert.equal(await lerVersaoSchema(db), COZINHA_SCHEMA_VERSION);
       assert.deepEqual(await snapshotIdempotencia(db), idemAntes);
       await close(db);
     });
@@ -410,7 +410,7 @@ describe('Sprint 04A — Upgrade schema Cozinha v2 → v3', () => {
       const cont1 = await snapshotContagens(db);
 
       const info2 = await garantirSchemaCozinha(db);
-      assert.equal(info2.versao, 4);
+      assert.equal(info2.versao, COZINHA_SCHEMA_VERSION);
       assert.equal(info2.migrado_v2_v3, false);
       assert.deepEqual(await snapshotIdempotencia(db), idem1);
       assert.deepEqual(await snapshotContagens(db), cont1);

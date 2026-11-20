@@ -163,7 +163,7 @@ async function schemaErpMinimo(db) {
   `);
   const info = await garantirSchemaCozinha(db);
   assert.equal(info.operacional, true);
-  assert.equal(COZINHA_SCHEMA_VERSION, 4);
+  assert.ok(COZINHA_SCHEMA_VERSION >= 4);
   assert.equal(isCozinhaOperacional(), true);
 }
 

@@ -80,7 +80,7 @@ function close(db) {
 async function preparar(db) {
   await garantirSchemaEmpresasAsync(db);
   await garantirSchemaCozinha(db);
-  assert.equal(COZINHA_SCHEMA_VERSION, 4);
+  assert.ok(COZINHA_SCHEMA_VERSION >= 4);
 
   const e1 = await run(db, `
     INSERT INTO empresas (cnpj, razao_social, nome_fantasia, ativo)
@@ -166,7 +166,7 @@ describe('Sprint 06 Bloco A — UNIQUE codigo_estacao por unidade', () => {
 
     const versaoRegistrada = await lerVersaoSchema(db);
     assert.equal(versaoRegistrada, COZINHA_SCHEMA_VERSION);
-    assert.equal(COZINHA_SCHEMA_VERSION, 4);
+    assert.ok(COZINHA_SCHEMA_VERSION >= 4);
 
     const rowMeta = await get(db, `
       SELECT valor FROM cozinha_schema_meta WHERE chave = 'schema_version'

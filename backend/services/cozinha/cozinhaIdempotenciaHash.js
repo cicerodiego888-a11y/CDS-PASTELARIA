@@ -12,6 +12,9 @@ const TIPOS_OPERACAO = Object.freeze({
   REDUZIR_TETO: 'REDUZIR_TETO',
   DESPACHO_LOTE: 'DESPACHO_LOTE',
   PREPARACAO_INICIADA: 'PREPARACAO_INICIADA',
+  PREPARACAO_REVERTIDA: 'PREPARACAO_REVERTIDA',
+  CANCELAMENTO_RODADA: 'CANCELAMENTO_RODADA',
+  CANCELAMENTO_ITEM: 'CANCELAMENTO_ITEM',
   ITEM_PRONTO: 'ITEM_PRONTO',
   BEBIDA_ENTREGUE: 'BEBIDA_ENTREGUE',
   RETIRADA_CONFIRMADA: 'RETIRADA_CONFIRMADA'
@@ -168,6 +171,27 @@ function montarPayloadSemantico(tipoOperacao, dados = {}) {
       tipo_operacao: TIPOS_OPERACAO.PREPARACAO_INICIADA,
       empresa_id: dados.empresa_id,
       item_id: Number(dados.item_id),
+      responsavel_operador_id: dados.responsavel_operador_id
+    });
+  }
+  if (tipo === TIPOS_OPERACAO.PREPARACAO_REVERTIDA) {
+    return normalizarObjeto({
+      tipo_operacao: TIPOS_OPERACAO.PREPARACAO_REVERTIDA,
+      empresa_id: dados.empresa_id,
+      unidade_id: dados.unidade_id,
+      item_id: Number(dados.item_id),
+      responsavel_operador_id: dados.responsavel_operador_id
+    });
+  }
+  if (tipo === TIPOS_OPERACAO.CANCELAMENTO_RODADA || tipo === TIPOS_OPERACAO.CANCELAMENTO_ITEM) {
+    return normalizarObjeto({
+      tipo_operacao: tipo,
+      empresa_id: dados.empresa_id,
+      unidade_id: dados.unidade_id,
+      rodada_alvo_id: dados.rodada_alvo_id,
+      item_id: dados.item_id,
+      motivo: dados.motivo,
+      justificativa: dados.justificativa,
       responsavel_operador_id: dados.responsavel_operador_id
     });
   }

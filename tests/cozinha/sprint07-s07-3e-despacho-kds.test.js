@@ -221,6 +221,10 @@ async function prepararBase(db) {
   await garantirSchemaDestinoCozinhaPedidos(db);
   await garantirSchemaDespachoPedidoCozinha(db);
   await garantirSchemaMesas(db);
+  await new Promise((resolve, reject) => {
+    const sql = fs.readFileSync(path.join(__dirname, '../../backend/migrations/s07-comanda-impressao.sql'), 'utf8');
+    db.exec(sql, (err) => err ? reject(err) : resolve());
+  });
   marcarCozinhaOperacional(true);
 
   const emp1 = await run(db, `
@@ -370,6 +374,176 @@ describe('S07-3E — isolamento', () => {
 
 describe('S07-3E — despacho controlado', () => {
   beforeEach(() => marcarCozinhaOperacional(false));
+
+  it('bloqueia despacho explicitamente se a migration da comanda estiver ausente', async () => {
+    const db = await openMem();
+    const ctx = await prepararBase(db);
+    const pedidoId = await criarPedidoResolvido(db, ctx);
+    await run(db, 'DROP TRIGGER cozinha_comanda_snapshot_liberar', []);
+    const out = await DespachoPedido.despacharPedidoResolvido({
+      empresaId: ctx.emp1, pedidoId, operadorId: ctx.opId
+    }, { db });
+    assert.equal(out.status, 'BLOQUEADO');
+    assert.equal(out.codigo, 'SCHEMA_COMANDA_INDISPONIVEL');
+    assert.equal((await all(db, 'SELECT id FROM cozinha_rodadas', [])).length, 0);
+    await close(db);
+  });
+
+  it('snapshot aguarda confirmação S07-3E antes de ficar disponível', async () => {
+    const db = await openMem();
+    const ctx = await prepararBase(db);
+    const pedidoId = await criarPedidoResolvido(db, ctx);
+    const item = await get(db, 'SELECT id FROM pedidos_itens WHERE pedido_id = ?', [pedidoId]);
+    const comanda = await run(db, `
+      INSERT INTO cozinha_comandas (empresa_id, atendimento_id, numero_comanda, pedido_id)
+      VALUES (?, ?, 1, ?)
+    `, [ctx.emp1, ctx.atendimentoId, pedidoId]);
+    const chave = 'snapshot-aguardando';
+    await run(db, `
+      INSERT INTO cozinha_pedido_despachos (empresa_id, pedido_id, unidade_id, status, idempotency_key)
+      VALUES (?, ?, ?, 'EM_ANDAMENTO', ?)
+    `, [ctx.emp1, pedidoId, ctx.unA, chave]);
+    const rodada = await CozinhaDespacho.despacharLote({
+      empresaId: ctx.emp1, operadorId: ctx.opId, idempotencyKey: chave,
+      unidade_id: ctx.unA, mesa_id: ctx.mesaId, atendimento_id: ctx.atendimentoId,
+      itens: [{ pedido_id: pedidoId, pedido_item_id: item.id, comanda_id: comanda.lastID, quantidade: 2 }]
+    }, { db, omitirEnfileiramentoImpressao: true, pedidoSnapshotComandaId: pedidoId });
+    const snapshot = await get(db, 'SELECT * FROM cozinha_comanda_snapshots WHERE pedido_id = ?', [pedidoId]);
+    assert.equal(snapshot.disponibilidade, 'AGUARDANDO_DESPACHO');
+    const servico = require('../../backend/services/cozinha/CozinhaComandaSnapshotService');
+    await assert.rejects(servico.obter(db, ctx.emp1, ctx.unA, snapshot.id), /indisponível/);
+    await run(db, `
+      UPDATE cozinha_pedido_despachos SET status = 'CONCLUIDO', rodada_id = ? WHERE pedido_id = ?
+    `, [rodada.rodada.id, pedidoId]);
+    assert.equal((await servico.obter(db, ctx.emp1, ctx.unA, snapshot.id)).id, snapshot.id);
+    await close(db);
+  });
+
+  it('snapshot imutável acompanha a rodada, preserva dados e não duplica no reprocessamento', async () => {
+    const db = await openMem();
+    const ctx = await prepararBase(db);
+    const pedidoId = await criarPedidoResolvido(db, ctx);
+    const entrada = { empresaId: ctx.emp1, pedidoId, operadorId: ctx.opId };
+    const out = await DespachoPedido.despacharPedidoResolvido(entrada, { db });
+    assert.equal(out.status, 'CONCLUIDO');
+    const snapshot = await get(db, 'SELECT * FROM cozinha_comanda_snapshots WHERE rodada_id = ?', [out.rodada_id]);
+    assert.equal(snapshot.disponibilidade, 'DISPONIVEL');
+    const original = JSON.parse(snapshot.conteudo_json);
+    assert.equal(original.mesa_numero, 7);
+    assert.equal(original.garcom, 'Op');
+    assert.equal(original.itens.length, 1);
+    assert.equal(original.itens[0].qty_solicitada_millis, 2000);
+    await run(db, 'UPDATE mesas SET numero = 88 WHERE id = ?', [ctx.mesaId]);
+    await run(db, "UPDATE usuarios SET nome = 'Outro' WHERE id = ?", [ctx.opId]);
+    await assert.rejects(run(db, "UPDATE cozinha_comanda_snapshots SET conteudo_json = '{}' WHERE id = ?", [snapshot.id]), /imutavel/);
+    const repetido = await DespachoPedido.despacharPedidoResolvido(entrada, { db });
+    assert.equal(repetido.repetida, true);
+    const registros = await all(db, 'SELECT * FROM cozinha_comanda_snapshots WHERE pedido_id = ?', [pedidoId]);
+    assert.equal(registros.length, 1);
+    assert.equal(registros[0].conteudo_json, snapshot.conteudo_json);
+    const sql = fs.readFileSync(path.join(__dirname, '../../backend/migrations/s07-comanda-impressao.sql'), 'utf8');
+    await new Promise((resolve, reject) => db.exec(sql, (err) => err ? reject(err) : resolve()));
+    assert.equal((await get(db, 'SELECT conteudo_json FROM cozinha_comanda_snapshots WHERE id = ?', [snapshot.id])).conteudo_json, snapshot.conteudo_json);
+    assert.equal((await all(db, 'PRAGMA foreign_key_check(cozinha_comanda_snapshots)', [])).length, 0);
+    await assert.rejects(run(db, `
+      INSERT INTO cozinha_comanda_tentativas (snapshot_id, empresa_id, unidade_id, operador_id)
+      VALUES (?, ?, ?, ?)
+    `, [snapshot.id, ctx.emp2, ctx.unOutra, ctx.opId]), /FOREIGN KEY/);
+    await close(db);
+  });
+
+  it('congela ingredientes personalizados e sinaliza composição sem evidência confiável', async () => {
+    const db = await openMem();
+    const ctx = await prepararBase(db);
+    await run(db, 'ALTER TABLE pedidos_itens ADD COLUMN personalizacao_ingredientes_snapshot INTEGER DEFAULT 0');
+    await run(db, 'UPDATE produtos SET utiliza_ficha_tecnica = 1 WHERE id = ?', [ctx.produtoId]);
+    const pedidoId = await criarPedidoResolvido(db, ctx);
+    const item = await get(db, 'SELECT id FROM pedidos_itens WHERE pedido_id = ?', [pedidoId]);
+    await run(db, 'UPDATE pedidos_itens SET personalizacao_ingredientes_snapshot = 1 WHERE id = ?', [item.id]);
+    for (const [insumoId, nome, classificacao, selecionado] of [
+      [1, 'Massa', 'OBRIGATORIO_OCULTO', 1],
+      [2, 'Queijo', 'OPCIONAL_COM_ADICIONAL', 1],
+      [3, 'Cebola', 'OPCIONAL', 0]
+    ]) {
+      await run(db, `INSERT INTO pedido_item_ingredientes
+        (pedido_id, pedido_item_id, empresa_id, insumo_id, insumo_nome_snapshot, quantidade_snapshot,
+         unidade_snapshot, classificacao_comercial_snapshot, selecionado)
+        VALUES (?, ?, ?, ?, ?, 0.1, 'kg', ?, ?)`,
+      [pedidoId, item.id, ctx.emp1, insumoId, nome, classificacao, selecionado]);
+    }
+    const out = await DespachoPedido.despacharPedidoResolvido({
+      empresaId: ctx.emp1, pedidoId, operadorId: ctx.opId
+    }, { db });
+    assert.equal(out.status, 'CONCLUIDO');
+    const snapshot = await get(db, 'SELECT conteudo_json FROM cozinha_comanda_snapshots WHERE rodada_id = ?', [out.rodada_id]);
+    const congelado = JSON.parse(snapshot.conteudo_json).itens[0];
+    assert.equal(congelado.tipo_item, 'PASTEL');
+    assert.equal(congelado.composicao_confiavel, true);
+    assert.deepEqual(congelado.ingredientes.map((ing) => [ing.nome, ing.selecionado]),
+      [['Massa', 1], ['Queijo', 1], ['Cebola', 0]]);
+    await run(db, "UPDATE pedido_item_ingredientes SET insumo_nome_snapshot = 'Alterado' WHERE pedido_item_id = ?", [item.id]);
+    assert.equal((await get(db, 'SELECT conteudo_json FROM cozinha_comanda_snapshots WHERE rodada_id = ?', [out.rodada_id])).conteudo_json, snapshot.conteudo_json);
+
+    const outro = await criarPedidoResolvido(db, ctx);
+    const itemOutro = await get(db, 'SELECT id FROM pedidos_itens WHERE pedido_id = ?', [outro]);
+    await run(db, 'UPDATE pedidos_itens SET personalizacao_ingredientes_snapshot = 1 WHERE id = ?', [itemOutro.id]);
+    await run(db, `INSERT INTO pedido_item_ingredientes
+      (pedido_id, pedido_item_id, empresa_id, insumo_id, insumo_nome_snapshot, quantidade_snapshot,
+       unidade_snapshot, classificacao_comercial_snapshot, selecionado)
+      VALUES (?, ?, ?, 1, 'Massa', 0.1, 'kg', 'OBRIGATORIO_OCULTO', 0)`,
+    [outro, itemOutro.id, ctx.emp1]);
+    await run(db, `INSERT INTO pedido_item_ingredientes
+      (pedido_id, pedido_item_id, empresa_id, insumo_id, insumo_nome_snapshot, quantidade_snapshot,
+       unidade_snapshot, classificacao_comercial_snapshot, selecionado)
+      VALUES (?, ?, ?, 2, 'Queijo', 0.1, 'kg', 'OPCIONAL', 1)`,
+    [outro, itemOutro.id, ctx.emp1]);
+    const resultado = await DespachoPedido.despacharPedidoResolvido({
+      empresaId: ctx.emp1, pedidoId: outro, operadorId: ctx.opId
+    }, { db });
+    const incompleto = JSON.parse((await get(db, 'SELECT conteudo_json FROM cozinha_comanda_snapshots WHERE rodada_id = ?', [resultado.rodada_id])).conteudo_json).itens[0];
+    assert.equal(incompleto.composicao_confiavel, false);
+    assert.deepEqual(incompleto.ingredientes, []);
+    await close(db);
+  });
+
+  it('rollback após snapshot desfaz rodada e snapshot, e mantém despacho sem conclusão', async () => {
+    const db = await openMem();
+    const ctx = await prepararBase(db);
+    const pedidoId = await criarPedidoResolvido(db, ctx);
+    const out = await DespachoPedido.despacharPedidoResolvido({
+      empresaId: ctx.emp1, pedidoId, operadorId: ctx.opId
+    }, { db, simularFalhaAposSnapshot: true });
+    assert.equal(out.status, 'FALHA');
+    assert.equal((await all(db, 'SELECT id FROM cozinha_rodadas', [])).length, 0);
+    assert.equal((await all(db, 'SELECT id FROM cozinha_comanda_snapshots', [])).length, 0);
+    await close(db);
+  });
+
+  it('disponibilidade exige despacho correspondente e pedido adicional contém apenas seus itens', async () => {
+    const db = await openMem();
+    const ctx = await prepararBase(db);
+    const primeiro = await criarPedidoResolvido(db, ctx);
+    const a = await DespachoPedido.despacharPedidoResolvido({
+      empresaId: ctx.emp1, pedidoId: primeiro, operadorId: ctx.opId
+    }, { db });
+    const segundo = await criarPedidoResolvido(db, ctx);
+    await run(db, "UPDATE pedidos_itens SET produto_nome_snapshot = 'Pastel adicional' WHERE pedido_id = ?", [segundo]);
+    const b = await DespachoPedido.despacharPedidoResolvido({
+      empresaId: ctx.emp1, pedidoId: segundo, operadorId: ctx.opId
+    }, { db });
+    assert.equal(b.status, 'CONCLUIDO');
+    const adicional = await get(db, 'SELECT * FROM cozinha_comanda_snapshots WHERE rodada_id = ?', [b.rodada_id]);
+    const itens = JSON.parse(adicional.conteudo_json).itens;
+    assert.equal(itens.length, 1);
+    assert.equal(itens[0].nome, 'Pastel adicional');
+    assert.notEqual(a.rodada_id, b.rodada_id);
+    const servico = require('../../backend/services/cozinha/CozinhaComandaSnapshotService');
+    await assert.rejects(servico.obter(db, ctx.emp2, ctx.unA, adicional.id), /indisponível/);
+    await assert.rejects(servico.obter(db, ctx.emp1, ctx.unB, adicional.id), /indisponível/);
+    await run(db, "UPDATE cozinha_pedido_despachos SET status = 'FALHA' WHERE pedido_id = ?", [segundo]);
+    await assert.rejects(servico.obter(db, ctx.emp1, ctx.unA, adicional.id), /indisponível/);
+    await close(db);
+  });
 
   it('1) RESOLVIDO despacha para a unidade correta', async () => {
     const db = await openMem();
@@ -561,6 +735,8 @@ describe('S07-3E — despacho controlado', () => {
     const nItens = await get(db, `SELECT COUNT(*) AS n FROM cozinha_itens WHERE pedido_id = ?`, [pedidoId]);
     assert.equal(Number(nRod.n), 1);
     assert.equal(Number(nItens.n), 1);
+    const nSnapshots = await get(db, 'SELECT COUNT(*) AS n FROM cozinha_comanda_snapshots WHERE pedido_id = ?', [pedidoId]);
+    assert.equal(Number(nSnapshots.n), 1);
 
     const ctrl = await get(db, `
       SELECT status FROM cozinha_pedido_despachos WHERE empresa_id = ? AND pedido_id = ?
@@ -1009,6 +1185,88 @@ describe('S07-3F — integração HTTP ERP → KDS', () => {
       else delete require.cache[dbModulePath];
     }
     if (dbHttp) await close(dbHttp);
+  });
+
+  it('comanda HTTP exige vínculo e unidade, registra tentativas e bloqueia concorrência', async () => {
+    const pedidoId = await criarPedidoResolvido(dbHttp, ctx);
+    const despacho = await DespachoPedido.despacharPedidoResolvido({
+      empresaId: ctx.emp1, pedidoId, operadorId: ctx.opId
+    }, { db: dbHttp });
+    assert.equal(despacho.status, 'CONCLUIDO');
+    const authUnidade = require('../../backend/services/cozinha/cozinhaAuthUnidade');
+    await authUnidade.garantirTabelaOperadorUnidades(dbHttp);
+    const chamar = (metodo, caminho, token, empresa, body) => new Promise((resolve, reject) => {
+      const payload = body == null ? null : JSON.stringify(body);
+      const url = new URL(caminho, baseUrl);
+      const req = http.request(url, {
+        method: metodo,
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          'X-Empresa-Id': String(empresa),
+          'Content-Type': 'application/json',
+          ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {})
+        }
+      }, (res) => {
+        let texto = '';
+        res.setEncoding('utf8');
+        res.on('data', (chunk) => { texto += chunk; });
+        res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(texto) }));
+      });
+      req.on('error', reject);
+      req.end(payload);
+    });
+    const caminho = `/api/pedidos/${pedidoId}/comanda-kds`;
+    assert.equal((await chamar('GET', caminho, null, ctx.emp1)).status, 401);
+    assert.equal((await chamar('GET', caminho, tokenOperador, ctx.emp1)).status, 403);
+    await run(dbHttp, `
+      INSERT INTO cozinha_operador_unidades (empresa_id, operador_id, unidade_id, ativo)
+      VALUES (?, ?, ?, 1)
+    `, [ctx.emp1, ctx.opId, ctx.unA]);
+    const tokenOutraUnidade = jwt.sign({
+      id: ctx.opId, role: 'operador', perfil: 'USUARIO', unidade_cozinha_id: ctx.unB
+    }, process.env.JWT_SECRET, { expiresIn: '1h' });
+    assert.equal((await chamar('GET', caminho, tokenOutraUnidade, ctx.emp1)).status, 403);
+    assert.equal((await chamar('GET', caminho, tokenOperador, ctx.emp2)).status, 403);
+    const ref = await chamar('GET', caminho, tokenOperador, ctx.emp1);
+    assert.equal(ref.status, 200);
+    const base = `/api/pedidos/comanda-kds/${ref.body.snapshot_id}/tentativas`;
+    const tentativa = await chamar('POST', base, tokenOperador, ctx.emp1, {});
+    assert.equal(tentativa.status, 201);
+    assert.equal(tentativa.body.snapshot.pedido_id, pedidoId);
+    assert.equal(ref.body.html, require('../../electron-comanda-kds').htmlComanda(tentativa.body.snapshot));
+    assert.equal((await chamar('POST', base, tokenOperador, ctx.emp1, {})).status, 409);
+    const final = await chamar('POST', `${base}/${tentativa.body.tentativa_id}`, tokenOperador, ctx.emp1, {
+      estado: 'FALHA', detalhe: 'simulada'
+    });
+    assert.equal(final.status, 200);
+    const retry = await chamar('POST', base, tokenOperador, ctx.emp1, {});
+    assert.equal(retry.status, 201);
+    assert.deepEqual(retry.body.snapshot, tentativa.body.snapshot);
+    assert.equal((await chamar('POST', `${base}/${retry.body.tentativa_id}`, tokenOperador, ctx.emp1, {
+      estado: 'ACEITA_PELO_SPOOLER'
+    })).status, 200);
+  });
+
+  it('envia pedido faturado sem alterar estado comercial e reprocessa sem duplicar rodada', async () => {
+    const criado = await postPedido({
+      mesa_id: ctx.mesaId,
+      total: 20,
+      itens: [{ produto_id: ctx.produtoId, quantidade: 2, preco_unitario: 10, subtotal: 20 }]
+    }, `s07-3f-faturado-${Date.now()}`);
+    assert.equal(criado.status, 201, JSON.stringify(criado.body));
+    const pedidoId = Number(criado.body.pedido.id);
+    await run(dbHttp, "UPDATE pedidos SET status = 'FATURADO' WHERE id = ?", [pedidoId]);
+    const envio = await postPreparacao(pedidoId, `s07-3f-faturado-envio-${Date.now()}`);
+    assert.equal(envio.status, 200, JSON.stringify(envio.body));
+    assert.equal(envio.body.despacho.status, 'CONCLUIDO', JSON.stringify(envio.body.despacho));
+    const repetido = await postPreparacao(pedidoId, `s07-3f-faturado-retry-${Date.now()}`);
+    assert.equal(repetido.body.despacho.status, 'CONCLUIDO');
+    assert.equal(repetido.body.despacho.repetida, true);
+    assert.equal((await get(dbHttp, 'SELECT status FROM pedidos WHERE id = ?', [pedidoId])).status, 'FATURADO');
+    assert.equal((await get(dbHttp, 'SELECT COUNT(*) AS n FROM cozinha_rodadas WHERE idempotency_key_despacho = ?', [
+      DespachoPedido.chaveIdempotenciaPedido(ctx.emp1, pedidoId)
+    ])).n, 1);
+    assert.equal((await get(dbHttp, 'SELECT COUNT(*) AS n FROM cozinha_comanda_snapshots WHERE pedido_id = ?', [pedidoId])).n, 1);
   });
 
   it('POST /api/pedidos cria sem despacho; envio explícito despacha e leitura KDS isola unidades', async () => {

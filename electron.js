@@ -1,4 +1,6 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const singleInstanceLock = process.argv.includes('--cds-impressao-cupom')
+  || app.requestSingleInstanceLock();
 const { spawn } = require('child_process');
 const { resolverIconeJanela } = require('./electron-icon');
 const path = require('path');
@@ -6,6 +8,7 @@ const fs = require('fs');
 const http = require('http');
 const net = require('net');
 const os = require('os');
+const comandaKds = require('./electron-comanda-kds');
 const { tratarFalhaConexaoRemota, aplicarRecuperacaoModoLocal } = require('./electron-rede-recuperacao');
 const { iniciarConexaoClienteRemoto, confirmarModoLocalEmergencia } = require('./electron-rede-cliente');
 const {
@@ -45,6 +48,16 @@ app.commandLine.appendSwitch('disable-features', 'UseSkiaRenderer');
 
 let mainWindow;
 let backendBaseUrl = null;
+if (!singleInstanceLock) {
+  console.warn('[APP] Já existe uma instância em execução; a segunda será encerrada.');
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  });
+}
 const { criarControladorAbrirPdv } = require('./electron-abrir-pdv');
 const controladorAbrirPdv = criarControladorAbrirPdv({
   BrowserWindow,
@@ -70,6 +83,18 @@ const controladorAbrirPdv = criarControladorAbrirPdv({
 });
 controladorAbrirPdv.registrar(ipcMain);
 let impressaoCupomAtiva = false;
+
+const imprimirComanda = comandaKds.criarImpressaoComanda({
+  requisitarBackend: (caminho, sessao, method, body) =>
+    comandaKds.requisitar(backendBaseUrl, caminho, sessao, method, body),
+  imprimir: (html, device) => comandaKds.imprimirNoElectron(BrowserWindow, html, device)
+});
+comandaKds.registrarIpcComanda({
+  ipcMain,
+  obterJanela: () => mainWindow,
+  obterBaseUrl: () => backendBaseUrl,
+  imprimirSnapshot: imprimirComanda
+});
 
 function obterJobImpressaoCupom() {
   const indice = process.argv.indexOf('--cds-impressao-cupom');
@@ -866,7 +891,7 @@ function createWindowRemote(remoteUrl, configServidor = {}) {
 }
 
 
-app.whenReady().then(() => {
+if (singleInstanceLock) app.whenReady().then(() => {
   const jobImpressao = obterJobImpressaoCupom();
   if (jobImpressao) {
     executarJobImpressaoCupom(jobImpressao);
