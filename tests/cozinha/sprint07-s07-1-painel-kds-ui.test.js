@@ -12,6 +12,7 @@ const fs = require('fs');
 const path = require('path');
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
+const CozinhaPreparacao = require('../../backend/services/cozinha/CozinhaPreparacaoService');
 
 process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
 process.env.CDS_TEST_ISOLATION = '1';
@@ -149,6 +150,76 @@ function montar(fetchJson, extra = {}) {
 }
 
 describe('S07-1 — distribuição e FIFO', () => {
+  it('separa pedidos comerciais cancelados e bloqueia ações de preparo, entrega e retirada', () => {
+    const rodada = {
+      ...fixtureRodadas()[2],
+      itens: [{
+        ...fixtureRodadas()[2].itens[0],
+        tipo_item: 'BEBIDA',
+        pedido_id: 146,
+        pedido_status: 'CANCELADO',
+        qty_pendente_retirada: '1.000',
+        qty_entregue: '1.000',
+        qty_disponivel_retirada: '1.000',
+        qty_pendente_entrega: '0.000'
+      }]
+    };
+    const html = kds.htmlPainel({
+      mostrarPedidosCancelados: true,
+      rodadas: [rodada],
+      distribuicao: kds.distribuirPorEstado([rodada])
+    }, AGORA);
+    assert.match(html, /pedidos comerciais cancelados/i);
+    assert.match(html, /Pedido comercial cancelado/);
+    assert.match(html, /data-acao="cancelar-item"/);
+    assert.doesNotMatch(html, /data-acao="confirmar-retirada-item"/);
+    assert.doesNotMatch(html, /data-acao="entregar-bebida"/);
+  });
+
+  it('converte quantidades exibidas sem arredondar precisão inválida', () => {
+    assert.equal(kds.parsearMilessimosUI('1,000'), 1000);
+    assert.equal(kds.parsearMilessimosUI('0.125'), 125);
+    assert.equal(kds.parsearMilessimosUI('1.0001'), null);
+    assert.equal(kds.parsearMilessimosUI(''), null);
+    assert.deepEqual(CozinhaPreparacao.normalizarQuantidadeEntrega({ qty_millis: 1000 }), {
+      qtyMillis: 1000,
+      qtyDecimal: '1.000'
+    });
+
+    assert.deepEqual(CozinhaPreparacao.normalizarQuantidadeEntrega({ qty_entregue: '1.000' }), {
+      qtyMillis: 1000,
+      qtyDecimal: '1.000'
+    });
+    assert.throws(
+      () => CozinhaPreparacao.normalizarQuantidadeEntrega({ qty_entregue: '' }),
+      { codigo: 'QTY_PRECISAO_INVALIDA' }
+    );
+    assert.throws(
+      () => CozinhaPreparacao.normalizarQuantidadeEntrega({ qty_entregue: '1.0001' }),
+      { codigo: 'QTY_PRECISAO_INVALIDA' }
+    );
+    assert.throws(
+      () => CozinhaPreparacao.normalizarQuantidadeEntrega({ qty_millis: 1.5 }),
+      { codigo: 'QTY_PRECISAO_INVALIDA' }
+    );
+  });
+
+  it('envia a opção de consulta dos pedidos comerciais cancelados ao alternar a visualização', async () => {
+    const chamadas = [];
+    const { control } = montar(async (_method, path) => {
+      chamadas.push(path);
+      return { success: true, empresa_id: 1, unidade_id: 3, rodadas: [] };
+    });
+    await control.iniciar();
+    await control.alternarPedidosCancelados();
+    assert.equal(control.estado.mostrarPedidosCancelados, true);
+    assert.match(chamadas[chamadas.length - 1], /incluir_pedidos_cancelados=1/);
+    await control.alternarPedidosCancelados();
+    assert.equal(control.estado.mostrarPedidosCancelados, false);
+    assert.match(chamadas[chamadas.length - 1], /incluir_pedidos_cancelados=0/);
+    control.parar();
+  });
+
   it('distribui cartões por estado do item e ordena FIFO', () => {
     const dist = kds.distribuirPorEstado(fixtureRodadas());
     assert.equal(dist.AGUARDANDO.length, 2);
@@ -168,6 +239,8 @@ describe('S07-1 — distribuição e FIFO', () => {
 
   it('renderiza cabeçalho, colunas, itens e observações', () => {
     const dist = kds.distribuirPorEstado(fixtureRodadas());
+    const rodadaPreparacao = dist.EM_PREPARACAO[0];
+    rodadaPreparacao.itens[0].iniciado_em = '2026-11-17T21:02:00Z';
     const html = kds.htmlPainel({
       empresaId: 1,
       empresaRotulo: 'Pastelaria Centro',
@@ -198,12 +271,17 @@ describe('S07-1 — distribuição e FIFO', () => {
     assert.match(html, /data-acao="marcar-pronto"/);
     assert.match(html, /MARCAR COMO PRONTO/);
     assert.match(html, /Concluído às/);
+    assert.match(html, /Preparação concluída às 18:00:00/);
+    assert.match(html, /Preparo iniciado às 18:02:00/);
+    assert.match(html, /Concluído às 17:49:00/);
+    assert.match(html, /Chegada 17:58:00/);
+    assert.match(html, /Última atualização: <strong data-kds-ultima>17\/11\/2026 21:10:00<\/strong>/);
+    assert.doesNotMatch(html, /UTC/);
     assert.match(html, /Operador #7/);
     assert.match(html, /CDS Sistemas/);
     assert.match(html, /Tempo total/);
     assert.match(html, /Espera do garçom/);
-    assert.match(html, /data-acao="confirmar-retirada"/);
-    assert.match(html, /CONFIRMAR RETIRADA/);
+    assert.doesNotMatch(html, /data-acao="confirmar-retirada"/);
     assert.match(html, /Responsável #6/);
     assert.doesNotMatch(html, /dual-write/i);
   });
@@ -248,6 +326,7 @@ describe('S07-1 — distribuição e FIFO', () => {
     const rodadas = fixtureRodadas();
     const retirada = rodadas.find((r) => r.id === 12);
     retirada.retirada_estado = 'RETIRADA';
+    retirada.retirada_confirmada_por_ledger = true;
     retirada.retirada_em = '2026-11-17T21:10:00Z';
     retirada.retirada_por = 7;
     const cancelada = {
@@ -270,9 +349,9 @@ describe('S07-1 — distribuição e FIFO', () => {
     }));
     await control.iniciar();
     assert.match(control.html(), /data-coluna="RETIRADO"/);
-    assert.match(control.html(), /Retirada confirmada às 21:10:00 UTC/);
-    assert.match(control.html(), /Retirado na rodada às 21:10:00 UTC/);
-    assert.match(control.html(), /Responsável #7/);
+    assert.match(control.html(), /Retirada integral confirmada no ledger/);
+    assert.doesNotMatch(control.html(), /Estado legado da rodada marcado como retirada/);
+    assert.match(control.html(), /Operador #7/);
     assert.doesNotMatch(control.html(), /Faltou massa/);
     await control.alternarHistoricoCancelados();
     const html = control.html();
@@ -280,7 +359,7 @@ describe('S07-1 — distribuição e FIFO', () => {
     assert.match(html, /Faltou massa/);
     assert.match(html, /Estado anterior: EM_PREPARACAO/);
     assert.match(html, /Operador: #8/);
-    assert.match(html, /17\/11\/2026 21:04:00 UTC/);
+    assert.match(html, /17\/11\/2026 18:04:00/);
     const tempos = kds.calcularTemposItem(control.estado.cancelados[0], control.estado.cancelados[0].itens[0], AGORA);
     assert.equal(tempos.chegadaFim, '2026-11-17T21:04:00Z');
     assert.equal(tempos.preparoFim, '2026-11-17T21:04:00Z');
@@ -678,7 +757,12 @@ describe('S07-1 — distribuição e FIFO', () => {
     assert.equal(aguardando.espera, 300);
     assert.equal(aguardando.preparo, 420);
     assert.equal(aguardando.espera + aguardando.preparo, 12 * 60);
-    const retirado = { ...card, retirada_estado: 'RETIRADA', retirada_em: '2026-01-01T20:14:00Z' };
+    const retirado = {
+      ...card,
+      retirada_estado: 'RETIRADA',
+      retirada_confirmada_por_ledger: true,
+      retirada_em: '2026-01-01T20:14:00Z'
+    };
     for (const instante of ['2026-01-01T20:14:00Z', '2026-01-01T21:00:00Z']) {
       const tempos = kds.calcularTemposItem(retirado, item, new Date(instante));
       assert.equal(tempos.esperaGarcom, 120);
@@ -710,7 +794,8 @@ describe('S07-1 — distribuição e FIFO', () => {
 
   it('soma tentativas, congela retirada e identifica lacunas nos eventos', () => {
     const card = { enviada_em: '2026-01-01T20:00:00Z', rodada_pronta_em: '2026-01-01T20:12:00Z',
-      retirada_estado: 'RETIRADA', retirada_em: '2026-01-01T20:15:00Z' };
+      retirada_estado: 'RETIRADA', retirada_confirmada_por_ledger: true,
+      retirada_em: '2026-01-01T20:15:00Z' };
     const eventos = [
       { tipo: 'PREPARACAO_INICIADA', em: '2026-01-01T20:02:00Z' },
       { tipo: 'PREPARACAO_REVERTIDA', em: '2026-01-01T20:05:00Z' },
@@ -723,12 +808,16 @@ describe('S07-1 — distribuição e FIFO', () => {
     assert.equal(tempos.preparo, 420);
     assert.equal(tempos.chegada, 900);
     assert.equal(tempos.esperaGarcom, 180);
-    const aguardando = kds.calcularTemposItem({ ...card, retirada_estado: 'PENDENTE', retirada_em: null },
+    const aguardando = kds.calcularTemposItem({
+      ...card, retirada_estado: 'PENDENTE', retirada_confirmada_por_ledger: false, retirada_em: null
+    },
       { estado_preparacao: 'AGUARDANDO', eventos_preparacao: eventos.slice(0, 2) },
       new Date('2026-01-01T20:07:00Z'));
     assert.equal(aguardando.espera, 240);
     assert.equal(aguardando.preparo, 180);
-    const ativo = kds.calcularTemposItem({ ...card, retirada_estado: 'PENDENTE', retirada_em: null },
+    const ativo = kds.calcularTemposItem({
+      ...card, retirada_estado: 'PENDENTE', retirada_confirmada_por_ledger: false, retirada_em: null
+    },
       { ...item, estado_preparacao: 'EM_PREPARACAO', eventos_preparacao: eventos.slice(0, 3) },
       new Date('2026-01-01T20:10:00Z'));
     assert.equal(ativo.espera, 300);
@@ -742,7 +831,8 @@ describe('S07-1 — distribuição e FIFO', () => {
     kds.atualizarCronometros({ querySelectorAll: () => [elemento] }, Date.parse('2026-01-01T20:10:00Z'));
     assert.equal(elemento.textContent, '00:05:00');
     const cancelado = kds.calcularTemposItem({
-      ...card, retirada_estado: 'PENDENTE', historico_cancelamento: true, cancelamento_em: '2026-01-01T20:10:00Z'
+      ...card, retirada_estado: 'PENDENTE', retirada_confirmada_por_ledger: false,
+      historico_cancelamento: true, cancelamento_em: '2026-01-01T20:10:00Z'
     }, { estado_preparacao: 'CANCELADO', eventos_preparacao: [
       ...eventos.slice(0, 3), { tipo: 'ITEM_CANCELADO', em: '2026-01-01T20:10:00Z', estado_anterior: 'EM_PREPARACAO' }
     ] }, new Date('2026-01-01T21:00:00Z'));
@@ -809,6 +899,7 @@ describe('S07-1 — distribuição e FIFO', () => {
     const eventoRodada = control.estado.cancelados.find((c) => c.historico_tipo === 'rodada');
     assert.equal(eventoRodada.cancelamento_justificativa, 'Justificativa da rodada');
     rodada.retirada_estado = 'RETIRADA';
+    rodada.retirada_confirmada_por_ledger = true;
     rodada.retirada_em = '2026-11-17T21:10:00Z';
     rodada.cancelamento_evento = null;
     await control.atualizarHistoricos();
@@ -817,9 +908,12 @@ describe('S07-1 — distribuição e FIFO', () => {
     assert.doesNotMatch(control.html(), /Retirada confirmada às/);
   });
 
-  it('calcula durações usando timestamps UTC sem somar tempos paralelos', () => {
-    assert.equal(kds.formatarHora('2026-11-17 20:58:00'), '20:58:00');
-    assert.equal(kds.formatarHora('2026-11-17T17:58:00-03:00'), '20:58:00');
+  it('formata timestamps em America/Fortaleza e mantém durações em tempo absoluto', () => {
+    assert.equal(kds.formatarHora('2026-11-20 04:51:39'), '01:51:39');
+    assert.equal(kds.formatarDataHoraLocal(new Date('2026-11-20T04:51:39Z')), '20/11/2026 01:51:39');
+    assert.equal(kds.formatarDataHoraLocal(new Date('2026-11-20T02:10:00Z')), '19/11/2026 23:10:00');
+    assert.equal(kds.formatarHora('2026-11-17 20:58:00'), '17:58:00');
+    assert.equal(kds.formatarHora('2026-11-17T17:58:00-03:00'), '17:58:00');
     assert.equal(kds.segundosEntre(
       '2026-11-17 20:00:00',
       '2026-11-17 20:05:00'
@@ -830,6 +924,7 @@ describe('S07-1 — distribuição e FIFO', () => {
       enviada_em: '2026-11-17 20:00:00',
       rodada_pronta_em: '2026-11-17 20:20:00',
       retirada_estado: 'RETIRADA',
+      retirada_confirmada_por_ledger: true,
       retirada_em: '2026-11-17 20:24:00'
     }, {
       estado_preparacao: 'PRONTO',
@@ -840,6 +935,10 @@ describe('S07-1 — distribuição e FIFO', () => {
     assert.equal(tempos.espera, 300);
     assert.equal(tempos.preparo, 600);
     assert.equal(tempos.esperaGarcom, 240);
+    assert.equal(tempos.chegadaEm, '2026-11-17 20:00:00');
+    assert.equal(tempos.preparoInicio, '2026-11-17 20:05:00');
+    assert.equal(tempos.preparoFim, '2026-11-17 20:15:00');
+    assert.equal(tempos.chegadaFim, '2026-11-17 20:24:00');
     assert.equal(kds.calcularTemposItem({
       created_at: '2026-11-17 20:00:00'
     }, {
@@ -847,8 +946,13 @@ describe('S07-1 — distribuição e FIFO', () => {
     }, new Date('2026-11-17T20:05:00Z')).chegada, null);
   });
 
-  it('renderiza uma única ação de retirada por rodada com vários estados de item', () => {
+  it('renderiza retirada individual mesmo quando a rodada tem estado legado RETIRADA', () => {
     const rodadas = fixtureRodadas();
+    const rodada = rodadas.find((item) => item.id === 12);
+    rodada.retirada_estado = 'RETIRADA';
+    rodada.retirada_em = '2026-11-17T21:10:00Z';
+    rodada.itens[0].qty_retirada_liquida = '0';
+    rodada.itens[0].qty_pendente_retirada = '1.5';
     rodadas.find((rodada) => rodada.id === 12).itens.push({
       id: 302,
       numero_comanda: 99,
@@ -866,9 +970,11 @@ describe('S07-1 — distribuição e FIFO', () => {
       erro: ''
     }, AGORA);
     assert.equal(
-      [...html.matchAll(/data-acao="confirmar-retirada" data-rodada-id="12"/g)].length,
+      [...html.matchAll(/data-acao="confirmar-retirada-item" data-item-id="301"/g)].length,
       1
     );
+    assert.match(html, /Estado legado da rodada marcado como retirada.*não comprova retirada individual/);
+    assert.doesNotMatch(html, /data-acao="confirmar-retirada" data-rodada-id="12"/);
   });
 
   it('estado vazio exibe mensagem por coluna', () => {
@@ -978,10 +1084,14 @@ describe('S07-1 — consumo API e atualização', () => {
     assert.deepEqual(confirmacoes, []);
   });
 
-  it('conclusão e retirada ocorrem sem solicitar confirmação', async () => {
+  it('não usa RETIRADA legado como prova para ocultar a retirada individual', async () => {
     const rodadas = fixtureRodadas();
     const posts = [];
     const confirmacoes = [];
+    const itemRetirado = rodadas.find((r) => r.id === 12).itens[0];
+    itemRetirado.qty_retirada_liquida = '0';
+    itemRetirado.qty_pendente_retirada = '1.5';
+    rodadas.find((r) => r.id === 12).retirada_estado = 'RETIRADA';
     const { control } = montar(async (method, path, body) => {
       if (method === 'GET') return { success: true, empresa_id: 1, unidade_id: 3, rodadas };
       posts.push({ path, body });
@@ -990,14 +1100,7 @@ describe('S07-1 — consumo API e atualização', () => {
         item.estado_preparacao = 'PRONTO';
         return { success: true, item: { id: 102, estado_preparacao: 'PRONTO' } };
       }
-      const rodada = rodadas.find((r) => r.id === 12);
-      rodada.retirada_estado = 'RETIRADA';
-      rodada.retirada_em = '2026-11-17 21:10:00';
-      rodada.retirada_por = 7;
-      return { success: true, rodada: {
-        id: 12, estado_preparacao: 'PRONTA', retirada_estado: 'RETIRADA',
-        retirada_em: rodada.retirada_em, retirada_por: 7
-      } };
+      return { success: true, cozinha_item_id: 301, qty_millis: 1000 };
     }, {
       confirmar: mensagem => { confirmacoes.push(mensagem); return false; },
       gerarChaveIdempotencia: (acao, id) => `teste:${acao}:${id}`
@@ -1005,14 +1108,106 @@ describe('S07-1 — consumo API e atualização', () => {
 
     await control.iniciar();
     assert.equal((await control.operarItem(102, 'pronto')).ok, true);
-    assert.equal((await control.confirmarRetirada(12)).ok, true);
+    assert.equal((await control.confirmarRetiradaItem(301)).ok, true);
     assert.deepEqual(posts.map((post) => post.path), [
-      '/cozinha/itens/102/pronto', '/cozinha/rodadas/12/retirada'
+      '/cozinha/itens/102/pronto', '/cozinha/itens/301/retirada-ledger'
     ]);
-    assert.equal(posts[1].body.idempotency_key, 'teste:retirada:12');
+    assert.equal(posts[1].body.idempotency_key, 'teste:retirada-item:301');
+    assert.deepEqual(posts[1].body, { idempotency_key: 'teste:retirada-item:301' });
     assert.deepEqual(confirmacoes, []);
-    assert.equal(control.estado.distribuicao.RETIRADO[0].retirada_estado, 'RETIRADA');
-    assert.equal(control.estado.distribuicao.RETIRADO[0].retirada_por, 7);
+    assert.equal(control.estado.distribuicao.RETIRADO.some((rodada) => rodada.id === 12), false);
+    assert.equal(control.estado.distribuicao.PRONTO.some((rodada) => rodada.id === 12), true);
+  });
+
+  it('mostra o saldo restante sem edição e o backend processa os milésimos pendentes', async () => {
+    const rodadas = fixtureRodadas();
+    const rodada = rodadas.find((item) => item.id === 12);
+    const item = rodada.itens[0];
+    item.qty_retirada_liquida = '1.000';
+    item.qty_pendente_retirada = '0.500';
+    let retirada = 1000;
+    const { control } = montar(async (method, path, body) => {
+      if (method === 'GET') return { success: true, empresa_id: 1, unidade_id: 3, rodadas };
+      retirada += 500;
+      item.qty_retirada_liquida = '1.500';
+      item.qty_pendente_retirada = '0.000';
+      rodada.retirada_estado = 'RETIRADA';
+      rodada.retirada_confirmada_por_ledger = true;
+      assert.deepEqual(body, { idempotency_key: 'teste:retirada-item:301' });
+      return { success: true, cozinha_item_id: 301, qty_millis: 500 };
+    }, {
+      gerarChaveIdempotencia: (acao, id) => `teste:${acao}:${id}`
+    });
+
+    await control.iniciar();
+    const html = control.html();
+    assert.match(html, /<output>0,500<\/output>/);
+    assert.doesNotMatch(html, /data-quantidade-(?:retirada|entrega)/);
+    assert.equal((html.match(/<input\b/g) || []).length, 0);
+    assert.equal((await control.confirmarRetiradaItem(301)).ok, true);
+    assert.equal(retirada, 1500);
+    assert.equal(control.estado.distribuicao.RETIRADO.some((cartao) => cartao.id === 12), true);
+    assert.equal(control.estado.distribuicao.PRONTO.some((cartao) => cartao.id === 12), false);
+  });
+
+  it('envia apenas a intenção de entrega e exibe saldo calculado em milésimos', async () => {
+    const rodadas = fixtureRodadas();
+    const rodada = rodadas.find((item) => item.id === 10);
+    rodada.estado_preparacao = 'PRONTA';
+    const bebida = rodada.itens.find((item) => item.id === 102);
+    bebida.estado_preparacao = 'PRONTO';
+    bebida.qty_pendente_entrega = '1.000';
+    bebida.qty_pendente_retirada = '1.000';
+    bebida.qty_disponivel_retirada = '0';
+    const posts = [];
+    const { control } = montar(async (method, path, body) => {
+      if (method === 'GET') return { success: true, empresa_id: 1, unidade_id: 3, rodadas };
+      posts.push({ path, body });
+      bebida.qty_pendente_entrega = '0';
+      bebida.qty_disponivel_retirada = '1';
+      return {
+        success: true,
+        entrega: { qty_entregue: '1.000', qty_restante: '0.000' },
+        item: { id: 102, estado_preparacao: 'PRONTO' }
+      };
+    }, {
+      gerarChaveIdempotencia: (acao, id) => `teste:${acao}:${id}`
+    });
+
+    await control.iniciar();
+    assert.match(control.html(), /<output>1,000<\/output>/);
+    assert.equal((await control.entregarBebida(102)).ok, true);
+    assert.equal(posts[0].path, '/cozinha/itens/102/bebida/entregar');
+    assert.deepEqual(posts[0].body, { idempotency_key: 'teste:entrega-bebida:102' });
+  });
+
+  it('reutiliza a chave idempotente após resposta de rede ambígua', async () => {
+    const rodadas = fixtureRodadas();
+    const item = rodadas.find((r) => r.id === 12).itens[0];
+    item.qty_retirada_liquida = '0';
+    item.qty_pendente_retirada = '1.5';
+    const chaves = [];
+    let tentativas = 0;
+    let geracoes = 0;
+    const { control } = montar(async (method, path, body) => {
+      if (method === 'GET') return { success: true, empresa_id: 1, unidade_id: 3, rodadas };
+      tentativas += 1;
+      chaves.push(body.idempotency_key);
+      if (tentativas === 1) throw new Error('Conexão interrompida');
+      return { success: true, cozinha_item_id: 301, qty_millis: 1000 };
+    }, {
+      gerarChaveIdempotencia: (operacao, itemId) => {
+        geracoes += 1;
+        return `teste:${operacao}:${itemId}:${geracoes}`;
+      }
+    });
+
+    await control.iniciar();
+    assert.ok((await control.confirmarRetiradaItem(301)).erro);
+    assert.equal((await control.confirmarRetiradaItem(301)).ok, true);
+    assert.equal(tentativas, 2);
+    assert.equal(geracoes, 1);
+    assert.equal(chaves[0], chaves[1]);
   });
 
   it('ignora clique duplo enquanto a operação está em curso', async () => {

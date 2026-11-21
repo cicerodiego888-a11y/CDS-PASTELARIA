@@ -22,6 +22,9 @@ const CozinhaRoteamentoConfig = require('../services/cozinha/CozinhaRoteamentoCo
 const CozinhaCanais = require('../services/cozinha/CozinhaCanaisService');
 const CozinhaImpressaoEstacao = require('../services/cozinha/CozinhaImpressaoEstacaoService');
 const CozinhaImpressaoFila = require('../services/cozinha/CozinhaImpressaoFilaService');
+const CozinhaRetiradaLedger = require('../services/cozinha/CozinhaRetiradaLedgerService');
+const { verificarToken } = require('../middleware/auth');
+const { exigirSenhaAdmin } = require('../middleware/exigirSenhaAdmin');
 const {
   montarPayloadSnapshot,
   serializarSnapshot,
@@ -177,6 +180,44 @@ router.post('/rodadas/:id/retirada', async (req, res) => {
   }
 });
 
+router.post('/itens/:id/retirada-ledger', async (req, res) => {
+  try {
+    if (!exigirCozinhaOperacional(res)) return;
+    const out = await CozinhaRetiradaLedger.retirarItem({
+      empresaId: empresaIdDoReqPedido(req),
+      operadorId: operadorDaSessao(req),
+      unidade_id: resolverUnidadeOperacionalReq(req),
+      itemId: req.params.id,
+      usar_saldo_pendente: true,
+      idempotencyKey: chaveIdempotencia(req)
+    });
+    return res.status(out.repetida ? 200 : 201).json(out);
+  } catch (err) {
+    return responderErro(res, err);
+  }
+});
+
+router.post('/retiradas/:id/estornar', async (req, res) => {
+  try {
+    if (!exigirCozinhaOperacional(res)) return;
+    const body = req.body || {};
+    const out = await CozinhaRetiradaLedger.estornarRetirada({
+      empresaId: empresaIdDoReqPedido(req),
+      operadorId: operadorDaSessao(req),
+      unidade_id: resolverUnidadeOperacionalReq(req),
+      eventoId: req.params.id,
+      qty_millis: body.qty_millis,
+      quantidade: body.quantidade,
+      justificativa: body.justificativa,
+      autorizadoPorOperadorId: body.autorizado_por_operador_id,
+      idempotencyKey: chaveIdempotencia(req)
+    });
+    return res.status(out.repetida ? 200 : 201).json(out);
+  } catch (err) {
+    return responderErro(res, err);
+  }
+});
+
 router.post('/itens/:id/cancelar', async (req, res) => {
   try {
     if (!exigirCozinhaOperacional(res)) return;
@@ -195,6 +236,79 @@ router.post('/itens/:id/cancelar', async (req, res) => {
     return responderErro(res, err);
   }
 });
+
+router.post('/itens/:id/cancelamento-ledger', async (req, res) => {
+  try {
+    if (!exigirCozinhaOperacional(res)) return;
+    const body = req.body || {};
+    const out = await CozinhaRetiradaLedger.cancelarItem({
+      empresaId: empresaIdDoReqPedido(req),
+      operadorId: operadorDaSessao(req),
+      unidade_id: resolverUnidadeOperacionalReq(req),
+      itemId: req.params.id,
+      qty_millis: body.qty_millis,
+      quantidade: body.quantidade,
+      justificativa: body.justificativa,
+      idempotencyKey: chaveIdempotencia(req)
+    });
+    return res.status(out.repetida ? 200 : 201).json(out);
+  } catch (err) {
+    return responderErro(res, err);
+  }
+});
+
+router.post('/cancelamentos/:id/estornar', async (req, res) => {
+  try {
+    if (!exigirCozinhaOperacional(res)) return;
+    const body = req.body || {};
+    const out = await CozinhaRetiradaLedger.estornarCancelamento({
+      empresaId: empresaIdDoReqPedido(req),
+      operadorId: operadorDaSessao(req),
+      unidade_id: resolverUnidadeOperacionalReq(req),
+      eventoId: req.params.id,
+      qty_millis: body.qty_millis,
+      quantidade: body.quantidade,
+      justificativa: body.justificativa,
+      autorizadoPorOperadorId: body.autorizado_por_operador_id,
+      idempotencyKey: chaveIdempotencia(req)
+    });
+    return res.status(out.repetida ? 200 : 201).json(out);
+  } catch (err) {
+    return responderErro(res, err);
+  }
+});
+
+router.post(
+  '/itens/:id/ajuste-retirada',
+  verificarToken,
+  (req, res, next) => {
+    if (!exigirCozinhaOperacional(res)) return;
+    next();
+  },
+  exigirSenhaAdmin,
+  async (req, res) => {
+    try {
+      const body = req.body || {};
+      const operadorId = operadorDaSessao(req);
+      const out = await CozinhaRetiradaLedger.ajustarRetirada({
+        empresaId: empresaIdDoReqPedido(req),
+        operadorId,
+        autorizadoPorOperadorId: req.adminAutorizadorId,
+        unidade_id: resolverUnidadeOperacionalReq(req),
+        eventoId: body.evento_origem_id,
+        tipo_evento: body.tipo_evento,
+        qty_millis: body.qty_millis,
+        quantidade: body.quantidade,
+        justificativa: body.justificativa,
+        idempotencyKey: chaveIdempotencia(req),
+        adminAutorizado: true
+      });
+      return res.status(out.repetida ? 200 : 201).json(out);
+    } catch (err) {
+      return responderErro(res, err);
+    }
+  }
+);
 
 router.post('/rodadas/:id/cancelar', async (req, res) => {
   try {
@@ -218,14 +332,13 @@ router.post('/rodadas/:id/cancelar', async (req, res) => {
 router.post('/itens/:id/bebida/entregar', async (req, res) => {
   try {
     if (!exigirCozinhaOperacional(res)) return;
-    const body = req.body || {};
     const out = await CozinhaPreparacao.entregarBebida({
       empresaId: empresaIdDoReqPedido(req),
       operadorId: operadorDaSessao(req),
       idempotencyKey: chaveIdempotencia(req),
       itemId: req.params.id,
       unidade_id: resolverUnidadeOperacionalReq(req),
-      qty_entregue: body.qty_entregue != null ? body.qty_entregue : body.quantidade
+      usar_saldo_pendente: true
     });
     return res.status(out.repetida ? 200 : 201).json(out);
   } catch (err) {
@@ -554,7 +667,9 @@ router.get('/preparacao/painel', async (req, res) => {
       fila: q.historicos === '1' ? 'ativa' : q.fila,
       incluir_cancelados: q.incluir_cancelados != null
         ? q.incluir_cancelados
-        : q.incluirCancelados
+        : q.incluirCancelados,
+      incluir_pedidos_cancelados: q.incluir_pedidos_cancelados
+        != null ? q.incluir_pedidos_cancelados : q.incluirPedidosCancelados
     }, { db });
     if (q.historicos === '1') {
       const contexto = { empresaId: empresaIdDoReqPedido(req), unidadeId, limite: q.limite, paginacao: q.paginacao };

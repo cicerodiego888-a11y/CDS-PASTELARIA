@@ -272,6 +272,8 @@
     const totais = calcularTotais(estado);
     return {
       cliente_id: estado.cliente && estado.cliente.id ? Number(estado.cliente.id) : null,
+      ...(estado.cliente && !estado.cliente.id && estado.cliente.nome
+        ? { cliente_nome: String(estado.cliente.nome).trim() } : {}),
       mesa_id: estado.mesaId ? Number(estado.mesaId) : null,
       representante_nome: null,
       observacao: estado.observacao ? String(estado.observacao) : null,
@@ -288,21 +290,30 @@
     const corpo = data && typeof data === 'object' ? data : {};
     const codigo = corpo.codigo || corpo.code || corpo.erro || null;
     const texto = corpo.mensagem || corpo.error || corpo.erro || '';
+    const pendencias = Array.isArray(corpo.pendencias) ? corpo.pendencias : [];
+    const detalheRetirada = pendencias.map((item) => {
+      const partes = [];
+      if (item.qty_exigivel != null) partes.push('exigível ' + item.qty_exigivel + ' milésimos');
+      if (item.qty_retirada_liquida != null) partes.push('retirada ' + item.qty_retirada_liquida + ' milésimos');
+      if (item.qty_pendente != null) partes.push('pendente ' + item.qty_pendente + ' milésimos');
+      return 'Item ' + (item.pedido_item_id || '?') + (partes.length ? ' (' + partes.join(', ') + ')' : '');
+    }).join('; ');
+    const textoComDetalhe = typeof texto === 'string' && texto
+      ? texto + (detalheRetirada ? ' ' + detalheRetirada + '.' : '')
+      : (detalheRetirada || ('Não foi possível concluir a operação (HTTP ' + status + ').'));
     if (status === 401 || codigo === 'SESSAO_INVALIDA') {
       return {
         codigo: 'SESSAO_INVALIDA',
-        mensagem: typeof texto === 'string' && texto ? texto : 'Sessão expirada. Entre novamente.',
+        mensagem: typeof textoComDetalhe === 'string' && textoComDetalhe ? textoComDetalhe : 'Sessão expirada. Entre novamente.',
         autenticacao: true
       };
     }
     if (codigo && MENSAGENS[codigo]) {
-      return { codigo, mensagem: MENSAGENS[codigo], detalhe: typeof texto === 'string' ? texto : '' };
+      return { codigo, mensagem: MENSAGENS[codigo], detalhe: textoComDetalhe };
     }
     return {
       codigo,
-      mensagem: typeof texto === 'string' && texto
-        ? texto
-        : ('Não foi possível concluir a operação (HTTP ' + status + ').')
+      mensagem: textoComDetalhe
     };
   }
 
@@ -748,6 +759,7 @@
     )).join('');
     resumo.innerHTML = `
       <p><strong>Empresa</strong><br>${escapar(nomeEmpresaAtual() || 'Não selecionada')}</p>
+      <p><strong>Mesa</strong><br>${escapar(estado.mesaId ? (estado.mesaNumero != null ? estado.mesaNumero : estado.mesaId) : 'Sem mesa')}</p>
       <p><strong>Cliente</strong><br>${escapar(estado.cliente ? estado.cliente.nome : 'Sem cliente')}</p>
       <ul>${linhas || '<li>Nenhum item</li>'}</ul>
       <p>Subtotal ${dinheiro(totais.subtotal)}</p>
@@ -769,6 +781,7 @@
     box.innerHTML = `
       <p><strong>Código</strong><br>${escapar(conf.codigo)}</p>
       <p><strong>Empresa</strong><br>${escapar(nomeEmpresaAtual() || ('#' + conf.empresaId))}</p>
+      <p><strong>Mesa</strong><br>${escapar(estado.mesaId ? (estado.mesaNumero != null ? estado.mesaNumero : estado.mesaId) : 'Sem mesa')}</p>
       <p><strong>Cliente</strong><br>${escapar(conf.cliente ? conf.cliente.nome : 'Sem cliente')}</p>
       <p><strong>Total</strong><br>${dinheiro(conf.total)}</p>
     `;
@@ -848,7 +861,7 @@
     if (data.situacao !== 'OCUPADA' || !data.atendimento) {
       return { ok: false, codigo: 'MESA_SEM_ATENDIMENTO', mensagem: MENSAGENS.MESA_SEM_ATENDIMENTO, numero: data.numero };
     }
-    return { ok: true, numero: data.numero };
+    return { ok: true, numero: data.numero, atendimentoId: data.atendimento.id };
   }
   api.consultarMesa = consultarMesa;
 
@@ -859,11 +872,18 @@
     if (resultado.numero != null) estado.mesaNumero = resultado.numero;
     estado.mesaBloqueada = !resultado.ok;
     mostrarAlerta(resultado.ok ? '' : resultado.mensagem);
+    return resultado;
   }
 
   function pintarMesa(estado) {
     const faixa = $('mp-mesa-faixa');
     const confirmado = estado.etapa === 'confirmado';
+    const escolhida = $('mp-mesa-escolhida');
+    if (escolhida) {
+      escolhida.textContent = estado.mesaId
+        ? ('Mesa selecionada: ' + (estado.mesaNumero != null ? estado.mesaNumero : estado.mesaId))
+        : 'Pedido sem mesa';
+    }
     if (faixa) {
       faixa.hidden = !estado.mesaId;
       const rotulo = $('mp-mesa-rotulo');
@@ -894,8 +914,16 @@
     const estado = criarEstado();
     estado.mesaId = mesaDaUrl();
     const guardado = root.CdsMobileOperacao ? root.CdsMobileOperacao.lerPedido(estado.mesaId) : null;
-    if (guardado && guardado.ok && guardado.registro && guardado.registro.estado) {
-      const salvo = guardado.registro.estado;
+    let pedidoAnterior = null;
+    try {
+      pedidoAnterior = Number(new root.URLSearchParams(root.location.search).get('novoApos')) || null;
+    } catch (_erro) {
+      pedidoAnterior = null;
+    }
+    const salvo = guardado && guardado.ok && guardado.registro && guardado.registro.estado;
+    const iniciarOutro = estado.mesaId && pedidoAnterior && salvo && salvo.etapa === 'confirmado'
+      && salvo.confirmacao && Number(salvo.confirmacao.id) === pedidoAnterior;
+    if (salvo && !iniciarOutro) {
       if (ETAPAS.indexOf(salvo.etapa) >= 0 || salvo.etapa === 'confirmado') estado.etapa = salvo.etapa;
       estado.cliente = salvo.cliente || null;
       estado.itens = Array.isArray(salvo.itens) ? salvo.itens : [];
@@ -927,13 +955,38 @@
         mostrarAlerta('Você não possui empresa disponível.');
         return;
       }
-      if (typeof contexto.adotarEmpresaPadrao !== 'function') {
-        mostrarAlerta('A resolução da empresa padrão não está disponível.');
+      const empresaId = typeof contexto.lerEmpresaId === 'function' ? contexto.lerEmpresaId() : null;
+      if (empresaId && !lista.some((empresa) => Number(empresa.id) === Number(empresaId))) {
+        mostrarAlerta('A empresa selecionada não está disponível para esta sessão.');
         return;
       }
-      await contexto.adotarEmpresaPadrao();
+      if (!empresaId) {
+        if (typeof contexto.adotarEmpresaPadrao !== 'function') {
+          mostrarAlerta('A resolução da empresa padrão não está disponível.');
+          return;
+        }
+        await contexto.adotarEmpresaPadrao();
+      }
       mostrarAlerta('');
-      await validarMesaDoPedido(estado);
+      const mesa = await validarMesaDoPedido(estado);
+      if (mesa && mesa.ok && root.CdsMobileOperacao) {
+        try {
+          const operacao = root.CdsMobileOperacao;
+          const identificacao = operacao.lerClienteMesa(estado.mesaId, mesa.atendimentoId);
+          if (identificacao.ok && !estado.cliente && estado.etapa !== 'confirmado') {
+            estado.cliente = identificacao.registro.cliente;
+            const salvo = operacao.salvarPedido(estado);
+            if (salvo && salvo.ok) operacao.limparClienteMesa(estado.mesaId, mesa.atendimentoId);
+            else mostrarAlerta('A identificação foi carregada, mas não foi possível guardá-la no rascunho.');
+          } else if (identificacao.ok && estado.cliente) {
+            mostrarAlerta('O rascunho já tem cliente. A identificação informada na mesa não foi aplicada.');
+          } else if (identificacao.codigo === 'OPERADOR_DIVERGENTE' || identificacao.codigo === 'INVALIDO') {
+            mostrarAlerta('Não foi possível recuperar a identificação informada na mesa para esta sessão.');
+          }
+        } catch (erro) {
+          mostrarAlerta('Não foi possível recuperar a identificação informada na mesa.');
+        }
+      }
       pintar(estado);
     }
 
@@ -1030,8 +1083,10 @@
     });
 
     let timerProduto = null;
+    let sequenciaBuscaProduto = 0;
     $('mp-produto-busca').addEventListener('input', () => {
       clearTimeout(timerProduto);
+      const sequencia = ++sequenciaBuscaProduto;
       const termo = $('mp-produto-busca').value;
       timerProduto = setTimeout(async () => {
         const status = $('mp-produto-status');
@@ -1039,6 +1094,7 @@
         status.textContent = 'Buscando produtos…';
         const resultado = await buscarProdutos(termo, root.fetch.bind(root), headersLeitura());
         tratarAutenticacao(resultado);
+        if (sequencia !== sequenciaBuscaProduto) return;
         if (resultado.mensagem) {
           status.textContent = resultado.mensagem;
           $('mp-produto-lista').innerHTML = '';
@@ -1150,12 +1206,19 @@
           selecao,
           ingredientes: pendente.ficha ? ingredientesDaFicha(pendente.ficha, selecao) : []
         });
+        clearTimeout(timerProduto);
+        sequenciaBuscaProduto += 1;
+        $('mp-produto-busca').value = '';
+        $('mp-produto-lista').innerHTML = '';
+        $('mp-produto-status').hidden = true;
+        $('mp-produto-status').textContent = '';
         estado.produtoPendente = null;
         $('mp-produto-escolha').hidden = true;
         $('mp-produto-qtd').value = '1';
         mostrarAlerta('Item incluído. Você continua em Produtos.');
         estado.etapa = etapaDepoisDeAdicionar();
         pintar(estado);
+        if (typeof $('mp-produto-busca').focus === 'function') $('mp-produto-busca').focus();
       } catch (erro) {
         mostrarAlerta(erro.message || 'Não foi possível adicionar o item.');
       } finally {

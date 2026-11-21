@@ -6,6 +6,26 @@ function escapar(valor) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+function formatarDataHoraLocal(valor) {
+  if (valor == null || valor === '') return 'Não disponível';
+  const texto = String(valor).trim().replace(' ', 'T');
+  const iso = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(texto) ? texto : `${texto}Z`;
+  const instante = new Date(iso);
+  if (Number.isNaN(instante.getTime())) return 'Não disponível';
+  const partes = new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Fortaleza',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(instante);
+  const valores = Object.fromEntries(partes.map(({ type, value }) => [type, value]));
+  return `${valores.day}/${valores.month}/${valores.year} ${valores.hour}:${valores.minute}:${valores.second}`;
+}
+
 function htmlComanda(snapshot) {
   if (!snapshot || !Array.isArray(snapshot.itens) || !snapshot.itens.length) {
     throw new Error('Snapshot sem itens.');
@@ -53,7 +73,7 @@ function htmlComanda(snapshot) {
     <div>Pedido: ${escapar(snapshot.pedido_codigo || snapshot.pedido_id)}</div>
     <div>Rodada: ${escapar(snapshot.numero_rodada)}</div>
     <div>Garçom: ${escapar(snapshot.garcom)}</div>
-    <div>Envio (UTC): ${escapar(snapshot.enviada_em)}</div>
+    <div>Envio: ${escapar(formatarDataHoraLocal(snapshot.enviada_em))}</div>
     ${snapshot.observacao_geral ? `<div>Observação: ${escapar(snapshot.observacao_geral)}</div>` : ''}
     ${itens}</body></html>`;
 }

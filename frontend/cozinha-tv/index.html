@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CDS Sistemas — Cozinha KDS</title>
+  <link rel="stylesheet" href="/css/cozinha-kds.css">
+  <link rel="stylesheet" href="/cozinha-tv/cozinha-tv.css">
+</head>
+<body>
+  <header class="tv-barra">
+    <strong>CDS Sistemas · Cozinha</strong>
+    <div>
+      <button id="tv-tela-cheia" type="button">Tela cheia</button>
+      <button id="tv-sair" type="button" hidden>Sair</button>
+    </div>
+  </header>
+  <p id="cds-rede-status" class="cds-rede-status" data-tipo="kds" role="status" aria-live="polite">Procurando servidor…</p>
+  <p id="tv-alerta" role="alert" aria-live="polite"></p>
+  <main>
+    <section id="tv-acesso" class="tv-acesso">
+      <h1>Acesso à cozinha</h1>
+      <p>Entre com seu usuário autorizado e selecione a empresa e a unidade.</p>
+      <form id="tv-login">
+        <label for="tv-usuario">Usuário</label>
+        <input id="tv-usuario" autocomplete="username" required>
+        <label for="tv-senha">Senha</label>
+        <input id="tv-senha" type="password" autocomplete="current-password" required>
+        <button type="submit">Entrar</button>
+      </form>
+      <form id="tv-empresa" hidden>
+        <label for="tv-empresa-selecao">Empresa</label>
+        <select id="tv-empresa-selecao" required></select>
+        <button type="submit">Continuar</button>
+      </form>
+      <p id="tv-mensagem" role="alert" aria-live="polite"></p>
+    </section>
+    <div id="page-content"></div>
+  </main>
+  <script src="/shared/js/cds-empresa-contexto.js"></script>
+  <script src="/erp/js/cozinha-kds.js"></script>
+  <script src="/cozinha-tv/cozinha-tv.js"></script>
+</body>
+</html>

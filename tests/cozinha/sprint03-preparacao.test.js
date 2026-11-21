@@ -296,6 +296,23 @@ async function despacharItens(db, infra, linhas, chave) {
   return CozinhaDespacho.despacharLote(entradaDespacho(infra, itens, chave), { db });
 }
 
+async function deixarItemPronto(db, infra, itemId, chave) {
+  const contexto = {
+    empresaId: infra.empresaId,
+    operadorId: 7,
+    unidade_id: infra.unidadeId,
+    itemId
+  };
+  await CozinhaPreparacao.iniciarPreparacao({
+    ...contexto,
+    idempotencyKey: `${chave}-inicio`
+  }, { db });
+  return CozinhaPreparacao.marcarItemPronto({
+    ...contexto,
+    idempotencyKey: `${chave}-pronto`
+  }, { db });
+}
+
 describe('Sprint 03 — Preparação / conclusão de rodada', () => {
   beforeEach(() => marcarCozinhaOperacional(false));
 
@@ -461,7 +478,7 @@ describe('Sprint 03 — Preparação / conclusão de rodada', () => {
       } finally { await close(db); }
     });
 
-    it('retira estado pronto da rodada quando o item restante passa a ser bloqueador', async () => {
+    it('não inventa histórico de rodada pronta quando há item restante bloqueador', async () => {
       const db = await open();
       try {
         await schemaErp(db);
@@ -480,7 +497,7 @@ describe('Sprint 03 — Preparação / conclusão de rodada', () => {
         const ativo = await CozinhaKdsPainel.listarPainelPreparacao({ ...base, fila: 'ativa' }, { db });
         assert.equal(ativo.rodadas[0].rodada_pronta_em, null);
         const historico = await CozinhaKdsPainel.listarPainelPreparacao({ ...base, historico: 'cancelados' }, { db });
-        assert.ok(historico.rodadas[0].itens[0].rodada_pronta_em_cancelamento);
+        assert.equal(historico.rodadas[0].itens[0].rodada_pronta_em_cancelamento, null);
       } finally { await close(db); }
     });
 
@@ -645,7 +662,7 @@ describe('Sprint 03 — Preparação / conclusão de rodada', () => {
       }
     });
 
-    it('mantém a rodada pronta ao retornar item que não bloqueia a conclusão', async () => {
+    it('retorna a rodada para EM_PREPARACAO quando item exigível volta a aguardar', async () => {
       const db = await open();
       try {
         await schemaErp(db);
@@ -666,7 +683,7 @@ describe('Sprint 03 — Preparação / conclusão de rodada', () => {
         const resultado = await CozinhaPreparacao.voltarParaAguardando({
           ...base, itemId: idOutro, idempotencyKey: 'retorno-pronta-voltar'
         }, { db });
-        assert.equal(resultado.rodada.estado_preparacao, 'PRONTA');
+        assert.equal(resultado.rodada.estado_preparacao, 'EM_PREPARACAO');
       } finally {
         await close(db);
       }
@@ -744,6 +761,7 @@ describe('Sprint 03 — Preparação / conclusão de rodada', () => {
       assert.ok(itemPastel);
       assert.ok(itemBebida);
 
+      await deixarItemPronto(db, infra, itemBebida.id, 's03-8-bebida');
       const ent = await CozinhaPreparacao.entregarBebida({
         empresaId: 1, operadorId: 7,
         unidade_id: infra.unidadeId,
@@ -782,6 +800,7 @@ describe('Sprint 03 — Preparação / conclusão de rodada', () => {
       const item = out.itens[0];
       assert.equal(item.tipo_item, 'BEBIDA');
 
+      await deixarItemPronto(db, infra, item.id, 's03-10-bebida');
       const p1 = await CozinhaPreparacao.entregarBebida({
         empresaId: 1, operadorId: 7, itemId: item.id,
         unidade_id: infra.unidadeId,
@@ -817,7 +836,7 @@ describe('Sprint 03 — Preparação / conclusão de rodada', () => {
       await close(db);
     });
 
-    it('12) OUTRO não bloqueia rodada com PASTEL', async () => {
+    it('12) OUTRO bloqueia rodada com PASTEL até ficar pronto', async () => {
       const db = await open();
       await schemaErp(db);
       const infra = await seedInfra(db);
@@ -840,9 +859,18 @@ describe('Sprint 03 — Preparação / conclusão de rodada', () => {
       const pronto = await CozinhaPreparacao.marcarItemPronto({
         empresaId: 1, operadorId: 7, unidade_id: infra.unidadeId, itemId: itemPastel.id, idempotencyKey: 's03-12-pronto'
       }, { db });
-      assert.equal(pronto.rodada.estado_preparacao, 'PRONTA');
+      assert.equal(pronto.rodada.estado_preparacao, 'EM_PREPARACAO');
       const outroRow = await get(db, `SELECT estado_preparacao FROM cozinha_itens WHERE id=?`, [itemOutro.id]);
       assert.equal(outroRow.estado_preparacao, 'AGUARDANDO');
+      const consulta = await CozinhaPreparacao.consultarPreparacaoRodada({
+        empresaId: 1, rodadaId: out.rodada.id
+      }, { db });
+      assert.equal(consulta.conclusao.pronta, false);
+      assert.ok(consulta.conclusao.pendentes.includes(itemOutro.id));
+
+      await deixarItemPronto(db, infra, itemOutro.id, 's03-12-outro');
+      const rodada = await get(db, 'SELECT estado_preparacao FROM cozinha_rodadas WHERE id=?', [out.rodada.id]);
+      assert.equal(rodada.estado_preparacao, 'PRONTA');
       await close(db);
     });
 
@@ -862,6 +890,7 @@ describe('Sprint 03 — Preparação / conclusão de rodada', () => {
       const itemOutro = out.itens.find((i) => i.tipo_item === 'OUTRO');
       const itemBebida = out.itens.find((i) => i.tipo_item === 'BEBIDA');
 
+      await deixarItemPronto(db, infra, itemBebida.id, 's03-13-bebida');
       await CozinhaPreparacao.entregarBebida({
         empresaId: 1, operadorId: 7, itemId: itemBebida.id,
         unidade_id: infra.unidadeId,
@@ -1021,6 +1050,7 @@ describe('Sprint 03 — Preparação / conclusão de rodada', () => {
         classifSnapshot: 'INSUMO', qty: 1
       });
       const outB = await despacharItens(db, infra, [{ ...bebida, qty: '1.000' }], 's03-18-beb');
+      await deixarItemPronto(db, infra, outB.itens[0].id, 's03-18-pronta');
       await assert.rejects(
         () => CozinhaPreparacao.entregarBebida({
           empresaId: 1, operadorId: 7,
@@ -1046,6 +1076,7 @@ describe('Sprint 03 — Preparação / conclusão de rodada', () => {
       const out = await despacharItens(db, infra, [{ ...bebida, qty: '2.000' }], 's03-19-desp');
       const itemId = out.itens[0].id;
 
+      await deixarItemPronto(db, infra, itemId, 's03-19-pronta');
       const a = await CozinhaPreparacao.entregarBebida({
         empresaId: 1, operadorId: 7, itemId,
         unidade_id: infra.unidadeId,

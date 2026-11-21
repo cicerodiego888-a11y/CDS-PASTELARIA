@@ -292,3 +292,134 @@
     inicializar: inicializar
   };
 })(typeof window !== 'undefined' ? window : globalThis);
+
+// O gateway KDS já disponibiliza este arquivo compartilhado; a monitoração é opt-in.
+(function (global) {
+  'use strict';
+
+  function criarMonitor(opcoes) {
+    let ativo = false;
+    let requisicao = null;
+    let timer = null;
+    let estado = 'procurando';
+    let falhas = 0;
+    const textos = {
+      procurando: 'Procurando servidor…',
+      conectado: 'Conectado ao servidor (sessão não verificada)',
+      reconectando: 'Reconectando ao servidor…',
+      indisponivel: 'Servidor indisponível. Tentando novamente…'
+    };
+
+    function publicar(novo) {
+      estado = novo;
+      opcoes.aoMudar(novo, textos[novo]);
+    }
+
+    function agendar() {
+      if (ativo && timer == null) timer = global.setTimeout(function () {
+        timer = null;
+        consultar();
+      }, 5000);
+    }
+
+    function concluir(ok) {
+      if (!ativo || !requisicao) return;
+      requisicao = null;
+      const recuperou = ok && estado !== 'conectado' && estado !== 'procurando';
+      if (ok) {
+        falhas = 0;
+        publicar('conectado');
+      } else {
+        falhas += 1;
+        publicar(falhas >= 3 ? 'indisponivel' : 'reconectando');
+      }
+      agendar();
+      if (ok && recuperou && opcoes.aoReconectar) opcoes.aoReconectar();
+    }
+
+    function consultar() {
+      if (!ativo || requisicao) return;
+      if (timer != null) global.clearTimeout(timer);
+      timer = null;
+      try {
+        const xhr = new global.XMLHttpRequest();
+        requisicao = xhr;
+        xhr.open('GET', opcoes.caminho + '?cds_rede=' + Date.now(), true);
+        xhr.timeout = 8000;
+        xhr.onload = function () {
+          if (xhr !== requisicao) return;
+          let ok = xhr.status === 200;
+          if (ok && xhr.responseURL && global.location) {
+            try { ok = new URL(xhr.responseURL).origin === global.location.origin; } catch (_err) { ok = false; }
+          }
+          if (ok && opcoes.tipo === 'kds') {
+            ok = xhr.responseText.indexOf('id="tv-acesso"') !== -1;
+          } else if (ok) {
+            try { ok = JSON.parse(xhr.responseText).status === 'ok'; } catch (_err) { ok = false; }
+          }
+          concluir(ok);
+        };
+        xhr.onerror = xhr.ontimeout = function () { if (xhr === requisicao) concluir(false); };
+        xhr.send();
+      } catch (err) {
+        if (!requisicao) requisicao = {};
+        concluir(false);
+        if (global.console) global.console.error('[CDS REDE] Falha na consulta de conexão:', err.message);
+      }
+    }
+
+    function iniciar() {
+      if (ativo) return;
+      ativo = true;
+      publicar('procurando');
+      consultar();
+    }
+
+    function parar() {
+      ativo = false;
+      if (timer != null) global.clearTimeout(timer);
+      timer = null;
+      const anterior = requisicao;
+      requisicao = null;
+      if (anterior && typeof anterior.abort === 'function') anterior.abort();
+    }
+
+    function online() {
+      if (!ativo || requisicao) return;
+      if (estado !== 'conectado') publicar('reconectando');
+      consultar();
+    }
+
+    return { iniciar: iniciar, parar: parar, online: online };
+  }
+
+  global.CdsEstadoRede = { criarMonitor: criarMonitor };
+  const host = global.document && global.document.getElementById('cds-rede-status');
+  if (!host) return;
+  const tipo = host.getAttribute('data-tipo');
+  const monitor = criarMonitor({
+    tipo: tipo,
+    caminho: tipo === 'kds' ? '/cozinha' : '/api/ping',
+    aoMudar: function (estado, texto) {
+      host.textContent = texto;
+      host.setAttribute('data-estado', estado);
+    },
+    aoReconectar: function () {
+      const painel = global.CdsCozinhaKds;
+      if (tipo === 'kds' && painel && typeof painel.atualizar === 'function') {
+        Promise.resolve().then(function () {
+          if (global.CdsCozinhaKds !== painel || (painel.estado && painel.estado.ativo === false)) return;
+          return painel.estado && painel.estado.modo === 'selecao' && painel.estado.selecaoFalhaLista
+            ? painel.carregarUnidadesDisponiveis({ forcar: true })
+            : painel.atualizar({ silencioso: true, forcar: true });
+        }).catch(function (err) {
+          if (global.console) global.console.error('[CDS REDE] Falha ao atualizar o painel:', err);
+        });
+      }
+    }
+  });
+  global.addEventListener('online', monitor.online);
+  global.addEventListener('pagehide', monitor.parar);
+  global.addEventListener('pageshow', monitor.iniciar);
+  monitor.iniciar();
+})(typeof window !== 'undefined' ? window : globalThis);

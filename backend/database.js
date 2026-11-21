@@ -653,6 +653,10 @@ function aplicarAlteracoesPosCriacao() {
 
   // Sprint 3.1 — Faturamento / Pedido → Venda
   aplicarAlteracaoSegura('vendas', `ALTER TABLE vendas ADD COLUMN origem TEXT DEFAULT 'PDV'`);
+  // Auditoria operacional — nullable para manter vendas históricas sem classificação inventada.
+  aplicarAlteracaoSegura('vendas', `ALTER TABLE vendas ADD COLUMN origem_operacao TEXT`);
+  aplicarAlteracaoSegura('vendas', `ALTER TABLE vendas ADD COLUMN operador_nome_snapshot TEXT`);
+  aplicarAlteracaoSegura('vendas', `ALTER TABLE vendas ADD COLUMN terminal_tipo_snapshot TEXT`);
   aplicarAlteracaoSegura('vendas', `ALTER TABLE vendas ADD COLUMN pedido_id INTEGER`);
   // RC8.2 — snapshot imutável da Política Fiscal Comercial (MPFC)
   aplicarAlteracaoSegura('vendas', `ALTER TABLE vendas ADD COLUMN mpfc_politica_snapshot TEXT`);
@@ -3020,6 +3024,10 @@ function inicializarBanco() {
   const { garantirSchemaOrigemPedidos } = require('./utils/pedidosOrigemSchema');
   const cozinhaSchemaMod = require('./utils/cozinhaSchema');
   const { garantirSchemaCozinha } = cozinhaSchemaMod;
+  const { executarMigracaoSprint1 } =
+    require('./migrations/sprint1-pedidos-itens-empresa');
+  const { executarMigracaoSprint2 } =
+    require('./migrations/sprint2-cozinha-ledgers');
 
   db.serialize(() => {
     criarTabelas();
@@ -3112,6 +3120,26 @@ function inicializarBanco() {
               `[COZINHA] schema V1.2.3 v${infoCozinha.versao} operacional` +
               (infoCozinha.recriado ? ' (recriado com FKs compostas empresa)' : '')
             );
+            return executarMigracaoSprint1(db, { isolamentoExplicito: true })
+              .then((infoSprint1) => {
+                console.log(
+                  `[COZINHA] Sprint 1 ledger base operacional | pedidos_itens=${infoSprint1.countDepois}`
+                );
+                return executarMigracaoSprint2(db, { isolamentoExplicito: true });
+              })
+              .then((infoSprint2) => {
+                console.log(
+                  `[COZINHA] Sprint 2 ledgers operacionais | fk_check=${infoSprint2.foreignKeyCheck.length}`
+                );
+              })
+              .catch((err) => {
+                console.error(
+                  `[COZINHA] FALHA_MIGRACOES_LEDGER: ` +
+                  `codigo=${err && err.codigo ? err.codigo : 'LEDGER_MIGRACAO_FALHA'} | ` +
+                  (err && err.message ? err.message : String(err))
+                );
+                throw err;
+              });
           } else if (infoCozinha && infoCozinha.skipped) {
             console.warn('[COZINHA] schema ignorado (sem conexão); módulo Cozinha NÃO operacional');
           }

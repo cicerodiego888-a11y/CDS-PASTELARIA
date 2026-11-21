@@ -37,7 +37,7 @@ describe('Sprint 3.5 — frontend e rotas', () => {
     assert.match(index, /pedidos\.js/);
     assert.match(app, /case 'pedidos'/);
     assert.match(app, /loadPedidos/);
-    assert.match(core, /if \(p === 'pedidos'\) return possuiRecurso\('pedidos'\)/);
+    assert.match(core, /if \(p === 'pedidos' \|\| p === 'mesas' \|\| p === 'cozinha-kds'\) return possuiRecurso\('pedidos'\)/);
     assert.match(acl, /pedidos:\s*'vendas'/);
     assert.match(ui, /loadPedidos/);
     assert.match(ui, /btnPedNovo/);
@@ -75,6 +75,17 @@ describe('Sprint 3.5 — frontend e rotas', () => {
     assert.match(ui, /!data\.idempotente/);
     assert.match(ui, /ped-gerar-venda-pdv/);
     assert.match(ui, /Gerar venda no PDV/);
+    assert.match(ui, /btn-outline-danger ped-gerar-venda-pdv/);
+    assert.match(ui, /atualizarEstadosVendaPdv/);
+    assert.match(ui, /Retirada integral confirmada; geração liberada/);
+    const atualizador = ui.slice(
+      ui.indexOf('async function atualizarEstadosVendaPdv'),
+      ui.indexOf('function montarDiagnosticoPreparacao')
+    );
+    assert.match(atualizador, /\/liberacao-pdv/);
+    assert.match(atualizador, /method: 'GET'/);
+    assert.doesNotMatch(atualizador, /preparar-venda-pdv/);
+    assert.match(atualizador, /setInterval/);
     assert.match(ui, /ped-recuperar-venda-pdv/);
     assert.match(ui, /Concluir vínculo/);
     assert.match(ui, /venda_pdv_status/);

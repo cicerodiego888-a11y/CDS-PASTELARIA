@@ -513,7 +513,7 @@ describe('Sprint 05 — HTTP real: login validado + 3 operações', () => {
       ORDER BY id LIMIT 1
     `, [empresaId, unidadeId]);
     const itemBebida = await get(db, `
-      SELECT id FROM cozinha_itens
+      SELECT id, qty_solicitada_millis, qty_cancelada_millis FROM cozinha_itens
       WHERE empresa_id=? AND unidade_id=? AND tipo_item='BEBIDA'
       ORDER BY id LIMIT 1
     `, [empresaId, unidadeId]);
@@ -536,13 +536,31 @@ describe('Sprint 05 — HTTP real: login validado + 3 operações', () => {
     assert.equal(pronto.status, 200, JSON.stringify(pronto.body));
     assert.equal(pronto.body.item.estado_preparacao, 'PRONTO');
 
+    const iniciarBebida = await requestJson('POST', `/api/cozinha/itens/${itemBebida.id}/iniciar`, {
+      token: loginOk.body.token,
+      headers: { 'X-Empresa-Id': String(empresaId), 'Idempotency-Key': 'http-beb-iniciar' },
+      body: {}
+    });
+    assert.equal(iniciarBebida.status, 200, JSON.stringify(iniciarBebida.body));
+    const prontoBebida = await requestJson('POST', `/api/cozinha/itens/${itemBebida.id}/pronto`, {
+      token: loginOk.body.token,
+      headers: { 'X-Empresa-Id': String(empresaId), 'Idempotency-Key': 'http-beb-pronto' },
+      body: {}
+    });
+    assert.equal(prontoBebida.status, 200, JSON.stringify(prontoBebida.body));
+
     const beb = await requestJson('POST', `/api/cozinha/itens/${itemBebida.id}/bebida/entregar`, {
       token: loginOk.body.token,
       headers: { 'X-Empresa-Id': String(empresaId), 'Idempotency-Key': 'http-beb-1' },
-      body: { qty_entregue: '1.000' }
+      body: { qty_millis: 1 }
     });
     assert.ok([200, 201].includes(beb.status), JSON.stringify(beb.body));
     assert.equal(beb.body.success, true);
+    assert.equal(
+      Math.round(Number(beb.body.entrega.qty_entregue) * 1000),
+      Number(itemBebida.qty_solicitada_millis) - Number(itemBebida.qty_cancelada_millis || 0),
+      'A rota deve ignorar a quantidade enviada pelo cliente e calcular o saldo no servidor.'
+    );
 
     const tokenManipulado = jwt.sign(
       { id: operadorId, role: 'operador', perfil: 'USUARIO', unidade_cozinha_id: 999001 },

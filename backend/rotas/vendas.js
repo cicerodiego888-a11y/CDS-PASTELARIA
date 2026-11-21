@@ -25,6 +25,7 @@ const {
   integrarPagamentoRecomposicao,
   apresentacaoComposicaoFiscal
 } = require('../services/vendas/PagamentoRecomposicaoDocumentoService');
+const { validarLiberacaoPdv } = require('../services/cozinha/CozinhaLiberacaoPdvService');
 
 const { agoraLocalBrasil } = VendaFinanceiroService;
 const { criarVenda } = VendaApplicationService;
@@ -89,11 +90,17 @@ router.get('/', anexarEmpresaVenda, (req, res) => {
         OR c.nome LIKE ?
         OR v.forma_pagamento LIKE ?
         OR v.status LIKE ?
+        OR v.origem_operacao LIKE ?
+        OR COALESCE(
+          NULLIF(TRIM(v.operador_nome_snapshot), ''),
+          NULLIF(TRIM(u.nome), ''),
+          NULLIF(TRIM(u.username), '')
+        ) LIKE ?
       )
     `;
 
     const termo = `%${busca}%`;
-    params.push(termo, termo, termo, termo, termo);
+    params.push(termo, termo, termo, termo, termo, termo, termo);
   }
 
   if (!todas) {
@@ -126,6 +133,19 @@ router.get('/', anexarEmpresaVenda, (req, res) => {
       v.status_pagamento,
       v.tef_transacao_id,
       v.pedido_id,
+      v.origem,
+      v.origem_operacao,
+      v.operador_id,
+      v.operador_nome_snapshot,
+      COALESCE(
+        NULLIF(TRIM(v.operador_nome_snapshot), ''),
+        NULLIF(TRIM(u.nome), ''),
+        NULLIF(TRIM(u.username), '')
+      ) AS operador_nome_exibicao,
+      v.terminal_id,
+      v.terminal_tipo_snapshot,
+      v.caixa_id,
+      v.caixa_sessao_id,
       (
         SELECT GROUP_CONCAT(vp.forma_pagamento || '|' || printf('%.2f', vp.valor), ';')
         FROM venda_pagamentos vp
@@ -149,6 +169,7 @@ router.get('/', anexarEmpresaVenda, (req, res) => {
       ) AS total_itens
     FROM vendas v
     LEFT JOIN clientes c ON c.id = v.cliente_id
+    LEFT JOIN usuarios u ON u.id = v.operador_id
     LEFT JOIN nfce_notas n ON n.id = (
       SELECT n2.id
       FROM nfce_notas n2
@@ -329,6 +350,11 @@ router.get('/:id', anexarEmpresaVenda, (req, res) => {
       v.*,
       c.nome AS cliente_nome,
       c.cpf_cnpj AS cliente_cpf,
+      COALESCE(
+        NULLIF(TRIM(v.operador_nome_snapshot), ''),
+        NULLIF(TRIM(u.nome), ''),
+        NULLIF(TRIM(u.username), '')
+      ) AS operador_nome_exibicao,
       n.id AS nfce_id,
       n.numero AS nfce_numero,
       n.status AS nfce_status,
@@ -341,6 +367,7 @@ router.get('/:id', anexarEmpresaVenda, (req, res) => {
       nfe.protocolo AS nfe_protocolo
     FROM vendas v
     LEFT JOIN clientes c ON v.cliente_id = c.id
+    LEFT JOIN usuarios u ON u.id = v.operador_id
     LEFT JOIN nfce_notas n ON n.id = (
       SELECT n2.id
       FROM nfce_notas n2
@@ -458,7 +485,117 @@ router.post('/pre-calcular-distribuicao', validarCaixaAberto, preCalcularDistrib
 
 // CDS-PDV-EMPRESA-UNICA-02: fixa empresa PDV UNICA antes do caixa; depois núcleo.
 // Sprint 2.2: PDV exige caixa; demais origens reconhecidas sem validarCaixaAberto
+function resolverPedidoVinculadoVenda(req) {
+  return new Promise((resolve, reject) => {
+    const pedidoDireto = Number(
+      req.body && (req.body.pedido_id || req.body.pedidoId) || 0
+    );
+    const operacaoId = Number(
+      req.pedidoFaturamentoOperacaoId
+      || req.body?.pedido_faturamento_operacao_id
+      || 0
+    );
+    const empresaId = Number(
+      req.empresaId
+      || req.empresa_id
+      || req.body?.empresa_id
+      || req.body?.empresaId
+      || req.get && req.get('X-Empresa-Id')
+      || 0
+    );
+
+    if (!operacaoId) {
+      resolve({ pedidoId: pedidoDireto > 0 ? pedidoDireto : 0, empresaId });
+      return;
+    }
+
+    db.get(
+      `SELECT id, pedido_id, empresa_id, tipo_operacao
+       FROM pedido_faturamento_operacoes
+       WHERE id = ?`,
+      [operacaoId],
+      (err, operacao) => {
+        if (err) return reject(err);
+        if (!operacao) {
+          const erroOperacao = new Error('Operação de faturamento vinculada não foi encontrada.');
+          erroOperacao.statusCode = 409;
+          erroOperacao.codigo = 'OPERACAO_FATURAMENTO_INVALIDA';
+          return reject(erroOperacao);
+        }
+        if (String(operacao.tipo_operacao || '') !== 'PDV_COMPOSICAO') {
+          const erroTipo = new Error('Operação de faturamento não corresponde à composição PDV preparada.');
+          erroTipo.statusCode = 409;
+          erroTipo.codigo = 'OPERACAO_FATURAMENTO_TIPO_INVALIDO';
+          return reject(erroTipo);
+        }
+        if (
+          Number(operacao.empresa_id) !== empresaId
+          && empresaId > 0
+        ) {
+          const erroEmpresa = new Error('Operação de faturamento pertence a outra empresa.');
+          erroEmpresa.statusCode = 409;
+          erroEmpresa.codigo = 'OPERACAO_FATURAMENTO_EMPRESA_DIVERGENTE';
+          return reject(erroEmpresa);
+        }
+        const pedidoOperacao = Number(operacao.pedido_id || 0);
+        if (pedidoDireto > 0 && pedidoDireto !== pedidoOperacao) {
+          const erroPedido = new Error('Pedido informado diverge da operação de faturamento.');
+          erroPedido.statusCode = 409;
+          erroPedido.codigo = 'OPERACAO_FATURAMENTO_PEDIDO_DIVERGENTE';
+          return reject(erroPedido);
+        }
+        resolve({
+          pedidoId: pedidoOperacao > 0 ? pedidoOperacao : pedidoDireto,
+          empresaId: empresaId > 0 ? empresaId : Number(operacao.empresa_id)
+        });
+      }
+    );
+  });
+}
+
 function criarVendaComIdempotenciaPdv(req, res) {
+  resolverPedidoVinculadoVenda(req)
+    .then(({ pedidoId, empresaId }) => {
+      if (!Number.isInteger(pedidoId) || pedidoId <= 0) {
+        criarVendaComIdempotenciaAposValidacao(req, res);
+        return;
+      }
+      validarLiberacaoPdv({ pedidoId, empresaId }, { db })
+      .then(() => criarVendaComIdempotenciaAposValidacao(req, res))
+      .catch((err) => {
+        if (err && err.codigo === 'COZINHA_RETIRADA_PENDENTE') {
+          return res.status(err.statusCode || 409).json({
+            error: err.message,
+            mensagem: err.message,
+            code: err.codigo,
+            codigo: err.codigo,
+            pendencias: err.pendencias
+          });
+        }
+        if (err && err.statusCode) {
+          return res.status(err.statusCode).json({
+            error: err.message,
+            mensagem: err.message,
+            code: err.codigo,
+            codigo: err.codigo
+          });
+        }
+        console.error('[cozinha-liberacao-pdv]', err);
+        return res.status(500).json({
+          error: 'Não foi possível validar a retirada dos itens da cozinha.',
+          code: 'COZINHA_LIBERACAO_VALIDACAO_FALHOU'
+        });
+      });
+    })
+    .catch((err) => res.status(err.statusCode || 409).json({
+      error: err.message,
+      mensagem: err.message,
+      code: err.codigo || 'OPERACAO_FATURAMENTO_INVALIDA',
+      codigo: err.codigo || 'OPERACAO_FATURAMENTO_INVALIDA'
+    }));
+}
+
+function criarVendaComIdempotenciaAposValidacao(req, res) {
   const chave = String(req.body && req.body.chave_fechamento_pdv || '').trim();
   if (!/^[A-Za-z0-9._:-]{8,80}$/.test(chave)) return criarVenda(req, res);
 

@@ -5,6 +5,9 @@
 (function (root) {
   'use strict';
 
+  const MOBILE_INSTALLATION_KEY = 'cds_mobile_installation_id_v1';
+  const MOBILE_TERMINAL_HEARTBEAT_MS = 2 * 60 * 1000;
+
   function apiUrl() {
     if (typeof root.API_URL === 'string' && root.API_URL) return root.API_URL;
     if (root.location && root.location.origin) return root.location.origin + '/api';
@@ -25,13 +28,149 @@
 
   function headers() {
     const contexto = root.CdsEmpresaContexto;
-    if (contexto && typeof contexto.headersJson === 'function') return contexto.headersJson();
+    const h = contexto && typeof contexto.headersJson === 'function'
+      ? contexto.headersJson()
+      : null;
     const token = root.localStorage ? (root.localStorage.getItem('token') || '') : '';
-    return {
+    const resultado = h || {
       Accept: 'application/json',
       'Content-Type': 'application/json',
       Authorization: token ? 'Bearer ' + token : ''
     };
+    const installationId = root.__cdsMobileInstallationId;
+    const terminalId = Number(root.__cdsMobileTerminalId);
+    if (installationId) resultado['X-Mobile-Installation-Id'] = installationId;
+    if (Number.isInteger(terminalId) && terminalId > 0) {
+      resultado['X-Terminal-Id'] = String(terminalId);
+    }
+    return resultado;
+  }
+
+  function atualizarStatusTerminalMobile(texto) {
+    const el = root.document && root.document.getElementById('mv-terminal-status');
+    if (el) el.textContent = texto;
+  }
+
+  function atualizarStatusCaixaMobile(texto) {
+    const el = root.document && root.document.getElementById('mv-caixa-status');
+    if (el) el.textContent = texto;
+  }
+
+  function marcarSessaoMobileExpirada() {
+    root.__cdsMobileSessionValid = false;
+    atualizarStatusTerminalMobile('Sessão expirada. Entre novamente para continuar.');
+    const abrir = root.document && root.document.getElementById('mv-abrir-caixa');
+    const fechar = root.document && root.document.getElementById('mv-fechar-caixa');
+    const finalizar = root.document && root.document.getElementById('mv-finalizar');
+    if (abrir) abrir.disabled = true;
+    if (fechar) fechar.disabled = true;
+    if (finalizar) finalizar.disabled = true;
+    if (root.location && typeof root.location.replace === 'function') {
+      root.location.replace('/login?next=/mobile-pdv');
+    }
+  }
+
+  async function fetchMobileMonitorado(fetchFn, url, opcoes = {}) {
+    const resposta = await fetchFn(url, {
+      ...opcoes,
+      headers: Object.assign({}, headers(), opcoes.headers || {})
+    });
+    let erroSessao = resposta && resposta.status === 401;
+    if (!erroSessao && resposta && resposta.status === 403 && typeof resposta.clone === 'function') {
+      const corpo = await resposta.clone().json().catch(() => null);
+      erroSessao = Boolean(corpo && corpo.code === 'SESSAO_INVALIDA');
+    }
+    if (erroSessao) marcarSessaoMobileExpirada();
+    return resposta;
+  }
+
+  function fetchPdv(url, opcoes) {
+    return fetchMobileMonitorado(root.fetch.bind(root), url, opcoes);
+  }
+
+  async function requisicaoJsonMobile(fetchFn, caminho, metodo = 'GET', corpo) {
+    const opcoes = { method: metodo, headers: headers() };
+    if (corpo !== undefined) {
+      opcoes.headers['Content-Type'] = 'application/json';
+      opcoes.body = JSON.stringify(corpo);
+    }
+    const resposta = await fetchMobileMonitorado(
+      fetchFn,
+      apiUrl() + caminho,
+      opcoes
+    );
+    const dados = await resposta.json().catch(() => ({}));
+    if (!resposta.ok) {
+      const err = new Error(dados.error || dados.mensagem || ('HTTP ' + resposta.status));
+      err.status = resposta.status;
+      err.code = dados.code || dados.codigo;
+      err.body = dados;
+      throw err;
+    }
+    return dados;
+  }
+
+  async function obterModoFiscalOperacao(fetchFn) {
+    const configuracao = await requisicaoJsonMobile(
+      fetchFn,
+      '/configuracoes/modo_dashboard_fiscal'
+    );
+    if (!configuracao || configuracao.valor == null) {
+      const erro = new Error('O servidor não retornou o modo fiscal configurado.');
+      erro.code = 'MODO_FISCAL_AUSENTE';
+      throw erro;
+    }
+
+    const valor = configuracao.valor;
+    if (valor === true || valor === 1 || valor === '1' || String(valor).toLowerCase() === 'true') {
+      return true;
+    }
+    if (valor === false || valor === 0 || valor === '0' || String(valor).toLowerCase() === 'false') {
+      return false;
+    }
+
+    const erro = new Error('O servidor retornou um modo fiscal inválido.');
+    erro.code = 'MODO_FISCAL_INVALIDO';
+    throw erro;
+  }
+
+  function gerarUuidSeguro(cryptoApi) {
+    if (!cryptoApi || typeof cryptoApi.getRandomValues !== 'function') {
+      const erro = new Error('Este navegador não oferece geração segura de identidade Mobile.');
+      erro.code = 'IDENTIDADE_SEGURA_INDISPONIVEL';
+      throw erro;
+    }
+    const bytes = new Uint8Array(16);
+    cryptoApi.getRandomValues(bytes);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+    return [
+      hex.slice(0, 8),
+      hex.slice(8, 12),
+      hex.slice(12, 16),
+      hex.slice(16, 20),
+      hex.slice(20)
+    ].join('-');
+  }
+
+  function obterIdentidadeInstalacao(storage, cryptoApi) {
+    if (!storage || typeof storage.getItem !== 'function' || typeof storage.setItem !== 'function') {
+      throw new Error('O armazenamento local não está disponível para identificar esta instalação.');
+    }
+    const salvo = String(storage.getItem(MOBILE_INSTALLATION_KEY) || '').trim().toLowerCase();
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(salvo)) {
+      return salvo;
+    }
+    const cryptoDisponivel = cryptoApi || root.crypto;
+    const identidade = cryptoDisponivel && typeof cryptoDisponivel.randomUUID === 'function'
+      ? cryptoDisponivel.randomUUID().toLowerCase()
+      : gerarUuidSeguro(cryptoDisponivel);
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(identidade)) {
+      throw new Error('O navegador gerou uma identidade Mobile inválida.');
+    }
+    storage.setItem(MOBILE_INSTALLATION_KEY, identidade);
+    return identidade;
   }
 
   function lerHandoff(storage) {
@@ -98,6 +237,32 @@
 
   function estacaoComPinpad() {
     return Boolean(root.electronAPI);
+  }
+
+  async function obterConfiguracaoPagamento(fetchFn, precisaPix) {
+    const resposta = await fetchFn(apiUrl() + '/tef/fluxo-pdv', { headers: headers() });
+    if (!resposta.ok) throw new Error('Não foi possível verificar a configuração de pagamento.');
+    const fluxo = await resposta.json();
+    if (!fluxo || typeof fluxo.tefHabilitado !== 'boolean') {
+      throw new Error('Configuração de TEF inválida. Pagamento não iniciado.');
+    }
+    let pixIntegracaoHabilitada = false;
+    if (!fluxo.tefHabilitado && precisaPix) {
+      const respostaPix = await fetchFn(apiUrl() + '/pix/config', { headers: headers() });
+      if (!respostaPix.ok) throw new Error('Não foi possível verificar a configuração do PIX.');
+      const pix = await respostaPix.json();
+      if (!pix || pix.success !== true || !pix.config || typeof pix.config !== 'object'
+        || Array.isArray(pix.config)
+        || (pix.config.ativo != null && typeof pix.config.ativo !== 'boolean')) {
+        throw new Error('Configuração de PIX inválida. Pagamento não iniciado.');
+      }
+      pixIntegracaoHabilitada = pix.config.ativo === true;
+    }
+    return {
+      tefHabilitado: fluxo.tefHabilitado,
+      modoConfirmacaoFiscal: fluxo.modoConfirmacaoFiscal,
+      pixIntegracaoHabilitada
+    };
   }
 
   function textoSmartPosSimulado(retorno) {
@@ -263,6 +428,7 @@
       forma,
       valor,
       totalVenda: entrada.totalVenda,
+      tefHabilitado: true,
       autorizarTef: async () => ({
         aprovado: true,
         status: 'aprovado',
@@ -294,6 +460,114 @@
     return { ok: resp.ok, status: resp.status, data };
   }
 
+  function descreverSituacaoFiscal(resultado = {}) {
+    const venda = resultado.venda && typeof resultado.venda === 'object'
+      ? resultado.venda
+      : {};
+    const fiscal = resultado.fiscal && typeof resultado.fiscal === 'object'
+      ? resultado.fiscal
+      : (venda.fiscal && typeof venda.fiscal === 'object' ? venda.fiscal : null);
+    const documentoFiscal = venda.documento_fiscal && typeof venda.documento_fiscal === 'object'
+      ? venda.documento_fiscal
+      : null;
+    const emissaoSolicitada = Boolean(
+      (resultado.corpo && resultado.corpo.emitir_fiscal === true)
+      || venda.emitir_fiscal === true
+    );
+
+    if (documentoFiscal && documentoFiscal.bloqueado === true) {
+      const motivo = documentoFiscal.motivo || documentoFiscal.codigo || '';
+      return {
+        situacao: 'Solicitação fiscal bloqueada',
+        detalhe: String(motivo),
+        emissao: String(motivo || 'A emissão foi bloqueada pelo servidor.')
+      };
+    }
+
+    if (fiscal) {
+      const status = String(fiscal.status || '').trim().toLowerCase();
+      const mensagem = String(fiscal.message || fiscal.mensagem || '').trim();
+      let situacao = status;
+      if (status === 'autorizada') situacao = 'Autorizada';
+      else if (status.startsWith('rejeitada')) situacao = 'Rejeitada';
+      else if (['xml_preparado', 'soap_enviado', 'em_processamento', 'processando'].includes(status)) {
+        situacao = 'Em processamento';
+      } else if (['solicitada', 'aguardando_pagamento'].includes(status)) {
+        situacao = status === 'solicitada' ? 'Fiscal solicitada' : 'Pendente de processamento';
+      } else if (['pendente', 'enfileirada', 'aguardando_processamento'].includes(status)) {
+        situacao = 'Pendente de processamento';
+      } else if (status === 'sem_itens_fiscais') {
+        situacao = 'Não fiscal';
+      } else if (status === 'configuracao_pendente') {
+        situacao = 'Configuração fiscal pendente';
+      } else if (status === 'erro_emissao') {
+        situacao = 'Erro na emissão';
+      } else if (status === 'erro_transmissao') {
+        situacao = 'Erro na transmissão';
+      } else if (status === 'erro_validacao') {
+        situacao = 'Erro de validação fiscal';
+      } else if (status === 'recomposicao_bloqueada') {
+        situacao = 'Emissão bloqueada';
+      } else if (!status && emissaoSolicitada) {
+        situacao = 'Fiscal solicitada';
+      } else if (!status) {
+        situacao = 'Situação fiscal não informada pelo servidor';
+      }
+
+      const numero = fiscal.numero != null ? 'NFC-e #' + String(fiscal.numero) : '';
+      const emissao = [numero, mensagem].filter(Boolean).join(' · ');
+      return {
+        situacao: situacao || 'Situação fiscal não informada pelo servidor',
+        detalhe: mensagem,
+        emissao: situacao === 'Não fiscal' ? '' : (emissao || situacao)
+      };
+    }
+
+    const valorFiscal = venda.valor_fiscal == null || venda.valor_fiscal === ''
+      ? NaN
+      : Number(venda.valor_fiscal);
+    const valorNaoFiscal = venda.valor_nao_fiscal == null || venda.valor_nao_fiscal === ''
+      ? NaN
+      : Number(venda.valor_nao_fiscal);
+    const situacaoVenda = String(venda.situacao_fiscal || venda.status_fiscal || '')
+      .trim()
+      .toLowerCase();
+    if (situacaoVenda === 'nao_fiscal' || situacaoVenda === 'não fiscal'
+      || (Number.isFinite(valorFiscal) && valorFiscal <= 0
+        && Number.isFinite(valorNaoFiscal) && valorNaoFiscal > 0)) {
+      return { situacao: 'Não fiscal', detalhe: '', emissao: '' };
+    }
+    if (emissaoSolicitada) {
+      return {
+        situacao: 'Fiscal solicitada',
+        detalhe: 'O servidor ainda não retornou o resultado da emissão.',
+        emissao: 'Solicitação enviada; resultado de emissão ainda não retornado.'
+      };
+    }
+    if (resultado.corpo && resultado.corpo.emitir_fiscal === false) {
+      return {
+        situacao: 'Fiscal não solicitada',
+        detalhe: Number.isFinite(valorFiscal) && valorFiscal > 0
+          ? 'A resposta informa valor fiscal, mas não contém solicitação de emissão.'
+          : 'A requisição de venda não solicitou emissão fiscal.',
+        emissao: ''
+      };
+    }
+    return {
+      situacao: 'Situação fiscal não informada pelo servidor',
+      detalhe: 'A resposta da venda não trouxe dados suficientes para determinar o estado fiscal.',
+      emissao: ''
+    };
+  }
+
+  function valorTotalRetornado(venda) {
+    if (!venda || typeof venda !== 'object') return null;
+    const raw = venda.total != null ? venda.total : venda.valor_total;
+    if (raw == null || raw === '') return null;
+    const total = Number(raw);
+    return Number.isFinite(total) ? total : null;
+  }
+
   async function fechar(entrada) {
     if (entrada.vendaPersistida && entrada.vendaPersistida.id) {
       return {
@@ -319,6 +593,17 @@
         return { ok: false, codigo: 'COMPOSICAO_INVALIDA', mensagem: 'A composição dos pagamentos não foi validada. A venda não foi finalizada.' };
       }
     }
+    let modoFiscalAtivo;
+    try {
+      modoFiscalAtivo = await obterModoFiscalOperacao(fetchFn);
+    } catch (erro) {
+      return {
+        ok: false,
+        codigo: erro.code || (erro.status ? 'HTTP_' + erro.status : 'MODO_FISCAL_INDISPONIVEL'),
+        mensagem: 'Não foi possível consultar a configuração fiscal oficial. A venda não foi enviada. '
+          + (erro.message || '')
+      };
+    }
     let distribuicao;
     try {
       const resp = await fetchFn(apiUrl() + '/vendas/pre-calcular-distribuicao', {
@@ -326,7 +611,7 @@
         headers: headers(),
         body: JSON.stringify({
           itens: oficial.itensParaApi(entrada.itens),
-          emitir_fiscal: false,
+          emitir_fiscal: modoFiscalAtivo,
           pagamentos: parcelas,
           desconto: Number(entrada.desconto || 0),
           acrescimo: 0
@@ -343,7 +628,7 @@
     } catch (_erro) {
       return { ok: false, mensagem: 'Sem conexão ao calcular a distribuição. A venda não foi enviada.' };
     }
-    const montado = oficial.montarCorpo({
+    const dadosFechamento = {
       fluxo,
       parcelas,
       total,
@@ -354,10 +639,32 @@
       chave: entrada.chave,
       valorFiscal: distribuicao.valor_fiscal,
       valorNaoFiscal: distribuicao.valor_nao_fiscal,
+      modoFiscalAtivo,
       modoConfirmacaoFiscal: entrada.modoConfirmacaoFiscal || 'TEF',
       tefHabilitado: entrada.tefHabilitado === true
-    });
+    };
+    let montado = oficial.montarCorpo(dadosFechamento);
+    if (montado.codigo === 'CONFIRMACAO_MANUAL_NECESSARIA' && typeof entrada.confirmarRecebimento === 'function') {
+      let confirmado;
+      try {
+        confirmado = await entrada.confirmarRecebimento(parcelas);
+      } catch (erro) {
+        return {
+          ok: false,
+          codigo: 'CONFIRMACAO_INDISPONIVEL',
+          mensagem: 'Não foi possível abrir a confirmação dos recebimentos. A venda não foi enviada. '
+            + (erro && erro.message ? erro.message : '')
+        };
+      }
+      if (!confirmado) {
+        return { ok: false, codigo: 'CONFIRMACAO_CANCELADA', mensagem: 'Recebimento não confirmado. A venda não foi finalizada.' };
+      }
+      montado = oficial.montarCorpo({ ...dadosFechamento, confirmacaoManual: true });
+    }
     if (!montado.ok) return montado;
+    if (sequencial.assinatura() !== entrada.assinatura && entrada.assinatura != null) {
+      return { ok: false, codigo: 'PAGAMENTOS_ALTERADOS', mensagem: 'Os pagamentos foram alterados. Confira e finalize novamente.' };
+    }
     let respVenda;
     try {
       respVenda = await fetchFn(apiUrl() + '/vendas', {
@@ -414,14 +721,22 @@
     lerHandoff,
     destinoRetornoMesa,
     handoffCompativelComSessao,
+    obterIdentidadeInstalacao,
+    requisicaoJsonMobile,
+    MOBILE_INSTALLATION_KEY,
+    MOBILE_TERMINAL_HEARTBEAT_MS,
     prepararVendaPorValor,
     autorizarEletronico,
+    obterConfiguracaoPagamento,
     precoAvulso,
     identificarProduto,
     cotarProduto,
     acompanharCobranca,
     vincularCobrancaConfirmada,
+    obterModoFiscalOperacao,
     solicitarEmissao,
+    descreverSituacaoFiscal,
+    valorTotalRetornado,
     fechar,
     estacaoComPinpad,
     textoSmartPosSimulado
@@ -437,6 +752,138 @@
     if (!el) return;
     el.hidden = !texto;
     el.textContent = texto || '';
+  }
+
+  let resolverConfirmacaoMobile = null;
+  let resolverSenhaAdminMobile = null;
+
+  function rotuloFormaPagamentoMobile(forma) {
+    const formaNormalizada = String(forma || '').toLowerCase().trim();
+    const rotulos = {
+      pix: 'PIX',
+      pix_tef: 'PIX',
+      cartao_debito: 'Débito',
+      debito: 'Débito',
+      cartao_credito: 'Crédito',
+      credito: 'Crédito',
+      dinheiro: 'Dinheiro'
+    };
+    return rotulos[formaNormalizada] || 'Pagamento eletrônico';
+  }
+
+  function rotuloStatusPagamentoMobile(status) {
+    const statusNormalizado = String(status || '').toLowerCase();
+    const rotulos = {
+      informada: 'Informado',
+      pendente: 'Pendente',
+      aprovada: 'Aprovado',
+      aprovado: 'Aprovado',
+      rejeitada: 'Rejeitado',
+      rejeitado: 'Rejeitado',
+      erro: 'Falha',
+      timeout: 'Tempo esgotado'
+    };
+    return rotulos[statusNormalizado] || 'Pendente';
+  }
+
+  function solicitarConfirmacaoMobile(opcoes = {}) {
+    const dialogo = $('mv-dialogo-confirmacao');
+    const titulo = $('mv-confirmacao-titulo');
+    const descricao = $('mv-confirmacao-descricao');
+    const contexto = $('mv-confirmacao-contexto');
+    const lista = $('mv-confirmacao-lista');
+    const linhaTotal = $('mv-confirmacao-total-linha');
+    const rotuloTotal = $('mv-confirmacao-total-label');
+    const total = $('mv-confirmacao-total');
+    const botaoCancelar = $('mv-confirmacao-cancelar');
+    const botaoConfirmar = $('mv-confirmacao-confirmar');
+    if (!dialogo || typeof dialogo.showModal !== 'function') {
+      return Promise.reject(new Error('A confirmação não está disponível neste navegador.'));
+    }
+    if (resolverConfirmacaoMobile) {
+      return Promise.reject(new Error('Já existe uma confirmação em andamento.'));
+    }
+
+    const itens = Array.isArray(opcoes.itens) ? opcoes.itens : [];
+    const mostrarLista = opcoes.mostrarLista === true && itens.length > 0;
+    const soma = itens.reduce((valor, item) => valor + Number(item.valor || 0), 0);
+    titulo.textContent = opcoes.titulo || 'Confirmar recebimento';
+    descricao.textContent = opcoes.descricao || '';
+    contexto.textContent = opcoes.contexto || '';
+    contexto.hidden = !opcoes.contexto;
+    lista.hidden = !mostrarLista;
+    lista.innerHTML = mostrarLista
+      ? itens.map((item) => (
+        '<div class="mp-confirmacao-linha"><span>'
+        + escapar(rotuloFormaPagamentoMobile(item.forma_pagamento))
+        + '</span><strong>' + escapar(dinheiro(item.valor)) + '</strong></div>'
+      )).join('')
+      : '';
+    linhaTotal.hidden = itens.length === 0;
+    rotuloTotal.textContent = opcoes.rotuloTotal || 'Total a confirmar';
+    total.textContent = dinheiro(soma);
+    botaoCancelar.textContent = opcoes.botaoCancelar || 'Cancelar';
+    botaoConfirmar.textContent = opcoes.botaoConfirmar || 'Confirmar recebimentos';
+    botaoConfirmar.disabled = false;
+    dialogo.returnValue = '';
+
+    return new Promise((resolve, reject) => {
+      resolverConfirmacaoMobile = resolve;
+      try {
+        dialogo.showModal();
+      } catch (erro) {
+        resolverConfirmacaoMobile = null;
+        reject(erro);
+      }
+    });
+  }
+
+  function concluirConfirmacaoMobile(confirmado) {
+    if (!resolverConfirmacaoMobile) return;
+    const resolver = resolverConfirmacaoMobile;
+    resolverConfirmacaoMobile = null;
+    resolver(confirmado);
+    const dialogo = $('mv-dialogo-confirmacao');
+    if (dialogo && dialogo.open && typeof dialogo.close === 'function') {
+      dialogo.close(confirmado ? 'confirmado' : 'cancelado');
+    }
+  }
+
+  function solicitarSenhaAdminMobile() {
+    const dialogo = $('mv-dialogo-senha-admin');
+    const input = $('mv-senha-admin');
+    const erro = $('mv-senha-admin-erro');
+    if (!dialogo || typeof dialogo.showModal !== 'function') {
+      return Promise.reject(new Error('A autorização administrativa não está disponível neste navegador.'));
+    }
+    if (resolverSenhaAdminMobile) {
+      return Promise.reject(new Error('Já existe uma solicitação de autorização em andamento.'));
+    }
+    input.value = '';
+    erro.hidden = true;
+    erro.textContent = '';
+    $('mv-senha-admin-confirmar').disabled = false;
+    return new Promise((resolve, reject) => {
+      resolverSenhaAdminMobile = resolve;
+      try {
+        dialogo.showModal();
+        if (typeof input.focus === 'function') input.focus();
+      } catch (falha) {
+        resolverSenhaAdminMobile = null;
+        reject(falha);
+      }
+    });
+  }
+
+  function concluirSenhaAdminMobile(senha) {
+    if (!resolverSenhaAdminMobile) return;
+    const resolver = resolverSenhaAdminMobile;
+    resolverSenhaAdminMobile = null;
+    resolver(senha);
+    const dialogo = $('mv-dialogo-senha-admin');
+    if (dialogo && dialogo.open && typeof dialogo.close === 'function') {
+      dialogo.close(senha ? 'confirmado' : 'cancelado');
+    }
   }
 
   async function iniciar() {
@@ -481,7 +928,440 @@
     $('mv-empresa').textContent = empresa
       ? (empresa.nome_fantasia || empresa.razao_social || ('Empresa #' + empresa.id))
       : 'Empresa não selecionada';
-    $('mv-operador').textContent = nomeOperador() ? ('Operador: ' + nomeOperador()) : 'Operador da sessão atual';
+    $('mv-operador-nome').textContent = nomeOperador() || 'Operador da sessão atual';
+
+    let mobileInstallationId = null;
+    let mobileTerminalId = null;
+    let mobileTerminalReady = false;
+    let mobileHeartbeatOk = false;
+    let mobileSessionValid = true;
+    let caixaMobileAtual = null;
+    let operacaoCaixaEmCurso = false;
+    let heartbeatMobileTimer = null;
+    let heartbeatMobileEmCurso = false;
+
+    root.__cdsMobileSessionValid = true;
+    root.__cdsMobileInstallationId = null;
+    root.__cdsMobileTerminalId = null;
+
+    function operacaoCaixaDisponivel() {
+      return mobileSessionValid
+        && root.__cdsMobileSessionValid !== false
+        && mobileTerminalReady
+        && mobileHeartbeatOk
+        && !(root.navigator && root.navigator.onLine === false)
+        && Boolean(caixaMobileAtual);
+    }
+
+    function atualizarPainelTerminalCaixa() {
+      const estadoTerminal = !mobileSessionValid
+        ? 'Sessão expirada.'
+        : !mobileTerminalReady
+          ? 'Identificando terminal Mobile…'
+          : !mobileHeartbeatOk || root.navigator && root.navigator.onLine === false
+            ? 'Sem conexão com o servidor.'
+            : 'Terminal Mobile reconhecido.';
+      atualizarStatusTerminalMobile(estadoTerminal);
+      const terminalResumo = $('mv-terminal-resumo');
+      if (terminalResumo) {
+        terminalResumo.textContent = mobileTerminalId
+          ? 'Terminal Mobile #' + mobileTerminalId
+          : 'Terminal Mobile';
+      }
+
+      const estadoCaixa = !mobileTerminalReady
+        ? 'Aguardando reconhecimento do terminal.'
+        : !mobileHeartbeatOk || root.navigator && root.navigator.onLine === false
+          ? 'Caixa indisponível sem conexão confirmada.'
+          : caixaMobileAtual
+            ? 'Caixa aberto neste terminal.'
+            : 'Caixa não aberto. A abertura criará um caixa exclusivo para este Mobile.';
+      atualizarStatusCaixaMobile(estadoCaixa);
+      const resumoStatus = $('mv-caixa-resumo-status');
+      if (resumoStatus) {
+        const estadoResumo = caixaMobileAtual
+          ? 'aberto'
+          : !mobileTerminalReady || !mobileHeartbeatOk || root.navigator && root.navigator.onLine === false
+            ? 'indisponivel'
+            : 'fechado';
+        resumoStatus.textContent = estadoResumo === 'aberto'
+          ? 'Caixa aberto'
+          : estadoResumo === 'fechado'
+            ? 'Caixa não aberto'
+            : 'Caixa indisponível';
+        if (typeof resumoStatus.setAttribute === 'function') {
+          resumoStatus.setAttribute('data-estado', estadoResumo);
+        }
+      }
+      const resumoDetalhe = $('mv-caixa-resumo-detalhe');
+      if (resumoDetalhe) {
+        const sessao = caixaMobileAtual && caixaMobileAtual.sessao || {};
+        resumoDetalhe.textContent = caixaMobileAtual
+          ? 'Caixa #' + (caixaMobileAtual.id || sessao.caixa_turno_id || '—')
+          + ' · Sessão #' + (sessao.id || '—')
+          : '';
+      }
+
+      const painelAbrir = $('mv-caixa-abrir');
+      const painelAberto = $('mv-caixa-aberto');
+      const botaoAbrir = $('mv-abrir-caixa');
+      const botaoFechar = $('mv-fechar-caixa');
+      const detalhe = $('mv-caixa-detalhe');
+      if (painelAbrir) painelAbrir.hidden = Boolean(caixaMobileAtual);
+      if (painelAberto) painelAberto.hidden = !caixaMobileAtual;
+      if (botaoAbrir) {
+        botaoAbrir.disabled = !mobileSessionValid
+          || !mobileTerminalReady
+          || !mobileHeartbeatOk
+          || root.navigator && root.navigator.onLine === false
+          || Boolean(caixaMobileAtual)
+          || operacaoCaixaEmCurso;
+      }
+      if (botaoFechar) {
+        botaoFechar.disabled = !operacaoCaixaDisponivel() || operacaoCaixaEmCurso;
+      }
+      if (detalhe && caixaMobileAtual) {
+        const sessao = caixaMobileAtual.sessao || {};
+        detalhe.textContent = 'Sessão #' + (sessao.id || '—')
+          + ' · Caixa #' + (caixaMobileAtual.id || sessao.caixa_turno_id || '—');
+      }
+      const saldo = $('mv-caixa-saldo');
+      if (saldo) saldo.textContent = caixaMobileAtual && caixaMobileAtual.saldo_geral != null
+        ? dinheiro(caixaMobileAtual.saldo_geral)
+        : '—';
+      const recebido = $('mv-caixa-recebido');
+      if (recebido) recebido.textContent = caixaMobileAtual && caixaMobileAtual.total_recebido != null
+        ? dinheiro(caixaMobileAtual.total_recebido)
+        : '—';
+
+      const podePagar = operacaoCaixaDisponivel();
+      if (typeof root.document.querySelectorAll === 'function') {
+        root.document.querySelectorAll('#mv-formas button').forEach((botao) => {
+          botao.disabled = !podePagar || operacaoCaixaEmCurso;
+        });
+      }
+      const finalizar = $('mv-finalizar');
+      if (finalizar) finalizar.disabled = !podePagar || operacaoCaixaEmCurso;
+    }
+
+    function tratarFalhaTerminalMobile(erro) {
+      const status = Number(erro && erro.status);
+      if (status === 401 || (status === 403 && erro.code === 'SESSAO_INVALIDA')) {
+        mobileSessionValid = false;
+        marcarSessaoMobileExpirada();
+        atualizarPainelTerminalCaixa();
+        return;
+      }
+      if (!status || status >= 500) {
+        mobileHeartbeatOk = false;
+        atualizarStatusTerminalMobile('Sem conexão com o servidor.');
+      } else {
+        atualizarStatusTerminalMobile(erro.message || 'Terminal não autorizado.');
+      }
+      atualizarPainelTerminalCaixa();
+    }
+
+    async function consultarCaixaMobile() {
+      const resumo = await requisicaoJsonMobile(
+        root.fetch.bind(root),
+        '/caixa/aberto'
+      );
+      caixaMobileAtual = resumo || null;
+      atualizarPainelTerminalCaixa();
+      if (caixaMobileAtual && !$('mv-caixa-painel').hidden) {
+        await consultarMovimentacoesCaixaMobile();
+      } else if (!caixaMobileAtual) {
+        const lista = $('mv-caixa-movimentacoes');
+        const status = $('mv-caixa-movimentacoes-status');
+        if (lista) lista.innerHTML = '';
+        if (status) status.textContent = 'Abra um caixa para consultar as movimentações.';
+      }
+      return caixaMobileAtual;
+    }
+
+    async function consultarMovimentacoesCaixaMobile() {
+      const lista = $('mv-caixa-movimentacoes');
+      const status = $('mv-caixa-movimentacoes-status');
+      if (!caixaMobileAtual || !caixaMobileAtual.id) {
+        if (lista) lista.innerHTML = '';
+        if (status) status.textContent = 'Nenhum caixa aberto neste terminal.';
+        return;
+      }
+      if (status) status.textContent = 'Consultando movimentações…';
+      try {
+        const movimentacoes = await requisicaoJsonMobile(
+          root.fetch.bind(root),
+          '/caixa/movimentacoes/' + encodeURIComponent(String(caixaMobileAtual.id))
+        );
+        if (!Array.isArray(movimentacoes)) {
+          throw new Error('O servidor retornou movimentações em formato inválido.');
+        }
+        if (lista) {
+          lista.innerHTML = movimentacoes.map((movimentacao) => {
+            const nome = movimentacao.motivo || movimentacao.tipo_movimentacao
+              || movimentacao.tipo || 'Movimentação';
+            const data = movimentacao.criado_em || movimentacao.created_at || '';
+            return '<li><div><span>' + escapar(nome) + '</span><span>'
+              + escapar(data) + '</span></div><strong>'
+              + escapar(dinheiro(movimentacao.valor)) + '</strong></li>';
+          }).join('');
+        }
+        if (status) status.textContent = movimentacoes.length
+          ? movimentacoes.length + ' movimentação(ões).'
+          : 'Nenhuma movimentação registrada.';
+      } catch (erro) {
+        if (status) status.textContent = erro.message
+          || 'Não foi possível consultar as movimentações do caixa.';
+        tratarFalhaTerminalMobile(erro);
+      }
+    }
+
+    async function registrarIdentidadeMobile() {
+      if (!mobileInstallationId) {
+        throw new Error('Não foi possível gerar uma identidade segura para esta instalação.');
+      }
+      if (!empresaId) {
+        throw new Error('Selecione uma empresa autorizada antes de registrar o terminal Mobile.');
+      }
+      const resposta = await requisicaoJsonMobile(
+        root.fetch.bind(root),
+        '/terminais/mobile/registro',
+        'POST',
+        { installation_id: mobileInstallationId }
+      );
+      const id = Number(resposta.id);
+      if (!Number.isInteger(id) || id <= 0 || resposta.tipo !== 'mobile') {
+        throw new Error('O servidor não retornou um terminal Mobile válido.');
+      }
+      mobileTerminalId = id;
+      mobileTerminalReady = true;
+      mobileHeartbeatOk = true;
+      root.__cdsMobileInstallationId = mobileInstallationId;
+      root.__cdsMobileTerminalId = mobileTerminalId;
+      atualizarPainelTerminalCaixa();
+      return resposta;
+    }
+
+    async function enviarHeartbeatMobile() {
+      if (heartbeatMobileEmCurso || !mobileSessionValid
+        || root.__cdsMobileSessionValid === false || !mobileInstallationId) return;
+      heartbeatMobileEmCurso = true;
+      try {
+        if (!mobileTerminalReady) {
+          await registrarIdentidadeMobile();
+          return;
+        }
+        await requisicaoJsonMobile(
+          root.fetch.bind(root),
+          '/terminais/mobile/heartbeat',
+          'POST',
+          {
+            installation_id: mobileInstallationId,
+            terminal_id: mobileTerminalId
+          }
+        );
+        mobileHeartbeatOk = true;
+        atualizarPainelTerminalCaixa();
+      } catch (erro) {
+        tratarFalhaTerminalMobile(erro);
+      } finally {
+        heartbeatMobileEmCurso = false;
+      }
+    }
+
+    function iniciarHeartbeatMobile() {
+      if (!heartbeatMobileTimer && typeof root.setInterval === 'function') {
+        heartbeatMobileTimer = root.setInterval(
+          enviarHeartbeatMobile,
+          MOBILE_TERMINAL_HEARTBEAT_MS
+        );
+      }
+      if (typeof root.addEventListener === 'function') {
+        root.addEventListener('offline', () => {
+          mobileHeartbeatOk = false;
+          atualizarPainelTerminalCaixa();
+        });
+        root.addEventListener('online', async () => {
+          await enviarHeartbeatMobile();
+          if (mobileHeartbeatOk && mobileTerminalReady) {
+            try { await consultarCaixaMobile(); } catch (erro) { tratarFalhaTerminalMobile(erro); }
+          }
+        });
+      }
+    }
+
+    try {
+      mobileInstallationId = obterIdentidadeInstalacao(root.localStorage, root.crypto);
+      root.__cdsMobileInstallationId = mobileInstallationId;
+      atualizarStatusTerminalMobile('Identificando terminal Mobile…');
+      await registrarIdentidadeMobile();
+      await consultarCaixaMobile();
+    } catch (erro) {
+      tratarFalhaTerminalMobile(erro);
+    }
+    iniciarHeartbeatMobile();
+
+    async function requisitarOperacaoCaixa(caminho, corpo, senhaAdmin) {
+      let senha = senhaAdmin || null;
+      for (let tentativa = 0; tentativa < 2; tentativa += 1) {
+        const payload = Object.assign({}, corpo);
+        if (senha) payload.senha_admin = senha;
+        try {
+          const resposta = await requisicaoJsonMobile(
+            root.fetch.bind(root),
+            caminho,
+            'POST',
+            payload
+          );
+          return { resposta, senhaAdmin: senha };
+        } catch (erro) {
+          if (tentativa === 0 && erro.status === 403
+            && erro.body && erro.body.requer_senha_admin === true) {
+            senha = await solicitarSenhaAdminMobile();
+            if (!senha) throw erro;
+            continue;
+          }
+          throw erro;
+        }
+      }
+      throw new Error('Não foi possível autorizar a operação de caixa.');
+    }
+
+    async function abrirCaixaMobile() {
+      const valorInicial = Number($('mv-caixa-valor-inicial').value || 0);
+      if (!Number.isFinite(valorInicial) || valorInicial < 0) {
+        alerta('Informe um valor inicial válido.');
+        return;
+      }
+      if (!mobileSessionValid || !mobileTerminalReady || !mobileHeartbeatOk) {
+        alerta('O terminal Mobile precisa estar autenticado e conectado antes de abrir o caixa.');
+        return;
+      }
+      if (root.navigator && root.navigator.onLine === false) {
+        alerta('Sem conexão com o servidor. Reconecte antes de abrir o caixa.');
+        return;
+      }
+      operacaoCaixaEmCurso = true;
+      atualizarPainelTerminalCaixa();
+      let senhaAdmin = null;
+      try {
+        const config = await requisitarOperacaoCaixa(
+          '/terminais/mobile/caixa-config',
+          {
+            installation_id: mobileInstallationId,
+            terminal_id: mobileTerminalId
+          },
+          senhaAdmin
+        );
+        senhaAdmin = config.senhaAdmin;
+        await requisitarOperacaoCaixa(
+          '/caixa/abrir',
+          { valor_inicial: valorInicial },
+          senhaAdmin
+        );
+        alerta('');
+        await consultarCaixaMobile();
+      } catch (erro) {
+        alerta(erro.message || 'Não foi possível abrir o caixa Mobile.');
+        tratarFalhaTerminalMobile(erro);
+        if (mobileTerminalReady && mobileHeartbeatOk && mobileSessionValid) {
+          try { await consultarCaixaMobile(); } catch (_consultaErro) { /* erro já apresentado */ }
+        }
+      } finally {
+        operacaoCaixaEmCurso = false;
+        atualizarPainelTerminalCaixa();
+      }
+    }
+
+    async function fecharCaixaMobile() {
+      const valorInformado = Number($('mv-caixa-valor-fechamento').value);
+      if (!Number.isFinite(valorInformado) || valorInformado < 0) {
+        alerta('Informe o valor contado para fechar o caixa.');
+        return;
+      }
+      if (!operacaoCaixaDisponivel()) {
+        alerta('O caixa Mobile não está autenticado ou conectado.');
+        return;
+      }
+      operacaoCaixaEmCurso = true;
+      atualizarPainelTerminalCaixa();
+      try {
+        const confirmado = await solicitarConfirmacaoMobile({
+          titulo: 'Confirmar fechamento do caixa',
+          descricao: 'Confira o valor contado e confirme o encerramento da sessão deste terminal Mobile.',
+          botaoConfirmar: 'Confirmar fechamento'
+        });
+        if (!confirmado) return;
+        await requisitarOperacaoCaixa('/caixa/fechar', {
+          valor_informado: valorInformado,
+          observacao: String($('mv-caixa-observacao').value || '')
+        });
+        alerta('');
+        await consultarCaixaMobile();
+      } catch (erro) {
+        alerta(erro.message || 'Não foi possível fechar o caixa Mobile.');
+        tratarFalhaTerminalMobile(erro);
+      } finally {
+        operacaoCaixaEmCurso = false;
+        atualizarPainelTerminalCaixa();
+      }
+    }
+
+    if ($('mv-abrir-caixa')) {
+      $('mv-abrir-caixa').addEventListener('click', abrirCaixaMobile);
+    }
+    if ($('mv-fechar-caixa')) {
+      $('mv-fechar-caixa').addEventListener('click', fecharCaixaMobile);
+    }
+    $('mv-dialogo-confirmacao').addEventListener('close', () => {
+      if (resolverConfirmacaoMobile) concluirConfirmacaoMobile(false);
+    });
+    $('mv-dialogo-confirmacao').addEventListener('keydown', (evento) => {
+      if (evento.key === 'Escape') {
+        evento.preventDefault();
+        concluirConfirmacaoMobile(false);
+      }
+    });
+    $('mv-confirmacao-cancelar').addEventListener('click', () => concluirConfirmacaoMobile(false));
+    $('mv-confirmacao-confirmar').addEventListener('click', () => {
+      const botao = $('mv-confirmacao-confirmar');
+      if (botao.disabled || !resolverConfirmacaoMobile) return;
+      botao.disabled = true;
+      concluirConfirmacaoMobile(true);
+    });
+    const dialogoSenhaAdmin = $('mv-dialogo-senha-admin');
+    dialogoSenhaAdmin.addEventListener('close', () => {
+      if (resolverSenhaAdminMobile) concluirSenhaAdminMobile(null);
+    });
+    dialogoSenhaAdmin.addEventListener('keydown', (evento) => {
+      if (evento.key === 'Escape') {
+        evento.preventDefault();
+        concluirSenhaAdminMobile(null);
+      } else if (evento.key === 'Enter' && evento.target.id === 'mv-senha-admin') {
+        evento.preventDefault();
+        $('mv-senha-admin-confirmar').click();
+      }
+    });
+    $('mv-senha-admin-cancelar').addEventListener('click', () => concluirSenhaAdminMobile(null));
+    $('mv-senha-admin-confirmar').addEventListener('click', () => {
+      const input = $('mv-senha-admin');
+      if (!input.value) {
+        $('mv-senha-admin-erro').textContent = 'Informe a senha administrativa.';
+        $('mv-senha-admin-erro').hidden = false;
+        input.focus();
+        return;
+      }
+      concluirSenhaAdminMobile(input.value);
+    });
+    $('mv-ir-caixa').addEventListener('click', async () => {
+      $('mv-painel-venda').hidden = true;
+      $('mv-caixa-painel').hidden = false;
+      if (caixaMobileAtual) await consultarMovimentacoesCaixaMobile();
+    });
+    $('mv-voltar-pdv').addEventListener('click', () => {
+      $('mv-caixa-painel').hidden = true;
+      $('mv-painel-venda').hidden = false;
+    });
 
     let itens = [];
     let desconto = 0;
@@ -500,7 +1380,7 @@
         } else {
           let modelo = null;
           try {
-            const respModelo = await root.fetch(apiUrl() + '/vendas/pdv-modelo-empresa', { headers: headers() });
+            const respModelo = await fetchPdv(apiUrl() + '/vendas/pdv-modelo-empresa', { headers: headers() });
             if (respModelo.status === 401) {
               root.location.replace('/login?next=/mobile-pdv');
               return;
@@ -554,7 +1434,7 @@
       if (quantidade <= 0) {
         itens.splice(indice, 1);
       } else {
-        const cotacao = await cotarProduto(item.produto_id, quantidade, root.fetch.bind(root));
+        const cotacao = await cotarProduto(item.produto_id, quantidade, fetchPdv);
         if (!cotacao.ok) {
           alerta(cotacao.mensagem || 'A quantidade não foi atualizada.');
           return;
@@ -572,26 +1452,35 @@
         ? { informado: root.PagamentoSequencial.soma(), restante: Math.round((total - root.PagamentoSequencial.soma()) * 100) / 100, parcelas: root.PagamentoSequencial.snapshot() }
         : interacao.visao();
       $('mv-total').textContent = dinheiro(total);
-      $('mv-informado').textContent = 'Registrado: ' + dinheiro(root.PagamentoSequencial.soma());
-      $('mv-restante').textContent = 'Restante: ' + dinheiro(Math.max(0, total - root.PagamentoSequencial.soma()));
+      $('mv-informado-valor').textContent = dinheiro(root.PagamentoSequencial.soma());
+      $('mv-restante-valor').textContent = dinheiro(Math.max(0, total - root.PagamentoSequencial.soma()));
       $('mv-itens').innerHTML = itens.length
         ? '<ul>' + itens.map((item, indice) => (
-          '<li>' + escapar(item.quantidade) + ' × ' + escapar(item.nome || item.produto_nome || item.produto_id)
-          + ' — ' + dinheiro(item.subtotal)
-          + (handoffValido ? '' : ' <button type="button" data-qtd="' + indice + '" data-delta="-1">−</button><button type="button" data-qtd="' + indice + '" data-delta="1">+</button>')
-          + '</li>'
+          '<li class="mp-item-venda"><div class="mp-item-venda-info"><strong>'
+          + escapar(item.nome || item.produto_nome || item.produto_id)
+          + '</strong><span>' + escapar(item.quantidade) + ' unidade(s)</span></div>'
+          + '<div class="mp-item-venda-acoes"><strong>' + dinheiro(item.subtotal) + '</strong>'
+          + (handoffValido ? '' : '<button type="button" class="mp-btn mp-qtd-btn" aria-label="Diminuir quantidade" data-qtd="' + indice + '" data-delta="-1">−</button><button type="button" class="mp-btn mp-qtd-btn" aria-label="Aumentar quantidade" data-qtd="' + indice + '" data-delta="1">+</button>')
+          + '</div></li>'
         )).join('') + '</ul>'
-        : '<p>Nenhum item.</p>';
+        : '<p class="mp-itens-vazio"><svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 10h5l4 23h21l5-17H15"></path><circle cx="20" cy="40" r="2"></circle><circle cx="35" cy="40" r="2"></circle><path d="M25 5v6m8-3-3 5m-13-5 3 5"></path></svg><strong>Nenhum item adicionado</strong><span>Adicione produtos ou use Venda pelo Valor.</span></p>';
       $('mv-itens').querySelectorAll('button[data-qtd]').forEach((botao) => {
         botao.addEventListener('click', () => {
           alterarQuantidade(Number(botao.getAttribute('data-qtd')), Number(botao.getAttribute('data-delta')));
         });
       });
-      $('mv-parcelas').innerHTML = (visao.parcelas || []).map((parcela) => (
-        '<p><strong>' + escapar(parcela.forma_pagamento) + '</strong> '
-        + dinheiro(parcela.valor) + ' · ' + escapar(parcela.status_autorizacao || 'pendente') + '</p>'
-      )).join('') || '<p>Nenhuma parcela.</p>';
-      $('mv-finalizar').disabled = enviando;
+      const parcelasVisiveis = visao.parcelas || [];
+      $('mv-parcelas').hidden = parcelasVisiveis.length === 0;
+      $('mv-parcelas').innerHTML = parcelasVisiveis.map((parcela) => (
+        '<p class="mp-parcela"><strong>' + escapar(rotuloFormaPagamentoMobile(parcela.forma_pagamento))
+        + '</strong><span>' + dinheiro(parcela.valor) + '</span><small>'
+        + escapar(rotuloStatusPagamentoMobile(parcela.status_autorizacao)) + '</small></p>'
+      )).join('');
+      const pagamentoDisponivel = operacaoCaixaDisponivel();
+      $('mv-finalizar').disabled = enviando || !pagamentoDisponivel;
+      root.document.querySelectorAll('#mv-formas button').forEach((botao) => {
+        botao.disabled = !pagamentoDisponivel || operacaoCaixaEmCurso;
+      });
       if (root.CdsMobileOperacao && root.PagamentoSequencial) {
         root.CdsMobileOperacao.salvarPdv({
           itens: itens.slice(),
@@ -616,7 +1505,7 @@
         $('mv-composicao').hidden = true;
         return;
       }
-      const resp = await root.fetch(apiUrl() + '/vendas/composicao-sequencial', {
+      const resp = await fetchPdv(apiUrl() + '/vendas/composicao-sequencial', {
         method: 'POST',
         headers: headers(),
         body: JSON.stringify({
@@ -652,6 +1541,10 @@
 
     root.document.querySelectorAll('#mv-formas button').forEach((botao) => {
       botao.addEventListener('click', () => {
+        if (!operacaoCaixaDisponivel()) {
+          alerta('Abra o caixa exclusivo do terminal Mobile antes de receber pagamentos.');
+          return;
+        }
         if (!itens.length) {
           alerta('Inclua os itens antes do pagamento.');
           return;
@@ -695,6 +1588,17 @@
         if (dialogo && typeof dialogo.close === 'function') dialogo.close();
       });
     }
+    function confirmarPixManual(valor) {
+      return solicitarConfirmacaoMobile({
+        titulo: 'Confirmar recebimento',
+        descricao: 'Confirme se o cliente realizou o pagamento PIX fora do sistema.',
+        contexto: $('mv-pedido').textContent,
+        itens: [{ forma_pagamento: 'pix', valor }],
+        rotuloTotal: 'Valor do PIX',
+        botaoConfirmar: 'Confirmar PIX'
+      });
+    }
+
     if ($('mv-vv-cancelar')) {
       $('mv-vv-cancelar').addEventListener('click', () => {
         const dialogo = $('mv-dialogo-venda-valor');
@@ -705,6 +1609,10 @@
     $('mv-confirmar-parcela').addEventListener('click', async () => {
       const botao = $('mv-confirmar-parcela');
       if (botao.disabled) return;
+      if (!operacaoCaixaDisponivel()) {
+        alerta('Abra o caixa exclusivo do terminal Mobile antes de receber pagamentos.');
+        return;
+      }
       botao.disabled = true;
       try {
         if (!handoffValido) {
@@ -715,9 +1623,29 @@
           sequencial: root.PagamentoSequencial
         });
         if (forma) entradaInteracao.escolherForma(forma);
+        const formaSelecionada = forma;
+        const interacaoSelecionada = entradaInteracao;
         const valorInformado = Number($('mv-valor').value || 0);
         const eletronica = root.PagamentoSequencial.formaExigeAutorizador(forma);
-        if (eletronica && !estacaoComPinpad()) {
+        let configuracao = { tefHabilitado: false, pixIntegracaoHabilitada: false };
+        if (eletronica) {
+          try {
+            configuracao = await obterConfiguracaoPagamento(fetchPdv, forma === 'pix');
+          } catch (erro) {
+            alerta(erro.message || 'Não foi possível verificar a configuração de pagamento.');
+            return;
+          }
+          if (forma !== formaSelecionada || entradaInteracao !== interacaoSelecionada) {
+            alerta('A forma de pagamento foi alterada. Confirme o valor novamente.');
+            return;
+          }
+          $('mv-area-estacao').hidden = !configuracao.tefHabilitado;
+          if (configuracao.pixIntegracaoHabilitada) {
+            alerta('PIX automático está ativo e não está disponível nesta tela. Use o PDV desktop.');
+            return;
+          }
+        }
+        if (eletronica && configuracao.tefHabilitado && !estacaoComPinpad()) {
           const chaveCobranca = 'pdv-mob-' + Date.now().toString(36) + '-' + forma + '-' + valorInformado.toFixed(2);
           $('mv-correlacao').value = chaveCobranca;
           $('mv-estado-transacao').textContent = 'Aguardando a estação. Nada foi recebido.';
@@ -727,9 +1655,30 @@
           pintar();
           return;
         }
+        const valorArredondado = Math.round((valorInformado + Number.EPSILON) * 100) / 100;
+        if (forma === 'pix' && !configuracao.tefHabilitado
+          && valorArredondado > 0 && valorArredondado - entradaInteracao.visao().restante <= 0.009) {
+          let confirmado;
+          try {
+            confirmado = await confirmarPixManual(valorArredondado);
+          } catch (erro) {
+            alerta(erro.message || 'Não foi possível abrir a confirmação de PIX.');
+            return;
+          }
+          if (!confirmado) {
+            alerta('Recebimento PIX não confirmado. A parcela não foi registrada.');
+            return;
+          }
+          if (forma !== formaSelecionada || entradaInteracao !== interacaoSelecionada) {
+            alerta('A forma de pagamento foi alterada. Confirme o valor novamente.');
+            return;
+          }
+        }
         const resultado = await entradaInteracao.confirmarValor(valorInformado, {
-          formaUsaTef: (nome) => root.PagamentoSequencial.formaExigeAutorizador(nome),
-          autorizarTef: (nome, valor, chaveParcela) => autorizarEletronico(nome, valor, chaveParcela, root.fetch.bind(root))
+          tefHabilitado: configuracao.tefHabilitado,
+          pixIntegracaoHabilitada: configuracao.pixIntegracaoHabilitada,
+          formaUsaTef: (nome) => configuracao.tefHabilitado && root.PagamentoSequencial.formaExigeAutorizador(nome),
+          autorizarTef: (nome, valor, chaveParcela) => autorizarEletronico(nome, valor, chaveParcela, fetchPdv)
         });
         if (!resultado.ok) {
           $('mv-estado-transacao').textContent = resultado.mensagem || 'A parcela não foi confirmada.';
@@ -738,7 +1687,7 @@
           alerta('');
           $('mv-valor').value = '';
           forma = '';
-          $('mv-estado-transacao').textContent = 'Parcela registrada. Escolha a próxima forma.';
+          $('mv-estado-transacao').textContent = resultado.mensagem || 'Parcela registrada. Escolha a próxima forma.';
           const dialogo = $('mv-dialogo-valor');
           if (dialogo && typeof dialogo.close === 'function') dialogo.close();
           await avaliarComposicao();
@@ -754,7 +1703,7 @@
       $('mv-produto-busca')._timer = setTimeout(async () => {
         const termo = $('mv-produto-busca').value.trim();
         if (termo.length < 2) return;
-        const resp = await root.fetch(apiUrl() + '/produtos/consulta-pdv/buscar?q=' + encodeURIComponent(termo) + '&limite=15', { headers: headers() });
+        const resp = await fetchPdv(apiUrl() + '/produtos/consulta-pdv/buscar?q=' + encodeURIComponent(termo) + '&limite=15', { headers: headers() });
         const data = await resp.json().catch(() => []);
         if (!resp.ok || !Array.isArray(data)) {
           alerta((data && (data.mensagem || data.error)) || 'A pesquisa de produtos falhou.');
@@ -762,7 +1711,7 @@
         }
         let identificado = { ok: false };
         try {
-          identificado = await identificarProduto(termo, root.fetch.bind(root));
+          identificado = await identificarProduto(termo, fetchPdv);
         } catch (erro) {
           alerta(erro && erro.message ? erro.message : 'A identificação do produto falhou.');
         }
@@ -777,7 +1726,7 @@
         )).join('');
         $('mv-produto-lista').querySelectorAll('button').forEach((botao) => {
           botao.addEventListener('click', async () => {
-            const cotacao = await cotarProduto(Number(botao.getAttribute('data-id')), 1, root.fetch.bind(root));
+            const cotacao = await cotarProduto(Number(botao.getAttribute('data-id')), 1, fetchPdv);
             if (!cotacao.ok) {
               alerta(cotacao.mensagem || 'O preço do produto não foi calculado.');
               return;
@@ -792,7 +1741,7 @@
     });
 
     $('mv-consultar-estacao').addEventListener('click', async () => {
-      const retorno = await acompanharCobranca($('mv-correlacao').value, root.fetch.bind(root));
+      const retorno = await acompanharCobranca($('mv-correlacao').value, fetchPdv);
       if (retorno.autenticacao) {
         root.location.replace('/login?next=/mobile-pdv');
         return;
@@ -836,7 +1785,7 @@
           alerta(preparado.mensagem);
           return;
         }
-        const resp = await root.fetch(apiUrl() + preparado.endpoint, {
+        const resp = await fetchPdv(apiUrl() + preparado.endpoint, {
           method: 'POST',
           headers: Object.assign({ 'Content-Type': 'application/json', 'Idempotency-Key': 'pdv-vv-' + Date.now().toString(36) }, headers()),
           body: JSON.stringify(preparado.corpo)
@@ -859,23 +1808,39 @@
       });
     }
 
-    if ($('mv-emitir')) {
-      $('mv-emitir').addEventListener('click', async () => {
-        const pedido = await solicitarEmissao({
-          vendaId: vendaPersistida && vendaPersistida.id,
-          distribuicaoAutorizada: false,
-          transmitir: false
-        });
-        alerta(pedido.mensagem || 'A emissão não foi solicitada.');
-      });
-    }
-
     $('mv-finalizar').addEventListener('click', async () => {
       if (enviando) return;
+      if (!operacaoCaixaDisponivel()) {
+        alerta('Abra o caixa exclusivo do terminal Mobile antes de finalizar a venda.');
+        return;
+      }
       enviando = true;
       pintar();
+      const assinatura = root.PagamentoSequencial.assinatura();
+      const parcelasAtuais = root.PagamentoSequencial.exportar();
+      const eletronicas = parcelasAtuais.filter((parcela) => root.PagamentoSequencial.formaExigeAutorizador(parcela.forma_pagamento));
+      let configuracao = { tefHabilitado: false, modoConfirmacaoFiscal: 'TEF' };
+      if (eletronicas.length) {
+        try {
+          configuracao = await obterConfiguracaoPagamento(fetchPdv, eletronicas.some((parcela) => parcela.forma_pagamento === 'pix' && !parcela.tef_transacao_id && !parcela.pix_confirmado));
+          if (configuracao.pixIntegracaoHabilitada) {
+            throw new Error('PIX automático está ativo e não está disponível nesta tela. Use o PDV desktop.');
+          }
+        } catch (erro) {
+          enviando = false;
+          alerta(erro.message || 'Não foi possível verificar a configuração de pagamento.');
+          pintar();
+          return;
+        }
+      }
+      if (assinatura !== root.PagamentoSequencial.assinatura()) {
+        enviando = false;
+        alerta('Os pagamentos foram alterados. Confira e finalize novamente.');
+        pintar();
+        return;
+      }
       const resultado = await fechar({
-        fetch: root.fetch.bind(root),
+        fetch: fetchPdv,
         itens,
         total,
         desconto,
@@ -884,8 +1849,23 @@
         chave,
         enviando: false,
         vendaPersistida,
-        modoConfirmacaoFiscal: 'TEF',
-        tefHabilitado: false
+        modoConfirmacaoFiscal: configuracao.modoConfirmacaoFiscal,
+        tefHabilitado: configuracao.tefHabilitado,
+        assinatura,
+        confirmarRecebimento: (parcelas) => {
+          const pagamentosExternos = parcelas.filter((parcela) => (
+            root.PagamentoSequencial.formaExigeAutorizador(parcela.forma_pagamento)
+            && !parcela.tef_transacao_id
+            && !parcela.pix_confirmado
+          ));
+          return solicitarConfirmacaoMobile({
+            titulo: 'Confirmar recebimentos',
+            descricao: 'Confirme que estes pagamentos foram recebidos fora do CDS. Nenhuma cobrança será iniciada por esta confirmação.',
+            itens: pagamentosExternos,
+            mostrarLista: true,
+            botaoConfirmar: 'Confirmar recebimentos'
+          });
+        }
       });
       enviando = false;
       if (resultado.chave) chave = resultado.chave;
@@ -898,17 +1878,24 @@
       vendaPersistida = { id: resultado.vendaId };
       if (root.sessionStorage) root.sessionStorage.removeItem('pdvPedidoHandoff');
       if (root.CdsMobileOperacao) root.CdsMobileOperacao.limparPdv();
+      alerta('');
+      $('mv-caixa-painel').hidden = true;
       $('mv-painel-venda').hidden = true;
       $('mv-painel-resultado').hidden = false;
-      if (retornoMesa && $('mv-voltar-mesa-fim')) {
-        $('mv-voltar-mesa-fim').href = retornoMesa;
-        $('mv-voltar-mesa-fim').hidden = false;
-      }
-      const fiscal = resultado.fiscal;
-      $('mv-resultado').innerHTML = '<p><strong>Venda</strong><br>#' + resultado.vendaId + '</p>'
-        + '<p><strong>Pedido</strong><br>' + (handoffValido ? ('#' + handoffValido.pedido_id) : 'Sem pedido') + '</p>'
-        + '<p><strong>Empresa</strong><br>' + escapar($('mv-empresa').textContent) + '</p>'
-        + '<p><strong>Fiscal</strong><br>' + escapar(fiscal ? (fiscal.status || fiscal.message || 'Retorno do servidor') : 'NFC-e não solicitada nesta tela.') + '</p>';
+      const venda = resultado.venda || {};
+      $('mv-resultado-venda').textContent = '#' + resultado.vendaId;
+      const pedidoId = venda.pedido_id || (handoffValido && handoffValido.pedido_id);
+      $('mv-resultado-pedido').textContent = pedidoId ? '#' + pedidoId : 'Venda avulsa';
+      $('mv-resultado-empresa').textContent = venda.empresa_nome
+        || (venda.empresa && (venda.empresa.nome_fantasia || venda.empresa.razao_social))
+        || $('mv-empresa').textContent;
+      const valorTotal = valorTotalRetornado(venda);
+      $('mv-resultado-total-linha').hidden = valorTotal == null;
+      if (valorTotal != null) $('mv-resultado-total').textContent = dinheiro(valorTotal);
+      const situacaoFiscal = descreverSituacaoFiscal(resultado);
+      $('mv-resultado-fiscal-status').textContent = situacaoFiscal.situacao;
+      $('mv-resultado-emissao-linha').hidden = !situacaoFiscal.emissao;
+      $('mv-resultado-emissao').textContent = situacaoFiscal.emissao;
     });
 
     pintar();

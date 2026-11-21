@@ -69,6 +69,8 @@ function criarErroPedidoImutavel(pedido, estado = {}) {
   const status = String(pedido?.status || '').toUpperCase();
   const mensagem = status === 'CANCELADO'
     ? 'Pedido cancelado não pode ser editado.'
+    : estado.cozinha_despachada
+      ? 'Pedido enviado à cozinha não pode ter sua composição comercial alterada.'
     : estado.venda_vinculada
       ? 'Pedido com venda vinculada não pode ser editado.'
       : 'Este pedido já foi finalizado e faturado. A edição está bloqueada.';
@@ -78,7 +80,8 @@ function criarErroPedidoImutavel(pedido, estado = {}) {
   err.detalhes = {
     pedido_id: Number(pedido?.id),
     status: pedido?.status || null,
-    venda_id: pedido?.venda_id ?? null
+    venda_id: pedido?.venda_id ?? null,
+    cozinha_despachada: Boolean(estado.cozinha_despachada)
   };
   return err;
 }
@@ -88,6 +91,7 @@ async function obterEstadoEdicao(pedido, opts = {}) {
   const status = String(pedido?.status || '').toUpperCase();
   let vendaVinculada = pedido?.venda_id != null;
   let finalizacaoConfirmada = status === 'FATURADO';
+  let cozinhaDespachada = false;
   const pedidoId = Number(pedido?.id);
   const empresaId = Number(pedido?.empresa_id);
 
@@ -159,14 +163,33 @@ async function obterEstadoEdicao(pedido, opts = {}) {
         db
       ));
     }
+
+    const colunasCozinhaItens = await obterColunasTabela('cozinha_itens', db);
+    if (colunasCozinhaItens.has('pedido_id')) {
+      const params = [pedidoId];
+      let filtroEmpresa = '';
+      if (colunasCozinhaItens.has('empresa_id') && Number.isInteger(empresaId) && empresaId > 0) {
+        filtroEmpresa = ' AND empresa_id = ?';
+        params.push(empresaId);
+      }
+      cozinhaDespachada = Boolean(await get(
+        `SELECT 1 AS existe
+           FROM cozinha_itens
+          WHERE pedido_id = ?${filtroEmpresa}
+          LIMIT 1`,
+        params,
+        db
+      ));
+    }
   }
 
   const statusEncerrado = ['FATURADO', 'CANCELADO'].includes(status);
   return {
-    edicao_bloqueada: statusEncerrado || finalizacaoConfirmada || vendaVinculada,
+    edicao_bloqueada: statusEncerrado || finalizacaoConfirmada || vendaVinculada || cozinhaDespachada,
     finalizacao_confirmada: finalizacaoConfirmada,
-    somente_consulta: statusEncerrado || finalizacaoConfirmada,
-    venda_vinculada: vendaVinculada
+    somente_consulta: statusEncerrado || finalizacaoConfirmada || vendaVinculada || cozinhaDespachada,
+    venda_vinculada: vendaVinculada,
+    cozinha_despachada: cozinhaDespachada
   };
 }
 
@@ -217,7 +240,7 @@ async function carregarSnapshotsProdutos(itens = [], dbInjected) {
   return porId;
 }
 
-function montarInsertPedidoItem({ pedidoId, item, snapshot, colunasPedidoItens }) {
+function montarInsertPedidoItem({ pedidoId, empresaId, item, snapshot, colunasPedidoItens }) {
   const colunas = [
     'pedido_id',
     'produto_id',
@@ -236,6 +259,18 @@ function montarInsertPedidoItem({ pedidoId, item, snapshot, colunasPedidoItens }
     item.subtotal,
     item.tipo_venda || 'PESO'
   ];
+
+  if (colunasPedidoItens.has('empresa_id')) {
+    const empresa = Number(empresaId);
+    if (!Number.isInteger(empresa) || empresa <= 0) {
+      const err = new Error('Empresa do pedido é obrigatória para gravar seus itens.');
+      err.statusCode = 400;
+      err.codigo = 'EMPRESA_CONTEXT_REQUIRED';
+      throw err;
+    }
+    colunas.push('empresa_id');
+    valores.push(empresa);
+  }
 
   if (colunasPedidoItens.has('classificacao_operacional_snapshot')) {
     colunas.push('classificacao_operacional_snapshot');
@@ -715,6 +750,7 @@ async function criarPedido({
       );
       const insert = montarInsertPedidoItem({
         pedidoId,
+        empresaId,
         item,
         snapshot,
         colunasPedidoItens
@@ -942,6 +978,7 @@ async function substituirPedido({
       } else {
         const insert = montarInsertPedidoItem({
         pedidoId,
+        empresaId: emp,
         item,
         snapshot,
         colunasPedidoItens
@@ -1237,5 +1274,6 @@ module.exports = {
   atualizarStatus,
   excluirOrcamento,
   marcarFaturado,
-  atualizarDadosFiscais
+  atualizarDadosFiscais,
+  _montarInsertPedidoItem: montarInsertPedidoItem
 };

@@ -3,6 +3,106 @@
 O painel usa os eventos persistidos da cozinha. Não há migração adicional:
 o schema compartilhado permanece na versão 7.
 
+## Acesso na TV pela rede local
+
+Com o CDS executando como servidor local, o acesso exclusivo para a cozinha
+fica em `http://IP_DO_SERVIDOR:3002/cozinha`. O endereço não é fixo: o servidor
+registra os IPv4 privados detectados e suas interfaces na inicialização; no
+Windows, `ipconfig` também mostra o IPv4 do adaptador Wi-Fi. A porta pode ser
+definida antes de iniciar o CDS pela variável `CDS_KDS_LAN_PORT` (1 a 65535).
+Se ela já estiver ocupada, o erro aparece no log e o ERP continua funcionando.
+
+Para uma rede com DNS local já configurado no roteador, é possível definir
+`CDS_KDS_LAN_HOST` antes de iniciar o CDS com o nome exato do servidor, por
+exemplo `cds-loja.home.arpa`. O endereço passa a ser
+`http://cds-loja.home.arpa:3002/cozinha`. O gateway aceita somente esse nome
+configurado, além dos endereços já aceitos; ele não configura o roteador nem
+confirma que o nome resolve para o servidor. Configure e teste a atualização
+do registro DNS no roteador quando o IP mudar. Se o nome for inválido, o
+acesso KDS pela rede não é iniciado e o erro é registrado. O acesso por IP
+continua disponível como contingência quando a configuração é válida.
+
+### Anúncio na rede local
+
+O CDS anuncia `_cds-kds._tcp.local` por mDNS/DNS-SD somente enquanto o gateway
+está escutando, há IPv4 privado, o recurso de pedidos e o schema da cozinha estão
+operacionais e a licença está válida. A disponibilidade é reavaliada a cada
+10 segundos; mudanças de endereço recriam o anúncio. O anúncio divulga somente
+identificador aleatório, versão do protocolo, caminho `/cozinha`, protocolo HTTP
+e porta do gateway. A identidade e eventuais nomes ajustados por conflito são
+mantidos em `config/cds-network-discovery.json` no diretório de dados do CDS,
+fora do banco. Não copie esse arquivo entre instalações distintas.
+
+O nome mDNS anunciado é aceito pelo gateway somente enquanto o anúncio está
+ativo; `CDS_KDS_LAN_HOST` e acesso manual por IP continuam disponíveis. O
+anúncio é removido no encerramento normal e quando o serviço deixa de estar
+disponível; uma falha abrupta pode deixar registros temporários no cache da rede.
+Para mDNS, o firewall precisa permitir UDP 5353 na rede local confiável e o
+roteador deve permitir multicast entre os dispositivos, além da regra TCP do
+gateway descrita abaixo. Não exponha portas na internet.
+
+### Reconexão dos navegadores
+
+Os navegadores da TV e das páginas mobile não consultam DNS-SD diretamente.
+Abra inicialmente cada página pelo hostname local conhecido e pela respectiva
+porta: `http://HOST:3002/cozinha` para o KDS e a porta do ERP para o mobile.
+Use `CDS_KDS_LAN_HOST` e DNS local configurado para o gateway; alternativamente,
+o hostname mDNS anunciado pode ser usado apenas onde o dispositivo resolver
+`.local`. O nome e a porta devem ser obtidos e configurados manualmente na
+primeira utilização. O anúncio atual não divulga a porta do ERP mobile.
+
+Com o hostname mantido e o DNS/mDNS atualizado para o novo IPv4, o navegador
+pode reconectar sem trocar de origem, sujeito ao cache DNS e ao suporte da
+plataforma. Uma página aberta por IP não descobre o IP novo. Se for necessário
+abrir outro endereço, a sessão e os dados locais não são transferidos entre
+origens: autentique-se novamente e confira operações pendentes antes de agir.
+Ao contrário de uma ponte DNS-SD, esta solução não descobre automaticamente o
+servidor ou uma mudança do próprio hostname causada por conflito.
+
+Enquanto a página estiver aberta, o indicador mostra procura, conexão,
+reconexão ou indisponibilidade, usando apenas consultas GET à origem atual.
+Conectado significa que a página KDS ou a rota pública de verificação do ERP
+respondeu, **não** que a licença, a sessão ou a operação estejam autorizadas.
+Ao reconectar, o KDS atualiza somente consultas; não são reenviadas ações ou
+operações. Uma operação que falhou durante a queda pode ter resultado incerto:
+confira seu estado antes de tentar novamente. No mobile, a monitoração não
+reenvia nem conclui operações; atualize dados conforme o fluxo existente.
+Se a página não estiver carregada, não há indicador nem reconexão em segundo
+plano. O navegador também pode suspender sondas em abas em segundo plano.
+
+Android, iOS e navegadores de Smart TV dependem do suporte de cada navegador
+e rede à resolução escolhida; nenhuma dessas plataformas foi homologada aqui.
+Um anúncio e seu identificador não autenticam o servidor e podem ser
+falsificados. A conexão permanece HTTP e a autorização automática por
+dispositivo ainda não existe.
+
+Na TV, use um usuário já cadastrado, escolha uma empresa autorizada e selecione
+uma unidade autorizada. Senha de primeiro acesso deve ser alterada no computador
+antes de entrar pela TV. **Sair** limpa a sessão da TV. O botão **Tela cheia**
+depende do suporte do navegador e de uma ação do operador. O painel existente
+atualiza automaticamente os pedidos.
+
+A porta 3002 aceita apenas IPv4 privado da mesma sub-rede da interface atendida,
+além de localhost. Nela são disponibilizados apenas a página, recursos e rotas
+necessárias ao KDS; os mecanismos existentes de autenticação, licença e
+isolamento por empresa/unidade continuam aplicados. Isso não restringe a porta
+original do ERP, que continua compartilhada pelos módulos existentes.
+
+No Windows Firewall, permita entrada TCP na porta escolhida somente para a
+sub-rede local ou para o IP da TV, no perfil de rede apropriado; não habilite
+regra ampla de entrada. O perfil **Público** pode bloquear a conexão mesmo
+quando o teste no próprio computador funciona. Altere o perfil para **Privado**
+somente se a rede for confiável e conforme a política do local. Um administrador
+deve também verificar as regras existentes da porta do ERP e garantir que não
+haja encaminhamento de portas no roteador nem exposição por VPN ou túnel.
+Esses controles externos não podem ser garantidos pela aplicação.
+
+**HTTP não criptografa usuário, senha ou token.** Use somente uma rede confiável
+e isolada, ou configure HTTPS por infraestrutura local apropriada antes de
+utilizar credenciais em uma rede não confiável. Não coloque tokens no endereço.
+A compatibilidade de tela cheia e interação com o controle remoto deve ser
+homologada no navegador da TV.
+
 ## Tempos
 
 O envio da rodada inicia a primeira espera. Os eventos de início, retorno,
@@ -10,6 +110,11 @@ conclusão e cancelamento delimitam cada período do item; espera e preparação
 são somadas separadamente. A interface atualiza períodos abertos sem gravar
 no banco. Retirada ou cancelamento encerra os tempos aplicáveis. O total da
 rodada não soma períodos de itens paralelos.
+
+Os timestamps permanecem armazenados em UTC. O KDS e seus históricos os exibem
+no fuso `America/Fortaleza`, no formato `DD/MM/YYYY HH:mm:ss` para datas e
+`HH:mm:ss` para horários. Essa conversão afeta somente a apresentação; os
+cronômetros e durações continuam calculados sobre os instantes originais.
 
 Quando a sequência de eventos não permite reconstruir os períodos, a interface
 exibe “Histórico de tempos incompleto”. Eventos antigos de cancelamento de
@@ -24,6 +129,15 @@ sem depender dos diálogos `prompt` ou `confirm` do Electron. O operador escolhe
 um motivo e confirma o envio; para **Outro**, a justificativa é obrigatória.
 **Voltar** fecha o formulário sem enviar. O cancelamento não altera pedido
 comercial nem pagamento.
+
+Pedidos comerciais com status `CANCELADO` não aparecem na fila operacional
+normal. **Pedidos comerciais cancelados** os reexibe como exceções, sem ações
+de preparo, entrega de bebida ou retirada. A interface orienta a confirmar a
+situação física; o status comercial não cancela automaticamente itens já
+enviados à cozinha. O cancelamento operacional continua sendo uma ação
+explícita, sujeita à evidência e às validações existentes.
+O backend também bloqueia retirada individual e liberação para venda de pedidos
+cancelados. Os registros históricos não são reconciliados automaticamente.
 
 ## Paginação
 
@@ -75,6 +189,27 @@ completa e horários explícitos nos eventos; quando não há evidência suficie
 aparecem como “Não reconstruível”. O total e a espera do garçom também exigem
 os horários persistidos necessários. A consulta não usa `updated_at` nem
 substitui o horário operacional ausente pelo horário de criação do evento.
+
+## Liberação do pedido ao PDV
+
+A liberação verifica os registros já persistidos de `cozinha_rodadas`,
+`cozinha_itens` e `cozinha_bebida_entregas`. O backend bloqueia preparação,
+finalização PDV, venda vinculada e faturamento separado enquanto existir item
+ativo de cozinha sem retirada confirmada. Item integralmente cancelado não
+bloqueia; rodada cancelada e linhas canceladas são excluídas.
+
+As ações de entrega de bebida e retirada individual exibem o saldo calculado
+pelo backend como somente leitura. O navegador envia apenas a chave de
+idempotência; dentro da transação, o backend recalcula o saldo aplicável,
+considerando quantidade exigível, cancelamentos e movimentações já registradas.
+Valores de quantidade enviados por clientes antigos ou alterados no navegador
+não são usados pelas rotas do KDS.
+
+A entrega de bebida é registrada separadamente da retirada. Bebidas só podem
+ser retiradas até o saldo efetivamente entregue, e a rodada só é concluída
+quando todos os itens exigíveis têm comprovação no ledger individual.
+Quantidades mantêm precisão de milésimos; repetição com a mesma chave devolve
+o resultado da operação original, sem duplicar movimentações.
 
 ## Compatibilidade S06
 

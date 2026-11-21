@@ -75,6 +75,7 @@ function _pedHeaders() {
 
 let cdsAberturaMesaEmCurso = false;
 let cdsConsultaPedidoSeq = 0;
+let cdsPedidoPdvStatusTimer = null;
 
 function _pedEmpresaSelecionada() {
   return typeof CdsEmpresaContexto !== 'undefined'
@@ -425,6 +426,7 @@ function loadPedidos() {
   const chavesDuplicacaoPendentes = new Map();
   const chavesCancelamentoPendentes = new Map();
   const operacoesVendaPdvPendentes = new Set();
+  let atualizandoEstadosVendaPdv = false;
 
   function novaChaveIdempotencia() {
     if (window.crypto && typeof window.crypto.randomUUID === 'function') {
@@ -1397,7 +1399,7 @@ function loadPedidos() {
           <td class="text-end text-nowrap ped-acoes">
             ${estadoVendaPdv}
             ${vendaPdvGerada && !somenteConsulta ? `<button class="btn btn-sm btn-outline-success ped-recuperar-venda-pdv" data-id="${p.id}" data-venda-id="${vendaPdvId}" title="Concluir o vínculo da venda existente">Concluir vínculo</button>` : ''}
-            ${podeGerarVendaPdv ? `<button class="btn btn-sm btn-outline-success ped-gerar-venda-pdv" data-id="${p.id}" title="${vendaPdvIniciada ? 'Retomar a preparação da venda' : 'Gerar venda no PDV'}">${vendaPdvIniciada ? 'Retomar no PDV' : 'Gerar venda no PDV'}</button>` : ''}
+            ${podeGerarVendaPdv ? `<button class="btn btn-sm btn-outline-danger ped-gerar-venda-pdv" data-id="${p.id}" disabled title="Retirada integral ainda não confirmada">${vendaPdvIniciada ? 'Retomar no PDV' : 'Gerar venda no PDV'}</button>` : ''}
             ${editavel ? `<button class="btn btn-sm btn-outline-primary ped-editar" data-id="${p.id}" title="Editar"><i class="fas fa-edit"></i></button>` : ''}
             <button class="btn btn-sm btn-outline-dark ped-imprimir" data-id="${p.id}" title="Imprimir"><i class="fas fa-print"></i></button>
             ${!somenteConsulta ? `<button class="btn btn-sm btn-outline-secondary ped-duplicar" data-id="${p.id}" title="Duplicar"><i class="fas fa-copy"></i></button>` : ''}
@@ -1438,9 +1440,75 @@ function loadPedidos() {
           Number($(this).data('venda-id'))
         );
       });
+      atualizarEstadosVendaPdv();
       pintarConsolidada(itens);
     } catch (err) {
       $('#pedListaBody').html(`<tr><td colspan="8" class="text-danger text-center py-4">${escapeHtml(err.message)}</td></tr>`);
+    }
+  }
+
+  async function atualizarEstadosVendaPdv() {
+    if (atualizandoEstadosVendaPdv) return;
+    atualizandoEstadosVendaPdv = true;
+    const botoes = $('.ped-gerar-venda-pdv');
+    try {
+      for (const botao of botoes) {
+        const $botao = $(botao);
+        const pedidoId = Number($botao.data('id'));
+        if (!pedidoId) continue;
+        try {
+          const resp = await fetch(
+            `${API_URL}/pedidos/${pedidoId}/liberacao-pdv`,
+            { method: 'GET', headers: _pedHeaders() }
+          );
+          const status = await resp.json().catch(() => ({}));
+          if (resp.ok && status.liberado === true) {
+            $botao
+              .prop('disabled', false)
+              .removeClass('btn-outline-danger')
+              .addClass('btn-outline-success')
+              .attr('title', 'Retirada integral confirmada; geração liberada');
+          } else {
+            const detalhe = Array.isArray(status.pendencias)
+              ? status.pendencias.map((item) => {
+                const quantidades = [
+                  item.qty_retirada_liquida == null
+                    ? null
+                    : `retirada ${item.qty_retirada_liquida}`,
+                  item.qty_exigivel == null
+                    ? null
+                    : `exigível ${item.qty_exigivel}`,
+                  item.qty_pendente == null
+                    ? null
+                    : `pendente ${item.qty_pendente}`
+                ].filter(Boolean).join(', ');
+                const resumo = quantidades ? ` (${quantidades} milésimos)` : '';
+                return `Item ${item.pedido_item_id || 'indefinido'}${resumo}: ${item.descricao || item.motivo || 'bloqueio sem detalhe'}`;
+              }).join(' | ')
+              : '';
+            const motivo = status.mensagem || status.error
+              || 'Retirada integral ainda não confirmada';
+            $botao
+              .prop('disabled', true)
+              .removeClass('btn-outline-success')
+              .addClass('btn-outline-danger')
+              .attr('title', detalhe ? `${motivo} — ${detalhe}` : motivo);
+          }
+        } catch (_err) {
+          $botao
+            .prop('disabled', true)
+            .removeClass('btn-outline-success')
+            .addClass('btn-outline-danger')
+            .attr('title', 'Não foi possível consultar a retirada no servidor');
+        }
+      }
+    } finally {
+      atualizandoEstadosVendaPdv = false;
+    }
+    if (cdsPedidoPdvStatusTimer == null && typeof window.setInterval === 'function') {
+      cdsPedidoPdvStatusTimer = window.setInterval(() => {
+        if (document.querySelector('.ped-gerar-venda-pdv')) atualizarEstadosVendaPdv();
+      }, 5000);
     }
   }
 
@@ -1455,7 +1523,16 @@ function loadPedidos() {
     const complemento = Number.isFinite(valorParcial) && valorParcial >= 0
       ? ` Melhor composição disponível: R$ ${(valorParcial / 100).toFixed(2).replace('.', ',')}${parcial ? ` (${parcial})` : ''}; diferença de R$ ${(Number(detalhes.diferenca_centavos || 0) / 100).toFixed(2).replace('.', ',')}.`
       : '';
-    return `${preparacao.mensagem || preparacao.error || 'Não foi possível preparar a venda no PDV.'}${complemento}`;
+    const pendencias = Array.isArray(preparacao.pendencias) ? preparacao.pendencias : [];
+    const retirada = pendencias.map((item) => {
+      const exigivel = item.qty_exigivel != null ? ` exigível ${item.qty_exigivel} milésimos` : '';
+      const retiradaLiquida = item.qty_retirada_liquida != null ? `, retirada ${item.qty_retirada_liquida} milésimos` : '';
+      const pendente = item.qty_pendente != null ? `, pendente ${item.qty_pendente} milésimos` : '';
+      const motivo = item.motivo ? ` — ${item.motivo}` : '';
+      return `Item comercial ${item.pedido_item_id || '?'}:${exigivel}${retiradaLiquida}${pendente}${motivo}`;
+    }).join('; ');
+    const detalheRetirada = retirada ? ` ${retirada}.` : '';
+    return `${preparacao.mensagem || preparacao.error || 'Não foi possível preparar a venda no PDV.'}${complemento}${detalheRetirada}`;
   }
 
   async function requisitarPreparacaoVendaPdv(id) {

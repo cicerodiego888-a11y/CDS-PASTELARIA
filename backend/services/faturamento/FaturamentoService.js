@@ -23,6 +23,7 @@ const { consumirReservasPedidoNaVenda } = require('../estoque/pedidoReservaPonte
 const { montarOptsPortaReservaPdv } = require('../estoque/EstoqueReservaService');
 const { calcularFinanceiroPedido } = require('./CalculoFinanceiroPedido');
 const PedidoFaturamentoOperacaoRepository = require('./PedidoFaturamentoOperacaoRepository');
+const { validarLiberacaoPdv } = require('../cozinha/CozinhaLiberacaoPdvService');
 
 function assertModuloHabilitado() {
   if (!configService.recursoHabilitado('expedicao')) {
@@ -358,6 +359,12 @@ async function finalizarPedidoComVenda(
       );
     }
 
+    const { validarLiberacaoPdv } = require('../cozinha/CozinhaLiberacaoPdvService');
+    await validarLiberacaoPdv(
+      { pedidoId, empresaId },
+      { db: transacaoDb }
+    );
+
     const venda = await validarVendaCandidata(pedido, vendaId, payload, transacaoDb);
     if (venda.pedido_id == null || Number(venda.pedido_id) !== Number(pedidoId)) {
       const vinculada = await PedidoFaturamentoOperacaoRepository.run(transacaoDb, `
@@ -585,6 +592,10 @@ async function faturarPedido(pedidoId, body = {}, reqHttp = {}) {
   const empresaIdPedido = exigirOperacaoDoPedido(
     pedido,
     reqHttp.empresaId != null ? reqHttp.empresaId : reqHttp.empresa_id
+  );
+  await validarLiberacaoPdv(
+    { pedidoId: id, empresaId: empresaIdPedido },
+    { db: require('../../database') }
   );
 
   const statusPedidoPodeRetomar = [

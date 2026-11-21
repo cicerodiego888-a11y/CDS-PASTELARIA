@@ -277,3 +277,6 @@ h3 { font-size: 1rem; margin: 12px 0 6px; }
 }
 
 .mp-check input { width: 22px; height: 22px; margin-top: 2px; }
+.cds-rede-status { margin: 0; padding: 0.35rem 1rem; color: #7a4800; font-size: 0.875rem; }
+.cds-rede-status[data-estado="conectado"] { color: #166534; }
+.cds-rede-status[data-estado="indisponivel"] { color: #b91c1c; }

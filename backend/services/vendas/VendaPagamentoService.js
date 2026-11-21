@@ -352,6 +352,39 @@ function vendaVinculadaAoPedidoOperacional(req, pedidoId) {
   return origem === 'FATURAMENTO' || obterOperacaoPedidoId(req) > 0;
 }
 
+async function validarLiberacaoPdvAntesPersistencia(
+  transacaoDb,
+  empresaId,
+  req,
+  pedidoIdVenda
+) {
+  if (!Number.isInteger(Number(pedidoIdVenda)) || Number(pedidoIdVenda) <= 0) return;
+  const operacaoId = obterOperacaoPedidoId(req);
+  if (operacaoId > 0) {
+    const operacao = await getSqlite(transacaoDb, `
+      SELECT id, pedido_id, empresa_id, tipo_operacao
+      FROM pedido_faturamento_operacoes
+      WHERE id = ?
+    `, [operacaoId]);
+    if (
+      !operacao
+      || operacao.tipo_operacao !== 'PDV_COMPOSICAO'
+      || Number(operacao.pedido_id) !== Number(pedidoIdVenda)
+      || Number(operacao.empresa_id) !== Number(empresaId)
+    ) {
+      const err = new Error('Operação de faturamento incompatível ou divergente.');
+      err.statusCode = 409;
+      err.codigo = 'OPERACAO_FATURAMENTO_INVALIDA';
+      throw err;
+    }
+  }
+  const { validarLiberacaoPdv } = require('../cozinha/CozinhaLiberacaoPdvService');
+  await validarLiberacaoPdv(
+    { pedidoId: pedidoIdVenda, empresaId },
+    { db: transacaoDb }
+  );
+}
+
 async function obterVendaExistenteDaOperacaoPedido(
   transacaoDb,
   distribuicaoItens,
@@ -2362,6 +2395,12 @@ db.all(`
     let vendaId;
     try {
       vendaId = await executarTransacaoVendaExclusiva(async (transacaoDb) => {
+        await validarLiberacaoPdvAntesPersistencia(
+          transacaoDb,
+          empresaIdVenda,
+          req,
+          pedidoIdVenda
+        );
         const vendaExistente = await obterVendaExistenteDaOperacaoPedido(
           transacaoDb,
           distribuicaoItens,
@@ -2383,7 +2422,8 @@ db.all(`
           operadorId: req.operadorId,
           usuario: req.user,
           empresaId: empresaIdVenda,
-          clienteId: cliente_id
+          clienteId: cliente_id,
+          req
         });
         const chaveFechamentoPdv = String(
           (req.__chaveFechamentoPdv || (req.body && req.body.chave_fechamento_pdv) || '')
@@ -2393,8 +2433,9 @@ db.all(`
             codigo, data_venda, cliente_id, total, valor_outros, desconto, acrescimo,
             forma_pagamento, status, caixa_sessao_id, caixa_id, terminal_id,
             operador_id, valor_fiscal, valor_nao_fiscal, status_pagamento,
-            tef_transacao_id, mpfc_politica_snapshot, empresa_id, chave_fechamento_pdv
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            tef_transacao_id, mpfc_politica_snapshot, empresa_id, chave_fechamento_pdv,
+            origem_operacao, operador_nome_snapshot, terminal_tipo_snapshot
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `, [
           codigo,
           data_venda,
@@ -2414,7 +2455,10 @@ db.all(`
           resultadoFiscal?.transacoes?.[0] || null,
           snapshotJson,
           empresaIdVenda,
-          chaveFechamentoPdv
+          chaveFechamentoPdv,
+          refsVenda.origemOperacao,
+          refsVenda.operadorNomeSnapshot,
+          refsVenda.terminalTipoSnapshot
         ]);
         const id = venda.lastID;
 
@@ -2612,6 +2656,12 @@ const executarVenda = async () => {
   let vendaId;
   try {
     vendaId = await executarTransacaoVendaExclusiva(async (transacaoDb) => {
+      await validarLiberacaoPdvAntesPersistencia(
+        transacaoDb,
+        empresaIdVenda,
+        req,
+        pedidoIdVenda
+      );
       const vendaExistente = await obterVendaExistenteDaOperacaoPedido(
         transacaoDb,
         distribuicaoItens,
@@ -2633,7 +2683,8 @@ const executarVenda = async () => {
         operadorId: req.operadorId,
         usuario: req.user,
         empresaId: empresaIdVenda,
-        clienteId: cliente_id
+        clienteId: cliente_id,
+        req
       });
       const chaveFechamentoPdv = String(
         (req.__chaveFechamentoPdv || (req.body && req.body.chave_fechamento_pdv) || '')
@@ -2644,8 +2695,8 @@ const executarVenda = async () => {
           forma_pagamento, status, valor_recebido, caixa_sessao_id, caixa_id,
           terminal_id, cpf_cnpj_nota, operador_id, valor_fiscal, valor_nao_fiscal,
           status_pagamento, tef_transacao_id, mpfc_politica_snapshot, empresa_id,
-          chave_fechamento_pdv
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          chave_fechamento_pdv, origem_operacao, operador_nome_snapshot, terminal_tipo_snapshot
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'concluida', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         codigo,
         data_venda,
@@ -2667,7 +2718,10 @@ const executarVenda = async () => {
         resultadoFiscal?.transacoes?.[0] || null,
         snapshotJson,
         empresaIdVenda,
-        chaveFechamentoPdv
+        chaveFechamentoPdv,
+        refsVenda.origemOperacao,
+        refsVenda.operadorNomeSnapshot,
+        refsVenda.terminalTipoSnapshot
       ]);
       const id = venda.lastID;
 

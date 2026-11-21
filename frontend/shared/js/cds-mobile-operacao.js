@@ -7,6 +7,7 @@
 
   const CHAVE_PEDIDO = 'cdsMobilePedido';
   const CHAVE_PDV = 'cdsMobilePdv';
+  const CHAVE_CLIENTE_MESA = 'cdsMobileClienteMesa:';
 
   function armazenamento() {
     return root.sessionStorage || null;
@@ -93,6 +94,37 @@
     return compativel(lerBruto(chavePedido(mesaId)));
   }
 
+  function salvarClienteMesa(dados) {
+    const mesaId = Number(dados.mesaId);
+    const atendimentoId = Number(dados.atendimentoId);
+    if (!Number.isInteger(mesaId) || mesaId <= 0 || !Number.isInteger(atendimentoId) || atendimentoId <= 0
+      || !operadorId() || !empresaId() || !dados.cliente || !String(dados.cliente.nome || '').trim()) {
+      return { ok: false, codigo: 'CONTEXTO_INVALIDO' };
+    }
+    return gravar(CHAVE_CLIENTE_MESA + mesaId, {
+      atendimento_id: atendimentoId,
+      cliente: { id: dados.cliente.id || null, nome: String(dados.cliente.nome).trim() }
+    });
+  }
+
+  function lerClienteMesa(mesaId, atendimentoId) {
+    const leitura = compativel(lerBruto(CHAVE_CLIENTE_MESA + Number(mesaId)));
+    if (!leitura.ok) return leitura;
+    if (!operadorId() || Number(leitura.registro.sessao_operador_id) !== Number(operadorId())
+      || !empresaId() || Number(leitura.registro.empresa_id) !== Number(empresaId())
+      || Number(leitura.registro.atendimento_id) !== Number(atendimentoId)) {
+      return { ok: false, codigo: 'CONTEXTO_DIVERGENTE' };
+    }
+    return leitura;
+  }
+
+  function limparClienteMesa(mesaId, atendimentoId) {
+    const leitura = lerClienteMesa(mesaId, atendimentoId);
+    if (!leitura.ok) return leitura;
+    armazenamento().removeItem(CHAVE_CLIENTE_MESA + Number(mesaId));
+    return { ok: true };
+  }
+
   function salvarPdv(dados) {
     return gravar(CHAVE_PDV, {
       itens: Array.isArray(dados.itens) ? dados.itens : [],
@@ -137,6 +169,9 @@
   root.CdsMobileOperacao = {
     salvarPedido,
     lerPedido,
+    salvarClienteMesa,
+    lerClienteMesa,
+    limparClienteMesa,
     salvarPdv,
     lerPdv,
     limparPdv,

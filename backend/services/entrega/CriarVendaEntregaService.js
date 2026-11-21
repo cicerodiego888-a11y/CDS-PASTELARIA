@@ -29,6 +29,7 @@ const { normalizarTipoVendaItem } = require('../vendaUnidadeHelpers');
 const VendaFinanceiroService = require('../vendas/VendaFinanceiroService');
 const { obterCaixaTurnoId } = require('../../utils/caixaSessaoHelpers');
 const { exigirEmpresaDaOperacao } = require('../vendas/VendaEmpresaContextoService');
+const { resolverSnapshotsAuditoriaVenda } = require('../vendas/VendaReferenciaIntegridade');
 
 const { agoraLocalBrasil } = VendaFinanceiroService;
 
@@ -148,7 +149,7 @@ function criarVendaEntrega(req, res) {
     req.caixaAtual?.id ||
     null;
   const terminalId = req.terminalId || req.terminal?.id || null;
-  const operadorId = req.user?.id || req.operadorId || null;
+  let operadorId = req.user?.id || req.user?.usuario_id || req.operadorId || null;
 
   db.all(
     `
@@ -254,6 +255,23 @@ function criarVendaEntrega(req, res) {
       const valorNaoFiscal = resultadoMotor.valorNaoFiscal;
       const desconto = Number(body.desconto || 0) || 0;
       const codigo = `ENT-${Date.now()}`;
+      let auditoriaVenda;
+      try {
+        auditoriaVenda = await resolverSnapshotsAuditoriaVenda(db, {
+          terminalId,
+          operadorId,
+          usuario: req.user,
+          empresaId: empresaIdVenda,
+          exigirOperador: true,
+          req
+        });
+        operadorId = auditoriaVenda.operadorId;
+      } catch (errAudit) {
+        return res.status(errAudit.statusCode || 500).json({
+          error: errAudit.message || 'Falha ao registrar auditoria da venda.',
+          code: errAudit.codigo || 'VENDA_AUDITORIA_ERRO'
+        });
+      }
 
       const buscarCliente = (cb) => {
         if (!body.cliente_id) return cb(null, null);
@@ -278,7 +296,8 @@ function criarVendaEntrega(req, res) {
                 tipo_venda, status_venda, status_entrega, pagamento_previsto,
                 entregador, endereco_entrega, referencia_entrega, observacao_entrega,
                 taxa_entrega, leva_maquineta, troco_para,
-                prestacao_realizada, telefone_entrega, empresa_id
+                prestacao_realizada, telefone_entrega, empresa_id,
+                origem_operacao, operador_nome_snapshot, terminal_tipo_snapshot
               ) VALUES (
                 ?, ?, ?, ?, ?,
                 ?, 'reserva_entrega', 0,
@@ -287,7 +306,7 @@ function criarVendaEntrega(req, res) {
                 ?, ?, ?, ?,
                 ?, ?, ?, ?,
                 ?, ?, ?,
-                0, ?, ?
+                0, ?, ?, ?, ?, ?
               )
             `,
             [
@@ -315,7 +334,10 @@ function criarVendaEntrega(req, res) {
               levaMaquineta,
               levaTroco ? trocoPara : 0,
               String(body.telefone_entrega || cliente?.telefone || '').trim() || null,
-              empresaIdVenda
+              empresaIdVenda,
+              auditoriaVenda.origemOperacao,
+              auditoriaVenda.operadorNomeSnapshot,
+              auditoriaVenda.terminalTipoSnapshot
             ],
             function onInsertVenda(errIns) {
               if (errIns) {

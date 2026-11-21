@@ -29,6 +29,11 @@ function erroConflito(message, extra = {}) {
   return err;
 }
 
+async function validarLiberacaoCozinhaNaTransacao(db, pedidoId, empresaId) {
+  const { validarLiberacaoPdv } = require('../cozinha/CozinhaLiberacaoPdvService');
+  await validarLiberacaoPdv({ pedidoId, empresaId }, { db });
+}
+
 async function garantirSchema(db) {
   await run(db, `
     CREATE TABLE IF NOT EXISTS pedido_faturamento_operacoes (
@@ -134,6 +139,7 @@ async function prepararOperacao(pedidoId, empresaId, payload = {}) {
         operacao_empresa_id: empresaId
       });
     }
+    await validarLiberacaoCozinhaNaTransacao(transacaoDb, pedidoId, empresaId);
 
     let operacao = await get(
       transacaoDb,
@@ -293,6 +299,7 @@ async function prepararOperacaoPdv(pedidoId, empresaId, payload) {
     if (!pedido || Number(pedido.empresa_id) !== Number(empresaId)) {
       throw erroConflito('Pedido não encontrado para a empresa informada.');
     }
+    await validarLiberacaoCozinhaNaTransacao(transacaoDb, pedidoId, empresaId);
     if (!['PEDIDO', 'ABERTO', 'EM_SEPARACAO'].includes(String(pedido.status || '').toUpperCase())) {
       throw erroConflito(`Pedido no estado ${pedido.status} não pode iniciar uma venda pelo PDV.`);
     }

@@ -28,6 +28,7 @@ const {
 } = require('../../backend/utils/cozinhaSchema');
 const CozinhaDespacho = require('../../backend/services/cozinha/CozinhaDespachoService');
 const CozinhaPreparacao = require('../../backend/services/cozinha/CozinhaPreparacaoService');
+const CozinhaRetiradaLedger = require('../../backend/services/cozinha/CozinhaRetiradaLedgerService');
 const { TIPOS_OPERACAO } = require('../../backend/services/cozinha/cozinhaIdempotenciaHash');
 const {
   resolverUnidadeOperacionalReq
@@ -308,6 +309,23 @@ async function despacharBebida(db, infra, chave, qty = '3.000') {
   });
   const out = await despacharItens(db, infra, [{ ...bebida, qty }], chave);
   return { bebida, out, itemId: out.itens[0].id, rodadaId: out.rodada.id };
+}
+
+async function deixarItemPronto(db, infra, itemId, chave) {
+  const contexto = {
+    empresaId: infra.empresaId,
+    operadorId: 7,
+    unidade_id: infra.unidadeId,
+    itemId
+  };
+  await CozinhaPreparacao.iniciarPreparacao({
+    ...contexto,
+    idempotencyKey: `${chave}-inicio`
+  }, { db });
+  return CozinhaPreparacao.marcarItemPronto({
+    ...contexto,
+    idempotencyKey: `${chave}-pronto`
+  }, { db });
 }
 
 describe('Sprint 05 — Operações dos itens', () => {
@@ -670,6 +688,7 @@ describe('Sprint 05 — Operações dos itens', () => {
       await schemaErp(db);
       const infra = await seedInfra(db);
       const { itemId } = await despacharBebida(db, infra, 's05-beb-tot-desp', '2.000');
+      await deixarItemPronto(db, infra, itemId, 's05-beb-tot');
       const out = await CozinhaPreparacao.entregarBebida({
         empresaId: 1, operadorId: 7, itemId,
         unidade_id: infra.unidadeId,
@@ -690,6 +709,7 @@ describe('Sprint 05 — Operações dos itens', () => {
       await schemaErp(db);
       const infra = await seedInfra(db);
       const { itemId } = await despacharBebida(db, infra, 's05-beb-par-desp', '3.000');
+      await deixarItemPronto(db, infra, itemId, 's05-beb-par');
       const out = await CozinhaPreparacao.entregarBebida({
         empresaId: 1, operadorId: 7, itemId,
         unidade_id: infra.unidadeId,
@@ -700,11 +720,54 @@ describe('Sprint 05 — Operações dos itens', () => {
       await close(db);
     });
 
+    it('calcula a entrega do saldo restante em milésimos e mantém idempotência', async () => {
+      const db = await open();
+      await schemaErp(db);
+      const infra = await seedInfra(db);
+      const { itemId } = await despacharBebida(db, infra, 's05-beb-saldo-desp', '2.500');
+      await deixarItemPronto(db, infra, itemId, 's05-beb-saldo-pronto');
+      await CozinhaPreparacao.entregarBebida({
+        empresaId: 1, operadorId: 7, itemId,
+        unidade_id: infra.unidadeId,
+        qty_entregue: '1.750',
+        idempotencyKey: 's05-beb-saldo-parcial'
+      }, { db });
+
+      const entrada = {
+        empresaId: 1, operadorId: 7, itemId,
+        unidade_id: infra.unidadeId,
+        usar_saldo_pendente: true,
+        idempotencyKey: 's05-beb-saldo-auto'
+      };
+      const entrega = await CozinhaPreparacao.entregarBebida(entrada, { db });
+      const replay = await CozinhaPreparacao.entregarBebida({
+        ...entrada,
+        qty_millis: 1
+      }, { db });
+
+      assert.equal(entrega.entrega.qty_entregue, '0.750');
+      assert.equal(entrega.entrega.qty_restante, '0.000');
+      assert.equal(replay.repetida, true);
+      assert.equal(replay.entrega.qty_entregue, '0.750');
+      assert.equal(Number((await get(db, `
+        SELECT COUNT(*) AS n FROM cozinha_bebida_entregas WHERE cozinha_item_id=?
+      `, [itemId])).n), 2);
+      await assert.rejects(
+        () => CozinhaPreparacao.entregarBebida({
+          ...entrada,
+          idempotencyKey: 's05-beb-saldo-vazio'
+        }, { db }),
+        (err) => err.codigo === 'QTY_ENTREGA_SEM_PENDENCIA'
+      );
+      await close(db);
+    });
+
     it('entregas parciais sucessivas até zerar', async () => {
       const db = await open();
       await schemaErp(db);
       const infra = await seedInfra(db);
       const { itemId } = await despacharBebida(db, infra, 's05-beb-suc-desp', '3.000');
+      await deixarItemPronto(db, infra, itemId, 's05-beb-suc');
 
       await CozinhaPreparacao.entregarBebida({
         empresaId: 1, operadorId: 7, itemId,
@@ -735,6 +798,7 @@ describe('Sprint 05 — Operações dos itens', () => {
       await schemaErp(db);
       const infra = await seedInfra(db);
       const { itemId } = await despacharBebida(db, infra, 's05-beb-eq-desp', '2.500');
+      await deixarItemPronto(db, infra, itemId, 's05-beb-eq');
       await CozinhaPreparacao.entregarBebida({
         empresaId: 1, operadorId: 7, itemId,
         unidade_id: infra.unidadeId,
@@ -758,6 +822,7 @@ describe('Sprint 05 — Operações dos itens', () => {
       await schemaErp(db);
       const infra = await seedInfra(db);
       const { itemId } = await despacharBebida(db, infra, 's05-beb-exc-desp', '2.000');
+      await deixarItemPronto(db, infra, itemId, 's05-beb-exc');
       await CozinhaPreparacao.entregarBebida({
         empresaId: 1, operadorId: 7, itemId,
         unidade_id: infra.unidadeId,
@@ -816,6 +881,7 @@ describe('Sprint 05 — Operações dos itens', () => {
       await schemaErp(db);
       const infra = await seedInfra(db);
       const { itemId } = await despacharBebida(db, infra, 's05-beb-idem-desp', '2.000');
+      await deixarItemPronto(db, infra, itemId, 's05-beb-idem');
       const a = await CozinhaPreparacao.entregarBebida({
         empresaId: 1, operadorId: 7, itemId,
         unidade_id: infra.unidadeId,
@@ -852,6 +918,7 @@ describe('Sprint 05 — Operações dos itens', () => {
         { ...bebida, qty: '1.000' }
       ], 's05-beb-indep-desp');
       const itemBebida = out.itens.find((i) => i.tipo_item === 'BEBIDA');
+      await deixarItemPronto(db, infra, itemBebida.id, 's05-beb-indep');
       const ent = await CozinhaPreparacao.entregarBebida({
         empresaId: 1, operadorId: 7, itemId: itemBebida.id,
         unidade_id: infra.unidadeId,
@@ -896,6 +963,18 @@ describe('Sprint 05 — Operações dos itens', () => {
         idempotencyKey: 's05-retirada-pronto'
       }, { db });
 
+      const itemRetirada = await get(db, `
+        SELECT qty_solicitada_millis FROM cozinha_itens WHERE id=?
+      `, [despacho.itemId]);
+      await CozinhaRetiradaLedger.retirarItem({
+        empresaId: infra.empresaId,
+        operadorId: 7,
+        unidade_id: infra.unidadeId,
+        itemId: despacho.itemId,
+        qty_millis: Number(itemRetirada.qty_solicitada_millis),
+        idempotencyKey: 's05-retirada-ledger'
+      }, { db });
+
       const filaAntes = await get(db, 'SELECT COUNT(*) AS n FROM cozinha_impressao_fila');
       const retirada = await CozinhaPreparacao.confirmarRetirada({
         ...entrada,
@@ -910,7 +989,7 @@ describe('Sprint 05 — Operações dos itens', () => {
         idempotencyKey: 's05-retirada-replay-nova-chave'
       }, { db });
       assert.equal(retirada.success, true);
-      assert.equal(retirada.repetida, false);
+      assert.equal(retirada.repetida, true);
       assert.equal(repetida.repetida, true);
       assert.equal(novaChave.repetida, true);
       assert.equal(retirada.rodada.retirada_estado, 'RETIRADA');
@@ -950,6 +1029,17 @@ describe('Sprint 05 — Operações dos itens', () => {
         empresaId: 1, operadorId: 7, unidade_id: infra.unidadeId,
         itemId: despacho.itemId, idempotencyKey: 's05-retirada-concorrente-pronto'
       }, { db });
+      const itemRetirada = await get(db, `
+        SELECT qty_solicitada_millis FROM cozinha_itens WHERE id=?
+      `, [despacho.itemId]);
+      await CozinhaRetiradaLedger.retirarItem({
+        empresaId: 1,
+        operadorId: 7,
+        unidade_id: infra.unidadeId,
+        itemId: despacho.itemId,
+        qty_millis: Number(itemRetirada.qty_solicitada_millis),
+        idempotencyKey: 's05-retirada-concorrente-ledger'
+      }, { db });
 
       await assert.rejects(
         () => CozinhaPreparacao.confirmarRetirada({
@@ -978,7 +1068,7 @@ describe('Sprint 05 — Operações dos itens', () => {
       ]);
       assert.equal(a.success, true);
       assert.equal(b.success, true);
-      assert.equal([a, b].filter((r) => !r.repetida).length, 1);
+      assert.equal([a, b].filter((r) => !r.repetida).length, 0);
       const eventos = await get(db, `
         SELECT COUNT(*) AS n FROM cozinha_eventos_outbox
         WHERE tipo='RETIRADA_CONFIRMADA'
@@ -1078,6 +1168,7 @@ describe('Sprint 05 — Operações dos itens', () => {
       }, { db });
       assert.equal(prontoOk.item.estado_preparacao, 'PRONTO');
 
+      await deixarItemPronto(db, infraA, bebidaA.itemId, 's05-hom-ok-bebida');
       const bebOk = await CozinhaPreparacao.entregarBebida({
         empresaId: 1, operadorId: 7, unidade_id: unidadeA,
         itemId: bebidaA.itemId, qty_entregue: '1.000',
@@ -1303,6 +1394,7 @@ describe('Sprint 05 — Operações dos itens', () => {
       await schemaErp(db);
       const infra = await seedInfra(db);
       const { itemId } = await despacharBebida(db, infra, 's05-beb-fail-desp', '2.000');
+      await deixarItemPronto(db, infra, itemId, 's05-beb-fail');
 
       await assert.rejects(
         () => CozinhaPreparacao.entregarBebida({

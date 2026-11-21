@@ -2,6 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const vm = require('node:vm');
 
 const RAIZ = path.join(__dirname, '../..');
 const ler = (rel) => fs.readFileSync(path.join(RAIZ, rel), 'utf8');
@@ -36,6 +37,7 @@ function montar(opcoes = {}) {
     atendimentoId: 9,
     pedido: { id: 5, codigo: 'PED-5', status: 'PEDIDO', empresa_id: 1, total: 20, itens: [{ produto_id: 1, quantidade: 2, produto_nome: 'Pastel', subtotal: 20 }] },
     preparacao: { estado: 'EM_PREPARACAO' },
+    despacho: null,
     preparar: null,
     finalizar: null,
     offlineEm: null,
@@ -61,13 +63,13 @@ function montar(opcoes = {}) {
     localStorage: local,
     sessionStorage: sessao,
     CdsEmpresaContexto: {
-      headersJson: () => ({ 'Content-Type': 'application/json', 'X-Empresa-Id': String(o.empresa) }),
+      headersJson: () => ({ 'Content-Type': 'application/json', Authorization: 'Bearer teste', 'X-Empresa-Id': String(o.empresa) }),
       temEmpresaSelecionada: () => true
     },
     fetch: async (url, init = {}) => {
       const metodo = init.method || 'GET';
       const rota = url.replace('http://x/api', '');
-      chamadas.push({ metodo, rota, corpo: init.body });
+      chamadas.push({ metodo, rota, corpo: init.body, headers: init.headers });
       if (o.offlineEm && o.offlineEm.test(`${metodo} ${rota}`)) throw new TypeError('Failed to fetch');
       if (metodo === 'GET' && /\/mesas\/\d+\/atendimento$/.test(rota)) {
         return resposta(200, {
@@ -78,7 +80,7 @@ function montar(opcoes = {}) {
         });
       }
       if (metodo === 'GET' && /\/mesas\/\d+\/atendimento\/pedidos$/.test(rota)) {
-        return resposta(200, { pedidos: [{ id: o.pedido.id, mesa_atendimento_id: o.atendimentoId, preparacao: o.preparacao }] });
+        return resposta(200, { pedidos: [{ id: o.pedido.id, mesa_atendimento_id: o.atendimentoId, preparacao: o.preparacao, despacho: o.despacho }] });
       }
       if (metodo === 'GET' && /\/pedidos\/\d+$/.test(rota)) {
         return resposta(200, { pedido: { ...o.pedido, mesa_atendimento_id: o.atendimentoId } });
@@ -321,4 +323,202 @@ test('MESAS-07 sessão expirada no handoff pede novo login em vez de navegar', a
 test('MESAS-07 página de mesas carrega o encaminhamento oficial e limpa a dica de retorno', () => {
   assert.match(ler('frontend/mobile-mesas/index.html'), /\/mobile-pedido\/mobile-pedido\.js/);
   assert.match(ler('frontend/mobile-mesas/mobile-mesas.js'), /removeItem\(CHAVE_RETORNO\)/);
+});
+
+test('conferência recupera despacho da mesa e oferece reprocessamento apenas quando não confirmado', async () => {
+  for (const status of ['FALHA', 'CONCLUIDO']) {
+    const s = montar({ despacho: { status, codigo: status === 'FALHA' ? 'DESTINO_PENDENTE' : null, unidade_id: 7 } });
+    const leitura = await MobileMesas.consultarPedidoDaMesa(s.rede, Conf, 2, 5);
+    assert.equal(leitura.pedido.despacho.status, status);
+    const ctrl = Conf.criarConferencia({ fetchJson: () => {}, novaChave: () => 'k' });
+    ctrl.finalizar(leitura.pedido, { numero: 2 });
+    const html = MobileMesas.htmlConferencia({ ctrl });
+    if (status === 'FALHA') {
+      assert.match(html, /envio ao KDS não confirmado/);
+      assert.match(html, /DESTINO_PENDENTE/);
+      assert.match(html, /Reprocessar envio ao KDS/);
+    } else {
+      assert.match(html, /Envio ao KDS confirmado/);
+      assert.doesNotMatch(html, /data-acao="enviar"/);
+    }
+  }
+});
+
+test('envio mobile usa contrato desktop e reaproveita chave após resposta perdida', async () => {
+  const s = montar({ preparacao: { estado: 'NAO_ENVIADO' } });
+  let tentativas = 0;
+  const original = s.global.fetch;
+  s.global.fetch = async (url, init) => {
+    if (url.endsWith('/pedidos/5/preparacao/enviar')) {
+      s.chamadas.push({ metodo: init.method, rota: '/pedidos/5/preparacao/enviar', corpo: init.body, headers: init.headers });
+      tentativas += 1;
+      if (tentativas === 1) throw new TypeError('Resposta perdida');
+      return resposta(200, {
+        preparacao: { estado: 'EM_PREPARACAO', enviado_em: '2026-01-01 10:00:00' },
+        despacho: { success: true, status: 'CONCLUIDO', pedido_id: 5, unidade_id: 7, rodada_id: 8 }
+      });
+    }
+    return original(url, init);
+  };
+  const leitura = await MobileMesas.consultarPedidoDaMesa(s.rede, Conf, 2, 5);
+  const ctrl = Conf.criarConferencia({
+    fetchJson: (method, rota, chave) => s.rede.requisitar(method, rota, undefined, chave),
+    novaChave: () => 'mesma-chave'
+  });
+  ctrl.finalizar(leitura.pedido, { numero: 2 });
+  assert.equal((await ctrl.enviar()).ok, false);
+  assert.match(ctrl.estado.aviso, /servidor/);
+  assert.equal((await ctrl.enviar()).ok, true);
+  assert.equal((await ctrl.enviar()).codigo, 'DESPACHO_JA_CONCLUIDO');
+  const posts = postsDe(s.chamadas, /preparacao\/enviar$/);
+  assert.equal(posts.length, 2);
+  for (const post of posts) {
+    assert.equal(post.corpo, undefined);
+    assert.equal(post.headers['Idempotency-Key'], 'mesma-chave');
+    assert.equal(post.headers['X-Empresa-Id'], '1');
+    assert.equal(post.headers.Authorization, 'Bearer teste');
+  }
+});
+
+test('preparação registrada com falha KDS informa o erro e permite reprocessar', async () => {
+  const s = montar({ preparacao: { estado: 'NAO_ENVIADO' } });
+  let tentativas = 0;
+  const ctrl = Conf.criarConferencia({
+    novaChave: () => 'chave-pedido',
+    fetchJson: async () => ({
+      preparacao: { estado: 'EM_PREPARACAO', enviado_em: '2026-01-01 10:00:00' },
+      despacho: ++tentativas === 1
+        ? { success: false, status: 'FALHA', codigo: 'DESTINO_PENDENTE', mensagem: 'Configure o destino.' }
+        : { success: true, status: 'CONCLUIDO', pedido_id: 5, unidade_id: 7, rodada_id: 8 }
+    })
+  });
+  const leitura = await MobileMesas.consultarPedidoDaMesa(s.rede, Conf, 2, 5);
+  ctrl.finalizar(leitura.pedido, { numero: 2 });
+  assert.equal((await ctrl.enviar()).ok, false);
+  const html = MobileMesas.htmlConferencia({ ctrl });
+  assert.match(html, /Configure o destino/);
+  assert.match(html, /Reprocessar envio ao KDS/);
+  assert.equal((await ctrl.enviar()).ok, true);
+  assert.doesNotMatch(MobileMesas.htmlConferencia({ ctrl }), /data-acao="enviar"/);
+  assert.equal(tentativas, 2);
+});
+
+test('pedido faturado sem despacho pode ser enviado ao KDS sem oferecer finalização ao PDV', async () => {
+  for (const estadoPrep of ['NAO_ENVIADO', 'EM_PREPARACAO']) {
+    const pedido = { id: 5, status: 'FATURADO', mesa_atendimento_id: 9, itens: [], preparacao: { estado: estadoPrep } };
+    const ctrl = Conf.criarConferencia({
+      novaChave: () => 'faturado',
+      fetchJson: async () => ({
+        preparacao: { estado: 'EM_PREPARACAO', enviado_em: '2026-01-01 10:00:00' },
+        despacho: { success: true, status: 'CONCLUIDO', pedido_id: 5, unidade_id: 7, rodada_id: 8 }
+      })
+    });
+    ctrl.finalizar(pedido, { numero: 2 });
+    let html = MobileMesas.htmlConferencia({ ctrl });
+    assert.match(html, /data-acao="enviar"/);
+    assert.doesNotMatch(html, /finalizar-pdv/);
+    assert.equal((await ctrl.enviar()).ok, true);
+    html = MobileMesas.htmlConferencia({ ctrl });
+    assert.doesNotMatch(html, /data-acao="enviar"/);
+    assert.doesNotMatch(html, /finalizar-pdv/);
+  }
+});
+
+test('seleção de mesa ocupada mantém identificador até o payload do pedido', async () => {
+  const P = globalThis.CdsPainelMesasApi;
+  const chamadas = [];
+  let destino;
+  const ctrl = P.criarControlador({
+    empresaId: 1,
+    fetchJson: async (method, rota) => {
+      chamadas.push({ method, rota });
+      if (rota === '/mesas/situacao') return { itens: [{ id: 2, numero: 12, empresa_id: 1, ativo: true, situacao: 'OCUPADA', atendimento: { id: 9 } }] };
+      if (rota === '/mesas/2/atendimento') return { situacao: 'OCUPADA', numero: 12, atendimento: { id: 9 } };
+      if (rota === '/mesas/2/atendimento/pedidos') return { pedidos: [] };
+      throw new Error('Rota inesperada: ' + rota);
+    },
+    aoIrParaPedidos: (ctx) => { destino = ctx; }
+  });
+  await ctrl.iniciar();
+  await ctrl.selecionar('2');
+  assert.equal(ctrl.estado.mesaSelecionadaId, 2);
+  assert.equal(ctrl.lancarPedido().ok, true);
+  assert.equal(destino.mesaId, 2);
+  assert.equal(destino.atendimentoId, 9);
+  const estado = globalThis.MobilePedido.criarEstado();
+  estado.mesaId = destino.mesaId;
+  assert.equal(globalThis.MobilePedido.montarPayload(estado).mesa_id, 2);
+  assert.ok(chamadas.every((chamada) => chamada.method === 'GET'));
+  ctrl.parar();
+});
+
+test('mobile abre mesa sem cliente, com nome livre ou com cliente cadastrado', async () => {
+  for (const cliente of [null, { id: null, nome: 'Visitante' }, { id: 5, nome: 'Ana' }]) {
+    let situacao = 'LIVRE';
+    const chamadas = [];
+    let lancamento;
+    const ctrl = globalThis.CdsPainelMesasApi.criarControlador({
+      empresaId: 1,
+      permitirClienteNomeLivre: true,
+      aoIrParaPedidos: (ctx) => { lancamento = ctx; },
+      fetchJson: async (method, rota, body) => {
+        if (rota === '/mesas/situacao') return { itens: [{ id: 2, numero: 12, empresa_id: 1, ativo: true, situacao }] };
+        if (rota === '/mesas/2/atendimento' && method === 'POST') {
+          chamadas.push(body);
+          situacao = 'OCUPADA';
+          return { atendimento: { id: 9 } };
+        }
+        if (rota === '/mesas/2/atendimento') return { situacao, numero: 12, atendimento: situacao === 'OCUPADA' ? { id: 9 } : null };
+        if (rota === '/mesas/2/atendimento/pedidos') return { pedidos: [] };
+        throw new Error('Rota inesperada: ' + rota);
+      }
+    });
+    await ctrl.iniciar();
+    await ctrl.selecionar(2);
+    if (cliente) {
+      ctrl.definirCliente(cliente.nome);
+      if (cliente.id) ctrl.selecionarCliente(cliente.id, cliente.nome);
+      else ctrl.definirSugestoesClientes([]);
+    }
+    const resultado = await ctrl.abrirAtendimento();
+    assert.equal(resultado.ok, true);
+    assert.deepEqual(chamadas, [cliente && cliente.id ? { cliente_id: cliente.id } : {}]);
+    assert.equal(lancamento.mesaId, 2);
+    assert.equal(lancamento.atendimentoId, 9);
+    assert.deepEqual(lancamento.cliente || null, cliente);
+    ctrl.parar();
+  }
+});
+
+test('identificação da mesa é restrita à empresa, operador e atendimento', () => {
+  const sessionStorage = armazenamento();
+  const localStorage = armazenamento();
+  let empresa = 1;
+  localStorage.setItem('user', JSON.stringify({ id: 3 }));
+  const ctx = { sessionStorage, localStorage, CdsEmpresaContexto: { lerEmpresaId: () => empresa } };
+  vm.createContext(ctx);
+  vm.runInContext(ler('frontend/shared/js/cds-mobile-operacao.js'), ctx);
+  const operacao = ctx.CdsMobileOperacao;
+  assert.equal(operacao.salvarClienteMesa({ mesaId: 2, atendimentoId: 9, cliente: { nome: 'Visitante' } }).ok, true);
+  assert.equal(operacao.lerClienteMesa(2, 9).registro.cliente.nome, 'Visitante');
+  assert.equal(operacao.lerClienteMesa(2, 10).codigo, 'CONTEXTO_DIVERGENTE');
+  empresa = 2;
+  assert.equal(operacao.lerClienteMesa(2, 9).codigo, 'CONTEXTO_DIVERGENTE');
+  empresa = 1;
+  localStorage.setItem('user', JSON.stringify({ id: 4 }));
+  assert.equal(operacao.lerClienteMesa(2, 9).codigo, 'OPERADOR_DIVERGENTE');
+  localStorage.setItem('user', JSON.stringify({ id: 3 }));
+  assert.equal(operacao.limparClienteMesa(2, 9).ok, true);
+  assert.equal(operacao.lerClienteMesa(2, 9).codigo, 'AUSENTE');
+});
+
+test('lançar outro pedido identifica só a confirmação salva da mesa', () => {
+  const global = { CdsMobileOperacao: { lerPedido: (mesaId) => ({
+    ok: true, registro: { estado: { etapa: 'confirmado', confirmacao: { id: mesaId === 2 ? 5 : 6 } } }
+  }) } };
+  assert.equal(MobileMesas.destinoNovoPedidoMesa(global, 2), '/mobile-pedido/?mesa=2&novoApos=5');
+  global.CdsMobileOperacao.lerPedido = () => ({ ok: true, registro: { estado: { etapa: 'produtos', itens: [{}] } } });
+  assert.equal(MobileMesas.destinoNovoPedidoMesa(global, 2), '/mobile-pedido/?mesa=2');
+  global.CdsMobileOperacao.lerPedido = () => ({ ok: false, codigo: 'OPERADOR_DIVERGENTE' });
+  assert.equal(MobileMesas.destinoNovoPedidoMesa(global, 2), '/mobile-pedido/?mesa=2');
 });

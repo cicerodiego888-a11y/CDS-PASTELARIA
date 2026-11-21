@@ -34,6 +34,8 @@ function responderErro(res, err) {
     success: false,
     error: err.message || 'Erro interno.',
     codigo: err.codigo || undefined,
+    mensagem: err.message || 'Erro interno.',
+    pendencias: err.pendencias || undefined,
     venda_id: err.venda_id || undefined,
     body: err.body || undefined
   });

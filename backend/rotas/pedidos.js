@@ -23,6 +23,7 @@ const VendaConsolidadaMesa = require('../services/vendas/VendaConsolidadaMesaSer
 const ComandaSnapshot = require('../services/cozinha/CozinhaComandaSnapshotService');
 const { htmlComanda } = require('../services/cozinha/CozinhaComandaRenderer');
 const { validarUnidadeCozinhaNoLogin } = require('../services/cozinha/cozinhaAuthUnidade');
+const { validarLiberacaoPdv } = require('../services/cozinha/CozinhaLiberacaoPdvService');
 
 router.use(exigirRecurso('pedidos'));
 router.use(criarMiddlewareContextoEmpresa(db));
@@ -39,6 +40,7 @@ function responderErro(res, err) {
   if (err.plano) payload.plano = err.plano;
   if (err.consultas) payload.consultas = err.consultas;
   if (err.detalhes) payload.detalhes = err.detalhes;
+  if (err.pendencias) payload.pendencias = err.pendencias;
   if (err.consolidacao_id != null) payload.consolidacao_id = err.consolidacao_id;
   if (err.pedido_id != null) payload.pedido_id = err.pedido_id;
   if (err.codigo === 'MODULO_NAO_LICENCIADO') {
@@ -98,6 +100,31 @@ router.get('/:id', async (req, res) => {
     res.json(out);
   } catch (err) {
     responderErro(res, err);
+  }
+});
+
+router.get('/:id/liberacao-pdv', async (req, res) => {
+  try {
+    const pedidoId = Number(req.params.id);
+    const empresaId = empresaIdDoReqPedido(req);
+    await validarLiberacaoPdv({ pedidoId, empresaId }, { db });
+    return res.json({
+      success: true,
+      liberado: true,
+      pedido_id: pedidoId,
+      pendencias: []
+    });
+  } catch (err) {
+    if (err && err.codigo === 'COZINHA_RETIRADA_PENDENTE') {
+      return res.json({
+        success: true,
+        liberado: false,
+        pedido_id: Number(req.params.id),
+        mensagem: err.message,
+        pendencias: err.pendencias || []
+      });
+    }
+    return responderErro(res, err);
   }
 });
 
@@ -195,6 +222,7 @@ router.post('/venda-consolidada-mesa/:consolidacaoId/liberar', async (req, res) 
 router.post('/:id/preparar-venda-pdv', async (req, res) => {
   try {
     const empresaId = empresaIdDoReqPedido(req);
+    await validarLiberacaoPdv({ pedidoId: req.params.id, empresaId }, { db });
     const operacaoExistente = await PedidoFaturamentoOperacaoRepository.consultarOperacaoPdv(
       Number(req.params.id),
       empresaId
@@ -258,6 +286,10 @@ router.post('/:id/preparar-venda-pdv', async (req, res) => {
 
 router.post('/:id/finalizar-venda-pdv', async (req, res) => {
   try {
+    await validarLiberacaoPdv(
+      { pedidoId: req.params.id, empresaId: empresaIdDoReqPedido(req) },
+      { db }
+    );
     const out = await FaturamentoService.finalizarVendaPdvPedido(req.params.id, req);
     res.json({
       success: true,

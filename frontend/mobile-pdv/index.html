@@ -12,40 +12,115 @@
 <body>
     <div id="mv-app" class="mp">
         <header class="mp-topo">
-            <img src="/branding/logo-oficial.png" alt="CDS Sistemas" class="mp-logo" width="40" height="40">
-            <div class="mp-topo-texto">
-                <strong>CDS Sistemas</strong>
-                <span id="mv-empresa">Empresa não selecionada</span>
+            <div class="mp-topo-identidade">
+                <img src="/branding/logo-oficial.png" alt="CDS Sistemas" class="mp-logo" width="40" height="40">
+                <span class="mp-topo-divisor" aria-hidden="true"></span>
+                <div class="mp-topo-texto">
+                    <strong>CDS Sistemas</strong>
+                    <span>PDV Mobile</span>
+                </div>
             </div>
             <nav class="mp-modulos" aria-label="Módulos do CDS">
                 <a href="/mobile/">Início</a>
                 <a href="/mobile-pedido/">Pedido</a>
                 <a href="/mobile-pdv/" aria-current="page">PDV</a>
             </nav>
+            <span id="mv-empresa" hidden>Empresa não selecionada</span>
         </header>
+        <p id="cds-rede-status" class="cds-rede-status" data-tipo="mobile" role="status" aria-live="polite">Procurando servidor…</p>
         <div id="mv-alerta" class="mp-alerta" hidden></div>
         <main>
             <section id="mv-painel-venda">
-                <h1>Fechamento</h1>
-                <p id="mv-operador" class="mp-ajuda"></p>
+                <h1 class="mp-titulo-pdv">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M3 4h2l2.2 11.2a2 2 0 0 0 2 1.6h8.5a2 2 0 0 0 2-1.6L21 8H6"></path>
+                        <circle cx="10" cy="20" r="1"></circle><circle cx="18" cy="20" r="1"></circle>
+                        <path d="M8 11h10M10 8l2 6m4-6-2 6"></path>
+                    </svg>
+                    <span>PDV Mobile</span>
+                </h1>
+                <section id="mv-caixa-resumo" class="mp-caixa-resumo" aria-live="polite">
+                    <span class="mp-terminal-icone" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="6" y="2.5" width="12" height="19" rx="2"></rect><path d="M10 18.5h4"></path>
+                        </svg>
+                    </span>
+                    <div class="mp-caixa-resumo-texto">
+                        <strong id="mv-terminal-resumo">Terminal Mobile</strong>
+                        <span id="mv-caixa-resumo-status" class="mp-terminal-status" data-estado="indisponivel">Aguardando autenticação.</span>
+                        <span id="mv-caixa-resumo-detalhe"></span>
+                    </div>
+                    <button type="button" class="mp-btn mp-caixa-resumo-botao" id="mv-ir-caixa">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="m12 3 9 5-9 5-9-5 9-5Z"></path><path d="m3 12 9 5 9-5"></path><path d="m3 16 9 5 9-5"></path>
+                        </svg>
+                        Meu Caixa
+                    </button>
+                </section>
+                <p id="mv-operador" class="mp-operador">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <circle cx="12" cy="8" r="4"></circle><path d="M4 21a8 8 0 0 1 16 0"></path>
+                    </svg>
+                    <span class="mp-operador-label">Operador:</span>
+                    <strong id="mv-operador-nome">Operador da sessão atual</strong>
+                </p>
                 <p id="mv-pedido" class="mp-ajuda"></p>
                 <a id="mv-voltar-mesa" class="mp-btn" href="/mobile-mesas/" hidden>Voltar à mesa</a>
-                <div id="mv-itens" class="mp-card"></div>
                 <div id="mv-busca-livre">
-                    <button type="button" class="mp-btn" id="mv-venda-valor">Venda pelo Valor</button>
-                    <label class="mp-label" for="mv-produto-busca">Produto para venda avulsa</label>
-                    <input id="mv-produto-busca" class="mp-campo" type="search" autocomplete="off" enterkeyhint="search">
+                    <h2 class="mp-titulo-secao">Adicionar à venda</h2>
+                    <label class="mp-sr-only" for="mv-produto-busca">Buscar produto por nome, código ou código de barras</label>
+                    <div class="mp-busca">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true">
+                            <circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path>
+                        </svg>
+                        <input id="mv-produto-busca" class="mp-campo" type="search" placeholder="Buscar produto por nome, código ou código de barras" autocomplete="off" enterkeyhint="search">
+                    </div>
                     <div id="mv-produto-lista" class="mp-lista"></div>
+                    <button type="button" class="mp-btn mp-venda-valor" id="mv-venda-valor">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <rect x="2.5" y="5" width="19" height="14" rx="2"></rect><circle cx="12" cy="12" r="3"></circle><path d="M6 9h.01M18 15h.01"></path>
+                        </svg>
+                        <span><strong>Venda pelo Valor</strong><small>Registrar uma venda informando diretamente o valor.</small></span>
+                        <svg class="mp-venda-seta" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="m9 18 6-6-6-6"></path>
+                        </svg>
+                    </button>
                 </div>
-                <p class="mp-total">Total <strong id="mv-total">R$ 0,00</strong></p>
-                <h2>Pagamentos</h2>
-                <p id="mv-informado" class="mp-ajuda"></p>
-                <p id="mv-restante" class="mp-ajuda"></p>
+                <h2 class="mp-titulo-secao mp-titulo-itens">Itens da venda</h2>
+                <div id="mv-itens" class="mp-card mp-itens-card" aria-live="polite"></div>
+                <div class="mp-total"><span>Total</span><strong id="mv-total">R$ 0,00</strong></div>
+                <h2 class="mp-titulo-secao mp-titulo-pagamentos">Pagamentos</h2>
+                <div class="mp-pagamento-resumo">
+                    <p id="mv-informado">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M3 7h18v13H3z"></path><path d="M3 7V5a2 2 0 0 1 2-2h14v4"></path><path d="M16 13h5v4h-5a2 2 0 0 1 0-4Z"></path>
+                        </svg>
+                        <span>Registrado:</span><strong id="mv-informado-valor">R$ 0,00</strong>
+                    </p>
+                    <p id="mv-restante">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <ellipse cx="9" cy="5" rx="6" ry="2.5"></ellipse><path d="M3 5v4c0 1.4 2.7 2.5 6 2.5"></path><path d="M15 5v3"></path><ellipse cx="15" cy="11" rx="6" ry="2.5"></ellipse><path d="M9 11v4c0 1.4 2.7 2.5 6 2.5s6-1.1 6-2.5v-4"></path><path d="M9 15v4c0 1.4 2.7 2.5 6 2.5s6-1.1 6-2.5v-4"></path>
+                        </svg>
+                        <span>Restante:</span><strong id="mv-restante-valor">R$ 0,00</strong>
+                    </p>
+                </div>
                 <div id="mv-formas" class="mp-acoes">
-                    <button type="button" class="mp-btn" data-forma="pix">PIX</button>
-                    <button type="button" class="mp-btn" data-forma="cartao_debito">Débito</button>
-                    <button type="button" class="mp-btn" data-forma="cartao_credito">Crédito</button>
-                    <button type="button" class="mp-btn" data-forma="dinheiro">Dinheiro</button>
+                    <button type="button" class="mp-btn mp-forma-pagamento" data-forma="pix">
+                        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m12 2.2 4.1 4.1-4.1 4.1-4.1-4.1L12 2.2Zm5.7 5.7 4.1 4.1-4.1 4.1-4.1-4.1 4.1-4.1ZM6.3 7.9l4.1 4.1-4.1 4.1-4.1-4.1 4.1-4.1Zm5.7 5.7 4.1 4.1-4.1 4.1-4.1-4.1 4.1-4.1Z"></path></svg>
+                        <span>PIX</span>
+                    </button>
+                    <button type="button" class="mp-btn mp-forma-pagamento" data-forma="cartao_debito">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="2"></rect><path d="M2 9h20M6 15h5"></path></svg>
+                        <span>Débito</span>
+                    </button>
+                    <button type="button" class="mp-btn mp-forma-pagamento" data-forma="cartao_credito">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="2"></rect><path d="M2 9h20M6 15h8"></path></svg>
+                        <span>Crédito</span>
+                    </button>
+                    <button type="button" class="mp-btn mp-forma-pagamento" data-forma="dinheiro">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="5" width="20" height="14" rx="2"></rect><circle cx="12" cy="12" r="3"></circle><path d="M6 9h.01M18 15h.01"></path></svg>
+                        <span>Dinheiro</span>
+                    </button>
                 </div>
                 <p id="mv-estado-transacao" class="mp-ajuda"></p>
                 <dialog id="mv-dialogo-valor">
@@ -69,23 +144,97 @@
                         <button type="button" class="mp-btn mp-btn-primario" id="mv-vv-continuar">Continuar</button>
                     </div>
                 </dialog>
-                <div id="mv-parcelas" class="mp-lista"></div>
+                <div id="mv-parcelas" class="mp-lista" hidden></div>
                 <div id="mv-composicao" class="mp-card" hidden></div>
-                <p class="mp-ajuda">PIX, débito e crédito só entram depois da confirmação gravada pela estação. Este celular não comanda o pinpad nem a maquininha. Uma resposta de Smart POS simulada não substitui essa confirmação e não é recebimento real.</p>
-                <label class="mp-label" for="mv-correlacao">Identificador da cobrança na estação</label>
-                <input id="mv-correlacao" class="mp-campo" type="text" autocomplete="off">
-                <button type="button" class="mp-btn" id="mv-consultar-estacao">Consultar estação</button>
-                <button type="button" class="mp-btn mp-btn-primario" id="mv-finalizar">Finalizar venda</button>
+                <p class="mp-ajuda mp-ajuda-pagamento">Com TEF desligado, confirme o recebimento de PIX e cartões fora do CDS antes de finalizar. Este celular não comanda a maquininha.</p>
+                <div id="mv-area-estacao" hidden>
+                    <p class="mp-ajuda">Com TEF ligado, consulte a cobrança executada na estação. Uma simulação não é recebimento real.</p>
+                    <label class="mp-label" for="mv-correlacao">Identificador da cobrança na estação</label>
+                    <input id="mv-correlacao" class="mp-campo" type="text" autocomplete="off">
+                    <button type="button" class="mp-btn" id="mv-consultar-estacao">Consultar estação</button>
+                </div>
+                <button type="button" class="mp-btn mp-btn-primario mp-finalizar" id="mv-finalizar">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14M13 5l7 7-7 7"></path></svg>
+                    Finalizar venda
+                </button>
+            </section>
+            <section id="mv-caixa-painel" class="mp-painel-caixa" hidden>
+                <h1>Meu Caixa</h1>
+                <p id="mv-terminal-status" class="mp-ajuda">Identificando terminal…</p>
+                <p id="mv-caixa-status" class="mp-ajuda">Aguardando autenticação.</p>
+                <div id="mv-caixa-abrir" class="mp-card" hidden>
+                    <h2>Abrir caixa Mobile</h2>
+                    <label class="mp-label" for="mv-caixa-valor-inicial">Valor inicial do caixa</label>
+                    <input id="mv-caixa-valor-inicial" class="mp-campo" type="number" min="0" step="0.01" inputmode="decimal" value="0">
+                    <button type="button" class="mp-btn mp-btn-primario" id="mv-abrir-caixa" disabled>Abrir meu caixa</button>
+                </div>
+                <div id="mv-caixa-aberto" class="mp-card" hidden>
+                    <h2>Sessão aberta</h2>
+                    <p id="mv-caixa-detalhe" class="mp-ajuda"></p>
+                    <div class="mp-caixa-saldos">
+                        <p><span>Saldo esperado</span><strong id="mv-caixa-saldo">—</strong></p>
+                        <p><span>Total recebido</span><strong id="mv-caixa-recebido">—</strong></p>
+                    </div>
+                    <h3>Movimentações</h3>
+                    <p id="mv-caixa-movimentacoes-status" class="mp-ajuda">As movimentações serão consultadas ao abrir Meu Caixa.</p>
+                    <ul id="mv-caixa-movimentacoes" class="mp-caixa-movimentacoes"></ul>
+                    <label class="mp-label" for="mv-caixa-valor-fechamento">Valor contado para fechamento</label>
+                    <input id="mv-caixa-valor-fechamento" class="mp-campo" type="number" min="0" step="0.01" inputmode="decimal">
+                    <label class="mp-label" for="mv-caixa-observacao">Observação do fechamento</label>
+                    <input id="mv-caixa-observacao" class="mp-campo" type="text" maxlength="500">
+                    <button type="button" class="mp-btn mp-btn-primario" id="mv-fechar-caixa">Fechar meu caixa</button>
+                </div>
+                <button type="button" class="mp-btn" id="mv-voltar-pdv">Voltar ao PDV</button>
             </section>
             <section id="mv-painel-resultado" hidden>
                 <h1>Venda registrada</h1>
-                <p class="mp-ajuda">O registro veio do PDV oficial. A emissão usa o contrato do emissor e permanece bloqueada nesta etapa.</p>
-                <div id="mv-resultado" class="mp-card"></div>
-                <a id="mv-voltar-mesa-fim" class="mp-btn mp-btn-primario" href="/mobile-mesas/" hidden>Voltar à mesa</a>
-                <button type="button" class="mp-btn" id="mv-emitir" disabled>Solicitar emissão</button>
-                <a class="mp-btn" href="/mobile-pedido">Novo pedido</a>
+                <p id="mv-resultado-indicador" class="mp-ajuda" role="status" aria-live="polite">Venda registrada.</p>
+                <div id="mv-resultado" class="mp-card">
+                    <p><strong>Número da venda</strong><br><span id="mv-resultado-venda"></span></p>
+                    <p><strong>Número do pedido</strong><br><span id="mv-resultado-pedido"></span></p>
+                    <p><strong>Empresa</strong><br><span id="mv-resultado-empresa"></span></p>
+                    <p id="mv-resultado-total-linha" hidden><strong>Valor total</strong><br><span id="mv-resultado-total"></span></p>
+                    <p><strong>Situação fiscal</strong><br><span id="mv-resultado-fiscal-status"></span></p>
+                    <p id="mv-resultado-emissao-linha" hidden><strong>Resultado da emissão NFC-e</strong><br><span id="mv-resultado-emissao"></span></p>
+                </div>
+                <a id="mv-continuar-pdv" class="mp-btn mp-btn-primario" href="/mobile-pdv/">Continuar para o PDV</a>
             </section>
         </main>
+        <dialog id="mv-dialogo-confirmacao" class="mp-confirmacao-dialogo" aria-labelledby="mv-confirmacao-titulo" aria-describedby="mv-confirmacao-descricao">
+            <div class="mp-pix-cabecalho">
+                <span class="mp-pix-icone" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M3 3h7v7H3zm2 2v3h3V5zm9-2h7v7h-7zm2 2v3h3V5zM3 14h7v7H3zm2 2v3h3v-3zm9-2h3v3h-3zm4 0h3v2h-3zm0 3h3v4h-3zm-4 1h3v3h-3z"/>
+                    </svg>
+                </span>
+                <div>
+                    <span class="mp-pix-identificacao">CDS Sistemas</span>
+                    <h2 id="mv-confirmacao-titulo">Confirmar recebimento</h2>
+                </div>
+            </div>
+            <p id="mv-confirmacao-descricao" class="mp-pix-descricao"></p>
+            <p id="mv-confirmacao-contexto" class="mp-ajuda" hidden></p>
+            <div id="mv-confirmacao-lista" class="mp-confirmacao-lista" hidden></div>
+            <div id="mv-confirmacao-total-linha" class="mp-pix-resumo" hidden>
+                <span id="mv-confirmacao-total-label">Total a confirmar</span>
+                <strong id="mv-confirmacao-total"></strong>
+            </div>
+            <div class="mp-acoes mp-pix-acoes">
+                <button type="button" class="mp-btn" id="mv-confirmacao-cancelar">Cancelar</button>
+                <button type="button" class="mp-btn mp-btn-primario" id="mv-confirmacao-confirmar">Confirmar recebimentos</button>
+            </div>
+        </dialog>
+        <dialog id="mv-dialogo-senha-admin" class="mp-confirmacao-dialogo" aria-labelledby="mv-senha-admin-titulo">
+            <h2 id="mv-senha-admin-titulo">Autorização administrativa</h2>
+            <p class="mp-ajuda">Informe a senha administrativa para continuar esta operação de caixa.</p>
+            <label class="mp-label" for="mv-senha-admin">Senha do administrador</label>
+            <input id="mv-senha-admin" class="mp-campo" type="password" autocomplete="current-password">
+            <p id="mv-senha-admin-erro" class="mp-senha-admin-erro" role="status" hidden></p>
+            <div class="mp-acoes">
+                <button type="button" class="mp-btn" id="mv-senha-admin-cancelar">Cancelar</button>
+                <button type="button" class="mp-btn mp-btn-primario" id="mv-senha-admin-confirmar">Continuar</button>
+            </div>
+        </dialog>
     </div>
     <script src="/shared/js/cds-empresa-contexto.js"></script>
     <script src="/shared/js/cds-mobile-operacao.js"></script>
@@ -94,6 +243,7 @@
     <script src="/pdv/js/pdv-venda-por-valor.js"></script>
     <script src="/shared/js/tefFluxoPagamento.js"></script>
     <script src="/shared/js/classificacaoModalidadePagamento.js"></script>
+    <script src="/pdv/js/decisaoConfirmacaoPagamento.js"></script>
     <script src="/pdv/js/pagamentoSequencial.js"></script>
     <script src="/pdv/js/interacaoPagamentoMisto.js"></script>
     <script src="/pdv/js/pdv-fechamento-oficial.js"></script>

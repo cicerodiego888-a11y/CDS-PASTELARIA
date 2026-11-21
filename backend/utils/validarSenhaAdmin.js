@@ -9,15 +9,22 @@ function isAdminUsuario(usuario) {
 }
 
 function validarSenhaAdmin(senhaAdmin, callback) {
+  validarSenhaAdminComUsuario(senhaAdmin, (err, usuario) => {
+    if (err) return callback(err);
+    callback(null, !!usuario);
+  });
+}
+
+function validarSenhaAdminComUsuario(senhaAdmin, callback) {
   if (!senhaAdmin) {
-    return callback(null, false);
+    return callback(null, null);
   }
 
   db.all('SELECT * FROM usuarios WHERE COALESCE(ativo, 1) = 1', [], async (err, usuarios) => {
     if (err) return callback(err);
 
     if (!usuarios || usuarios.length === 0) {
-      return callback(null, false);
+      return callback(null, null);
     }
 
     for (const usuario of usuarios) {
@@ -34,15 +41,21 @@ function validarSenhaAdmin(senhaAdmin, callback) {
       const senhaOk = await bcrypt.compare(senhaAdmin, senhaBanco).catch(() => false);
 
       if (senhaOk || senhaAdmin === senhaBanco) {
-        return callback(null, true);
+        return callback(null, {
+          id: usuario.id,
+          username: usuario.username,
+          role: usuario.role,
+          perfil: usuario.perfil
+        });
       }
     }
 
-    return callback(null, false);
+    return callback(null, null);
   });
 }
 
 module.exports = {
   isAdminUsuario,
-  validarSenhaAdmin
+  validarSenhaAdmin,
+  validarSenhaAdminComUsuario
 };

@@ -30,8 +30,9 @@ function carregar(opcoes = {}) {
   const contexto = {
     console,
     crypto: opcoes.crypto || crypto,
-    setTimeout,
-    clearTimeout,
+    URLSearchParams,
+    setTimeout: opcoes.setTimeout || setTimeout,
+    clearTimeout: opcoes.clearTimeout || clearTimeout,
     API_URL: 'http://cds.test/api',
     localStorage: {
       getItem(chave) { return memoria.has(chave) ? memoria.get(chave) : null; },
@@ -41,16 +42,18 @@ function carregar(opcoes = {}) {
     location: {
       origin: 'http://cds.test',
       href: '/mobile-pedido',
+      search: opcoes.search || '',
       replace(url) { this.href = url; }
     },
-    document: {
+    document: opcoes.document || {
       readyState: 'complete',
       getElementById() { return null; },
       addEventListener() {},
       querySelectorAll() { return []; }
     },
     fetch: opcoes.fetch || (async () => { throw new Error('fetch não configurado'); }),
-    CdsEmpresaContexto: opcoes.contexto || null
+    CdsEmpresaContexto: opcoes.contexto || null,
+    CdsMobileOperacao: opcoes.operacao || null
   };
   contexto.window = contexto;
   contexto.globalThis = contexto;
@@ -86,6 +89,58 @@ function produtoPedido(extra = {}) {
     preco_pedido: 8.99,
     preco_promocional: null
   }, extra);
+}
+
+function telaProdutos() {
+  const elementos = new Map();
+  const timers = new Map();
+  let ultimoTimer = 0;
+  const documento = {
+    readyState: 'complete',
+    activeElement: null,
+    querySelectorAll() { return []; },
+    getElementById(id) {
+      if (!elementos.has(id)) {
+        const el = {
+          value: '', hidden: false, textContent: '', disabled: false,
+          listeners: {},
+          classList: { toggle() {} },
+          addEventListener(tipo, fn) { this.listeners[tipo] = fn; },
+          emit(tipo) { return this.listeners[tipo] && this.listeners[tipo]({ target: this }); },
+          focus() { documento.activeElement = this; },
+          querySelectorAll(seletor) {
+            if (id !== 'mp-produto-lista' || seletor !== 'button') return [];
+            return this.botoes;
+          },
+          set innerHTML(valor) {
+            this.html = valor;
+            this.botoes = Array.from(valor.matchAll(/data-id="(\d+)"/g), (match) => ({
+              listeners: {},
+              getAttribute() { return match[1]; },
+              addEventListener(tipo, fn) { this.listeners[tipo] = fn; },
+              emit(tipo) { return this.listeners[tipo](); }
+            }));
+          },
+          get innerHTML() { return this.html; }
+        };
+        el.innerHTML = '';
+        elementos.set(id, el);
+      }
+      return elementos.get(id);
+    }
+  };
+  return {
+    documento,
+    elemento: (id) => documento.getElementById(id),
+    setTimeout(fn) { const id = ++ultimoTimer; timers.set(id, fn); return id; },
+    clearTimeout(id) { timers.delete(id); },
+    executarBusca() {
+      const entrada = timers.entries().next().value;
+      assert.ok(entrada, 'Busca agendada');
+      timers.delete(entrada[0]);
+      return entrada[1]();
+    }
+  };
 }
 
 describe('Mobile Pedido — página e contrato', () => {
@@ -144,6 +199,42 @@ describe('Mobile Pedido — página e contrato', () => {
     assert.equal(chamadas, 0);
   });
 
+  it('recupera identificação da mesa e a mantém no pedido sem exigir cadastro', async () => {
+    for (const cliente of [{ id: null, nome: 'Visitante' }, { id: 5, nome: 'Ana' }]) {
+      const tela = telaProdutos();
+      let atual;
+      let removida = false;
+      const operacao = {
+        lerPedido: () => ({ ok: false }),
+        salvarPedido: (estado) => { atual = { ...estado }; return { ok: true }; },
+        lerClienteMesa: (mesaId, atendimentoId) => {
+          assert.equal(mesaId, 2);
+          assert.equal(atendimentoId, 9);
+          return { ok: true, registro: { cliente } };
+        },
+        limparClienteMesa: () => { removida = true; return { ok: true }; }
+      };
+      const ctx = carregar({
+        search: '?mesa=2',
+        storage: { token: 'tok-mobile' },
+        contexto: Object.assign(contextoEmpresa(7), {
+          lerEmpresaId: () => 7,
+          listarDisponiveis: async () => [{ id: 7 }]
+        }),
+        operacao,
+        document: tela.documento,
+        fetch: async () => ({ ok: true, json: async () => ({ situacao: 'OCUPADA', numero: 12, atendimento: { id: 9 } }) })
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(tela.elemento('mp-cliente-escolhido').textContent, 'Cliente: ' + cliente.nome);
+      assert.equal(removida, true);
+      const payload = ctx.MobilePedido.montarPayload(atual);
+      assert.equal(payload.mesa_id, 2);
+      assert.equal(payload.cliente_id, cliente.id);
+      assert.equal(payload.cliente_nome, cliente.id ? undefined : cliente.nome);
+    }
+  });
+
   it('pesquisa cliente e produto e mostra o erro em vez de escondê-lo', async () => {
     const ctx = carregar({ storage: { token: 'tok-mobile' }, contexto: contextoEmpresa() });
     const clientes = await ctx.MobilePedido.buscarClientes('ana', async (url) => {
@@ -170,6 +261,185 @@ describe('Mobile Pedido — página e contrato', () => {
       throw new Error('rede');
     }, {});
     assert.match(falhaProduto.mensagem, /Sem conexão ao pesquisar produtos/);
+  });
+
+  it('limpa pesquisa após inclusões confirmadas, preservando o carrinho e falhas', async () => {
+    const tela = telaProdutos();
+    const produtos = [
+      produtoPedido({ id: 747, nome: 'Pastel de carne', nome_comercial: 'Pastel de carne' }),
+      produtoPedido({ id: 748, nome: 'Refrigerante', nome_comercial: 'Refrigerante', codigo: '748' })
+    ];
+    carregar({
+      storage: { token: 'tok-mobile' },
+      contexto: Object.assign(contextoEmpresa(), {
+        listarDisponiveis: async () => [{ id: 7 }],
+        adotarEmpresaPadrao: async () => ({ empresa: { id: 7 } })
+      }),
+      document: tela.documento, setTimeout: tela.setTimeout, clearTimeout: tela.clearTimeout,
+      fetch: async (url) => {
+        if (url.includes('/consulta-pedido/buscar')) {
+          const termo = new URL(url).searchParams.get('q');
+          return { ok: true, json: async () => produtos.filter((p) => p.nome.toLowerCase().includes(termo.toLowerCase())) };
+        }
+        const id = Number(url.match(/\/produtos\/(\d+)$/)[1]);
+        return { ok: true, json: async () => produtos.find((p) => p.id === id) };
+      }
+    });
+    const busca = tela.elemento('mp-produto-busca');
+    const lista = tela.elemento('mp-produto-lista');
+    const quantidade = tela.elemento('mp-produto-qtd');
+    const adicionar = tela.elemento('mp-adicionar');
+    for (const termo of ['pastel', 'refrigerante']) {
+      busca.value = termo;
+      busca.emit('input');
+      await tela.executarBusca();
+      await lista.querySelectorAll('button')[0].emit('click');
+      if (termo === 'pastel') {
+        quantidade.value = '0';
+        adicionar.emit('click');
+        assert.equal(busca.value, termo);
+        assert.match(lista.innerHTML, /Pastel de carne/);
+        assert.match(tela.elemento('mp-alerta').textContent, /quantidade maior que zero/);
+        quantidade.value = '2';
+      }
+      adicionar.emit('click');
+      assert.equal(busca.value, '');
+      assert.equal(lista.innerHTML, '');
+      assert.equal(tela.elemento('mp-produto-status').hidden, true);
+      assert.equal(tela.documento.activeElement, busca);
+    }
+    assert.match(tela.elemento('mp-carrinho-lista').innerHTML, /Pastel de carne/);
+    assert.match(tela.elemento('mp-carrinho-lista').innerHTML, /Refrigerante/);
+    assert.match(tela.elemento('mp-carrinho-lista').innerHTML, /value="2"/);
+    busca.value = 'inexistente';
+    busca.emit('input');
+    await tela.executarBusca();
+    assert.equal(busca.value, 'inexistente');
+    assert.match(lista.innerHTML, /Nenhum produto encontrado/);
+  });
+
+  it('ignora resposta de pesquisa anterior que chega após a inclusão', async () => {
+    const tela = telaProdutos();
+    let resolverPesquisa;
+    const produto = produtoPedido();
+    carregar({
+      storage: { token: 'tok-mobile' },
+      contexto: Object.assign(contextoEmpresa(), {
+        listarDisponiveis: async () => [{ id: 7 }],
+        adotarEmpresaPadrao: async () => ({ empresa: { id: 7 } })
+      }),
+      document: tela.documento, setTimeout: tela.setTimeout, clearTimeout: tela.clearTimeout,
+      fetch: async (url) => {
+        if (url.includes('/consulta-pedido/buscar')) {
+          if (url.includes('q=pendente')) {
+            return new Promise((resolve) => { resolverPesquisa = resolve; });
+          }
+          return { ok: true, json: async () => [produto] };
+        }
+        return { ok: true, json: async () => produto };
+      }
+    });
+    const busca = tela.elemento('mp-produto-busca');
+    const lista = tela.elemento('mp-produto-lista');
+    busca.value = 'pastel';
+    busca.emit('input');
+    await tela.executarBusca();
+    await lista.querySelectorAll('button')[0].emit('click');
+    busca.value = 'pendente';
+    busca.emit('input');
+    const pesquisa = tela.executarBusca();
+    tela.elemento('mp-adicionar').emit('click');
+    resolverPesquisa({ ok: true, json: async () => [produto] });
+    await pesquisa;
+    assert.equal(busca.value, '');
+    assert.equal(lista.innerHTML, '');
+    assert.equal(tela.elemento('mp-produto-status').hidden, true);
+    assert.match(tela.elemento('mp-carrinho-lista').innerHTML, /Pastel de carne/);
+  });
+
+  it('novo pedido de mesa não restaura confirmação anterior nem descarta outro rascunho', () => {
+    for (const [salvo, etapaEsperada, itensEsperados] of [
+      [{ etapa: 'confirmado', confirmacao: { id: 5 }, itens: [] }, 'cliente', 0],
+      [{ etapa: 'produtos', confirmacao: null, itens: [{ editorId: '1', nome: 'Pendente', quantidade: 1, precoUnitario: 10 }] }, 'produtos', 1],
+      [{ etapa: 'confirmado', confirmacao: { id: 6 }, itens: [] }, 'confirmado', 0]
+    ]) {
+      const tela = telaProdutos();
+      let gravado;
+      const operacao = {
+        lerPedido(mesaId) {
+          assert.equal(mesaId, 2);
+          return { ok: true, registro: { estado: salvo } };
+        },
+        salvarPedido(estado) {
+          gravado = { mesaId: estado.mesaId, etapa: estado.etapa, itens: estado.itens.length };
+        }
+      };
+      carregar({
+        search: '?mesa=2&novoApos=5',
+        storage: { token: 'tok-mobile' },
+        contexto: Object.assign(contextoEmpresa(), {
+          listarDisponiveis: async () => [{ id: 7 }],
+          adotarEmpresaPadrao: async () => ({ empresa: { id: 7 } })
+        }),
+        operacao,
+        document: tela.documento,
+        fetch: async () => ({ ok: true, json: async () => ({ situacao: 'OCUPADA', numero: 2, atendimento: { id: 9 } }) })
+      });
+
+      it('oferece seleção de mesa e mostra a mesa durante o pedido e na confirmação', async () => {
+        assert.match(html, /href="\/mobile-mesas\/"[^>]*>Selecionar mesa<\/a>/);
+        for (const [search, salvo, rotulo, mesa] of [
+          ['', null, 'Pedido sem mesa', 'Sem mesa'],
+          ['?mesa=2', null, 'Mesa selecionada: 12', '12'],
+          ['?mesa=2', { etapa: 'confirmado', confirmacao: { id: 5, codigo: 'PED-5', empresaId: 7, total: 10 }, itens: [] }, 'Mesa selecionada: 12', '12']
+        ]) {
+          const tela = telaProdutos();
+          carregar({
+            search,
+            storage: { token: 'tok-mobile' },
+            contexto: Object.assign(contextoEmpresa(), {
+              listarDisponiveis: async () => [{ id: 7 }],
+              adotarEmpresaPadrao: async () => ({ empresa: { id: 7 } })
+            }),
+            operacao: {
+              lerPedido: () => salvo ? { ok: true, registro: { estado: salvo } } : { ok: false },
+              salvarPedido: () => ({ ok: true })
+            },
+            document: tela.documento,
+            fetch: async () => ({ ok: true, json: async () => ({ situacao: 'OCUPADA', numero: 12, atendimento: { id: 9 } }) })
+          });
+
+          it('mantém a empresa selecionada ao abrir pedido de mesa', async () => {
+            const tela = telaProdutos();
+            let padraoChamado = false;
+            let cabecalhoMesa;
+            carregar({
+              search: '?mesa=2',
+              storage: { token: 'tok-mobile' },
+              contexto: Object.assign(contextoEmpresa(7), {
+                lerEmpresaId: () => 7,
+                listarDisponiveis: async () => [{ id: 7 }, { id: 8 }],
+                adotarEmpresaPadrao: async () => { padraoChamado = true; }
+              }),
+              document: tela.documento,
+              fetch: async (_url, opcoes) => {
+                cabecalhoMesa = opcoes.headers['X-Empresa-Id'];
+                return { ok: true, json: async () => ({ situacao: 'OCUPADA', numero: 12, atendimento: { id: 9 } }) };
+              }
+            });
+            await new Promise((resolve) => setImmediate(resolve));
+            assert.equal(padraoChamado, false);
+            assert.equal(cabecalhoMesa, '7');
+            assert.equal(tela.elemento('mp-mesa-escolhida').textContent, 'Mesa selecionada: 12');
+          });
+          await new Promise((resolve) => setImmediate(resolve));
+          assert.equal(tela.elemento('mp-mesa-escolhida').textContent, rotulo);
+          assert.match(tela.elemento('mp-resumo').innerHTML, new RegExp('<strong>Mesa</strong><br>' + mesa));
+          if (salvo) assert.match(tela.elemento('mp-confirmacao').innerHTML, /<strong>Mesa<\/strong><br>12/);
+        }
+      });
+      assert.deepEqual(gravado, { mesaId: 2, etapa: etapaEsperada, itens: itensEsperados });
+    }
   });
 
   it('aplica preco_pedido, promoção e preco_venda pela regra do ERP', () => {

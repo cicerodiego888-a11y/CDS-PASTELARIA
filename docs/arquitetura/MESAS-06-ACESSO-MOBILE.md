@@ -25,6 +25,16 @@
 
 ## 2. Correção aplicada
 
+Após gravar um pedido de mesa, o envio ao KDS é uma ação explícita na conferência. Se a preparação estiver registrada sem despacho confirmado, a conferência mostra o resultado e permite reprocessar pelo mesmo endpoint idempotente do desktop; recarregar ou reconectar não envia automaticamente.
+
+Ao lançar outro pedido, uma confirmação anterior da mesma mesa não é reaberta como se fosse o novo lançamento; um rascunho ainda não confirmado é preservado. Pedidos faturados sem despacho confirmado podem ser enviados ao KDS, como na conferência desktop, sem permitir edição ou nova finalização pelo PDV.
+
+No início do pedido mobile, “Selecionar mesa” abre o módulo Mesas existente. Para uma mesa livre, o operador abre o atendimento; para uma ocupada, escolhe “Lançar pedido”. O pedido também pode continuar sem mesa. A seleção, a conferência e a confirmação exibem a mesa, e cada mesa mantém seu próprio rascunho. O cadastro de mesas é por empresa e não possui vínculo de unidade no contrato atual.
+
+Ao abrir uma mesa no mobile, o cliente é opcional. Um cliente cadastrado pode ser selecionado; um nome livre é mantido na aba durante o lançamento e gravado em `pedidos.cliente_nome` ao salvar. O atendimento não armazena nome livre, portanto a identificação não aparece em outros dispositivos antes da gravação do pedido. A transferência do nome é vinculada à empresa, ao operador e ao atendimento.
+
+A empresa já selecionada é mantida na navegação entre Pedido e Mesas quando consta na lista autorizada; a empresa padrão é adotada apenas se não houver seleção.
+
 Um casco mobile fino que **reutiliza** controlador e conferência do desktop e as APIs existentes. Não há segundo módulo nem regra de negócio duplicada.
 
 - **`/mobile-mesas`** (novo): lista de cartões verticais (número grande, selo de estado Livre/Ocupada/Fechamento, filtros, permanência); detalhe por mesa; conferência do pedido com “Enviar para preparação”; transferência; consulta somente leitura em fechamento.

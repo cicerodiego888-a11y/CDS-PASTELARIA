@@ -3,6 +3,9 @@ const router = express.Router();
 const jwt = require('jsonwebtoken');
 const db = require('../database');
 const { gravarAuditoria } = require('../services/auditoria');
+const MobileTerminalService = require('../services/TerminalPdvMobileService');
+const { verificarToken } = require('../middleware/auth');
+const { exigirPermissaoOuSenhaAdmin } = require('../middleware/exigirPermissaoOuSenhaAdmin');
 
 const { getJwtSecret } = require('../config/secrets');
 const JWT_SECRET = getJwtSecret();
@@ -53,6 +56,9 @@ function registrarTerminalAuto(req, res) {
   const hostname = String(req.query.hostname || '').trim();
   if (!hostname || hostname === 'web-browser') {
     return res.status(400).json({ error: 'Hostname do terminal PDV inválido.' });
+  }
+  if (hostname.toLowerCase().startsWith(MobileTerminalService.MOBILE_HOST_PREFIX)) {
+    return res.status(400).json({ error: 'Identidade Mobile reservada para o registro autenticado.' });
   }
 
   const { usuario_id: usuarioId, usuario_nome: usuarioNome } = extrairUsuarioHeartbeat(req);
@@ -121,6 +127,96 @@ function registrarTerminalAuto(req, res) {
       }
     );
   });
+}
+
+function responderErroTerminalMobile(res, err) {
+  const status = Number(err && (err.status || err.statusCode)) || 500;
+  if (status >= 500) {
+    console.error('Erro no fluxo de terminal Mobile:', err);
+  }
+  return res.status(status).json({
+    error: err && err.message ? err.message : 'Erro no fluxo de terminal Mobile.',
+    code: err && err.code ? err.code : 'TERMINAL_MOBILE_ERRO'
+  });
+}
+
+async function registrarTerminalMobile(req, res) {
+  try {
+    const resultado = await MobileTerminalService.registrar({
+      req,
+      db,
+      installationId: req.body && req.body.installation_id
+    });
+    if (resultado.criado) {
+      gravarAuditoria({
+        usuario_id: req.user.id,
+        usuario_nome: req.user.nome || req.user.username || null,
+        modulo: 'terminais',
+        acao: 'registrar_terminal_mobile',
+        referencia_tipo: 'terminal',
+        referencia_id: resultado.terminal.id,
+        detalhes: {
+          empresa_id: resultado.empresa_id,
+          tipo: 'mobile'
+        },
+        ip_requisicao: req.ip || null
+      }).catch((auditErr) => console.error('Erro ao auditar terminal Mobile:', auditErr));
+    }
+    return res.status(resultado.criado ? 201 : 200).json({
+      ...resultado.terminal,
+      tipo: 'mobile',
+      empresa_id: resultado.empresa_id
+    });
+  } catch (err) {
+    return responderErroTerminalMobile(res, err);
+  }
+}
+
+async function heartbeatTerminalMobile(req, res) {
+  try {
+    const resultado = await MobileTerminalService.heartbeat({
+      req,
+      db,
+      installationId: req.body && req.body.installation_id,
+      terminalId: req.body && req.body.terminal_id
+    });
+    return res.json(resultado);
+  } catch (err) {
+    return responderErroTerminalMobile(res, err);
+  }
+}
+
+async function garantirCaixaProprioMobile(req, res) {
+  try {
+    const resultado = await MobileTerminalService.garantirCaixaProprio({
+      req,
+      db,
+      installationId: req.body && req.body.installation_id,
+      terminalId: req.body && req.body.terminal_id
+    });
+    if (resultado.criado) {
+      gravarAuditoria({
+        usuario_id: req.user.id,
+        usuario_nome: req.user.nome || req.user.username || null,
+        modulo: 'terminais',
+        acao: 'criar_caixa_exclusivo_mobile',
+        referencia_tipo: 'caixa',
+        referencia_id: resultado.caixa.id,
+        detalhes: {
+          terminal_id: Number(req.body.terminal_id),
+          empresa_id: resultado.empresa_id
+        },
+        ip_requisicao: req.ip || null
+      }).catch((auditErr) => console.error('Erro ao auditar caixa Mobile:', auditErr));
+    }
+    return res.status(resultado.criado ? 201 : 200).json({
+      ...resultado.caixa,
+      criado: resultado.criado,
+      empresa_id: resultado.empresa_id
+    });
+  } catch (err) {
+    return responderErroTerminalMobile(res, err);
+  }
 }
 
 function exigirSuperAdminTerminal(req, res, next) {
@@ -238,13 +334,24 @@ router.post('/', (req, res) => {
   const { nome, hostname, caixa_id, ativo } = req.body;
   const nomeTerminal = String(nome || hostname || '').trim();
 
+  if (req.headers['x-mobile-installation-id']) {
+    return res.status(403).json({
+      error: 'Uma instalação Mobile não pode cadastrar outro terminal.',
+      code: 'TERMINAL_MOBILE_OPERACAO_NAO_PERMITIDA'
+    });
+  }
   if (!nomeTerminal) {
     return res.status(400).json({ error: 'Nome ou hostname do terminal é obrigatório.' });
   }
 
-  const valores = [nomeTerminal, String(hostname || nomeTerminal).trim() || null, caixa_id || null, ativo === 0 ? 0 : 1, new Date().toISOString(), new Date().toISOString()];
+  const hostnameTerminal = String(hostname || nomeTerminal).trim();
+  if (hostnameTerminal.toLowerCase().startsWith(MobileTerminalService.MOBILE_HOST_PREFIX)) {
+    return res.status(400).json({ error: 'Identidade Mobile reservada para o registro autenticado.' });
+  }
 
-  db.run(
+  const valores = [nomeTerminal, hostnameTerminal || null, caixa_id || null, ativo === 0 ? 0 : 1, new Date().toISOString(), new Date().toISOString()];
+
+  const inserirTerminal = () => db.run(
     `INSERT INTO terminais (nome, hostname, caixa_id, ativo, ultima_conexao, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
     valores,
     function(err) {
@@ -255,14 +362,39 @@ router.post('/', (req, res) => {
       });
     }
   );
+  if (caixa_id == null || caixa_id === '') return inserirTerminal();
+
+  db.get(
+    `SELECT hostname FROM terminais WHERE caixa_id = ? LIMIT 1`,
+    [caixa_id],
+    (errVinculo, vinculo) => {
+      if (errVinculo) return res.status(500).json({ error: errVinculo.message });
+      if (vinculo && String(vinculo.hostname || '').toLowerCase().startsWith(MobileTerminalService.MOBILE_HOST_PREFIX)) {
+        return res.status(409).json({
+          error: 'O caixa já está vinculado a um terminal Mobile.',
+          code: 'CAIXA_VINCULADO_A_OUTRO_TERMINAL'
+        });
+      }
+      inserirTerminal();
+    }
+  );
 });
 
+router.post('/mobile/registro', verificarToken, registrarTerminalMobile);
+router.post('/mobile/heartbeat', verificarToken, heartbeatTerminalMobile);
+router.post(
+  '/mobile/caixa-config',
+  verificarToken,
+  exigirPermissaoOuSenhaAdmin('abrir_caixa'),
+  garantirCaixaProprioMobile
+);
 router.put('/auto/nome', exigirSuperAdminTerminal, atualizarNomeTerminalPdv);
 router.post('/auto/nome', exigirSuperAdminTerminal, atualizarNomeTerminalPdv);
 
 router.put('/:id', (req, res) => {
   const id = Number(req.params.id);
   const { nome, hostname, caixa_id, ativo } = req.body;
+  const identidadeMobileSolicitada = req.headers['x-mobile-installation-id'];
 
   db.get(`SELECT * FROM terminais WHERE id = ?`, [id], (err, terminal) => {
     if (err) return res.status(500).json({ error: err.message });
@@ -274,10 +406,36 @@ router.put('/:id', (req, res) => {
     }
 
     const updatedHostname = hostname !== undefined ? String(hostname).trim() : terminal.hostname;
-    const updatedCaixaId = caixa_id === '' || caixa_id === null || caixa_id === undefined
-      ? null
-      : Number(caixa_id);
+    const updatedCaixaId = caixa_id === undefined
+      ? terminal.caixa_id
+      : caixa_id === '' || caixa_id === null
+        ? null
+        : Number(caixa_id);
     const updatedAtivo = ativo !== undefined ? (ativo ? 1 : 0) : terminal.ativo;
+    const terminalEhMobile = String(terminal.hostname || '').toLowerCase()
+      .startsWith(MobileTerminalService.MOBILE_HOST_PREFIX);
+    const hostnameMobileSolicitado = updatedHostname.toLowerCase()
+      .startsWith(MobileTerminalService.MOBILE_HOST_PREFIX);
+
+    if (identidadeMobileSolicitada && !terminalEhMobile) {
+      return res.status(403).json({
+        error: 'Uma instalação Mobile não pode alterar o cadastro de outro terminal.',
+        code: 'TERMINAL_MOBILE_OPERACAO_NAO_PERMITIDA'
+      });
+    }
+    if (hostnameMobileSolicitado && !terminalEhMobile) {
+      return res.status(400).json({ error: 'Identidade Mobile reservada para o registro autenticado.' });
+    }
+    if (terminalEhMobile && (
+      updatedHostname !== terminal.hostname
+      || Number(updatedCaixaId) !== Number(terminal.caixa_id)
+      || updatedAtivo !== terminal.ativo
+    )) {
+      return res.status(403).json({
+        error: 'O cadastro e o caixa do terminal Mobile só podem ser alterados pelo fluxo Mobile autenticado.',
+        code: 'TERMINAL_MOBILE_GERENCIADO_PELO_FLUXO_PROPRIO'
+      });
+    }
     const agora = new Date().toISOString();
 
     const aplicarAtualizacao = () => {
@@ -316,11 +474,30 @@ router.put('/:id', (req, res) => {
         if (errCaixa) return res.status(500).json({ error: errCaixa.message });
         if (!caixa) return res.status(400).json({ error: 'Caixa não encontrado.' });
 
-        db.run(
-          `UPDATE terminais SET caixa_id = NULL WHERE caixa_id = ? AND id != ?`,
+        db.get(
+          `SELECT id, hostname FROM terminais WHERE caixa_id = ? AND id != ? LIMIT 1`,
           [updatedCaixaId, id],
-          (errDetach) => {
-            if (errDetach) return res.status(500).json({ error: errDetach.message });
+          (errVinculo, vinculo) => {
+            if (errVinculo) return res.status(500).json({ error: errVinculo.message });
+            const vinculoEhMobile = vinculo && String(vinculo.hostname || '').toLowerCase()
+              .startsWith(MobileTerminalService.MOBILE_HOST_PREFIX);
+            if ((terminalEhMobile || vinculoEhMobile) && vinculo) {
+              return res.status(409).json({
+                error: 'O caixa já está vinculado a outro terminal; nenhum vínculo foi alterado.',
+                code: 'CAIXA_VINCULADO_A_OUTRO_TERMINAL'
+              });
+            }
+            if (vinculo) {
+              db.run(
+                `UPDATE terminais SET caixa_id = NULL WHERE caixa_id = ? AND id != ?`,
+                [updatedCaixaId, id],
+                (errDetach) => {
+                  if (errDetach) return res.status(500).json({ error: errDetach.message });
+                  aplicarAtualizacao();
+                }
+              );
+              return;
+            }
             aplicarAtualizacao();
           }
         );
@@ -335,6 +512,9 @@ router.put('/:id', (req, res) => {
 module.exports = router;
 module.exports.registrarTerminalAuto = registrarTerminalAuto;
 module.exports.registrarTerminalOffline = registrarTerminalOffline;
+module.exports.registrarTerminalMobile = registrarTerminalMobile;
+module.exports.heartbeatTerminalMobile = heartbeatTerminalMobile;
+module.exports.garantirCaixaProprioMobile = garantirCaixaProprioMobile;
 module.exports.atualizarNomeTerminalPdv = atualizarNomeTerminalPdv;
 module.exports.exigirSuperAdminTerminal = exigirSuperAdminTerminal;
 module.exports.terminalEstaOnline = terminalEstaOnline;

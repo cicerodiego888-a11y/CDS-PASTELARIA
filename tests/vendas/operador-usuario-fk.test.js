@@ -38,6 +38,7 @@ async function preparar() {
   await run(db, `CREATE TABLE usuarios (
     id INTEGER PRIMARY KEY,
     username TEXT UNIQUE,
+    nome TEXT,
     role TEXT,
     perfil TEXT,
     ativo INTEGER DEFAULT 1
@@ -75,18 +76,26 @@ async function preparar() {
     caixa_sessao_id INTEGER,
     terminal_id INTEGER,
     operador_id INTEGER REFERENCES usuarios(id),
-    empresa_id INTEGER
+    empresa_id INTEGER,
+    origem_operacao TEXT,
+    operador_nome_snapshot TEXT,
+    terminal_tipo_snapshot TEXT
   )`);
   await run(db, `INSERT INTO empresas (id) VALUES (1), (2)`);
-  await run(db, `INSERT INTO usuarios (id, username, role, perfil, ativo) VALUES (5, 'caixa', 'operador', 'USUARIO', 1)`);
-  await run(db, `INSERT INTO usuarios (id, username, role, perfil, ativo) VALUES (9, 'outro', 'operador', 'USUARIO', 1)`);
+  await run(db, `INSERT INTO usuarios (id, username, nome, role, perfil, ativo)
+    VALUES (5, 'caixa', 'Vendedor Autenticado', 'operador', 'USUARIO', 1)`);
+  await run(db, `INSERT INTO usuarios (id, username, nome, role, perfil, ativo)
+    VALUES (9, 'outro', 'Outro Vendedor', 'operador', 'USUARIO', 1)`);
   await run(db, `INSERT INTO operadores (id, nome) VALUES (2, 'Cadastro que não é usuário')`);
   await run(db, `INSERT INTO usuario_empresas (id, usuario_id, empresa_id, ativo) VALUES (1, 5, 1, 1), (2, 9, 2, 1)`);
   await run(db, `INSERT INTO terminais (id, nome, hostname) VALUES (3, 'PDV', 'pdv-01')`);
+  await run(db, `INSERT INTO terminais (id, nome, hostname)
+    VALUES (4, 'Mobile', 'cds-mobile-v1:11111111-2222-4333-8444-555555555555')`);
   await run(db, `INSERT INTO caixa (id, data, status) VALUES (15, '2026-11-12', 'aberto')`);
+  await run(db, `INSERT INTO caixa (id, data, status) VALUES (16, '2026-11-12', 'aberto')`);
   await run(db, `INSERT INTO caixa_sessoes (
     id, caixa_id, caixa_turno_id, terminal_id, operador_id, empresa_id, status
-  ) VALUES (8, 2, 15, 3, 2, 1, 'aberto')`);
+  ) VALUES (8, 2, 15, 3, 2, 1, 'aberto'), (9, 2, 16, 4, 2, 1, 'aberto')`);
   return db;
 }
 
@@ -120,6 +129,98 @@ test('o operador autenticado grava usuarios.id 5, não o cadastro 2', async () =
     ]);
     const venda = await get(db, 'SELECT operador_id FROM vendas');
     assert.equal(venda.operador_id, 5);
+  } finally {
+    await fecharDb(db);
+  }
+});
+
+test('origem, nome e tipo de terminal vêm da sessão validada, não do body', async () => {
+  const db = await preparar();
+  try {
+    const desktop = await validarReferenciasPersistenciaVenda(db, {
+      ...contexto(),
+      req: {
+        canalVendaHttp: 'PDV',
+        vendaContext: { origem: 'PDV' },
+        body: { origem: 'FATURAMENTO', operador_id: 9, terminal_id: 4 }
+      }
+    });
+    assert.equal(desktop.operadorId, 5);
+    assert.equal(desktop.operadorNomeSnapshot, 'Vendedor Autenticado');
+    assert.equal(desktop.terminalId, 3);
+    assert.equal(desktop.terminalTipoSnapshot, 'DESKTOP');
+    assert.equal(desktop.origemOperacao, 'PDV_DESKTOP');
+    const faturamento = await validarReferenciasPersistenciaVenda(db, {
+      ...contexto(),
+      req: { vendaContext: { origem: 'FATURAMENTO' } }
+    });
+    assert.equal(faturamento.origemOperacao, 'FATURAMENTO');
+
+    const mobile = await validarReferenciasPersistenciaVenda(db, {
+      caixaId: 16,
+      caixaSessaoId: 9,
+      terminalId: 4,
+      operadorId: 9,
+      usuario: { id: 9, username: 'caixa' },
+      empresaId: 1,
+      req: {
+        canalVendaHttp: 'PDV',
+        mobileInstallationId: '11111111-2222-4333-8444-555555555555',
+        vendaContext: { origem: 'PDV' },
+        body: { origem: 'PDV_DESKTOP', operador_id: 9, terminal_id: 3 }
+      }
+    });
+    assert.equal(mobile.operadorId, 5);
+    assert.equal(mobile.operadorNomeSnapshot, 'Vendedor Autenticado');
+    assert.equal(mobile.terminalId, 4);
+    assert.equal(mobile.terminalTipoSnapshot, 'MOBILE');
+    assert.equal(mobile.origemOperacao, 'PDV_MOBILE');
+    await assert.rejects(
+      () => validarReferenciasPersistenciaVenda(db, {
+        caixaId: 16,
+        caixaSessaoId: 9,
+        terminalId: 4,
+        operadorId: 5,
+        usuario: { id: 5, username: 'caixa' },
+        empresaId: 1,
+        req: { canalVendaHttp: 'PDV', vendaContext: { origem: 'PDV' } }
+      }),
+      (err) => err.codigo === 'IDENTIDADE_MOBILE_NAO_VALIDADA'
+    );
+
+    await run(db, `INSERT INTO vendas (
+      codigo, data_venda, total, caixa_id, caixa_sessao_id, terminal_id, operador_id,
+      empresa_id, origem_operacao, operador_nome_snapshot, terminal_tipo_snapshot
+    ) VALUES ('DESKTOP', '2026-11-12', 10, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+      desktop.caixaId, desktop.caixaSessaoId, desktop.terminalId, desktop.operadorId,
+      desktop.empresaId, desktop.origemOperacao, desktop.operadorNomeSnapshot,
+      desktop.terminalTipoSnapshot
+    ]);
+    await run(db, `INSERT INTO vendas (
+      codigo, data_venda, total, caixa_id, caixa_sessao_id, terminal_id, operador_id,
+      empresa_id, origem_operacao, operador_nome_snapshot, terminal_tipo_snapshot
+    ) VALUES ('MOBILE', '2026-11-12', 10, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+      mobile.caixaId, mobile.caixaSessaoId, mobile.terminalId, mobile.operadorId,
+      mobile.empresaId, mobile.origemOperacao, mobile.operadorNomeSnapshot,
+      mobile.terminalTipoSnapshot
+    ]);
+    const gravadas = await get(db, `
+      SELECT origem_operacao, operador_id, operador_nome_snapshot, terminal_id, terminal_tipo_snapshot
+      FROM vendas ORDER BY id
+    `);
+    assert.equal(gravadas.origem_operacao, 'PDV_DESKTOP');
+    assert.equal(gravadas.operador_id, 5);
+    assert.equal(gravadas.operador_nome_snapshot, 'Vendedor Autenticado');
+    const todas = await new Promise((resolve, reject) => {
+      db.all(`
+        SELECT origem_operacao, terminal_id, terminal_tipo_snapshot
+        FROM vendas ORDER BY id
+      `, (err, rows) => (err ? reject(err) : resolve(rows || [])));
+    });
+    assert.deepEqual(todas, [
+      { origem_operacao: 'PDV_DESKTOP', terminal_id: 3, terminal_tipo_snapshot: 'DESKTOP' },
+      { origem_operacao: 'PDV_MOBILE', terminal_id: 4, terminal_tipo_snapshot: 'MOBILE' }
+    ]);
   } finally {
     await fecharDb(db);
   }

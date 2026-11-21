@@ -166,6 +166,19 @@ async function criarVendaGravada({
   return venda.lastID;
 }
 
+async function criarVendaAuditada(codigo, origemOperacao, opcoes = {}) {
+  const origem = opcoes.origem == null ? 'PDV' : opcoes.origem;
+  const operadorId = opcoes.operadorId == null ? operador.id : opcoes.operadorId;
+  const nomeSnapshot = opcoes.nomeSnapshot === undefined ? 'Operador 21G' : opcoes.nomeSnapshot;
+  const venda = await run(`
+    INSERT INTO vendas (
+      codigo, data_venda, total, desconto, forma_pagamento, status, status_pagamento,
+      empresa_id, origem, origem_operacao, operador_id, operador_nome_snapshot
+    ) VALUES (?, date('now','localtime'), 10, 0, 'dinheiro', 'concluida', 'quitada', ?, ?, ?, ?, ?)
+  `, [codigo, empresaA.id, origem, origemOperacao, operadorId, nomeSnapshot]);
+  return venda.lastID;
+}
+
 function somar(lista) {
   return Math.round(lista.reduce((acc, item) => acc + Number(item.valor || 0), 0) * 100) / 100;
 }
@@ -322,6 +335,89 @@ describe('Sprint 21G — consulta e histórico de pagamentos', { concurrency: fa
     assert.equal(JSON.stringify(outra.body).includes('NSU-CARTAO'), false);
     const listaB = await httpJson('GET', '/api/vendas?todas=1', headers(empresaB.id));
     assert.equal((listaB.body || []).some((venda) => venda.id === cartao), false);
+  });
+
+  it('lista e detalha origem/vendedor persistidos, mantendo legado sem distinção inventada', async () => {
+    const desktopId = await criarVendaAuditada('AUD-DESKTOP', 'PDV_DESKTOP');
+    const mobileId = await criarVendaAuditada('AUD-MOBILE', 'PDV_MOBILE');
+    const origemDesconhecidaId = await criarVendaAuditada('AUD-ORIGEM-DESCONHECIDA', 'NOVA_ORIGEM');
+    await run(`UPDATE usuarios SET nome = 'Nome Atualizado 21G' WHERE id = ?`, [operador.id]);
+    const legadoId = await criarVendaAuditada('AUD-LEGADO', null, { nomeSnapshot: null });
+    const usuarioSemNome = await run(
+      `INSERT INTO usuarios (username, password_hash, role, nome, perfil, ativo)
+       VALUES ('op21g-sem-nome', 'x', 'operador', NULL, 'OPERADOR', 1)`
+    );
+    const usernameId = await criarVendaAuditada(
+      'AUD-USERNAME',
+      null,
+      { operadorId: usuarioSemNome.lastID, nomeSnapshot: null }
+    );
+    const foreignKeys = await get('PRAGMA foreign_keys');
+    let usuarioInexistenteId;
+    try {
+      await run('PRAGMA foreign_keys = OFF');
+      usuarioInexistenteId = await criarVendaAuditada(
+        'AUD-USUARIO-AUSENTE',
+        null,
+        { operadorId: 999999, nomeSnapshot: null }
+      );
+    } finally {
+      if (Number(foreignKeys && foreignKeys.foreign_keys) === 1) {
+        await run('PRAGMA foreign_keys = ON');
+      }
+    }
+
+    const lista = await httpJson('GET', '/api/vendas?todas=1', headers(empresaA.id));
+    assert.equal(lista.status, 200);
+    const desktop = lista.body.find((venda) => venda.id === desktopId);
+    const mobile = lista.body.find((venda) => venda.id === mobileId);
+    const origemDesconhecida = lista.body.find((venda) => venda.id === origemDesconhecidaId);
+    const legado = lista.body.find((venda) => venda.id === legadoId);
+    const username = lista.body.find((venda) => venda.id === usernameId);
+    const semUsuario = lista.body.find((venda) => venda.id === usuarioInexistenteId);
+    assert.equal(desktop.origem_operacao, 'PDV_DESKTOP');
+    assert.equal(desktop.operador_id, operador.id);
+    assert.equal(desktop.operador_nome_snapshot, 'Operador 21G');
+    assert.equal(desktop.operador_nome_exibicao, 'Operador 21G');
+    assert.equal(mobile.origem_operacao, 'PDV_MOBILE');
+    assert.equal(mobile.operador_nome_snapshot, 'Operador 21G');
+    assert.equal(mobile.operador_nome_exibicao, 'Operador 21G');
+    assert.equal(origemDesconhecida.origem_operacao, 'NOVA_ORIGEM');
+    assert.equal(legado.origem_operacao, null);
+    assert.equal(legado.operador_nome_snapshot, null);
+    assert.equal(legado.operador_nome_exibicao, 'Nome Atualizado 21G');
+    assert.equal(username.operador_nome_snapshot, null);
+    assert.equal(username.operador_nome_exibicao, 'op21g-sem-nome');
+    assert.equal(semUsuario.operador_nome_exibicao, null);
+    assert.equal(semUsuario.operador_id, 999999);
+
+    const detalhe = await httpJson('GET', `/api/vendas/${mobileId}`, headers(empresaA.id));
+    assert.equal(detalhe.status, 200);
+    assert.equal(detalhe.body.origem_operacao, 'PDV_MOBILE');
+    assert.equal(detalhe.body.operador_id, operador.id);
+    assert.equal(detalhe.body.operador_nome_snapshot, 'Operador 21G');
+
+    const detalheLegado = await httpJson('GET', `/api/vendas/${legadoId}`, headers(empresaA.id));
+    assert.equal(detalheLegado.status, 200);
+    assert.equal(detalheLegado.body.operador_nome_snapshot, null);
+    assert.equal(detalheLegado.body.operador_nome_exibicao, 'Nome Atualizado 21G');
+
+    const buscaSnapshot = await httpJson(
+      'GET',
+      '/api/vendas?todas=1&busca=Operador%2021G',
+      headers(empresaA.id)
+    );
+    assert.equal(buscaSnapshot.status, 200);
+    assert.ok(buscaSnapshot.body.some((venda) => venda.id === desktopId));
+    const buscaCadastro = await httpJson(
+      'GET',
+      '/api/vendas?todas=1&busca=Nome%20Atualizado%2021G',
+      headers(empresaA.id)
+    );
+    assert.equal(buscaCadastro.status, 200);
+    assert.ok(buscaCadastro.body.some((venda) => venda.id === legadoId));
+    const outraEmpresa = await httpJson('GET', '/api/vendas?todas=1', headers(empresaB.id));
+    assert.equal((outraEmpresa.body || []).some((venda) => venda.id === mobileId), false);
   });
 
   it('o histórico separa os status e não soma os meios ao total', async () => {

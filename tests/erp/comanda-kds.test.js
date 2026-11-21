@@ -8,6 +8,23 @@ const vm = require('node:vm');
 const conferencia = require('../../frontend/erp/js/mesas-conferencia');
 const { criarImpressaoComanda, htmlComanda, registrarIpcComanda } = require('../../electron-comanda-kds');
 
+test('comanda exibe envio em America/Fortaleza sem alterar timestamp do snapshot', () => {
+  const timestamp = '2026-11-20 04:51:39';
+  const html = htmlComanda({
+    enviada_em: timestamp,
+    itens: [{ nome: 'Pastel', qty_solicitada_millis: 1000 }]
+  });
+  assert.match(html, /Envio: 20\/11\/2026 01:51:39/);
+  assert.doesNotMatch(html, /UTC/);
+  assert.equal(timestamp, '2026-11-20 04:51:39');
+
+  const virada = htmlComanda({
+    enviada_em: '2026-11-20T02:10:00Z',
+    itens: [{ nome: 'Pastel', qty_solicitada_millis: 1000 }]
+  });
+  assert.match(virada, /Envio: 19\/11\/2026 23:10:00/);
+});
+
 function criarControle(despacho, imprimirComanda) {
   const controle = conferencia.criarConferencia({
     novaChave: () => 'chave',

@@ -1,5 +1,7 @@
 'use strict';
 
+const { MOBILE_HOST_PREFIX } = require('../TerminalPdvMobileService');
+
 function idPositivo(valor) {
   const n = Number(valor);
   return Number.isInteger(n) && n > 0 ? n : null;
@@ -129,6 +131,72 @@ async function resolverOperadorUsuario(db, entrada = {}) {
   return Number(operador.id);
 }
 
+async function resolverSnapshotsAuditoriaVenda(db, entrada = {}) {
+  const req = entrada.req && typeof entrada.req === 'object' ? entrada.req : null;
+  const operadorId = entrada.exigirOperador === true
+    || entrada.usuario
+    || idPositivo(entrada.operadorId)
+    ? await resolverOperadorUsuario(db, {
+      usuario: entrada.usuario,
+      operadorId: entrada.operadorId,
+      empresaId: entrada.empresaId
+    })
+    : null;
+  const terminalId = idPositivo(entrada.terminalId);
+
+  let operadorNomeSnapshot = null;
+  if (operadorId) {
+    const operador = await consultar(db, 'SELECT * FROM usuarios WHERE id = ?', [operadorId]);
+    const nome = String(operador && (operador.nome || operador.username) || '').trim();
+    operadorNomeSnapshot = nome || null;
+  }
+
+  let terminalTipoSnapshot = null;
+  if (terminalId) {
+    const terminal = await consultar(db, 'SELECT hostname FROM terminais WHERE id = ?', [terminalId]);
+    const hostname = String(terminal && terminal.hostname || '');
+    const terminalMobile = hostname.startsWith(MOBILE_HOST_PREFIX);
+    const installationId = String(req && req.mobileInstallationId || '').trim();
+
+    if (terminalMobile && (!installationId || hostname !== MOBILE_HOST_PREFIX + installationId)) {
+      throw referenciaInvalida(
+        'IDENTIDADE_MOBILE_NAO_VALIDADA',
+        'A venda aponta para um terminal Mobile sem identidade de instalação validada.',
+        { tabela: 'terminais', coluna: 'terminal_id', id: terminalId }
+      );
+    }
+    if (installationId && !terminalMobile) {
+      throw referenciaInvalida(
+        'TERMINAL_MOBILE_DIVERGENTE',
+        'A identidade Mobile validada não corresponde ao terminal da venda.',
+        { tabela: 'terminais', coluna: 'terminal_id', id: terminalId }
+      );
+    }
+    terminalTipoSnapshot = terminalMobile ? 'MOBILE' : 'DESKTOP';
+  }
+
+  const origemContexto = String(req && req.vendaContext && req.vendaContext.origem || '')
+    .trim()
+    .toUpperCase();
+  let origemOperacao = null;
+  if (req && req.canalVendaHttp === 'PDV') {
+    origemOperacao = terminalTipoSnapshot === 'MOBILE' ? 'PDV_MOBILE' : 'PDV_DESKTOP';
+  } else if (origemContexto && origemContexto !== 'PDV') {
+    origemOperacao = origemContexto;
+  } else if (terminalTipoSnapshot === 'MOBILE') {
+    origemOperacao = 'PDV_MOBILE';
+  } else if (origemContexto === 'PDV' || terminalTipoSnapshot === 'DESKTOP') {
+    origemOperacao = 'PDV_DESKTOP';
+  }
+
+  return {
+    origemOperacao,
+    operadorId,
+    operadorNomeSnapshot,
+    terminalTipoSnapshot
+  };
+}
+
 /**
  * Confere as FKs de vendas antes do INSERT.
  * vendas.caixa_id aponta para caixa(id), o turno.
@@ -247,11 +315,15 @@ async function validarReferenciasPersistenciaVenda(db, entrada = {}) {
     }
   }
 
-  const operadorId = await resolverOperadorUsuario(db, {
+  const auditoria = await resolverSnapshotsAuditoriaVenda(db, {
     usuario: entrada.usuario,
     operadorId: operadorInformado,
-    empresaId
+    empresaId,
+    terminalId,
+    exigirOperador: true,
+    req: entrada.req
   });
+  const operadorId = auditoria.operadorId;
 
   if (clienteId) {
     const cliente = await consultar(db, 'SELECT id FROM clientes WHERE id = ?', [clienteId]);
@@ -269,6 +341,7 @@ async function validarReferenciasPersistenciaVenda(db, entrada = {}) {
     caixaSessaoId: sessaoId,
     terminalId,
     operadorId,
+    ...auditoria,
     empresaId,
     clienteId
   };
@@ -277,6 +350,7 @@ async function validarReferenciasPersistenciaVenda(db, entrada = {}) {
 module.exports = {
   validarReferenciasPersistenciaVenda,
   resolverOperadorUsuario,
+  resolverSnapshotsAuditoriaVenda,
   idDeclaradoDoUsuario,
   referenciaInvalida
 };

@@ -21,21 +21,24 @@
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 1rem;
-  padding: 0.75rem 1rem;
+  gap: 0.4rem 1rem;
+  padding: 0.4rem 1rem;
   background: #11161d;
   border-bottom: 1px solid var(--kds-border);
 }
 
 .kds-cabecalho__titulo {
+  display: inline-block;
   margin: 0;
-  font-size: 1.35rem;
+  font-size: 1.2rem;
   font-weight: 700;
   letter-spacing: 0.02em;
+  vertical-align: baseline;
 }
 
 .kds-cabecalho__marca {
-  margin-bottom: 0.15rem;
+  display: inline-block;
+  margin-right: 0.5rem;
   color: var(--kds-muted);
   font-size: 0.7rem;
   font-weight: 700;
@@ -51,9 +54,10 @@
 }
 
 .kds-cabecalho__meta {
-  margin-top: 0.35rem;
+  margin-top: 0.15rem;
   color: var(--kds-muted);
-  font-size: 0.95rem;
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
 }
 
 .kds-cabecalho__meta strong {
@@ -65,7 +69,20 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.kds-cabecalho > div:first-child {
+  min-width: 0;
+}
+
+.kds-cabecalho__acoes .kds-btn-secundario,
+.kds-cabecalho__acoes .kds-btn-atualizar {
+  min-height: 2.5rem;
+  max-width: 100%;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.875rem;
 }
 
 .kds-status {
@@ -377,6 +394,20 @@
   gap: 0.35rem;
   justify-content: flex-end;
   margin-top: 0.4rem;
+}
+
+.kds-item__quantidade {
+  align-items: center;
+  color: var(--kds-text);
+  display: inline-flex;
+  font-size: 0.7rem;
+  gap: 0.3rem;
+}
+
+.kds-item__quantidade output {
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
 }
 
 .kds-btn-operacao {

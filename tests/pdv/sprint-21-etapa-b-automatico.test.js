@@ -43,6 +43,7 @@ require.cache[emissorPath] = {
 const { isolarBancoTeste } = require('../central-entradas/helpers/isolarBancoTeste');
 const isolamento = isolarBancoTeste('cds-sprint21b-');
 const db = require('../../backend/database');
+const { garantirSchemaIdempotenciaPdv } = require('../../backend/services/vendas/PdvFechamentoIdempotenciaService');
 isolamento.comprobar(db);
 
 const tefManager = require('../../backend/services/tef/TefManager');
@@ -57,6 +58,8 @@ const { garantirSchemaEstoqueEmpresaAsync } = require('../../backend/services/es
 const { garantirSchemaUsuarioEmpresasAsync } = require('../../backend/services/empresas/usuarioEmpresasSchema');
 const { verificarToken } = require('../../backend/middleware/auth');
 const { validarCaixaAberto, validarCaixaSeOrigemPdv } = require('../../backend/middleware/validarCaixaAberto');
+const validarTerminalMobile = require('../../backend/middleware/validarTerminalMobile');
+const { MOBILE_HOST_PREFIX } = require('../../backend/services/TerminalPdvMobileService');
 const { criarMiddlewareContextoEmpresa } = require('../../backend/services/fiscalNaoFiscal/empresaContexto');
 const { middlewareAplicarPdvModeloEmpresa } = require('../../backend/services/pdv/PdvModeloEmpresaService');
 const VendaApplicationService = require('../../backend/services/vendas/VendaApplicationService');
@@ -364,6 +367,10 @@ let empresaA;
 let empresaB;
 let produtoId;
 let terminalId;
+let mobileTerminalId;
+let mobileTurnoId;
+let mobileSessaoId;
+const mobileInstallationId = '11111111-2222-4333-8444-555555555555';
 let operador;
 let supervisor;
 let tokenOperador;
@@ -631,6 +638,7 @@ function corpoVendaDireta({ forma, vendaFiscal, pagamentos, extra = {} }) {
 describe('Sprint 21 Etapa B — fluxo automático', { concurrency: false }, () => {
   before(async () => {
     await whenReady();
+    await garantirSchemaIdempotenciaPdv(db);
     const cfgPath = path.join(dbDir, 'config', 'configuracoes.json');
     const cfgAtual = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
     cfgAtual.modo_operacional_global = 'MULTIEMPRESA';
@@ -737,6 +745,25 @@ describe('Sprint 21 Etapa B — fluxo automático', { concurrency: false }, () =
        ) VALUES (?, ?, ?, ?, 'aberto', 0, DATETIME('now','localtime'))`,
       [turnoSupervisor.lastID, terminalSupervisor.lastID, supervisor.id, empresaA.id]
     );
+    const terminalMobile = await run(
+      `INSERT INTO terminais (nome, hostname, usuario_id, ativo)
+       VALUES ('PDV Mobile 21B', ?, ?, 1)`,
+      [MOBILE_HOST_PREFIX + mobileInstallationId, operador.id]
+    );
+    mobileTerminalId = terminalMobile.lastID;
+    const turnoMobile = await run(
+      `INSERT INTO caixa (data, valor_inicial, status, terminal_id, aberto_em, aberto_por)
+       VALUES (date('now','localtime'), 0, 'aberto', ?, DATETIME('now','localtime'), ?)`,
+      [mobileTerminalId, operador.id]
+    );
+    mobileTurnoId = turnoMobile.lastID;
+    const sessaoMobile = await run(
+      `INSERT INTO caixa_sessoes (
+         caixa_turno_id, terminal_id, operador_id, empresa_id, status, valor_abertura, aberto_em
+       ) VALUES (?, ?, ?, ?, 'aberto', 0, DATETIME('now','localtime'))`,
+      [mobileTurnoId, mobileTerminalId, operador.id, empresaA.id]
+    );
+    mobileSessaoId = sessaoMobile.lastID;
 
     const app = express();
     app.use(express.json({ limit: '2mb' }));
@@ -778,6 +805,7 @@ describe('Sprint 21 Etapa B — fluxo automático', { concurrency: false }, () =
     app.post(
       '/api/vendas',
       verificarToken,
+      validarTerminalMobile,
       contextoEmpresa,
       aplicarModelo,
       validarCaixaSeOrigemPdv,
@@ -1255,13 +1283,64 @@ describe('Sprint 21 Etapa B — fluxo automático', { concurrency: false }, () =
     }), headersEmpresaA());
     assert.ok(resp.status < 400, JSON.stringify(resp.body));
     const venda = await get(
-      `SELECT id, status_pagamento, tef_transacao_id FROM vendas WHERE id = ?`,
+      `SELECT id, status_pagamento, tef_transacao_id, origem_operacao, operador_id,
+              operador_nome_snapshot, terminal_id, terminal_tipo_snapshot,
+              caixa_id, caixa_sessao_id
+       FROM vendas WHERE id = ?`,
       [resp.body.venda_id || resp.body.id]
     );
     assert.equal(venda.status_pagamento, 'quitada');
     assert.equal(Number(venda.tef_transacao_id), Number(previa.id));
+    assert.equal(venda.origem_operacao, 'PDV_DESKTOP');
+    assert.equal(venda.operador_id, operador.id);
+    assert.equal(venda.operador_nome_snapshot, 'Operador 21B');
+    assert.equal(venda.terminal_id, terminalId);
+    assert.equal(venda.terminal_tipo_snapshot, 'DESKTOP');
+    assert.ok(venda.caixa_id > 0);
+    assert.ok(venda.caixa_sessao_id > 0);
     assert.equal(autorizacoesReais.length, realAntes);
     resultados.E3 = { aprovado: true, vendaId: venda.id, transacaoId: previa.id };
+  });
+
+  it('grava venda Mobile com usuário e caixa da instalação, ignorando declarações do body', async () => {
+    const sessaoDesktopAntes = await get(
+      `SELECT id, caixa_turno_id, status FROM caixa_sessoes WHERE terminal_id = ? AND status = 'aberto'`,
+      [terminalId]
+    );
+    const resposta = await httpJson(
+      server,
+      'POST',
+      '/api/vendas',
+      corpoVendaDireta({
+        forma: 'dinheiro',
+        vendaFiscal: false,
+        pagamentos: [{ forma_pagamento: 'dinheiro', valor: 10, tipo_recebimento: 'nao_fiscal' }],
+        extra: { origem: 'PDV_DESKTOP', operador_id: supervisor.id, terminal_id: mobileTerminalId }
+      }),
+      {
+        ...headersEmpresaA(),
+        'X-Mobile-Installation-Id': mobileInstallationId
+      }
+    );
+    assert.ok(resposta.status < 400, JSON.stringify(resposta.body));
+    const venda = await get(
+      `SELECT id, origem_operacao, operador_id, operador_nome_snapshot, terminal_id,
+              terminal_tipo_snapshot, caixa_id, caixa_sessao_id
+       FROM vendas WHERE id = ?`,
+      [resposta.body.venda_id || resposta.body.id]
+    );
+    assert.equal(venda.origem_operacao, 'PDV_MOBILE');
+    assert.equal(venda.operador_id, operador.id);
+    assert.equal(venda.operador_nome_snapshot, 'Operador 21B');
+    assert.equal(venda.terminal_id, mobileTerminalId);
+    assert.equal(venda.terminal_tipo_snapshot, 'MOBILE');
+    assert.equal(venda.caixa_id, mobileTurnoId);
+    assert.equal(venda.caixa_sessao_id, mobileSessaoId);
+    const sessaoDesktopDepois = await get(
+      `SELECT id, caixa_turno_id, status FROM caixa_sessoes WHERE terminal_id = ? AND status = 'aberto'`,
+      [terminalId]
+    );
+    assert.deepEqual(sessaoDesktopDepois, sessaoDesktopAntes);
   });
 
   it('E4 — confirmação manual explícita com modo MANUAL permanece permitida', async () => {

@@ -169,7 +169,7 @@
         <label class="mp-label" for="mm-cliente">Cliente, se houver</label>
         <input id="mm-cliente" class="mp-campo" type="search" value="${escapar(estado.clienteNome)}" placeholder="Nome, CPF ou telefone" autocomplete="off" enterkeyhint="search">
         <div class="mm-sugestoes" id="mm-sugestoes">${sugestoes}</div>
-        <p class="mp-ajuda" id="mm-cliente-ajuda" role="status">${escapar(estado.clienteBuscaStatus || (estado.clienteId ? `Cliente selecionado: ${estado.clienteNome}` : 'Opcional. Selecione um cliente cadastrado para vinculá-lo à mesa.'))}</p>
+        <p class="mp-ajuda" id="mm-cliente-ajuda" role="status">${escapar(estado.clienteBuscaStatus || (estado.clienteId ? `Cliente selecionado: ${estado.clienteNome}` : 'Opcional. Escolha um cliente cadastrado ou informe um nome para o pedido.'))}</p>
         <div class="mm-acoes"><button type="button" class="mp-btn mp-btn-primario" data-acao="abrir">Abrir atendimento</button></div>`
         : '<p>Mesa desativada. O atendimento não pode ser aberto.</p>';
     } else if (situacao === 'FECHAMENTO') {
@@ -222,20 +222,30 @@
     const pedido = estado.pedido;
     const prep = estado.preparacao || {};
     const enviada = prep.estado === 'EM_PREPARACAO' || prep.estado === 'CONCLUIDO';
+    const despacho = pedido.despacho || {};
+    const kdsConfirmado = despacho.status === 'CONCLUIDO' && despacho.success !== false;
     const itens = (Array.isArray(pedido.itens) ? pedido.itens : []).map((item) => `
       <li>${escapar(item.quantidade)} × ${escapar(item.produto_nome || item.produto_codigo || ('Produto ' + item.produto_id))}${item.subtotal != null ? ` — ${dinheiro(item.subtotal)}` : ''}</li>`).join('');
     const status = String(pedido.status || '').toUpperCase();
-    const bloqueado = status === 'FATURADO' || status === 'CANCELADO' || status === 'ORCAMENTO';
+    const bloqueado = status === 'CANCELADO' || status === 'ORCAMENTO';
     let acoes;
     if (bloqueado) {
       acoes = `<p>O pedido está ${escapar(status)}. Esta tela não altera itens nem reenvia à preparação.</p>`;
+    } else if (status === 'FATURADO') {
+      acoes = `<p>O pedido está FATURADO e não pode ser editado.</p>
+        <p>${kdsConfirmado ? 'Envio ao KDS confirmado.' : 'Envio ao KDS não confirmado.'}</p>
+        ${despacho.codigo ? `<p>Código do despacho: ${escapar(despacho.codigo)}</p>` : ''}
+        ${despacho.mensagem ? `<p>${escapar(despacho.mensagem)}</p>` : ''}
+        ${!kdsConfirmado ? `<button type="button" class="mp-btn mp-btn-primario" data-acao="enviar"${estado.emCurso ? ' disabled' : ''}>${estado.emCurso ? 'Enviando…' : (enviada ? 'Reprocessar envio ao KDS' : 'Enviar para cozinha (KDS)')}</button>` : ''}`;
     } else if (enviada) {
       const pdv = vista.pdv || { fase: 'idle' };
       const ocupado = pdv.fase === 'enviando';
       const jaVinculado = Number(pedido.venda_id) > 0;
       acoes = `
         <div class="mm-bloco">
-          <p><strong>Enviado para preparação.</strong> Registro operacional do ERP; não confirma recebimento por cozinha, impressora ou KDS.</p>
+          <p><strong>${kdsConfirmado ? 'Envio ao KDS confirmado.' : 'Preparação registrada; envio ao KDS não confirmado.'}</strong></p>
+          ${despacho.codigo ? `<p>Código do despacho: ${escapar(despacho.codigo)}</p>` : ''}
+          ${despacho.mensagem ? `<p>${escapar(despacho.mensagem)}</p>` : ''}
           <p>Estado ${escapar(rotuloEstadoPreparacao(prep.estado))}</p>
           <p>Envio ${escapar(prep.enviado_em || '—')}</p>
           ${prep.concluido_em ? `<p>Conclusão ${escapar(prep.concluido_em)}</p>` : ''}
@@ -243,6 +253,7 @@
         </div>
         ${pdv.mensagem ? `<div class="mm-aviso" role="alert">${escapar(pdv.mensagem)}</div>` : ''}
         <div class="mm-acoes">
+          ${!kdsConfirmado ? `<button type="button" class="mp-btn mp-btn-primario" data-acao="enviar"${estado.emCurso ? ' disabled' : ''}>${estado.emCurso ? 'Enviando…' : 'Reprocessar envio ao KDS'}</button>` : ''}
           <button type="button" class="mp-btn mp-btn-primario" data-acao="finalizar-pdv"${ocupado || pdv.fase === 'confirmando' ? ' disabled' : ''}>${jaVinculado ? 'Recuperar operação no PDV' : 'Finalizar pedido e ir para o PDV'}</button>
           <button type="button" class="mp-btn" data-acao="outro">Lançar outro pedido nesta mesa</button>
         </div>
@@ -261,7 +272,7 @@
         </div>` : ''}`;
     } else {
       acoes = `<div class="mm-acoes">
-        <button type="button" class="mp-btn mp-btn-primario" data-acao="enviar"${estado.emCurso ? ' disabled' : ''}>${estado.emCurso ? 'Enviando…' : 'Enviar para preparação'}</button>
+        <button type="button" class="mp-btn mp-btn-primario" data-acao="enviar"${estado.emCurso ? ' disabled' : ''}>${estado.emCurso ? 'Enviando…' : 'Enviar para cozinha (KDS)'}</button>
       </div>`;
     }
     return `${cab}
@@ -298,7 +309,11 @@
     }
     const lista = await rede.requisitar('GET', `/mesas/${mesaId}/atendimento/pedidos`);
     const item = (lista.pedidos || []).find((row) => Number(row.id) === Number(dados.pedido.id));
-    const pedido = { ...dados.pedido, preparacao: item && item.preparacao };
+    const pedido = {
+      ...dados.pedido,
+      preparacao: item && item.preparacao,
+      despacho: item && item.despacho ? item.despacho : dados.pedido.despacho
+    };
     pedido.mesa_atendimento_id = item ? item.mesa_atendimento_id : null;
     const decisao = Conf.decidirConsultaPedido(consulta, pedido, geracao ? { geracao: geracao.seq, geracaoAtual: geracao.atual() } : {});
     return { consulta, pedido, decisao };
@@ -450,6 +465,18 @@
     }
   }
 
+  function destinoNovoPedidoMesa(global, mesaId) {
+    let destino = '/mobile-pedido/?mesa=' + encodeURIComponent(mesaId);
+    const operacao = global.CdsMobileOperacao;
+    const leitura = operacao && operacao.lerPedido(mesaId);
+    const salvo = leitura && leitura.ok && leitura.registro && leitura.registro.estado;
+    const anterior = Number(salvo && salvo.confirmacao && salvo.confirmacao.id);
+    if (salvo && salvo.etapa === 'confirmado' && Number.isInteger(anterior) && anterior > 0) {
+      destino += '&novoApos=' + encodeURIComponent(anterior);
+    }
+    return destino;
+  }
+
   function falhaFatal(global) {
     return (erro) => {
       const el = global.document.getElementById('mm-alerta');
@@ -556,7 +583,7 @@
           return;
         }
         const ctrl = Conf.criarConferencia({
-          fetchJson: (method, path, chave) => rede.requisitar(method, path, undefined, chave),
+          fetchJson: (method, path, chave) => fetchJson(method, path, undefined, chave),
           novaChave: () => novaChave(global),
           listarPedidos: (id) => rede.requisitar('GET', `/mesas/${id}/atendimento/pedidos`)
         });
@@ -584,7 +611,18 @@
     function irParaPedidos(ctx) {
       if (ctx && ctx.pedidoId) { abrirConferencia(ctx.mesaId, ctx.pedidoId); return; }
       if (ctx && ctx.visualizarPedidos) return;
-      global.location.assign('/mobile-pedido/?mesa=' + encodeURIComponent(ctx.mesaId));
+      if (ctx && ctx.cliente) {
+        try {
+          const operacao = global.CdsMobileOperacao;
+          const resultado = operacao && operacao.salvarClienteMesa(ctx);
+          if (!resultado || !resultado.ok) throw new Error('Armazenamento da identificação indisponível.');
+        } catch (erro) {
+          control.estado.aviso = 'Atendimento aberto, mas não foi possível guardar a identificação para o pedido. Informe o cliente novamente no pedido.';
+          render();
+          return;
+        }
+      }
+      global.location.assign(destinoNovoPedidoMesa(global, ctx.mesaId));
     }
 
     function buscarClientes(termo) {
@@ -618,8 +656,13 @@
     };
 
     try {
-      await contexto.listarDisponiveis();
-      await contexto.adotarEmpresaPadrao();
+      const disponiveis = await contexto.listarDisponiveis();
+      const empresaId = contexto.lerEmpresaId ? contexto.lerEmpresaId() : null;
+      if (empresaId && (!Array.isArray(disponiveis)
+        || !disponiveis.some((empresa) => Number(empresa.id) === Number(empresaId)))) {
+        throw new Error('A empresa selecionada não está disponível para esta sessão.');
+      }
+      if (!empresaId) await contexto.adotarEmpresaPadrao();
     } catch (err) {
       if (tratar(err)) return null;
       alerta((err && err.message) || 'Não foi possível identificar a empresa da sessão.');
@@ -640,6 +683,7 @@
       agendar: (fn, ms) => global.setTimeout(async () => { await fn(); render(); }, ms),
       cancelar: (id) => global.clearTimeout(id),
       aoMudar: render,
+      permitirClienteNomeLivre: true,
       aoIrParaPedidos: irParaPedidos
     });
 
@@ -710,7 +754,9 @@
         });
         return;
       }
-      if (acao === 'outro' && vista) { global.location.assign('/mobile-pedido/?mesa=' + encodeURIComponent(vista.mesaId)); }
+      if (acao === 'outro' && vista) {
+        global.location.assign(destinoNovoPedidoMesa(global, vista.mesaId));
+      }
     });
     host.addEventListener('input', (evento) => {
       if (evento.target.id !== 'mm-cliente') return;
@@ -750,6 +796,7 @@
     CHAVE_RETORNO,
     criarRede,
     parametrosDaUrl,
+    destinoNovoPedidoMesa,
     iniciar,
     falhaFatal,
     rotuloSituacao

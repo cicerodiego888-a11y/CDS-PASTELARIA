@@ -25,6 +25,7 @@
                 <a href="/mobile-pdv/">PDV</a>
             </nav>
         </header>
+        <p id="cds-rede-status" class="cds-rede-status" data-tipo="mobile" role="status" aria-live="polite">Procurando servidor…</p>
 
         <div id="mp-alerta" class="mp-alerta" hidden></div>
 
@@ -43,6 +44,12 @@
         <main>
             <section id="mp-painel-cliente" data-painel="cliente">
                 <h1>Cliente</h1>
+                <div class="mp-card">
+                    <h2>Mesa</h2>
+                    <p id="mp-mesa-escolhida">Pedido sem mesa</p>
+                    <a class="mp-btn mp-link-btn" href="/mobile-mesas/">Selecionar mesa</a>
+                    <p class="mp-ajuda">Escolha a mesa antes de adicionar produtos. Cada mesa mantém seu próprio rascunho.</p>
+                </div>
                 <p class="mp-ajuda">Opcional. O pedido pode seguir sem cliente.</p>
                 <label class="mp-label" for="mp-cliente-busca">Nome, CPF ou telefone</label>
                 <input id="mp-cliente-busca" class="mp-campo" type="search" autocomplete="off" enterkeyhint="search">
@@ -113,7 +120,7 @@
                 <div id="mp-confirmacao" class="mp-card"></div>
                 <button type="button" class="mp-btn mp-btn-primario" id="mp-enviar-pdv">Enviar para o PDV</button>
                 <div id="mp-mesa-acoes" class="mp-mesa-acoes" hidden>
-                    <a id="mp-mesa-conferir" class="mp-btn mp-btn-primario mp-link-btn" href="/mobile-mesas/">Conferir e enviar para preparação</a>
+                    <a id="mp-mesa-conferir" class="mp-btn mp-btn-primario mp-link-btn" href="/mobile-mesas/">Conferir e enviar para cozinha (KDS)</a>
                     <a id="mp-mesa-voltar-fim" class="mp-btn mp-link-btn" href="/mobile-mesas/">Voltar às mesas</a>
                 </div>
                 <button type="button" class="mp-btn" id="mp-novo">Novo pedido</button>

@@ -364,6 +364,9 @@ describe('PDV Mobile — pagamento sequencial', () => {
     const resultado = await ctx.MobilePdv.fechar({
       fetch: async (url, opcoes) => {
         urls.push({ url, opcoes });
+        if (url.endsWith('/configuracoes/modo_dashboard_fiscal')) {
+          return { ok: true, json: async () => ({ valor: '0' }) };
+        }
         if (url.endsWith('/pre-calcular-distribuicao')) {
           return { ok: true, json: async () => ({ sucesso: true, valor_fiscal: 0, valor_nao_fiscal: 17.98 }) };
         }
@@ -386,12 +389,134 @@ describe('PDV Mobile — pagamento sequencial', () => {
     assert.equal(urls.some((c) => c.url.endsWith('/fiscal/emitir/venda/90')), false);
     const gravacao = urls.find((c) => c.url.endsWith('/vendas'));
     const corpo = JSON.parse(gravacao.opcoes.body);
+    const preCalculo = urls.find((c) => c.url.endsWith('/pre-calcular-distribuicao'));
+    assert.equal(JSON.parse(preCalculo.opcoes.body).emitir_fiscal, false);
+    assert.equal(corpo.emitir_fiscal, false);
     assert.equal(corpo.origem, 'PDV');
     assert.equal(corpo.pedido_id, 55);
     assert.equal(corpo.pedido_faturamento_operacao_id, 9);
     assert.equal(corpo.chave_fechamento_pdv, 'pdv-teste-chave01');
     assert.equal(corpo.itens[0].produto_id, 747);
     assert.equal(corpo.itens[0].subtotal, 17.98);
+  });
+
+  it('consulta o modo fiscal oficial e recebe emissão pelo finalizador de venda sem chamada duplicada', async () => {
+    const ctx = carregarPdv();
+    await ctx.PagamentoSequencial.adicionar({
+      forma: 'pix',
+      valor: 17.98,
+      totalVenda: 17.98,
+      tefHabilitado: true,
+      autorizarTef: async () => ({
+        aprovado: true,
+        status: 'aprovado',
+        transacao_id: 'pix-fiscal-test-1'
+      })
+    });
+    const chamadas = [];
+    const resultado = await ctx.MobilePdv.fechar({
+      fetch: async (url, opcoes) => {
+        chamadas.push({ url: String(url), opcoes });
+        if (String(url).endsWith('/configuracoes/modo_dashboard_fiscal')) {
+          return { ok: true, json: async () => ({ valor: '1' }) };
+        }
+        if (String(url).endsWith('/pre-calcular-distribuicao')) {
+          return { ok: true, json: async () => ({
+            sucesso: true,
+            valor_fiscal: 17.98,
+            valor_nao_fiscal: 0
+          }) };
+        }
+        if (String(url).endsWith('/vendas')) {
+          return { ok: true, status: 201, json: async () => ({
+            id: 91,
+            venda_id: 91,
+            status_pagamento: 'quitada',
+            fiscal: { success: true, status: 'autorizada', numero: 14 }
+          }) };
+        }
+        throw new Error('url inesperada ' + url);
+      },
+      itens: preparacaoOk().itens,
+      total: 17.98,
+      desconto: 0,
+      handoff: null,
+      chave: 'pdv-fiscal-teste-01',
+      tefHabilitado: true
+    });
+
+    assert.equal(resultado.ok, true);
+    assert.equal(resultado.vendaId, 91);
+    assert.equal(resultado.fiscal.status, 'autorizada');
+    const preCalculo = chamadas.find((chamada) => chamada.url.endsWith('/pre-calcular-distribuicao'));
+    const venda = chamadas.find((chamada) => chamada.url.endsWith('/vendas'));
+    assert.equal(JSON.parse(preCalculo.opcoes.body).emitir_fiscal, true);
+    assert.equal(JSON.parse(venda.opcoes.body).emitir_fiscal, true);
+    assert.equal(JSON.parse(venda.opcoes.body).valor_fiscal, 17.98);
+    assert.equal(chamadas.some((chamada) => chamada.url.includes('/fiscal/emitir/venda/')), false);
+  });
+
+  it('não solicita emissão no corpo final se a distribuição não contiver valor fiscal', async () => {
+    const ctx = carregarPdv();
+    await ctx.PagamentoSequencial.adicionar({ forma: 'dinheiro', valor: 17.98, totalVenda: 17.98 });
+    ctx.PagamentoSequencial.registrarComposicao({ sucesso: true });
+    const chamadas = [];
+    const resultado = await ctx.MobilePdv.fechar({
+      fetch: async (url, opcoes) => {
+        chamadas.push({ url: String(url), opcoes });
+        if (String(url).endsWith('/configuracoes/modo_dashboard_fiscal')) {
+          return { ok: true, json: async () => ({ valor: '1' }) };
+        }
+        if (String(url).endsWith('/pre-calcular-distribuicao')) {
+          return { ok: true, json: async () => ({
+            sucesso: true,
+            valor_fiscal: 0,
+            valor_nao_fiscal: 17.98
+          }) };
+        }
+        if (String(url).endsWith('/vendas')) {
+          return { ok: true, status: 201, json: async () => ({ id: 92, venda_id: 92 }) };
+        }
+        throw new Error('url inesperada ' + url);
+      },
+      itens: preparacaoOk().itens,
+      total: 17.98,
+      desconto: 0,
+      handoff: null,
+      chave: 'pdv-fiscal-sem-itens-01',
+      tefHabilitado: false
+    });
+
+    assert.equal(resultado.ok, true);
+    const preCalculo = chamadas.find((chamada) => chamada.url.endsWith('/pre-calcular-distribuicao'));
+    const venda = chamadas.find((chamada) => chamada.url.endsWith('/vendas'));
+    assert.equal(JSON.parse(preCalculo.opcoes.body).emitir_fiscal, true);
+    assert.equal(JSON.parse(venda.opcoes.body).emitir_fiscal, false);
+    assert.equal(JSON.parse(venda.opcoes.body).valor_fiscal, 0);
+    assert.equal(chamadas.some((chamada) => chamada.url.includes('/fiscal/emitir/venda/')), false);
+  });
+
+  it('não envia venda se a configuração fiscal oficial não puder ser consultada', async () => {
+    const ctx = carregarPdv();
+    await ctx.PagamentoSequencial.adicionar({ forma: 'dinheiro', valor: 17.98, totalVenda: 17.98 });
+    ctx.PagamentoSequencial.registrarComposicao({ sucesso: true });
+    const chamadas = [];
+    const resultado = await ctx.MobilePdv.fechar({
+      fetch: async (url) => {
+        chamadas.push(String(url));
+        return { ok: false, status: 403, json: async () => ({ error: 'Acesso negado.' }) };
+      },
+      itens: preparacaoOk().itens,
+      total: 17.98,
+      desconto: 0,
+      handoff: null
+    });
+
+    assert.equal(resultado.ok, false);
+    assert.equal(resultado.codigo, 'HTTP_403');
+    assert.equal(chamadas.length, 1);
+    assert.ok(chamadas[0].endsWith('/configuracoes/modo_dashboard_fiscal'));
+    assert.match(resultado.mensagem, /configuração fiscal oficial/);
   });
 
   it('bloqueia caixa fechado, segundo clique e venda já persistida', async () => {
@@ -408,6 +533,9 @@ describe('PDV Mobile — pagamento sequencial', () => {
     const semCaixa = await ctx.MobilePdv.fechar({
       ...comum,
       fetch: async (url) => {
+        if (String(url).endsWith('/configuracoes/modo_dashboard_fiscal')) {
+          return { ok: true, status: 200, json: async () => ({ valor: '0' }) };
+        }
         if (url.endsWith('/vendas')) vendas += 1;
         return { ok: false, status: 400, json: async () => ({ error: 'Nenhum caixa aberto.', code: 'CAIXA_NAO_ENCONTRADO' }) };
       }

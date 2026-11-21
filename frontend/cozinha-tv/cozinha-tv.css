@@ -1,0 +1,21 @@
+* { box-sizing: border-box; }
+body { margin: 0; background: #0d1117; color: #e6edf3; font: 16px "Segoe UI", sans-serif; }
+.tv-barra { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 0.25rem 1rem; padding: 0.3rem 1rem; background: #161b22; }
+.tv-barra button, .tv-acesso button { border: 1px solid #596575; border-radius: 6px; background: #242b33; color: #fff; padding: 0.7rem 1rem; cursor: pointer; }
+.tv-barra button { min-height: 2.5rem; padding: 0.35rem 0.75rem; }
+.tv-acesso { max-width: 32rem; margin: 4rem auto; padding: 2rem; background: #161b22; border: 1px solid #30363d; border-radius: 8px; }
+.tv-acesso form { display: grid; gap: 0.7rem; }
+.tv-acesso form[hidden], [hidden] { display: none; }
+.tv-acesso input, .tv-acesso select { width: 100%; padding: 0.7rem; font: inherit; }
+#tv-mensagem { color: #ffb4a9; }
+#tv-alerta { margin: 0; }
+#tv-alerta:not(:empty) { color: #ffb4a9; padding: 0.4rem 1rem; }
+.cds-rede-status { margin: 0; padding: 0.2rem 1rem; color: #f0c674; font-size: 0.875rem; }
+.cds-rede-status[data-estado="conectado"] { color: #8bd5a0; }
+.cds-rede-status[data-estado="indisponivel"] { color: #ffb4a9; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.kds-painel { min-height: calc(100vh - 3.5rem); }
+@media (min-width: 1600px) {
+  .kds-painel { font-size: 1.15rem; }
+  .kds-item__nome, .kds-item__qtd { font-size: 1.2rem; }
+}

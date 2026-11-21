@@ -9,14 +9,15 @@
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (root) {
     root.CdsCozinhaKdsApi = api;
-    root.loadCozinhaKds = function loadCozinhaKds() {
+    root.loadCozinhaKds = function loadCozinhaKds(opts) {
       if (root.CdsCozinhaKds && typeof root.CdsCozinhaKds.parar === 'function') {
         root.CdsCozinhaKds.parar();
       }
+
       const painel = api.montarNoNavegador(root);
       root.CdsCozinhaKds = painel;
       const host = root.document && root.document.getElementById('page-content');
-      return painel.iniciar(host);
+      return painel.iniciar(host, opts);
     };
   }
 }(typeof window !== 'undefined' ? window : globalThis, function factory() {
@@ -24,6 +25,7 @@
 
   const INTERVALO_MS = 5000;
   const LIMITE_PAINEL = 100;
+  const FUSO_EXIBICAO = 'America/Fortaleza';
   const ESTADOS_COLUNA = Object.freeze(['AGUARDANDO', 'EM_PREPARACAO', 'PRONTO', 'RETIRADO']);
   const ROTULOS_COLUNA = Object.freeze({
     AGUARDANDO: 'Aguardando',
@@ -67,22 +69,31 @@
   function formatarHora(valor) {
     const ms = parseServidor(valor);
     if (!Number.isFinite(ms)) return '—';
-    const d = new Date(ms);
-    const hh = String(d.getUTCHours()).padStart(2, '0');
-    const mm = String(d.getUTCMinutes()).padStart(2, '0');
-    const ss = String(d.getUTCSeconds()).padStart(2, '0');
-    return `${hh}:${mm}:${ss}`;
+    const partes = new Intl.DateTimeFormat('pt-BR', {
+      timeZone: FUSO_EXIBICAO,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23'
+    }).formatToParts(new Date(ms));
+    const valores = Object.fromEntries(partes.map(({ type, value }) => [type, value]));
+    return `${valores.hour}:${valores.minute}:${valores.second}`;
   }
 
-  function formatarDataHoraUtc(date) {
+  function formatarDataHoraLocal(date) {
     if (!(date instanceof Date) || Number.isNaN(date.getTime())) return '—';
-    const dd = String(date.getUTCDate()).padStart(2, '0');
-    const mo = String(date.getUTCMonth() + 1).padStart(2, '0');
-    const yyyy = date.getUTCFullYear();
-    const hh = String(date.getUTCHours()).padStart(2, '0');
-    const mm = String(date.getUTCMinutes()).padStart(2, '0');
-    const ss = String(date.getUTCSeconds()).padStart(2, '0');
-    return `${dd}/${mo}/${yyyy} ${hh}:${mm}:${ss}`;
+    const partes = new Intl.DateTimeFormat('pt-BR', {
+      timeZone: FUSO_EXIBICAO,
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23'
+    }).formatToParts(date);
+    const valores = Object.fromEntries(partes.map(({ type, value }) => [type, value]));
+    return `${valores.day}/${valores.month}/${valores.year} ${valores.hour}:${valores.minute}:${valores.second}`;
   }
 
   function segundosEntre(inicio, fim, agoraMs) {
@@ -106,7 +117,7 @@
       ? agora.getTime()
       : Date.now();
     const chegadaEm = card.enviada_em;
-    const retiradaConfirmada = card.retirada_estado === 'RETIRADA';
+    const retiradaConfirmada = card.retirada_confirmada_por_ledger === true;
     const canceladoEm = card.historico_cancelamento ? (item.cancelamento_em || card.cancelamento_em) : null;
     const chegadaFim = card.historico_cancelamento ? canceladoEm : (retiradaConfirmada ? card.retirada_em : null);
     const fimAusente = (card.historico_cancelamento || retiradaConfirmada) && !chegadaFim;
@@ -250,6 +261,22 @@
     return String(n).replace(/\.?0+$/, '');
   }
 
+  function parsearMilessimosUI(valor) {
+    if (valor == null || (typeof valor === 'string' && !valor.trim())) return null;
+    if (typeof valor === 'number' && !Number.isFinite(valor)) return null;
+    const bruto = String(valor).trim();
+    if (!/^\d+(?:[.,]\d{1,3})?$/.test(bruto)) return null;
+    const partes = bruto.replace(',', '.').split('.');
+    const millis = Number(partes[0]) * 1000 + Number(((partes[1] || '') + '000').slice(0, 3));
+    return Number.isSafeInteger(millis) ? millis : null;
+  }
+
+  function formatarMilessimosUI(valor) {
+    const millis = Number.isSafeInteger(valor) ? valor : parsearMilessimosUI(valor);
+    if (!Number.isSafeInteger(millis) || millis < 0) return '—';
+    return `${Math.floor(millis / 1000)},${String(millis % 1000).padStart(3, '0')}`;
+  }
+
   function rotuloMesa(rodada) {
     if (rodada && rodada.mesa_numero != null && String(rodada.mesa_numero).trim() !== '') {
       return `Mesa ${String(rodada.mesa_numero).padStart(2, '0')}`;
@@ -304,9 +331,9 @@
           .sort(compararItensFifo);
       });
       
-      const retiradaConfirmada = rodada.retirada_estado === 'RETIRADA';
+      const retiradaConfirmada = rodada.retirada_confirmada_por_ledger === true;
       const retiradaDisponivel = rodada.estado_preparacao === 'PRONTA'
-        && rodada.retirada_estado === 'PENDENTE';
+        && !retiradaConfirmada;
       const estadoAcaoRetirada = retiradaDisponivel
         ? ['PRONTO', 'EM_PREPARACAO', 'AGUARDANDO']
           .find((estado) => itensPorEstado[estado].length)
@@ -330,6 +357,7 @@
             enviada_em: rodada.enviada_em,
             rodada_pronta_em: rodada.rodada_pronta_em,
             retirada_estado: rodada.retirada_estado,
+            retirada_confirmada_por_ledger: true,
             retirada_em: rodada.retirada_em,
             retirada_por: rodada.retirada_por,
             pode_confirmar_retirada: false,
@@ -356,6 +384,7 @@
             enviada_em: rodada.enviada_em,
             rodada_pronta_em: rodada.rodada_pronta_em,
             retirada_estado: rodada.retirada_estado,
+            retirada_confirmada_por_ledger: false,
             retirada_em: rodada.retirada_em,
             retirada_por: rodada.retirada_por,
             pode_confirmar_retirada: estado === estadoAcaoRetirada,
@@ -502,21 +531,25 @@
       </div>`;
   }
 
-  function htmlItem(item, operacoesEmCurso, card, instante) {
+  function htmlItem(item, operacoesEmCurso, retiradasEmCurso, card, instante) {
     const estado = String(item.estado_preparacao || '').toUpperCase();
     const operando = !!(operacoesEmCurso && operacoesEmCurso[item.id]);
     const tempos = calcularTemposItem(card, item, instante);
     let acao = '';
     let conclusao = '';
-    const somenteLeitura = card.retirada_estado === 'RETIRADA' || card.historico_cancelamento;
-    if (!somenteLeitura && estado === 'AGUARDANDO') {
+    const somenteLeitura = !!card.historico_cancelamento;
+    const pedidoCancelado = String(item.pedido_status || '').trim().toUpperCase() === 'CANCELADO';
+    const retiradaComprovada = card.retirada_confirmada_por_ledger === true;
+    const rodadaRetiradaLegada = card.retirada_estado === 'RETIRADA' && !retiradaComprovada;
+    const bloqueioPreparo = somenteLeitura || retiradaComprovada || pedidoCancelado;
+    if (!bloqueioPreparo && estado === 'AGUARDANDO') {
       acao = `<div class="kds-item__acoes">
         <button type="button" class="kds-btn-operacao" data-acao="iniciar-preparo" data-item-id="${escapar(item.id)}"
           ${operando ? 'disabled' : ''}>
           ${operando ? 'PROCESSANDO…' : 'INICIAR PREPARO'}
         </button>
       </div>`;
-    } else if (!somenteLeitura && estado === 'EM_PREPARACAO') {
+    } else if (!bloqueioPreparo && estado === 'EM_PREPARACAO') {
       acao = `<div class="kds-item__acoes">
         ${card.retirada_estado === 'PENDENTE' ? `<button type="button" class="kds-btn-operacao"
           data-acao="voltar-aguardando" data-item-id="${escapar(item.id)}" ${operando ? 'disabled' : ''}>
@@ -532,10 +565,15 @@
         ? ` · Operador #${escapar(item.operador_pronto_id)}`
         : '';
       conclusao = `<div class="kds-item__conclusao">
-        Concluído às ${escapar(formatarHora(item.pronto_em))} UTC${operador}
+        Concluído às ${escapar(formatarHora(item.pronto_em))}${operador}
       </div>`;
     }
-    if (!somenteLeitura && card.retirada_estado === 'PENDENTE'
+    const pendenteLedger = item.qty_pendente_retirada == null
+      ? 0
+      : Number(item.qty_pendente_retirada);
+    const podeCancelarItem = card.retirada_estado === 'PENDENTE'
+      && (!pedidoCancelado || (item.qty_pendente_retirada != null && pendenteLedger > 0));
+    if (!somenteLeitura && podeCancelarItem
       && ['AGUARDANDO', 'EM_PREPARACAO', 'PRONTO'].includes(estado)) {
       acao += `<div class="kds-item__acoes"><button type="button" class="kds-btn-operacao kds-btn-operacao--cancelar"
         data-acao="cancelar-item" data-item-id="${escapar(item.id)}" ${operando ? 'disabled' : ''}>
@@ -544,6 +582,9 @@
     }
     const obs = item.observacoes_snapshot != null && String(item.observacoes_snapshot).trim() !== ''
       ? `<div class="kds-item__obs">${escapar(item.observacoes_snapshot)}</div>`
+      : '';
+    const inicioPreparacao = item.iniciado_em
+      ? `<div class="kds-item__obs">Preparo iniciado às ${escapar(formatarHora(item.iniciado_em))}</div>`
       : '';
     const temposEtapa = `<div class="kds-item__tempos">
       ${tempos.periodos
@@ -557,6 +598,55 @@
     const quantidades = card.historico_cancelamento
       ? `<div class="kds-item__obs">Preparada: ${escapar(formatarQtd(item.qty_preparada || 0))} · Cancelada: ${escapar(formatarQtd(item.qty_cancelada || 0))}</div>`
       : '';
+    const tipoBebida = String(item.tipo_item || '').toUpperCase() === 'BEBIDA';
+    const quantidadeEmCurso = !!(retiradasEmCurso && retiradasEmCurso[item.id]);
+    const quantidadePendenteEntrega = parsearMilessimosUI(item.qty_pendente_entrega);
+    const quantidadeDisponivelRetirada = parsearMilessimosUI(tipoBebida
+      ? item.qty_disponivel_retirada
+      : item.qty_pendente_retirada);
+    const acaoEntregaBebida = !somenteLeitura
+      && !pedidoCancelado
+      && tipoBebida
+      && estado === 'PRONTO'
+      && item.qty_pendente_entrega != null
+      && Number.isSafeInteger(quantidadePendenteEntrega)
+      && quantidadePendenteEntrega > 0
+      ? `<div class="kds-item__acoes">
+          <div class="kds-item__quantidade">
+            <span>Entregar quantidade</span>
+            <output>${escapar(formatarMilessimosUI(quantidadePendenteEntrega))}</output>
+          </div>
+          <button type="button" class="kds-btn-operacao"
+            data-acao="entregar-bebida" data-item-id="${escapar(item.id)}"
+            ${operando || quantidadeEmCurso ? 'disabled' : ''}>
+            REGISTRAR ENTREGA
+          </button>
+        </div>`
+      : '';
+    const acaoRetiradaItem = !somenteLeitura
+      && !pedidoCancelado
+      && card.estado_preparacao === 'PRONTA'
+      && estado === 'PRONTO'
+      && item.qty_pendente_retirada != null
+      && Number.isSafeInteger(quantidadeDisponivelRetirada)
+      && quantidadeDisponivelRetirada > 0
+      ? `<div class="kds-item__acoes">
+          <div class="kds-item__quantidade">
+            <span>Retirar quantidade</span>
+            <output>${escapar(formatarMilessimosUI(quantidadeDisponivelRetirada))}</output>
+          </div>
+          <button type="button" class="kds-btn-operacao kds-btn-operacao--retirada"
+            data-acao="confirmar-retirada-item" data-item-id="${escapar(item.id)}"
+            ${operando || quantidadeEmCurso ? 'disabled' : ''}>
+            CONFIRMAR RETIRADA
+          </button>
+        </div>`
+      : '';
+    const statusLedger = item.qty_pendente_retirada == null
+      ? '<div class="kds-item__obs">Ledger individual indisponível; retirada bloqueada.</div>'
+      : tipoBebida
+        ? `<div class="kds-item__obs">Entregue: ${escapar(formatarQtd(item.qty_entregue || 0))} · Retirada líquida: ${escapar(formatarQtd(item.qty_retirada_liquida || 0))}</div>`
+        : `<div class="kds-item__obs">Retirada líquida: ${escapar(formatarQtd(item.qty_retirada_liquida || 0))} · Pendente: ${escapar(formatarQtd(item.qty_pendente_retirada))}</div>`;
     return `
       <div class="kds-item" data-item-id="${escapar(item.id)}">
         <div class="kds-item__linha">
@@ -565,12 +655,18 @@
           <span class="kds-item__tipo">${escapar(item.tipo_item || '')}</span>
         </div>
         ${(somenteLeitura && item.pedido_id != null) ? `<div class="kds-item__obs">Pedido #${escapar(item.pedido_id)}</div>` : ''}
-        ${card.retirada_estado === 'RETIRADA' && !card.historico_cancelamento
-          ? `<div class="kds-item__obs">Retirado na rodada às ${escapar(formatarHora(card.retirada_em))} UTC · Preparo: ${escapar(estado)}</div>` : ''}
+        ${pedidoCancelado ? '<div class="kds-card__cancelamento" role="alert">Pedido comercial cancelado. Não prossiga com preparo, entrega ou retirada. Confirme a situação física e registre cancelamento operacional apenas com evidência.</div>' : ''}
+        ${rodadaRetiradaLegada && !card.historico_cancelamento
+          ? `<div class="kds-item__obs">Estado legado da rodada marcado como retirada às ${escapar(formatarHora(card.retirada_em))}; isso não comprova retirada individual.</div>` : ''}
+        ${rodadaRetiradaLegada ? `<div class="kds-item__obs">Preparo: ${escapar(estado)}</div>` : ''}
+        ${inicioPreparacao}
         ${obs}
         ${quantidades}
+        ${statusLedger}
         ${temposEtapa}
         ${acao}
+        ${acaoEntregaBebida}
+        ${acaoRetiradaItem}
         ${conclusao}
       </div>`;
   }
@@ -584,26 +680,15 @@
       card.operador_envio_id != null ? `Responsável #${card.operador_envio_id}` : null
     ].filter(Boolean).map((t) => `<span class="kds-chip">${escapar(t)}</span>`).join('');
     const tempos = calcularTemposItem(card, (card.itens || [])[0] || {}, instante);
-    const retiradaEmCurso = !!(retiradasEmCurso && retiradasEmCurso[card.id]);
-    const retirada = card.retirada_estado === 'RETIRADA' && card.historico_cancelamento
-      ? `<div class="kds-card__retirada">Rodada retirada às ${escapar(formatarHora(card.retirada_em))} UTC; item cancelado não retirado.</div>`
-      : card.retirada_estado === 'RETIRADA'
+    const retirada = card.retirada_confirmada_por_ledger === true && card.historico_cancelamento
+      ? `<div class="kds-card__retirada">Rodada retirada às ${escapar(formatarHora(card.retirada_em))}; item cancelado não retirado.</div>`
+      : card.retirada_confirmada_por_ledger === true
       ? `<div class="kds-card__retirada">
-          Retirada confirmada${card.retirada_em ? ` às ${escapar(formatarHora(card.retirada_em))} UTC` : ''}
-          ${card.retirada_por != null ? ` · Responsável #${escapar(card.retirada_por)}` : ''}
+          Retirada integral confirmada no ledger${card.retirada_em ? ` às ${escapar(formatarHora(card.retirada_em))}` : ''}.
         </div>`
       : card.retirada_estado === 'ASSUMIDA_RETIRADA'
         ? '<div class="kds-card__retirada">Retirada assumida; confirmação indisponível.</div>'
         : '';
-    const acaoRetirada = card.pode_confirmar_retirada
-      ? `<div class="kds-card__acoes">
-          <button type="button" class="kds-btn-operacao kds-btn-operacao--retirada"
-            data-acao="confirmar-retirada" data-rodada-id="${escapar(card.id)}"
-            ${retiradaEmCurso ? 'disabled' : ''}>
-            ${retiradaEmCurso ? 'PROCESSANDO…' : 'CONFIRMAR RETIRADA'}
-          </button>
-        </div>`
-      : '';
     
     const acacaoCancelamento = (!card.historico_cancelamento && card.retirada_estado === 'PENDENTE' && card.estado_preparacao !== 'CANCELADA')
       ? `<div class="kds-card__acoes">
@@ -621,7 +706,7 @@
           Motivo: ${escapar(card.cancelamento_motivo || 'Não informado')}
           ${card.cancelamento_justificativa ? `<br>Justificativa: ${escapar(card.cancelamento_justificativa)}` : ''}
           <br>Operador: ${card.cancelamento_por != null ? `#${escapar(card.cancelamento_por)}` : 'Não informado'}
-          · ${escapar(formatarDataHoraUtc(new Date(parseServidor(card.cancelamento_em))))} UTC
+          · ${escapar(formatarDataHoraLocal(new Date(parseServidor(card.cancelamento_em))))}
           <br>Etapa: ${escapar(card.cancelamento_etapa || 'Não informada')}
           · Estado anterior: ${escapar(card.estado_anterior || 'Não informado')}
         </div>`
@@ -631,10 +716,12 @@
         <div class="kds-card__topo">
           <div class="kds-card__mesa">${escapar(rotuloMesa(card))}</div>
           <div class="kds-card__hora">
-            Chegada ${escapar(formatarHora(card.enviada_em))} UTC
+            Chegada ${escapar(formatarHora(card.enviada_em))}
           </div>
         </div>
         <div class="kds-card__meta">${chips}</div>
+        ${card.rodada_pronta_em
+          ? `<div class="kds-card__meta">Preparação concluída às ${escapar(formatarHora(card.rodada_pronta_em))}</div>` : ''}
         <div class="kds-card__tempos">
           ${htmlCronometro('Tempo total', tempos.chegadaEm, tempos.chegadaFim, tempos.chegadaAtiva, instante)}
           ${htmlCronometro(
@@ -645,10 +732,11 @@
             instante
           )}
         </div>
-        ${(card.itens || []).map((item) => htmlItem(item, operacoesEmCurso, card, instante)).join('')}
+        ${(card.itens || []).map((item) => htmlItem(
+          item, operacoesEmCurso, retiradasEmCurso, card, instante
+        )).join('')}
         ${retirada}
         ${cancelamento}
-        ${acaoRetirada}
         ${acacaoCancelamento}
       </article>`;
   }
@@ -671,7 +759,7 @@
     const disponivel = (valor) => valor == null || String(valor).trim() === '' ? 'Não disponível' : String(valor);
     const data = (valor) => {
       const ms = parseServidor(valor);
-      return Number.isFinite(ms) ? `${formatarDataHoraUtc(new Date(ms))} UTC` : 'Não disponível';
+      return Number.isFinite(ms) ? formatarDataHoraLocal(new Date(ms)) : 'Não disponível';
     };
     const duracao = (valor) => valor == null ? 'Não reconstruível' : formatarDuracao(valor);
     const registros = (estado.legado || []).map((rodada) => {
@@ -751,7 +839,7 @@
     const retiradasEmCurso = estado.retiradasEmCurso || {};
     const counts = contadores(dist);
     const ultima = estado.ultimaAtualizacao
-      ? formatarDataHoraUtc(estado.ultimaAtualizacao)
+      ? formatarDataHoraLocal(estado.ultimaAtualizacao)
       : '—';
     let statusClasse = 'kds-status--ok';
     let statusTexto = 'Atualizado';
@@ -803,7 +891,7 @@
             <div class="kds-cabecalho__meta">
               <strong>${escapar(empresa)}</strong>
               · ${escapar(unidade)}
-              · Última atualização: <strong data-kds-ultima>${escapar(ultima)} UTC</strong>
+              · Última atualização: <strong data-kds-ultima>${escapar(ultima)}</strong>
             </div>
           </div>
           <div class="kds-cabecalho__acoes">
@@ -817,6 +905,9 @@
             </button>
             <button type="button" class="kds-btn-secundario" data-acao="historico-cancelados">
               ${estado.mostrarCancelados ? 'Ocultar cancelados' : 'Histórico de cancelados'}
+            </button>
+            <button type="button" class="kds-btn-secundario" data-acao="pedidos-cancelados">
+              ${estado.mostrarPedidosCancelados ? 'Ocultar pedidos comerciais cancelados' : 'Pedidos comerciais cancelados'}
             </button>
             <button type="button" class="kds-btn-secundario" data-acao="historico-legado">
               ${estado.mostrarLegado ? 'Ocultar histórico legado' : 'Histórico legado'}
@@ -850,6 +941,7 @@
     let timer = null;
     let seq = 0;
     let atualizarDepois = false;
+    const chavesRetiradaPendentes = new Map();
     const estado = {
       ativo: false,
       carregando: false,
@@ -863,6 +955,7 @@
       rodadas: [],
       cancelados: [],
       mostrarCancelados: false,
+      mostrarPedidosCancelados: false,
       legado: [],
       mostrarLegado: false,
       erroLegado: '',
@@ -946,7 +1039,7 @@
         const indiceCancelados = cancelados.indice;
         const cursorRetirados = retirados.cursores[retirados.indice];
         const cursorCancelados = cancelados.cursores[indiceCancelados];
-        const data = await fetchJson('GET', `/cozinha/preparacao/painel?limite=${LIMITE_PAINEL}&offset=0&historicos=1&paginacao=cursor${cursorRetirados ? `&cursor_retirados=${encodeURIComponent(cursorRetirados)}` : ''}${cursorCancelados ? `&cursor_cancelados=${encodeURIComponent(cursorCancelados)}` : ''}`);
+        const data = await fetchJson('GET', `/cozinha/preparacao/painel?limite=${LIMITE_PAINEL}&offset=0&historicos=1&paginacao=cursor&incluir_pedidos_cancelados=${estado.mostrarPedidosCancelados ? '1' : '0'}${cursorRetirados ? `&cursor_retirados=${encodeURIComponent(cursorRetirados)}` : ''}${cursorCancelados ? `&cursor_cancelados=${encodeURIComponent(cursorCancelados)}` : ''}`);
         if (!estado.ativo || ticket !== seq) return { obsoleta: true };
         estado.rodadas = Array.isArray(data && data.rodadas) ? data.rodadas : [];
         if (data.historico_retirados && Array.isArray(data.historico_retirados.rodadas)) {
@@ -1050,6 +1143,12 @@
       }
       publicar();
       if (estado.mostrarCancelados) return atualizar({ forcar: true });
+    }
+
+    async function alternarPedidosCancelados() {
+      estado.mostrarPedidosCancelados = !estado.mostrarPedidosCancelados;
+      publicar();
+      return atualizar({ forcar: true });
     }
 
     async function alternarHistoricoLegado() {
@@ -1198,42 +1297,91 @@
       }
     }
 
-    async function confirmarRetirada(rodadaIdRaw) {
-      const rodadaId = Number(rodadaIdRaw);
-      if (!Number.isInteger(rodadaId) || rodadaId <= 0) return { ignorada: true };
-      if (estado.retiradasEmCurso[rodadaId]) return { ignorada: true, sobreposta: true };
-      const rodada = estado.rodadas.find((candidata) => Number(candidata.id) === rodadaId);
-      if (!rodada || rodada.estado_preparacao !== 'PRONTA' || rodada.retirada_estado !== 'PENDENTE') {
-        estado.feedback = 'A rodada mudou de estado. Atualize o painel antes de confirmar a retirada.';
+    async function registrarQuantidadeItem(itemIdRaw, tipo) {
+      const itemId = Number(itemIdRaw);
+      if (!Number.isInteger(itemId) || itemId <= 0) return { ignorada: true };
+      if (estado.retiradasEmCurso[itemId]) return { ignorada: true, sobreposta: true };
+      const encontrado = localizarItem(itemId);
+      const item = encontrado && encontrado.item;
+      const rodada = encontrado && encontrado.rodada;
+      if (!item || !rodada || item.estado_preparacao !== 'PRONTO'
+        || rodada.historico_cancelamento) {
+        estado.feedback = 'O item não está disponível para esta operação. Atualize o painel.';
         estado.feedbackTipo = 'erro';
         publicar();
         return { erro: true };
       }
-      estado.retiradasEmCurso[rodadaId] = true;
+
+      const bebida = String(item.tipo_item || '').toUpperCase() === 'BEBIDA';
+      const saldoExibido = tipo === 'entrega'
+        ? item.qty_pendente_entrega
+        : bebida ? item.qty_disponivel_retirada : item.qty_pendente_retirada;
+      const saldoMillis = parsearMilessimosUI(saldoExibido);
+      if (
+        (tipo === 'entrega' && (!bebida || item.estado_preparacao !== 'PRONTO'))
+        || (tipo === 'retirada' && (rodada.estado_preparacao !== 'PRONTA'
+          || item.qty_pendente_retirada == null))
+        || !Number.isSafeInteger(saldoMillis)
+        || saldoMillis <= 0
+      ) {
+        estado.feedback = 'O saldo calculado não está disponível. Atualize o painel antes de tentar novamente.';
+        estado.feedbackTipo = 'erro';
+        publicar();
+        return { erro: true };
+      }
+
+      estado.retiradasEmCurso[itemId] = true;
       estado.feedback = '';
       estado.feedbackTipo = '';
       publicar();
-      const chave = typeof deps.gerarChaveIdempotencia === 'function'
-        ? deps.gerarChaveIdempotencia('retirada', rodadaId)
-        : `kds:retirada:${rodadaId}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+      const operacao = tipo === 'entrega' ? 'entrega-bebida' : 'retirada-item';
+      const chavePendente = `${operacao}:${itemId}`;
+      let chaveRegistrada = null;
       try {
-        const data = await fetchJson(
-          'POST',
-          `/cozinha/rodadas/${rodadaId}/retirada`,
-          { idempotency_key: chave }
-        );
-        if (!data || data.success !== true || !data.rodada
-          || Number(data.rodada.id) !== rodadaId
-          || data.rodada.retirada_estado !== 'RETIRADA') {
-          throw Object.assign(new Error('O servidor não confirmou a retirada.'), {
-            codigo: 'RESPOSTA_RETIRADA_INVALIDA'
-          });
+        chaveRegistrada = chavesRetiradaPendentes.get(chavePendente);
+        if (!chaveRegistrada) {
+          const cryptoApi = typeof globalThis !== 'undefined' ? globalThis.crypto : null;
+          const chaveNova = typeof deps.gerarChaveIdempotencia === 'function'
+            ? deps.gerarChaveIdempotencia(operacao, itemId)
+            : cryptoApi && typeof cryptoApi.randomUUID === 'function'
+              ? cryptoApi.randomUUID()
+              : cryptoApi && typeof cryptoApi.getRandomValues === 'function'
+                ? Array.from(cryptoApi.getRandomValues(new Uint8Array(16)),
+                  (byte) => byte.toString(16).padStart(2, '0')).join('')
+                : `kds:${operacao}:${itemId}:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+          chaveRegistrada = chaveNova;
+          chavesRetiradaPendentes.set(chavePendente, chaveRegistrada);
         }
-        Object.assign(rodada, data.rodada);
-        reiniciarHistorico('retirados');
-        estado.distribuicao = distribuirPorEstado(estado.rodadas);
-        estado.feedback = data.repetida ? 'Retirada já estava confirmada.' : 'Retirada confirmada.';
+        const path = tipo === 'entrega'
+          ? `/cozinha/itens/${itemId}/bebida/entregar`
+          : `/cozinha/itens/${itemId}/retirada-ledger`;
+        const data = await fetchJson('POST', path, {
+          idempotency_key: chaveRegistrada
+        });
+        const quantidadeConfirmada = tipo === 'entrega'
+          ? parsearMilessimosUI(data && data.entrega && data.entrega.qty_entregue)
+          : Number(data && data.qty_millis);
+        const respostaValida = tipo === 'entrega'
+          ? data && data.success === true && data.entrega && data.item
+            && Number(data.item.id) === itemId && Number.isSafeInteger(quantidadeConfirmada)
+            && quantidadeConfirmada > 0
+          : data && data.success === true
+            && Number(data.cozinha_item_id) === itemId
+            && Number.isSafeInteger(quantidadeConfirmada) && quantidadeConfirmada > 0;
+        if (!respostaValida) {
+          throw Object.assign(new Error(
+            tipo === 'entrega'
+              ? 'O servidor não confirmou a entrega da bebida.'
+              : 'O servidor não confirmou a retirada individual.'
+          ), { codigo: 'RESPOSTA_LEDGER_ITEM_INVALIDA' });
+        }
+        estado.feedback = data.repetida
+          ? 'Operação já estava registrada.'
+          : tipo === 'entrega' ? 'Entrega da bebida registrada.' : 'Retirada individual registrada.';
         estado.feedbackTipo = 'sucesso';
+        if (chavesRetiradaPendentes.get(chavePendente) === chaveRegistrada) {
+          chavesRetiradaPendentes.delete(chavePendente);
+        }
         publicar();
         await atualizar({ silencioso: true, forcar: true });
         return { ok: true, data };
@@ -1243,9 +1391,17 @@
         publicar();
         return { erro: err };
       } finally {
-        delete estado.retiradasEmCurso[rodadaId];
+        delete estado.retiradasEmCurso[itemId];
         publicar();
       }
+    }
+
+    function confirmarRetiradaItem(itemId) {
+      return registrarQuantidadeItem(itemId, 'retirada');
+    }
+
+    function entregarBebida(itemId) {
+      return registrarQuantidadeItem(itemId, 'entrega');
     }
 
     async function cancelarOperacao(tipo, idRaw) {
@@ -1396,6 +1552,7 @@
         const data = await fetchJson('POST', '/cozinha/sessao/unidade', {
           unidade_cozinha_id: id
         });
+        if (!estado.ativo) return { ignorada: true };
         if (!data || !data.token) {
           throw Object.assign(new Error('Falha na emissão do novo token.'), {
             codigo: 'TOKEN_AUSENTE'
@@ -1410,6 +1567,7 @@
           );
         }
         await deps.aoAtualizarSessao(data);
+        if (!estado.ativo) return { ignorada: true };
         estado.modo = 'painel';
         estado.unidadeId = unidadeToken;
         estado.selecaoConfirmando = false;
@@ -1490,10 +1648,12 @@
       parar,
       atualizar,
       operarItem,
-      confirmarRetirada,
+      confirmarRetiradaItem,
+      entregarBebida,
       cancelarRodada,
       cancelarItem,
       alternarHistoricoCancelados,
+      alternarPedidosCancelados,
       alternarHistoricoLegado,
       mudarPaginaHistorico,
       carregarUnidadesDisponiveis,
@@ -1513,12 +1673,41 @@
       ? contexto.headersJson()
       : (contexto && contexto.headersAuth ? contexto.headersAuth() : { 'Content-Type': 'application/json' });
     const base = typeof global.API_URL === 'string' ? global.API_URL : '/api';
-    const resp = await global.fetch(base + path, {
-      method,
-      headers,
+    const opcoes = {
+      method, headers,
       body: corpo && method !== 'GET' ? JSON.stringify(corpo) : undefined
-    });
-    const data = await resp.json().catch(() => ({}));
+    };
+    const tv = global.document && global.document.getElementById('cds-rede-status');
+    let timer = null;
+    let controller = null;
+    const consulta = async () => {
+      const resp = await global.fetch(base + path, opcoes);
+      const data = await resp.json().catch(() => ({}));
+      return { resp, data };
+    };
+    let resultado;
+    try {
+      if (tv && method === 'GET') {
+        if (typeof global.AbortController === 'function') {
+          controller = new global.AbortController();
+          opcoes.signal = controller.signal;
+        }
+        resultado = await Promise.race([
+          consulta(),
+          new Promise((resolve, reject) => {
+            timer = global.setTimeout(() => {
+              reject(new Error('Tempo esgotado ao consultar a cozinha. A atualização será tentada novamente.'));
+              if (controller) controller.abort();
+            }, 10000);
+          })
+        ]);
+      } else {
+        resultado = await consulta();
+      }
+    } finally {
+      if (timer != null) global.clearTimeout(timer);
+    }
+    const { resp, data } = resultado;
     if (!resp.ok) {
       const err = new Error((data && (data.mensagem || data.error)) || 'Falha na operação.');
       err.codigo = (data && (data.codigo || data.code)) || null;
@@ -1802,15 +1991,15 @@
     });
 
     const originalIniciar = control.iniciar;
-    control.iniciar = async function iniciarNaTela(host) {
+    control.iniciar = async function iniciarNaTela(host, opts) {
       if (contexto && contexto.temEmpresaSelecionada && !contexto.temEmpresaSelecionada()) {
         if (host) {
           host.innerHTML = `<div class="alert alert-warning">${escapar(contexto.mensagemEmpresaObrigatoria())}</div>`;
         }
         return control.estado;
       }
-      await originalIniciar();
-      desenhar(global, control, host);
+      await originalIniciar(opts);
+      if (control.estado.ativo) desenhar(global, control, host);
       return control.estado;
     };
     return control;
@@ -1853,6 +2042,8 @@
     }
     const historico = raiz.querySelector('[data-acao="historico-cancelados"]');
     if (historico) historico.addEventListener('click', () => control.alternarHistoricoCancelados());
+    const pedidosCancelados = raiz.querySelector('[data-acao="pedidos-cancelados"]');
+    if (pedidosCancelados) pedidosCancelados.addEventListener('click', () => control.alternarPedidosCancelados());
     const legado = raiz.querySelector('[data-acao="historico-legado"]');
     if (legado) legado.addEventListener('click', () => control.alternarHistoricoLegado());
     ['retirados', 'cancelados', 'legado'].forEach((tipo) => {
@@ -1872,9 +2063,14 @@
           control.operarItem(botaoAcao.getAttribute('data-item-id'), acao);
         });
       });
-    raiz.querySelectorAll('[data-acao="confirmar-retirada"]').forEach((botaoAcao) => {
+    raiz.querySelectorAll('[data-acao="confirmar-retirada-item"]').forEach((botaoAcao) => {
       botaoAcao.addEventListener('click', () => {
-        control.confirmarRetirada(botaoAcao.getAttribute('data-rodada-id'));
+        control.confirmarRetiradaItem(botaoAcao.getAttribute('data-item-id'));
+      });
+    });
+    raiz.querySelectorAll('[data-acao="entregar-bebida"]').forEach((botaoAcao) => {
+      botaoAcao.addEventListener('click', () => {
+        control.entregarBebida(botaoAcao.getAttribute('data-item-id'));
       });
     });
     raiz.querySelectorAll('[data-acao="cancelar-rodada"]').forEach((botaoAcao) => {
@@ -1894,13 +2090,14 @@
     ROTULOS_COLUNA,
     escapar,
     formatarHora,
-    formatarDataHoraUtc,
+    formatarDataHoraLocal,
     segundosEntre,
     formatarDuracao,
     calcularTemposItem,
     htmlCronometro,
     atualizarCronometros,
     formatarQtd,
+    parsearMilessimosUI,
     rotuloMesa,
     compararFifo,
     distribuirPorEstado,

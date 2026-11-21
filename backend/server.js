@@ -24,6 +24,7 @@ const bodyParser = require('body-parser');
 const http = require('http');
 const { isCorsOriginAllowed } = require('./config/secrets');
 const { verificarToken } = require('./middleware/auth');
+const validarTerminalMobile = require('./middleware/validarTerminalMobile');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -116,6 +117,10 @@ const frontendRoot = path.join(__dirname, '../frontend');
 // Login e módulos ERP/PDV (páginas HTML)
 app.get('/login', (req, res) => {
     res.sendFile(path.join(frontendRoot, 'shared/login.html'));
+});
+
+app.get(['/cozinha', '/cozinha/'], (req, res) => {
+    res.sendFile(path.join(frontendRoot, 'cozinha-tv/index.html'));
 });
 
 app.get(['/mobile', '/mobile/'], (req, res) => {
@@ -236,8 +241,8 @@ app.use('/api/atendimentos', verificarToken, require('./rotas/atendimentos'));
 app.use('/api/pdv-universal', verificarToken, require('./rotas/pdv-universal'));
 app.use('/api/estoque', verificarToken, require('./rotas/estoque'));
 // Sprint 1 — rotas de entrega montadas antes das rotas genéricas de vendas
-app.use('/api/vendas', verificarToken, entregasRoutes);
-app.use('/api/vendas', verificarToken, vendasRoutes);
+app.use('/api/vendas', verificarToken, validarTerminalMobile, entregasRoutes);
+app.use('/api/vendas', verificarToken, validarTerminalMobile, vendasRoutes);
 app.use('/api/faturamento', verificarToken, exigirRecurso('faturamento'), faturamentoRoutes);
 app.use('/api/central-faturamento', verificarToken, exigirRecurso('nfe'), centralFaturamentoRoutes);
 app.use('/api/pedidos', verificarToken, exigirRecurso('pedidos'), pedidosRoutes);
@@ -270,7 +275,7 @@ app.use('/api/fiscal', verificarToken, exigirRecurso('fiscal'), fiscalRoutes);
 app.use('/api/nfe', verificarToken, exigirRecurso('nfe'), nfeRoutes);
 app.use('/api/fornecedores', verificarToken, fornecedoresRoutes);
 app.use('/api/impressao', verificarToken, impressaoRoutes);
-app.use('/api/caixa', verificarToken, caixaRoutes);
+app.use('/api/caixa', verificarToken, validarTerminalMobile, caixaRoutes);
 app.use('/api/caixas', verificarToken, exigirRecurso('multiCaixa'), caixasRoutes);
 app.get('/api/terminais/auto', terminaisRoutes.registrarTerminalAuto);
 app.get('/api/terminais/auto/offline', terminaisRoutes.registrarTerminalOffline);
@@ -487,6 +492,79 @@ db.whenReady(async (readyErr) => {
         console.log(`Servidor rodando na porta ${PORT}`);
         console.log(`Acesse: http://localhost:${PORT}/login`);
         console.log('Configuração avançada:', configService.getRecursos());
+
+        if (process.env.CDS_TEST_ISOLATION !== '1') {
+            const { criarServidorKds, interfacesIpv4, validarNomeDnsLocal } = require('./cozinha-rede-local');
+            const portaKds = Number(process.env.CDS_KDS_LAN_PORT || 3002);
+            let nomeDnsKds = null;
+            let erroDnsKds = null;
+            try {
+                nomeDnsKds = validarNomeDnsLocal(process.env.CDS_KDS_LAN_HOST);
+            } catch (err) {
+                erroDnsKds = err;
+            }
+            if (erroDnsKds) {
+                console.error('[KDS REDE] Acesso de rede não iniciado:', erroDnsKds.message);
+            } else if (!Number.isInteger(portaKds) || portaKds < 1 || portaKds > 65535) {
+                console.error('[KDS REDE] Porta inválida; acesso de rede não iniciado.');
+            } else {
+                let discovery = null;
+                const servidorKds = criarServidorKds(app, interfacesIpv4, nomeDnsKds,
+                    () => discovery && discovery.hostname());
+                servidorKds.on('error', (err) => {
+                    console.error('[KDS REDE] Falha ao iniciar acesso de rede:', err.message);
+                });
+                servidorKds.listen(portaKds, '0.0.0.0', () => {
+                    console.log(`[KDS REDE] Local: http://127.0.0.1:${portaKds}/cozinha`);
+                    if (nomeDnsKds) console.log(`[KDS REDE] DNS local configurado: http://${nomeDnsKds}:${portaKds}/cozinha`);
+                    for (const rede of interfacesIpv4()) {
+                        console.log(`[KDS REDE] ${rede.nome}: http://${rede.endereco}:${portaKds}/cozinha`);
+                    }
+                    try {
+                        const { criarDiscoveryKds } = require('./services/cdsNetworkDiscovery');
+                        const { isCozinhaOperacional } = require('./utils/cozinhaSchema');
+                        const licencaService = require('./services/licencaService');
+                        discovery = criarDiscoveryKds({
+                            servidor: servidorKds,
+                            diretorio: path.join(db.dbDir, 'config'),
+                            obterInterfaces: interfacesIpv4,
+                            autorizado: () => new Promise((resolve, reject) => {
+                                if (!configService.recursoHabilitado('pedidos') || !isCozinhaOperacional()) {
+                                    resolve(false);
+                                    return;
+                                }
+                                db.get('SELECT codigo_licenca, data_expiracao, ultima_execucao FROM licenca ORDER BY id ASC LIMIT 1', [], (err, licenca) => {
+                                    if (err) return reject(err);
+                                    resolve(!!licenca && !!licenca.codigo_licenca
+                                        && !licencaService.verificarDataAlterada(licenca.ultima_execucao)
+                                        && licencaService.diasRestantes(licenca.data_expiracao) > 0);
+                                });
+                            })
+                        });
+                        void discovery.iniciar().catch(() => {});
+                    } catch (err) {
+                        console.error('[CDS DISCOVERY] Não iniciado:', err.message);
+                    }
+                });
+                const pararDiscovery = () => {
+                    if (discovery) return discovery.parar();
+                    return Promise.resolve();
+                };
+                servidorKds.on('close', () => { void pararDiscovery().catch(() => {}); });
+                server.on('close', () => servidorKds.close());
+                process.on('SIGTERM', () => { void pararDiscovery().catch(() => {}); });
+                process.on('SIGINT', () => { void pararDiscovery().catch(() => {}); });
+                if (process.versions.electron) {
+                    const electronApp = require('electron').app;
+                    if (electronApp) electronApp.once('before-quit', (event) => {
+                        if (!discovery) return;
+                        event.preventDefault();
+                        const limite = new Promise((resolve) => setTimeout(resolve, 2000));
+                        void Promise.race([pararDiscovery(), limite]).catch(() => {}).then(() => electronApp.quit());
+                    });
+                }
+            }
+        }
 
         // Desacoplado do boot: não impede o listen nem a aceitação de conexões
         setImmediate(() => {

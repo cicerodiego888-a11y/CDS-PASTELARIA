@@ -32,6 +32,8 @@ Quatro etapas, em botões próprios, fora do modal `modal-xl`:
 3. Carrinho — quantidade, preço unitário editável no item comum, desconto percentual, subtotal, remoção. O preço do item personalizado permanece somente leitura.
 4. Conferência — empresa, cliente, itens, desconto do pedido, observação geral e total. O botão grava.
 
+Após incluir um produto, a pesquisa e os resultados anteriores são limpos e o foco retorna ao campo. Se a inclusão falhar, a pesquisa permanece.
+
 Depois da resposta, a tela mostra o código devolvido, a empresa e o cliente, e avisa que o registro é um pedido, não uma venda. “Novo pedido” limpa o carrinho. Não há chamada a `/pdv`.
 
 O carrinho fica na memória da página. Trocar de etapa não apaga os itens. Fechar o navegador perde o rascunho.

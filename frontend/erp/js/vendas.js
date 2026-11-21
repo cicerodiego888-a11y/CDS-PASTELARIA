@@ -97,6 +97,8 @@ function renderVendas(vendas) {
                                 <th>ID</th>
                                 <th>Código</th>
                                 <th>Data</th>
+                                <th>Origem</th>
+                                <th>Vendedor</th>
                                 <th>Cliente</th>
                                 <th>Total</th>
                                 <th>Forma</th>
@@ -110,13 +112,15 @@ function renderVendas(vendas) {
                                     <td>${v.id || '-'}</td>
                                     <td>${escapeHtml(v.codigo || '-')}${v.nfe_numero ? ` <span class="badge bg-info" title="NF-e vinculada">NF-e</span>` : ''}${v.nfce_numero ? ` <span class="badge bg-success" title="NFC-e">NFC-e</span>` : ''}</td>
                                     <td>${formatDate(v.data_venda || v.created_at)}</td>
+                                    <td>${htmlOrigemOperacaoVenda(v)}</td>
+                                    <td>${escapeHtml(rotuloVendedorHistoricoVenda(v))}</td>
                                     <td>${escapeHtml(v.cliente_nome || 'Não informado')}</td>
                                     <td>${formatCurrency(v.total)}</td>
                                     <td>${rotuloPagamentoDaVenda(v)}</td>
                                     <td>${rotuloStatusVenda(statusExibidoHistoricoVenda(v))}</td>
                                     <td class="historico-venda-acoes-col">${montarHtmlAcoesHistoricoVenda(v)}</td>
                                 </tr>
-                            `).join('') || '<tr><td colspan="8" class="text-center">Nenhuma venda encontrada.</td></tr>'}
+                            `).join('') || '<tr><td colspan="10" class="text-center">Nenhuma venda encontrada.</td></tr>'}
                         </tbody>
                     </table>
                 </div>
@@ -198,6 +202,29 @@ function showVendaModal(venda) {
                             <div class="col-sm-4"><strong>Cliente:</strong> ${escapeHtml(venda.cliente_nome || 'Não informado')}</div>
                         </div>
                         <div class="row mb-3">
+                            <div class="col-sm-4"><strong>Origem:</strong> ${htmlOrigemOperacaoVenda(venda)}</div>
+                            <div class="col-sm-4">
+                                <strong>Vendedor:</strong> ${escapeHtml(rotuloVendedorHistoricoVenda(venda))}
+                                ${venda.operador_id != null && String(venda.operador_nome_snapshot || venda.operador_nome_exibicao || '').trim()
+                                    ? `<small class="text-muted d-block">Usuário ID #${escapeHtml(String(venda.operador_id))}</small>`
+                                    : ''}
+                            </div>
+                            <div class="col-sm-4"><strong>Terminal:</strong> ${escapeHtml(rotuloTerminalHistoricoVenda(venda))}</div>
+                        </div>
+                        <div class="row mb-3">
+                            <div class="col-sm-6"><strong>Classificação persistida:</strong> ${escapeHtml(venda.origem_operacao || 'Não identificada')}</div>
+                            <div class="col-sm-6"><strong>Origem legada:</strong> ${escapeHtml(venda.origem || 'Não informada')}</div>
+                        </div>
+                        <div class="row mb-3">
+                            <div class="col-sm-4"><strong>Caixa:</strong> ${escapeHtml(rotuloCaixaHistoricoVenda(venda))}</div>
+                            <div class="col-sm-4"><strong>Sessão do caixa:</strong> ${escapeHtml(venda.caixa_sessao_id != null ? `#${venda.caixa_sessao_id}` : 'Não vinculada')}</div>
+                            <div class="col-sm-4"><strong>Data e horário da operação:</strong> ${escapeHtml(
+                                typeof formatDateTime === 'function'
+                                    ? formatDateTime(venda.created_at || venda.data_venda)
+                                    : formatDate(venda.created_at || venda.data_venda)
+                            )}</div>
+                        </div>
+                        <div class="row mb-3">
                             <div class="col-sm-4"><strong>Total:</strong> ${formatCurrency(totalExibido)}</div>
                             <div class="col-sm-4"><strong>Desconto:</strong> ${formatCurrency(venda.desconto)}</div>
                             <div class="col-sm-4"><strong>Pagamento:</strong> ${rotuloPagamentoDaVenda(venda)}</div>
@@ -269,6 +296,40 @@ function showVendaModal(venda) {
     $('#modal-container').html(modalHtml);
     const vendaModal = new bootstrap.Modal(document.getElementById('vendaModal'));
     vendaModal.show();
+}
+
+function htmlOrigemOperacaoVenda(venda) {
+    const origemOperacao = String(venda?.origem_operacao || '').trim().toUpperCase();
+    if (origemOperacao === 'PDV_DESKTOP') {
+        return '<span class="badge bg-primary">DESKTOP</span>';
+    }
+    if (origemOperacao === 'PDV_MOBILE') {
+        return '<span class="badge bg-info text-dark">MOBILE</span>';
+    }
+    return '<span class="badge bg-light text-muted border">Não identificado</span>';
+}
+
+function rotuloVendedorHistoricoVenda(venda) {
+    const operadorId = Number(venda?.operador_id);
+    const snapshot = String(venda?.operador_nome_snapshot || '').trim();
+    const nome = snapshot || String(venda?.operador_nome_exibicao || '').trim();
+    if (nome) return nome;
+    if (Number.isInteger(operadorId) && operadorId > 0) {
+        return `ID #${operadorId}`;
+    }
+    return 'Não identificado';
+}
+
+function rotuloTerminalHistoricoVenda(venda) {
+    const terminalId = Number(venda?.terminal_id);
+    if (!Number.isInteger(terminalId) || terminalId <= 0) return 'Não vinculado';
+    const tipo = String(venda?.terminal_tipo_snapshot || '').trim().toUpperCase();
+    const rotuloTipo = tipo === 'MOBILE' ? 'Mobile' : tipo === 'DESKTOP' ? 'Desktop' : '';
+    return `Terminal${rotuloTipo ? ` ${rotuloTipo}` : ''} #${terminalId}`;
+}
+
+function rotuloCaixaHistoricoVenda(venda) {
+    return venda?.caixa_id != null ? `Turno #${venda.caixa_id}` : 'Não vinculado';
 }
 
 function rotuloPagamentoDaVenda(venda) {

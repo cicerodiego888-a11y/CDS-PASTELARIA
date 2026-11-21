@@ -134,6 +134,9 @@ describe('pagamento e acompanhamento', () => {
     ctx.PagamentoSequencial.registrarComposicao({ sucesso: true });
     const primeiro = await ctx.MobilePdv.fechar({
       fetch: async (url) => {
+        if (String(url).endsWith('/configuracoes/modo_dashboard_fiscal')) {
+          return { ok: true, json: async () => ({ valor: '0' }) };
+        }
         if (String(url).endsWith('/pre-calcular-distribuicao')) {
           return { ok: true, json: async () => ({ sucesso: true, valor_fiscal: 0, valor_nao_fiscal: 20 }) };
         }

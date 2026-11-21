@@ -56,6 +56,15 @@ function all(db, sql, params = []) {
   });
 }
 
+async function tabelaExiste(db, nome) {
+  const row = await get(
+    db,
+    "SELECT 1 AS existe FROM sqlite_master WHERE type='table' AND name=?",
+    [nome]
+  );
+  return !!row;
+}
+
 function exigirEmpresa(empresaId) {
   const n = Number(empresaId);
   if (!Number.isInteger(n) || n <= 0) {
@@ -131,6 +140,21 @@ function parseOffset(raw) {
 }
 
 function mapearItem(row, historico = {}) {
+  const retiradaLiquidaMillis = row.qty_retirada_liquida_millis == null
+    ? null
+    : Number(row.qty_retirada_liquida_millis);
+  const cancelamentoLiquidoMillis = row.qty_cancelamento_liquido_millis == null
+    ? null
+    : Number(row.qty_cancelamento_liquido_millis);
+  const entregueMillis = row.qty_entregue_millis == null
+    ? null
+    : Number(row.qty_entregue_millis);
+  const exigivelMillis = cancelamentoLiquidoMillis == null
+    ? null
+    : Math.max(0, Number(row.qty_solicitada_millis || 0) - cancelamentoLiquidoMillis);
+  const pendenteRetiradaMillis = exigivelMillis == null || retiradaLiquidaMillis == null
+    ? null
+    : Math.max(0, exigivelMillis - retiradaLiquidaMillis);
   return {
     id: row.item_id,
     empresa_id: row.empresa_id,
@@ -139,6 +163,7 @@ function mapearItem(row, historico = {}) {
     comanda_id: row.comanda_id,
     numero_comanda: row.numero_comanda != null ? Number(row.numero_comanda) : null,
     pedido_id: row.pedido_id,
+    pedido_status: row.pedido_status || null,
     pedido_item_id: row.pedido_item_id,
     tipo_item: row.tipo_item,
     estado_preparacao: row.item_estado,
@@ -146,6 +171,21 @@ function mapearItem(row, historico = {}) {
     qty_solicitada: milessimosParaDecimalString(row.qty_solicitada_millis),
     qty_preparada: milessimosParaDecimalString(row.qty_preparada_millis || 0),
     qty_cancelada: milessimosParaDecimalString(row.qty_cancelada_millis || 0),
+    qty_retirada_liquida: retiradaLiquidaMillis == null
+      ? null
+      : milessimosParaDecimalString(retiradaLiquidaMillis),
+    qty_pendente_retirada: pendenteRetiradaMillis == null
+      ? null
+      : milessimosParaDecimalString(pendenteRetiradaMillis),
+    qty_entregue: entregueMillis == null
+      ? null
+      : milessimosParaDecimalString(entregueMillis),
+    qty_pendente_entrega: entregueMillis == null || exigivelMillis == null
+      ? null
+      : milessimosParaDecimalString(Math.max(0, exigivelMillis - entregueMillis)),
+    qty_disponivel_retirada: entregueMillis == null || retiradaLiquidaMillis == null
+      ? null
+      : milessimosParaDecimalString(Math.max(0, entregueMillis - retiradaLiquidaMillis)),
     produto_id: row.produto_id,
     produto_nome_snapshot: row.produto_nome_snapshot,
     observacoes_snapshot: row.observacoes_snapshot != null ? row.observacoes_snapshot : null,
@@ -184,6 +224,7 @@ function mapearRodadaBase(row, rodadaProntaEm = null) {
       || (row.rodada_estado === 'CANCELADA' && row.cancelamento_etapa === 'PRONTA')
       ? rodadaProntaEm : null,
     retirada_estado: row.retirada_estado,
+    retirada_confirmada_por_ledger: Number(row.retirada_completa_ledger) === 1,
     retirada_em: row.retirada_em || null,
     retirada_por: row.retirada_por != null ? Number(row.retirada_por) : null,
     cancelamento_motivo: row.cancelamento_motivo || null,
@@ -370,7 +411,77 @@ function lerCursor(raw, empresaId, unidadeId, historico) {
   }
 }
 
-async function selecionarHistoricoCursor(db, empresaId, unidadeId, historico, limite, rawCursor) {
+function sqlRetiradaCompletaLedger({ retirada, cancelamento, bebida }) {
+  if (!retirada || !cancelamento) return '0';
+  const escopo = 'i.rodada_id = r.id AND i.empresa_id = r.empresa_id AND i.unidade_id = r.unidade_id';
+  const cancelamentos = `
+    COALESCE((
+      SELECT SUM(CASE
+        WHEN c.tipo_evento = 'CANCELAMENTO_CONFIRMADO' THEN c.qty_millis
+        WHEN c.tipo_evento = 'CANCELAMENTO_ESTORNADO' THEN -c.qty_millis
+        ELSE 0
+      END)
+      FROM cozinha_cancelamento_itens c
+      WHERE c.empresa_id = i.empresa_id AND c.cozinha_item_id = i.id
+        AND c.unidade_id = i.unidade_id
+        AND c.pedido_id = i.pedido_id AND c.pedido_item_id = i.pedido_item_id
+        AND c.rodada_id = i.rodada_id
+    ), 0)
+  `;
+  const exigivel = `(i.qty_solicitada_millis - ${cancelamentos})`;
+  const retiradas = `
+    COALESCE((
+      SELECT SUM(CASE
+        WHEN e.tipo_evento IN ('RETIRADA_CONFIRMADA', 'AJUSTE_CREDITO') THEN e.qty_millis
+        WHEN e.tipo_evento IN ('RETIRADA_ESTORNADA', 'AJUSTE_DEBITO') THEN -e.qty_millis
+        ELSE 0
+      END)
+      FROM cozinha_retirada_itens e
+      WHERE e.empresa_id = i.empresa_id AND e.cozinha_item_id = i.id
+        AND e.unidade_id = i.unidade_id
+        AND e.pedido_id = i.pedido_id AND e.pedido_item_id = i.pedido_item_id
+        AND e.rodada_id = i.rodada_id
+    ), 0)
+  `;
+  const entregas = bebida
+    ? `COALESCE((
+        SELECT SUM(b.qty_entregue_millis)
+        FROM cozinha_bebida_entregas b
+        WHERE b.empresa_id = i.empresa_id AND b.cozinha_item_id = i.id
+          AND b.rodada_id = i.rodada_id
+      ), 0)`
+    : 'NULL';
+  return `r.estado_preparacao = 'PRONTA'
+    AND EXISTS (
+      SELECT 1 FROM cozinha_itens i WHERE ${escopo} AND ${exigivel} > 0
+    )
+    AND NOT EXISTS (
+      SELECT 1 FROM cozinha_itens i
+      WHERE ${escopo}
+        AND (
+          NOT EXISTS (
+            SELECT 1
+            FROM pedidos_itens pi
+            JOIN pedidos p ON p.id = pi.pedido_id AND p.empresa_id = pi.empresa_id
+            WHERE pi.id = i.pedido_item_id AND pi.pedido_id = i.pedido_id
+              AND pi.empresa_id = i.empresa_id
+          )
+          OR ${exigivel} < 0
+          OR ${retiradas} <> ${exigivel}
+          OR (UPPER(i.tipo_item) = 'BEBIDA' AND (${entregas} IS NULL OR ${entregas} <> ${exigivel}))
+        )
+    )`;
+}
+
+async function selecionarHistoricoCursor(
+  db,
+  empresaId,
+  unidadeId,
+  historico,
+  limite,
+  rawCursor,
+  retiradaCompletaSql
+) {
   let cursor = lerCursor(rawCursor, empresaId, unidadeId, historico);
   if (!cursor) {
     const max = await get(db, 'SELECT COALESCE(MAX(id), 0) AS id FROM cozinha_eventos_outbox WHERE empresa_id=? AND unidade_id=?', [empresaId, unidadeId]);
@@ -387,10 +498,12 @@ async function selecionarHistoricoCursor(db, empresaId, unidadeId, historico, li
       FROM cozinha_eventos_outbox e
       WHERE e.empresa_id=? AND e.unidade_id=? AND e.id<=?
         AND e.tipo IN (${tipos.map(() => '?').join(',')}) AND json_valid(e.payload_json)
+        ${historico === 'retirados' ? "AND json_extract(e.payload_json, '$.origem') = 'LEDGER_ITENS'" : ''}
     ), classificados AS (
       SELECT e.*, ROW_NUMBER() OVER (PARTITION BY e.rodada_id ORDER BY e.instante DESC, e.id DESC) AS pos
       FROM eventos e JOIN cozinha_rodadas r
         ON r.id=e.rodada_id AND r.empresa_id=? AND r.unidade_id=?
+      ${historico === 'retirados' ? `WHERE (${retiradaCompletaSql})` : ''}
     ), historico AS (SELECT * FROM classificados WHERE pos=1)
   `;
   const params = [empresaId, unidadeId, cursor.snapshot, ...tipos, empresaId, unidadeId];
@@ -402,11 +515,12 @@ async function selecionarHistoricoCursor(db, empresaId, unidadeId, historico, li
       END AS INTEGER) AS rodada_id
       FROM cozinha_eventos_outbox
       WHERE empresa_id=? AND unidade_id=? AND tipo IN (${tipos.map(() => '?').join(',')})
+        ${historico === 'retirados' ? "AND json_extract(payload_json, '$.origem') = 'LEDGER_ITENS'" : ''}
     )
     SELECT COUNT(*) AS total FROM cozinha_rodadas r
     LEFT JOIN rodadas_evento e ON e.rodada_id=r.id
     WHERE r.empresa_id=? AND r.unidade_id=?
-      AND ${historico === 'retirados' ? "r.retirada_estado='RETIRADA'" : `EXISTS (
+      AND ${historico === 'retirados' ? `(${retiradaCompletaSql})` : `EXISTS (
         SELECT 1 FROM cozinha_itens i WHERE i.rodada_id=r.id AND i.empresa_id=r.empresa_id
           AND i.unidade_id=r.unidade_id AND i.estado_preparacao='CANCELADO'
       )`}
@@ -567,6 +681,14 @@ async function listarPainelPreparacao(entrada = {}, opts = {}) {
     entrada.unidadeId != null ? entrada.unidadeId : entrada.unidade_id
   );
   await exigirUnidadeDaEmpresa(db, empresaId, unidadeId);
+  const retiradaLedgerDisponivel = await tabelaExiste(db, 'cozinha_retirada_itens');
+  const cancelamentoLedgerDisponivel = await tabelaExiste(db, 'cozinha_cancelamento_itens');
+  const entregaBebidaDisponivel = await tabelaExiste(db, 'cozinha_bebida_entregas');
+  const retiradaCompletaSql = sqlRetiradaCompletaLedger({
+    retirada: retiradaLedgerDisponivel,
+    cancelamento: cancelamentoLedgerDisponivel,
+    bebida: entregaBebidaDisponivel
+  });
 
   const estadosItem = parseListaEstados(
     entrada.estado_item != null ? entrada.estado_item : entrada.estadoItem,
@@ -584,6 +706,10 @@ async function listarPainelPreparacao(entrada = {}, opts = {}) {
     || entrada.incluirCancelados === true
     || entrada.incluir_cancelados === '1'
     || entrada.incluir_cancelados === 'true';
+  const incluirPedidosCancelados = entrada.incluir_pedidos_cancelados === true
+    || entrada.incluirPedidosCancelados === true
+    || entrada.incluir_pedidos_cancelados === '1'
+    || entrada.incluir_pedidos_cancelados === 'true';
   const historico = entrada.historico || null;
   if (historico && !['retirados', 'cancelados'].includes(historico)) {
     throw erro('Histórico inválido.', 400, 'HISTORICO_INVALIDO');
@@ -593,7 +719,15 @@ async function listarPainelPreparacao(entrada = {}, opts = {}) {
   }
   const paginacaoCursor = entrada.paginacao === 'cursor' && historico;
   const selecaoCursor = paginacaoCursor
-    ? await selecionarHistoricoCursor(db, empresaId, unidadeId, historico, limite, entrada.cursor)
+    ? await selecionarHistoricoCursor(
+      db,
+      empresaId,
+      unidadeId,
+      historico,
+      limite,
+      entrada.cursor,
+      retiradaCompletaSql
+    )
     : null;
 
   const params = [empresaId, unidadeId];
@@ -603,10 +737,13 @@ async function listarPainelPreparacao(entrada = {}, opts = {}) {
       AND i.empresa_id = r.empresa_id
       AND i.unidade_id = r.unidade_id
   `;
+  if (!historico && !incluirPedidosCancelados) {
+    where += ` AND (p.id IS NULL OR UPPER(COALESCE(p.status, '')) <> 'CANCELADO')`;
+  }
 
-  if (historico === 'retirados') where += ` AND r.retirada_estado = 'RETIRADA'`;
+  if (historico === 'retirados') where += ` AND (${retiradaCompletaSql})`;
   if (historico === 'cancelados') where += ` AND i.estado_preparacao = 'CANCELADO'`;
-  if (entrada.fila === 'ativa') where += ` AND r.retirada_estado <> 'RETIRADA'`;
+  if (entrada.fila === 'ativa') where += ` AND NOT (${retiradaCompletaSql})`;
 
   if (estadosRodada && estadosRodada.length) {
     where += ` AND r.estado_preparacao IN (${estadosRodada.map(() => '?').join(',')})`;
@@ -626,6 +763,7 @@ async function listarPainelPreparacao(entrada = {}, opts = {}) {
     SELECT COUNT(DISTINCT r.id) AS total
     FROM cozinha_rodadas r
     INNER JOIN cozinha_itens i ON i.rodada_id = r.id AND i.empresa_id = r.empresa_id
+    LEFT JOIN pedidos p ON p.id = i.pedido_id AND p.empresa_id = i.empresa_id
     ${where}
   `, params);
   const total = selecaoCursor ? selecaoCursor.total : Number(countRow && countRow.total) || 0;
@@ -634,6 +772,7 @@ async function listarPainelPreparacao(entrada = {}, opts = {}) {
     SELECT r.id AS rodada_id, r.sequencia_global, r.enviada_em, r.created_at
     FROM cozinha_rodadas r
     INNER JOIN cozinha_itens i ON i.rodada_id = r.id AND i.empresa_id = r.empresa_id
+    LEFT JOIN pedidos p ON p.id = i.pedido_id AND p.empresa_id = i.empresa_id
     ${where}
     GROUP BY r.id
     ORDER BY ${historico ? (historico === 'retirados' ? 'r.retirada_em DESC' : 'MAX(i.cancelado_em) DESC') : 'r.sequencia_global ASC, r.enviada_em ASC'}, r.id ${historico ? 'DESC' : 'ASC'}
@@ -659,6 +798,29 @@ async function listarPainelPreparacao(entrada = {}, opts = {}) {
 
   const ids = rodadaIdsRows.map((r) => Number(r.rodada_id));
   const itemParams = [empresaId, unidadeId, ...ids];
+  const retiradaLiquidaSelect = retiradaLedgerDisponivel
+    ? `(SELECT
+         COALESCE(SUM(CASE WHEN tipo_evento IN ('RETIRADA_CONFIRMADA','AJUSTE_CREDITO')
+           THEN qty_millis ELSE 0 END), 0)
+         - COALESCE(SUM(CASE WHEN tipo_evento IN ('RETIRADA_ESTORNADA','AJUSTE_DEBITO')
+           THEN qty_millis ELSE 0 END), 0)
+       FROM cozinha_retirada_itens
+       WHERE empresa_id = i.empresa_id AND cozinha_item_id = i.id)`
+    : 'NULL';
+  const cancelamentoLiquidoSelect = cancelamentoLedgerDisponivel
+    ? `(SELECT
+         COALESCE(SUM(CASE WHEN tipo_evento = 'CANCELAMENTO_CONFIRMADO'
+           THEN qty_millis ELSE 0 END), 0)
+         - COALESCE(SUM(CASE WHEN tipo_evento = 'CANCELAMENTO_ESTORNADO'
+           THEN qty_millis ELSE 0 END), 0)
+       FROM cozinha_cancelamento_itens
+       WHERE empresa_id = i.empresa_id AND cozinha_item_id = i.id)`
+    : 'NULL';
+  const entregaBebidaSelect = entregaBebidaDisponivel
+    ? `(SELECT COALESCE(SUM(qty_entregue_millis), 0)
+       FROM cozinha_bebida_entregas
+       WHERE empresa_id = i.empresa_id AND cozinha_item_id = i.id AND rodada_id = i.rodada_id)`
+    : 'NULL';
   let itemWhere = `
     WHERE r.empresa_id = ?
       AND r.unidade_id = ?
@@ -666,6 +828,9 @@ async function listarPainelPreparacao(entrada = {}, opts = {}) {
       AND i.empresa_id = r.empresa_id
       AND i.unidade_id = r.unidade_id
   `;
+  if (!historico && !incluirPedidosCancelados) {
+    itemWhere += ` AND (p.id IS NULL OR UPPER(COALESCE(p.status, '')) <> 'CANCELADO')`;
+  }
   if (estadosItem && estadosItem.length) {
     itemWhere += ` AND i.estado_preparacao IN (${estadosItem.map(() => '?').join(',')})`;
     itemParams.push(...estadosItem);
@@ -688,6 +853,7 @@ async function listarPainelPreparacao(entrada = {}, opts = {}) {
       r.operador_envio_id,
       r.enviada_em,
       r.retirada_estado,
+      (${retiradaCompletaSql}) AS retirada_completa_ledger,
       r.retirada_em,
       r.retirada_por,
       r.cancelamento_motivo,
@@ -702,6 +868,7 @@ async function listarPainelPreparacao(entrada = {}, opts = {}) {
       c.numero_comanda,
       i.id AS item_id,
       i.pedido_id,
+      p.status AS pedido_status,
       i.pedido_item_id,
       i.tipo_item,
       i.estado_preparacao AS item_estado,
@@ -712,6 +879,9 @@ async function listarPainelPreparacao(entrada = {}, opts = {}) {
       i.qty_solicitada_millis,
       i.qty_preparada_millis,
       i.qty_cancelada_millis,
+      ${retiradaLiquidaSelect} AS qty_retirada_liquida_millis,
+      ${cancelamentoLiquidoSelect} AS qty_cancelamento_liquido_millis,
+      ${entregaBebidaSelect} AS qty_entregue_millis,
       i.produto_id,
       i.produto_nome_snapshot,
       i.observacoes_snapshot,
@@ -720,6 +890,8 @@ async function listarPainelPreparacao(entrada = {}, opts = {}) {
     FROM cozinha_rodadas r
     INNER JOIN cozinha_itens i
       ON i.rodada_id = r.id AND i.empresa_id = r.empresa_id
+    LEFT JOIN pedidos p
+      ON p.id = i.pedido_id AND p.empresa_id = i.empresa_id
     INNER JOIN cozinha_comandas c
       ON c.id = i.comanda_id AND c.empresa_id = i.empresa_id
     LEFT JOIN mesas m

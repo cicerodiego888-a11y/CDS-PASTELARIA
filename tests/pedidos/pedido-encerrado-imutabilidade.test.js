@@ -47,6 +47,7 @@ async function criarSchema(db) {
     codigo TEXT,
     data_pedido TEXT,
     cliente_id INTEGER,
+    cliente_nome TEXT,
     total REAL DEFAULT 0,
     desconto REAL DEFAULT 0,
     frete REAL DEFAULT 0,
@@ -264,6 +265,40 @@ describe('Imutabilidade de pedidos encerrados', () => {
       );
       const pedido = await PedidoRepository.obterPorId(6, { db });
       assert.equal(pedido.itens.length, 0);
+
+      await run(db, `CREATE TABLE cozinha_itens (
+        id INTEGER PRIMARY KEY,
+        empresa_id INTEGER NOT NULL,
+        pedido_id INTEGER NOT NULL
+      )`);
+      await criarPedido(db, { id: 7, status: 'PEDIDO', item: false });
+      await run(
+        db,
+        'INSERT INTO cozinha_itens (id, empresa_id, pedido_id) VALUES (1, 1, 7)'
+      );
+      await assert.rejects(
+        PedidoRepository.substituirPedido({
+          pedidoId: 7,
+          clienteId: null,
+          total: 10,
+          desconto: 0,
+          frete: 0,
+          itens: [{ produto_id: 1, quantidade: 1, preco_unitario: 10, subtotal: 10 }],
+          empresaId: 1,
+          db
+        }),
+        (err) => err.codigo === 'PEDIDO_IMUTAVEL'
+          && /enviado à cozinha/.test(err.message)
+      );
+      const estadoDespachado = await PedidoRepository.obterEstadoEdicao({
+        id: 7,
+        status: 'PEDIDO',
+        empresa_id: 1,
+        venda_id: null
+      }, { db });
+      assert.equal(estadoDespachado.cozinha_despachada, true);
+      assert.equal(estadoDespachado.edicao_bloqueada, true);
+      assert.equal(estadoDespachado.somente_consulta, true);
     } finally {
       await closeDb(db);
     }

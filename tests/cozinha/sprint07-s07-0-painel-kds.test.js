@@ -34,11 +34,13 @@ const {
 } = require('../../backend/utils/cozinhaSchema');
 const CozinhaDespacho = require('../../backend/services/cozinha/CozinhaDespachoService');
 const CozinhaPreparacao = require('../../backend/services/cozinha/CozinhaPreparacaoService');
+const CozinhaRetiradaLedger = require('../../backend/services/cozinha/CozinhaRetiradaLedgerService');
 const CozinhaKdsPainel = require('../../backend/services/cozinha/CozinhaKdsPainelService');
 const cozinhaRoutes = require('../../backend/rotas/cozinha');
 const { verificarToken } = require('../../backend/middleware/auth');
 const { exigirRecurso } = require('../../backend/middleware/validarRecursoImplantacao');
 const configService = require('../../backend/services/configuracaoService');
+const { executarMigracaoSprint2 } = require('../../backend/migrations/sprint2-cozinha-ledgers');
 
 function run(db, sql, params = []) {
   return new Promise((resolve, reject) => {
@@ -68,7 +70,36 @@ function close(db) {
   return new Promise((resolve) => db.close(() => resolve()));
 }
 
+async function retirarItemLedger(db, base, itemId, idempotencyKey) {
+  const item = await get(db, `
+    SELECT qty_solicitada_millis FROM cozinha_itens WHERE id=?
+  `, [itemId]);
+  return CozinhaRetiradaLedger.retirarItem({
+    ...base,
+    itemId,
+    qty_millis: Number(item.qty_solicitada_millis),
+    idempotencyKey
+  }, { db });
+}
+
 async function schemaErp(db) {
+  await run(db, `
+    CREATE TABLE IF NOT EXISTS empresas (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      nome TEXT
+    )
+  `);
+  await run(db, `
+    CREATE TABLE IF NOT EXISTS usuarios (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT,
+      password_hash TEXT,
+      role TEXT,
+      perfil TEXT,
+      ativo INTEGER NOT NULL DEFAULT 1,
+      nome TEXT
+    )
+  `);
   await run(db, `
     CREATE TABLE IF NOT EXISTS configuracoes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -135,6 +166,7 @@ async function schemaErp(db) {
     CREATE TABLE IF NOT EXISTS pedidos_itens (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       pedido_id INTEGER NOT NULL,
+      empresa_id INTEGER NOT NULL,
       produto_id INTEGER NOT NULL,
       quantidade REAL NOT NULL,
       preco_unitario DECIMAL(10,2) DEFAULT 0,
@@ -143,6 +175,14 @@ async function schemaErp(db) {
       produto_nome_snapshot TEXT,
       observacao TEXT
     )
+  `);
+  await run(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_pedidos_id_empresa
+    ON pedidos(id, empresa_id)
+  `);
+  await run(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_pedidos_itens_id_pedido_empresa
+    ON pedidos_itens(id, pedido_id, empresa_id)
   `);
   await run(db, `
     CREATE TABLE IF NOT EXISTS pedido_item_ingredientes (
@@ -161,6 +201,7 @@ async function schemaErp(db) {
   `);
   const info = await garantirSchemaCozinha(db);
   assert.equal(info.operacional, true);
+  await executarMigracaoSprint2(db, { isolamentoExplicito: true });
   marcarCozinhaOperacional(true);
   assert.equal(isCozinhaOperacional(), true);
 }
@@ -201,10 +242,10 @@ async function despacharPastel(db, infra, { observacao = null, chave, numeroComa
   `, [`P-${chave}`, infra.empresaId, infra.mesaId, infra.atendimentoId]);
   const item = await run(db, `
     INSERT INTO pedidos_itens (
-      pedido_id, produto_id, quantidade, preco_unitario, subtotal,
+      pedido_id, empresa_id, produto_id, quantidade, preco_unitario, subtotal,
       classificacao_operacional_snapshot, produto_nome_snapshot, observacao
-    ) VALUES (?, ?, 2, 15.50, 31.00, 'PASTEL', 'Pastel Carne', ?)
-  `, [ped.lastID, infra.prodPastelId, observacao]);
+    ) VALUES (?, ?, ?, 2, 15.50, 31.00, 'PASTEL', 'Pastel Carne', ?)
+  `, [ped.lastID, infra.empresaId, infra.prodPastelId, observacao]);
   const nCmd = numeroComanda != null
     ? Number(numeroComanda)
     : (Math.abs(String(chave).split('').reduce((a, c) => a + c.charCodeAt(0), 0)) % 9000) + 1;
@@ -327,8 +368,7 @@ describe('Sprint 07 S07-0 — painel KDS (serviço)', () => {
         const itemId = d.despacho.itens[0].id;
         await CozinhaPreparacao.iniciarPreparacao({ ...base, itemId, idempotencyKey: `${chave}-ini` }, { db });
         await CozinhaPreparacao.marcarItemPronto({ ...base, itemId, idempotencyKey: `${chave}-pronto` }, { db });
-        await CozinhaPreparacao.confirmarRetirada({ ...base, rodadaId: d.despacho.rodada.id,
-          idempotencyKey: `${chave}-retirada` }, { db });
+        await retirarItemLedger(db, base, itemId, `${chave}-retirada`);
         return d.despacho.rodada.id;
       }
       const retirada1 = await retirar('snapshot-r1');
@@ -444,9 +484,8 @@ describe('Sprint 07 S07-0 — painel KDS (serviço)', () => {
       const itemRetirado = retirada.despacho.itens[0].id;
       await CozinhaPreparacao.iniciarPreparacao({ ...base, itemId: itemRetirado, idempotencyKey: 'leg-ret-inicio' }, { db });
       await CozinhaPreparacao.marcarItemPronto({ ...base, itemId: itemRetirado, idempotencyKey: 'leg-ret-pronto' }, { db });
-      await CozinhaPreparacao.confirmarRetirada({ ...base, rodadaId: retirada.despacho.rodada.id,
-        idempotencyKey: 'leg-retirada' }, { db });
-      await run(db, "DELETE FROM cozinha_eventos_outbox WHERE idempotency_key='leg-retirada:EVENTO'");
+      await retirarItemLedger(db, base, itemRetirado, 'leg-retirada');
+      await run(db, "DELETE FROM cozinha_eventos_outbox WHERE idempotency_key='leg-retirada:RETIRADA_CONFIRMADA'");
       await run(db, `UPDATE cozinha_rodadas SET enviada_em='2026-01-01T20:00:00Z',
         retirada_em='2026-01-01T20:14:00Z' WHERE id=?`, [retirada.despacho.rodada.id]);
       await run(db, `UPDATE cozinha_eventos_outbox SET payload_json=json_set(payload_json, '$.iniciado_em', ?)
@@ -634,7 +673,7 @@ describe('Sprint 07 S07-0 — painel KDS (serviço)', () => {
       await CozinhaPreparacao.cancelarItem({ ...base, itemId: itemCancelado, motivo: 'FALTA_PRODUTO', idempotencyKey: 'misto-cancelar' }, { db });
       await CozinhaPreparacao.iniciarPreparacao({ ...base, itemId: copia.lastID, idempotencyKey: 'misto-iniciar' }, { db });
       await CozinhaPreparacao.marcarItemPronto({ ...base, itemId: copia.lastID, idempotencyKey: 'misto-pronto' }, { db });
-      await CozinhaPreparacao.confirmarRetirada({ ...base, rodadaId: d.despacho.rodada.id, idempotencyKey: 'misto-retirar' }, { db });
+      await retirarItemLedger(db, base, copia.lastID, 'misto-retirar');
       const retirados = await CozinhaKdsPainel.listarPainelPreparacao({ ...base, historico: 'retirados', paginacao: 'cursor' }, { db });
       const cancelados = await CozinhaKdsPainel.listarPainelPreparacao({ ...base, historico: 'cancelados', paginacao: 'cursor' }, { db });
       assert.deepEqual(retirados.rodadas[0].itens.map((i) => i.id), [copia.lastID]);
@@ -997,10 +1036,10 @@ describe('Sprint 07 S07-0 — painel KDS (HTTP)', () => {
     pedidoHttpId = ped.lastID;
     const pit = await run(dbHttp, `
       INSERT INTO pedidos_itens (
-        pedido_id, produto_id, quantidade, preco_unitario, subtotal,
+        pedido_id, empresa_id, produto_id, quantidade, preco_unitario, subtotal,
         classificacao_operacional_snapshot, produto_nome_snapshot
-      ) VALUES (?, ?, 1, 9.99, 9.99, 'PASTEL', 'Pastel HTTP')
-    `, [ped.lastID, prod.lastID]);
+      ) VALUES (?, ?, ?, 1, 9.99, 9.99, 'PASTEL', 'Pastel HTTP')
+    `, [ped.lastID, empresaId, prod.lastID]);
     const cmd = await run(dbHttp, `
       INSERT INTO cozinha_comandas (
         empresa_id, atendimento_id, numero_comanda, pedido_id, operador_lancamento_id
@@ -1127,6 +1166,32 @@ describe('Sprint 07 S07-0 — painel KDS (HTTP)', () => {
     });
     assert.equal(pronto.status, 200);
 
+    const pendente = await requestJson('POST', rota, {
+      token: tokenOk,
+      body: { idempotency_key: 'http-retirada-sem-ledger' }
+    });
+    assert.equal(pendente.status, 409);
+    assert.equal(pendente.body.codigo, 'RETIRADA_INDIVIDUAL_PENDENTE');
+    const itemRetirada = await get(dbHttp, `
+      SELECT qty_solicitada_millis FROM cozinha_itens WHERE id=?
+    `, [itemCozinhaHttpId]);
+    const retiradaIndividual = await requestJson('POST',
+      `/api/cozinha/itens/${itemCozinhaHttpId}/retirada-ledger`, {
+        token: tokenOk,
+        body: {
+          idempotency_key: 'http-retirada-ledger',
+          qty_millis: 1
+        }
+      });
+    assert.equal(retiradaIndividual.status, 201);
+    assert.equal(retiradaIndividual.body.success, true);
+    assert.equal(
+      retiradaIndividual.body.qty_millis,
+      Number(itemRetirada.qty_solicitada_millis),
+      'A rota deve ignorar a quantidade enviada pelo cliente e calcular o saldo no servidor.'
+    );
+    assert.equal(retiradaIndividual.body.rodada_retirada, true);
+
     const filaAntes = await get(dbHttp, 'SELECT COUNT(*) AS n FROM cozinha_impressao_fila');
     const [a, b] = await Promise.all([
       requestJson('POST', rota, {
@@ -1142,7 +1207,7 @@ describe('Sprint 07 S07-0 — painel KDS (HTTP)', () => {
     assert.equal(b.status, 200);
     assert.equal(a.body.success, true);
     assert.equal(b.body.success, true);
-    assert.equal([a.body, b.body].filter((r) => !r.repetida).length, 1);
+    assert.equal([a.body, b.body].filter((r) => !r.repetida).length, 0);
     const repetida = await requestJson('POST', rota, {
       token: tokenOk,
       body: { idempotency_key: 'http-retirada-concorrente-a' }

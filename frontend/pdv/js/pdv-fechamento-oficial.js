@@ -162,8 +162,17 @@
         mensagem: 'O fechamento saiu do pagamento sequencial oficial. A venda não foi enviada.'
       };
     }
-    const confirmacao = fluxo.listaSequencialJaConfirmada(parcelas);
-    if (!confirmacao.dispensaModalExtra) {
+    const confirmacao = fluxo.listaSequencialJaConfirmada(parcelas, {
+      tefHabilitado: entrada.tefHabilitado !== false
+    });
+    if (confirmacao.requerConfirmacaoManual && entrada.confirmacaoManual !== true) {
+      return {
+        ok: false,
+        codigo: 'CONFIRMACAO_MANUAL_NECESSARIA',
+        mensagem: 'Confirme o recebimento eletrônico antes de finalizar.'
+      };
+    }
+    if (!confirmacao.dispensaModalExtra && !confirmacao.requerConfirmacaoManual) {
       const textos = {
         PARCELA_ELETRONICA_SEM_AUTORIZACAO: 'Há parcela eletrônica sem autorização. A venda não foi finalizada.',
         PARCELA_NAO_CONFIRMADA: 'Há parcela pendente, recusada ou com falha. A venda não foi finalizada.',
@@ -187,7 +196,11 @@
         };
       }
     }
-    const pagamentos = fluxo.montarParcelasListaSequencial(parcelas);
+    const pagamentos = fluxo.montarParcelasListaSequencial(parcelas, {
+      carimbarConfirmacaoManual: confirmacao.requerConfirmacaoManual && entrada.confirmacaoManual === true
+    });
+    const valorFiscal = Number(entrada.valorFiscal || 0);
+    const emitirFiscal = entrada.modoFiscalAtivo === true && valorFiscal > 0;
     const corpo = {
       chave_fechamento_pdv: novaChave(entrada.chave),
       cliente_id: entrada.clienteId || null,
@@ -196,11 +209,11 @@
       acrescimo: 0,
       total,
       pagamento_sequencial: true,
-      emitir_fiscal: false,
-      cpf_cnpj_nota: null,
+      emitir_fiscal: emitirFiscal,
+      cpf_cnpj_nota: emitirFiscal ? (entrada.cpfCnpjNota || null) : null,
       pagamentos,
       itens: itensParaApi(entrada.itens),
-      valor_fiscal: Number(entrada.valorFiscal || 0),
+      valor_fiscal: valorFiscal,
       valor_nao_fiscal: Number(entrada.valorNaoFiscal || 0),
       confirmacao_fiscal_manual: pagamentos.some((pagamento) => pagamento.confirmacao_manual === 1)
     };

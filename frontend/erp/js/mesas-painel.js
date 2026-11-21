@@ -281,7 +281,7 @@
       return { ok: true, total: estado.pedidos.length };
     }
 
-    function publicarLancamento(data, mesa) {
+    function publicarLancamento(data, mesa, cliente) {
       if (typeof deps.aoIrParaPedidos !== 'function' || !mesa) return;
       const atendimento = data && data.atendimento ? data.atendimento : null;
       deps.aoIrParaPedidos({
@@ -289,7 +289,8 @@
         numero: mesa.numero,
         atendimentoId: atendimento && atendimento.id,
         empresaId: estado.empresaId,
-        abertoEm: atendimento && atendimento.aberto_em
+        abertoEm: atendimento && atendimento.aberto_em,
+        ...(cliente ? { cliente } : {})
       });
     }
 
@@ -297,7 +298,7 @@
       const mesa = mesaAtual();
       if (!mesa || mesa.situacao !== 'LIVRE' || mesa.ativo === false) return { ok: false };
       if (operacao) return { ok: false, ignorada: true };
-      if (estado.clienteNome.trim() && !estado.clienteId) {
+      if (estado.clienteNome.trim() && !estado.clienteId && !deps.permitirClienteNomeLivre) {
         estado.aviso = 'Selecione um cliente cadastrado na lista ou limpe o campo antes de abrir o atendimento.';
         if (deps.aoMudar && estado.ativo) deps.aoMudar();
         return { ok: false, codigo: 'CLIENTE_NAO_SELECIONADO' };
@@ -305,9 +306,12 @@
       operacao = true;
       const corpo = {};
       if (String(estado.clienteId || '').trim() !== '') corpo.cliente_id = Number(estado.clienteId);
+      const cliente = deps.permitirClienteNomeLivre && estado.clienteNome.trim()
+        ? { id: estado.clienteId ? Number(estado.clienteId) : null, nome: estado.clienteNome.trim() }
+        : null;
       try {
         const resultado = await executar('POST', `/mesas/${mesa.id}/atendimento`, corpo, mesa.id);
-        if (resultado.ok) publicarLancamento(resultado.data, mesa);
+        if (resultado.ok) publicarLancamento(resultado.data, mesa, cliente);
         return resultado;
       } finally {
         operacao = false;
@@ -473,7 +477,10 @@
       estado.clientesSugestoes = [];
       estado.clienteBuscaStatus = estado.clienteNome.trim().length >= 2
         ? 'Pesquisando clientes...'
-        : (estado.clienteNome.trim() ? 'Digite ao menos 2 caracteres para pesquisar.' : 'Pesquise e selecione um cliente cadastrado para vinculá-lo à mesa.');
+        : (estado.clienteNome.trim() ? 'Digite ao menos 2 caracteres para pesquisar.'
+          : (deps.permitirClienteNomeLivre
+            ? 'Opcional. Escolha um cliente cadastrado ou informe um nome para o pedido.'
+            : 'Pesquise e selecione um cliente cadastrado para vinculá-lo à mesa.'));
     }
 
     function selecionarCliente(id, nome) {
@@ -489,7 +496,9 @@
 
     function definirSugestoesClientes(clientes) {
       estado.clientesSugestoes = Array.isArray(clientes) ? clientes : [];
-      estado.clienteBuscaStatus = estado.clientesSugestoes.length ? '' : 'Nenhum cliente encontrado.';
+      estado.clienteBuscaStatus = estado.clientesSugestoes.length ? '' : (deps.permitirClienteNomeLivre
+        ? 'Nenhum cliente encontrado. O nome informado pode identificar o pedido.'
+        : 'Nenhum cliente encontrado.');
       if (deps.aoMudar && estado.ativo) deps.aoMudar();
     }
 

@@ -340,6 +340,7 @@
     "test:produto-embalagens": "node tests/produtos/produto-embalagens.test.js"
   },
   "dependencies": {
+    "@homebridge/ciao": "1.1.8",
     "acorn": "^8.17.0",
     "archiver": "^5.3.2",
     "axios": "^1.15.0",

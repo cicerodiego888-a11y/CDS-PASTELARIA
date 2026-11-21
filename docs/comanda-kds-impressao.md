@@ -19,6 +19,9 @@ Fechar a janela ou escolher **Não** não registra tentativa de impressão.
 O documento tem largura útil de 76 mm e margens de 2 mm para bobina de 80 mm.
 A janela exibe o mesmo HTML usado para impressão. Configure também papel de
 80 mm no driver da impressora: o adaptador usa as configurações do dispositivo.
+O horário de envio exibido na prévia e na impressão converte o timestamp UTC
+para `America/Fortaleza` no formato `DD/MM/YYYY HH:mm:ss`; o snapshot original
+não é alterado.
 
 Novos snapshots guardam a classificação da cozinha e os ingredientes já
 registrados no item da rodada. O documento agrupa primeiro `BEBIDA`, depois

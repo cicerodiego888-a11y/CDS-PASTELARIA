@@ -17,9 +17,11 @@ const {
 } = require('./cozinhaQuantidade');
 const {
   TIPOS_OPERACAO,
-  calcularHashOperacao
+  calcularHashOperacao,
+  calcularPayloadHash
 } = require('./cozinhaIdempotenciaHash');
 const { exigirUnidadeOperacional } = require('./cozinhaUnidadeOperacional');
+const CozinhaRetiradaLedgerService = require('./CozinhaRetiradaLedgerService');
 
 const EVENTOS = Object.freeze({
   PREPARACAO_INICIADA: 'PREPARACAO_INICIADA',
@@ -72,6 +74,35 @@ async function timestampUtc(db) {
     throw erro('Não foi possível obter o horário UTC do banco.', 500, 'HORARIO_UTC_INDISPONIVEL');
   }
   return row.agora;
+}
+
+function normalizarQuantidadeEntrega(entrada = {}) {
+  let qtyMillis;
+  try {
+    if (entrada.qty_millis != null) {
+      const bruto = entrada.qty_millis;
+      const millis = typeof bruto === 'number' ? bruto
+        : typeof bruto === 'string' && /^\d+$/.test(bruto.trim()) ? Number(bruto.trim()) : NaN;
+      if (!Number.isSafeInteger(millis)) {
+        throw erro('Milésimos devem ser um inteiro seguro.', 400, 'QTY_PRECISAO_INVALIDA');
+      }
+      qtyMillis = millis;
+    } else {
+      qtyMillis = decimalParaMilessimos(
+        entrada.qty_entregue != null ? entrada.qty_entregue : entrada.quantidade
+      );
+    }
+  } catch (e) {
+    if (e && e.codigo === 'QTY_PRECISAO_INVALIDA') throw e;
+    throw erro('Quantidade inválida.', 400, 'QTY_INVALIDA');
+  }
+  if (qtyMillis <= 0) {
+    throw erro('Quantidade deve ser maior que zero.', 400, 'QTY_INVALIDA');
+  }
+  return {
+    qtyMillis,
+    qtyDecimal: milessimosParaDecimalString(qtyMillis)
+  };
 }
 
 async function beginImmediate(db) {
@@ -319,7 +350,8 @@ function exigirRodadaNaoCancelada(rodada) {
  */
 async function validarIntegridadeOperacional(db, item, rodada, {
   empresaId,
-  unidadeIdAutorizada
+  unidadeIdAutorizada,
+  permitirPedidoCancelado = false
 }) {
   if (Number(item.rodada_id) !== Number(rodada.id)) {
     throw erro('Item não pertence à rodada informada.', 409, 'ITEM_RODADA_INCOMPATIVEL');
@@ -369,13 +401,16 @@ async function validarIntegridadeOperacional(db, item, rodada, {
     );
   }
   const pedido = await get(db, `
-    SELECT id FROM pedidos WHERE id = ? AND empresa_id = ?
+    SELECT id, status FROM pedidos WHERE id = ? AND empresa_id = ?
   `, [item.pedido_id, empresaId]);
   if (!pedido) {
     throw erro('Pedido do item não pertence à empresa autorizada.', 403, 'PEDIDO_ITEM_ISOLAMENTO');
   }
+  if (!permitirPedidoCancelado && String(pedido.status || '').trim().toUpperCase() === 'CANCELADO') {
+    throw erro('Pedido comercial cancelado não permite operações de cozinha.', 409, 'PEDIDO_CANCELADO');
+  }
 
-  return { comanda, unidadeId };
+  return { comanda, pedido, unidadeId };
 }
 
 async function carregarItensRodada(db, rodadaId, empresaId) {
@@ -429,31 +464,18 @@ async function qtyBebidaEntregue(db, cozinhaItemId, empresaId) {
   return Number(row && row.total) || 0;
 }
 
-/**
- * Bloqueadores da rodada:
- * - Com PASTEL: só pastéis precisam estar PRONTO.
- * - Sem PASTEL: OUTROs precisam estar PRONTO.
- * - BEBIDA nunca bloqueia.
- */
 function avaliarConclusaoRodada(itens) {
-  const lista = itens || [];
-  const pastels = lista.filter((i) => i.tipo_item === 'PASTEL' && i.estado_preparacao !== 'CANCELADO');
-  const outros = lista.filter((i) => i.tipo_item === 'OUTRO' && i.estado_preparacao !== 'CANCELADO');
-
-  if (pastels.length > 0) {
-    const pendentes = pastels.filter((i) => i.estado_preparacao !== 'PRONTO');
-    return {
-      pronta: pendentes.length === 0,
-      regra: 'PASTEIS_OBRIGATORIOS',
-      pendentes: pendentes.map((i) => i.id)
-    };
-  }
-
-  const pendentesOutro = outros.filter((i) => i.estado_preparacao !== 'PRONTO');
+  const exigiveis = (itens || []).filter(
+    (item) => String(item.estado_preparacao || '').toUpperCase() !== 'CANCELADO'
+  );
+  const pendentes = exigiveis.filter(
+    (item) => String(item.estado_preparacao || '').toUpperCase() !== 'PRONTO'
+  );
   return {
-    pronta: pendentesOutro.length === 0,
-    regra: 'OUTROS_SEM_PASTEL',
-    pendentes: pendentesOutro.map((i) => i.id)
+    pronta: exigiveis.length > 0 && pendentes.length === 0,
+    regra: 'TODOS_ITENS_EXIGIVEIS',
+    pendentes: pendentes.map((item) => item.id),
+    sem_itens_exigiveis: exigiveis.length === 0
   };
 }
 
@@ -949,21 +971,6 @@ async function confirmarRetirada(entrada = {}, opts = {}) {
       }
       await validarUnidadeAtivaDaEmpresa(db, empresaId, unidadeIdAutorizada);
 
-      const claim = await claimIdempotenciaCentral(db, {
-        idempotencyKey,
-        tipoOperacao: TIPOS_OPERACAO.RETIRADA_CONFIRMADA,
-        hash,
-        contexto: JSON.stringify({
-          empresa_id: empresaId,
-          unidade_id: unidadeIdAutorizada,
-          rodada_id: rodadaId
-        })
-      });
-      if (claim.replay) {
-        await commit(db);
-        return { ...claim.corpo, repetida: true };
-      }
-
       if (rodada.estado_preparacao === 'CANCELADA') {
         throw erro('Rodada cancelada não pode ser retirada.', 409, 'RODADA_CANCELADA');
       }
@@ -986,31 +993,6 @@ async function confirmarRetirada(entrada = {}, opts = {}) {
         );
       }
       const rodadaProntaEm = await carregarRodadaProntaEm(db, rodada);
-
-      if (rodada.retirada_estado === 'RETIRADA') {
-        const resposta = {
-          success: true,
-          repetida: true,
-          rodada: {
-            id: rodadaId,
-            estado_preparacao: rodada.estado_preparacao,
-            retirada_estado: rodada.retirada_estado,
-            retirada_em: rodada.retirada_em || null,
-            retirada_por: rodada.retirada_por != null ? Number(rodada.retirada_por) : null,
-            rodada_pronta_em: rodadaProntaEm
-          },
-          evento: EVENTOS.RETIRADA_CONFIRMADA
-        };
-        await concluirIdempotencia(db, {
-          idempotencyKey,
-          resultado: resposta,
-          httpStatus: 200,
-          recursoTipo: 'cozinha_rodada',
-          recursoId: rodadaId
-        });
-        await commit(db);
-        return resposta;
-      }
       if (rodada.retirada_estado === 'ASSUMIDA_RETIRADA') {
         throw erro(
           'A rodada está em ASSUMIDA_RETIRADA; o significado dessa etapa precisa ser definido antes da confirmação.',
@@ -1018,67 +1000,50 @@ async function confirmarRetirada(entrada = {}, opts = {}) {
           'RETIRADA_ESTADO_NAO_SUPORTADO'
         );
       }
-      if (rodada.retirada_estado !== 'PENDENTE'
-        || rodada.retirada_em != null
-        || rodada.retirada_por != null) {
+      const retirada = await CozinhaRetiradaLedgerService.sincronizarEstadoRetiradaRodada(db, {
+        empresaId,
+        unidadeId: unidadeIdAutorizada,
+        rodadaId,
+        operadorId,
+        idempotencyKey
+      });
+      if (!retirada.completa) {
         throw erro(
-          'Estado de retirada inconsistente; nenhuma alteração foi aplicada.',
+          'A retirada da rodada exige comprovação individual completa no ledger.',
           409,
-          'RETIRADA_ESTADO_INCONSISTENTE'
+          'RETIRADA_INDIVIDUAL_PENDENTE'
         );
       }
 
-      const retiradaEm = await timestampUtc(db);
-      const atualizado = await run(db, `
-        UPDATE cozinha_rodadas
-        SET retirada_estado = 'RETIRADA',
-            retirada_em = ?,
-            retirada_por = ?,
-            updated_at = ?
-        WHERE id = ?
-          AND empresa_id = ?
-          AND unidade_id = ?
-          AND estado_preparacao = 'PRONTA'
-          AND retirada_estado = 'PENDENTE'
-          AND retirada_em IS NULL
-          AND retirada_por IS NULL
-      `, [
-        retiradaEm,
-        operadorId,
-        retiradaEm,
-        rodadaId,
-        empresaId,
-        unidadeIdAutorizada
-      ]);
-      if (atualizado.changes !== 1) {
-        throw erro(
-          'A rodada mudou durante a confirmação da retirada.',
-          409,
-          'RETIRADA_CONCORRENTE'
-        );
+      const claim = await claimIdempotenciaCentral(db, {
+        idempotencyKey,
+        tipoOperacao: TIPOS_OPERACAO.RETIRADA_CONFIRMADA,
+        hash,
+        contexto: JSON.stringify({
+          empresa_id: empresaId,
+          unidade_id: unidadeIdAutorizada,
+          rodada_id: rodadaId
+        })
+      });
+      if (claim.replay) {
+        await commit(db);
+        return { ...claim.corpo, repetida: true };
       }
 
       const resposta = {
         success: true,
-        repetida: false,
+        repetida: !retirada.transicionada,
         operador_id: operadorId,
         rodada: {
           id: rodadaId,
           estado_preparacao: 'PRONTA',
           retirada_estado: 'RETIRADA',
-          retirada_em: retiradaEm,
-          retirada_por: operadorId,
+          retirada_em: retirada.rodada.retirada_em,
+          retirada_por: retirada.rodada.retirada_por,
           rodada_pronta_em: rodadaProntaEm
         },
         evento: EVENTOS.RETIRADA_CONFIRMADA
       };
-      await registrarEventoOutbox(db, {
-        empresaId,
-        unidadeId: unidadeIdAutorizada,
-        tipo: EVENTOS.RETIRADA_CONFIRMADA,
-        idempotencyKey: `${idempotencyKey}:EVENTO`,
-        payload: resposta
-      });
       await concluirIdempotencia(db, {
         idempotencyKey,
         resultado: resposta,
@@ -1104,27 +1069,29 @@ async function entregarBebida(entrada = {}, opts = {}) {
   const idempotencyKey = exigirChave(entrada.idempotencyKey);
   const db = conn(opts);
 
-  let qtyMillis;
-  let qtyDecimal;
-  try {
-    qtyMillis = decimalParaMilessimos(
-      entrada.qty_entregue != null ? entrada.qty_entregue : entrada.quantidade
-    );
-    qtyDecimal = milessimosParaDecimalString(qtyMillis);
-  } catch (e) {
-    if (e && e.codigo === 'QTY_PRECISAO_INVALIDA') throw e;
-    throw erro('Quantidade inválida.', 400, 'QTY_INVALIDA');
-  }
-  if (qtyMillis <= 0) {
-    throw erro('Quantidade deve ser maior que zero.', 400, 'QTY_INVALIDA');
+  const usarSaldoPendente = entrada.usar_saldo_pendente === true;
+  let qtyMillis = null;
+  let qtyDecimal = null;
+  if (!usarSaldoPendente) {
+    const quantidade = normalizarQuantidadeEntrega(entrada);
+    qtyMillis = quantidade.qtyMillis;
+    qtyDecimal = quantidade.qtyDecimal;
   }
 
-  const hash = calcularHashOperacao(TIPOS_OPERACAO.BEBIDA_ENTREGUE, {
-    empresa_id: empresaId,
-    item_id: itemId,
-    qty_entregue: qtyDecimal,
-    responsavel_operador_id: operadorId
-  });
+  const hash = usarSaldoPendente
+    ? calcularPayloadHash({
+      tipo_operacao: TIPOS_OPERACAO.BEBIDA_ENTREGUE,
+      empresa_id: empresaId,
+      item_id: itemId,
+      usar_saldo_pendente: true,
+      responsavel_operador_id: operadorId
+    })
+    : calcularHashOperacao(TIPOS_OPERACAO.BEBIDA_ENTREGUE, {
+      empresa_id: empresaId,
+      item_id: itemId,
+      qty_entregue: qtyDecimal,
+      responsavel_operador_id: operadorId
+    });
 
   return serializarTransacao(db, async () => {
     await run(db, 'PRAGMA foreign_keys = ON');
@@ -1137,7 +1104,9 @@ async function entregarBebida(entrada = {}, opts = {}) {
         contexto: JSON.stringify({
           empresa_id: empresaId,
           item_id: itemId,
-          qty_entregue: qtyDecimal
+          ...(usarSaldoPendente
+            ? { usar_saldo_pendente: true }
+            : { qty_entregue: qtyDecimal })
         })
       });
       if (claim.replay) {
@@ -1160,12 +1129,30 @@ async function entregarBebida(entrada = {}, opts = {}) {
       if (item.estado_preparacao === 'CANCELADO') {
         throw erro('Item cancelado.', 409, 'ITEM_CANCELADO');
       }
+      if (item.estado_preparacao !== 'PRONTO') {
+        throw erro(
+          'A bebida deve estar preparada antes do registro de entrega.',
+          409,
+          'BEBIDA_NAO_PRONTA'
+        );
+      }
 
       const jaEntregue = await qtyBebidaEntregue(db, item.id, empresaId);
       const capacidade = subtrairMilessimos(
         subtrairMilessimos(item.qty_solicitada_millis, item.qty_cancelada_millis || 0),
         jaEntregue
       );
+      if (usarSaldoPendente) {
+        if (!Number.isSafeInteger(capacidade) || capacidade <= 0) {
+          throw erro(
+            'Não há saldo exigível pendente para entrega.',
+            409,
+            'QTY_ENTREGA_SEM_PENDENCIA'
+          );
+        }
+        qtyMillis = capacidade;
+        qtyDecimal = milessimosParaDecimalString(qtyMillis);
+      }
       if (qtyMillis > capacidade) {
         throw erro(
           'Quantidade entregue excede o saldo da bebida.',
@@ -1193,16 +1180,6 @@ async function entregarBebida(entrada = {}, opts = {}) {
         qtyMillis, restanteApos,
         operadorId, entregueEm, idempotencyKey
       ]);
-
-      if (restanteApos === 0 && item.estado_preparacao !== 'PRONTO') {
-        await run(db, `
-          UPDATE cozinha_itens
-          SET estado_preparacao = 'PRONTO',
-              qty_preparada_millis = qty_solicitada_millis - qty_cancelada_millis,
-              updated_at = ?
-          WHERE id = ? AND empresa_id = ?
-        `, [entregueEm, item.id, empresaId]);
-      }
 
       const itens = await carregarItensRodada(db, rodada.id, empresaId);
       const sync = await sincronizarEstadoRodada(db, rodada, itens, {
@@ -1425,7 +1402,11 @@ async function cancelarItem(entrada = {}, opts = {}) {
     try {
       const item = await carregarItemEmpresa(db, itemId, empresaId);
       const rodada = await carregarRodadaEmpresa(db, item.rodada_id, empresaId);
-      await validarIntegridadeOperacional(db, item, rodada, { empresaId, unidadeIdAutorizada: unidadeId });
+      await validarIntegridadeOperacional(db, item, rodada, {
+        empresaId,
+        unidadeIdAutorizada: unidadeId,
+        permitirPedidoCancelado: true
+      });
       const claim = await claimIdempotenciaCentral(db, {
         idempotencyKey, tipoOperacao: TIPOS_OPERACAO.CANCELAMENTO_ITEM, hash,
         contexto: JSON.stringify({ empresa_id: empresaId, unidade_id: unidadeId, item_id: itemId })
@@ -1599,5 +1580,6 @@ module.exports = {
   cancelarItem,
   consultarPreparacaoRodada,
   avaliarConclusaoRodada,
-  sincronizarEstadoRodada
+  sincronizarEstadoRodada,
+  normalizarQuantidadeEntrega
 };

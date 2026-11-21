@@ -463,6 +463,32 @@ describe('S07-2 — UI seleção KDS', () => {
     assert.ok(chamadas.some((c) => String(c.path).includes('/cozinha/preparacao/painel')));
   });
 
+  it('resposta tardia da unidade não restaura sessão após parar', async () => {
+    let responder;
+    let persistencias = 0;
+    const chamadas = [];
+    const control = kds.criarControlador({
+      empresaId: 1,
+      aoAtualizarSessao: () => { persistencias += 1; },
+      fetchJson: async (method, path) => {
+        chamadas.push(path);
+        if (path === '/cozinha/sessao/unidade') {
+          return new Promise((resolve) => { responder = resolve; });
+        }
+        return { success: true, unidades: [{ id: 10, codigo: 'UA' }] };
+      },
+      agendar: () => { throw new Error('Polling não deve iniciar'); }
+    });
+    await control.iniciar();
+    control.definirUnidadeSelecionada(10);
+    const pendente = control.confirmarUnidade();
+    control.parar();
+    responder({ success: true, token: jwt.sign({ id: 1, unidade_cozinha_id: 10 }, process.env.JWT_SECRET) });
+    assert.equal((await pendente).ignorada, true);
+    assert.equal(persistencias, 0);
+    assert.equal(chamadas.length, 2);
+  });
+
   it('falha de lista não dispara chamada repetitiva automática', async () => {
     let n = 0;
     const control = kds.criarControlador({
@@ -1006,6 +1032,7 @@ describe('S07-2 — schema Cozinha / cozinha_notificacoes', () => {
 
 describe('S07-2 — HTTP (listagem, seleção, painel, login)', () => {
   let server;
+  let serverKdsRede;
   let baseUrl;
   let recursoOriginal;
   let dbHttp;
@@ -1304,12 +1331,39 @@ describe('S07-2 — HTTP (listagem, seleção, painel, login)', () => {
       const instance = app.listen(0, '127.0.0.1', () => resolve(instance));
       instance.once('error', reject);
     });
+    serverKdsRede = require('../../backend/cozinha-rede-local').criarServidorKds(app);
+    await new Promise((resolve, reject) => {
+      serverKdsRede.once('error', reject);
+      serverKdsRede.listen(0, '127.0.0.1', resolve);
+    });
     baseUrl = `http://127.0.0.1:${server.address().port}`;
   });
 
   after(async () => {
     if (recursoOriginal) configService.recursoHabilitado = recursoOriginal;
+    if (serverKdsRede) await new Promise((r) => serverKdsRede.close(() => r()));
     if (server) await new Promise((r) => server.close(() => r()));
+  });
+
+  it('porta KDS reutiliza login e autorização reais e bloqueia rotas fora do escopo', async () => {
+    const base = `http://127.0.0.1:${serverKdsRede.address().port}`;
+    const semSessao = await fetch(`${base}/api/cozinha/unidades-disponiveis`);
+    assert.equal(semSessao.status, 401);
+    const login = await fetch(`${base}/api/auth/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'op_s07_2_http', password: passwordPlain })
+    });
+    assert.equal(login.status, 200);
+    const { token } = await login.json();
+    const headers = { Authorization: `Bearer ${token}`, 'X-Empresa-Id': String(empresaId) };
+    const unidades = await fetch(`${base}/api/cozinha/unidades-disponiveis`, { headers });
+    assert.equal(unidades.status, 200);
+    assert.deepEqual((await unidades.json()).unidades.map((unidade) => unidade.id), [unidadeId]);
+    const empresaIncorreta = await fetch(`${base}/api/cozinha/unidades-disponiveis`, {
+      headers: { ...headers, 'X-Empresa-Id': String(empresaOutraId) }
+    });
+    assert.equal(empresaIncorreta.status, 403);
+    assert.equal((await fetch(`${base}/api/backup`, { headers })).status, 404);
   });
 
   it('A) login normal sem unidade continua funcionando', async () => {
