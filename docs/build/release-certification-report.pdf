@@ -27,15 +27,15 @@ BT
 0 -14 Td
 (- Vers?o: 1.0.3) Tj
 0 -14 Td
-(- Commit: 694fb39) Tj
+(- Commit: 222e90f) Tj
 0 -14 Td
-(- Build: 2026-11-16T10:37:28.934Z) Tj
+(- Build: 2026-11-19T18:25:34.435Z) Tj
 0 -14 Td
-(- Hash app.asar: `49f5f7c7025c2500cebe468739895426f0d69bf8b5baa4d0758413fc629c15aa`) Tj
+(- Hash app.asar: `a447c9340fcad90dce75e4b881079a5bf9fc489dbf8f42a5e3c44e2ad244fda1`) Tj
 0 -14 Td
 (- Origem: fonte) Tj
 0 -14 Td
-(- Data: 2026-11-19T18:25:33.673Z) Tj
+(- Data: 2026-11-22T14:20:55.635Z) Tj
 0 -14 Td
 () Tj
 0 -14 Td
@@ -49,11 +49,11 @@ BT
 0 -14 Td
 (? Login) Tj
 0 -14 Td
-(  - user=rc4320_1795112732430 perfil=SUPER_ADMIN) Tj
+(  - user=rc4320_1795357254494 perfil=SUPER_ADMIN) Tj
 0 -14 Td
 (? Cadastro de Produtos) Tj
 0 -14 Td
-(  - CRUD ok | embalagem CX?12 | codigo=RC4320-1795112729424-P) Tj
+(  - CRUD ok | embalagem CX?12 | codigo=RC4320-1795357251512-P) Tj
 0 -14 Td
 (? Compras) Tj
 0 -14 Td
@@ -89,7 +89,7 @@ BT
 0 -14 Td
 (? Performance) Tj
 0 -14 Td
-(  - 4.2s | mem 32.6MB | sql=16) Tj
+(  - 4.1s | mem 24.3MB | sql=16) Tj
 0 -14 Td
 () Tj
 0 -14 Td
@@ -97,11 +97,11 @@ BT
 0 -14 Td
 () Tj
 0 -14 Td
-(- Tempo total: 4.3s) Tj
+(- Tempo total: 4.1s) Tj
 0 -14 Td
-(- Mem?ria m?xima: 32.6 MB) Tj
+(- Mem?ria m?xima: 24.3 MB) Tj
 0 -14 Td
-(- CPU user: 1469 ms) Tj
+(- CPU user: 1687 ms) Tj
 0 -14 Td
 (- Testes/etapas: 12) Tj
 0 -14 Td
