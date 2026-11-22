@@ -145,6 +145,7 @@ CREATE TABLE IF NOT EXISTS cozinha_retirada_itens (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   empresa_id INTEGER NOT NULL,
   unidade_id INTEGER NOT NULL,
+  turno_id INTEGER,
   pedido_id INTEGER NOT NULL,
   pedido_item_id INTEGER NOT NULL,
   cozinha_item_id INTEGER NOT NULL,
@@ -210,6 +211,7 @@ CREATE TABLE IF NOT EXISTS cozinha_cancelamento_itens (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   empresa_id INTEGER NOT NULL,
   unidade_id INTEGER NOT NULL,
+  turno_id INTEGER,
   pedido_id INTEGER NOT NULL,
   pedido_item_id INTEGER NOT NULL,
   cozinha_item_id INTEGER NOT NULL,
@@ -605,6 +607,12 @@ async function executarMigracaoSprint2(db, opts = {}) {
 
     await executar(db, DDL_RETIRADA);
     await executar(db, DDL_CANCELAMENTO);
+    for (const tabela of ['cozinha_retirada_itens', 'cozinha_cancelamento_itens']) {
+      const colunas = await consultarTodos(db, `PRAGMA table_info("${tabela}")`);
+      if (!colunas.some((coluna) => coluna.name === 'turno_id')) {
+        await executar(db, `ALTER TABLE "${tabela}" ADD COLUMN turno_id INTEGER`);
+      }
+    }
     await criarIndices(db);
     await criarTriggers(db);
 

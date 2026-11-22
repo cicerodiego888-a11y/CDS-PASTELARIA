@@ -23,7 +23,8 @@ const {
   complementoMaximoPermitidoCentavos
 } = require('./RecomposicaoFiscalToleranciaDinheiroSimulacaoService');
 const {
-  avaliarCandidatoComComplementoDinheiro
+  avaliarCandidatoComComplementoDinheiro,
+  avaliarComplementoFiscalIntegral
 } = require('./RecomposicaoFiscalComposicaoMotorSimulacaoService');
 const {
   encaminharPropostaValidadaAoDistribuidorOficial
@@ -628,6 +629,7 @@ async function integrarPagamentoRecomposicao(entrada = {}, opcoes = {}) {
   let complementoDinheiro = 0;
   let descontoAjuste = 0;
   let propostaSomenteMotor = false;
+  let complementoExcepcionalIntegral = false;
   const margemInfo = complementoMaximoPermitidoCentavos(conferencia.confirmados);
   if (residualUtilizavel && modelos.length) {
     // 1) Tentativa preferencial: residual após pastel fiscal integral (só itens do carrinho).
@@ -641,13 +643,26 @@ async function integrarPagamentoRecomposicao(entrada = {}, opcoes = {}) {
     if (!motorCompativelComItensVendidos(motor, itens)) {
       motor = null;
     }
+    if (!motor || motor.distribuicao_possivel !== true || Number(motor.desconto_ajuste || 0) > 0.009) {
+      const integral = avaliarComplementoFiscalIntegral({
+        valorFiscalCandidato: residual,
+        dinheiroDisponivel: margemInfo.dinheiro_recebido,
+        modelos,
+        capacidadePorCategoria: capacidade
+      });
+      if (motorCompativelComItensVendidos(integral, itens)) {
+        motor = integral;
+        complementoExcepcionalIntegral = Number(integral.complemento_dinheiro || 0) > 0.009;
+      }
+    }
   }
 
-  // 2) Residual inviável, pastel > eletrônico, ou residual no teto 20% com
+  // 2) Residual inviável, pastel > eletrônico, ou residual que exige ajuste
   //    desconto alto: tenta o eletrônico cheio e prefere menor complemento.
   const residualNoTeto20 = !!(motor
     && motor.distribuicao_possivel === true
-    && motor.modo === 'acima_teto_20_com_desconto');
+    && (motor.modo === 'acima_teto_20_com_desconto'
+      || Number(motor.desconto_ajuste || 0) > 0.009));
   if (
     ((!motor || motor.distribuicao_possivel !== true) || residualNoTeto20)
     && fiscal > 0.009
@@ -666,17 +681,36 @@ async function integrarPagamentoRecomposicao(entrada = {}, opcoes = {}) {
         modelos: modelosCheios,
         capacidadePorCategoria: capacidadeCheia
       });
-      if (motorCompativelComItensVendidos(motorCheio, itens)) {
+      let candidatoCheio = motorCompativelComItensVendidos(motorCheio, itens)
+        ? motorCheio
+        : null;
+      let candidatoCheioExcepcional = false;
+      if (!candidatoCheio || Number(candidatoCheio.desconto_ajuste || 0) > 0.009) {
+        const integralCheio = avaliarComplementoFiscalIntegral({
+          valorFiscalCandidato: fiscal,
+          dinheiroDisponivel: margemInfo.dinheiro_recebido,
+          modelos: modelosCheios,
+          capacidadePorCategoria: capacidadeCheia
+        });
+        if (motorCompativelComItensVendidos(integralCheio, itens)) {
+          candidatoCheio = integralCheio;
+          candidatoCheioExcepcional = Number(integralCheio.complemento_dinheiro || 0) > 0.009;
+        }
+      }
+      if (candidatoCheio) {
         const semMotor = !motor || motor.distribuicao_possivel !== true;
-        const complementoCheio = round2(Number(motorCheio.complemento_dinheiro || 0));
+        const substituirAjustePorItemIntegral = Number(motor && motor.desconto_ajuste || 0) > 0.009
+          && Number(candidatoCheio.desconto_ajuste || 0) <= 0.009;
+        const complementoCheio = round2(Number(candidatoCheio.complemento_dinheiro || 0));
         const complementoAtual = round2(Number(motor && motor.complemento_dinheiro || 0));
-        const descontoCheio = round2(Number(motorCheio.desconto_ajuste || 0));
+        const descontoCheio = round2(Number(candidatoCheio.desconto_ajuste || 0));
         const descontoAtual = round2(Number(motor && motor.desconto_ajuste || 0));
         const melhorComplemento = complementoCheio + 0.009 < complementoAtual;
         const mesmoComplementoMenorDesconto = Math.abs(complementoCheio - complementoAtual) <= 0.02
           && descontoCheio + 0.009 < descontoAtual;
-        if (semMotor || melhorComplemento || mesmoComplementoMenorDesconto) {
-          motor = motorCheio;
+        if (semMotor || substituirAjustePorItemIntegral || melhorComplemento || mesmoComplementoMenorDesconto) {
+          motor = candidatoCheio;
+          complementoExcepcionalIntegral = candidatoCheioExcepcional;
           modelos = modelosCheios;
           capacidade = capacidadeCheia;
           propostaSomenteMotor = true;
@@ -687,6 +721,17 @@ async function integrarPagamentoRecomposicao(entrada = {}, opcoes = {}) {
   }
 
   if (residualUtilizavel || propostaSomenteMotor || residual < -0.009) {
+    if (
+      motor
+      && motor.distribuicao_possivel === true
+      && Number(motor.desconto_ajuste || 0) > 0.009
+    ) {
+      return bloqueio(
+        'DINHEIRO_INSUFICIENTE_COMPLEMENTO_INTEGRAL',
+        'O dinheiro disponível é insuficiente para completar integralmente os produtos fiscais. A geração fiscal foi bloqueada.',
+        { referencia, motor, margem_complemento: margemInfo }
+      );
+    }
     if (!motor || motor.distribuicao_possivel !== true) {
       return bloqueio(
         motor && motor.codigo
@@ -724,7 +769,10 @@ async function integrarPagamentoRecomposicao(entrada = {}, opcoes = {}) {
     valor_nao_fiscal_referencia_inicial: naoFiscal,
     complemento_dinheiro_utilizado: complementoDinheiro,
     desconto_ajuste: descontoAjuste,
-    margem_complemento_maxima: margemInfo.complemento_maximo
+    margem_complemento_maxima: margemInfo.complemento_maximo,
+    origem_recomposicao: complementoExcepcionalIntegral
+      ? 'complemento_integral_produto_excepcional'
+      : referencia.origem_recomposicao
   });
 
   const descontoComercialEntrada = round2(Number(

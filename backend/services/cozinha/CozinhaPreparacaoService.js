@@ -22,6 +22,7 @@ const {
 } = require('./cozinhaIdempotenciaHash');
 const { exigirUnidadeOperacional } = require('./cozinhaUnidadeOperacional');
 const CozinhaRetiradaLedgerService = require('./CozinhaRetiradaLedgerService');
+const CozinhaTurno = require('./CozinhaTurnoService');
 
 const EVENTOS = Object.freeze({
   PREPARACAO_INICIADA: 'PREPARACAO_INICIADA',
@@ -601,6 +602,12 @@ async function iniciarPreparacao(entrada = {}, opts = {}) {
         empresaId,
         unidadeIdAutorizada: entrada.unidade_id != null ? entrada.unidade_id : entrada.unidadeId
       });
+      await CozinhaTurno.resolverTurnoOperacional(db, {
+        empresaId,
+        unidadeId: Number(entrada.unidade_id != null ? entrada.unidade_id : entrada.unidadeId),
+        rodadaId: item.rodada_id,
+        cozinhaItemId: itemId
+      });
       const claim = await claimIdempotenciaCentral(db, {
         idempotencyKey,
         tipoOperacao: TIPOS_OPERACAO.PREPARACAO_INICIADA,
@@ -643,9 +650,11 @@ async function iniciarPreparacao(entrada = {}, opts = {}) {
       const iniciadoEm = await timestampUtc(db);
       const atualizado = await run(db, `
         UPDATE cozinha_itens
-        SET estado_preparacao = 'EM_PREPARACAO', updated_at = ?
+        SET estado_preparacao = 'EM_PREPARACAO',
+            preparo_iniciado_em = COALESCE(preparo_iniciado_em, ?),
+            updated_at = ?
         WHERE id = ? AND empresa_id = ? AND estado_preparacao = 'AGUARDANDO'
-      `, [iniciadoEm, itemId, empresaId]);
+      `, [iniciadoEm, iniciadoEm, itemId, empresaId]);
       if (atualizado.changes !== 1) {
         throw erro('O estado do item mudou durante o início do preparo.', 409, 'TRANSICAO_CONCORRENTE');
       }
@@ -825,6 +834,12 @@ async function marcarItemPronto(entrada = {}, opts = {}) {
         empresaId,
         unidadeIdAutorizada: entrada.unidade_id != null ? entrada.unidade_id : entrada.unidadeId
       });
+      await CozinhaTurno.resolverTurnoOperacional(db, {
+        empresaId,
+        unidadeId: Number(entrada.unidade_id != null ? entrada.unidade_id : entrada.unidadeId),
+        rodadaId: item.rodada_id,
+        cozinhaItemId: itemId
+      });
       const claim = await claimIdempotenciaCentral(db, {
         idempotencyKey,
         tipoOperacao: TIPOS_OPERACAO.ITEM_PRONTO,
@@ -881,9 +896,10 @@ async function marcarItemPronto(entrada = {}, opts = {}) {
         UPDATE cozinha_itens
         SET estado_preparacao = 'PRONTO',
             qty_preparada_millis = qty_solicitada_millis - qty_cancelada_millis,
+            pronto_em = COALESCE(pronto_em, ?),
             updated_at = ?
         WHERE id = ? AND empresa_id = ? AND estado_preparacao = 'EM_PREPARACAO'
-      `, [prontoEm, itemId, empresaId]);
+      `, [prontoEm, prontoEm, itemId, empresaId]);
       if (atualizado.changes !== 1) {
         throw erro('O estado do item mudou durante a conclusão.', 409, 'TRANSICAO_CONCORRENTE');
       }
@@ -1123,6 +1139,13 @@ async function entregarBebida(entrada = {}, opts = {}) {
         unidadeIdAutorizada: entrada.unidade_id != null ? entrada.unidade_id : entrada.unidadeId
       });
 
+      await CozinhaTurno.resolverTurnoOperacional(db, {
+        empresaId,
+        unidadeId: Number(entrada.unidade_id != null ? entrada.unidade_id : entrada.unidadeId),
+        rodadaId: item.rodada_id,
+        cozinhaItemId: itemId
+      });
+
       if (item.tipo_item !== 'BEBIDA') {
         throw erro('Entrega de bebida só se aplica a itens BEBIDA.', 409, 'ITEM_NAO_BEBIDA');
       }
@@ -1180,6 +1203,14 @@ async function entregarBebida(entrada = {}, opts = {}) {
         qtyMillis, restanteApos,
         operadorId, entregueEm, idempotencyKey
       ]);
+      await CozinhaTurno.vincularEventoAoTurno(db, {
+        empresaId,
+        unidadeId: Number(entrada.unidade_id != null ? entrada.unidade_id : entrada.unidadeId),
+        rodadaId: item.rodada_id,
+        cozinhaItemId: item.id,
+        tabela: 'cozinha_bebida_entregas',
+        eventoId: ins.lastID
+      });
 
       const itens = await carregarItensRodada(db, rodada.id, empresaId);
       const sync = await sincronizarEstadoRodada(db, rodada, itens, {
@@ -1407,6 +1438,12 @@ async function cancelarItem(entrada = {}, opts = {}) {
         unidadeIdAutorizada: unidadeId,
         permitirPedidoCancelado: true
       });
+      await CozinhaTurno.resolverTurnoOperacional(db, {
+        empresaId,
+        unidadeId,
+        rodadaId: item.rodada_id,
+        cozinhaItemId: itemId
+      });
       const claim = await claimIdempotenciaCentral(db, {
         idempotencyKey, tipoOperacao: TIPOS_OPERACAO.CANCELAMENTO_ITEM, hash,
         contexto: JSON.stringify({ empresa_id: empresaId, unidade_id: unidadeId, item_id: itemId })
@@ -1510,6 +1547,11 @@ async function cancelarRodada(entrada = {}, opts = {}) {
         );
       }
       await validarUnidadeAtivaDaEmpresa(db, empresaId, unidadeIdAutorizada);
+      await CozinhaTurno.resolverTurnoOperacional(db, {
+        empresaId,
+        unidadeId: unidadeIdAutorizada,
+        rodadaId
+      });
 
       const claim = await claimIdempotenciaCentral(db, {
         idempotencyKey,

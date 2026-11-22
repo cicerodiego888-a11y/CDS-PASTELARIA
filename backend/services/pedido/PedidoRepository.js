@@ -313,8 +313,8 @@ function montarInsertPedidoItem({ pedidoId, empresaId, item, snapshot, colunasPe
   };
 }
 
-function montarUpdatePedidoItem({ pedidoId, item, snapshot, colunasPedidoItens }) {
-  const dados = montarInsertPedidoItem({ pedidoId, item, snapshot, colunasPedidoItens });
+function montarUpdatePedidoItem({ pedidoId, empresaId, item, snapshot, colunasPedidoItens }) {
+  const dados = montarInsertPedidoItem({ pedidoId, empresaId, item, snapshot, colunasPedidoItens });
   const atualizaveis = dados.colunas.filter((coluna) => coluna !== 'pedido_id');
   const indices = atualizaveis.map((coluna) => dados.colunas.indexOf(coluna));
   return {
@@ -808,13 +808,25 @@ async function substituirPedido({
       throw err;
     }
     const empresaSolicitada = Number(empresaId);
+    const empresaDoPedido = Number(pedidoAtual.empresa_id);
+    const empresaPedidoValida = colunasPedidos.has('empresa_id')
+      && Number.isInteger(empresaDoPedido) && empresaDoPedido > 0;
+    if (colunasPedidos.has('empresa_id') && !empresaPedidoValida) {
+      const err = new Error('Pedido sem empresa válida; edição bloqueada para preservar o isolamento.');
+      err.statusCode = 409;
+      err.codigo = 'EMPRESA_PEDIDO_INVALIDA';
+      throw err;
+    }
     if (Number.isInteger(empresaSolicitada) && empresaSolicitada > 0
-      && Number(pedidoAtual.empresa_id) !== empresaSolicitada) {
+      && empresaPedidoValida && empresaDoPedido !== empresaSolicitada) {
       const err = new Error('Pedido não encontrado.');
       err.statusCode = 404;
       err.codigo = 'PEDIDO_NAO_ENCONTRADO';
       throw err;
     }
+    const emp = empresaPedidoValida
+      ? empresaDoPedido
+      : (Number.isInteger(empresaSolicitada) && empresaSolicitada > 0 ? empresaSolicitada : null);
     const estadoEdicao = await obterEstadoEdicao(pedidoAtual, { db });
     if (estadoEdicao.edicao_bloqueada) {
       throw criarErroPedidoImutavel(pedidoAtual, estadoEdicao);
@@ -893,7 +905,6 @@ async function substituirPedido({
         AND status IN ('ORCAMENTO', 'PEDIDO', 'ABERTO', 'EM_SEPARACAO', 'AGUARDANDO_FATURAMENTO')
     `;
     if (colunasPedidos.has('venda_id')) sql += ' AND venda_id IS NULL';
-    const emp = empresaId != null ? Number(empresaId) : null;
     if (Number.isInteger(emp) && emp > 0) {
       sql += ' AND empresa_id = ?';
       params.push(emp);
@@ -962,10 +973,11 @@ async function substituirPedido({
         : combinarSnapshotProdutoComItem(snapshotAtual, item);
       if (anterior) {
         const update = montarUpdatePedidoItem({
-        pedidoId,
-        item,
-        snapshot,
-        colunasPedidoItens
+          pedidoId,
+          empresaId: emp,
+          item,
+          snapshot,
+          colunasPedidoItens
         });
         const atualizado = await run(update.sql, update.valores, db);
         if (!atualizado.changes) {
@@ -1275,5 +1287,6 @@ module.exports = {
   excluirOrcamento,
   marcarFaturado,
   atualizarDadosFiscais,
-  _montarInsertPedidoItem: montarInsertPedidoItem
+  _montarInsertPedidoItem: montarInsertPedidoItem,
+  _montarUpdatePedidoItem: montarUpdatePedidoItem
 };

@@ -2,6 +2,7 @@
 
 const crypto = require('crypto');
 const { decimalParaMilessimos, subtrairMilessimos } = require('./cozinhaQuantidade');
+const CozinhaTurno = require('./CozinhaTurnoService');
 
 const filasTransacao = new WeakMap();
 
@@ -510,6 +511,12 @@ async function retirarItem(entrada = {}, opts = {}) {
 
       const contexto = await obterContextoItem(db, { empresaId, unidadeId, itemId });
       const { item, rodada, pedido, pedidoItem, pedidoItemMillis } = contexto;
+      const turno = await CozinhaTurno.resolverTurnoOperacional(db, {
+        empresaId,
+        unidadeId,
+        rodadaId: item.rodada_id,
+        cozinhaItemId: itemId
+      });
       if (String(pedido.status || '').trim().toUpperCase() === 'CANCELADO') {
         throw erro(
           'Pedido comercial cancelado não permite confirmar retirada.',
@@ -519,9 +526,6 @@ async function retirarItem(entrada = {}, opts = {}) {
       }
       if (item.estado_preparacao === 'CANCELADO' || rodada.estado_preparacao === 'CANCELADA') {
         throw erro('Item ou rodada cancelada não pode ser retirada.', 409, 'ITEM_CANCELADO');
-      }
-      if (rodada.estado_preparacao !== 'PRONTA') {
-        throw erro('A retirada só pode ocorrer em rodada pronta.', 409, 'RODADA_NAO_PRONTA');
       }
       if (item.estado_preparacao !== 'PRONTO') {
         throw erro('O item precisa estar PRONTO para registrar a retirada.', 409, 'ITEM_NAO_PRONTO');
@@ -592,8 +596,8 @@ async function retirarItem(entrada = {}, opts = {}) {
           empresa_id, unidade_id, pedido_id, pedido_item_id,
           cozinha_item_id, rodada_id, tipo_evento, qty_millis,
           operador_id, autorizado_por_operador_id, operacao_id,
-          evento_origem_id, justificativa, registrado_em
-        ) VALUES (?, ?, ?, ?, ?, ?, 'RETIRADA_CONFIRMADA', ?, ?, NULL, ?, NULL, NULL, ?)
+          evento_origem_id, justificativa, turno_id, registrado_em
+        ) VALUES (?, ?, ?, ?, ?, ?, 'RETIRADA_CONFIRMADA', ?, ?, NULL, ?, NULL, NULL, ?, ?)
       `, [
         empresaId,
         unidadeId,
@@ -604,9 +608,18 @@ async function retirarItem(entrada = {}, opts = {}) {
         qtyMillis,
         operadorId,
         chave,
+        turno.id,
         registradoEm
       ]);
 
+      await CozinhaTurno.vincularEventoAoTurno(db, {
+        empresaId,
+        unidadeId,
+        rodadaId: item.rodada_id,
+        cozinhaItemId: itemId,
+        tabela: 'cozinha_retirada_itens',
+        eventoId: inserida.lastID
+      });
       const rodadaRetirada = await sincronizarEstadoRetiradaRodada(db, {
         empresaId,
         unidadeId,
@@ -700,6 +713,12 @@ async function estornarRetirada(entrada = {}, opts = {}) {
       if (!['RETIRADA_CONFIRMADA', 'AJUSTE_CREDITO', 'AJUSTE_DEBITO'].includes(origem.tipo_evento)) {
         throw erro('Evento não pode ser estornado.', 409, 'EVENTO_ORIGEM_INVALIDO');
       }
+      const turno = await CozinhaTurno.resolverTurnoOperacional(db, {
+        empresaId,
+        unidadeId,
+        rodadaId: origem.rodada_id,
+        cozinhaItemId: origem.cozinha_item_id
+      });
 
       const estornos = await get(db, `
         SELECT COALESCE(SUM(qty_millis), 0) AS total
@@ -717,8 +736,8 @@ async function estornarRetirada(entrada = {}, opts = {}) {
           empresa_id, unidade_id, pedido_id, pedido_item_id,
           cozinha_item_id, rodada_id, tipo_evento, qty_millis,
           operador_id, autorizado_por_operador_id, operacao_id,
-          evento_origem_id, justificativa, registrado_em
-        ) VALUES (?, ?, ?, ?, ?, ?, 'RETIRADA_ESTORNADA', ?, ?, ?, ?, ?, ?, ?)
+          evento_origem_id, justificativa, turno_id, registrado_em
+        ) VALUES (?, ?, ?, ?, ?, ?, 'RETIRADA_ESTORNADA', ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         empresaId,
         unidadeId,
@@ -732,8 +751,17 @@ async function estornarRetirada(entrada = {}, opts = {}) {
         chave,
         eventoId,
         justificativa,
+        turno.id,
         registradoEm
       ]);
+      await CozinhaTurno.vincularEventoAoTurno(db, {
+        empresaId,
+        unidadeId,
+        rodadaId: origem.rodada_id,
+        cozinhaItemId: origem.cozinha_item_id,
+        tabela: 'cozinha_retirada_itens',
+        eventoId: inserida.lastID
+      });
       const rodadaRetirada = await sincronizarEstadoRetiradaRodada(db, {
         empresaId,
         unidadeId,
@@ -813,6 +841,12 @@ async function cancelarItem(entrada = {}, opts = {}) {
 
       const contexto = await obterContextoItem(db, { empresaId, unidadeId, itemId });
       const { item, rodada, pedidoItem, pedidoItemMillis } = contexto;
+      const turno = await CozinhaTurno.resolverTurnoOperacional(db, {
+        empresaId,
+        unidadeId,
+        rodadaId: item.rodada_id,
+        cozinhaItemId: itemId
+      });
       if (rodada.estado_preparacao === 'CANCELADA') {
         throw erro('Rodada já cancelada.', 409, 'RODADA_CANCELADA');
       }
@@ -848,8 +882,8 @@ async function cancelarItem(entrada = {}, opts = {}) {
           empresa_id, unidade_id, pedido_id, pedido_item_id,
           cozinha_item_id, rodada_id, tipo_evento, qty_millis,
           operador_id, autorizado_por_operador_id, operacao_id,
-          evento_origem_id, justificativa, registrado_em
-        ) VALUES (?, ?, ?, ?, ?, ?, 'CANCELAMENTO_CONFIRMADO', ?, ?, NULL, ?, NULL, ?, ?)
+          evento_origem_id, justificativa, turno_id, registrado_em
+        ) VALUES (?, ?, ?, ?, ?, ?, 'CANCELAMENTO_CONFIRMADO', ?, ?, NULL, ?, NULL, ?, ?, ?)
       `, [
         empresaId,
         unidadeId,
@@ -861,8 +895,17 @@ async function cancelarItem(entrada = {}, opts = {}) {
         operadorId,
         chave,
         justificativa,
+        turno.id,
         registradoEm
       ]);
+      await CozinhaTurno.vincularEventoAoTurno(db, {
+        empresaId,
+        unidadeId,
+        rodadaId: item.rodada_id,
+        cozinhaItemId: itemId,
+        tabela: 'cozinha_cancelamento_itens',
+        eventoId: inserida.lastID
+      });
       await run(db, `
         UPDATE cozinha_itens
         SET qty_cancelada_millis = qty_cancelada_millis + ?,
@@ -966,6 +1009,12 @@ async function estornarCancelamento(entrada = {}, opts = {}) {
       if (!origem || origem.tipo_evento !== 'CANCELAMENTO_CONFIRMADO') {
         throw erro('Evento original de cancelamento não encontrado.', 404, 'EVENTO_CANCELAMENTO_INVALIDO');
       }
+      const turno = await CozinhaTurno.resolverTurnoOperacional(db, {
+        empresaId,
+        unidadeId,
+        rodadaId: origem.rodada_id,
+        cozinhaItemId: origem.cozinha_item_id
+      });
       const estornos = await get(db, `
         SELECT COALESCE(SUM(qty_millis), 0) AS total
         FROM cozinha_cancelamento_itens
@@ -982,8 +1031,8 @@ async function estornarCancelamento(entrada = {}, opts = {}) {
           empresa_id, unidade_id, pedido_id, pedido_item_id,
           cozinha_item_id, rodada_id, tipo_evento, qty_millis,
           operador_id, autorizado_por_operador_id, operacao_id,
-          evento_origem_id, justificativa, registrado_em
-        ) VALUES (?, ?, ?, ?, ?, ?, 'CANCELAMENTO_ESTORNADO', ?, ?, ?, ?, ?, ?, ?)
+          evento_origem_id, justificativa, turno_id, registrado_em
+        ) VALUES (?, ?, ?, ?, ?, ?, 'CANCELAMENTO_ESTORNADO', ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         empresaId,
         unidadeId,
@@ -997,8 +1046,17 @@ async function estornarCancelamento(entrada = {}, opts = {}) {
         chave,
         eventoId,
         justificativa,
+        turno.id,
         registradoEm
       ]);
+      await CozinhaTurno.vincularEventoAoTurno(db, {
+        empresaId,
+        unidadeId,
+        rodadaId: origem.rodada_id,
+        cozinhaItemId: origem.cozinha_item_id,
+        tabela: 'cozinha_cancelamento_itens',
+        eventoId: inserida.lastID
+      });
       await run(db, `
         UPDATE cozinha_itens
         SET qty_cancelada_millis = MAX(0, qty_cancelada_millis - ?),
@@ -1139,6 +1197,12 @@ async function ajustarRetirada(entrada = {}, opts = {}) {
       if (!origem || !['RETIRADA_CONFIRMADA', 'AJUSTE_CREDITO', 'AJUSTE_DEBITO'].includes(origem.tipo_evento)) {
         throw erro('Referência de ajuste inválida.', 409, 'AJUSTE_REFERENCIA_INVALIDA');
       }
+      const turno = await CozinhaTurno.resolverTurnoOperacional(db, {
+        empresaId,
+        unidadeId,
+        rodadaId: origem.rodada_id,
+        cozinhaItemId: origem.cozinha_item_id
+      });
 
       const retiradaLiquida = await retiradaLiquidaItem(db, empresaId, origem.cozinha_item_id);
       if (tipoEvento === 'AJUSTE_DEBITO' && qtd > retiradaLiquida) {
@@ -1175,8 +1239,8 @@ async function ajustarRetirada(entrada = {}, opts = {}) {
           empresa_id, unidade_id, pedido_id, pedido_item_id,
           cozinha_item_id, rodada_id, tipo_evento, qty_millis,
           operador_id, autorizado_por_operador_id, operacao_id,
-          evento_origem_id, justificativa, registrado_em
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          evento_origem_id, justificativa, turno_id, registrado_em
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `, [
         empresaId,
         unidadeId,
@@ -1191,8 +1255,17 @@ async function ajustarRetirada(entrada = {}, opts = {}) {
         chave,
         eventoId,
         justificativa,
+        turno.id,
         registradoEm
       ]);
+      await CozinhaTurno.vincularEventoAoTurno(db, {
+        empresaId,
+        unidadeId,
+        rodadaId: origem.rodada_id,
+        cozinhaItemId: origem.cozinha_item_id,
+        tabela: 'cozinha_retirada_itens',
+        eventoId: inserida.lastID
+      });
       const rodadaRetirada = await sincronizarEstadoRetiradaRodada(db, {
         empresaId,
         unidadeId,

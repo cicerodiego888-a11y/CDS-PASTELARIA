@@ -231,6 +231,124 @@
 }
 .kds-card__cancelamento { margin-top: 0.4rem; color: #fecaca; font-size: 0.72rem; }
 
+.kds-historico-retirados {
+  color: var(--kds-text);
+}
+.kds-historico-retirados__cabecalho {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}
+.kds-historico-retirados__cabecalho > div {
+  display: flex;
+  gap: 0.5rem;
+}
+.kds-historico-filtros {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.65rem;
+  margin: 0.75rem 0 1rem;
+  padding: 0.75rem;
+  background: var(--kds-surface);
+  border: 1px solid var(--kds-border);
+  border-radius: 8px;
+}
+.kds-historico-filtros label {
+  display: grid;
+  gap: 0.25rem;
+  color: var(--kds-muted);
+  font-size: 0.8rem;
+}
+.kds-historico-filtros input,
+.kds-historico-filtros select {
+  min-height: 2rem;
+  padding: 0.3rem 0.45rem;
+  color: var(--kds-text);
+  background: var(--kds-bg);
+  border: 1px solid var(--kds-border);
+  border-radius: 4px;
+}
+.kds-historico-pedido,
+.kds-historico-excepcional {
+  margin: 0.75rem 0;
+  padding: 0.75rem;
+  background: var(--kds-surface);
+  border: 1px solid var(--kds-border);
+  border-radius: 8px;
+  break-inside: avoid;
+}
+.kds-historico-pedido h3,
+.kds-historico-excepcional h3 {
+  margin: 0 0 0.4rem;
+}
+.kds-historico-pedido p,
+.kds-historico-excepcional p {
+  color: var(--kds-muted);
+}
+.kds-historico-pedido__tabela {
+  overflow-x: auto;
+}
+.kds-historico-pedido table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.kds-historico-pedido th,
+.kds-historico-pedido td {
+  padding: 0.5rem;
+  border: 1px solid var(--kds-border);
+  text-align: left;
+  vertical-align: top;
+  font-size: 0.82rem;
+}
+.kds-historico-pedido th {
+  background: var(--kds-surface-2);
+}
+.kds-historico-pedido small {
+  color: var(--kds-muted);
+}
+.kds-historico-paginacao {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+.kds-registros-legados {
+  margin-top: 1rem;
+}
+.kds-registros-legados summary {
+  cursor: pointer;
+  margin-bottom: 0.5rem;
+}
+
+@media print {
+  .kds-painel {
+    min-height: 0;
+    color: #111;
+    background: #fff;
+    padding: 0;
+  }
+  .kds-cabecalho,
+  .kds-historico-filtros,
+  .kds-historico-paginacao,
+  .kds-registros-legados,
+  [data-acao="imprimir-historico"],
+  [data-acao="exportar-pdf-historico"] {
+    display: none !important;
+  }
+  .kds-historico-pedido,
+  .kds-historico-excepcional {
+    color: #111;
+    background: #fff;
+    border-color: #999;
+  }
+  .kds-historico-pedido td,
+  .kds-historico-pedido th {
+    color: #111;
+    border-color: #999;
+  }
+}
+
 .kds-contador {
   min-width: 1.45rem;
   height: 1.45rem;
@@ -335,6 +453,13 @@
   font-size: 0.98rem;
   font-weight: 700;
   color: #fff;
+}
+
+.kds-item__qtd small {
+  margin-left: 0.2rem;
+  color: var(--kds-muted);
+  font-size: 0.62rem;
+  font-weight: 600;
 }
 
 .kds-item__nome {

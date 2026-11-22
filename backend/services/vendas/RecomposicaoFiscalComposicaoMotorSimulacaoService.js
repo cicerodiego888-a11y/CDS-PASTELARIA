@@ -430,6 +430,106 @@ function registrarCandidatoAcimaComComplemento(candidatos, modelos, busca, candi
 }
 
 /**
+ * Completa a referência fiscal somente até a menor composição de produtos inteiros
+ * que a cubra. O limite é o dinheiro recebido, sem alterar a regra padrão dos 20%.
+ */
+function avaliarComplementoFiscalIntegral(params = {}) {
+  const candidatoC = centavos(params.valorFiscalCandidato, 'valor_fiscal_candidato');
+  const dinheiroC = centavos(params.dinheiroDisponivel != null ? params.dinheiroDisponivel : 0, 'dinheiro_disponivel');
+  const modelos = Array.isArray(params.modelos) ? params.modelos : [];
+  const capacidade = params.capacidadePorCategoria || {};
+
+  if (candidatoC < 0 || dinheiroC < 0) {
+    throw erroAdapt('VALOR_MONETARIO_INVALIDO', 'Referência fiscal e dinheiro disponível não podem ser negativos.');
+  }
+  if (!modelos.length) {
+    return Object.freeze({
+      distribuicao_possivel: false,
+      codigo: 'COMPOSICAO_AUSENTE_NO_MOTOR',
+      motivo: 'Nenhum produto fiscal elegível foi fornecido para completar a referência.',
+      complemento_dinheiro: 0,
+      desconto_ajuste: 0,
+      itens_compostos: []
+    });
+  }
+
+  const busca = buscarComposicao(
+    modelos,
+    capacidade,
+    candidatoC + dinheiroC,
+    candidatoC,
+    params.limiteEstados,
+    { objetivo: 'MINIMO' }
+  );
+  const totalC = busca && Number(busca.totalCentavos);
+  const complementoC = totalC - candidatoC;
+  if (
+    !busca
+    || !busca.otimalidadeComprovada
+    || !Array.isArray(busca.quantidades)
+    || !quantidadesSaoInteiras(busca.quantidades)
+    || !Number.isSafeInteger(totalC)
+    || totalC < candidatoC
+    || complementoC > dinheiroC
+  ) {
+    return Object.freeze({
+      distribuicao_possivel: false,
+      codigo: 'DINHEIRO_INSUFICIENTE_COMPLEMENTO_INTEGRAL',
+      motivo: 'O dinheiro disponível não cobre uma composição fiscal integral.',
+      complemento_dinheiro: 0,
+      desconto_ajuste: 0,
+      margem_complemento_maxima: deCentavos(dinheiroC),
+      itens_compostos: [],
+      busca
+    });
+  }
+
+  const itens = comporItens(modelos, busca.quantidades);
+  if (!Array.isArray(itens) || itens.some((item) => (
+    !Number.isSafeInteger(Number(item.quantidade))
+    || Number(item.quantidade) < 0
+    || (Number(item.quantidade) > 0 && !(
+      Number(item.subtotal != null ? item.subtotal : Number(item.subtotalCentavos || 0) / 100) > 0
+    ))
+  ))) {
+    return Object.freeze({
+      distribuicao_possivel: false,
+      codigo: 'COMPOSICAO_INTEGRAL_INVALIDA',
+      motivo: 'A composição encontrada não preserva quantidades e valores integrais.',
+      complemento_dinheiro: 0,
+      desconto_ajuste: 0,
+      itens_compostos: [],
+      busca
+    });
+  }
+
+  return Object.freeze({
+    distribuicao_possivel: true,
+    codigo: complementoC > 0
+      ? 'OK_COMPLEMENTO_EXCEPCIONAL_INTEGRAL'
+      : 'OK_COMPOSICAO_EXATA',
+    motivo: complementoC > 0
+      ? 'Complemento limitado ao valor necessário para cobrir produtos fiscais integrais.'
+      : 'A composição fiscal integral coincide com a referência.',
+    valor_fiscal_candidato: deCentavos(candidatoC),
+    valor_fiscal_candidato_inicial: deCentavos(candidatoC),
+    valor_fiscal_candidato_oficial: deCentavos(totalC),
+    valor_fiscal_candidato_oficial_centavos: totalC,
+    candidato_oficial_atualizado: totalC !== candidatoC,
+    composicao_encontrada: deCentavos(totalC),
+    composicao_encontrada_centavos: totalC,
+    complemento_dinheiro: deCentavos(complementoC),
+    complemento_dinheiro_centavos: complementoC,
+    desconto_ajuste: 0,
+    desconto_ajuste_centavos: 0,
+    margem_complemento_maxima: deCentavos(dinheiroC),
+    modo: complementoC > 0 ? 'complemento_excepcional_integral' : 'exata',
+    itens_compostos: Object.freeze(itens.map((item) => Object.freeze({ ...item }))),
+    busca
+  });
+}
+
+/**
  * CDS-PDV-RECOMPOSICAO-MISTA-COMPLEMENTO-20-PORCENTO-01
  * + CDS-PDV-CORRECAO-COMPOSICAO-CANDIDATO-OFICIAL-ARREDONDAMENTO-05-CENTAVOS-01
  *
@@ -773,6 +873,7 @@ module.exports = {
   avaliarCandidatosComMotorComposicao,
   avaliarCandidatoComBuscarComposicao,
   avaliarCandidatoComComplementoDinheiro,
+  avaliarComplementoFiscalIntegral,
   /** Expostos para auditoria da Sprint — confirmam a interface oficial. */
   MOTOR_OFICIAL: 'ComposicaoFiscalPedidoService',
   INTERFACE_PUBLICA: 'simularComposicao',

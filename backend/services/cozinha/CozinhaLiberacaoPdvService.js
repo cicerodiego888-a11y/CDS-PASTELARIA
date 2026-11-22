@@ -1,6 +1,7 @@
 'use strict';
 
 const { decimalParaMilessimos } = require('./cozinhaQuantidade');
+const { classificarItemCozinha } = require('./cozinhaClassificacaoItem');
 
 function erroLiberacao(pendencias) {
   const err = new Error(
@@ -40,6 +41,63 @@ async function tabelaExiste(db, nome) {
     [nome]
   );
   return !!row;
+}
+
+async function classificarExigibilidadeCozinha(db, itemPedido) {
+  const snapshot = String(
+    itemPedido.classificacao_operacional_snapshot
+    || itemPedido.tipo_operacional_snapshot
+    || ''
+  ).trim().toUpperCase();
+  if (['NAO_COZINHA', 'SEM_COZINHA', 'NAO_EXIGE_COZINHA'].includes(snapshot)) {
+    return { exigeCozinha: false, confiavel: true, motivo: 'snapshot_sem_cozinha' };
+  }
+  if (['EXIGE_COZINHA', 'PASTEL', 'BEBIDA', 'OUTRO'].includes(snapshot)) {
+    return {
+      exigeCozinha: true,
+      confiavel: true,
+      tipo: ['PASTEL', 'BEBIDA', 'OUTRO'].includes(snapshot) ? snapshot : null,
+      motivo: 'snapshot_exige_cozinha'
+    };
+  }
+
+  const temProdutos = await tabelaExiste(db, 'produtos');
+  if (!temProdutos) {
+    return { exigeCozinha: null, confiavel: false, motivo: 'catalogo_indisponivel' };
+  }
+  const colunasProduto = new Set(
+    (await sqliteAll(db, 'PRAGMA table_info(produtos)')).map((coluna) => String(coluna.name))
+  );
+  const temCategorias = await tabelaExiste(db, 'categorias');
+  const colunasCategoria = temCategorias
+    ? new Set((await sqliteAll(db, 'PRAGMA table_info(categorias)')).map((coluna) => String(coluna.name)))
+    : new Set();
+  const categoriaJoin = colunasProduto.has('categoria_id') && colunasCategoria.has('id')
+    ? 'LEFT JOIN categorias c ON c.id = p.categoria_id'
+    : '';
+  const categoriaSelect = categoriaJoin && colunasCategoria.has('nome')
+    ? 'c.nome AS categoria_nome'
+    : 'NULL AS categoria_nome';
+  const produto = await sqliteGet(db, `
+    SELECT
+      ${colunasProduto.has('tipo_operacional') ? "COALESCE(p.tipo_operacional, 'COMERCIAL')" : "'COMERCIAL'"} AS tipo_operacional,
+      ${colunasProduto.has('comercializavel') ? 'COALESCE(p.comercializavel, 0)' : '0'} AS comercializavel,
+      ${colunasProduto.has('utiliza_ficha_tecnica') ? 'p.utiliza_ficha_tecnica' : 'NULL'} AS utiliza_ficha_tecnica,
+      ${categoriaSelect}
+    FROM produtos p
+    ${categoriaJoin}
+    WHERE p.id = ?
+  `, [itemPedido.produto_id]);
+  const classificacao = classificarItemCozinha({
+    ...(produto || {}),
+    classificacao_operacional_snapshot: snapshot
+  });
+  return {
+    exigeCozinha: classificacao.confiavel ? true : null,
+    confiavel: classificacao.confiavel,
+    tipo: classificacao.tipo,
+    motivo: classificacao.motivo
+  };
 }
 
 async function colunaExiste(db, tabela, coluna) {
@@ -320,26 +378,23 @@ async function validarLiberacaoPdv({ pedidoId, empresaId } = {}, opts = {}) {
       continue;
     }
 
-    const classificacaoExplicita = String(
-      pi.classificacao_operacional_snapshot
-      || pi.tipo_operacional_snapshot
-      || ''
-    ).trim().toUpperCase();
-    const comprovadamenteSemCozinha = [
-      'NAO_COZINHA',
-      'SEM_COZINHA',
-      'NAO_EXIGE_COZINHA'
-    ].includes(classificacaoExplicita);
-
     const itensLinha = itensKds.filter((item) => Number(item.pedido_item_id) === pedidoItemId);
 
     if (!itensLinha.length) {
-      if (comprovadamenteSemCozinha) continue;
+      const classificacao = await classificarExigibilidadeCozinha(db, pi);
+      if (classificacao.exigeCozinha === false) continue;
+      const itemExigivel = classificacao.exigeCozinha === true;
       pendencias.push({
         pedido_id: pedido,
         pedido_item_id: pedidoItemId,
-        motivo: 'ITEM_COMERCIAL_SEM_KDS',
-        descricao: 'O item comercial exigível não possui linha correspondente no KDS.',
+        motivo: itemExigivel
+          ? 'ITEM_COZINHA_SEM_ENCAMINHAMENTO'
+          : 'CLASSIFICACAO_COZINHA_AMBIGUA',
+        descricao: itemExigivel
+          ? 'O produto exige atendimento da cozinha, mas não possui encaminhamento correspondente ao KDS.'
+          : 'Não há evidência suficiente para comprovar se o produto exige atendimento da cozinha.',
+        tipo_cozinha: classificacao.tipo || null,
+        classificacao_motivo: classificacao.motivo,
         qty_exigivel: exigivelComercial,
         qty_retirada_liquida: 0,
         qty_pendente: exigivelComercial

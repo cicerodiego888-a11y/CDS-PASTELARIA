@@ -1,19 +1,25 @@
 'use strict';
 
+const Module = require('node:module');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
 const sqlite3 = require('sqlite3').verbose();
 
-const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-cozinha-ledger-s3-'));
-process.env.DB_DIR = dbDir;
+process.env.DB_DIR = ':memory:';
 process.env.CDS_TEST_ISOLATION = '1';
 process.env.CDS_BLOQUEAR_BOCO_OFICIAL = '1';
 process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
 process.env.CDS_FORCAR_LOCAL = '1';
 delete process.env.CDS_ALLOW_OFFICIAL_DB;
+
+const databasePath = require.resolve('../../backend/database');
+const databaseMock = new Module(databasePath);
+databaseMock.filename = databasePath;
+databaseMock.loaded = true;
+databaseMock.exports = {};
+require.cache[databasePath] = databaseMock;
 
 const {
   executarMigracaoSprint2
@@ -83,10 +89,19 @@ async function schema(db) {
   `);
   await run(db, 'CREATE TABLE cozinha_unidades (id INTEGER PRIMARY KEY, empresa_id INTEGER NOT NULL, codigo TEXT, UNIQUE(id,empresa_id))');
   await run(db, `
+    CREATE TABLE cozinha_turnos (
+      id INTEGER PRIMARY KEY,
+      empresa_id INTEGER NOT NULL,
+      unidade_id INTEGER NOT NULL,
+      estado TEXT NOT NULL
+    )
+  `);
+  await run(db, `
     CREATE TABLE cozinha_rodadas (
       id INTEGER PRIMARY KEY,
       empresa_id INTEGER NOT NULL,
       unidade_id INTEGER NOT NULL,
+      turno_id INTEGER,
       estado_preparacao TEXT,
       retirada_estado TEXT,
       retirada_em TEXT,
@@ -106,6 +121,7 @@ async function schema(db) {
       comanda_id INTEGER,
       pedido_id INTEGER NOT NULL,
       pedido_item_id INTEGER NOT NULL,
+      turno_id INTEGER,
       tipo_item TEXT,
       estado_preparacao TEXT,
       qty_solicitada_millis INTEGER NOT NULL,
@@ -161,13 +177,14 @@ async function schema(db) {
   await run(db, 'INSERT INTO pedidos(id,empresa_id) VALUES (10,1)');
   await run(db, 'INSERT INTO pedidos_itens(id,pedido_id,empresa_id,produto_id,quantidade) VALUES (20,10,1,30,2)');
   await run(db, 'INSERT INTO cozinha_unidades(id,empresa_id,codigo) VALUES (40,1,\'COZ1\')');
-  await run(db, 'INSERT INTO cozinha_rodadas(id,empresa_id,unidade_id,estado_preparacao,retirada_estado) VALUES (50,1,40,\'PRONTA\',\'PENDENTE\')');
+  await run(db, "INSERT INTO cozinha_turnos(id,empresa_id,unidade_id,estado) VALUES (1,1,40,'ABERTA')");
+  await run(db, 'INSERT INTO cozinha_rodadas(id,empresa_id,unidade_id,turno_id,estado_preparacao,retirada_estado) VALUES (50,1,40,1,\'PRONTA\',\'PENDENTE\')');
   await run(db, 'INSERT INTO cozinha_comandas(id,empresa_id) VALUES (60,1)');
   await run(db, `
     INSERT INTO cozinha_itens(
-      id,empresa_id,unidade_id,rodada_id,comanda_id,pedido_id,pedido_item_id,
+      id,empresa_id,unidade_id,rodada_id,comanda_id,pedido_id,pedido_item_id,turno_id,
       tipo_item,estado_preparacao,qty_solicitada_millis,qty_preparada_millis,qty_cancelada_millis
-    ) VALUES (70,1,40,50,60,10,20,'PASTEL','PRONTO',2000,2000,0)
+    ) VALUES (70,1,40,50,60,10,20,1,'PASTEL','PRONTO',2000,2000,0)
   `);
 }
 

@@ -142,6 +142,7 @@ const CATALOGO_PESQUISA_PAGINAS = Object.freeze([
     { page: 'pedidos', titulo: 'Pedidos', keywords: 'pedido orçamento', recurso: 'pedidos' },
     { page: 'mesas', titulo: 'Controle de Mesas', keywords: 'mesas salão atendimento ocupação', recurso: 'pedidos' },
     { page: 'cozinha-kds', titulo: 'Cozinha (KDS)', keywords: 'cozinha kds preparacao painel pedidos', recurso: 'pedidos' },
+    { page: 'cozinha-gerencial', titulo: 'Gestão da Cozinha', keywords: 'cozinha gerencial gestão turno desempenho pedidos', recurso: 'pedidos' },
     { page: 'faturamento', titulo: 'Expedição', keywords: 'expedição expedir pedido liberação entrega comercial', recurso: 'expedicao' },
     { page: 'central-faturamento', titulo: 'Central de Faturamento', keywords: 'faturamento fiscal nf-e emitir checklist', fiscal: true, recurso: 'nfe' },
     { page: 'caixa', titulo: 'Fechamento de Caixa', keywords: 'caixa fechamento' },
@@ -356,7 +357,7 @@ function paginaPermitidaPorImplantacao(page) {
     if (p === 'caixas' && !implantacaoPermiteMultiCaixa()) return false;
     if (p === 'entregas') return possuiRecurso('vendasEntrega');
     if (p === 'faturamento') return expedicaoHabilitada();
-    if (p === 'pedidos' || p === 'mesas' || p === 'cozinha-kds') return possuiRecurso('pedidos');
+    if (p === 'pedidos' || p === 'mesas' || p === 'cozinha-kds' || p === 'cozinha-gerencial') return possuiRecurso('pedidos');
     return true;
 }
 

@@ -177,6 +177,9 @@ function mapearItem(row, historico = {}) {
     qty_pendente_retirada: pendenteRetiradaMillis == null
       ? null
       : milessimosParaDecimalString(pendenteRetiradaMillis),
+    retirada_confirmada_por_ledger: exigivelMillis != null
+      && exigivelMillis > 0
+      && retiradaLiquidaMillis === exigivelMillis,
     qty_entregue: entregueMillis == null
       ? null
       : milessimosParaDecimalString(entregueMillis),
@@ -702,6 +705,12 @@ async function listarPainelPreparacao(entrada = {}, opts = {}) {
   );
   const limite = parseLimite(entrada.limite != null ? entrada.limite : entrada.limit);
   const offset = parseOffset(entrada.offset);
+  const turnoId = entrada.turnoId != null || entrada.turno_id != null
+    ? Number(entrada.turnoId != null ? entrada.turnoId : entrada.turno_id)
+    : null;
+  if (turnoId != null && (!Number.isInteger(turnoId) || turnoId <= 0)) {
+    throw erro('Turno inválido.', 400, 'TURNO_INVALIDO');
+  }
   const incluirCancelados = entrada.incluir_cancelados === true
     || entrada.incluirCancelados === true
     || entrada.incluir_cancelados === '1'
@@ -737,6 +746,10 @@ async function listarPainelPreparacao(entrada = {}, opts = {}) {
       AND i.empresa_id = r.empresa_id
       AND i.unidade_id = r.unidade_id
   `;
+  if (turnoId != null) {
+    where += ' AND r.turno_id = ?';
+    params.push(turnoId);
+  }
   if (!historico && !incluirPedidosCancelados) {
     where += ` AND (p.id IS NULL OR UPPER(COALESCE(p.status, '')) <> 'CANCELADO')`;
   }

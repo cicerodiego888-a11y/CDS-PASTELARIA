@@ -10,15 +10,25 @@
 
 const fs = require('fs');
 const path = require('path');
+const Module = require('node:module');
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
-const CozinhaPreparacao = require('../../backend/services/cozinha/CozinhaPreparacaoService');
 
 process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
 process.env.CDS_TEST_ISOLATION = '1';
+process.env.CDS_FORCAR_LOCAL = '1';
+delete process.env.DB_DIR;
 delete process.env.CDS_ALLOW_OFFICIAL_DB;
 delete process.env.CDS_COZINHA_IMPRESSAO_FISICA_AUTORIZADA;
 
+const databasePath = require.resolve('../../backend/database');
+const databaseMock = new Module(databasePath);
+databaseMock.filename = databasePath;
+databaseMock.loaded = true;
+databaseMock.exports = {};
+require.cache[databasePath] = databaseMock;
+
+const CozinhaPreparacao = require('../../backend/services/cozinha/CozinhaPreparacaoService');
 const kds = require('../../frontend/erp/js/cozinha-kds.js');
 
 const AGORA = new Date('2026-11-17T21:10:00-03:00');
@@ -167,7 +177,8 @@ describe('S07-1 — distribuição e FIFO', () => {
     const html = kds.htmlPainel({
       mostrarPedidosCancelados: true,
       rodadas: [rodada],
-      distribuicao: kds.distribuirPorEstado([rodada])
+      distribuicao: kds.distribuirPorEstado([rodada]),
+      turnoPendencias: []
     }, AGORA);
     assert.match(html, /pedidos comerciais cancelados/i);
     assert.match(html, /Pedido comercial cancelado/);
@@ -210,13 +221,14 @@ describe('S07-1 — distribuição e FIFO', () => {
       chamadas.push(path);
       return { success: true, empresa_id: 1, unidade_id: 3, rodadas: [] };
     });
+    const chamadasPainel = () => chamadas.filter((path) => path.startsWith('/cozinha/preparacao/painel?'));
     await control.iniciar();
     await control.alternarPedidosCancelados();
     assert.equal(control.estado.mostrarPedidosCancelados, true);
-    assert.match(chamadas[chamadas.length - 1], /incluir_pedidos_cancelados=1/);
+    assert.match(chamadasPainel()[chamadasPainel().length - 1], /incluir_pedidos_cancelados=1/);
     await control.alternarPedidosCancelados();
     assert.equal(control.estado.mostrarPedidosCancelados, false);
-    assert.match(chamadas[chamadas.length - 1], /incluir_pedidos_cancelados=0/);
+    assert.match(chamadasPainel()[chamadasPainel().length - 1], /incluir_pedidos_cancelados=0/);
     control.parar();
   });
 
@@ -249,6 +261,7 @@ describe('S07-1 — distribuição e FIFO', () => {
       distribuicao: dist,
       carregando: false,
       erro: '',
+      turnoPendencias: [],
       ultimaAtualizacao: AGORA
     }, AGORA);
     assert.match(html, /Cozinha/);
@@ -322,7 +335,7 @@ describe('S07-1 — distribuição e FIFO', () => {
     assert.doesNotMatch(control.html(), /data-acao="voltar-aguardando" data-item-id="102"/);
   });
 
-  it('apresenta retirados e histórico separado de cancelados com tempos encerrados', async () => {
+  it('mantém a coluna operacional restrita ao turno e preserva o histórico de cancelados', async () => {
     const rodadas = fixtureRodadas();
     const retirada = rodadas.find((r) => r.id === 12);
     retirada.retirada_estado = 'RETIRADA';
@@ -349,9 +362,9 @@ describe('S07-1 — distribuição e FIFO', () => {
     }));
     await control.iniciar();
     assert.match(control.html(), /data-coluna="RETIRADO"/);
-    assert.match(control.html(), /Retirada integral confirmada no ledger/);
+    assert.equal(control.estado.rodadas.length, 1);
+    assert.doesNotMatch(control.html(), /Retirada integral confirmada no ledger/);
     assert.doesNotMatch(control.html(), /Estado legado da rodada marcado como retirada/);
-    assert.match(control.html(), /Operador #7/);
     assert.doesNotMatch(control.html(), /Faltou massa/);
     await control.alternarHistoricoCancelados();
     const html = control.html();
@@ -583,17 +596,25 @@ describe('S07-1 — distribuição e FIFO', () => {
     }, { solicitarCancelamento: () => ({ motivo: 'FALTA_PRODUTO' }) });
     await control.iniciar();
     assert.equal((await control.cancelarRodada(rodada.id)).ok, true);
-    assert.doesNotMatch(chamadas[chamadas.length - 1].path, /cursor_cancelados=antigo/);
+    const consultaPainel = chamadas.filter((chamada) => chamada.path.startsWith('/cozinha/preparacao/painel?'));
+    assert.doesNotMatch(consultaPainel[consultaPainel.length - 1].path, /cursor_cancelados=antigo/);
     await control.alternarHistoricoCancelados();
     assert.match(control.html(), /Cancelamento da rodada/);
     assert.match(control.html(), /Pedido #42/);
     control.parar();
   });
 
-  it('permite paginar separadamente os históricos de retirada e cancelamento', async () => {
+  it('pagina o histórico diário usando o endpoint gerencial', async () => {
     const chamadas = [];
     const { control } = montar(async (method, path) => {
       chamadas.push(path);
+      if (path.includes('gerencial/historico-pedidos-retirados')) {
+        const query = new URLSearchParams(path.split('?')[1]);
+        return {
+          success: true, limite: 25, offset: Number(query.get('offset')) || 0,
+          total: 51, turnos: [], pedidos: [], pendencias_excepcionais: []
+        };
+      }
       return {
         success: true, empresa_id: 1, unidade_id: 3, rodadas: [],
         historico_retirados: { rodadas: [], total: 201, cursor_atual: 'ret-atual', cursor_proximo: 'ret-proximo' },
@@ -601,17 +622,12 @@ describe('S07-1 — distribuição e FIFO', () => {
       };
     });
     await control.iniciar();
-    await control.mudarPaginaHistorico('retirados', 1);
-    assert.match(chamadas[1], /cursor_retirados=ret-proximo/);
-    assert.match(chamadas[1], /cursor_cancelados=can-atual/);
-    await control.mudarPaginaHistorico('cancelados', 1);
-    assert.match(chamadas[2], /cursor_retirados=ret-atual/);
-    assert.match(chamadas[2], /cursor_cancelados=can-proximo/);
-    assert.match(control.html(), /Página 2 · 201 rodadas no snapshot/);
-    await control.mudarPaginaHistorico('retirados', -1);
-    assert.match(chamadas[3], /cursor_retirados=ret-atual/);
-    await control.atualizarHistoricos();
-    assert.doesNotMatch(chamadas[4], /cursor_retirados|cursor_cancelados/);
+    await control.alternarHistoricoPedidosRetirados();
+    assert.ok(chamadas.some((path) => path.includes('gerencial/historico-pedidos-retirados')));
+    await control.mudarPaginaHistoricoPedidosRetirados(1);
+    const consultas = chamadas.filter((path) => path.includes('gerencial/historico-pedidos-retirados'));
+    assert.equal(new URLSearchParams(consultas[1].split('?')[1]).get('offset'), '25');
+    assert.match(control.html(), /Próxima/);
   });
 
   it('ao abrir cancelados inicia novo snapshot sem alterar o de retirados', async () => {
@@ -638,17 +654,18 @@ describe('S07-1 — distribuição e FIFO', () => {
         }
       };
     });
+    const chamadasPainel = () => chamadas.filter((path) => path.startsWith('/cozinha/preparacao/painel?'));
     await control.iniciar();
     novoCancelamento = true;
     await control.atualizar();
     assert.equal(control.estado.cancelados.length, 0);
     await control.alternarHistoricoCancelados();
-    assert.match(chamadas[chamadas.length - 1], /cursor_retirados=ret-atual/);
-    assert.doesNotMatch(chamadas[chamadas.length - 1], /cursor_cancelados=/);
+    assert.doesNotMatch(chamadasPainel()[chamadasPainel().length - 1], /cursor_retirados=/);
+    assert.doesNotMatch(chamadasPainel()[chamadasPainel().length - 1], /cursor_cancelados=/);
     assert.match(control.html(), /Pedido #42/);
     assert.match(control.html(), /FALTA_PRODUTO/);
     await control.atualizar();
-    assert.match(chamadas[chamadas.length - 1], /cursor_cancelados=novo/);
+    assert.match(chamadasPainel()[chamadasPainel().length - 1], /cursor_cancelados=novo/);
     control.parar();
   });
 
@@ -657,7 +674,10 @@ describe('S07-1 — distribuição e FIFO', () => {
     const nova = adiar();
     let chamadas = 0;
     const base = { success: true, empresa_id: 1, unidade_id: 3, rodadas: [] };
-    const { control } = montar(async () => {
+    const { control } = montar(async (_method, path) => {
+      if (path === '/cozinha/turnos/status') {
+        return { success: true, estado: 'ABERTA' };
+      }
       chamadas += 1;
       if (chamadas === 1) return {
         ...base, historico_cancelados: { rodadas: [], cursor_atual: 'antigo' }
@@ -682,7 +702,7 @@ describe('S07-1 — distribuição e FIFO', () => {
     assert.equal(control.estado.paginasCancelados.cursores[0], 'novo');
     control.parar();
   });
-  it('apresenta histórico legado separado, com lacunas e paginação própria', async () => {
+  it('substitui o atalho legado por histórico de retiradas e preserva legado sem comprovante', async () => {
     const chamadas = [];
     const registro = {
       id: 8, mesa_numero: '4', numero_rodada: 2, estado_preparacao: 'CANCELADA',
@@ -701,13 +721,20 @@ describe('S07-1 — distribuição e FIFO', () => {
       if (path.includes('historico=legado')) {
         return { registros: [registro], cursor_atual: 'leg-atual', cursor_proximo: 'leg-proximo' };
       }
+      if (path.includes('gerencial/historico-pedidos-retirados')) {
+        return { total: 0, limite: 25, offset: 0, turnos: [], pedidos: [], pendencias_excepcionais: [] };
+      }
       return { empresa_id: 1, unidade_id: 3, rodadas: [] };
     });
     await control.iniciar();
     assert.equal(chamadas.some((path) => path.includes('historico=legado')), false);
+    await control.alternarHistoricoPedidosRetirados();
+    assert.match(control.html(), /Histórico de Pedidos Retirados/);
+    assert.match(control.html(), /Imprimir/);
+    assert.match(control.html(), /Exportar PDF/);
     await control.alternarHistoricoLegado();
     const html = control.html();
-    assert.match(html, /Histórico legado/);
+    assert.match(html, /Registros legados \(sem comprovação no ledger\)/);
     assert.match(html, /Cancelamento da rodada — evento ausente/);
     assert.match(html, /Cancelamento do item — evento ausente/);
     assert.match(html, /Justificativa: Somente na rodada/);
@@ -715,30 +742,60 @@ describe('S07-1 — distribuição e FIFO', () => {
     assert.match(html, /Espera: Não reconstruível/);
     assert.match(html, /Preparação: Não reconstruível/);
     assert.match(html, /Total: 00:10:00/);
-    const semEventos = kds.htmlPainel({ mostrarLegado: true, paginasLegado: { indice: 0 },
+    const semEventos = kds.htmlPainel({ mostrarHistoricoRetirados: true, mostrarLegado: true, paginasLegado: { indice: 0 },
+      turnoPendencias: [],
       rodadas: [], legado: [{ ...registro, retirada_estado: 'RETIRADA',
         retirada_em: '2026-01-01T20:14:00Z', itens: [{ ...registro.itens[0],
           estado_preparacao: 'AGUARDANDO', cancelamento_sem_evento: 0, eventos_preparacao: [] }] }] }, AGORA);
     assert.match(semEventos, /Espera: Não reconstruível/);
     assert.match(semEventos, /Preparação: Não reconstruível/);
     await control.mudarPaginaHistorico('legado', 1);
-    assert.match(chamadas[chamadas.length - 1], /historico=legado.*cursor=leg-proximo/);
+    const chamadasLegado = chamadas.filter((path) => path.includes('historico=legado'));
+    assert.match(chamadasLegado[chamadasLegado.length - 1], /cursor=leg-proximo/);
     await control.atualizarHistoricos();
-    assert.doesNotMatch(chamadas[chamadas.length - 1], /cursor=/);
+    const consultasPainel = chamadas.filter((path) => path.startsWith('/cozinha/preparacao/painel?'));
+    assert.doesNotMatch(consultasPainel[consultasPainel.length - 1], /cursor=/);
     control.parar();
   });
 
-  it('mantém o painel ativo quando a consulta do legado falha', async () => {
+  it('mantém o painel ativo quando a consulta de registros legados falha', async () => {
     const { control } = montar(async (_method, path) => {
-      if (path.includes('historico=legado')) throw new Error('Falha no histórico legado');
+      if (path.includes('historico=legado')) throw new Error('Falha nos registros legados');
+      if (path.includes('gerencial/historico-pedidos-retirados')) {
+        return { total: 0, limite: 25, offset: 0, turnos: [], pedidos: [], pendencias_excepcionais: [] };
+      }
       return { empresa_id: 1, unidade_id: 3, rodadas: fixtureRodadas() };
     });
     await control.iniciar();
+    await control.alternarHistoricoPedidosRetirados();
     await control.alternarHistoricoLegado();
     assert.equal(control.estado.erro, '');
-    assert.match(control.html(), /Falha no histórico legado/);
+    assert.match(control.html(), /Falha nos registros legados/);
     assert.ok(control.estado.rodadas.length);
     control.parar();
+  });
+
+  it('não mistura retiradas históricas às colunas operacionais do turno', async () => {
+    const rodadasAtivas = fixtureRodadas().slice(0, 1);
+    const retiradaAntiga = { ...fixtureRodadas()[2], id: 99 };
+    const { control } = montar(async (_method, path) => {
+      if (path === '/cozinha/turnos/status') return { estado: 'ABERTA', turno: { id: 4 } };
+      return {
+        empresa_id: 1,
+        unidade_id: 3,
+        rodadas: rodadasAtivas,
+        historico_retirados: { rodadas: [retiradaAntiga], total: 1 }
+      };
+    });
+    await control.iniciar();
+    assert.deepEqual(control.estado.rodadas.map((rodada) => rodada.id), [rodadasAtivas[0].id]);
+    control.parar();
+  });
+
+  it('exibe o acesso ao histórico apenas para perfis gerenciais', () => {
+    const estado = { turnoPendencias: [], rodadas: [] };
+    assert.match(kds.htmlPainel(estado, AGORA, true), /data-acao="historico-retirados"/);
+    assert.doesNotMatch(kds.htmlPainel(estado, AGORA, false), /data-acao="historico-retirados"/);
   });
 
   it('cronometra garçom ativo e congela retirada sem sobrepor períodos', () => {
@@ -862,7 +919,7 @@ describe('S07-1 — distribuição e FIFO', () => {
     const rodadaRenderizada = { ...fixtureRodadas()[2], ...card, itens: [{
       ...fixtureRodadas()[2].itens[0], ...item
     }] };
-    const html = kds.htmlPainel({ rodadas: [rodadaRenderizada],
+    const html = kds.htmlPainel({ rodadas: [rodadaRenderizada], turnoPendencias: [],
       distribuicao: kds.distribuirPorEstado([rodadaRenderizada]) }, new Date('2026-01-01T21:00:00Z'));
     assert.match(html, /00:07:00/);
     assert.match(html, /00:05:00/);
@@ -966,6 +1023,7 @@ describe('S07-1 — distribuição e FIFO', () => {
       empresaId: 1,
       unidadeId: 3,
       rodadas,
+      turnoPendencias: [],
       carregando: false,
       erro: ''
     }, AGORA);
@@ -983,6 +1041,7 @@ describe('S07-1 — distribuição e FIFO', () => {
       unidadeId: 1,
       rodadas: [],
       distribuicao: kds.distribuirPorEstado([]),
+      turnoPendencias: [],
       carregando: false,
       erro: '',
       ultimaAtualizacao: AGORA
@@ -1008,10 +1067,10 @@ describe('S07-1 — consumo API e atualização', () => {
       };
     });
     await control.iniciar();
-    assert.equal(chamadas.length, 1);
-    assert.equal(chamadas[0].method, 'GET');
-    assert.match(chamadas[0].path, /^\/cozinha\/preparacao\/painel\?/);
-    assert.match(chamadas[0].path, /limite=100/);
+    const consultaPainel = chamadas.find((chamada) => chamada.path.startsWith('/cozinha/preparacao/painel?'));
+    assert.equal(consultaPainel.method, 'GET');
+    assert.match(consultaPainel.path, /limite=100/);
+    assert.ok(chamadas.some((chamada) => chamada.path === '/cozinha/turnos/status'));
     assert.equal(control.estado.unidadeId, 3);
     assert.equal(control.estado.rodadas.length, 3);
     assert.equal(control.estado.distribuicao.AGUARDANDO.length, 2);
@@ -1080,7 +1139,8 @@ describe('S07-1 — consumo API e atualização', () => {
     assert.match(control.html(), /Concluído às/);
     assert.match(control.html(), /Operador #9/);
     assert.match(control.html(), /Item marcado como pronto/);
-    assert.equal(chamadas.filter((c) => c.method === 'GET').length, 3);
+    assert.equal(chamadas.filter((c) => c.method === 'GET'
+      && c.path.startsWith('/cozinha/preparacao/painel?')).length, 3);
     assert.deepEqual(confirmacoes, []);
   });
 
@@ -1240,7 +1300,10 @@ describe('S07-1 — consumo API e atualização', () => {
 
   it('atualização manual dispara novo GET', async () => {
     let n = 0;
-    const { control } = montar(async () => {
+    const { control } = montar(async (_method, path) => {
+      if (path === '/cozinha/turnos/status') {
+        return { success: true, estado: 'ABERTA' };
+      }
       n += 1;
       return {
         success: true,
@@ -1281,7 +1344,10 @@ describe('S07-1 — consumo API e atualização', () => {
 
   it('em erro preserva últimos dados válidos', async () => {
     let n = 0;
-    const { control } = montar(async () => {
+    const { control } = montar(async (_method, path) => {
+      if (path === '/cozinha/turnos/status') {
+        return { success: true, estado: 'ABERTA' };
+      }
       n += 1;
       if (n === 1) {
         return {

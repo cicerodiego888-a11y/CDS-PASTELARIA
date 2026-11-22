@@ -356,9 +356,11 @@ function gravarReferenciaRecomposicao(dbConnection, vendaId, avaliacao) {
   const complemento = Number(avaliacao.complemento_dinheiro_utilizado || 0);
   const descontoAjuste = Number(avaliacao.desconto_ajuste || 0);
   const dinheiroRecebido = naoFiscalInicial > 0.009 ? naoFiscalInicial : naoFiscalFinal;
-  const origem = complemento > 0.009
-    ? 'recomposicao_complemento_20'
-    : (avaliacao.origem_recomposicao || 'recomposicao_referencia');
+  const origem = avaliacao.origem_recomposicao === 'complemento_integral_produto_excepcional'
+    ? avaliacao.origem_recomposicao
+    : (complemento > 0.009
+      ? 'recomposicao_complemento_20'
+      : (avaliacao.origem_recomposicao || 'recomposicao_referencia'));
 
   return garantirSchemaVendaComposicaoReferencia(dbConnection).then(() => runSql(
     dbConnection,
@@ -550,6 +552,25 @@ function validarReferenciaFiscalFinalComComplemento({
     }
     const margem = complementoMaximoPermitidoCentavos(pagamentos || []);
     const complementoC = Math.round(complemento * 100);
+    const complementoExcepcionalIntegral = persistida.origem_recomposicao
+      === 'complemento_integral_produto_excepcional';
+    if (complementoExcepcionalIntegral && lista.some((item) => (
+      Number(item && item.valor_fiscal || 0) > 0.009
+      && (
+        !Number.isSafeInteger(Number(item.quantidade_fiscal))
+        || Number(item.quantidade_fiscal) <= 0
+      )
+    ))) {
+      return Object.freeze({
+        ok: false,
+        codigo: 'COMPLEMENTO_EXCEPCIONAL_QUANTIDADE_FRACIONADA',
+        motivo: 'Complemento excepcional exige quantidades fiscais integrais em todos os produtos fiscais.',
+        complemento,
+        referencia_pagamentos: refsPag,
+        somaFiscal,
+        somaNao
+      });
+    }
     // Dinheiro pode vir do snapshot persistido (releitura sem carimbo); a margem
     // efetiva é o maior entre a live e 20% desse dinheiro restaurado.
     const dinheiroC = Math.round(Number(dinheiro || 0) * 100);
@@ -560,7 +581,7 @@ function validarReferenciaFiscalFinalComComplemento({
       Number(margem.complemento_maximo_centavos || 0),
       margemSnapshotC
     );
-    if (!ehComplementoMoeda5Centavos(complementoC)) {
+    if (!complementoExcepcionalIntegral && !ehComplementoMoeda5Centavos(complementoC)) {
       return Object.freeze({
         ok: false,
         codigo: 'COMPLEMENTO_MOEDA_INVALIDA',
@@ -571,11 +592,19 @@ function validarReferenciaFiscalFinalComComplemento({
         somaNao
       });
     }
-    if (complementoC > margemEfetivaC || complemento - dinheiro > 0.009) {
+    if (
+      (!complementoExcepcionalIntegral && complementoC > margemEfetivaC)
+      || complemento - dinheiro > 0.009
+      || (complementoExcepcionalIntegral && descontoAjuste > 0.009)
+    ) {
       return Object.freeze({
         ok: false,
-        codigo: 'COMPLEMENTO_ACIMA_DA_MARGEM',
-        motivo: 'Complemento persistido ultrapassa 20% do dinheiro ou o disponível.',
+        codigo: complementoExcepcionalIntegral
+          ? 'COMPLEMENTO_EXCEPCIONAL_INTEGRAL_INVALIDO'
+          : 'COMPLEMENTO_ACIMA_DA_MARGEM',
+        motivo: complementoExcepcionalIntegral
+          ? 'Complemento excepcional deve usar somente dinheiro disponível e não pode reduzir o valor integral dos produtos.'
+          : 'Complemento persistido ultrapassa 20% do dinheiro ou o disponível.',
         complemento,
         margem_maxima: arredondar(margemEfetivaC / 100),
         referencia_pagamentos: refsPag,
@@ -610,7 +639,10 @@ function validarReferenciaFiscalFinalComComplemento({
       });
     }
     // Defesa: piso da margem efetiva nunca arredonda para cima.
-    if (pisoComplementoMoeda5Centavos(margemEfetivaC) < complementoC) {
+    if (
+      !complementoExcepcionalIntegral
+      && pisoComplementoMoeda5Centavos(margemEfetivaC) < complementoC
+    ) {
       return Object.freeze({
         ok: false,
         codigo: 'COMPLEMENTO_ACIMA_DA_MARGEM',

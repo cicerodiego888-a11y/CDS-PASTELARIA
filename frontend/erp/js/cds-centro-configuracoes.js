@@ -592,6 +592,38 @@
             <i class="fas fa-store"></i> Abrir Unidades
           </button>
         `, 'unidades cozinha cadastro ativo inativo')}
+        ${card('<i class="fas fa-clock text-primary"></i> Metas e horários da cozinha', `
+          <p class="cds-cfg-hint mb-3">Metas por unidade, com histórico versionado no backend.</p>
+          <div class="row g-2">
+            <div class="col-md-6">
+              <label class="cds-cfg-label" for="cozinhaEmpresaContexto">Empresa</label>
+              <select class="form-select form-select-sm" id="cozinhaEmpresaContexto"></select>
+            </div>
+            <div class="col-md-6">
+              <label class="cds-cfg-label" for="cozinhaUnidadeContexto">Unidade</label>
+              <select class="form-select form-select-sm" id="cozinhaUnidadeContexto"></select>
+            </div>
+            <div class="col-md-3">
+              <label class="cds-cfg-label" for="cozinhaMetaPreparo">Meta de preparo (min)</label>
+              <input type="number" min="1" class="form-control form-control-sm" id="cozinhaMetaPreparo">
+            </div>
+            <div class="col-md-3">
+              <label class="cds-cfg-label" for="cozinhaMetaEspera">Meta de espera (min)</label>
+              <input type="number" min="1" class="form-control form-control-sm" id="cozinhaMetaEspera">
+            </div>
+            <div class="col-md-3">
+              <label class="cds-cfg-label" for="cozinhaHorarioAbertura">Abertura</label>
+              <input type="time" class="form-control form-control-sm" id="cozinhaHorarioAbertura">
+            </div>
+            <div class="col-md-3">
+              <label class="cds-cfg-label" for="cozinhaHorarioFechamento">Fechamento</label>
+              <input type="time" class="form-control form-control-sm" id="cozinhaHorarioFechamento">
+            </div>
+          </div>
+          <button type="button" class="btn btn-primary btn-sm mt-3" id="btnSalvarCozinhaConfiguracao">
+            <i class="fas fa-save"></i> Salvar configuração da cozinha
+          </button>
+        `, 'cozinha meta preparo espera horário abertura fechamento configuração')}
       </div>
 
       <div class="cds-cfg-pane" data-cfg-pane="empresasCanalVenda">
@@ -1568,7 +1600,122 @@
     }
   }
 
+  async function carregarContextosCozinha() {
+    const token = localStorage.getItem('token');
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+    try {
+      const respEmp = await fetch(`${global.API_URL}/empresas/contexto/disponiveis`, { headers });
+      const dataEmp = await respEmp.json();
+      if (!respEmp.ok) throw new Error(dataEmp.error || dataEmp.mensagem || `HTTP ${respEmp.status}`);
+      const empresas = Array.isArray(dataEmp) ? dataEmp
+        : (Array.isArray(dataEmp.empresas) ? dataEmp.empresas : []);
+      const selEmp = document.getElementById('cozinhaEmpresaContexto');
+      if (selEmp) {
+        selEmp.innerHTML = empresas.map(e =>
+          `<option value="${escapeHtml(String(e.id))}">${escapeHtml(e.nome_fantasia || e.razao_social || `Empresa #${e.id}`)}</option>`
+        ).join('');
+      }
+      const empresaId = selEmp?.value || (empresas[0] && String(empresas[0].id));
+      if (empresaId) await carregarUnidadesCozinha(empresaId);
+      else if (selEmp) selEmp.innerHTML = '';
+    } catch (error) {
+      console.warn('[COZINHA] Falha ao carregar contexto:', error);
+    }
+  }
+
+  async function carregarUnidadesCozinha(empresaId) {
+    const selUni = document.getElementById('cozinhaUnidadeContexto');
+    if (!empresaId) {
+      if (selUni) selUni.innerHTML = '';
+      return;
+    }
+    const token = localStorage.getItem('token');
+    const headers = token ? { Authorization: `Bearer ${token}` } : {};
+    const resp = await fetch(`${global.API_URL}/cozinha/unidades-disponiveis?empresa_id=${encodeURIComponent(empresaId)}`, { headers });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || data.mensagem || `HTTP ${resp.status}`);
+    const unidades = Array.isArray(data.unidades) ? data.unidades : [];
+    if (selUni) {
+      selUni.innerHTML = unidades.map(u =>
+        `<option value="${escapeHtml(String(u.id))}">${escapeHtml(u.codigo || `Unidade #${u.id}`)}</option>`
+      ).join('');
+    }
+  }
+
+  async function carregarConfiguracaoCozinha() {
+    try {
+      const token = localStorage.getItem('token');
+      const empresaSel = document.getElementById('cozinhaEmpresaContexto')?.value;
+      const unidadeSel = document.getElementById('cozinhaUnidadeContexto')?.value;
+      if (!empresaSel || !unidadeSel) return;
+      const params = new URLSearchParams();
+      if (empresaSel) params.set('empresa_id', empresaSel);
+      if (unidadeSel) params.set('unidade_id', unidadeSel);
+      const resp = await fetch(`${global.API_URL}/cozinha/configuracoes${params.toString() ? `?${params}` : ''}`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {}
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || data.mensagem || `HTTP ${resp.status}`);
+      const cfg = data.config || {};
+      const mapa = {
+        cozinhaMetaPreparo: 'meta_preparo_minutos',
+        cozinhaMetaEspera: 'meta_espera_minutos',
+        cozinhaHorarioAbertura: 'horario_abertura',
+        cozinhaHorarioFechamento: 'horario_fechamento'
+      };
+      Object.entries(mapa).forEach(([id, chave]) => {
+        const el = document.getElementById(id);
+        if (el) el.value = cfg[chave] != null ? String(cfg[chave]) : '';
+      });
+    } catch (error) {
+      console.warn('[COZINHA] Falha ao carregar configuração:', error);
+      if (typeof global.showNotification === 'function') {
+        global.showNotification(error.message || 'Falha ao carregar configuração da cozinha.', 'danger');
+      }
+    }
+  }
+
+  async function salvarConfiguracaoCozinha() {
+    const empresaId = document.getElementById('cozinhaEmpresaContexto')?.value;
+    const unidadeId = document.getElementById('cozinhaUnidadeContexto')?.value;
+    if (!empresaId || !unidadeId) throw new Error('Selecione uma empresa e uma unidade autorizadas.');
+    const payload = { empresa_id: empresaId, unidade_id: unidadeId };
+    const campos = {
+      meta_preparo_minutos: 'cozinhaMetaPreparo',
+      meta_espera_minutos: 'cozinhaMetaEspera',
+      horario_abertura: 'cozinhaHorarioAbertura',
+      horario_fechamento: 'cozinhaHorarioFechamento'
+    };
+    Object.entries(campos).forEach(([chave, id]) => {
+      const valor = document.getElementById(id)?.value;
+      if (valor != null && String(valor).trim() !== '') payload[chave] = valor;
+    });
+    if (Object.keys(payload).length === 2) {
+      throw new Error('Preencha ao menos uma meta ou horário antes de salvar.');
+    }
+    const token = localStorage.getItem('token');
+    const resp = await fetch(`${global.API_URL}/cozinha/configuracoes`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {})
+      },
+      body: JSON.stringify(payload)
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || data.mensagem || `HTTP ${resp.status}`);
+    await carregarConfiguracaoCozinha();
+  }
+
   function wireShell() {
+    document.getElementById('btnVoltarTelaAnteriorCfg')?.addEventListener('click', () => {
+      const anterior = global.CDS_ERP_PREVIOUS_PAGE;
+      const destino = anterior && anterior !== 'configuracoes-avancadas'
+        ? anterior
+        : 'configuracoes';
+      if (typeof global.loadPage === 'function') global.loadPage(destino);
+    });
+
     document.querySelectorAll('[data-cfg-nav]').forEach((btn) => {
       btn.addEventListener('click', () => ativarCategoria(btn.getAttribute('data-cfg-nav')));
     });
@@ -1761,6 +1908,36 @@
     document.getElementById('btnAbrirEmpresasCanalVenda')?.addEventListener('click', () => {
       if (typeof global.loadPage === 'function') global.loadPage('empresas');
     });
+    document.getElementById('btnSalvarCozinhaConfiguracao')?.addEventListener('click', async () => {
+      try {
+        await salvarConfiguracaoCozinha();
+        if (typeof global.showNotification === 'function') {
+          global.showNotification('Configuração da cozinha salva e versionada.', 'success');
+        }
+      } catch (error) {
+        if (typeof global.showNotification === 'function') {
+          global.showNotification(error.message || 'Falha ao salvar configuração da cozinha.', 'danger');
+        }
+      }
+    });
+    document.getElementById('cozinhaEmpresaContexto')?.addEventListener('change', async (ev) => {
+      try {
+        await carregarUnidadesCozinha(ev.target.value);
+        await carregarConfiguracaoCozinha();
+      } catch (error) {
+        console.warn('[COZINHA] Falha ao trocar o contexto:', error);
+        if (typeof global.showNotification === 'function') {
+          global.showNotification(error.message || 'Falha ao carregar unidades da cozinha.', 'danger');
+        }
+      }
+    });
+    document.getElementById('cozinhaUnidadeContexto')?.addEventListener('change', () => {
+      void carregarConfiguracaoCozinha();
+    });
+    void (async () => {
+      await carregarContextosCozinha();
+      await carregarConfiguracaoCozinha();
+    })();
     configurarEventosCanaisVenda();
     document.getElementById('btnSalvarCanalVenda')?.addEventListener('click', salvarCanalVenda);
     document.getElementById('btnRecarregarCanaisVenda')?.addEventListener('click', carregarCanaisVenda);
@@ -1831,7 +2008,12 @@
 
         <form id="formConfigAvancadas" onsubmit="return false;">
           <div class="cds-cfg-shell">
-            <nav class="cds-cfg-nav" aria-label="Categorias de configuração">${renderNav('empresa')}</nav>
+            <nav class="cds-cfg-nav" aria-label="Categorias de configuração">
+              <button type="button" class="btn btn-outline-secondary btn-sm w-100 mb-2" id="btnVoltarTelaAnteriorCfg">
+                <i class="fas fa-arrow-left me-1"></i> Voltar
+              </button>
+              ${renderNav('empresa')}
+            </nav>
             <div class="cds-cfg-main">${renderPanes(config || {})}</div>
           </div>
         </form>

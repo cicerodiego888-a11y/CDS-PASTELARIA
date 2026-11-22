@@ -6,10 +6,14 @@
  * Versão 5: adiciona cancelamento estruturado (motivo, justificativa, operador, etc).
  * Versão 6: registra idempotência do retorno de preparo para aguardando.
  * Versão 7: registra idempotência do cancelamento individual de itens.
+ * Versão 9: persiste snapshots imutáveis dos relatórios de encerramento.
  */
 'use strict';
 
-const COZINHA_SCHEMA_VERSION = 7;
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const COZINHA_SCHEMA_VERSION = 9;
 
 const IDEMPOTENCIA_COLUNAS = Object.freeze([
   'id',
@@ -130,7 +134,13 @@ const TABELAS_COZINHA = Object.freeze([
   'cozinha_reducoes_teto',
   'cozinha_pedido_item_controle',
   'cozinha_idempotencia',
-  'cozinha_unidades'
+  'cozinha_unidades',
+  'cozinha_turnos',
+  'cozinha_turno_relatorios',
+  'cozinha_turno_pedidos',
+  'cozinha_turno_intervencoes',
+  'cozinha_configuracoes',
+  'cozinha_configuracoes_historico'
 ]);
 
 /**
@@ -163,6 +173,97 @@ function dbGet(db, sql, params = []) {
   return new Promise((resolve, reject) => {
     db.get(sql, params, (err, row) => (err ? reject(err) : resolve(row || null)));
   });
+}
+
+async function verificarBackupPreMigracao(arquivo) {
+  const sqlite3 = require('sqlite3').verbose();
+  const backupDb = await new Promise((resolve, reject) => {
+    let conexao;
+    conexao = new sqlite3.Database(arquivo, sqlite3.OPEN_READONLY, err => {
+      if (err) reject(err);
+      else resolve(conexao);
+    });
+  });
+  let integridade;
+  try {
+    integridade = await dbGet(backupDb, 'PRAGMA integrity_check');
+  } finally {
+    await new Promise((resolve, reject) => backupDb.close(err => err ? reject(err) : resolve()));
+  }
+  if (!integridade || integridade.integrity_check !== 'ok') {
+    const err = new Error('O backup pré-migração falhou na verificação SQLite integrity_check.');
+    err.codigo = 'COZINHA_BACKUP_PRE_MIGRACAO_INVALIDO';
+    throw err;
+  }
+  return integridade.integrity_check;
+}
+
+function sha256Arquivo(arquivo) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = fs.createReadStream(arquivo);
+    stream.on('data', chunk => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+function criarBackupOnline(db, destino) {
+  return new Promise((resolve, reject) => {
+    let job;
+    try {
+      if (typeof db.backup !== 'function') {
+        throw new Error('A conexão SQLite não oferece a API de backup online.');
+      }
+      job = db.backup(destino);
+      job.step(-1, stepError => {
+        if (stepError) {
+          job.finish(finishError => reject(stepError || finishError));
+          return;
+        }
+        job.finish(finishError => finishError ? reject(finishError) : resolve());
+      });
+    } catch (err) {
+      if (job && typeof job.finish === 'function') {
+        job.finish(() => reject(err));
+        return;
+      }
+      reject(err);
+    }
+  });
+}
+
+async function criarBackupPreMigracaoSeNecessario(db, versaoPersistida) {
+  if (versaoPersistida >= COZINHA_SCHEMA_VERSION || !db.dbPath) return null;
+  const { exigirCaminhosBackup } = require('../lib/sqliteOfficialGuard');
+  const pastaBackups = path.join(path.dirname(db.dbPath), 'backups');
+  const sufixo = `${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+  const arquivo = path.join(pastaBackups, `backup_cozinha_v9_${sufixo}.db`);
+  exigirCaminhosBackup({ origem: db.dbPath, destino: arquivo });
+
+  try {
+    fs.mkdirSync(pastaBackups, { recursive: true });
+    await criarBackupOnline(db, arquivo);
+    const estat = fs.statSync(arquivo);
+    if (estat.size <= 0) throw new Error('O backup SQLite resultou vazio.');
+    const integrityCheck = await verificarBackupPreMigracao(arquivo);
+    const sha256 = await sha256Arquivo(arquivo);
+    const resultado = {
+      arquivo,
+      tamanho_bytes: estat.size,
+      sha256,
+      metodo: 'sqlite_online_backup',
+      integrity_check: integrityCheck
+    };
+    console.info(
+      `[COZINHA][MIGRATION][V9][BACKUP] arquivo=${arquivo} bytes=${estat.size} ` +
+      `sha256=${sha256} integrity_check=${integrityCheck}`
+    );
+    return resultado;
+  } catch (err) {
+    if (!err.codigo) err.codigo = 'COZINHA_BACKUP_PRE_MIGRACAO_FALHA';
+    throw err;
+  }
 }
 
 function marcarCozinhaOperacional(ok, err = null) {
@@ -198,13 +299,17 @@ async function garantirConfigNotificacaoCozinha(db) {
 }
 
 async function lerVersaoSchema(db) {
-  await dbRun(db, `
-    CREATE TABLE IF NOT EXISTS cozinha_schema_meta (
-      chave TEXT PRIMARY KEY NOT NULL,
-      valor TEXT NOT NULL,
-      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
+  const metaExiste = await dbGet(db,
+    "SELECT 1 AS existe FROM sqlite_master WHERE type='table' AND name='cozinha_schema_meta'");
+  if (!metaExiste) {
+    await dbRun(db, `
+      CREATE TABLE IF NOT EXISTS cozinha_schema_meta (
+        chave TEXT PRIMARY KEY NOT NULL,
+        valor TEXT NOT NULL,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+  }
   const row = await dbGet(db, `
     SELECT valor FROM cozinha_schema_meta WHERE chave = 'schema_version'
   `);
@@ -1050,6 +1155,9 @@ async function migrarCozinhaV4paraV5(db, opts = {}) {
             idempotency_key_despacho TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT,
+            turno_id INTEGER,
+            preparacao_iniciada_em TEXT,
+            pronta_em TEXT,
             CHECK (numero_rodada > 0),
             CHECK (sequencia_global > 0),
             UNIQUE (id, empresa_id),
@@ -1287,6 +1395,194 @@ async function migrarIdempotencia(db, opts, de, para, sqlCriacao, checkAnterior,
   }
 }
 
+async function criarEstruturasRelatorioTurno(db) {
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_turnos_id_contexto
+    ON cozinha_turnos(id, empresa_id, unidade_id)
+  `);
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_turno_relatorios (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      unidade_id INTEGER NOT NULL,
+      turno_id INTEGER NOT NULL,
+      snapshot_json TEXT NOT NULL,
+      snapshot_sha256 TEXT NOT NULL,
+      gerado_em TEXT NOT NULL,
+      UNIQUE (empresa_id, unidade_id, turno_id),
+      FOREIGN KEY (turno_id, empresa_id, unidade_id)
+        REFERENCES cozinha_turnos(id, empresa_id, unidade_id),
+      FOREIGN KEY (unidade_id, empresa_id)
+        REFERENCES cozinha_unidades(id, empresa_id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE TRIGGER IF NOT EXISTS trg_cozinha_turno_relatorio_turno_fechado
+    BEFORE INSERT ON cozinha_turno_relatorios
+    WHEN NOT EXISTS (
+      SELECT 1 FROM cozinha_turnos
+      WHERE id=NEW.turno_id AND empresa_id=NEW.empresa_id
+        AND unidade_id=NEW.unidade_id AND estado='FECHADA'
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'relatorio exige turno fechado no mesmo contexto');
+    END
+  `);
+  await dbRun(db, `
+    CREATE TRIGGER IF NOT EXISTS trg_cozinha_turno_relatorio_imutavel_update
+    BEFORE UPDATE ON cozinha_turno_relatorios
+    BEGIN
+      SELECT RAISE(ABORT, 'snapshot de relatorio de turno e imutavel');
+    END
+  `);
+  await dbRun(db, `
+    CREATE TRIGGER IF NOT EXISTS trg_cozinha_turno_relatorio_imutavel_delete
+    BEFORE DELETE ON cozinha_turno_relatorios
+    BEGIN
+      SELECT RAISE(ABORT, 'snapshot de relatorio de turno e imutavel');
+    END
+  `);
+}
+
+async function validarEstruturasRelatorioTurno(db) {
+  const coluna = await dbGet(db, `
+    SELECT 1 AS existe FROM pragma_table_info('cozinha_turnos')
+    WHERE name='configuracoes_snapshot_json'
+  `);
+  if (!coluna) {
+    throw erroSchemaIncompativel('Falta cozinha_turnos.configuracoes_snapshot_json.');
+  }
+  const relatorios = await dbGet(db, `
+    SELECT 1 AS existe FROM sqlite_master
+    WHERE type='table' AND name='cozinha_turno_relatorios'
+  `);
+  if (!relatorios) throw erroSchemaIncompativel('Falta cozinha_turno_relatorios.');
+  const colunasRelatorio = await dbAll(db, 'PRAGMA table_info(cozinha_turno_relatorios)');
+  const colunasObrigatorias = [
+    'id',
+    'empresa_id',
+    'unidade_id',
+    'turno_id',
+    'snapshot_json',
+    'snapshot_sha256',
+    'gerado_em'
+  ];
+  for (const nome of colunasObrigatorias) {
+    if (!colunasRelatorio.some(c => c.name === nome)) {
+      throw erroSchemaIncompativel(`Falta coluna cozinha_turno_relatorios.${nome}.`);
+    }
+  }
+  for (const nome of ['empresa_id', 'unidade_id', 'turno_id', 'snapshot_json', 'snapshot_sha256', 'gerado_em']) {
+    const colunaRelatorio = colunasRelatorio.find(c => c.name === nome);
+    if (Number(colunaRelatorio.notnull) !== 1) {
+      throw erroSchemaIncompativel(`A coluna cozinha_turno_relatorios.${nome} deve ser NOT NULL.`);
+    }
+  }
+
+  const unicoPorContexto = await indiceUnicoComColunas(
+    db,
+    'cozinha_turnos',
+    ['id', 'empresa_id', 'unidade_id']
+  );
+  if (!unicoPorContexto) {
+    throw erroSchemaIncompativel('Falta índice único do turno por contexto.');
+  }
+  const unicoPorTurno = await indiceUnicoComColunas(
+    db,
+    'cozinha_turno_relatorios',
+    ['empresa_id', 'unidade_id', 'turno_id']
+  );
+  if (!unicoPorTurno) {
+    throw erroSchemaIncompativel('Falta unicidade do relatório por turno.');
+  }
+
+  const gatilhos = [
+    [
+      'trg_cozinha_turno_relatorio_turno_fechado',
+      'BEFORE INSERT',
+      ['FECHADA', 'NEW.TURNO_ID', 'NEW.EMPRESA_ID', 'NEW.UNIDADE_ID', 'RAISE(ABORT']
+    ],
+    ['trg_cozinha_turno_relatorio_imutavel_update', 'BEFORE UPDATE', ['RAISE(ABORT']],
+    ['trg_cozinha_turno_relatorio_imutavel_delete', 'BEFORE DELETE', ['RAISE(ABORT']]
+  ];
+  for (const [nome, evento, regras] of gatilhos) {
+    const trigger = await dbGet(db, `
+      SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?
+    `, [nome]);
+    const sql = String(trigger && trigger.sql || '').toUpperCase();
+    if (!trigger || !sql.includes(evento) || !regras.every(regra => sql.includes(regra))) {
+      throw erroSchemaIncompativel(`Trigger ${nome} ausente ou incompatível.`);
+    }
+  }
+
+  const fkRelatorio = await dbAll(db, 'PRAGMA foreign_key_list(cozinha_turno_relatorios)');
+  const fkTurno = fkRelatorio.filter(fk => fk.table === 'cozinha_turnos')
+    .sort((a, b) => Number(a.seq) - Number(b.seq));
+  if (fkTurno.map(fk => `${fk.from}:${fk.to}`).join('|') !== 'turno_id:id|empresa_id:empresa_id|unidade_id:unidade_id') {
+    throw erroSchemaIncompativel('A relação do relatório com o turno está incompatível.');
+  }
+  const fkUnidade = fkRelatorio.filter(fk => fk.table === 'cozinha_unidades')
+    .sort((a, b) => Number(a.seq) - Number(b.seq));
+  if (fkUnidade.map(fk => `${fk.from}:${fk.to}`).join('|') !== 'unidade_id:id|empresa_id:empresa_id') {
+    throw erroSchemaIncompativel('A relação do relatório com a unidade está incompatível.');
+  }
+  if (!await indiceUnicoComColunas(db, 'cozinha_unidades', ['id', 'empresa_id'])) {
+    throw erroSchemaIncompativel('Falta a chave única da unidade por empresa.');
+  }
+}
+
+async function registrarBackupPreMigracao(db, backup) {
+  if (!backup) return;
+  const valor = JSON.stringify(backup);
+  await dbRun(db, `
+    INSERT INTO cozinha_schema_meta (chave, valor, updated_at)
+    VALUES ('schema_v9_backup', ?, datetime('now'))
+    ON CONFLICT(chave) DO UPDATE SET
+      valor=excluded.valor, updated_at=datetime('now')
+  `, [valor]);
+}
+
+async function migrarSchemaV8paraV9(db) {
+  await dbRun(db, 'BEGIN IMMEDIATE');
+  try {
+    const turnos = await dbGet(db, `
+      SELECT 1 AS existe FROM sqlite_master WHERE type='table' AND name='cozinha_turnos'
+    `);
+    if (!turnos) throw erroSchemaIncompativel('A tabela cozinha_turnos não existe no schema v8.');
+
+    const colunas = await dbAll(db, 'PRAGMA table_info(cozinha_turnos)');
+    if (!colunas.some(c => c.name === 'configuracoes_snapshot_json')) {
+      await dbRun(db, 'ALTER TABLE cozinha_turnos ADD COLUMN configuracoes_snapshot_json TEXT');
+    }
+    await criarEstruturasRelatorioTurno(db);
+    await validarEstruturasRelatorioTurno(db);
+    await gravarVersaoSchema(db, COZINHA_SCHEMA_VERSION);
+    await dbRun(db, 'COMMIT');
+    return { migrado: true, de: 8, para: COZINHA_SCHEMA_VERSION };
+  } catch (err) {
+    try { await dbRun(db, 'ROLLBACK'); }
+    catch (rollbackErr) { err.rollbackError = rollbackErr; }
+    throw err;
+  }
+}
+
+function erroSchemaIncompativel(mensagem) {
+  const err = new Error(`[COZINHA] Schema incompatível: ${mensagem}`);
+  err.codigo = 'COZINHA_SCHEMA_INCOMPATIVEL';
+  return err;
+}
+
+async function indiceUnicoComColunas(db, tabela, esperadas) {
+  const indices = await dbAll(db, `PRAGMA index_list("${tabela}")`);
+  for (const indice of indices) {
+    if (Number(indice.unique) !== 1) continue;
+    const nome = String(indice.name).replace(/"/g, '""');
+    const colunas = await dbAll(db, `PRAGMA index_info("${nome}")`);
+    if (colunas.map(c => c.name).join('|') === esperadas.join('|')) return true;
+  }
+  return false;
+}
+
 async function criarTabelasCozinha(db) {
   // —— Unidades ——
   await dbRun(db, `
@@ -1514,6 +1810,7 @@ async function criarTabelasCozinha(db) {
     CREATE TABLE IF NOT EXISTS cozinha_bebida_entregas (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       empresa_id INTEGER NOT NULL,
+      unidade_id INTEGER,
       cozinha_item_id INTEGER NOT NULL,
       rodada_id INTEGER NOT NULL,
       qty_entregue_millis INTEGER NOT NULL,
@@ -1802,6 +2099,140 @@ async function criarTabelasCozinha(db) {
     ON cozinha_idempotencia(situacao, created_at)
   `);
 
+  // —— Turnos de cozinha e auditoria aditiva (v8) ——
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_turnos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      unidade_id INTEGER NOT NULL,
+      estado TEXT NOT NULL DEFAULT 'ABERTA'
+        CHECK (estado IN ('ABERTA', 'FECHADA')),
+      abertura_operador_id INTEGER NOT NULL,
+      abertura_em TEXT NOT NULL,
+      fechamento_operador_id INTEGER,
+      fechamento_em TEXT,
+      fechamento_tipo TEXT
+        CHECK (fechamento_tipo IS NULL OR fechamento_tipo IN ('NORMAL', 'EXCEPCIONAL')),
+      fechamento_justificativa TEXT,
+      configuracoes_snapshot_json TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT,
+      FOREIGN KEY (unidade_id, empresa_id)
+        REFERENCES cozinha_unidades(id, empresa_id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_cozinha_turno_aberto_por_unidade
+    ON cozinha_turnos(empresa_id, unidade_id) WHERE estado = 'ABERTA'
+  `);
+  await dbRun(db, `
+    CREATE INDEX IF NOT EXISTS idx_cozinha_turnos_unidade_estado
+    ON cozinha_turnos(empresa_id, unidade_id, estado, abertura_em)
+  `);
+  await criarEstruturasRelatorioTurno(db);
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_turno_pedidos (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      unidade_id INTEGER NOT NULL,
+      turno_id INTEGER NOT NULL,
+      pedido_id INTEGER NOT NULL,
+      pedido_item_id INTEGER,
+      cozinha_item_id INTEGER,
+      rodada_id INTEGER,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (empresa_id, unidade_id, turno_id, pedido_id, pedido_item_id, cozinha_item_id, rodada_id)
+    )
+  `);
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_turno_intervencoes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      unidade_id INTEGER NOT NULL,
+      turno_id INTEGER,
+      tipo TEXT NOT NULL,
+      operador_id INTEGER,
+      observacao TEXT,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_configuracoes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      unidade_id INTEGER NOT NULL,
+      chave TEXT NOT NULL,
+      valor TEXT NOT NULL,
+      tipo TEXT NOT NULL DEFAULT 'TEXT',
+      versao INTEGER NOT NULL DEFAULT 1,
+      ativo INTEGER NOT NULL DEFAULT 1,
+      criado_por INTEGER,
+      updated_by INTEGER,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (empresa_id, unidade_id, chave)
+    )
+  `);
+  await dbRun(db, `
+    CREATE TABLE IF NOT EXISTS cozinha_configuracoes_historico (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      empresa_id INTEGER NOT NULL,
+      unidade_id INTEGER NOT NULL,
+      chave TEXT NOT NULL,
+      valor TEXT NOT NULL,
+      versao INTEGER NOT NULL,
+      alterado_por INTEGER,
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  const adicionarColunaTurno = async (tabela) => {
+    const existente = await dbGet(db,
+      "SELECT 1 AS existe FROM sqlite_master WHERE type='table' AND name=?",
+      [tabela]);
+    if (!existente) return;
+    const colunas = await dbAll(db, `PRAGMA table_info("${tabela}")`);
+    if (!colunas.some(c => c.name === 'turno_id')) {
+      await dbRun(db, `ALTER TABLE "${tabela}" ADD COLUMN turno_id INTEGER`);
+      if (tabela === 'cozinha_bebida_entregas') {
+        await dbRun(db, `CREATE INDEX IF NOT EXISTS idx_cozinha_bebida_entregas_turno ON "${tabela}"(empresa_id, turno_id)`);
+      } else {
+        await dbRun(db, `CREATE INDEX IF NOT EXISTS idx_${tabela}_turno ON "${tabela}"(empresa_id, unidade_id, turno_id)`);
+      }
+    }
+  };
+  await adicionarColunaTurno('cozinha_rodadas');
+  await adicionarColunaTurno('cozinha_itens');
+  await adicionarColunaTurno('cozinha_retirada_itens');
+  await adicionarColunaTurno('cozinha_cancelamento_itens');
+  await adicionarColunaTurno('cozinha_bebida_entregas');
+  const bebidaExiste = await dbGet(db,
+    "SELECT 1 AS existe FROM sqlite_master WHERE type='table' AND name='cozinha_bebida_entregas'");
+  if (bebidaExiste) {
+    const bebidaCols = await dbAll(db, 'PRAGMA table_info("cozinha_bebida_entregas")');
+    if (!bebidaCols.some(c => c.name === 'unidade_id')) {
+      await dbRun(db, 'ALTER TABLE "cozinha_bebida_entregas" ADD COLUMN unidade_id INTEGER');
+    }
+  }
+
+  const adicionarColunaSeAusente = async (tabela, coluna, definicao) => {
+    const existente = await dbGet(db,
+      "SELECT 1 AS existe FROM sqlite_master WHERE type='table' AND name=?",
+      [tabela]);
+    if (!existente) return;
+    const colunas = await dbAll(db, `PRAGMA table_info("${tabela}")`);
+    if (!colunas.some(c => c.name === coluna)) {
+      await dbRun(db, `ALTER TABLE "${tabela}" ADD COLUMN "${coluna}" ${definicao}`);
+    }
+  };
+  await adicionarColunaSeAusente('cozinha_rodadas', 'preparacao_iniciada_em', 'TEXT');
+  await adicionarColunaSeAusente('cozinha_rodadas', 'pronta_em', 'TEXT');
+  await adicionarColunaSeAusente('cozinha_itens', 'preparo_iniciado_em', 'TEXT');
+  await adicionarColunaSeAusente('cozinha_itens', 'pronto_em', 'TEXT');
+  await adicionarColunaSeAusente('cozinha_turnos', 'meta_preparo_minutos_snapshot', 'INTEGER');
+  await adicionarColunaSeAusente('cozinha_turnos', 'meta_espera_minutos_snapshot', 'INTEGER');
+  await adicionarColunaSeAusente('cozinha_turnos', 'configuracoes_snapshot_json', 'TEXT');
+
   await garantirIndiceEstacoesCodigoPorUnidade(db);
 }
 
@@ -1836,7 +2267,15 @@ async function garantirSchemaCozinhaSemConcorrencia(db, opts = {}) {
 
   try {
     await dbRun(db, 'PRAGMA foreign_keys = ON');
+    const metaExiste = await dbGet(db,
+      "SELECT 1 AS existe FROM sqlite_master WHERE type='table' AND name='cozinha_schema_meta'");
+    const metaAntes = metaExiste
+      ? await dbGet(db, "SELECT valor FROM cozinha_schema_meta WHERE chave='schema_version'")
+      : null;
+    const versaoPersistida = metaAntes ? Number(metaAntes.valor) : 0;
+    const backupPreMigracao = await criarBackupPreMigracaoSeNecessario(db, versaoPersistida);
     const versaoAtual = await lerVersaoSchema(db);
+    await registrarBackupPreMigracao(db, backupPreMigracao);
 
     if (versaoAtual > COZINHA_SCHEMA_VERSION) {
       const err = new Error(
@@ -1857,8 +2296,13 @@ async function garantirSchemaCozinhaSemConcorrencia(db, opts = {}) {
     let detalheMigracaoV3V4 = null;
     let detalheMigracaoV4V5 = null;
     let detalheMigracaoV5V6 = null;
+    let detalheMigracaoV8V9 = null;
 
-    if (versaoAtual === 2) {
+    if (versaoAtual === COZINHA_SCHEMA_VERSION) {
+      // Schema vigente: validar somente, sem executar DDL.
+    } else if (versaoAtual === 8) {
+      detalheMigracaoV8V9 = await migrarSchemaV8paraV9(db);
+    } else if (versaoAtual === 2) {
       detalheMigracaoV2V3 = await migrarCozinhaV2paraV3(db, opts);
       migradoV2V3 = !!detalheMigracaoV2V3.migrado;
       await criarTabelasCozinha(db);
@@ -1928,6 +2372,11 @@ async function garantirSchemaCozinhaSemConcorrencia(db, opts = {}) {
       }
     }
 
+    // v9 — relatório imutável do fechamento e snapshot integral da configuração do turno.
+    if (versaoAtual < COZINHA_SCHEMA_VERSION && !detalheMigracaoV8V9) {
+      await gravarVersaoSchema(db, COZINHA_SCHEMA_VERSION);
+    }
+
     const versaoFinal = await lerVersaoSchema(db);
     if (versaoFinal !== COZINHA_SCHEMA_VERSION) {
       const err = new Error(
@@ -1936,12 +2385,15 @@ async function garantirSchemaCozinhaSemConcorrencia(db, opts = {}) {
       err.codigo = 'COZINHA_SCHEMA_FALHA';
       throw err;
     }
+    await validarEstruturasRelatorioTurno(db);
 
     marcarCozinhaOperacional(true);
     return {
       skipped: false,
       operacional: true,
       versao: COZINHA_SCHEMA_VERSION,
+      backup_pre_migracao: backupPreMigracao,
+      migracao_v8_v9: detalheMigracaoV8V9,
       recriado,
       migrado_v2_v3: migradoV2V3,
       migrado_v3_v4: migradoV3V4,

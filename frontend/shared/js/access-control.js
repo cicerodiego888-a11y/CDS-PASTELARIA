@@ -23,6 +23,7 @@ const PERMISSOES_PAGINAS = {
     pedidos: 'vendas',
     mesas: 'vendas',
     'cozinha-kds': 'vendas',
+    'cozinha-gerencial': 'vendas',
     'cozinha-unidades': 'configuracoes',
     'cozinha-roteamento': 'configuracoes',
     'nfe-central': 'fiscal',
@@ -244,6 +245,11 @@ function usuarioTemPermissao(page) {
 
     if (page === 'central-diagnostico' || page === 'dfe-auditoria') {
         return usuarioPodeAcessarDiagnosticoCentral();
+    }
+
+    if (page === 'cozinha-gerencial') {
+        return String(role || '').trim().toLowerCase() === 'gerente'
+            || ['GERENTE', 'SUPER_ADMIN'].includes(String(perfil || '').trim().toUpperCase());
     }
 
     if (page === 'usuarios') {

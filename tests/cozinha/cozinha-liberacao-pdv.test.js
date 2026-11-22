@@ -50,7 +50,11 @@ function close(db) {
 }
 
 async function schema(db) {
-  await run(db, 'CREATE TABLE pedidos (id INTEGER PRIMARY KEY, empresa_id INTEGER NOT NULL)');
+  await run(db, `CREATE TABLE pedidos (
+    id INTEGER PRIMARY KEY,
+    empresa_id INTEGER NOT NULL,
+    status TEXT DEFAULT 'PEDIDO'
+  )`);
   await run(db, `CREATE TABLE pedidos_itens (
     id INTEGER PRIMARY KEY,
     pedido_id INTEGER NOT NULL,

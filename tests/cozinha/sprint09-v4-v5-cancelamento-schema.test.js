@@ -83,6 +83,21 @@ function fechaDb(db) {
   });
 }
 
+async function removerArquivoComRetry(dbPath) {
+  for (let tentativa = 0; tentativa < 10; tentativa += 1) {
+    try {
+      for (const caminho of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`]) {
+        if (fs.existsSync(caminho)) fs.unlinkSync(caminho);
+      }
+      return;
+    } catch (err) {
+      if (err.code !== 'EBUSY' && err.code !== 'EPERM') throw err;
+      await new Promise(resolve => setTimeout(resolve, 50 * (tentativa + 1)));
+    }
+  }
+  return;
+}
+
 async function teste_schema_v5_criacao_novo_banco() {
   const { db, tmpDir, dbPath } = await setup();
   try {
@@ -90,7 +105,7 @@ async function teste_schema_v5_criacao_novo_banco() {
 
     const resultado = await garantirSchemaCozinha(db);
     assert(resultado.operacional === true, 'Schema deve estar operacional');
-    assert(resultado.versao === 7, `Versão esperada 7, obtida ${resultado.versao}`);
+    assert(resultado.versao === 9, `Versão esperada 9, obtida ${resultado.versao}`);
 
     const rodadasInfo = await dbAll(db, 'PRAGMA table_info(cozinha_rodadas)');
     const colNomes = rodadasInfo.map(c => c.name);
@@ -114,9 +129,7 @@ async function teste_schema_v5_criacao_novo_banco() {
     console.log('[PASS] schema v5 — criação em banco novo');
   } finally {
     await fechaDb(db);
-    if (fs.existsSync(dbPath)) {
-      fs.unlinkSync(dbPath);
-    }
+    await removerArquivoComRetry(dbPath);
   }
 }
 
@@ -204,7 +217,7 @@ async function teste_migracao_v4_populado(rodadasJaAtualizadas) {
 
     const resultado = await garantirSchemaCozinha(db);
     assert.strictEqual(resultado.operacional, true);
-    assert.strictEqual((await dbGet(db, `SELECT valor FROM cozinha_schema_meta WHERE chave='schema_version'`)).valor, '7');
+    assert.strictEqual((await dbGet(db, `SELECT valor FROM cozinha_schema_meta WHERE chave='schema_version'`)).valor, '9');
     assert.deepStrictEqual(await dbGet(db, 'SELECT id, empresa_id, unidade_id, mesa_id FROM cozinha_rodadas'), rodadaAntes);
     assert.deepStrictEqual(await dbGet(db, 'SELECT * FROM cozinha_itens'), itemAntes);
     assert.deepStrictEqual(await dbGet(db, 'SELECT * FROM cozinha_idempotencia'), idempotenciaAntes);
@@ -219,7 +232,7 @@ async function teste_migracao_v4_populado(rodadasJaAtualizadas) {
     console.log(`[PASS] migração v4 populada, rodadas atualizadas: ${rodadasJaAtualizadas}`);
   } finally {
     await fechaDb(db);
-    if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+    await removerArquivoComRetry(dbPath);
   }
 }
 
@@ -238,7 +251,7 @@ async function teste_migracao_preserva_sequencia_vazia() {
     console.log('[PASS] sequências preservadas em tabelas vazias');
   } finally {
     await fechaDb(db);
-    if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+    await removerArquivoComRetry(dbPath);
   }
 }
 
@@ -280,10 +293,10 @@ async function teste_migracao_v5_para_v6() {
     const inserido = await dbRun(db, `INSERT INTO cozinha_idempotencia (idempotency_key, tipo_operacao, payload_hash)
       VALUES ('novo-retorno', 'PREPARACAO_REVERTIDA', 'hash')`);
     assert(inserido.lastID > 100);
-    assert.strictEqual((await garantirSchemaCozinha(db)).versao, 7);
+    assert.strictEqual((await garantirSchemaCozinha(db)).versao, 9);
   } finally {
     await fechaDb(db);
-    if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+    await removerArquivoComRetry(dbPath);
   }
 }
 
@@ -325,7 +338,7 @@ async function teste_migracao_v6_para_v7() {
     assert(inserido.lastID > 100);
   } finally {
     await fechaDb(db);
-    if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
+    await removerArquivoComRetry(dbPath);
   }
 }
 

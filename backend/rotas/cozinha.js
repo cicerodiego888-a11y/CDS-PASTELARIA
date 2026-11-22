@@ -16,6 +16,7 @@ const { empresaIdDoReqPedido } = require('../services/pedido/empresaIdDoReqPedid
 const CozinhaDespacho = require('../services/cozinha/CozinhaDespachoService');
 const CozinhaPreparacao = require('../services/cozinha/CozinhaPreparacaoService');
 const CozinhaKdsPainel = require('../services/cozinha/CozinhaKdsPainelService');
+const CozinhaHistoricoPedidos = require('../services/cozinha/CozinhaHistoricoPedidosService');
 const CozinhaSessaoUnidade = require('../services/cozinha/CozinhaSessaoUnidadeService');
 const CozinhaUnidadeCadastro = require('../services/cozinha/CozinhaUnidadeCadastroService');
 const CozinhaRoteamentoConfig = require('../services/cozinha/CozinhaRoteamentoConfigService');
@@ -23,6 +24,7 @@ const CozinhaCanais = require('../services/cozinha/CozinhaCanaisService');
 const CozinhaImpressaoEstacao = require('../services/cozinha/CozinhaImpressaoEstacaoService');
 const CozinhaImpressaoFila = require('../services/cozinha/CozinhaImpressaoFilaService');
 const CozinhaRetiradaLedger = require('../services/cozinha/CozinhaRetiradaLedgerService');
+const CozinhaTurno = require('../services/cozinha/CozinhaTurnoService');
 const { verificarToken } = require('../middleware/auth');
 const { exigirSenhaAdmin } = require('../middleware/exigirSenhaAdmin');
 const {
@@ -49,6 +51,7 @@ function responderErro(res, err) {
     codigo: err.codigo || err.code || undefined
   };
   if (err.detalhes) payload.detalhes = err.detalhes;
+  if (Array.isArray(err.pendencias)) payload.pendencias = err.pendencias;
   return res.status(status).json(payload);
 }
 
@@ -61,6 +64,20 @@ function operadorDaSessao(req) {
     throw err;
   }
   return id;
+}
+
+async function exigirTurnoDaRequisicao(req) {
+  return CozinhaTurno.exigirTurnoAberto({
+    empresaId: empresaIdDoReqPedido(req),
+    unidadeId: resolverUnidadeOperacionalReq(req)
+  }, { db });
+}
+
+async function contextoGerencialDaRequisicao(req) {
+  return CozinhaTurno.exigirAcessoGerencial({
+    operadorId: operadorDaSessao(req),
+    unidadeId: resolverUnidadeOperacionalReq(req)
+  }, { db });
 }
 
 function chaveIdempotencia(req) {
@@ -82,6 +99,180 @@ router.get('/status', (req, res) => {
   });
 });
 
+router.get('/turnos/status', async (req, res) => {
+  try {
+    const out = await CozinhaTurno.statusTurno({
+      empresaId: empresaIdDoReqPedido(req),
+      unidadeId: resolverUnidadeOperacionalReq(req)
+    }, { db });
+    return res.status(200).json(out);
+  } catch (err) { return responderErro(res, err); }
+});
+
+router.post('/turnos/abrir', async (req, res) => {
+  try {
+    const out = await CozinhaTurno.abrirTurno({
+      empresaId: empresaIdDoReqPedido(req),
+      unidadeId: resolverUnidadeOperacionalReq(req),
+      operadorId: operadorDaSessao(req)
+    }, { db });
+    return res.status(201).json(out);
+  } catch (err) { return responderErro(res, err); }
+});
+
+router.post('/turnos/fechar', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const contexto = await contextoGerencialDaRequisicao(req);
+    const empresaInformada = empresaIdDoReqPedido(req);
+    const out = await CozinhaTurno.fecharTurno({
+      empresaId: empresaInformada == null ? contexto.empresaId : empresaInformada,
+      unidadeId: contexto.unidadeId,
+      operadorId: contexto.operadorId,
+      tipo: body.tipo,
+      justificativa: body.justificativa
+    }, { db });
+    return res.status(200).json(out);
+  } catch (err) { return responderErro(res, err); }
+});
+
+router.get('/turnos/historico', async (req, res) => {
+  try {
+    const contexto = await contextoGerencialDaRequisicao(req);
+    const out = await CozinhaTurno.listarHistorico({
+      empresaId: contexto.empresaId,
+      unidadeId: contexto.unidadeId,
+      limite: req.query.limit
+    }, { db });
+    return res.status(200).json(out);
+  } catch (err) { return responderErro(res, err); }
+});
+
+router.get('/gerencial/historico-pedidos-retirados', async (req, res) => {
+  try {
+    const out = await CozinhaHistoricoPedidos.listarHistoricoPedidosRetirados({
+      operadorId: operadorDaSessao(req),
+      unidadeId: resolverUnidadeOperacionalReq(req),
+      data: req.query.data,
+      turnoId: req.query.turno_id,
+      pedido: req.query.pedido,
+      mesa: req.query.mesa,
+      garcom: req.query.garcom,
+      produto: req.query.produto,
+      categoria: req.query.categoria,
+      limite: req.query.limite,
+      offset: req.query.offset
+    }, { db });
+    return res.status(200).json(out);
+  } catch (err) { return responderErro(res, err); }
+});
+
+router.get('/turnos/:id/relatorio', async (req, res) => {
+  try {
+    const contexto = await contextoGerencialDaRequisicao(req);
+    const out = await CozinhaTurno.gerarRelatorio({
+      empresaId: contexto.empresaId,
+      unidadeId: contexto.unidadeId,
+      turnoId: req.params.id
+    }, { db });
+    return res.status(200).json(out);
+  } catch (err) { return responderErro(res, err); }
+});
+
+router.get('/gerencial/painel', async (req, res) => {
+  try {
+    const contexto = await contextoGerencialDaRequisicao(req);
+    const status = await CozinhaTurno.statusTurno({
+      empresaId: contexto.empresaId,
+      unidadeId: contexto.unidadeId
+    }, { db });
+    const turno = status.turno;
+    const historico = turno ? null : await CozinhaTurno.listarHistorico({
+      empresaId: contexto.empresaId,
+      unidadeId: contexto.unidadeId,
+      limite: 1
+    }, { db });
+    const turnoRelatorio = turno || (historico && historico.turnos[0]) || null;
+    const painel = turno
+      ? await CozinhaKdsPainel.listarPainelPreparacao({
+        empresaId: contexto.empresaId,
+        unidadeId: contexto.unidadeId,
+        turnoId: turno.id,
+        limite: 100,
+        fila: 'ativa'
+      }, { db })
+      : { success: true, empresa_id: contexto.empresaId, unidade_id: contexto.unidadeId, rodadas: [] };
+    const relatorio = turnoRelatorio
+      ? await CozinhaTurno.gerarRelatorio({
+        empresaId: contexto.empresaId,
+        unidadeId: contexto.unidadeId,
+        turnoId: turnoRelatorio.id
+      }, { db })
+      : null;
+    return res.status(200).json({
+      success: true,
+      empresa_id: contexto.empresaId,
+      unidade: { id: contexto.unidadeId, codigo: contexto.unidadeCodigo },
+      operador_nome: contexto.operadorNome,
+      estado: status.estado,
+      turno,
+      turno_relatorio: turnoRelatorio,
+      painel,
+      relatorio
+    });
+  } catch (err) { return responderErro(res, err); }
+});
+
+router.get('/gerencial/turnos/historico', async (req, res) => {
+  try {
+    const contexto = await contextoGerencialDaRequisicao(req);
+    const out = await CozinhaTurno.listarHistorico({
+      empresaId: contexto.empresaId,
+      unidadeId: contexto.unidadeId,
+      limite: req.query.limit
+    }, { db });
+    return res.status(200).json(out);
+  } catch (err) { return responderErro(res, err); }
+});
+
+router.get('/gerencial/turnos/:id/relatorio', async (req, res) => {
+  try {
+    const contexto = await contextoGerencialDaRequisicao(req);
+    const out = await CozinhaTurno.gerarRelatorio({
+      empresaId: contexto.empresaId,
+      unidadeId: contexto.unidadeId,
+      turnoId: req.params.id
+    }, { db });
+    return res.status(200).json(out);
+  } catch (err) { return responderErro(res, err); }
+});
+
+router.get('/configuracoes', async (req, res) => {
+  try {
+    const empresaRaw = req.query.empresa_id != null ? req.query.empresa_id : req.query.empresaId;
+    const unidadeRaw = req.query.unidade_id != null ? req.query.unidade_id : req.query.unidadeCozinhaId;
+    const out = await CozinhaTurno.obterConfiguracoes({
+      empresaId: empresaRaw != null ? empresaRaw : empresaIdDoReqPedido(req),
+      unidadeId: unidadeRaw != null ? unidadeRaw : resolverUnidadeOperacionalReq(req),
+      operadorId: operadorDaSessao(req)
+    }, { db });
+    return res.status(200).json(out);
+  } catch (err) { return responderErro(res, err); }
+});
+
+router.put('/configuracoes', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const out = await CozinhaTurno.salvarConfiguracoes({
+      empresaId: body.empresa_id != null ? body.empresa_id : empresaIdDoReqPedido(req),
+      unidadeId: body.unidade_id != null ? body.unidade_id : resolverUnidadeOperacionalReq(req),
+      operadorId: operadorDaSessao(req),
+      config: req.body || {}
+    }, { db });
+    return res.status(200).json(out);
+  } catch (err) { return responderErro(res, err); }
+});
+
 function exigirCozinhaOperacional(res) {
   if (isCozinhaOperacional()) return true;
   const st = getCozinhaSchemaStatus();
@@ -99,6 +290,10 @@ function exigirCozinhaOperacional(res) {
 router.post('/despacho', async (req, res) => {
   try {
     if (!exigirCozinhaOperacional(res)) return;
+    await CozinhaTurno.exigirTurnoAberto({
+      empresaId: empresaIdDoReqPedido(req),
+      unidadeId: resolverUnidadeOperacionalReq(req)
+    }, { db });
     const body = req.body || {};
     const out = await CozinhaDespacho.despacharLote({
       empresaId: empresaIdDoReqPedido(req),
@@ -109,6 +304,23 @@ router.post('/despacho', async (req, res) => {
       atendimento_id: body.atendimento_id,
       itens: body.itens
     });
+    const turnoDespacho = await CozinhaTurno.statusTurno({
+      empresaId: empresaIdDoReqPedido(req),
+      unidadeId: resolverUnidadeOperacionalReq(req)
+    }, { db });
+    if (turnoDespacho.turno) {
+      for (const item of (Array.isArray(body.itens) ? body.itens : [])) {
+        await CozinhaTurno.vincularPedidoAoTurno(db, {
+          empresaId: empresaIdDoReqPedido(req),
+          unidadeId: resolverUnidadeOperacionalReq(req),
+          turnoId: turnoDespacho.turno.id,
+          pedidoId: item.pedido_id,
+          pedidoItemId: item.pedido_item_id,
+          cozinhaItemId: null,
+          rodadaId: out.rodada ? out.rodada.id : null
+        });
+      }
+    }
     return res.status(out.repetida ? 200 : 201).json(out);
   } catch (err) {
     return responderErro(res, err);
@@ -118,6 +330,7 @@ router.post('/despacho', async (req, res) => {
 router.post('/itens/:id/iniciar', async (req, res) => {
   try {
     if (!exigirCozinhaOperacional(res)) return;
+    await exigirTurnoDaRequisicao(req);
     const out = await CozinhaPreparacao.iniciarPreparacao({
       empresaId: empresaIdDoReqPedido(req),
       operadorId: operadorDaSessao(req),
@@ -135,6 +348,7 @@ router.post('/itens/:id/iniciar', async (req, res) => {
 router.post('/itens/:id/aguardando', async (req, res) => {
   try {
     if (!exigirCozinhaOperacional(res)) return;
+    await exigirTurnoDaRequisicao(req);
     const out = await CozinhaPreparacao.voltarParaAguardando({
       empresaId: empresaIdDoReqPedido(req),
       operadorId: operadorDaSessao(req),
@@ -151,6 +365,7 @@ router.post('/itens/:id/aguardando', async (req, res) => {
 router.post('/itens/:id/pronto', async (req, res) => {
   try {
     if (!exigirCozinhaOperacional(res)) return;
+    await exigirTurnoDaRequisicao(req);
     const out = await CozinhaPreparacao.marcarItemPronto({
       empresaId: empresaIdDoReqPedido(req),
       operadorId: operadorDaSessao(req),
@@ -167,6 +382,7 @@ router.post('/itens/:id/pronto', async (req, res) => {
 router.post('/rodadas/:id/retirada', async (req, res) => {
   try {
     if (!exigirCozinhaOperacional(res)) return;
+    await exigirTurnoDaRequisicao(req);
     const out = await CozinhaPreparacao.confirmarRetirada({
       empresaId: empresaIdDoReqPedido(req),
       operadorId: operadorDaSessao(req),
@@ -183,6 +399,7 @@ router.post('/rodadas/:id/retirada', async (req, res) => {
 router.post('/itens/:id/retirada-ledger', async (req, res) => {
   try {
     if (!exigirCozinhaOperacional(res)) return;
+    await exigirTurnoDaRequisicao(req);
     const out = await CozinhaRetiradaLedger.retirarItem({
       empresaId: empresaIdDoReqPedido(req),
       operadorId: operadorDaSessao(req),
@@ -200,6 +417,7 @@ router.post('/itens/:id/retirada-ledger', async (req, res) => {
 router.post('/retiradas/:id/estornar', async (req, res) => {
   try {
     if (!exigirCozinhaOperacional(res)) return;
+    await exigirTurnoDaRequisicao(req);
     const body = req.body || {};
     const out = await CozinhaRetiradaLedger.estornarRetirada({
       empresaId: empresaIdDoReqPedido(req),
@@ -221,6 +439,7 @@ router.post('/retiradas/:id/estornar', async (req, res) => {
 router.post('/itens/:id/cancelar', async (req, res) => {
   try {
     if (!exigirCozinhaOperacional(res)) return;
+    await exigirTurnoDaRequisicao(req);
     const body = req.body || {};
     const out = await CozinhaPreparacao.cancelarItem({
       empresaId: empresaIdDoReqPedido(req),
@@ -240,6 +459,7 @@ router.post('/itens/:id/cancelar', async (req, res) => {
 router.post('/itens/:id/cancelamento-ledger', async (req, res) => {
   try {
     if (!exigirCozinhaOperacional(res)) return;
+    await exigirTurnoDaRequisicao(req);
     const body = req.body || {};
     const out = await CozinhaRetiradaLedger.cancelarItem({
       empresaId: empresaIdDoReqPedido(req),
@@ -260,6 +480,7 @@ router.post('/itens/:id/cancelamento-ledger', async (req, res) => {
 router.post('/cancelamentos/:id/estornar', async (req, res) => {
   try {
     if (!exigirCozinhaOperacional(res)) return;
+    await exigirTurnoDaRequisicao(req);
     const body = req.body || {};
     const out = await CozinhaRetiradaLedger.estornarCancelamento({
       empresaId: empresaIdDoReqPedido(req),
@@ -288,6 +509,7 @@ router.post(
   exigirSenhaAdmin,
   async (req, res) => {
     try {
+      await exigirTurnoDaRequisicao(req);
       const body = req.body || {};
       const operadorId = operadorDaSessao(req);
       const out = await CozinhaRetiradaLedger.ajustarRetirada({
@@ -313,6 +535,7 @@ router.post(
 router.post('/rodadas/:id/cancelar', async (req, res) => {
   try {
     if (!exigirCozinhaOperacional(res)) return;
+    await exigirTurnoDaRequisicao(req);
     const body = req.body || {};
     const out = await CozinhaPreparacao.cancelarRodada({
       empresaId: empresaIdDoReqPedido(req),
@@ -332,6 +555,7 @@ router.post('/rodadas/:id/cancelar', async (req, res) => {
 router.post('/itens/:id/bebida/entregar', async (req, res) => {
   try {
     if (!exigirCozinhaOperacional(res)) return;
+    await exigirTurnoDaRequisicao(req);
     const out = await CozinhaPreparacao.entregarBebida({
       empresaId: empresaIdDoReqPedido(req),
       operadorId: operadorDaSessao(req),
@@ -372,9 +596,10 @@ function bearerTokenDoReq(req) {
 router.get('/unidades-disponiveis', async (req, res) => {
   try {
     if (!exigirCozinhaOperacional(res)) return;
+    const empresaRaw = req.query.empresa_id != null ? req.query.empresa_id : req.query.empresaId;
     const out = await CozinhaSessaoUnidade.listarUnidadesDisponiveis({
       user: req.user,
-      empresaId: empresaIdDoReqPedido(req)
+      empresaId: empresaRaw != null ? empresaRaw : empresaIdDoReqPedido(req)
     }, { db });
     return res.status(200).json(out);
   } catch (err) {
@@ -654,35 +879,66 @@ router.get('/preparacao/painel', async (req, res) => {
       }, { db });
       return res.status(200).json(legado);
     }
-    const out = await CozinhaKdsPainel.listarPainelPreparacao({
-      empresaId: empresaIdDoReqPedido(req),
-      unidadeId,
-      estado_item: q.estado_item != null ? q.estado_item : q.estadoItem,
-      estado_rodada: q.estado_rodada != null ? q.estado_rodada : q.estadoRodada,
-      limite: q.limite != null ? q.limite : q.limit,
-      offset: q.offset,
-      historico: q.historico,
-      paginacao: q.paginacao,
-      cursor: q.cursor,
-      fila: q.historicos === '1' ? 'ativa' : q.fila,
-      incluir_cancelados: q.incluir_cancelados != null
-        ? q.incluir_cancelados
-        : q.incluirCancelados,
-      incluir_pedidos_cancelados: q.incluir_pedidos_cancelados
-        != null ? q.incluir_pedidos_cancelados : q.incluirPedidosCancelados
-    }, { db });
+    const empresaId = empresaIdDoReqPedido(req);
+    if (q.historico === 'retirados') {
+      await CozinhaTurno.exigirAcessoGerencial({
+        operadorId: operadorDaSessao(req),
+        unidadeId
+      }, { db });
+    }
+    const turnoAtivo = q.historico
+      ? null
+      : await CozinhaTurno.statusTurno({ empresaId, unidadeId }, { db });
+    const turnoId = q.historico
+      ? q.turno_id
+      : turnoAtivo && turnoAtivo.turno ? turnoAtivo.turno.id : null;
+    let out = !q.historico && turnoId == null
+      ? {
+        success: true,
+        empresa_id: empresaId,
+        unidade_id: unidadeId,
+        rodadas: [],
+        total: 0,
+        ordenacao: null
+      }
+      : await CozinhaKdsPainel.listarPainelPreparacao({
+        empresaId,
+        unidadeId,
+        turnoId,
+        estado_item: q.estado_item != null ? q.estado_item : q.estadoItem,
+        estado_rodada: q.estado_rodada != null ? q.estado_rodada : q.estadoRodada,
+        limite: q.limite != null ? q.limite : q.limit,
+        offset: q.offset,
+        historico: q.historico,
+        paginacao: q.paginacao,
+        cursor: q.cursor,
+        fila: q.historicos === '1' ? 'ativa' : q.fila,
+        incluir_cancelados: q.incluir_cancelados != null
+          ? q.incluir_cancelados
+          : q.incluirCancelados,
+        incluir_pedidos_cancelados: q.incluir_pedidos_cancelados
+          != null ? q.incluir_pedidos_cancelados : q.incluirPedidosCancelados
+      }, { db });
+    // fila=ativa exclui rodadas concluídas; recupere-as pelo ledger para a coluna RETIRADOS.
+    if (!q.historico && q.historicos === '1' && turnoId != null) {
+      const retiradosDoTurno = await CozinhaKdsPainel.listarPainelPreparacao({
+        empresaId,
+        unidadeId,
+        turnoId,
+        limite: q.limite != null ? q.limite : q.limit,
+        historico: 'retirados'
+      }, { db });
+      out = {
+        ...out,
+        total: Number(out.total || 0) + Number(retiradosDoTurno.total || 0),
+        rodadas: [...(out.rodadas || []), ...retiradosDoTurno.rodadas]
+      };
+    }
     if (q.historicos === '1') {
       const contexto = { empresaId: empresaIdDoReqPedido(req), unidadeId, limite: q.limite, paginacao: q.paginacao };
-      const [retirados, cancelados] = await Promise.all([
-        CozinhaKdsPainel.listarPainelPreparacao({
-          ...contexto, historico: 'retirados', offset: q.offset_retirados, cursor: q.cursor_retirados
-        }, { db }),
-        CozinhaKdsPainel.listarPainelPreparacao({
-          ...contexto, historico: 'cancelados', offset: q.offset_cancelados, cursor: q.cursor_cancelados
-        }, { db })
-      ]);
-      out.historico_retirados = retirados;
-      out.historico_cancelados = cancelados;
+      out.historico_cancelados = await CozinhaKdsPainel.listarPainelPreparacao({
+        ...contexto, historico: 'cancelados', offset: q.offset_cancelados, cursor: q.cursor_cancelados
+      }, { db });
     }
     return res.status(200).json(out);
   } catch (err) {

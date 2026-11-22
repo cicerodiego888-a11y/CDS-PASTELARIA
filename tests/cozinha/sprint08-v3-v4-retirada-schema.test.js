@@ -109,7 +109,7 @@ describe('S08 — migração idempotência v3→v4', () => {
     try {
       const resultado = await garantirSchemaCozinha(db);
       assert.equal(resultado.operacional, true);
-      assert.equal(await lerVersaoSchema(db), 4);
+      assert.equal(await lerVersaoSchema(db), 8);
       assert.equal(
         checkIdempotenciaAceitaRetirada(await obterSqlTabela(db, 'cozinha_idempotencia')),
         true

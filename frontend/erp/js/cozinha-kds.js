@@ -311,8 +311,7 @@
   }
 
   /**
-   * Distribui cartões por estado do item (contrato S07-0).
-   * Cada cartão = rodada com apenas os itens daquele estado, FIFO.
+   * Distribui os itens de cada rodada por estado de preparo e retirada individual.
    */
   function distribuirPorEstado(rodadas) {
     const out = {
@@ -323,79 +322,85 @@
     };
     (rodadas || []).forEach((rodada) => {
       if (!rodada) return;
+      const itensRodada = rodada.itens || [];
+      const retiradaConfirmada = rodada.retirada_confirmada_por_ledger === true;
+      const itensRetirados = retiradaConfirmada
+        ? itensRodada
+        : itensRodada.filter((item) => item.retirada_confirmada_por_ledger === true);
+      const itensAtivos = retiradaConfirmada
+        ? []
+        : itensRodada.filter((item) => item.retirada_confirmada_por_ledger !== true);
+
+      if (itensRetirados.length) {
+        out.RETIRADO.push({
+          id: rodada.id,
+          empresa_id: rodada.empresa_id,
+          unidade_id: rodada.unidade_id,
+          mesa_id: rodada.mesa_id,
+          mesa_numero: rodada.mesa_numero,
+          atendimento_id: rodada.atendimento_id,
+          numero_rodada: rodada.numero_rodada,
+          sequencia_global: rodada.sequencia_global,
+          estado_preparacao: rodada.estado_preparacao,
+          operador_envio_id: rodada.operador_envio_id,
+          enviada_em: rodada.enviada_em,
+          rodada_pronta_em: rodada.rodada_pronta_em,
+          retirada_estado: rodada.retirada_estado,
+          retirada_confirmada_por_ledger: true,
+          retirada_por_item: !retiradaConfirmada,
+          retirada_parcial: !retiradaConfirmada,
+          retirada_em: rodada.retirada_em,
+          retirada_por: rodada.retirada_por,
+          pode_confirmar_retirada: false,
+          created_at: rodada.created_at,
+          itens: itensRetirados
+        });
+      }
+
       const itensPorEstado = {};
       ESTADOS_COLUNA.forEach((estado) => {
-        itensPorEstado[estado] = (rodada.itens || [])
+        itensPorEstado[estado] = itensAtivos
           .filter((it) => String(it.estado_preparacao || '').toUpperCase() === estado)
           .slice()
           .sort(compararItensFifo);
       });
-      
-      const retiradaConfirmada = rodada.retirada_confirmada_por_ledger === true;
-      const retiradaDisponivel = rodada.estado_preparacao === 'PRONTA'
-        && !retiradaConfirmada;
-      const estadoAcaoRetirada = retiradaDisponivel
-        ? ['PRONTO', 'EM_PREPARACAO', 'AGUARDANDO']
-          .find((estado) => itensPorEstado[estado].length)
-        : null;
 
-      if (retiradaConfirmada) {
-        // Rodada já retirada — aparece em RETIRADO com todos os itens
-        const todoItens = rodada.itens || [];
-        if (todoItens.length) {
-          out.RETIRADO.push({
-            id: rodada.id,
-            empresa_id: rodada.empresa_id,
-            unidade_id: rodada.unidade_id,
-            mesa_id: rodada.mesa_id,
-            mesa_numero: rodada.mesa_numero,
-            atendimento_id: rodada.atendimento_id,
-            numero_rodada: rodada.numero_rodada,
-            sequencia_global: rodada.sequencia_global,
-            estado_preparacao: rodada.estado_preparacao,
-            operador_envio_id: rodada.operador_envio_id,
-            enviada_em: rodada.enviada_em,
-            rodada_pronta_em: rodada.rodada_pronta_em,
-            retirada_estado: rodada.retirada_estado,
-            retirada_confirmada_por_ledger: true,
-            retirada_em: rodada.retirada_em,
-            retirada_por: rodada.retirada_por,
-            pode_confirmar_retirada: false,
-            created_at: rodada.created_at,
-            itens: todoItens
-          });
-        }
-      } else {
-        // Rodada ativa — distribuir por estado de item
-        ESTADOS_COLUNA.slice(0, -1).forEach((estado) => { // exclui RETIRADO
-          const itens = itensPorEstado[estado];
-          if (!itens.length) return;
-          out[estado].push({
-            id: rodada.id,
-            empresa_id: rodada.empresa_id,
-            unidade_id: rodada.unidade_id,
-            mesa_id: rodada.mesa_id,
-            mesa_numero: rodada.mesa_numero,
-            atendimento_id: rodada.atendimento_id,
-            numero_rodada: rodada.numero_rodada,
-            sequencia_global: rodada.sequencia_global,
-            estado_preparacao: rodada.estado_preparacao,
-            operador_envio_id: rodada.operador_envio_id,
-            enviada_em: rodada.enviada_em,
-            rodada_pronta_em: rodada.rodada_pronta_em,
-            retirada_estado: rodada.retirada_estado,
-            retirada_confirmada_por_ledger: false,
-            retirada_em: rodada.retirada_em,
-            retirada_por: rodada.retirada_por,
-            pode_confirmar_retirada: estado === estadoAcaoRetirada,
-            cancelamento_motivo: rodada.cancelamento_motivo,
-            cancelamento_por: rodada.cancelamento_por,
-            cancelamento_em: rodada.cancelamento_em,
-            created_at: rodada.created_at,
-            itens
-          });
+      ESTADOS_COLUNA.slice(0, -1).forEach((estado) => {
+        const itens = itensPorEstado[estado];
+        if (!itens.length) return;
+        out[estado].push({
+          id: rodada.id,
+          empresa_id: rodada.empresa_id,
+          unidade_id: rodada.unidade_id,
+          mesa_id: rodada.mesa_id,
+          mesa_numero: rodada.mesa_numero,
+          atendimento_id: rodada.atendimento_id,
+          numero_rodada: rodada.numero_rodada,
+          sequencia_global: rodada.sequencia_global,
+          estado_preparacao: rodada.estado_preparacao,
+          operador_envio_id: rodada.operador_envio_id,
+          enviada_em: rodada.enviada_em,
+          rodada_pronta_em: rodada.rodada_pronta_em,
+          retirada_estado: rodada.retirada_estado,
+          retirada_confirmada_por_ledger: false,
+          retirada_parcial: itensRetirados.length > 0,
+          retirada_em: rodada.retirada_em,
+          retirada_por: rodada.retirada_por,
+          pode_confirmar_retirada: estado === 'PRONTO'
+            && itens.some((item) => {
+              const bebida = String(item.tipo_item || '').toUpperCase() === 'BEBIDA';
+              const saldo = parsearMilessimosUI(bebida
+                ? item.qty_disponivel_retirada
+                : item.qty_pendente_retirada);
+              return Number.isSafeInteger(saldo) && saldo > 0;
+            }),
+          cancelamento_motivo: rodada.cancelamento_motivo,
+          cancelamento_por: rodada.cancelamento_por,
+          cancelamento_em: rodada.cancelamento_em,
+          created_at: rodada.created_at,
+          itens
         });
-      }
+      });
     });
     ESTADOS_COLUNA.filter((estado) => estado !== 'RETIRADO').forEach((estado) => {
       out[estado].sort(compararFifo);
@@ -572,6 +577,7 @@
       ? 0
       : Number(item.qty_pendente_retirada);
     const podeCancelarItem = card.retirada_estado === 'PENDENTE'
+      && !retiradaComprovada
       && (!pedidoCancelado || (item.qty_pendente_retirada != null && pendenteLedger > 0));
     if (!somenteLeitura && podeCancelarItem
       && ['AGUARDANDO', 'EM_PREPARACAO', 'PRONTO'].includes(estado)) {
@@ -599,6 +605,18 @@
       ? `<div class="kds-item__obs">Preparada: ${escapar(formatarQtd(item.qty_preparada || 0))} · Cancelada: ${escapar(formatarQtd(item.qty_cancelada || 0))}</div>`
       : '';
     const tipoBebida = String(item.tipo_item || '').toUpperCase() === 'BEBIDA';
+    const retiradaLiquidaMillis = parsearMilessimosUI(item.qty_retirada_liquida);
+    const retiradaPendenteMillis = parsearMilessimosUI(item.qty_pendente_retirada);
+    const retiradaParcial = estado === 'PRONTO'
+      && item.qty_retirada_liquida != null
+      && item.qty_pendente_retirada != null
+      && Number.isSafeInteger(retiradaLiquidaMillis)
+      && Number.isSafeInteger(retiradaPendenteMillis)
+      && retiradaLiquidaMillis > 0
+      && retiradaPendenteMillis > 0;
+    const quantidadeExibida = retiradaParcial
+      ? item.qty_pendente_retirada
+      : item.qty_solicitada;
     const quantidadeEmCurso = !!(retiradasEmCurso && retiradasEmCurso[item.id]);
     const quantidadePendenteEntrega = parsearMilessimosUI(item.qty_pendente_entrega);
     const quantidadeDisponivelRetirada = parsearMilessimosUI(tipoBebida
@@ -625,7 +643,6 @@
       : '';
     const acaoRetiradaItem = !somenteLeitura
       && !pedidoCancelado
-      && card.estado_preparacao === 'PRONTA'
       && estado === 'PRONTO'
       && item.qty_pendente_retirada != null
       && Number.isSafeInteger(quantidadeDisponivelRetirada)
@@ -650,7 +667,7 @@
     return `
       <div class="kds-item" data-item-id="${escapar(item.id)}">
         <div class="kds-item__linha">
-          <span class="kds-item__qtd">${escapar(formatarQtd(item.qty_solicitada))}</span>
+          <span class="kds-item__qtd">${escapar(formatarQtd(quantidadeExibida))}${retiradaParcial ? '<small>pendente</small>' : ''}</span>
           <span class="kds-item__nome">${escapar(item.produto_nome_snapshot || 'Produto')}</span>
           <span class="kds-item__tipo">${escapar(item.tipo_item || '')}</span>
         </div>
@@ -680,7 +697,9 @@
       card.operador_envio_id != null ? `Responsável #${card.operador_envio_id}` : null
     ].filter(Boolean).map((t) => `<span class="kds-chip">${escapar(t)}</span>`).join('');
     const tempos = calcularTemposItem(card, (card.itens || [])[0] || {}, instante);
-    const retirada = card.retirada_confirmada_por_ledger === true && card.historico_cancelamento
+    const retirada = card.retirada_confirmada_por_ledger === true && card.retirada_por_item
+      ? '<div class="kds-card__retirada">Retirada destes itens confirmada individualmente no ledger.</div>'
+      : card.retirada_confirmada_por_ledger === true && card.historico_cancelamento
       ? `<div class="kds-card__retirada">Rodada retirada às ${escapar(formatarHora(card.retirada_em))}; item cancelado não retirado.</div>`
       : card.retirada_confirmada_por_ledger === true
       ? `<div class="kds-card__retirada">
@@ -690,7 +709,11 @@
         ? '<div class="kds-card__retirada">Retirada assumida; confirmação indisponível.</div>'
         : '';
     
-    const acacaoCancelamento = (!card.historico_cancelamento && card.retirada_estado === 'PENDENTE' && card.estado_preparacao !== 'CANCELADA')
+    const acacaoCancelamento = (!card.historico_cancelamento
+      && !card.retirada_parcial
+      && !card.retirada_por_item
+      && card.retirada_estado === 'PENDENTE'
+      && card.estado_preparacao !== 'CANCELADA')
       ? `<div class="kds-card__acoes">
           <button type="button" class="kds-btn-operacao kds-btn-operacao--cancelar"
             data-acao="cancelar-rodada" data-rodada-id="${escapar(card.id)}">
@@ -817,9 +840,9 @@
       </article>`;
     }).join('');
     const paginas = estado.paginasLegado;
-    return `<section class="kds-historico" aria-label="Histórico legado">
-      <h2>Histórico legado</h2>
-      <p>Registros com eventos ausentes; dados e estados apresentados conforme persistidos.</p>
+    return `<section class="kds-historico" aria-label="Registros legados sem comprovação no ledger">
+      <h3>Registros legados sem comprovação no ledger</h3>
+      <p>Dados históricos preservados; não são evidência de retirada individual.</p>
       ${estado.erroLegado ? `<div class="kds-aviso" role="alert">${escapar(estado.erroLegado)}</div>` : ''}
       <div class="kds-coluna__lista">${registros || (estado.erroLegado ? ''
         : `<div class="kds-vazio">${estado.carregando ? 'Carregando histórico legado…' : 'Nenhum registro legado nesta página'}</div>`)}</div>
@@ -833,7 +856,106 @@
     </section>`;
   }
 
-  function htmlPainel(estado, instante) {
+  function htmlHistoricoPedidosRetirados(estado, empresa, unidade) {
+    const historico = estado.historicoPedidosRetirados || {};
+    const filtros = historico.filtros || {};
+    const turnos = historico.resultado && Array.isArray(historico.resultado.turnos)
+      ? historico.resultado.turnos : [];
+    const pedidos = historico.resultado && Array.isArray(historico.resultado.pedidos)
+      ? historico.resultado.pedidos : [];
+    const eventos = (lista, formatar) => (lista || []).map(formatar).join('<br>') || '—';
+    const itens = pedidos.map((pedido) => `
+      <article class="kds-historico-pedido">
+        <h3>Pedido ${escapar(pedido.pedido_codigo || pedido.pedido_id)}
+          · Turno #${escapar(pedido.turno_id == null ? 'sem vínculo' : pedido.turno_id)}</h3>
+        <p>Comanda: ${escapar(pedido.numero_comanda == null ? '—' : pedido.numero_comanda)}
+          · Mesa: ${escapar(pedido.mesa_numero || '—')}
+          · Garçom: ${escapar(pedido.garcom_nome || 'Não identificado')}
+          · Status: ${escapar(pedido.status_retirada || '—')}
+          · Última retirada: ${escapar(pedido.ultima_retirada_em ? formatarHora(pedido.ultima_retirada_em) : '—')}</p>
+        <div class="kds-historico-pedido__tabela">
+          <table>
+            <thead><tr><th>Produto</th><th>Quantidades</th><th>Preparo</th><th>Entrega de bebida</th><th>Retiradas e ocorrências</th></tr></thead>
+            <tbody>${(pedido.itens || []).map((item) => `
+              <tr>
+                <td>${escapar(item.produto_nome)}${item.categoria_nome ? `<br><small>${escapar(item.categoria_nome)}</small>` : ''}</td>
+                <td>Solicitada ${escapar(item.quantidade_solicitada)}<br>
+                  Preparada ${escapar(item.quantidade_preparada)}<br>
+                  Retirada ${escapar(item.quantidade_retirada_liquida)}<br>
+                  Cancelada ${escapar(item.quantidade_cancelada)}<br>
+                  ${escapar(item.status_retirada)}</td>
+                <td>${eventos(item.eventos_preparacao, (evento) =>
+                  `${escapar(evento.tipo)} · ${escapar(formatarHora(evento.em))} · ${escapar(evento.operador_nome || 'Operador não identificado')}`)}</td>
+                <td>${eventos(item.entregas_bebida, (evento) =>
+                  `${escapar(evento.quantidade)} · ${escapar(formatarHora(evento.entregue_em))} · ${escapar(evento.operador_nome || 'Operador não identificado')}`)}
+                  <br><small>Entrega de bebida, não retirada do garçom.</small></td>
+                <td>${eventos(item.eventos_retirada, (evento) =>
+                  `${escapar(evento.tipo_evento)} · ${escapar(evento.quantidade)} · ${escapar(formatarHora(evento.registrado_em))} · ${escapar(evento.operador_nome || 'Operador não identificado')}${evento.justificativa ? ` · ${escapar(evento.justificativa)}` : ''}`)}
+                  ${item.eventos_cancelamento && item.eventos_cancelamento.length
+                    ? `<hr>${eventos(item.eventos_cancelamento, (evento) =>
+                      `${escapar(evento.tipo_evento)} · ${escapar(evento.quantidade)} · ${escapar(formatarHora(evento.registrado_em))} · ${escapar(evento.operador_nome || 'Operador não identificado')}${evento.justificativa ? ` · ${escapar(evento.justificativa)}` : ''}`)}`
+                    : ''}</td>
+              </tr>`).join('')}</tbody>
+          </table>
+        </div>
+      </article>`).join('');
+    const turnosHtml = turnos.map((turno) => `
+      <option value="${escapar(turno.id)}" ${String(filtros.turnoId || '') === String(turno.id) ? 'selected' : ''}>
+        Turno #${escapar(turno.id)} · ${escapar(turno.fechamento_tipo || 'Em andamento')}
+      </option>`).join('');
+    const excepcionais = (historico.resultado && historico.resultado.pendencias_excepcionais || [])
+      .map((turno) => `<article class="kds-historico-excepcional">
+        <h3>Fechamento excepcional · Turno #${escapar(turno.turno_id)}</h3>
+        <p>Autorizado por operador #${escapar(turno.fechamento_operador_id || 'não identificado')}
+          · ${escapar(formatarHora(turno.fechamento_em))}</p>
+        <p>Justificativa: ${escapar(turno.fechamento_justificativa || 'Não informada')}</p>
+        ${turno.snapshot_persistido
+          ? `<p>${escapar(turno.situacao)}</p><ul>${(turno.pendencias || []).map((pendencia) =>
+            `<li>${escapar(pendencia.tipo || pendencia.motivo || 'Pendência operacional')}: ${escapar(pendencia.quantidade || pendencia.status || '')}</li>`).join('')}</ul>`
+          : '<p role="alert">Snapshot do fechamento indisponível; pendências não foram reconstruídas.</p>'}
+      </article>`).join('');
+
+    return `<section class="kds-historico kds-historico-retirados" aria-label="Histórico de Pedidos Retirados">
+      <div class="kds-historico-retirados__cabecalho">
+        <h2>Histórico de Pedidos Retirados</h2>
+        <div>
+          <button type="button" class="kds-btn-secundario" data-acao="imprimir-historico">Imprimir</button>
+          <button type="button" class="kds-btn-secundario" data-acao="exportar-pdf-historico">Exportar PDF</button>
+        </div>
+      </div>
+      <p class="kds-historico-contexto">Empresa: ${escapar(empresa)} · ${escapar(unidade)} · Data: ${escapar(filtros.data || '—')}</p>
+      <form class="kds-historico-filtros" data-form="historico-retirados">
+        <label>Data <input type="date" name="data" value="${escapar(filtros.data || '')}" required></label>
+        <label>Turno <select name="turno"><option value="">Todos os turnos</option>${turnosHtml}</select></label>
+        <label>Pedido <input name="pedido" value="${escapar(filtros.pedido || '')}" maxlength="100"></label>
+        <label>Mesa <input name="mesa" value="${escapar(filtros.mesa || '')}" maxlength="100"></label>
+        <label>Garçom <input name="garcom" value="${escapar(filtros.garcom || '')}" maxlength="100"></label>
+        <label>Produto <input name="produto" value="${escapar(filtros.produto || '')}" maxlength="100"></label>
+        <label>Categoria <input name="categoria" value="${escapar(filtros.categoria || '')}" maxlength="100"></label>
+        <button type="submit" class="kds-btn-atualizar" ${historico.carregando ? 'disabled' : ''}>
+          ${historico.carregando ? 'Consultando…' : 'Filtrar'}
+        </button>
+      </form>
+      ${historico.erro ? `<p class="kds-aviso" role="alert">${escapar(historico.erro)}</p>` : ''}
+      ${historico.resultado ? `<p>${historico.resultado.total} pedido(s) com eventos oficiais de retirada.</p>` : ''}
+      ${pedidos.length ? itens : `<p class="kds-vazio">${historico.carregando ? 'Consultando histórico…' : 'Nenhum pedido com retirada oficial nesta consulta.'}</p>`}
+      ${excepcionais ? `<section aria-label="Pendências de fechamentos excepcionais"><h2>Pendências preservadas em fechamentos excepcionais</h2>${excepcionais}</section>` : ''}
+      <div class="kds-historico-paginacao">
+        <button type="button" class="kds-btn-secundario" data-acao="historico-anterior" ${Number(historico.offset) <= 0 ? 'disabled' : ''}>Anterior</button>
+        <button type="button" class="kds-btn-secundario" data-acao="historico-proximo"
+          ${!historico.resultado || Number(historico.offset) + Number(historico.resultado.limite) >= Number(historico.resultado.total) ? 'disabled' : ''}>Próxima</button>
+      </div>
+      <details class="kds-registros-legados">
+        <summary>Registros legados (sem comprovação no ledger)</summary>
+        <button type="button" class="kds-btn-secundario" data-acao="historico-legado">
+          ${estado.mostrarLegado ? 'Ocultar registros legados' : 'Consultar registros legados'}
+        </button>
+        ${estado.mostrarLegado ? htmlHistoricoLegado(estado, new Date()) : ''}
+      </details>
+    </section>`;
+  }
+
+  function htmlPainel(estado, instante, podeAcessarGestao) {
     const dist = estado.distribuicao || distribuirPorEstado(estado.rodadas || []);
     const operacoesEmCurso = estado.acoesEmCurso || {};
     const retiradasEmCurso = estado.retiradasEmCurso || {};
@@ -879,7 +1001,7 @@
         <button type="button" class="kds-btn-secundario" data-acao="pagina-${tipo}-anterior" ${!dados || dados.indice <= 0 ? 'disabled' : ''}>Anterior</button>
         <span>Página ${dados ? dados.indice + 1 : 1} · ${total} rodadas no snapshot (use Atualizar agora para novos eventos)</span>
         <button type="button" class="kds-btn-secundario" data-acao="pagina-${tipo}-proxima" ${!dados || !dados.proximo ? 'disabled' : ''}>Próxima</button>
-        ${semEvento ? `<span role="alert">${semEvento} rodada(s) sem evento histórico; consulte o histórico legado.</span>` : ''}
+        ${semEvento ? `<span role="alert">${semEvento} rodada(s) sem evento histórico; consulte os registros legados sem comprovação.</span>` : ''}
       </div>`;
 
     return `
@@ -891,6 +1013,8 @@
             <div class="kds-cabecalho__meta">
               <strong>${escapar(empresa)}</strong>
               · ${escapar(unidade)}
+              · Cozinha: <strong>${escapar(estado.turnoEstado)}</strong>
+              ${estado.turno ? `· Responsável: ${escapar(estado.turno.abertura_operador_nome || estado.turno.abertura_operador_id)} · Aberta em ${escapar(estado.turno.abertura_em || '')}` : ''}
               · Última atualização: <strong data-kds-ultima>${escapar(ultima)}</strong>
             </div>
           </div>
@@ -903,15 +1027,27 @@
               title="Voltar para a seleção de unidade de cozinha">
               Trocar unidade
             </button>
+            ${estado.turnoEstado === 'ABERTA'
+              ? `<button type="button" class="kds-btn-secundario" data-acao="fechar-turno">FECHAR COZINHA</button>`
+              : `<button type="button" class="kds-btn-atualizar" data-acao="abrir-turno" ${estado.abrindoTurno ? 'disabled' : ''}>
+                  ${estado.abrindoTurno ? 'ABRINDO…' : 'ABRIR COZINHA'}
+                </button>`}
+            ${podeAcessarGestao
+              ? `<button type="button" class="kds-btn-secundario" data-acao="gestao-cozinha">GESTÃO DA COZINHA</button>`
+              : ''}
+            ${estado.turnoPendencias.length
+              ? `<div class="kds-vazio">Pendências: ${escapar(estado.turnoPendencias.map(p => `${p.tipo}: ${p.quantidade}`).join(' · '))}</div>`
+              : ''}
+            ${estado.turnoErro ? `<div class="kds-vazio" role="alert">${escapar(estado.turnoErro)}</div>` : ''}
             <button type="button" class="kds-btn-secundario" data-acao="historico-cancelados">
               ${estado.mostrarCancelados ? 'Ocultar cancelados' : 'Histórico de cancelados'}
             </button>
             <button type="button" class="kds-btn-secundario" data-acao="pedidos-cancelados">
               ${estado.mostrarPedidosCancelados ? 'Ocultar pedidos comerciais cancelados' : 'Pedidos comerciais cancelados'}
             </button>
-            <button type="button" class="kds-btn-secundario" data-acao="historico-legado">
-              ${estado.mostrarLegado ? 'Ocultar histórico legado' : 'Histórico legado'}
-            </button>
+            ${podeAcessarGestao ? `<button type="button" class="kds-btn-secundario" data-acao="historico-retirados">
+              ${estado.mostrarHistoricoRetirados ? 'Voltar ao painel' : 'Histórico de Pedidos Retirados'}
+            </button>` : ''}
             <button type="button" class="kds-btn-atualizar" data-acao="atualizar"
               ${estado.carregando ? 'disabled' : ''}>
               Atualizar agora
@@ -920,13 +1056,14 @@
         </header>
         ${aviso}
         ${feedback}
-        ${corpoVazioInicial}
-        ${pagina('retirados', estado.paginasRetirados, estado.totalRetirados || 0, estado.semEventoRetirados)}
+        ${estado.mostrarHistoricoRetirados
+          ? htmlHistoricoPedidosRetirados(estado, empresa, unidade)
+          : `${corpoVazioInicial}
         ${estado.mostrarCancelados ? `<div class="kds-historico">
           ${htmlColuna('CANCELADO', estado.cancelados || [], operacoesEmCurso, retiradasEmCurso, instante)}
           ${pagina('cancelados', estado.paginasCancelados, estado.totalCancelados || 0, estado.semEventoCancelados)}
         </div>` : ''}
-        ${estado.mostrarLegado ? htmlHistoricoLegado(estado, instante) : ''}
+        `}
         <div class="visually-hidden" data-kds-contadores>
           Aguardando ${counts.AGUARDANDO}; Em preparação ${counts.EM_PREPARACAO}; Prontos ${counts.PRONTO}
         </div>
@@ -956,6 +1093,8 @@
       cancelados: [],
       mostrarCancelados: false,
       mostrarPedidosCancelados: false,
+      mostrarHistoricoRetirados: false,
+      historicoPedidosRetirados: null,
       legado: [],
       mostrarLegado: false,
       erroLegado: '',
@@ -981,7 +1120,12 @@
       selecaoErro: '',
       selecaoCodigo: '',
       selecaoMensagemServidor: '',
-      selecaoFalhaLista: false
+      selecaoFalhaLista: false,
+      turnoEstado: 'FECHADA',
+      turno: null,
+      turnoPendencias: [],
+      turnoErro: '',
+      abrindoTurno: false
     };
 
     function publicar() {
@@ -1040,15 +1184,14 @@
         const cursorRetirados = retirados.cursores[retirados.indice];
         const cursorCancelados = cancelados.cursores[indiceCancelados];
         const data = await fetchJson('GET', `/cozinha/preparacao/painel?limite=${LIMITE_PAINEL}&offset=0&historicos=1&paginacao=cursor&incluir_pedidos_cancelados=${estado.mostrarPedidosCancelados ? '1' : '0'}${cursorRetirados ? `&cursor_retirados=${encodeURIComponent(cursorRetirados)}` : ''}${cursorCancelados ? `&cursor_cancelados=${encodeURIComponent(cursorCancelados)}` : ''}`);
+        const turnoStatus = await fetchJson('GET', '/cozinha/turnos/status');
+        if (turnoStatus && typeof turnoStatus === 'object') {
+          estado.turnoEstado = turnoStatus.estado || 'FECHADA';
+          estado.turno = turnoStatus.turno || null;
+          estado.turnoPendencias = Array.isArray(estado.turnoPendencias) ? estado.turnoPendencias : [];
+        }
         if (!estado.ativo || ticket !== seq) return { obsoleta: true };
         estado.rodadas = Array.isArray(data && data.rodadas) ? data.rodadas : [];
-        if (data.historico_retirados && Array.isArray(data.historico_retirados.rodadas)) {
-          estado.rodadas = estado.rodadas.concat(data.historico_retirados.rodadas);
-          estado.totalRetirados = Number(data.historico_retirados.total) || 0;
-          estado.semEventoRetirados = Number(data.historico_retirados.registros_sem_evento) || 0;
-          retirados.cursores[retirados.indice] = data.historico_retirados.cursor_atual || null;
-          retirados.proximo = data.historico_retirados.cursor_proximo || null;
-        }
         if (estado.paginasCancelados === cancelados && cancelados.indice === indiceCancelados
           && data.historico_cancelados && Array.isArray(data.historico_cancelados.rodadas)) {
           estado.totalCancelados = Number(data.historico_cancelados.total) || 0;
@@ -1155,6 +1298,98 @@
       estado.mostrarLegado = !estado.mostrarLegado;
       publicar();
       if (estado.mostrarLegado) return atualizar({ forcar: true });
+    }
+
+    function dataHojeLocal() {
+      const data = agora();
+      const mes = String(data.getMonth() + 1).padStart(2, '0');
+      const dia = String(data.getDate()).padStart(2, '0');
+      return `${data.getFullYear()}-${mes}-${dia}`;
+    }
+
+    async function consultarHistoricoPedidosRetirados(filtros, offset) {
+      const anterior = estado.historicoPedidosRetirados || {};
+      const atuais = filtros || anterior.filtros || { data: dataHojeLocal() };
+      const mesmosFiltros = JSON.stringify(atuais) === JSON.stringify(anterior.filtros || {});
+      const historico = estado.historicoPedidosRetirados = {
+        filtros: { ...atuais },
+        offset: Number.isInteger(offset) && offset >= 0 ? offset : 0,
+        carregando: true,
+        erro: '',
+        resultado: mesmosFiltros ? anterior.resultado || null : null
+      };
+      publicar();
+      try {
+        const params = new URLSearchParams();
+        Object.keys(historico.filtros).forEach((chave) => {
+          const nome = chave === 'turnoId' ? 'turno_id' : chave;
+          const valor = historico.filtros[chave];
+          if (valor != null && String(valor).trim() !== '') params.set(nome, String(valor).trim());
+        });
+        params.set('limite', '25');
+        params.set('offset', String(historico.offset));
+        const resultado = await fetchJson(
+          'GET',
+          `/cozinha/gerencial/historico-pedidos-retirados?${params.toString()}`
+        );
+        historico.resultado = resultado;
+        return { ok: true, data: resultado };
+      } catch (err) {
+        historico.erro = mensagemDe(err);
+        if (mesmosFiltros) {
+          historico.offset = Number(anterior.offset) || 0;
+          historico.resultado = anterior.resultado || null;
+        }
+        return { erro: err };
+      } finally {
+        historico.carregando = false;
+        publicar();
+      }
+    }
+
+    async function alternarHistoricoPedidosRetirados() {
+      estado.mostrarHistoricoRetirados = !estado.mostrarHistoricoRetirados;
+      estado.mostrarLegado = false;
+      if (!estado.mostrarHistoricoRetirados) {
+        publicar();
+        return { ok: true };
+      }
+      const filtros = estado.historicoPedidosRetirados
+        ? estado.historicoPedidosRetirados.filtros
+        : { data: dataHojeLocal() };
+      return consultarHistoricoPedidosRetirados(filtros, 0);
+    }
+
+    function aplicarFiltrosHistoricoPedidosRetirados(form) {
+      const valor = (nome) => {
+        const campo = form.elements.namedItem(nome);
+        return campo ? String(campo.value || '').trim() : '';
+      };
+      const data = valor('data');
+      const filtrosAtuais = estado.historicoPedidosRetirados
+        && estado.historicoPedidosRetirados.filtros || {};
+      return consultarHistoricoPedidosRetirados({
+        data,
+        turnoId: filtrosAtuais.data === data ? valor('turno') : '',
+        pedido: valor('pedido'),
+        mesa: valor('mesa'),
+        garcom: valor('garcom'),
+        produto: valor('produto'),
+        categoria: valor('categoria')
+      }, 0);
+    }
+
+    function mudarPaginaHistoricoPedidosRetirados(direcao) {
+      const historico = estado.historicoPedidosRetirados;
+      if (!historico || !historico.resultado) return { ignorada: true };
+      const limite = Number(historico.resultado.limite) || 25;
+      const total = Number(historico.resultado.total) || 0;
+      const proximo = historico.offset + limite;
+      const novoOffset = direcao < 0
+        ? Math.max(0, historico.offset - limite)
+        : proximo < total ? proximo : historico.offset;
+      if (novoOffset === historico.offset) return { ignorada: true };
+      return consultarHistoricoPedidosRetirados(historico.filtros, novoOffset);
     }
 
     async function mudarPaginaHistorico(tipo, direcao) {
@@ -1319,8 +1554,7 @@
       const saldoMillis = parsearMilessimosUI(saldoExibido);
       if (
         (tipo === 'entrega' && (!bebida || item.estado_preparacao !== 'PRONTO'))
-        || (tipo === 'retirada' && (rodada.estado_preparacao !== 'PRONTA'
-          || item.qty_pendente_retirada == null))
+        || (tipo === 'retirada' && item.qty_pendente_retirada == null)
         || !Number.isSafeInteger(saldoMillis)
         || saldoMillis <= 0
       ) {
@@ -1619,6 +1853,8 @@
       estado.carregando = false;
       estado.rodadas = [];
       estado.cancelados = [];
+      estado.mostrarHistoricoRetirados = false;
+      estado.historicoPedidosRetirados = null;
       estado.legado = [];
       estado.mostrarLegado = false;
       estado.erroLegado = '';
@@ -1642,6 +1878,73 @@
       return estado;
     }
 
+    async function abrirTurno() {
+      if (estado.abrindoTurno) return { ignorada: true };
+      estado.turnoErro = '';
+      estado.abrindoTurno = true;
+      publicar();
+      try {
+        const data = await fetchJson('POST', '/cozinha/turnos/abrir', {});
+        estado.turno = data.turno || null;
+        estado.turnoEstado = 'ABERTA';
+        await atualizar({ silencioso: false });
+        publicar();
+        return { ok: true, data };
+      } catch (err) {
+        estado.turnoErro = mensagemDe(err);
+        publicar();
+        return { erro: err };
+      } finally {
+        estado.abrindoTurno = false;
+        publicar();
+      }
+    }
+
+    async function fecharTurno() {
+      estado.turnoErro = '';
+      try {
+        const data = await fetchJson('POST', '/cozinha/turnos/fechar', { tipo: 'NORMAL' });
+        estado.turno = null;
+        estado.turnoEstado = 'FECHADA';
+        await atualizar({ silencioso: false });
+        publicar();
+        return { ok: true, data };
+      } catch (err) {
+        if (err && err.codigo === 'FECHAMENTO_NORMAL_BLOQUEADO') {
+          estado.turnoPendencias = Array.isArray(err.pendencias) ? err.pendencias : [];
+          estado.turnoErro = mensagemDe(err);
+        } else {
+          estado.turnoErro = mensagemDe(err);
+        }
+        publicar();
+        return { erro: err };
+      }
+    }
+
+    async function fecharTurnoExcepcional(justificativa) {
+      const texto = String(justificativa || '').trim();
+      if (texto.length < 10) {
+        estado.turnoErro = 'Justificativa obrigatória com pelo menos 10 caracteres.';
+        publicar();
+        return { ok: false };
+      }
+      try {
+        const data = await fetchJson('POST', '/cozinha/turnos/fechar', {
+          tipo: 'EXCEPCIONAL',
+          justificativa: texto
+        });
+        estado.turno = null;
+        estado.turnoEstado = 'FECHADA';
+        await atualizar({ silencioso: false });
+        publicar();
+        return { ok: true, data };
+      } catch (err) {
+        estado.turnoErro = mensagemDe(err);
+        publicar();
+        return { erro: err };
+      }
+    }
+
     return {
       estado,
       iniciar,
@@ -1655,15 +1958,21 @@
       alternarHistoricoCancelados,
       alternarPedidosCancelados,
       alternarHistoricoLegado,
+      alternarHistoricoPedidosRetirados,
+      aplicarFiltrosHistoricoPedidosRetirados,
+      mudarPaginaHistoricoPedidosRetirados,
       mudarPaginaHistorico,
       carregarUnidadesDisponiveis,
       definirUnidadeSelecionada,
       confirmarUnidade,
       voltarParaSelecao,
+      abrirTurno,
+      fecharTurno,
+      fecharTurnoExcepcional,
       atualizarHistoricos,
       html: () => (estado.modo === 'selecao'
         ? htmlSelecaoUnidade(estado)
-        : htmlPainel(estado, agora()))
+        : htmlPainel(estado, agora(), deps.podeAcessarGestao))
     };
   }
 
@@ -1711,6 +2020,7 @@
     if (!resp.ok) {
       const err = new Error((data && (data.mensagem || data.error)) || 'Falha na operação.');
       err.codigo = (data && (data.codigo || data.code)) || null;
+      err.pendencias = Array.isArray(data && data.pendencias) ? data.pendencias : [];
       err.status = resp.status;
       throw err;
     }
@@ -1737,6 +2047,14 @@
     err.codigo = codigo;
     err.retornoElectron = retorno || null;
     throw err;
+  }
+
+  async function abrirTurnoENavegarParaGestao(control, global) {
+    const resultado = await control.abrirTurno();
+    if (!resultado || !resultado.ok || !resultado.data || !resultado.data.turno) return resultado;
+    global.CDS_COZINHA_TURNO_ATUAL = resultado.data.turno;
+    if (typeof global.loadPage === 'function') global.loadPage('cozinha-gerencial');
+    return resultado;
   }
 
   /**
@@ -1972,6 +2290,16 @@
       confirmar: typeof global.confirm === 'function'
         ? global.confirm.bind(global)
         : null,
+      podeAcessarGestao: (() => {
+        try {
+          const user = JSON.parse(global.localStorage.getItem('user') || '{}');
+          const perfil = String(user.perfil || '').trim().toUpperCase();
+          const role = String(user.role || '').trim().toLowerCase();
+          return role === 'gerente' || perfil === 'GERENTE' || perfil === 'SUPER_ADMIN';
+        } catch (_e) {
+          return false;
+        }
+      })(),
       solicitarCancelamento: solicitador.solicitar,
       fecharSolicitacaoCancelamento: solicitador.fechar,
       lerUnidadeJwt: () => {
@@ -2040,12 +2368,46 @@
         control.voltarParaSelecao();
       });
     }
+    const abrir = raiz.querySelector('[data-acao="abrir-turno"]');
+    if (abrir) abrir.addEventListener('click', async () => {
+      await abrirTurnoENavegarParaGestao(control, global);
+    });
+    const gestao = raiz.querySelector('[data-acao="gestao-cozinha"]');
+    if (gestao) gestao.addEventListener('click', () => {
+      if (typeof global.loadPage === 'function') global.loadPage('cozinha-gerencial');
+    });
+    const fechar = raiz.querySelector('[data-acao="fechar-turno"]');
+    if (fechar) fechar.addEventListener('click', async () => {
+      const resultado = await control.fecharTurno();
+      if (resultado && resultado.erro && resultado.erro.codigo === 'FECHAMENTO_NORMAL_BLOQUEADO') {
+        const motivo = window.prompt('Fechamento excepcional exige justificativa (mínimo 10 caracteres):');
+        if (motivo) await control.fecharTurnoExcepcional(motivo);
+      }
+    });
     const historico = raiz.querySelector('[data-acao="historico-cancelados"]');
     if (historico) historico.addEventListener('click', () => control.alternarHistoricoCancelados());
     const pedidosCancelados = raiz.querySelector('[data-acao="pedidos-cancelados"]');
     if (pedidosCancelados) pedidosCancelados.addEventListener('click', () => control.alternarPedidosCancelados());
     const legado = raiz.querySelector('[data-acao="historico-legado"]');
     if (legado) legado.addEventListener('click', () => control.alternarHistoricoLegado());
+    const historicoRetirados = raiz.querySelector('[data-acao="historico-retirados"]');
+    if (historicoRetirados) historicoRetirados.addEventListener('click', () =>
+      control.alternarHistoricoPedidosRetirados());
+    const formHistoricoRetirados = raiz.querySelector('[data-form="historico-retirados"]');
+    if (formHistoricoRetirados) formHistoricoRetirados.addEventListener('submit', (event) => {
+      event.preventDefault();
+      control.aplicarFiltrosHistoricoPedidosRetirados(formHistoricoRetirados);
+    });
+    const imprimirHistorico = raiz.querySelector('[data-acao="imprimir-historico"]');
+    if (imprimirHistorico) imprimirHistorico.addEventListener('click', () => window.print());
+    const exportarHistorico = raiz.querySelector('[data-acao="exportar-pdf-historico"]');
+    if (exportarHistorico) exportarHistorico.addEventListener('click', () => window.print());
+    const historicoAnterior = raiz.querySelector('[data-acao="historico-anterior"]');
+    if (historicoAnterior) historicoAnterior.addEventListener('click', () =>
+      control.mudarPaginaHistoricoPedidosRetirados(-1));
+    const historicoProximo = raiz.querySelector('[data-acao="historico-proximo"]');
+    if (historicoProximo) historicoProximo.addEventListener('click', () =>
+      control.mudarPaginaHistoricoPedidosRetirados(1));
     ['retirados', 'cancelados', 'legado'].forEach((tipo) => {
       ['anterior', 'proxima'].forEach((sentido) => {
         const botaoPagina = raiz.querySelector(`[data-acao="pagina-${tipo}-${sentido}"]`);
@@ -2105,6 +2467,7 @@
     lerUnidadeCozinhaDoToken,
     exigirUnidadeNoJwt,
     interpretarRetornoEstabelecerSessao,
+    abrirTurnoENavegarParaGestao,
     htmlSelecaoUnidade,
     htmlPainel,
     persistirSessao,

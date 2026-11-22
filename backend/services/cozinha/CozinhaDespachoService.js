@@ -309,6 +309,12 @@ async function despacharLote(entrada = {}, opts = {}) {
     if (Number(unidade.ativo) !== 1) {
       throw erro('Unidade operacional inativa.', 409, 'UNIDADE_INATIVA');
     }
+    const turnoAberto = await get(db, `
+      SELECT id FROM cozinha_turnos
+      WHERE empresa_id=? AND unidade_id=? AND estado='ABERTA'
+      LIMIT 1
+    `, [empresaId, unidadeId]);
+    const turnoId = turnoAberto ? Number(turnoAberto.id) : null;
 
     const mesa = await get(db, `
       SELECT id, empresa_id, numero, ativo FROM mesas
@@ -557,15 +563,15 @@ async function despacharLote(entrada = {}, opts = {}) {
       INSERT INTO cozinha_rodadas (
         empresa_id, unidade_id, mesa_id, atendimento_id, numero_rodada, sequencia_global,
         enviada_em, operador_envio_id, estado_preparacao, retirada_estado, entrega_estado,
-        idempotency_key_despacho, updated_at
+        idempotency_key_despacho, updated_at, turno_id
       ) VALUES (
         ?, ?, ?, ?, ?, ?,
         datetime('now'), ?, 'AGUARDANDO', 'PENDENTE', 'PENDENTE',
-        ?, datetime('now')
+        ?, datetime('now'), ?
       )
     `, [
       empresaId, unidadeId, mesaId, atendimentoId, numeroRodada, sequenciaGlobal,
-      operadorId, idempotencyKey
+      operadorId, idempotencyKey, turnoId
     ]);
     const rodadaId = insRodada.lastID;
 
@@ -577,13 +583,13 @@ async function despacharLote(entrada = {}, opts = {}) {
           sequencia_global, tipo_item, tipo_lancamento,
           qty_solicitada_millis, qty_preparada_millis, qty_cancelada_millis,
           estado_preparacao, produto_id, produto_nome_snapshot, observacoes_snapshot,
-          updated_at
+          updated_at, turno_id
         ) VALUES (
           ?, ?, ?, ?, ?, ?,
           ?, ?, 'ORIGINAL',
           ?, 0, 0,
           'AGUARDANDO', ?, ?, ?,
-          datetime('now')
+          datetime('now'), ?
         )
       `, [
         empresaId, unidadeId, rodadaId, linha.comanda_id, linha.pedido_id, linha.pedido_item_id,
@@ -591,7 +597,8 @@ async function despacharLote(entrada = {}, opts = {}) {
         linha.qty_solicitada_millis,
         item.produto_id || null,
         item.produto_nome_snapshot || item.produto_nome || null,
-        item.observacao || item.observacoes || null
+        item.observacao || item.observacoes || null,
+        turnoId
       ]);
 
       for (const ing of ingredientes) {

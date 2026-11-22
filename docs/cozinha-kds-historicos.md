@@ -1,7 +1,8 @@
 # Históricos e tempos do KDS
 
-O painel usa os eventos persistidos da cozinha. Não há migração adicional:
-o schema compartilhado permanece na versão 7.
+O painel usa os eventos persistidos da cozinha. O schema compartilhado da
+cozinha está na versão 9, que adiciona o snapshot imutável do relatório de
+encerramento e as configurações capturadas na abertura do turno.
 
 ## Acesso na TV pela rede local
 
@@ -111,6 +112,66 @@ são somadas separadamente. A interface atualiza períodos abertos sem gravar
 no banco. Retirada ou cancelamento encerra os tempos aplicáveis. O total da
 rodada não soma períodos de itens paralelos.
 
+## Relatório de encerramento do turno
+
+Gerentes e Super Administradores podem consultar o histórico de turnos na
+Gestão da Cozinha. O fechamento normal e o excepcional consolidam os dados e
+persistem o snapshot do relatório junto com o fechamento, na mesma transação
+SQLite. Um turno fechado pelo fluxo novo não é confirmado sem o registro
+recuperável do relatório. A consulta valida a empresa e a unidade da sessão e
+devolve sempre o snapshot original; hash SHA-256 e gatilhos do banco detectam
+alteração ou exclusão retroativa.
+
+Na atualização do schema v8 para v9, o inicializador usa a conexão e o caminho
+efetivos do banco, cria um backup pela API online do SQLite e valida a cópia
+com `PRAGMA integrity_check` antes de qualquer DDL. Registra o caminho, tamanho
+e SHA-256 do backup no log e em `cozinha_schema_meta.schema_v9_backup`; se o
+backup não puder ser criado ou validado, a migration é interrompida. O backup
+online não força checkpoint nem remove WAL, SHM ou journal. A migration v8→v9
+é aditiva e transacional; uma falha reverte tanto o DDL quanto a atualização da
+versão. Em schema v9, o inicializador valida as estruturas sem reaplicar DDL.
+
+O relatório inclui o tipo de fechamento, responsáveis, metas e configurações
+capturadas ao abrir o turno, indicadores dos registros e ledgers existentes,
+intervenções, ocorrências e pendências. No fechamento excepcional, as
+pendências são identificadas como preservadas, sem criar retiradas ou
+conclusões artificiais. Os controles de impressão e exportação PDF usam o
+diálogo de impressão do ambiente.
+
+Turnos encerrados antes da implantação não têm snapshot retroativo: a tela os
+identifica como relatórios sem snapshot persistido. O histórico e os ledgers
+operacionais não são regravados para simular um relatório de fechamento.
+
+## Ciclo diário e histórico de pedidos retirados
+
+O painel operacional consulta somente o turno aberto derivado no backend. O
+despacho grava o `turno_id` da rodada e dos itens quando há turno aberto; sem
+turno, a visão operacional retorna vazia. Fechar ou abrir um turno não exclui
+pedidos, itens, eventos, entregas, cancelamentos, ajustes ou snapshots. Assim,
+rodadas antigas permanecem consultáveis no histórico, mas não voltam às
+colunas operacionais do turno atual.
+
+Gerentes e Super Administradores acessam **Histórico de Pedidos Retirados**.
+O endpoint `GET /api/cozinha/gerencial/historico-pedidos-retirados` deriva
+empresa e operador da sessão e valida o vínculo gerencial com a unidade. A
+consulta aceita data, turno, pedido, mesa, garçom, produto e categoria; a data
+reúne todos os turnos do dia e o filtro turno limita a um único turno. A
+retirada é comprovada pelo ledger oficial. Retiradas parciais, integrais e
+pedidos cancelados com eventos de retirada são identificados pelos saldos dos
+ledgers, sem contar a entrega de bebida como retirada.
+
+Os eventos de preparo, bebidas, retiradas e cancelamentos são apresentados em
+seções separadas, com operador e horário. As pendências de fechamento
+excepcional vêm do snapshot persistido e seu SHA-256 é validado; snapshots
+ausentes ou inconsistentes não são reconstruídos. O catálogo atual fornece o
+nome da categoria quando não existe snapshot histórico dessa classificação.
+Imprimir e Exportar PDF usam o diálogo de impressão do navegador/ambiente.
+
+O acesso aos registros antigos sem comprovação no ledger foi movido para a
+seção **Registros legados (sem comprovação no ledger)** dentro do histórico de
+pedidos retirados. Esses registros permanecem claramente distintos dos
+eventos oficiais; sua presença não comprova retirada individual.
+
 Os timestamps permanecem armazenados em UTC. O KDS e seus históricos os exibem
 no fuso `America/Fortaleza`, no formato `DD/MM/YYYY HH:mm:ss` para datas e
 `HH:mm:ss` para horários. Essa conversão afeta somente a apresentação; os
@@ -141,33 +202,37 @@ cancelados. Os registros históricos não são reconciliados automaticamente.
 
 ## Paginação
 
-O KDS consulta `/api/cozinha/preparacao/painel` com `paginacao=cursor`.
-Cada histórico recebe seu próprio cursor, limitado ao maior ID de evento
-existente quando a navegação começa. Rodadas são ordenadas pelo horário e ID
-do último evento correspondente dentro desse snapshot, em ordem decrescente.
-Novos eventos não deslocam páginas abertas; **Atualizar agora** inicia novos
-snapshots. Uma retirada ou cancelamento efetuado no próprio painel também
-reinicia o snapshot do histórico correspondente.
+O histórico de cancelados do KDS consulta `/api/cozinha/preparacao/painel`
+com `paginacao=cursor`. O histórico de Pedidos Retirados usa paginação própria
+por `limite` e `offset` no endpoint gerencial. O cursor legado permanece
+disponível para integrações compatíveis.
+Nos históricos do KDS, rodadas são ordenadas pelo horário e ID do último
+evento correspondente dentro do snapshot, em ordem decrescente. Novos eventos
+não deslocam páginas abertas; **Atualizar agora** inicia novos snapshots. Um
+cancelamento efetuado no próprio painel também reinicia o snapshot
+correspondente.
 Ao abrir novamente **Histórico de cancelados**, o painel inicia um novo
 snapshot desse histórico, incluindo cancelamentos feitos em outros terminais.
 Enquanto o histórico permanece aberto, use **Atualizar agora** para incluir
 novos eventos sem comprometer a estabilidade da paginação em andamento.
 
-Para consulta individual, envie `historico=retirados` ou `historico=cancelados`,
-`paginacao=cursor` e, para a página seguinte, `cursor` com o valor retornado
-em `cursor_proximo`. `cursor_atual` permite repetir uma página. O cursor é
-vinculado à empresa, unidade e tipo de histórico; a autorização continua a
-ser feita pela sessão. Para o painel combinado, usam-se `cursor_retirados` e
-`cursor_cancelados`. O contrato antigo por `offset` permanece para clientes
-legados, mas não oferece estabilidade sob inserções concorrentes.
+Para consulta individual pela API compatível, envie `historico=retirados` ou
+`historico=cancelados`, `paginacao=cursor` e, para a página seguinte, `cursor`
+com o valor retornado em `cursor_proximo`. `cursor_atual` permite repetir uma
+página. A consulta de retirados exige perfil Gerente ou Super Administrador,
+inclusive na rota compatível; ela não é incluída em `historicos=1`. O cursor é
+vinculado à empresa, unidade e tipo de histórico. O contrato antigo por
+`offset` permanece para clientes legados, mas não oferece estabilidade sob
+inserções concorrentes.
 
-## Histórico legado
+## Registros legados sem comprovação no ledger
 
-O botão **Histórico legado** abre uma consulta independente dos históricos de
-retirados e cancelados. Ela inclui rodadas com retirada ou cancelamento sem
-evento correspondente e itens cancelados sem evento próprio nem identificação
-expressa no evento de cancelamento da rodada. A existência de outro evento da
-rodada não comprova o cancelamento de cada item.
+Dentro do histórico de pedidos retirados, a seção **Registros legados (sem
+comprovação no ledger)** abre uma consulta independente dos eventos oficiais.
+Ela inclui rodadas com retirada ou cancelamento sem evento correspondente e
+itens cancelados sem evento próprio nem identificação expressa no evento de
+cancelamento da rodada. A existência de outro evento da rodada não comprova o
+cancelamento de cada item.
 
 O endpoint autenticado é `GET /api/cozinha/preparacao/painel?historico=legado`.
 Use `limite` e `cursor` com o valor de `cursor_proximo` para navegar. O cursor

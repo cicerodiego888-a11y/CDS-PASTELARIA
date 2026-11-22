@@ -60,6 +60,7 @@ const CDS_ERP_PAGE_SCRIPTS = Object.freeze({
     pedidos: ['/erp/js/mesas-lancamento.js', '/erp/js/mesas-conferencia.js', '/erp/js/mesas-venda-consolidada.js', '/erp/js/pedidos.js'],
     mesas: ['/erp/js/mesas-lancamento.js', '/erp/js/mesas-conferencia.js', '/erp/js/mesas-painel.js'],
     'cozinha-kds': ['/erp/js/cozinha-kds.js'],
+    'cozinha-gerencial': ['/erp/js/cozinha-gerencial.js'],
     'cozinha-unidades': ['/erp/js/cozinha-unidades.js'],
     'cozinha-roteamento': ['/erp/js/cozinha-roteamento.js'],
     financeiro: [
@@ -299,6 +300,9 @@ window.minimizarModal = function minimizarModal(modalId, rotuloRestaurar) {
 };
 
 async function loadPage(page) {
+    if (page !== currentPage) {
+        window.CDS_ERP_PREVIOUS_PAGE = currentPage;
+    }
     currentPage = page;
     window.CDS_ERP_ACTIVE_PAGE = page;
     if (window.CdsPainelMesas && typeof window.CdsPainelMesas.parar === 'function') {
@@ -309,6 +313,10 @@ async function loadPage(page) {
     if (window.CdsCozinhaKds && typeof window.CdsCozinhaKds.parar === 'function') {
         window.CdsCozinhaKds.parar();
         window.CdsCozinhaKds = null;
+    }
+    if (window.CdsCozinhaGerencial && typeof window.CdsCozinhaGerencial.parar === 'function') {
+        window.CdsCozinhaGerencial.parar();
+        window.CdsCozinhaGerencial = null;
     }
 
     if (!paginaPermitidaPorImplantacao(page)) {
@@ -453,6 +461,10 @@ async function loadPage(page) {
             return typeof loadCozinhaKds === 'function'
                 ? loadCozinhaKds()
                 : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar o Painel KDS.</div>');
+        case 'cozinha-gerencial':
+            return typeof loadCozinhaGerencial === 'function'
+                ? loadCozinhaGerencial()
+                : $('#page-content').html('<div class="alert alert-danger">Erro ao carregar Gestão da Cozinha.</div>');
         case 'cozinha-unidades':
             return typeof loadCozinhaUnidades === 'function'
                 ? loadCozinhaUnidades()

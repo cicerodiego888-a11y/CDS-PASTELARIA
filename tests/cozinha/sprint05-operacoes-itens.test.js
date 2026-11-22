@@ -1,25 +1,30 @@
 /**
  * Sprint 05 — Operações e transições dos itens da Cozinha.
- * Banco temporário apenas. Sem banco oficial.
+ * SQLite exclusivamente em memória. Sem banco oficial ou arquivos SQLite.
  *
  * Executar:
  *   node --test --test-concurrency=1 tests/cozinha/sprint05-operacoes-itens.test.js
  */
 'use strict';
 
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
-const { describe, it, beforeEach } = require('node:test');
+const Module = require('node:module');
+const { describe, it, beforeEach, after } = require('node:test');
 const assert = require('node:assert/strict');
 const sqlite3 = require('sqlite3').verbose();
 
-const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cds-cozinha-s05-'));
-process.env.DB_DIR = dbDir;
 process.env.CDS_TEST_ISOLATION = '1';
 process.env.CDS_BLOQUEAR_BANCO_OFICIAL = '1';
 process.env.CDS_FORCAR_LOCAL = '1';
 delete process.env.CDS_ALLOW_OFFICIAL_DB;
+delete process.env.DB_DIR;
+
+const databasePath = require.resolve('../../backend/database');
+const databaseMemory = new sqlite3.Database(':memory:');
+const databaseMock = new Module(databasePath);
+databaseMock.filename = databasePath;
+databaseMock.loaded = true;
+databaseMock.exports = databaseMemory;
+require.cache[databasePath] = databaseMock;
 
 const {
   garantirSchemaCozinha,
@@ -29,6 +34,7 @@ const {
 const CozinhaDespacho = require('../../backend/services/cozinha/CozinhaDespachoService');
 const CozinhaPreparacao = require('../../backend/services/cozinha/CozinhaPreparacaoService');
 const CozinhaRetiradaLedger = require('../../backend/services/cozinha/CozinhaRetiradaLedgerService');
+const { executarMigracaoSprint2 } = require('../../backend/migrations/sprint2-cozinha-ledgers');
 const { TIPOS_OPERACAO } = require('../../backend/services/cozinha/cozinhaIdempotenciaHash');
 const {
   resolverUnidadeOperacionalReq
@@ -52,9 +58,9 @@ function all(db, sql, params = []) {
     db.all(sql, params, (err, rows) => (err ? reject(err) : resolve(rows || [])));
   });
 }
-function open(arquivo) {
+function open() {
   return new Promise((resolve, reject) => {
-    const db = new sqlite3.Database(arquivo || ':memory:', (err) => {
+    const db = new sqlite3.Database(':memory:', (err) => {
       if (err) return reject(err);
       db.serialize(() => {
         db.run('PRAGMA foreign_keys = ON');
@@ -68,6 +74,23 @@ function close(db) {
 }
 
 async function schemaErp(db) {
+  await run(db, `
+    CREATE TABLE IF NOT EXISTS empresas (
+      id INTEGER PRIMARY KEY,
+      nome TEXT
+    )
+  `);
+  await run(db, `
+    CREATE TABLE IF NOT EXISTS usuarios (
+      id INTEGER PRIMARY KEY,
+      username TEXT,
+      password_hash TEXT,
+      role TEXT,
+      perfil TEXT,
+      ativo INTEGER NOT NULL DEFAULT 1,
+      nome TEXT
+    )
+  `);
   await run(db, `
     CREATE TABLE IF NOT EXISTS configuracoes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,6 +157,7 @@ async function schemaErp(db) {
     CREATE TABLE IF NOT EXISTS pedidos_itens (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       pedido_id INTEGER NOT NULL,
+      empresa_id INTEGER NOT NULL,
       produto_id INTEGER NOT NULL,
       quantidade REAL NOT NULL,
       preco_unitario DECIMAL(10,2) DEFAULT 0,
@@ -142,6 +166,14 @@ async function schemaErp(db) {
       produto_nome_snapshot TEXT,
       observacao TEXT
     )
+  `);
+  await run(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_pedidos_id_empresa
+    ON pedidos(id, empresa_id)
+  `);
+  await run(db, `
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_pedidos_itens_id_pedido_empresa
+    ON pedidos_itens(id, pedido_id, empresa_id)
   `);
   await run(db, `
     CREATE TABLE IF NOT EXISTS pedido_item_ingredientes (
@@ -160,10 +192,18 @@ async function schemaErp(db) {
   `);
   const info = await garantirSchemaCozinha(db);
   assert.equal(info.operacional, true);
+  await executarMigracaoSprint2(db, { isolamentoExplicito: true });
   assert.equal(isCozinhaOperacional(), true);
 }
 
 async function seedInfra(db, empresaId = 1) {
+  await run(db, `
+    INSERT OR IGNORE INTO empresas (id, nome) VALUES (?, ?)
+  `, [empresaId, `Empresa ${empresaId}`]);
+  await run(db, `
+    INSERT OR IGNORE INTO usuarios (id, username, role, perfil, ativo)
+    VALUES (7, 'kds_operator', 'operador', 'USUARIO', 1)
+  `);
   const catRef = await run(db, `INSERT INTO categorias (nome) VALUES ('Refrigerantes')`);
   const catOut = await run(db, `INSERT INTO categorias (nome) VALUES ('Diversos')`);
 
@@ -202,6 +242,11 @@ async function seedInfra(db, empresaId = 1) {
     INSERT INTO cozinha_unidades (empresa_id, codigo, sequencia_atual)
     VALUES (?, ?, 0)
   `, [empresaId, `U-${empresaId}-${Date.now()}-${Math.random()}`]);
+  await run(db, `
+    INSERT INTO cozinha_turnos (
+      empresa_id, unidade_id, estado, abertura_operador_id, abertura_em
+    ) VALUES (?, ?, 'ABERTA', 7, datetime('now'))
+  `, [empresaId, un.lastID]);
 
   return {
     empresaId,
@@ -234,10 +279,10 @@ async function criarPedidoItem(db, infra, {
   ]);
   const item = await run(db, `
     INSERT INTO pedidos_itens (
-      pedido_id, produto_id, quantidade, preco_unitario, subtotal,
+      pedido_id, empresa_id, produto_id, quantidade, preco_unitario, subtotal,
       classificacao_operacional_snapshot, produto_nome_snapshot
-    ) VALUES (?, ?, ?, 10, 10, ?, ?)
-  `, [ped.lastID, produtoId, qty, classifSnapshot, nome]);
+    ) VALUES (?, ?, ?, ?, 10, 10, ?, ?)
+  `, [ped.lastID, infra.empresaId, produtoId, qty, classifSnapshot, nome]);
 
   if (comPersonalizacao) {
     await run(db, `
@@ -330,6 +375,7 @@ async function deixarItemPronto(db, infra, itemId, chave) {
 
 describe('Sprint 05 — Operações dos itens', () => {
   beforeEach(() => marcarCozinhaOperacional(false));
+  after(async () => close(databaseMemory));
 
   describe('Preparação — iniciar', () => {
     it('início válido AGUARDANDO→EM_PREPARACAO + outbox + idempotência PREPARACAO_INICIADA', async () => {
@@ -1149,6 +1195,11 @@ describe('Sprint 05 — Operações dos itens', () => {
         VALUES (1, 'U-B-HOM', 0)
       `);
       const unidadeB = unidadeBRow.lastID;
+      await run(db, `
+        INSERT INTO cozinha_turnos (
+          empresa_id, unidade_id, estado, abertura_operador_id, abertura_em
+        ) VALUES (1, ?, 'ABERTA', 7, datetime('now'))
+      `, [unidadeB]);
       const infraB = { ...infraA, unidadeId: unidadeB };
 
       const pastelA = await despacharPastel(db, infraA, 's05-hom-a-pastel');

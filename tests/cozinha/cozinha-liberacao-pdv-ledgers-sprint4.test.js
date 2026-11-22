@@ -58,16 +58,21 @@ function close(db) {
 async function schema(db) {
   await run(db, 'CREATE TABLE empresas (id INTEGER PRIMARY KEY)');
   await run(db, 'INSERT INTO empresas(id) VALUES (1)');
-  await run(db, 'CREATE TABLE produtos (id INTEGER PRIMARY KEY, nome TEXT)');
+  await run(db, `CREATE TABLE produtos (
+    id INTEGER PRIMARY KEY, nome TEXT, tipo_operacional TEXT,
+    comercializavel INTEGER, utiliza_ficha_tecnica INTEGER, categoria_id INTEGER
+  )`);
   await run(db, 'INSERT INTO produtos(id,nome) VALUES (30,\'Pastel\')');
   await run(db, 'INSERT INTO produtos(id,nome) VALUES (31,\'Bebida ou outro\')');
+  await run(db, 'CREATE TABLE categorias (id INTEGER PRIMARY KEY, nome TEXT)');
   await run(db, 'CREATE TABLE usuarios (id INTEGER PRIMARY KEY, username TEXT, role TEXT, perfil TEXT, ativo INTEGER DEFAULT 1)');
   await run(db, 'INSERT INTO usuarios(id,username,role,perfil,ativo) VALUES (7,\'garcom\',\'admin\',\'ADMIN\',1)');
   await run(db, `
     CREATE TABLE pedidos (
       id INTEGER PRIMARY KEY,
       empresa_id INTEGER,
-      codigo TEXT
+      codigo TEXT,
+      status TEXT DEFAULT 'PEDIDO'
     )
   `);
   await run(db, `
@@ -285,14 +290,45 @@ describe('Sprint 4 — liberação central por ledgers', () => {
     await close(db);
   });
 
-  it('bloqueia item comercial sem linha KDS', async () => {
+  it('mantém ambíguo o item sem KDS quando o cadastro não comprova sua exigibilidade', async () => {
     const db = await openDb();
     await schema(db);
     await seed(db);
     await run(db, 'INSERT INTO pedidos_itens(id,pedido_id,empresa_id,produto_id,quantidade,subtotal) VALUES (21,10,1,31,1,10)');
     await assert.rejects(
       () => validarLiberacaoPdv({ pedidoId: 10, empresaId: 1 }, { db }),
-      (err) => err.pendencias.some((p) => p.motivo === 'ITEM_COMERCIAL_SEM_KDS')
+      (err) => err.pendencias.some((p) => p.motivo === 'CLASSIFICACAO_COZINHA_AMBIGUA')
+    );
+    await close(db);
+  });
+
+  it('identifica produto com ficha técnica como cozinha sem encaminhamento KDS', async () => {
+    const db = await openDb();
+    await schema(db);
+    await seed(db);
+    await run(db, 'UPDATE produtos SET tipo_operacional=\'COMERCIAL\', utiliza_ficha_tecnica=1 WHERE id=31');
+    await run(db, 'INSERT INTO pedidos_itens(id,pedido_id,empresa_id,produto_id,quantidade,subtotal) VALUES (21,10,1,31,1,10)');
+    await assert.rejects(
+      () => validarLiberacaoPdv({ pedidoId: 10, empresaId: 1 }, { db }),
+      (err) => err.pendencias.some((p) => p.motivo === 'ITEM_COZINHA_SEM_ENCAMINHAMENTO'
+        && p.tipo_cozinha === 'PASTEL'
+        && p.classificacao_motivo === 'comercial_utiliza_ficha_tecnica')
+    );
+    await close(db);
+  });
+
+  it('identifica bebida comercializável por categoria como cozinha sem encaminhamento KDS', async () => {
+    const db = await openDb();
+    await schema(db);
+    await seed(db);
+    await run(db, 'INSERT INTO categorias(id,nome) VALUES (8,\'Refrigerantes\')');
+    await run(db, 'UPDATE produtos SET tipo_operacional=\'INSUMO\', comercializavel=1, categoria_id=8 WHERE id=31');
+    await run(db, 'INSERT INTO pedidos_itens(id,pedido_id,empresa_id,produto_id,quantidade,subtotal) VALUES (21,10,1,31,1,10)');
+    await assert.rejects(
+      () => validarLiberacaoPdv({ pedidoId: 10, empresaId: 1 }, { db }),
+      (err) => err.pendencias.some((p) => p.motivo === 'ITEM_COZINHA_SEM_ENCAMINHAMENTO'
+        && p.tipo_cozinha === 'BEBIDA'
+        && p.classificacao_motivo === 'insumo_comercializavel_categoria_refrigerante')
     );
     await close(db);
   });
